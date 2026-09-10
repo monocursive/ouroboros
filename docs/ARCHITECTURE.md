@@ -194,10 +194,11 @@ attach natively — all of which have landed.
 - `Ouroboros.Provider.Native.Loop` drives one turn. It runs in a task so the session
   process stays answerable, emits through a function, and takes control on its mailbox.
   Models are reached through `Ouroboros.Provider.Native.Model`, a single-callback
-  behaviour whose ReqLLM implementation opens every provider ReqLLM ships. `jido_ai` is
-  used only for `ToolAdapter`, which turns a `Jido.Action` schema into the model's JSON
-  Schema. The tool schemas are built once per turn and held in the loop's state: a tool
-  list that could change between two calls of one turn is a changed cached prefix.
+  behaviour whose ReqLLM implementation opens every provider ReqLLM ships. The owned
+  `Tools.Schema` adapter calls `Jido.Action.Schema` to generate parameter schemas, then
+  `Tools` applies description and model schema overrides. Tool schemas are built once
+  per turn and held in the loop's state: a tool list that could change between two calls
+  of one turn is a changed cached prefix.
 - `Ouroboros.Provider.Native.Tools` is the fifteen-tool set and the classification the
   permission engine is asked about — the tool, its mode (`:read`/`:write`/`:execute`/
   `:network`), the paths it touches, the subset it would *change*, the domains it would

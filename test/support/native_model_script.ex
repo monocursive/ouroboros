@@ -2,9 +2,9 @@ defmodule Ouroboros.Test.NativeModelScript do
   @moduledoc """
   A deterministic model for the native provider's tests. No network, no key, no spend.
 
-  Neither `req_llm` nor `jido_ai` ships a stub provider a test can register — their own
-  fixtures (`ReqLLM.Step.Fixture`, `ReqLLM.Streaming.Fixtures`) replay recorded HTTP for
-  their own suite and need a real request to record first. So the stand-in goes at the
+  ReqLLM's fixtures (`ReqLLM.Step.Fixture`, `ReqLLM.Streaming.Fixtures`) replay recorded
+  HTTP for its own suite and need a real request to record first. Our tests supply
+  deterministic model chunks directly, so the stand-in goes at the
   native loop's own seam: `Ouroboros.Provider.Native.Model` is one callback, and this
   implements it from a script the test writes.
 

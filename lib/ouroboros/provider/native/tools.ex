@@ -10,9 +10,9 @@ defmodule Ouroboros.Provider.Native.Tools do
   list costs context in every request and teaches the model that they differ.
 
   The schemas the model sees come from each tool's `Jido.Action` schema, converted by
-  `Jido.AI.ToolAdapter.from_action/2`. That conversion is the only part of `jido_ai`
-  this provider uses, and it is used precisely because a hand-written JSON Schema beside
-  a `Jido.Action` schema is two declarations that drift.
+  `Ouroboros.Provider.Native.Tools.Schema` through the pinned Jido Action schema API.
+  The generated schema is kept separate from final model overrides, local validation,
+  and the transport's own `ReqLLM.Tool` construction.
 
   A module may override its description per session by exporting `description/1` — one
   tool does, `skill`, because the Agent Skills convention is names-in-the-prompt and
@@ -37,7 +37,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   module (and therefore no per-server atom) is generated from a remote tool list.
   """
 
-  alias Jido.AI.ToolAdapter
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
@@ -56,6 +55,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.Mcp, as: McpTool
   alias Ouroboros.Provider.Native.Tools.Plan
   alias Ouroboros.Provider.Native.Tools.Read
+  alias Ouroboros.Provider.Native.Tools.Schema
   alias Ouroboros.Provider.Native.Tools.Skill
   alias Ouroboros.Provider.Native.Tools.WebFetch
   alias Ouroboros.Provider.Native.Tools.Write
@@ -211,12 +211,12 @@ defmodule Ouroboros.Provider.Native.Tools do
   @doc "One tool's spec as the model sees it."
   @spec spec(module(), keyword()) :: Model.tool_spec()
   def spec(module, opts \\ []) do
-    tool = ToolAdapter.from_action(module)
+    generated = Schema.from_action(module)
 
     %{
-      name: tool.name,
-      description: description(module, tool.description, opts),
-      parameters: model_schema(module, tool.parameter_schema)
+      name: module.name(),
+      description: description(module, module.description(), opts),
+      parameters: model_schema(module, generated)
     }
   end
 

@@ -1,0 +1,3867 @@
+{
+  "composed": {
+    "allow_and_deny": [
+      {
+        "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "How many lines to return.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "First line to return, 0-based.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List fleet machines, live connectivity, advisory tags and toolchains. Read this before choosing a machine for agent.",
+        "name": "fleet",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+        "name": "plan",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "explanation": {
+              "description": "One line on what the plan is for.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "The full ordered plan. Each step has text and one lifecycle status.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "The work item's current lifecycle state.",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  },
+                  "step": {
+                    "description": "The work item.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "depth_restricted": [
+      {
+        "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "How many lines to return.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "First line to return, 0-based.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a change to an existing file.",
+        "name": "write",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "description": "The complete new file content.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Replace an exact string in a workspace file. Read the file first. `old_string` must appear exactly once unless `replace_all` is true.",
+        "name": "edit",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "new_string": {
+              "description": "The replacement text.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The exact text to replace.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            },
+            "replace_all": {
+              "description": "Replace every occurrence instead of requiring exactly one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, moves or deletes several files at once. Read every file you update first. Prefer `edit` for a single change to a single file.",
+        "name": "apply_patch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "patch": {
+              "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Run a shell command in the workspace root. Under read_only and workspace_write it runs inside this node's OS sandbox; without a backend those modes refuse rather than running unsandboxed. A sandbox denial reports the constraint that was hit. Output is truncated to 30 KiB; the full output is saved to a file whose path is returned.",
+        "name": "bash",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "The command line to run with `sh -c`.",
+              "type": "string"
+            },
+            "description": {
+              "description": "A short description of what the command does, shown in the transcript.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search file contents for a regular expression, in the workspace. Returns matching lines with their paths and line numbers, newest-modified files first. Bounded to 200 matches.",
+        "name": "grep",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "case_insensitive": {
+              "description": "Ignore case, like ripgrep's `-i`.",
+              "type": "boolean"
+            },
+            "glob": {
+              "description": "Only search files whose name matches this glob, for example `*.ex`.",
+              "type": "string"
+            },
+            "line_numbers": {
+              "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "File or directory to search. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "The regular expression to search for.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, most-recently-modified first. Bounded to 2000 results.",
+        "name": "glob",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory to search from. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "A glob pattern, relative to `path` or to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List the entries of a workspace directory. `depth` defaults to 1 and is capped at 3. Bounded to 1000 entries.",
+        "name": "ls",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Directory to list. Defaults to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Fetch an http(s) URL with GET and return its text. HTML is converted to text. Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not followed. Loopback, private, link-local, and metadata destinations are refused.",
+        "name": "web_fetch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_bytes": {
+              "description": "Stop reading after this many bytes. Maximum 1048576.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "The absolute http:// or https:// URL to fetch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Ask the operator one question and wait for their answer. Use it when a choice changes what you build and you cannot infer it from the workspace. Do not use it for anything you can find out by reading a file.",
+        "name": "ask_user",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "description": "A two- or three-word label for the question, shown above it.",
+              "type": "string"
+            },
+            "options": {
+              "description": "Optional suggested answers. The operator may answer with something else.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question, in one or two sentences.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List fleet machines, live connectivity, advisory tags and toolchains. Read this before choosing a machine for agent.",
+        "name": "fleet",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+        "name": "plan",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "explanation": {
+              "description": "One line on what the plan is for.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "The full ordered plan. Each step has text and one lifecycle status.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "The work item's current lifecycle state.",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  },
+                  "step": {
+                    "description": "The work item.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "dynamic": [
+      {
+        "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "How many lines to return.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "First line to return, 0-based.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a change to an existing file.",
+        "name": "write",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "description": "The complete new file content.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Replace an exact string in a workspace file. Read the file first. `old_string` must appear exactly once unless `replace_all` is true.",
+        "name": "edit",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "new_string": {
+              "description": "The replacement text.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The exact text to replace.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            },
+            "replace_all": {
+              "description": "Replace every occurrence instead of requiring exactly one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, moves or deletes several files at once. Read every file you update first. Prefer `edit` for a single change to a single file.",
+        "name": "apply_patch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "patch": {
+              "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Run a shell command in the workspace root. Under read_only and workspace_write it runs inside this node's OS sandbox; without a backend those modes refuse rather than running unsandboxed. A sandbox denial reports the constraint that was hit. Output is truncated to 30 KiB; the full output is saved to a file whose path is returned.",
+        "name": "bash",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "The command line to run with `sh -c`.",
+              "type": "string"
+            },
+            "description": {
+              "description": "A short description of what the command does, shown in the transcript.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search file contents for a regular expression, in the workspace. Returns matching lines with their paths and line numbers, newest-modified files first. Bounded to 200 matches.",
+        "name": "grep",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "case_insensitive": {
+              "description": "Ignore case, like ripgrep's `-i`.",
+              "type": "boolean"
+            },
+            "glob": {
+              "description": "Only search files whose name matches this glob, for example `*.ex`.",
+              "type": "string"
+            },
+            "line_numbers": {
+              "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "File or directory to search. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "The regular expression to search for.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, most-recently-modified first. Bounded to 2000 results.",
+        "name": "glob",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory to search from. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "A glob pattern, relative to `path` or to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List the entries of a workspace directory. `depth` defaults to 1 and is capped at 3. Bounded to 1000 entries.",
+        "name": "ls",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Directory to list. Defaults to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Fetch an http(s) URL with GET and return its text. HTML is converted to text. Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not followed. Loopback, private, link-local, and metadata destinations are refused.",
+        "name": "web_fetch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_bytes": {
+              "description": "Stop reading after this many bytes. Maximum 1048576.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "The absolute http:// or https:// URL to fetch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Ask the operator one question and wait for their answer. Use it when a choice changes what you build and you cannot infer it from the workspace. Do not use it for anything you can find out by reading a file.",
+        "name": "ask_user",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "description": "A two- or three-word label for the question, shown above it.",
+              "type": "string"
+            },
+            "options": {
+              "description": "Optional suggested answers. The operator may answer with something else.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question, in one or two sentences.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Spawn a child agent with its own context window and get a summary back. Use it for work whose *findings* you need but whose *reading* you do not — searching a large codebase, checking a hypothesis in unfamiliar files, running several independent explorations at once. The child sees no part of this conversation except the prompt you write, so put everything it needs in that prompt. It can never use a tool you do not have, and never run more permissively than you do.",
+        "name": "agent",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "background": {
+              "description": "Return a task_id immediately instead of waiting. Collect it with agent_result. Interactive background children can ask for permission between turns. Foreground children are bounded by the loop tool timeout; use background for long work.",
+              "type": "boolean"
+            },
+            "deadline_ms": {
+              "description": "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": {
+              "description": "A three- to five-word label for this child, shown in the transcript.",
+              "type": "string"
+            },
+            "machine": {
+              "description": "Run the child on another machine of this fleet. Call fleet for the live list. Name a connected machine or use tag:NAME when exactly one matches; omit to run here.",
+              "type": "string"
+            },
+            "max_turns": {
+              "description": "How many model round-trips the child may take. Maximum 30.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "prompt": {
+              "description": "The child's entire instruction. It shares none of your context, so state the goal, the constraints, and exactly what to report back.",
+              "type": "string"
+            },
+            "sync": {
+              "description": "Send a snapshot of this repository, including uncommitted work, to the machine. Requires machine and creates an isolated worktree there. Cannot be combined with workspace. Ignored files do not travel; the child installs dependencies.",
+              "type": "boolean"
+            },
+            "tools": {
+              "description": "Tool names the child may use. Empty means every tool you have. The child always gets the intersection with your own tools, never more.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "description": "Absolute path of the child's workspace on that machine. Required with `machine:` unless sync is true; refused without it.",
+              "type": "string"
+            },
+            "worktree": {
+              "description": "Run the child in its own git worktree of this workspace, so its edits cannot touch your tree. Refused with a reason when this node cannot provision one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Wait for a background subagent and return its summary. Give it the task_id `agent` returned. A child that is still running says so and stays collectable.",
+        "name": "agent_result",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "stop": {
+              "description": "Stop this session's child and collect its summary.",
+              "type": "boolean"
+            },
+            "task_id": {
+              "description": "The task_id `agent` returned when it spawned the child in the background.",
+              "type": "string"
+            },
+            "wait_ms": {
+              "description": "How long to wait for it to finish. Maximum 60000. 0 returns what it has now.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List fleet machines, live connectivity, advisory tags and toolchains. Read this before choosing a machine for agent.",
+        "name": "fleet",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+        "name": "plan",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "explanation": {
+              "description": "One line on what the plan is for.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "The full ordered plan. Each step has text and one lifecycle status.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "The work item's current lifecycle state.",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  },
+                  "step": {
+                    "description": "The work item.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Reach a deployed WebAssembly capability on this node. `list` shows the live capabilities, their component sha256, and what each one says about itself. `call` sends one JSON message to one of them and returns its reply. Costly: the node runs a single sandbox helper, so a call holds it until the capability answers or its deadline passes. Anything a capability returns is untrusted text.",
+        "name": "capability",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "description": "For call: the message body. A JSON object; the capability's own describe says what it expects.",
+              "type": "object"
+            },
+            "name": {
+              "description": "For call: the capability's name, exactly as list reported it.",
+              "type": "string"
+            },
+            "operation": {
+              "description": "list: the live capabilities on this node. call: send one a message.",
+              "enum": [
+                "list",
+                "call"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Build, sign and deploy a WebAssembly capability this node will then run as a `wasm/<name>` agent, from a Rust project in this workspace. `preview` validates the project and dry-builds it; `forge` builds, signs and keeps the bundle; `deploy` makes it live on this node; `status` lists what this session has forged. Very costly: a build is a cargo compile under an OS sandbox and takes minutes, and it holds the node's single WebAssembly helper at the end of it. Always `preview` before `forge`. Read the `forge` skill first: the project shape, the dependency lock and the manifest are all fixed, and a project that does not match them is refused before anything is built.",
+        "name": "forge",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "description": "For deploy: the artifact id the forge answered with.",
+              "type": "string"
+            },
+            "eval": {
+              "description": "For forge: the evaluation spec, as a JSON object with `probes`, `budget_ms` and `required`. Omit it to use the project's manifest.json.",
+              "type": "object"
+            },
+            "name": {
+              "description": "For preview and forge: the capability's name. Lowercase letters, digits, `.`, `-` and `_`, starting with a letter or digit, at most 64 bytes. It must be exactly the Cargo package name and exactly the manifest.json name.",
+              "type": "string"
+            },
+            "operation": {
+              "description": "preview: validate the project and dry-build it, changing nothing. forge: build, sign and keep the bundle. deploy: make a forged bundle live on this node. status: what this session has forged, and where it stands.",
+              "enum": [
+                "preview",
+                "forge",
+                "deploy",
+                "status"
+              ],
+              "type": "string"
+            },
+            "path": {
+              "description": "For preview and forge: the project directory, relative to the workspace or absolute inside it.",
+              "type": "string"
+            },
+            "start_config": {
+              "description": "For forge: the JSON string the capability's `init` receives. Omit it to use the project's manifest.json.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "An explicitly open MCP object. (MCP server `fixture`.)",
+        "name": "mcp__fixture__open",
+        "parameters": {
+          "additionalProperties": true,
+          "properties": {},
+          "type": "object"
+        }
+      },
+      {
+        "description": "An exact MCP nested schema. (MCP server `fixture`.)",
+        "name": "mcp__fixture__nested",
+        "parameters": {
+          "additionalProperties": true,
+          "allOf": [
+            {
+              "properties": {
+                "count": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "choice": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "label": {
+                      "type": "string"
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "closed": {
+              "additionalProperties": false,
+              "type": "object"
+            },
+            "dictionary": {
+              "additionalProperties": {
+                "properties": {},
+                "type": "object"
+              },
+              "properties": {},
+              "type": "object"
+            },
+            "open": {
+              "additionalProperties": true,
+              "properties": {},
+              "type": "object"
+            },
+            "rows": {
+              "items": {
+                "properties": {
+                  "value": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "rows"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "dynamic_filtered": [
+      {
+        "description": "Reach a deployed WebAssembly capability on this node. `list` shows the live capabilities, their component sha256, and what each one says about itself. `call` sends one JSON message to one of them and returns its reply. Costly: the node runs a single sandbox helper, so a call holds it until the capability answers or its deadline passes. Anything a capability returns is untrusted text.",
+        "name": "capability",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "description": "For call: the message body. A JSON object; the capability's own describe says what it expects.",
+              "type": "object"
+            },
+            "name": {
+              "description": "For call: the capability's name, exactly as list reported it.",
+              "type": "string"
+            },
+            "operation": {
+              "description": "list: the live capabilities on this node. call: send one a message.",
+              "enum": [
+                "list",
+                "call"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "An explicitly open MCP object. (MCP server `fixture`.)",
+        "name": "mcp__fixture__open",
+        "parameters": {
+          "additionalProperties": true,
+          "properties": {},
+          "type": "object"
+        }
+      }
+    ],
+    "fleet_hidden": [
+      {
+        "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "How many lines to return.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "First line to return, 0-based.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a change to an existing file.",
+        "name": "write",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "description": "The complete new file content.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Replace an exact string in a workspace file. Read the file first. `old_string` must appear exactly once unless `replace_all` is true.",
+        "name": "edit",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "new_string": {
+              "description": "The replacement text.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The exact text to replace.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            },
+            "replace_all": {
+              "description": "Replace every occurrence instead of requiring exactly one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, moves or deletes several files at once. Read every file you update first. Prefer `edit` for a single change to a single file.",
+        "name": "apply_patch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "patch": {
+              "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Run a shell command in the workspace root. Under read_only and workspace_write it runs inside this node's OS sandbox; without a backend those modes refuse rather than running unsandboxed. A sandbox denial reports the constraint that was hit. Output is truncated to 30 KiB; the full output is saved to a file whose path is returned.",
+        "name": "bash",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "The command line to run with `sh -c`.",
+              "type": "string"
+            },
+            "description": {
+              "description": "A short description of what the command does, shown in the transcript.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search file contents for a regular expression, in the workspace. Returns matching lines with their paths and line numbers, newest-modified files first. Bounded to 200 matches.",
+        "name": "grep",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "case_insensitive": {
+              "description": "Ignore case, like ripgrep's `-i`.",
+              "type": "boolean"
+            },
+            "glob": {
+              "description": "Only search files whose name matches this glob, for example `*.ex`.",
+              "type": "string"
+            },
+            "line_numbers": {
+              "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "File or directory to search. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "The regular expression to search for.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, most-recently-modified first. Bounded to 2000 results.",
+        "name": "glob",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory to search from. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "A glob pattern, relative to `path` or to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List the entries of a workspace directory. `depth` defaults to 1 and is capped at 3. Bounded to 1000 entries.",
+        "name": "ls",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Directory to list. Defaults to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Fetch an http(s) URL with GET and return its text. HTML is converted to text. Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not followed. Loopback, private, link-local, and metadata destinations are refused.",
+        "name": "web_fetch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_bytes": {
+              "description": "Stop reading after this many bytes. Maximum 1048576.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "The absolute http:// or https:// URL to fetch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Ask the operator one question and wait for their answer. Use it when a choice changes what you build and you cannot infer it from the workspace. Do not use it for anything you can find out by reading a file.",
+        "name": "ask_user",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "description": "A two- or three-word label for the question, shown above it.",
+              "type": "string"
+            },
+            "options": {
+              "description": "Optional suggested answers. The operator may answer with something else.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question, in one or two sentences.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Spawn a child agent with its own context window and get a summary back. Use it for work whose *findings* you need but whose *reading* you do not — searching a large codebase, checking a hypothesis in unfamiliar files, running several independent explorations at once. The child sees no part of this conversation except the prompt you write, so put everything it needs in that prompt. It can never use a tool you do not have, and never run more permissively than you do.",
+        "name": "agent",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "background": {
+              "description": "Return a task_id immediately instead of waiting. Collect it with agent_result. Interactive background children can ask for permission between turns. Foreground children are bounded by the loop tool timeout; use background for long work.",
+              "type": "boolean"
+            },
+            "deadline_ms": {
+              "description": "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": {
+              "description": "A three- to five-word label for this child, shown in the transcript.",
+              "type": "string"
+            },
+            "machine": {
+              "description": "Run the child on another machine of this fleet. Call fleet for the live list. Name a connected machine or use tag:NAME when exactly one matches; omit to run here.",
+              "type": "string"
+            },
+            "max_turns": {
+              "description": "How many model round-trips the child may take. Maximum 30.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "prompt": {
+              "description": "The child's entire instruction. It shares none of your context, so state the goal, the constraints, and exactly what to report back.",
+              "type": "string"
+            },
+            "sync": {
+              "description": "Send a snapshot of this repository, including uncommitted work, to the machine. Requires machine and creates an isolated worktree there. Cannot be combined with workspace. Ignored files do not travel; the child installs dependencies.",
+              "type": "boolean"
+            },
+            "tools": {
+              "description": "Tool names the child may use. Empty means every tool you have. The child always gets the intersection with your own tools, never more.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "description": "Absolute path of the child's workspace on that machine. Required with `machine:` unless sync is true; refused without it.",
+              "type": "string"
+            },
+            "worktree": {
+              "description": "Run the child in its own git worktree of this workspace, so its edits cannot touch your tree. Refused with a reason when this node cannot provision one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Wait for a background subagent and return its summary. Give it the task_id `agent` returned. A child that is still running says so and stays collectable.",
+        "name": "agent_result",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "stop": {
+              "description": "Stop this session's child and collect its summary.",
+              "type": "boolean"
+            },
+            "task_id": {
+              "description": "The task_id `agent` returned when it spawned the child in the background.",
+              "type": "string"
+            },
+            "wait_ms": {
+              "description": "How long to wait for it to finish. Maximum 60000. 0 returns what it has now.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+        "name": "plan",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "explanation": {
+              "description": "One line on what the plan is for.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "The full ordered plan. Each step has text and one lifecycle status.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "The work item's current lifecycle state.",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  },
+                  "step": {
+                    "description": "The work item.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "fleet_visible": [
+      {
+        "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "How many lines to return.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "First line to return, 0-based.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a change to an existing file.",
+        "name": "write",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "description": "The complete new file content.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Replace an exact string in a workspace file. Read the file first. `old_string` must appear exactly once unless `replace_all` is true.",
+        "name": "edit",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "new_string": {
+              "description": "The replacement text.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The exact text to replace.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            },
+            "replace_all": {
+              "description": "Replace every occurrence instead of requiring exactly one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, moves or deletes several files at once. Read every file you update first. Prefer `edit` for a single change to a single file.",
+        "name": "apply_patch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "patch": {
+              "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Run a shell command in the workspace root. Under read_only and workspace_write it runs inside this node's OS sandbox; without a backend those modes refuse rather than running unsandboxed. A sandbox denial reports the constraint that was hit. Output is truncated to 30 KiB; the full output is saved to a file whose path is returned.",
+        "name": "bash",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "The command line to run with `sh -c`.",
+              "type": "string"
+            },
+            "description": {
+              "description": "A short description of what the command does, shown in the transcript.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search file contents for a regular expression, in the workspace. Returns matching lines with their paths and line numbers, newest-modified files first. Bounded to 200 matches.",
+        "name": "grep",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "case_insensitive": {
+              "description": "Ignore case, like ripgrep's `-i`.",
+              "type": "boolean"
+            },
+            "glob": {
+              "description": "Only search files whose name matches this glob, for example `*.ex`.",
+              "type": "string"
+            },
+            "line_numbers": {
+              "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "File or directory to search. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "The regular expression to search for.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, most-recently-modified first. Bounded to 2000 results.",
+        "name": "glob",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory to search from. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "A glob pattern, relative to `path` or to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List the entries of a workspace directory. `depth` defaults to 1 and is capped at 3. Bounded to 1000 entries.",
+        "name": "ls",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Directory to list. Defaults to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Fetch an http(s) URL with GET and return its text. HTML is converted to text. Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not followed. Loopback, private, link-local, and metadata destinations are refused.",
+        "name": "web_fetch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_bytes": {
+              "description": "Stop reading after this many bytes. Maximum 1048576.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "The absolute http:// or https:// URL to fetch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Ask the operator one question and wait for their answer. Use it when a choice changes what you build and you cannot infer it from the workspace. Do not use it for anything you can find out by reading a file.",
+        "name": "ask_user",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "description": "A two- or three-word label for the question, shown above it.",
+              "type": "string"
+            },
+            "options": {
+              "description": "Optional suggested answers. The operator may answer with something else.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question, in one or two sentences.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Spawn a child agent with its own context window and get a summary back. Use it for work whose *findings* you need but whose *reading* you do not — searching a large codebase, checking a hypothesis in unfamiliar files, running several independent explorations at once. The child sees no part of this conversation except the prompt you write, so put everything it needs in that prompt. It can never use a tool you do not have, and never run more permissively than you do.",
+        "name": "agent",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "background": {
+              "description": "Return a task_id immediately instead of waiting. Collect it with agent_result. Interactive background children can ask for permission between turns. Foreground children are bounded by the loop tool timeout; use background for long work.",
+              "type": "boolean"
+            },
+            "deadline_ms": {
+              "description": "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": {
+              "description": "A three- to five-word label for this child, shown in the transcript.",
+              "type": "string"
+            },
+            "machine": {
+              "description": "Run the child on another machine of this fleet. Call fleet for the live list. Name a connected machine or use tag:NAME when exactly one matches; omit to run here.",
+              "type": "string"
+            },
+            "max_turns": {
+              "description": "How many model round-trips the child may take. Maximum 30.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "prompt": {
+              "description": "The child's entire instruction. It shares none of your context, so state the goal, the constraints, and exactly what to report back.",
+              "type": "string"
+            },
+            "sync": {
+              "description": "Send a snapshot of this repository, including uncommitted work, to the machine. Requires machine and creates an isolated worktree there. Cannot be combined with workspace. Ignored files do not travel; the child installs dependencies.",
+              "type": "boolean"
+            },
+            "tools": {
+              "description": "Tool names the child may use. Empty means every tool you have. The child always gets the intersection with your own tools, never more.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "description": "Absolute path of the child's workspace on that machine. Required with `machine:` unless sync is true; refused without it.",
+              "type": "string"
+            },
+            "worktree": {
+              "description": "Run the child in its own git worktree of this workspace, so its edits cannot touch your tree. Refused with a reason when this node cannot provision one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Wait for a background subagent and return its summary. Give it the task_id `agent` returned. A child that is still running says so and stays collectable.",
+        "name": "agent_result",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "stop": {
+              "description": "Stop this session's child and collect its summary.",
+              "type": "boolean"
+            },
+            "task_id": {
+              "description": "The task_id `agent` returned when it spawned the child in the background.",
+              "type": "string"
+            },
+            "wait_ms": {
+              "description": "How long to wait for it to finish. Maximum 60000. 0 returns what it has now.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List fleet machines, live connectivity, advisory tags and toolchains. Read this before choosing a machine for agent.",
+        "name": "fleet",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {},
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+        "name": "plan",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "explanation": {
+              "description": "One line on what the plan is for.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "The full ordered plan. Each step has text and one lifecycle status.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "The work item's current lifecycle state.",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  },
+                  "step": {
+                    "description": "The work item.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "mcp_deferred": [
+      {
+        "description": "An explicitly open MCP object. (MCP server `fixture`.) (This tool's argument schema was withheld to keep the request small; pass the arguments the server's own documentation names — it validates them.)",
+        "name": "mcp__fixture__open",
+        "parameters": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      {
+        "description": "An exact MCP nested schema. (MCP server `fixture`.) (This tool's argument schema was withheld to keep the request small; pass the arguments the server's own documentation names — it validates them.)",
+        "name": "mcp__fixture__nested",
+        "parameters": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      }
+    ],
+    "required_audit": [
+      {
+        "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+        "name": "read",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "description": "How many lines to return.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "offset": {
+              "description": "First line to return, 0-based.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a change to an existing file.",
+        "name": "write",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "description": "The complete new file content.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Replace an exact string in a workspace file. Read the file first. `old_string` must appear exactly once unless `replace_all` is true.",
+        "name": "edit",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "new_string": {
+              "description": "The replacement text.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The exact text to replace.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path, or a path relative to the workspace root.",
+              "type": "string"
+            },
+            "replace_all": {
+              "description": "Replace every occurrence instead of requiring exactly one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, moves or deletes several files at once. Read every file you update first. Prefer `edit` for a single change to a single file.",
+        "name": "apply_patch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "patch": {
+              "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "patch"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Run a shell command in the workspace root. Under read_only and workspace_write it runs inside this node's OS sandbox; without a backend those modes refuse rather than running unsandboxed. A sandbox denial reports the constraint that was hit. Output is truncated to 30 KiB; the full output is saved to a file whose path is returned.",
+        "name": "bash",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "The command line to run with `sh -c`.",
+              "type": "string"
+            },
+            "description": {
+              "description": "A short description of what the command does, shown in the transcript.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search file contents for a regular expression, in the workspace. Returns matching lines with their paths and line numbers, newest-modified files first. Bounded to 200 matches.",
+        "name": "grep",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "case_insensitive": {
+              "description": "Ignore case, like ripgrep's `-i`.",
+              "type": "boolean"
+            },
+            "glob": {
+              "description": "Only search files whose name matches this glob, for example `*.ex`.",
+              "type": "string"
+            },
+            "line_numbers": {
+              "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "File or directory to search. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "The regular expression to search for.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, most-recently-modified first. Bounded to 2000 results.",
+        "name": "glob",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "description": "Directory to search from. Defaults to the workspace root.",
+              "type": "string"
+            },
+            "pattern": {
+              "description": "A glob pattern, relative to `path` or to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "List the entries of a workspace directory. `depth` defaults to 1 and is capped at 3. Bounded to 1000 entries.",
+        "name": "ls",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "description": "Directory to list. Defaults to the workspace root.",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Fetch an http(s) URL with GET and return its text. HTML is converted to text. Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not followed. Loopback, private, link-local, and metadata destinations are refused.",
+        "name": "web_fetch",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "max_bytes": {
+              "description": "Stop reading after this many bytes. Maximum 1048576.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "url": {
+              "description": "The absolute http:// or https:// URL to fetch.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Ask the operator one question and wait for their answer. Use it when a choice changes what you build and you cannot infer it from the workspace. Do not use it for anything you can find out by reading a file.",
+        "name": "ask_user",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "description": "A two- or three-word label for the question, shown above it.",
+              "type": "string"
+            },
+            "options": {
+              "description": "Optional suggested answers. The operator may answer with something else.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "question": {
+              "description": "The question, in one or two sentences.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Spawn a child agent with its own context window and get a summary back. Use it for work whose *findings* you need but whose *reading* you do not — searching a large codebase, checking a hypothesis in unfamiliar files, running several independent explorations at once. The child sees no part of this conversation except the prompt you write, so put everything it needs in that prompt. It can never use a tool you do not have, and never run more permissively than you do.",
+        "name": "agent",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "background": {
+              "description": "Return a task_id immediately instead of waiting. Collect it with agent_result. Interactive background children can ask for permission between turns. Foreground children are bounded by the loop tool timeout; use background for long work.",
+              "type": "boolean"
+            },
+            "deadline_ms": {
+              "description": "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "description": {
+              "description": "A three- to five-word label for this child, shown in the transcript.",
+              "type": "string"
+            },
+            "machine": {
+              "description": "Run the child on another machine of this fleet. Call fleet for the live list. Name a connected machine or use tag:NAME when exactly one matches; omit to run here.",
+              "type": "string"
+            },
+            "max_turns": {
+              "description": "How many model round-trips the child may take. Maximum 30.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "prompt": {
+              "description": "The child's entire instruction. It shares none of your context, so state the goal, the constraints, and exactly what to report back.",
+              "type": "string"
+            },
+            "sync": {
+              "description": "Send a snapshot of this repository, including uncommitted work, to the machine. Requires machine and creates an isolated worktree there. Cannot be combined with workspace. Ignored files do not travel; the child installs dependencies.",
+              "type": "boolean"
+            },
+            "tools": {
+              "description": "Tool names the child may use. Empty means every tool you have. The child always gets the intersection with your own tools, never more.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspace": {
+              "description": "Absolute path of the child's workspace on that machine. Required with `machine:` unless sync is true; refused without it.",
+              "type": "string"
+            },
+            "worktree": {
+              "description": "Run the child in its own git worktree of this workspace, so its edits cannot touch your tree. Refused with a reason when this node cannot provision one.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Wait for a background subagent and return its summary. Give it the task_id `agent` returned. A child that is still running says so and stays collectable.",
+        "name": "agent_result",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "stop": {
+              "description": "Stop this session's child and collect its summary.",
+              "type": "boolean"
+            },
+            "task_id": {
+              "description": "The task_id `agent` returned when it spawned the child in the background.",
+              "type": "string"
+            },
+            "wait_ms": {
+              "description": "How long to wait for it to finish. Maximum 60000. 0 returns what it has now.",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "task_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+        "name": "plan",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "explanation": {
+              "description": "One line on what the plan is for.",
+              "type": "string"
+            },
+            "steps": {
+              "description": "The full ordered plan. Each step has text and one lifecycle status.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "description": "The work item's current lifecycle state.",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  },
+                  "step": {
+                    "description": "The work item.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "step",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "skills_budget": [
+      {
+        "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  (1 more not listed — the budget is 200 characters)\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+        "name": "skill",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The skill's name, exactly as listed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "context_inputs": [
+    {
+      "allowed": null,
+      "audit_mode": "standard",
+      "capability_live": false,
+      "disallowed": null,
+      "forge_enabled": false,
+      "id": "fleet_hidden",
+      "mcp_enabled": false,
+      "options": {
+        "distributed": false
+      }
+    },
+    {
+      "allowed": [],
+      "audit_mode": "standard",
+      "capability_live": false,
+      "disallowed": [],
+      "forge_enabled": false,
+      "id": "fleet_visible",
+      "mcp_enabled": false,
+      "options": {
+        "distributed": true
+      }
+    },
+    {
+      "allowed": null,
+      "audit_mode": "standard",
+      "capability_live": false,
+      "disallowed": null,
+      "forge_enabled": false,
+      "id": "depth_restricted",
+      "mcp_enabled": false,
+      "options": {
+        "distributed": true,
+        "subagent_depth": 2
+      }
+    },
+    {
+      "allowed": [
+        " read ",
+        "plan",
+        "agent",
+        "fleet",
+        "skill",
+        "bash"
+      ],
+      "audit_mode": "standard",
+      "capability_live": false,
+      "disallowed": [
+        "agent",
+        "bash"
+      ],
+      "forge_enabled": false,
+      "id": "allow_and_deny",
+      "mcp_enabled": false,
+      "options": {
+        "distributed": true
+      }
+    },
+    {
+      "allowed": [
+        "skill"
+      ],
+      "audit_mode": "standard",
+      "capability_live": false,
+      "disallowed": null,
+      "forge_enabled": false,
+      "id": "skills_budget",
+      "mcp_enabled": false,
+      "options": {
+        "context_window": 1000
+      }
+    },
+    {
+      "allowed": null,
+      "audit_mode": "standard",
+      "capability_live": true,
+      "disallowed": null,
+      "forge_enabled": true,
+      "id": "dynamic",
+      "mcp_enabled": true,
+      "options": {
+        "distributed": true
+      }
+    },
+    {
+      "allowed": [
+        "capability",
+        "forge",
+        "mcp__fixture__open",
+        "mcp__fixture__nested"
+      ],
+      "audit_mode": "standard",
+      "capability_live": true,
+      "disallowed": [
+        "forge",
+        "mcp__fixture__nested"
+      ],
+      "forge_enabled": true,
+      "id": "dynamic_filtered",
+      "mcp_enabled": true,
+      "options": {
+        "distributed": false
+      }
+    },
+    {
+      "allowed": [
+        "mcp__fixture__open",
+        "mcp__fixture__nested"
+      ],
+      "audit_mode": "standard",
+      "capability_live": false,
+      "disallowed": null,
+      "forge_enabled": false,
+      "id": "mcp_deferred",
+      "mcp_enabled": true,
+      "options": {
+        "max_tool_schema_bytes": 1
+      }
+    },
+    {
+      "allowed": null,
+      "audit_mode": "required",
+      "capability_live": true,
+      "disallowed": null,
+      "forge_enabled": true,
+      "id": "required_audit",
+      "mcp_enabled": true,
+      "options": {
+        "distributed": true
+      }
+    }
+  ],
+  "descriptions": {
+    "empty": {
+      "description": "Static fallback description.",
+      "name": "baseline_description_override",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    },
+    "nil": {
+      "description": "Static fallback description.",
+      "name": "baseline_description_override",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    },
+    "overridden": {
+      "description": "Session description.",
+      "name": "baseline_description_override",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    },
+    "raises": {
+      "description": "Static fallback description.",
+      "name": "baseline_description_override",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    }
+  },
+  "final": {
+    "Ouroboros.NativeToolSchemaBaseline.Defaults": {
+      "description": "Keyword schema defaults, enums, bounds and lists.",
+      "name": "baseline_defaults",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "description": "A positive count.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "No description provided.",
+            "type": "boolean"
+          },
+          "labels": {
+            "description": "No description provided.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "description": "No description provided.",
+            "enum": [
+              "fast",
+              "careful"
+            ],
+            "type": "string"
+          },
+          "offset": {
+            "description": "No description provided.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "payload": {
+            "description": "No description provided.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.NativeToolSchemaBaseline.DescriptionOverride": {
+      "description": "Static fallback description.",
+      "name": "baseline_description_override",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    },
+    "Ouroboros.NativeToolSchemaBaseline.Empty": {
+      "description": "An empty action schema.",
+      "name": "baseline_empty",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    },
+    "Ouroboros.NativeToolSchemaBaseline.Nested": {
+      "description": "Nested objects, arrays, open objects and schema-valued extra keys.",
+      "name": "baseline_nested",
+      "parameters": {
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "choice": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closed": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "dictionary": {
+            "additionalProperties": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "properties": {},
+            "type": "object"
+          },
+          "open": {
+            "additionalProperties": true,
+            "properties": {},
+            "type": "object"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.NativeToolSchemaBaseline.NonStrict": {
+      "description": "An explicit false strict callback preserves open objects.",
+      "name": "baseline_non_strict",
+      "parameters": {
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "choice": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closed": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "dictionary": {
+            "additionalProperties": {
+              "additionalProperties": false,
+              "properties": {},
+              "type": "object"
+            },
+            "properties": {},
+            "type": "object"
+          },
+          "open": {
+            "additionalProperties": true,
+            "properties": {},
+            "type": "object"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.NativeToolSchemaBaseline.Strict": {
+      "description": "The optional strict callback overrides explicitly open typed objects.",
+      "name": "baseline_strict",
+      "parameters": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "minimum": 1,
+                "type": "integer"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "choice": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closed": {
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "dictionary": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "open": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rows"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Agent": {
+      "description": "Spawn a child agent with its own context window and get a summary back. Use it for work whose *findings* you need but whose *reading* you do not — searching a large codebase, checking a hypothesis in unfamiliar files, running several independent explorations at once. The child sees no part of this conversation except the prompt you write, so put everything it needs in that prompt. It can never use a tool you do not have, and never run more permissively than you do.",
+      "name": "agent",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "background": {
+            "description": "Return a task_id immediately instead of waiting. Collect it with agent_result. Interactive background children can ask for permission between turns. Foreground children are bounded by the loop tool timeout; use background for long work.",
+            "type": "boolean"
+          },
+          "deadline_ms": {
+            "description": "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "description": {
+            "description": "A three- to five-word label for this child, shown in the transcript.",
+            "type": "string"
+          },
+          "machine": {
+            "description": "Run the child on another machine of this fleet. Call fleet for the live list. Name a connected machine or use tag:NAME when exactly one matches; omit to run here.",
+            "type": "string"
+          },
+          "max_turns": {
+            "description": "How many model round-trips the child may take. Maximum 30.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "prompt": {
+            "description": "The child's entire instruction. It shares none of your context, so state the goal, the constraints, and exactly what to report back.",
+            "type": "string"
+          },
+          "sync": {
+            "description": "Send a snapshot of this repository, including uncommitted work, to the machine. Requires machine and creates an isolated worktree there. Cannot be combined with workspace. Ignored files do not travel; the child installs dependencies.",
+            "type": "boolean"
+          },
+          "tools": {
+            "description": "Tool names the child may use. Empty means every tool you have. The child always gets the intersection with your own tools, never more.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "workspace": {
+            "description": "Absolute path of the child's workspace on that machine. Required with `machine:` unless sync is true; refused without it.",
+            "type": "string"
+          },
+          "worktree": {
+            "description": "Run the child in its own git worktree of this workspace, so its edits cannot touch your tree. Refused with a reason when this node cannot provision one.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.AgentResult": {
+      "description": "Wait for a background subagent and return its summary. Give it the task_id `agent` returned. A child that is still running says so and stays collectable.",
+      "name": "agent_result",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "stop": {
+            "description": "Stop this session's child and collect its summary.",
+            "type": "boolean"
+          },
+          "task_id": {
+            "description": "The task_id `agent` returned when it spawned the child in the background.",
+            "type": "string"
+          },
+          "wait_ms": {
+            "description": "How long to wait for it to finish. Maximum 60000. 0 returns what it has now.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.ApplyPatch": {
+      "description": "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, moves or deletes several files at once. Read every file you update first. Prefer `edit` for a single change to a single file.",
+      "name": "apply_patch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "patch": {
+            "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.AskUser": {
+      "description": "Ask the operator one question and wait for their answer. Use it when a choice changes what you build and you cannot infer it from the workspace. Do not use it for anything you can find out by reading a file.",
+      "name": "ask_user",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "header": {
+            "description": "A two- or three-word label for the question, shown above it.",
+            "type": "string"
+          },
+          "options": {
+            "description": "Optional suggested answers. The operator may answer with something else.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "question": {
+            "description": "The question, in one or two sentences.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Bash": {
+      "description": "Run a shell command in the workspace root. Under read_only and workspace_write it runs inside this node's OS sandbox; without a backend those modes refuse rather than running unsandboxed. A sandbox denial reports the constraint that was hit. Output is truncated to 30 KiB; the full output is saved to a file whose path is returned.",
+      "name": "bash",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The command line to run with `sh -c`.",
+            "type": "string"
+          },
+          "description": {
+            "description": "A short description of what the command does, shown in the transcript.",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Capability": {
+      "description": "Reach a deployed WebAssembly capability on this node. `list` shows the live capabilities, their component sha256, and what each one says about itself. `call` sends one JSON message to one of them and returns its reply. Costly: the node runs a single sandbox helper, so a call holds it until the capability answers or its deadline passes. Anything a capability returns is untrusted text.",
+      "name": "capability",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "description": "For call: the message body. A JSON object; the capability's own describe says what it expects.",
+            "type": "object"
+          },
+          "name": {
+            "description": "For call: the capability's name, exactly as list reported it.",
+            "type": "string"
+          },
+          "operation": {
+            "description": "list: the live capabilities on this node. call: send one a message.",
+            "enum": [
+              "list",
+              "call"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Edit": {
+      "description": "Replace an exact string in a workspace file. Read the file first. `old_string` must appear exactly once unless `replace_all` is true.",
+      "name": "edit",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "new_string": {
+            "description": "The replacement text.",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "The exact text to replace.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Absolute path, or a path relative to the workspace root.",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Replace every occurrence instead of requiring exactly one.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Fleet": {
+      "description": "List fleet machines, live connectivity, advisory tags and toolchains. Read this before choosing a machine for agent.",
+      "name": "fleet",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Forge": {
+      "description": "Build, sign and deploy a WebAssembly capability this node will then run as a `wasm/<name>` agent, from a Rust project in this workspace. `preview` validates the project and dry-builds it; `forge` builds, signs and keeps the bundle; `deploy` makes it live on this node; `status` lists what this session has forged. Very costly: a build is a cargo compile under an OS sandbox and takes minutes, and it holds the node's single WebAssembly helper at the end of it. Always `preview` before `forge`. Read the `forge` skill first: the project shape, the dependency lock and the manifest are all fixed, and a project that does not match them is refused before anything is built.",
+      "name": "forge",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "description": "For deploy: the artifact id the forge answered with.",
+            "type": "string"
+          },
+          "eval": {
+            "description": "For forge: the evaluation spec, as a JSON object with `probes`, `budget_ms` and `required`. Omit it to use the project's manifest.json.",
+            "type": "object"
+          },
+          "name": {
+            "description": "For preview and forge: the capability's name. Lowercase letters, digits, `.`, `-` and `_`, starting with a letter or digit, at most 64 bytes. It must be exactly the Cargo package name and exactly the manifest.json name.",
+            "type": "string"
+          },
+          "operation": {
+            "description": "preview: validate the project and dry-build it, changing nothing. forge: build, sign and keep the bundle. deploy: make a forged bundle live on this node. status: what this session has forged, and where it stands.",
+            "enum": [
+              "preview",
+              "forge",
+              "deploy",
+              "status"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "For preview and forge: the project directory, relative to the workspace or absolute inside it.",
+            "type": "string"
+          },
+          "start_config": {
+            "description": "For forge: the JSON string the capability's `init` receives. Omit it to use the project's manifest.json.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Glob": {
+      "description": "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, most-recently-modified first. Bounded to 2000 results.",
+      "name": "glob",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Directory to search from. Defaults to the workspace root.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "A glob pattern, relative to `path` or to the workspace root.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Grep": {
+      "description": "Search file contents for a regular expression, in the workspace. Returns matching lines with their paths and line numbers, newest-modified files first. Bounded to 200 matches.",
+      "name": "grep",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "case_insensitive": {
+            "description": "Ignore case, like ripgrep's `-i`.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Only search files whose name matches this glob, for example `*.ex`.",
+            "type": "string"
+          },
+          "line_numbers": {
+            "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "File or directory to search. Defaults to the workspace root.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "The regular expression to search for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Ls": {
+      "description": "List the entries of a workspace directory. `depth` defaults to 1 and is capped at 3. Bounded to 1000 entries.",
+      "name": "ls",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Directory to list. Defaults to the workspace root.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Plan": {
+      "description": "Record the current plan. Replaces the whole plan; send every step each time. Optional — use it when a task has enough steps that the operator should see them.",
+      "name": "plan",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "explanation": {
+            "description": "One line on what the plan is for.",
+            "type": "string"
+          },
+          "steps": {
+            "description": "The full ordered plan. Each step has text and one lifecycle status.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "description": "The work item's current lifecycle state.",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "type": "string"
+                },
+                "step": {
+                  "description": "The work item.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "step",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Read": {
+      "description": "Read a file from the workspace. Returns line-numbered text starting at `offset`. Read a file before editing it.",
+      "name": "read",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "How many lines to return.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "description": "First line to return, 0-based.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Absolute path, or a path relative to the workspace root.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Skill": {
+      "description": "Load one skill's instructions by name. Skills available in this session:\n  alpha — Inspect deterministic fixtures.\n  beta — Explain schema and transport contracts.\n  zeta — A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description. A bounded description.\nCall this when a skill's description matches the task. Do not guess a name that is not listed.",
+      "name": "skill",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "The skill's name, exactly as listed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.WebFetch": {
+      "description": "Fetch an http(s) URL with GET and return its text. HTML is converted to text. Bounded to 1 MiB and 15 seconds; redirects to another host are reported, not followed. Loopback, private, link-local, and metadata destinations are refused.",
+      "name": "web_fetch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "max_bytes": {
+            "description": "Stop reading after this many bytes. Maximum 1048576.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "description": "The absolute http:// or https:// URL to fetch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    },
+    "Ouroboros.Provider.Native.Tools.Write": {
+      "description": "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a change to an existing file.",
+      "name": "write",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "The complete new file content.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Absolute path, or a path relative to the workspace root.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "generated": {
+    "Ouroboros.NativeToolSchemaBaseline.Defaults": {
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "description": "A positive count.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "enabled": {
+          "description": "No description provided.",
+          "type": "boolean"
+        },
+        "labels": {
+          "description": "No description provided.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "description": "No description provided.",
+          "enum": [
+            "fast",
+            "careful"
+          ],
+          "type": "string"
+        },
+        "offset": {
+          "description": "No description provided.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "payload": {
+          "description": "No description provided.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The title.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.NativeToolSchemaBaseline.DescriptionOverride": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "Ouroboros.NativeToolSchemaBaseline.Empty": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "Ouroboros.NativeToolSchemaBaseline.Nested": {
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "choice": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "closed": {
+          "additionalProperties": false,
+          "type": "object"
+        },
+        "dictionary": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "open": {
+          "additionalProperties": true,
+          "properties": {},
+          "type": "object"
+        },
+        "rows": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.NativeToolSchemaBaseline.NonStrict": {
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "choice": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "closed": {
+          "additionalProperties": false,
+          "type": "object"
+        },
+        "dictionary": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+          },
+          "properties": {},
+          "type": "object"
+        },
+        "open": {
+          "additionalProperties": true,
+          "properties": {},
+          "type": "object"
+        },
+        "rows": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.NativeToolSchemaBaseline.Strict": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "choice": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "closed": {
+          "additionalProperties": false,
+          "type": "object"
+        },
+        "dictionary": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "open": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "rows": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Agent": {
+      "additionalProperties": false,
+      "properties": {
+        "background": {
+          "description": "Return a task_id immediately instead of waiting. Collect it with agent_result. Interactive background children can ask for permission between turns. Foreground children are bounded by the loop tool timeout; use background for long work.",
+          "type": "boolean"
+        },
+        "deadline_ms": {
+          "description": "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "description": {
+          "description": "A three- to five-word label for this child, shown in the transcript.",
+          "type": "string"
+        },
+        "machine": {
+          "description": "Run the child on another machine of this fleet. Call fleet for the live list. Name a connected machine or use tag:NAME when exactly one matches; omit to run here.",
+          "type": "string"
+        },
+        "max_turns": {
+          "description": "How many model round-trips the child may take. Maximum 30.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prompt": {
+          "description": "The child's entire instruction. It shares none of your context, so state the goal, the constraints, and exactly what to report back.",
+          "type": "string"
+        },
+        "sync": {
+          "description": "Send a snapshot of this repository, including uncommitted work, to the machine. Requires machine and creates an isolated worktree there. Cannot be combined with workspace. Ignored files do not travel; the child installs dependencies.",
+          "type": "boolean"
+        },
+        "tools": {
+          "description": "Tool names the child may use. Empty means every tool you have. The child always gets the intersection with your own tools, never more.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "workspace": {
+          "description": "Absolute path of the child's workspace on that machine. Required with `machine:` unless sync is true; refused without it.",
+          "type": "string"
+        },
+        "worktree": {
+          "description": "Run the child in its own git worktree of this workspace, so its edits cannot touch your tree. Refused with a reason when this node cannot provision one.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.AgentResult": {
+      "additionalProperties": false,
+      "properties": {
+        "stop": {
+          "description": "Stop this session's child and collect its summary.",
+          "type": "boolean"
+        },
+        "task_id": {
+          "description": "The task_id `agent` returned when it spawned the child in the background.",
+          "type": "string"
+        },
+        "wait_ms": {
+          "description": "How long to wait for it to finish. Maximum 60000. 0 returns what it has now.",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "task_id"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.ApplyPatch": {
+      "additionalProperties": false,
+      "properties": {
+        "patch": {
+          "description": "The complete patch, starting with `*** Begin Patch` and ending with `*** End Patch`. Sections are `*** Add File: <path>`, `*** Delete File: <path>`, and `*** Update File: <path>` with optional `*** Move to: <path>`; hunks start with `@@` and their lines are prefixed with a space, `-`, or `+`. No line numbers.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "patch"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.AskUser": {
+      "additionalProperties": false,
+      "properties": {
+        "header": {
+          "description": "A two- or three-word label for the question, shown above it.",
+          "type": "string"
+        },
+        "options": {
+          "description": "Optional suggested answers. The operator may answer with something else.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "question": {
+          "description": "The question, in one or two sentences.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Bash": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "description": "The command line to run with `sh -c`.",
+          "type": "string"
+        },
+        "description": {
+          "description": "A short description of what the command does, shown in the transcript.",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h).",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Capability": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "description": "For call: the JSON object to send as the message body.",
+          "type": "string"
+        },
+        "name": {
+          "description": "For call: the capability's name, from list.",
+          "type": "string"
+        },
+        "operation": {
+          "description": "list (the live capabilities on this node) or call (send one a message).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Edit": {
+      "additionalProperties": false,
+      "properties": {
+        "new_string": {
+          "description": "The replacement text.",
+          "type": "string"
+        },
+        "old_string": {
+          "description": "The exact text to replace.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path, or a path relative to the workspace root.",
+          "type": "string"
+        },
+        "replace_all": {
+          "description": "Replace every occurrence instead of requiring exactly one.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "old_string",
+        "new_string"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Fleet": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Forge": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "description": "For deploy: the artifact id a forge answered with.",
+          "type": "string"
+        },
+        "eval": {
+          "description": "For forge: the evaluation spec the signer requires, as a JSON object. Taken from the project's manifest.json when absent.",
+          "type": "string"
+        },
+        "name": {
+          "description": "For preview and forge: the capability's name. Must equal the Cargo package name and the manifest's, exactly.",
+          "type": "string"
+        },
+        "operation": {
+          "description": "preview, forge, deploy or status.",
+          "type": "string"
+        },
+        "path": {
+          "description": "For preview and forge: the project directory, inside this workspace.",
+          "type": "string"
+        },
+        "start_config": {
+          "description": "For forge: the JSON string the capability is initialised with. Taken from the project's manifest.json when absent.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Glob": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Directory to search from. Defaults to the workspace root.",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "A glob pattern, relative to `path` or to the workspace root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Grep": {
+      "additionalProperties": false,
+      "properties": {
+        "case_insensitive": {
+          "description": "Ignore case, like ripgrep's `-i`.",
+          "type": "boolean"
+        },
+        "glob": {
+          "description": "Only search files whose name matches this glob, for example `*.ex`.",
+          "type": "string"
+        },
+        "line_numbers": {
+          "description": "Prefix each match with its line number, like ripgrep's `-n`.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "File or directory to search. Defaults to the workspace root.",
+          "type": "string"
+        },
+        "pattern": {
+          "description": "The regular expression to search for.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Ls": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "description": "How many levels to descend. 1 lists the directory itself. Maximum 3.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Directory to list. Defaults to the workspace root.",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Plan": {
+      "additionalProperties": false,
+      "properties": {
+        "explanation": {
+          "description": "One line on what the plan is for.",
+          "type": "string"
+        },
+        "steps": {
+          "description": "The full ordered plan. Each step is {\"step\": \"...\", \"status\": \"pending\"|\"in_progress\"|\"completed\"}.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Read": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "How many lines to return.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "First line to return, 0-based.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Absolute path, or a path relative to the workspace root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Skill": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The skill's name, exactly as listed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.WebFetch": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "description": "Stop reading after this many bytes. Maximum 1048576.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "url": {
+          "description": "The absolute http:// or https:// URL to fetch.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "Ouroboros.Provider.Native.Tools.Write": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "description": "The complete new file content.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Absolute path, or a path relative to the workspace root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  "provenance": {
+    "canonicalization": "JSON map keys sorted only; arrays and every field value preserved",
+    "capture_command": "MIX_ENV=test mix run --no-start --no-compile -r test/support/native_tool_schema_baseline.ex /tmp/capture_native_schema_baseline.exs",
+    "captured_on": "2026-09-10",
+    "differential_result": "23 of 23 old and new generated schemas matched exactly before Jido AI removal",
+    "environment": {
+      "application_started": false,
+      "capability": "temporary named registry fixture with one synthetic live row",
+      "credentials": "none",
+      "mcp": "read-only GenServer fixture",
+      "mix_env": "test",
+      "model_calls": 0,
+      "network": "none",
+      "user_skills": "temporary synthetic directory",
+      "workspace": "temporary synthetic workspace"
+    },
+    "packages": {
+      "jido": "2.3.3",
+      "jido_action": "2.3.2",
+      "jido_ai": "2.3.0",
+      "jido_harness": "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b",
+      "req_llm": "1.21.1"
+    },
+    "source_revision": "d6cc85309141111b6ae1ae3852b254a30092f426",
+    "source_sha256": {
+      "deps/jido_action/lib/jido_action/schema.ex": "4a0b42fb1addf0fef41906c46327e05b0eee8b8ff6bbe199e07f3ec085bf05e0",
+      "deps/jido_ai/lib/jido_ai/tool_adapter.ex": "817574b6f878f1ba3aaa1d47507dffc2ec9d28a2f2e3155bfe615ecc38774a1d",
+      "lib/ouroboros/provider/native/tools.ex": "baf7a98b99acab87fd9511e19a27c7cf9e0f793c0ae28f6b57915abd312fd294"
+    }
+  }
+}

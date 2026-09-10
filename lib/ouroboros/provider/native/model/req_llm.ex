@@ -7,9 +7,9 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   `ReqLLM.StreamChunk` stream back into the loop's normalized chunks. No decision about
   a tool, a path, or an approval is made here.
 
-  The tool schemas arrive already in JSON Schema form: `Jido.AI.ToolAdapter.from_action/2`
-  converts a `Jido.Action`'s schema, which is the one piece of `jido_ai` this provider
-  uses (see `Ouroboros.Provider.Native.Tools`).
+  The tool schemas arrive already in JSON Schema form: the owned
+  `Ouroboros.Provider.Native.Tools.Schema` converter uses `Jido.Action.Schema`, then
+  `Ouroboros.Provider.Native.Tools` applies its final model schema overrides.
 
   Every model provider `ReqLLM` ships is reachable — `anthropic:…`, `openai:…`,
   `openai_codex:…`, `google:…`, `openrouter:…`, `ollama:…` and the rest. Keys normally
