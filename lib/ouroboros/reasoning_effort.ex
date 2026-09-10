@@ -5,9 +5,8 @@ defmodule Ouroboros.ReasoningEffort do
 
   OpenAI reasoning models can declare `none`, `low`, `medium`, `high`, `xhigh`, and
   `max`. The gateway, web preferences, model catalogue, TUI, and native provider all use
-  this ordering. Vendor transports remain on the three values their pinned Harness
-  schemas can validate; the native provider can carry the complete vocabulary because it
-  owns the model request and can validate the request before entering Harness.
+  this ordering. The native provider carries the complete vocabulary because it owns the
+  model request and can validate the request before entering Harness.
 
   Harness currently validates only `low | medium | high` in its provider-neutral request
   structs. For native requests, the constructors below let Harness validate every other
@@ -18,12 +17,10 @@ defmodule Ouroboros.ReasoningEffort do
   """
 
   alias Jido.Harness.{Registry, RequestResolver, RunManager, SessionManager}
-  alias Jido.Harness.{RunRequest, Session, SessionRequest, TurnRequest}
+  alias Jido.Harness.{RunRequest, SessionRequest, TurnRequest}
 
   @atoms [:none, :low, :medium, :high, :xhigh, :max]
-  @legacy_atoms [:low, :medium, :high]
   @names Enum.map(@atoms, &Atom.to_string/1)
-  @legacy_names Enum.map(@legacy_atoms, &Atom.to_string/1)
 
   @spec atoms() :: [atom()]
   def atoms, do: @atoms
@@ -35,17 +32,16 @@ defmodule Ouroboros.ReasoningEffort do
   @spec names() :: [String.t()]
   def names, do: @names
 
-  @doc "The values a provider's current transport can accept, in display order."
-  @spec names_for_provider(atom() | String.t() | nil) :: [String.t()]
-  def names_for_provider(provider) when provider in [:native, "native"], do: @names
-  def names_for_provider(_provider), do: @legacy_names
+  @doc "The values the native transport accepts, in display order."
+  @spec accepted_names() :: [String.t()]
+  def accepted_names, do: @names
 
   @spec valid?(term()) :: boolean()
   def valid?(value), do: value in @atoms or value in @names
 
   @doc "Starts a Harness session, preserving the native provider's wider vocabulary."
-  @spec start_session(atom(), map() | keyword()) :: {:ok, String.t()} | {:error, term()}
-  def start_session(:native, attrs) when is_map(attrs) or is_list(attrs) do
+  @spec start_session(map() | keyword()) :: {:ok, String.t()} | {:error, term()}
+  def start_session(attrs) when is_map(attrs) or is_list(attrs) do
     with {:ok, attrs} <- attributes(attrs),
          defaults =
            Registry.provider_config(:native) |> Map.get(:session_defaults, %{}) |> Map.new(),
@@ -55,19 +51,15 @@ defmodule Ouroboros.ReasoningEffort do
     end
   end
 
-  def start_session(provider, attrs), do: Session.start(provider, attrs)
-
   @doc "Starts a detached Harness run, preserving the native provider's wider vocabulary."
-  @spec start_run(atom(), map() | keyword()) :: {:ok, String.t()} | {:error, term()}
-  def start_run(:native, attrs) when is_map(attrs) or is_list(attrs) do
+  @spec start_run(map() | keyword()) :: {:ok, String.t()} | {:error, term()}
+  def start_run(attrs) when is_map(attrs) or is_list(attrs) do
     with {:ok, attrs} <- attributes(attrs),
          {:ok, request} <- native_run_request(attrs),
          {:ok, request} <- RequestResolver.resolve(:native, request) do
       RunManager.start(:native, request)
     end
   end
-
-  def start_run(provider, attrs), do: Jido.Harness.Run.start(provider, attrs)
 
   @doc "Builds a session request while retaining a canonical reasoning effort."
   @spec session_request(map() | keyword()) :: {:ok, SessionRequest.t()} | {:error, term()}

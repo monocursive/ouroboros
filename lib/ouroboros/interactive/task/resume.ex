@@ -94,10 +94,7 @@ defmodule Ouroboros.Interactive.Task.Resume do
     case State.unrequestable_reason(session) do
       nil ->
         case Task.safe_session_call(fn ->
-               Ouroboros.ReasoningEffort.start_session(
-                 session.provider,
-                 State.request(session)
-               )
+               Ouroboros.ReasoningEffort.start_session(State.request(session))
              end) do
           {:ok, harness_session_id} ->
             adopt_resumed(runtime, harness_session_id, session.harness_session_id)

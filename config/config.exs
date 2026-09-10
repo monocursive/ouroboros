@@ -294,22 +294,9 @@ config :ouroboros, Ouroboros.Web.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   render_errors: [formats: [html: Ouroboros.Web.ErrorHTML], layout: false]
 
-# Keep every upstream Codex execution and validation behavior, but normalize the one
-# command-start event the pinned Harness currently leaves provider-specific before its
-# journal deliberately discards raw provider records. Claude gains the one flag its
-# managed transport needs to have a human in the loop at all — `--permission-prompt-tool`
-# pointed at `ouro mcp-serve` — and is otherwise the pinned adapter.
-#
-# Harness bundles a Codex CLI adapter. Override it with an explicit removed boundary so
-# deleting Ouroboros's old override cannot silently expose `codex exec` again. `native`
-# is the in-process direct provider and the product default.
-config :jido_harness,
-  providers: %{
-    claude: Ouroboros.Provider.ClaudeAdapter,
-    codex: Ouroboros.Provider.RemovedCodex,
-    grok: Ouroboros.Provider.GrokAdapter,
-    kimi: Ouroboros.Provider.KimiAdapter,
-    opencode: Ouroboros.Provider.OpenCodeAdapter,
-    native: Ouroboros.Provider.Native
-  },
-  process_driver: Ouroboros.Provider.ProcessDriver
+# `native` — the in-process tool loop — is the only provider. `Jido.Harness.Registry`
+# still carries nine bundled vendor-CLI adapters and *merges* this map over them, so this
+# key cannot remove them; `Ouroboros.Interactive.State` refuses any provider but `:native`
+# at the boundary instead, with a named error. Registering `native` here is what makes
+# `Jido.Harness.Registry.spec(:native)` answer this runtime's own adapter.
+config :jido_harness, providers: %{native: Ouroboros.Provider.Native}

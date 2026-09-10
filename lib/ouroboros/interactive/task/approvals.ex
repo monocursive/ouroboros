@@ -9,9 +9,10 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   alias Ouroboros.Interactive.Task
   alias Ouroboros.Workspace.Exec
 
-  # C2 — external approvals. One session may hold at most this many unanswered questions
-  # at once; the next is denied rather than queued, because a provider that can ask nine
-  # times without being answered is a provider nobody is reading, and an unbounded table
+  # External approvals: a question this runtime was asked for by something that is not
+  # this session's own transport — today, a native subagent's approval relayed to the
+  # parent that owns the modal. One session may hold at most this many unanswered
+  # questions at once; the next is denied rather than queued, because an unbounded table
   # of waiting callers is an unbounded table.
   @max_external_approvals 8
 
@@ -139,13 +140,12 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   end
 
   # ---------------------------------------------------------------------------
-  # C2 — the external-approval path
+  # The external-approval path
   #
-  # A managed transport such as Claude runs one process per turn and may declare no
-  # approvals channel, so Harness cannot ask before a tool runs. Claude Code offers
-  # `--permission-prompt-tool` instead; `ouro mcp-serve` is that tool's server.
-  # Calls land here. The runtime relays; it does not decide, except where C1's rule
-  # engine already decided or a bound was reached.
+  # A question that did not arrive on this session's own transport: a native subagent's
+  # approval, relayed to the parent session that owns the modal
+  # (`Ouroboros.InteractiveSession.relay_approval/2`). The runtime relays; it does not
+  # decide, except where the rule engine already decided or a bound was reached.
   # ---------------------------------------------------------------------------
 
   defp open_external_approval(runtime, request_ref, request, from) do

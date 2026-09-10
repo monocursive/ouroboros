@@ -12,27 +12,6 @@ defmodule Ouroboros.Gateway.Methods.Encode do
   # one: the point of the chain is that a client can recompute it from the answer alone.
   @chain_seed String.duplicate("0", 64)
 
-  # Atoms the coordinator chose, rendered as the literal strings this module contains. A
-  # decision is never `to_string`d out of whatever the plane happened to answer.
-  def approval_answer(answer) do
-    %{
-      "decision" => if(answer.decision == :allow, do: "allow", else: "deny"),
-      "request_id" => answer.request_id,
-      "source" => approval_source(answer.source),
-      "reason" => answer.reason
-    }
-  end
-
-  defp approval_source(:engine), do: "engine"
-  defp approval_source(:human), do: "human"
-  defp approval_source(:timeout), do: "timeout"
-  defp approval_source(:capacity), do: "capacity"
-  defp approval_source(:session_terminal), do: "session_terminal"
-  defp approval_source(:checkpoint_failed), do: "checkpoint_failed"
-  defp approval_source(:caller_gone), do: "caller_gone"
-  defp approval_source(:coordinator_restart), do: "coordinator_restart"
-  defp approval_source(_other), do: "runtime"
-
   @spec chain([EffectLedger.Entry.t()]) :: map()
   def chain(entries) when is_list(entries) do
     {lines, head} =

@@ -9,7 +9,6 @@ defmodule Ouroboros.Interactive.State do
   alias Ouroboros.Runtime.Exposure
 
   @session_options [
-    :transport,
     :turn_runtime_timeout_ms,
     :turn_idle_timeout_ms,
     :session_idle_timeout_ms,
@@ -198,64 +197,32 @@ defmodule Ouroboros.Interactive.State do
   # Values for these adapter options are reproducible execution policy, not
   # credentials. Rich settings, arbitrary argv, and toolbox maps belong in the
   # node's provider configuration and never in a durable session checkpoint.
+  #
+  # Deliberately a literal rather than a read of `Ouroboros.Provider.Native.spec/0`: this
+  # is the storage rule, and it holds even if the adapter's declaration is ever wrong.
+  # `valid_provider_options?/1` requires membership in both. Forty further names lived here
+  # for the wrapped vendor CLIs — `cli_path`, `betas`, `no_jetbrains` and the rest — and
+  # went with them; they are in `Ouroboros.Storage.RetiredAtoms` because a session record
+  # written before the reduction still has them as keys.
   @durable_provider_options [
-    :agent,
-    :allowed_mcp_server_names,
-    :api_timeout_ms,
-    :attach,
-    :base_url,
-    :betas,
-    :cli_path,
-    :continue,
-    :dangerously_allow_all,
-    :debug,
-    :extensions,
-    :fallback_model,
-    :fork,
+    :event_limit,
     :fork_session,
     # R3. A turn id or ordinal naming where a native fork branches. Reproducible execution
     # policy in exactly the sense this list means: it is the branch point a child was
     # started at, it is worth nothing without `fork_session`, and it carries no secret.
     :fork_to_turn,
-    :log_file,
-    :log_level,
-    :max_budget_usd,
-    :model_provider,
     :max_iterations,
-    :model_reasoning_summary,
-    :network_access_enabled,
-    :no_color,
-    :no_context_files,
-    :no_extensions,
-    :no_ide,
-    :no_jetbrains,
-    :no_notifications,
-    :no_session,
-    :no_skills,
-    :offline,
     # B2. `plan` is execution policy in the plainest sense — a read-only posture with an
     # exit approval attached — and it is durable for the same reason `approval_mode` is: a
     # session resumed from a checkpoint must come back in the posture it was running in.
     :plan,
-    :event_limit,
-    :project_trust,
-    :resume_last,
-    :session_dir,
-    :session_name,
-    :skip_git_repo_check,
-    :skills,
-    :skills_dirs,
     # G3. The two halves of subagent policy an operator may state at a start: which model
     # children run on, and how long one may run. A child's depth, parent and task id are
     # deliberately *not* here: this runtime sets them when it opens a child, and a request
     # that could name them would be a request that could forge a lineage.
     :subagent_deadline_ms,
     :subagent_model,
-    :tool_timeout_ms,
-    :thinking,
-    :title,
-    :visibility,
-    :web_search_enabled
+    :tool_timeout_ms
   ]
 
   @terminal_statuses [:closed, :failed, :cancelled, :lost]
@@ -268,14 +235,7 @@ defmodule Ouroboros.Interactive.State do
            :ok <- validate_id(id),
            :ok <- validate_parent(Keyword.get(opts, :forked_from)),
            :ok <- validate_parent(Keyword.get(opts, :handed_off_from)),
-           {:ok, base} <-
-             base(
-               Keyword.drop(opts, @session_options ++ @struct_options),
-               # The transport decides which normalized options a session may carry, so
-               # the capability lookup needs the one this session will select. It is a
-               # session option and therefore dropped from the base's own options.
-               {:interactive, Keyword.get(opts, :transport)}
-             ),
+           {:ok, base} <- base(Keyword.drop(opts, @session_options ++ @struct_options)),
            :ok <- validate_serializable_options(opts) do
         now = timestamp()
 
@@ -313,23 +273,21 @@ defmodule Ouroboros.Interactive.State do
   # normalized into what `request/1` will hand a harness. Every refusal here is about the
   # *start options*, which is why it answers a bare map rather than a struct: the session
   # struct is built by `new/2` from it.
-  defp base(opts, plane) do
+  defp base(opts) do
     workspace_option = Keyword.get(opts, :workspace, File.cwd!())
     provider = Keyword.get(opts, :provider, :native)
     sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
     worktree = Keyword.get(opts, :worktree, false)
-    safety = Provider.safety_options(provider, opts, plane)
+    safety = Provider.safety_options(opts)
     assembly = assemble_prompt_options(Map.new(opts))
 
     cond do
       not is_atom(provider) or is_nil(provider) ->
         {:error, :invalid_provider}
 
-      provider == :codex ->
-        {:error,
-         {:provider_removed, :codex,
-          "Codex CLI execution was removed; use provider :native with an openai: or openai_codex: model"}}
+      provider != :native ->
+        {:error, {:provider_removed, provider, provider_removed_message(provider)}}
 
       not is_binary(workspace_option) ->
         {:error, {:invalid_workspace, workspace_option}}
@@ -361,7 +319,7 @@ defmodule Ouroboros.Interactive.State do
       not valid_runtime_exposure?(Keyword.get(opts, :runtime_exposure, true)) ->
         {:error, :invalid_runtime_exposure}
 
-      not valid_provider_options?(provider, Keyword.get(opts, :provider_options, %{})) ->
+      not valid_provider_options?(Keyword.get(opts, :provider_options, %{})) ->
         {:error, {:unsafe_provider_options, provider}}
 
       not File.dir?(Path.expand(workspace_option)) ->
@@ -370,13 +328,10 @@ defmodule Ouroboros.Interactive.State do
       not valid_event_limit?(Keyword.get(opts, :event_limit, 10_000)) ->
         {:error, :invalid_event_limit}
 
-      match?({:error, _reason}, safety) ->
-        safety
-
       true ->
         {:ok, safety_options} = safety
         {:ok, prompt_assembly} = assembly
-        options = request_options(provider, opts, safety_options, prompt_assembly)
+        options = request_options(opts, safety_options, prompt_assembly)
 
         {:ok,
          %{
@@ -396,28 +351,31 @@ defmodule Ouroboros.Interactive.State do
   # values included, so they are dropped here and merged back rather than defaulted a
   # second time. An option it omitted must be absent from the request, not present as
   # `nil`: absent is what leaves the harness request at `:default`.
-  defp request_options(provider, opts, safety_options, assembly) do
+  defp request_options(opts, safety_options, assembly) do
     opts
     |> Keyword.take(@request_options)
     |> Keyword.drop([:approval_mode, :sandbox_mode, :agent_profile])
     |> Keyword.merge(safety_options)
     |> Map.new()
-    |> put_provider_execution_defaults(provider)
     |> put_system_prompt(assembly.system_prompt)
     |> Map.put(:runtime_exposure, Keyword.get(opts, :runtime_exposure, true))
-  end
-
-  defp put_provider_execution_defaults(options, provider) do
-    case Provider.execution_options(provider, Map.get(options, :provider_options)) do
-      nil -> Map.delete(options, :provider_options)
-      provider_options -> Map.put(options, :provider_options, provider_options)
-    end
   end
 
   defp put_system_prompt(options, nil), do: Map.delete(options, :system_prompt)
 
   defp put_system_prompt(options, system_prompt),
     do: Map.put(options, :system_prompt, system_prompt)
+
+  # The boundary. `Jido.Harness.Registry` merges `config :jido_harness, :providers` over
+  # nine bundled vendor-CLI adapters, so a name this build no longer serves still resolves
+  # to an upstream adapter and would start a wrapped CLI. Refusing here, by name, is what
+  # makes `native` the only provider rather than the only *configured* one — and it is
+  # refused before a workspace lease is taken, so nothing is half-started.
+  defp provider_removed_message(provider) do
+    "provider #{inspect(provider)} was removed; `:native` is the only provider. " <>
+      "A vendor model is reachable as a native model — `anthropic:`, `openai:`, " <>
+      "`openai_codex:`, `xai:` — through OUROBOROS_NATIVE_MODEL or the `model` option."
+  end
 
   defp valid_event_limit?(limit), do: is_integer(limit) and limit > 0 and limit <= 100_000
 
@@ -432,11 +390,11 @@ defmodule Ouroboros.Interactive.State do
 
   defp inline_mcp_config?(opts), do: Keyword.has_key?(opts, :mcp_config)
 
-  defp valid_provider_options?(_provider, options) when options in [nil, %{}], do: true
+  defp valid_provider_options?(options) when options in [nil, %{}], do: true
 
-  defp valid_provider_options?(provider, options) when is_map(options) do
+  defp valid_provider_options?(options) when is_map(options) do
     allowed_by_adapter =
-      case Jido.Harness.Registry.spec(provider) do
+      case Jido.Harness.Registry.spec(:native) do
         {:ok, spec} -> spec.provider_options
         {:error, _reason} -> []
       end
@@ -450,7 +408,7 @@ defmodule Ouroboros.Interactive.State do
     end)
   end
 
-  defp valid_provider_options?(_provider, _options), do: false
+  defp valid_provider_options?(_options), do: false
 
   defp normalize_provider_option_key(key, _allowed) when is_atom(key), do: key
 
@@ -518,8 +476,6 @@ defmodule Ouroboros.Interactive.State do
     })
     |> put_provider_session_id(state.provider_session_id)
     |> reject_nil_values()
-    |> Ouroboros.Provider.apply_runtime_provider_policy(state.provider)
-    |> Ouroboros.Provider.apply_execution_directories(state.provider, :session)
   end
 
   # B2. `plan` is a session option on the wire and a provider option underneath: the
@@ -777,11 +733,10 @@ defmodule Ouroboros.Interactive.State do
     }
   end
 
-  # C5. Which OS sandbox a native session's shell runs under is a fact about the node
-  # that owns the session, so it is answered only where that node is this one — a row
-  # projected elsewhere carries no `sandbox` key, which a client reads as unknown rather
-  # than as "none". Vendor providers run their own tools behind their own boundaries and
-  # say nothing here.
+  # C5. Which OS sandbox a session's shell runs under is a fact about the node that owns
+  # the session, so it is answered only where that node is this one — a row projected
+  # elsewhere carries no `sandbox` key, which a client reads as unknown rather than as
+  # "none".
   defp put_sandbox_capability(capabilities, %__MODULE__{provider: :native, node: owner})
        when is_map(capabilities) do
     if owner == node() do
@@ -807,7 +762,6 @@ defmodule Ouroboros.Interactive.State do
         sandbox_mode: Map.get(state.options, :sandbox_mode),
         model: Map.get(state.options, :model),
         reasoning_effort: Map.get(state.options, :reasoning_effort),
-        transport: Map.get(state.options, :transport),
         has_system_prompt:
           projected(
             state.options,
@@ -827,26 +781,13 @@ defmodule Ouroboros.Interactive.State do
           projected(
             state.options,
             :provider_execution,
-            Ouroboros.Provider.public_execution_policy(
-              state.provider,
-              state.options,
-              surface: :interactive,
-              transport: Map.get(state.options, :transport)
-            )
+            Ouroboros.Provider.public_execution_policy(state.options, surface: :interactive)
           ),
         # Derived from the provider spec at projection time rather than stored, so a
         # session listed after a restart declares what its transport can do without a
-        # coordinator being up to ask. `nil` where the provider or transport does not
-        # resolve — an absent claim rather than a false one.
+        # coordinator being up to ask.
         capabilities:
-          projected(
-            state.options,
-            :capabilities,
-            Ouroboros.Provider.session_capabilities(
-              state.provider,
-              Map.get(state.options, :transport)
-            )
-          )
+          projected(state.options, :capabilities, Ouroboros.Provider.session_capabilities())
           |> put_sandbox_capability(state)
       }
       |> Trace.put(prompt_trace)
@@ -998,14 +939,21 @@ defmodule Ouroboros.Interactive.State do
   Separate from `valid?/1` so a session whose durable prompt this build cannot honour
   fails as itself, at the moment it would be handed to the provider, rather than
   condemning every session that shares its checkpoint.
+
+  A record whose `provider` this build no longer has is exactly that case, and it is the
+  reason the check lives here rather than in `loadable?/1`: the session loads, lists, and
+  shows its history, and only a verb that would hand it to a provider —
+  `interactive.send`, `interactive.retry_turn`, a resume — is refused, by name, with the
+  provider it names. Quarantining it instead would delete a transcript to avoid running
+  something nobody asked to run.
   """
   @spec unrequestable_reason(term()) :: term() | nil
   def unrequestable_reason(%__MODULE__{options: options} = state) when is_map(options) do
     system_prompt = Map.get(options, :system_prompt)
 
     cond do
-      state.provider == :codex ->
-        {:legacy_transport_unavailable, :codex}
+      state.provider != :native ->
+        {:legacy_transport_unavailable, state.provider}
 
       Map.has_key?(options, :agent_profile) ->
         :agent_profile_in_durable_options
@@ -1029,6 +977,25 @@ defmodule Ouroboros.Interactive.State do
   end
 
   def unrequestable_reason(_state), do: :invalid_session_state
+
+  @doc """
+  Returns the provider a record names that this build no longer serves, or `nil`.
+
+  The one question `Ouroboros.Interactive.Task` asks before it takes a workspace lease, so
+  a session written by a build that still had wrapped vendor CLIs is held exactly as the
+  store handed it over rather than started, failed, or quarantined.
+  """
+  @spec removed_provider(term()) :: atom() | nil
+  def removed_provider(%__MODULE__{provider: provider})
+      when is_atom(provider) and not is_nil(provider) and provider != :native,
+      do: provider
+
+  def removed_provider(_state), do: nil
+
+  @doc "The refusal a verb answers with when a record names a provider this build lost."
+  @spec provider_removed_error(atom()) :: {:provider_removed, atom(), String.t()}
+  def provider_removed_error(provider),
+    do: {:provider_removed, provider, provider_removed_message(provider)}
 
   @doc "Returns whether a reconstructed session can safely build a Harness request."
   @spec requestable?(term()) :: boolean()
