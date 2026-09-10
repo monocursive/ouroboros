@@ -209,7 +209,7 @@ defmodule Ouroboros.Wasm.Artifact do
     metadata = metadata(attrs)
 
     epoch = Map.get(attrs, :epoch, :missing)
-    id = Map.get_lazy(attrs, :id, &Jido.Signal.ID.generate!/0)
+    id = Map.get_lazy(attrs, :id, &Ouroboros.ID.generate!/0)
     kind = Map.get(attrs, :kind, :capability)
     # The world follows the kind rather than being defaulted beside it, so a caller that names
     # one and not the other cannot produce a manifest whose two halves disagree. A caller that

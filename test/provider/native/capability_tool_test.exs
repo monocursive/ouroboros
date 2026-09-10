@@ -4,21 +4,21 @@ defmodule Ouroboros.Capability.CapabilityToolStandIn do
   # An agent that stands at a lane-W id with a seeded `:last_answer`. See the test module's
   # doc for why the tool is exercised against this rather than the wasm wrapper.
 
-  use Jido.Agent,
-    name: "ouroboros_capability_tool_stand_in",
-    description: "A mesh agent with a seeded answer, for the capability tool's own contract",
-    schema: [
-      inbox: [type: :list, default: []],
-      last_answer: [type: :any, default: nil],
-      last_message: [type: :any, default: nil],
-      messages_received: [type: :non_neg_integer, default: 0],
-      untrusted: [type: :any, default: nil]
-    ],
-    signal_routes: [
-      {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
-    ]
+  @behaviour Ouroboros.Mesh.Agent
 
-  def actions, do: super() ++ [Ouroboros.Mesh.ReceiveMessage]
+  @impl true
+  def init_state(initial),
+    do:
+      {:ok,
+       Map.merge(
+         %{inbox: [], last_answer: nil, last_message: nil, messages_received: 0, untrusted: nil},
+         initial
+       )}
+
+  @impl true
+  def handle_message(message, state, context) do
+    Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
+  end
 end
 
 defmodule Ouroboros.Provider.Native.CapabilityToolTest do

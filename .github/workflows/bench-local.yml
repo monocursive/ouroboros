@@ -43,8 +43,8 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      # `jido_harness` is a git dependency pinned by ref, so the cache key has to move
-      # when the lock does or a stale checkout survives a re-pin.
+      # The dependency cache follows the lock so removed packages and stale builds
+      # cannot survive a dependency-graph change.
       - uses: actions/cache@v6
         with:
           path: |

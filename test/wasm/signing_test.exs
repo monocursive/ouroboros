@@ -563,7 +563,7 @@ defmodule Ouroboros.Wasm.SigningTest do
       |> Keyword.put_new(:signer_id, @signer_id)
       |> Keyword.put_new(
         :storage,
-        {Jido.Storage.ETS,
+        {Ouroboros.Storage.ETS,
          table: String.to_atom("wasm_signing_journal_#{System.unique_integer([:positive])}")}
       )
       |> Keyword.put(:name, nil)

@@ -18,7 +18,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   between tools, stopping after the current tool on interrupt, and refusing repeated
   calls. The loop drives the model directly within the supervised native session.
 
-  `Ouroboros.Provider.Native.Tools.Schema` converts each `Jido.Action` schema into
+  `Ouroboros.Provider.Native.Tools.Schema` converts each `Ouroboros.Action` schema into
   the generated JSON Schema. Tools applies its description and model schema overrides;
   argument validation, permission dispatch, and execution remain separate boundaries.
   Models are reached through

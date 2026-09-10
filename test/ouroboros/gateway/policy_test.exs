@@ -994,7 +994,7 @@ defmodule Ouroboros.Gateway.PolicyTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("gw_policy_journal_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -1074,7 +1074,7 @@ defmodule Ouroboros.Gateway.PolicyTest do
       Registry.start_link(
         name: name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: String.to_atom("gw_policy_rollouts_#{System.unique_integer([:positive])}")}
       )
 

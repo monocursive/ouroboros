@@ -65,7 +65,7 @@ defmodule Ouroboros.Upgrade.EpochTest do
       Registry.start_link(
         name: name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: String.to_atom("epoch_target_claims_#{System.unique_integer([:positive])}")}
       )
 
@@ -121,7 +121,8 @@ defmodule Ouroboros.Upgrade.EpochTest do
   defp epoch_key, do: {:ouroboros, :forge_epoch, 1}
 
   defp ets_storage do
-    {Jido.Storage.ETS, table: String.to_atom("epoch_test_#{System.unique_integer([:positive])}")}
+    {Ouroboros.Storage.ETS,
+     table: String.to_atom("epoch_test_#{System.unique_integer([:positive])}")}
   end
 
   defp temporary_directory! do

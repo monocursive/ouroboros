@@ -93,8 +93,8 @@ defmodule Ouroboros.Wasm do
     # against it (F3).
     #
     # It exists because `:limits` arrives in `initial_state`, `Ouroboros.Mesh.start_agent/2`
-    # is remote-reachable, and Jido does not validate `initial_state` against the agent's
-    # schema — so before this, a remote starter simply wrote the helper's own maxima into the
+    # is remote-reachable, so domain limits must be checked where they are used.
+    # Before this, a remote starter simply wrote the helper's own maxima into the
     # state it started a capability with and got them: a full trillion units of fuel, a
     # gibibyte, and sixty seconds of wall clock per message, on a node that had never agreed
     # to any of it. A ceiling is the only place that decision can honestly live, because it

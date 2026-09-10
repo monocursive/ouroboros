@@ -1096,7 +1096,7 @@ defmodule Ouroboros.Cluster do
   # unsafe even if the application version was accidentally left unchanged. Never derive
   # it from a build path, source hash, or host: operators need one stable, reviewable
   # protocol revision shared by every artifact in a compatible fleet.
-  @fleet_protocol_revision 4
+  @fleet_protocol_revision 5
   @runtime_contract_keys [:fleet_protocol_revision, :ouroboros_version, :otp_release]
 
   @type role :: :core | :builder | :signer
@@ -1591,6 +1591,15 @@ defmodule Ouroboros.Cluster do
       true ->
         with {:ok, posture} <- probe(target), do: check_role(posture, expected)
     end
+  end
+
+  @doc "Checks connectivity and fleet compatibility for remote mesh control, regardless of placement overrides."
+  @spec ensure_compatible(node()) :: :ok | {:error, term()}
+  def ensure_compatible(target) when is_atom(target) do
+    with {:ok, posture} <- fleet_posture(target),
+         :ok <- check_role(posture, :any),
+         :ok <- check_runtime_compatibility(posture.runtime),
+         do: :ok
   end
 
   @doc """

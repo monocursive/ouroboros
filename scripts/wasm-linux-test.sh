@@ -160,8 +160,8 @@ rustup target add wasm32-wasip2 >/dev/null
 echo "==> cargo: $(cargo --version)"
 
 # deps/ is a volume seeded once from the host copy, rather than the host copy itself.
-# Both halves of that matter. Seeded, because a checkout .git is a FILE pointing at a
-# worktree this container cannot see, so mix deps.get cannot fetch the one git dependency.
+# Both halves of that matter. Seeded, so an available host dependency cache can be
+# reused before resolving the locked package graph inside the container.
 # A volume, because deps/ is not pure source: erlexec compiles a C port in-tree, and the
 # Mach-O objects a Mac leaves there are what a linker in here refuses.
 if [ ! -f /src/deps/.seeded-from-host ]; then
@@ -204,6 +204,7 @@ mix local.hex --force >/dev/null
 mix local.rebar --force >/dev/null
 mix deps.get >/dev/null
 mix compile
+mix run --no-start scripts/check_runtime_graph.exs
 
 # Which backend the suite is about to run under, recorded before it runs: a host whose
 # container policy refuses the namespace reports no backend at all, and this run would then

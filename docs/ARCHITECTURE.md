@@ -95,20 +95,27 @@ boundaries".
 ### Mesh
 
 `Ouroboros.Mesh` owns logical IDs and placement. Each member is a real
-`Jido.AgentServer` under `Ouroboros.Jido` supervision. A local directory monitors the
+`Ouroboros.Mesh.Server` under `Ouroboros.Mesh.Supervisor`, with a local Registry and
+DynamicSupervisor. A local directory monitors the
 PID and joins it to `{:ouroboros_agent, logical_id}` in a named `:pg` scope.
 
-Typed Jido signals are the protocol. Cross-node calls work because Erlang PIDs and
+`Ouroboros.Signals.AgentMessage` is the typed message envelope. Cross-node calls work because Erlang PIDs and
 monitors are distribution-native. `:erpc` is used when an operation must execute inside
 a selected node's ownership boundary.
 
 Invariant: a PID is an observation, not durable identity. Callers retain logical IDs or
 session references, never persist PIDs.
 
-`Ouroboros.Mesh.ReceiveMessage` is the action every mesh agent routes
-`ouroboros.agent.message` to. It bounds the inbox by count and by bytes, so a
-remote-reachable send cannot grow an agent's state without limit, and it is what makes
-`last_message` the field the rest of this runtime reads.
+`Ouroboros.Mesh.Agent` defines `init_state/1` and `handle_message/3`. A successful
+callback supplies the complete next state. The server serializes commits and gives
+the handler its logical ID and actual server PID. `Ouroboros.Mesh.ReceiveMessage`
+is an opt-in receive convention with a 64-message and byte-bounded inbox; the WASM
+wrapper keeps only its domain state, last message, and last answer.
+
+The fleet protocol revision changes with this contract. Drain and stop participating
+nodes before upgrading; mixed mesh contracts are refused before remote dispatch.
+Duplicate starts use the existing healthy-cluster lock, with no partition-safe
+consensus claim.
 
 > The coordination stack that used to sit here — teams, a durable orchestration DAG, and
 > an objective-level control loop with a planner and evaluator — was deleted in September
@@ -221,7 +228,7 @@ attach natively — all of which have landed.
   process stays answerable, emits through a function, and takes control on its mailbox.
   Models are reached through `Ouroboros.Provider.Native.Model`, a single-callback
   behaviour whose ReqLLM implementation opens every provider ReqLLM ships. The owned
-  `Tools.Schema` adapter calls `Jido.Action.Schema` to generate parameter schemas, then
+  `Tools.Schema` adapter uses the owned action-schema converter to generate parameter schemas, then
   `Tools` applies description and model schema overrides. Tool schemas are built once
   per turn and held in the loop's state: a tool list that could change between two calls
   of one turn is a changed cached prefix.
@@ -922,7 +929,6 @@ That architecture creates promising future capabilities:
 
 ## Primary references
 
-- [Jido documentation](https://jido.run/docs/getting-started/elixir-developers)
 - [Distributed Erlang](https://www.erlang.org/doc/system/distributed.html)
 - [`erlang:binary_to_term/2` and the `safe` option](https://www.erlang.org/doc/apps/erts/erlang.html#binary_to_term/2)
 - [The WebAssembly component model](https://component-model.bytecodealliance.org/)

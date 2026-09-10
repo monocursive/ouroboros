@@ -14,7 +14,7 @@ defmodule Ouroboros.Provider.Native.Tools.Ls do
   find three tool calls later.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "ls",
     description:
       "List the entries of a workspace directory. `depth` defaults to 1 and is capped " <>

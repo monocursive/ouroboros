@@ -35,7 +35,7 @@ defmodule Ouroboros.Provider.Native.Tools.ApplyPatch do
   three restorable paths.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "apply_patch",
     description:
       "Apply a V4A patch (`*** Begin Patch` … `*** End Patch`) that adds, updates, " <>

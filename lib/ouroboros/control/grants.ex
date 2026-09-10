@@ -506,20 +506,20 @@ defmodule Ouroboros.Control.Grants do
 
       :error ->
         case Application.get_env(:ouroboros, :grants_storage) do
-          nil -> {:ok, {Jido.Storage.ETS, table: :ouroboros_grants}}
+          nil -> {:ok, {Ouroboros.Storage.ETS, table: :ouroboros_grants}}
           storage -> {:ok, storage}
         end
     end
   end
 
   defp normalize_storage(storage) do
-    {adapter, adapter_opts} = Jido.Storage.normalize_storage(storage)
+    {adapter, adapter_opts} = Ouroboros.Storage.normalize_storage(storage)
     {:ok, adapter, adapter_opts}
   rescue
     error -> {:error, {:invalid_grants_storage, Exception.message(error)}}
   end
 
-  defp durability_level(Jido.Storage.ETS), do: :ephemeral_checkpoint
+  defp durability_level(Ouroboros.Storage.ETS), do: :ephemeral_checkpoint
   defp durability_level(Ouroboros.Storage.DurableFile), do: :synced_checkpoint
   defp durability_level(_adapter), do: :durable_checkpoint
 

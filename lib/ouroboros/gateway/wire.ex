@@ -7,7 +7,7 @@ defmodule Ouroboros.Gateway.Wire do
   An all-or-nothing serializer replaces the *entire* term the moment one pid appears
   anywhere in it. Pids are everywhere by construction — `Ouroboros.Mesh.list_agents/0`
   returns `%{id: .., pid: .., node: .., replicas: ..}` maps, `Ouroboros.status/0` embeds
-  those, and `Mesh.state/1` returns a `Jido.AgentServer.State` dense with pids, refs,
+  those, and `Mesh.state/1` returns owned domain state that may contain pids, refs,
   `:queue` tuples, and functions. Applied to any of them, that rule would answer one
   opaque string where the client needed a table. So this module walks the tree and
   substitutes at the *leaf*: the sibling keys stay readable, and only the thing that

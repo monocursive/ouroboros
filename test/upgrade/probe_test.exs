@@ -6,19 +6,16 @@ defmodule Ouroboros.Capability.ProbeReference do
   # It is what `Probe.ready?/1` was written against, so a probe that refuses this refuses
   # every honest capability.
 
-  use Jido.Agent,
-    name: "ouroboros_capability_probe_reference",
-    description: "A capability that answers the mesh's message convention and nothing more",
-    schema: [
-      inbox: [type: :list, default: []],
-      last_message: [type: :any, default: nil],
-      messages_received: [type: :non_neg_integer, default: 0]
-    ],
-    signal_routes: [
-      {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
-    ]
+  @behaviour Ouroboros.Mesh.Agent
 
-  def actions, do: super() ++ [Ouroboros.Mesh.ReceiveMessage]
+  @impl true
+  def init_state(initial),
+    do: {:ok, Map.merge(%{inbox: [], last_message: nil, messages_received: 0}, initial)}
+
+  @impl true
+  def handle_message(message, state, context) do
+    Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
+  end
 end
 
 defmodule Ouroboros.Capability.ProbeStartSpec do
@@ -30,24 +27,28 @@ defmodule Ouroboros.Capability.ProbeStartSpec do
   # answers with that value instead and fails it. Nothing outside this module has to be
   # inspected to know whether the seed arrived.
 
-  use Jido.Agent,
-    name: "ouroboros_capability_probe_start_spec",
-    description: "A capability whose echo is whatever its initial state says it is",
-    schema: [
-      echo_body: [type: :any, default: :verbatim],
-      last_message: [type: :any, default: nil],
-      messages_received: [type: :non_neg_integer, default: 0]
-    ],
-    signal_routes: [
-      {"ouroboros.agent.message", __MODULE__.Answer}
-    ]
+  @behaviour Ouroboros.Mesh.Agent
 
-  def actions, do: super() ++ [__MODULE__.Answer]
+  @impl true
+  def init_state(initial),
+    do:
+      {:ok, Map.merge(%{echo_body: :verbatim, last_message: nil, messages_received: 0}, initial)}
+
+  @impl true
+  def handle_message(message, state, context) do
+    with {:ok, changes} <-
+           __MODULE__.Answer.run(
+             message,
+             Map.put(context, :agent, %{id: context.id, state: state})
+           ) do
+      {:ok, Map.merge(state, changes)}
+    end
+  end
 
   defmodule Answer do
     @moduledoc false
 
-    use Jido.Action,
+    use Ouroboros.Action,
       name: "probe_start_spec_answer",
       description: "Echo the body, or whatever the seeded state named instead",
       schema: [
@@ -81,18 +82,23 @@ defmodule Ouroboros.Capability.SlowProbeAnswer do
   # the throwaway agent was alive" a fact rather than a race: the probe is still inside its
   # message exchange, several seconds from finishing, when it is killed.
 
-  use Jido.Agent,
-    name: "ouroboros_capability_slow_probe_answer",
-    description: "A capability that answers long after any deadline a caller sets",
-    schema: [last_message: [type: :any, default: nil]],
-    signal_routes: [{"ouroboros.agent.message", __MODULE__.Wait}]
+  @behaviour Ouroboros.Mesh.Agent
 
-  def actions, do: super() ++ [__MODULE__.Wait]
+  @impl true
+  def init_state(initial), do: {:ok, Map.merge(%{last_message: nil}, initial)}
+
+  @impl true
+  def handle_message(message, state, context) do
+    with {:ok, changes} <-
+           __MODULE__.Wait.run(message, Map.put(context, :agent, %{id: context.id, state: state})) do
+      {:ok, Map.merge(state, changes)}
+    end
+  end
 
   defmodule Wait do
     @moduledoc false
 
-    use Jido.Action,
+    use Ouroboros.Action,
       name: "slow_probe_answer_wait",
       description: "Sleeps past the deadline, then echoes",
       schema: [

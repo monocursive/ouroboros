@@ -635,7 +635,7 @@ defmodule Ouroboros.Wasm.StoreTest do
       Registry.start_link(
         name: name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: String.to_atom("wasm_store_rollouts_#{System.unique_integer([:positive])}")}
       )
 

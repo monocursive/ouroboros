@@ -8,7 +8,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   a tool, a path, or an approval is made here.
 
   The tool schemas arrive already in JSON Schema form: the owned
-  `Ouroboros.Provider.Native.Tools.Schema` converter uses `Jido.Action.Schema`, then
+  `Ouroboros.Provider.Native.Tools.Schema` converter uses `Ouroboros.Action.Schema`, then
   `Ouroboros.Provider.Native.Tools` applies its final model schema overrides.
 
   Every model provider `ReqLLM` ships is reachable — `anthropic:…`, `openai:…`,

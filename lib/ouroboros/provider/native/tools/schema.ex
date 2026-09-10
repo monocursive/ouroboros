@@ -1,13 +1,13 @@
 defmodule Ouroboros.Provider.Native.Tools.Schema do
   @moduledoc """
-  Converts a Jido Action schema into the native tool's generated parameter schema.
+  Converts an owned action schema into the native tool's generated parameter schema.
 
   Object schemas are closed unless they explicitly allow additional properties. Final
   model schema overrides belong to `Ouroboros.Provider.Native.Tools`; transport
   strictness and tool execution remain at their own boundaries.
   """
 
-  alias Jido.Action.Schema, as: ActionSchema
+  alias Ouroboros.Action.Schema, as: ActionSchema
 
   @spec from_action(module()) :: map()
   def from_action(module) do

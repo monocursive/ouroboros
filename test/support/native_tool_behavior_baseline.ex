@@ -1,6 +1,6 @@
 defmodule Ouroboros.Test.NativeToolBehaviorBaseline.Probe do
   @moduledoc false
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "native_contract_probe",
     description: "Synthetic action that reports its effective input without external effects.",
     schema: [

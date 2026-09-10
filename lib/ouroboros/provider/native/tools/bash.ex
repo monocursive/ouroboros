@@ -78,7 +78,7 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   model that needs the rest can `read` it; the transcript does not carry it.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "bash",
     description:
       "Run a shell command in the workspace root. Under read_only and workspace_write " <>

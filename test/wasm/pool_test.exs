@@ -1244,6 +1244,98 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
     end
 
+    test "a late successful instantiate is reclaimed after its owner and linked caller are killed" do
+      journal = journal_file()
+
+      helper =
+        write_helper(
+          awk_body(
+            @doctor_ok,
+            "",
+            ~s|print $0 >> "#{journal}"; close("#{journal}"); if ($0 ~ /"method":"instantiate"/) system("sleep 0.8"); |
+          )
+        )
+
+      pool = start_pool(helper)
+      assert {:ok, _report} = Pool.doctor(pool)
+      observer = self()
+
+      owner =
+        spawn(fn ->
+          server_pid = self()
+          task = Task.async(fn -> instantiate(pool, "late-owned", owner: server_pid) end)
+          send(observer, {:instantiate_caller, task.pid})
+          Process.sleep(:infinity)
+        end)
+
+      on_exit(fn -> Process.exit(owner, :kill) end)
+      assert_receive {:instantiate_caller, caller}
+      monitor = Process.monitor(caller)
+      assert wait_until(fn -> Enum.any?(requests(journal), &(&1["method"] == "instantiate")) end)
+
+      # The actual owner dies while its linked callback is awaiting the helper. The
+      # request has already crossed the wire, so cancellation cannot claim it absent.
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}
+      assert wait_until(fn -> match?(%{inflight: %{kind: :orphaned}}, :sys.get_state(pool)) end)
+
+      assert wait_until(fn -> Enum.any?(requests(journal), &(&1["method"] == "drop")) end),
+             "the successful orphaned instantiate was never reclaimed"
+
+      assert wait_until(fn -> Pool.status(pool).instances == 0 end)
+      assert %{phase: :ready, owned: 0, pending_drops: 0} = Pool.status(pool)
+      assert Enum.count(requests(journal), &(&1["method"] == "instantiate")) == 1
+
+      assert %{"method" => "drop", "params" => %{"instance" => "late-owned"}} =
+               List.last(requests(journal))
+    end
+
+    test "a queued reclaim cannot drop a replacement instance with the same stable name" do
+      journal = journal_file()
+
+      helper =
+        write_helper(
+          awk_body(
+            @doctor_ok,
+            "",
+            ~s|print $0 >> "#{journal}"; close("#{journal}"); if ($0 ~ /"method":"inspect"/) system("sleep 0.8"); |
+          )
+        )
+
+      pool = start_pool(helper)
+      original_owner = spawn(fn -> Process.sleep(:infinity) end)
+      replacement_owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        Process.exit(original_owner, :kill)
+        Process.exit(replacement_owner, :kill)
+      end)
+
+      assert {:ok, _} = instantiate(pool, "stable-name", owner: original_owner)
+
+      # Work already ahead of the reclaim keeps the helper busy while a replacement
+      # drops the old instance and stands a new one under the same logical identity.
+      path = component("slow-inspect")
+      blocker = Task.async(fn -> Pool.inspect(path, pool) end)
+      assert wait_until(fn -> Enum.any?(requests(journal), &(&1["method"] == "inspect")) end)
+      drop = Task.async(fn -> Pool.drop("stable-name", pool) end)
+      assert wait_until(fn -> :queue.len(:sys.get_state(pool).queue) == 1 end)
+
+      replacement =
+        Task.async(fn -> instantiate(pool, "stable-name", owner: replacement_owner) end)
+
+      assert wait_until(fn -> :queue.len(:sys.get_state(pool).queue) == 2 end)
+      Process.exit(original_owner, :kill)
+      assert wait_until(fn -> Pool.status(pool).pending_drops == 1 end)
+
+      assert {:ok, _} = Task.await(blocker)
+      assert {:ok, _} = Task.await(drop)
+      assert {:ok, _} = Task.await(replacement)
+      assert wait_until(fn -> :sys.get_state(pool).inflight == nil end)
+      assert %{phase: :ready, instances: 1, owned: 1, pending_drops: 0} = Pool.status(pool)
+      assert Enum.count(requests(journal), &(&1["method"] == "drop")) == 1
+    end
+
     test "an instance nobody claimed is nobody's to reclaim" do
       # `owner:` is optional, and an unowned instance is a legitimate one — it is simply one
       # whose lifetime its caller manages. Nothing here may drop it behind that caller's back.

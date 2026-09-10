@@ -514,12 +514,19 @@ defmodule Ouroboros.Wasm.Rollout do
 
   defp check_roles(nodes) do
     Enum.reduce_while(nodes, {:ok, nodes}, fn target, acc ->
-      case Cluster.ensure_placeable(target) do
+      admission =
+        with :ok <- mesh_compatible(target),
+             do: Cluster.ensure_placeable(target)
+
+      case admission do
         :ok -> {:cont, acc}
         {:error, reason} -> {:halt, {:error, {:node_not_deployable, target, reason}}}
       end
     end)
   end
+
+  defp mesh_compatible(target) when target == node(), do: :ok
+  defp mesh_compatible(target), do: Cluster.ensure_compatible(target)
 
   defp connected?(target), do: target == node() or target in Node.list(:connected)
 
@@ -1395,7 +1402,20 @@ defmodule Ouroboros.Wasm.Rollout do
     if target == node() do
       local_call(module, function, args, timeout)
     else
-      {:returned, :erpc.call(target, module, function, args, timeout)}
+      # Preflight is only an observation: a peer can change before a later gate or an
+      # operator rollback. These calls run local mesh operations on the destination, so
+      # the facade's remote-owner guard cannot protect them. Fence every dispatch here,
+      # independently of the optional placement-role check.
+      case mesh_compatible(target) do
+        :ok ->
+          {:returned, :erpc.call(target, module, function, args, timeout)}
+
+        {:error, {:runtime_incompatible, _, _} = reason} ->
+          {:returned, {:error, reason}}
+
+        {:error, reason} ->
+          {:ambiguous, {:compatibility_check_failed, reason}}
+      end
     end
   catch
     kind, reason -> {:ambiguous, {kind, inspect(reason, limit: 10)}}

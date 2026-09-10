@@ -6,14 +6,14 @@ defmodule Ouroboros.Provider.Native.Tools.Skill do
   `Ouroboros.Provider.Native.Skills`; this is the call. The tool's *description* carries
   the catalogue — the names and one-line descriptions of every skill this session can
   see, bounded — which is why the description is built per session rather than baked in
-  by `Jido.Action`. That is the whole Agent Skills trick: names in the prompt, bodies on
+  by `Ouroboros.Action`. That is the whole Agent Skills trick: names in the prompt, bodies on
   demand.
 
   A skill's body arrives as a tool result, so it reads to the model exactly like a file
   it opened. It grants nothing.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "skill",
     description:
       "Load one skill's instructions. Skills are project- or user-authored guides for " <>
@@ -31,6 +31,7 @@ defmodule Ouroboros.Provider.Native.Tools.Skill do
   scope — a prompt preview, for instance — the static description above stands.
   """
   @spec description(keyword()) :: String.t()
+  @impl true
   def description(opts) do
     root = Keyword.get(opts, :workspace)
     skills = Skills.discover(root)

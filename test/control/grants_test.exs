@@ -10,13 +10,13 @@ defmodule Ouroboros.Control.GrantsTest.FlakyStorage do
   def fail!, do: Application.put_env(:ouroboros, @flag, true)
   def heal!, do: Application.delete_env(:ouroboros, @flag)
 
-  def get_checkpoint(key, opts), do: Jido.Storage.ETS.get_checkpoint(key, opts)
+  def get_checkpoint(key, opts), do: Ouroboros.Storage.ETS.get_checkpoint(key, opts)
 
   def put_checkpoint(key, data, opts) do
     if Application.get_env(:ouroboros, @flag, false) do
       {:error, :storage_offline}
     else
-      Jido.Storage.ETS.put_checkpoint(key, data, opts)
+      Ouroboros.Storage.ETS.put_checkpoint(key, data, opts)
     end
   end
 end
@@ -262,7 +262,7 @@ defmodule Ouroboros.Control.GrantsTest do
 
   test "grants survive a restart of the authority" do
     table = unique_table()
-    storage = {Jido.Storage.ETS, table: table}
+    storage = {Ouroboros.Storage.ETS, table: table}
     grants = start_grants!(storage)
 
     assert {:ok, _grant} =
@@ -319,8 +319,12 @@ defmodule Ouroboros.Control.GrantsTest do
 
     test "a checkpoint this build cannot interpret stops the authority instead of emptying it" do
       table = unique_table()
-      storage = {Jido.Storage.ETS, table: table}
-      :ok = Jido.Storage.ETS.put_checkpoint(Grants.checkpoint_key(), %{version: 99}, table: table)
+      storage = {Ouroboros.Storage.ETS, table: table}
+
+      :ok =
+        Ouroboros.Storage.ETS.put_checkpoint(Grants.checkpoint_key(), %{version: 99},
+          table: table
+        )
 
       assert {:error, {{:unsupported_grant_checkpoint, 99}, _spec}} =
                start_supervised({Grants, name: unique_name(), storage: storage})
@@ -329,7 +333,7 @@ defmodule Ouroboros.Control.GrantsTest do
 
   defp start_grants!(storage \\ nil) do
     name = unique_name()
-    storage = storage || {Jido.Storage.ETS, table: unique_table()}
+    storage = storage || {Ouroboros.Storage.ETS, table: unique_table()}
     start_supervised!({Grants, name: name, storage: storage}, id: name)
     name
   end

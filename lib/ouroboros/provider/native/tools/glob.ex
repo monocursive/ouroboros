@@ -13,7 +13,7 @@ defmodule Ouroboros.Provider.Native.Tools.Glob do
   count of what was dropped, which is the number Claude Code uses for the same tool.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "glob",
     description:
       "List workspace files matching a glob pattern such as `**/*.ex` or `lib/**/*_test.exs`, " <>

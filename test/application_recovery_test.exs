@@ -18,21 +18,21 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     coordinator_monitor = Process.monitor(live.coordinator)
     admission = Process.whereis(Ouroboros.Provider.Native.Model.Admission)
     ledger = Process.whereis(Ouroboros.Agent.EffectLedger)
-    jido = Process.whereis(Ouroboros.Jido)
+    mesh = Process.whereis(Ouroboros.Mesh.Supervisor)
 
     assert is_pid(admission)
     assert is_pid(ledger)
-    assert is_pid(jido)
+    assert is_pid(mesh)
 
     admission_monitor = Process.monitor(admission)
     ledger_monitor = Process.monitor(ledger)
-    jido_monitor = Process.monitor(jido)
+    mesh_monitor = Process.monitor(mesh)
     Process.exit(admission, :kill)
 
     assert_receive {:DOWN, ^admission_monitor, :process, ^admission, :killed}, 1_000
     assert_receive {:DOWN, ^execution_monitor, :process, _, _}, 2_000
     assert_receive {:DOWN, ^coordinator_monitor, :process, _, _}, 2_000
-    assert_receive {:DOWN, ^jido_monitor, :process, ^jido, _reason}, 2_000
+    assert_receive {:DOWN, ^mesh_monitor, :process, ^mesh, _reason}, 2_000
     refute_receive {:DOWN, ^ledger_monitor, :process, ^ledger, _reason}, 300
     assert Process.alive?(ledger)
     assert Process.whereis(Ouroboros.Agent.EffectLedger) == ledger
@@ -42,10 +42,10 @@ defmodule Ouroboros.ApplicationRecoveryTest do
         replacement(Ouroboros.Provider.Native.Model.Admission, admission)
       end)
 
-    replacement_jido = assert_eventually(fn -> replacement(Ouroboros.Jido, jido) end)
+    replacement_mesh = assert_eventually(fn -> replacement(Ouroboros.Mesh.Supervisor, mesh) end)
 
     assert Process.alive?(replacement_admission)
-    assert Process.alive?(replacement_jido)
+    assert Process.alive?(replacement_mesh)
   end
 
   test "the effect ledger owns the execution subtree beneath its durable boundary", context do
@@ -53,39 +53,40 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     execution_monitor = Process.monitor(live.execution)
     coordinator_monitor = Process.monitor(live.coordinator)
     ledger = Process.whereis(Ouroboros.Agent.EffectLedger)
-    jido = Process.whereis(Ouroboros.Jido)
+    mesh = Process.whereis(Ouroboros.Mesh.Supervisor)
     grants = Process.whereis(Ouroboros.Control.Grants)
 
     assert is_pid(ledger)
-    assert is_pid(jido)
+    assert is_pid(mesh)
     assert is_pid(grants)
 
     ledger_monitor = Process.monitor(ledger)
-    jido_monitor = Process.monitor(jido)
+    mesh_monitor = Process.monitor(mesh)
     grants_monitor = Process.monitor(grants)
     Process.exit(ledger, :kill)
 
     assert_receive {:DOWN, ^ledger_monitor, :process, ^ledger, :killed}, 1_000
     assert_receive {:DOWN, ^execution_monitor, :process, _, _}, 2_000
     assert_receive {:DOWN, ^coordinator_monitor, :process, _, _}, 2_000
-    assert_receive {:DOWN, ^jido_monitor, :process, ^jido, _reason}, 2_000
+    assert_receive {:DOWN, ^mesh_monitor, :process, ^mesh, _reason}, 2_000
     assert_receive {:DOWN, ^grants_monitor, :process, ^grants, _reason}, 2_000
 
     replacement_ledger =
       assert_eventually(fn -> replacement(Ouroboros.Agent.EffectLedger, ledger) end)
 
-    replacement_jido = assert_eventually(fn -> replacement(Ouroboros.Jido, jido) end)
+    replacement_mesh = assert_eventually(fn -> replacement(Ouroboros.Mesh.Supervisor, mesh) end)
 
     replacement_grants =
       assert_eventually(fn -> replacement(Ouroboros.Control.Grants, grants) end)
 
     assert Process.alive?(replacement_ledger)
-    assert Process.alive?(replacement_jido)
+    assert Process.alive?(replacement_mesh)
     assert Process.alive?(replacement_grants)
   end
 
   setup context do
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+    previous_storage = Application.fetch_env!(:ouroboros, :interactive_storage)
     previous_roots = Application.get_env(:ouroboros, :workspace_allowed_roots)
     previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     previous_native_data_dir = Application.get_env(:ouroboros, :native_data_dir)
@@ -100,18 +101,19 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     journal_dir = Path.join(base, "runtime-journal")
     File.mkdir_p!(workspace)
 
-    # The stores' tables outlive an :ouroboros restart on purpose, so a live session
-    # record another test left behind — its workspace is that test's cwd, far outside the
-    # root this module is about to restrict to — would make the restricted boot below
-    # refuse the whole node over someone else's leftovers (the streaming suite hit the
-    # same landmine and drives its own records terminal; this module cannot rely on every
-    # predecessor doing so). Purged while the store processes are still up, because after
-    # stop_application/0 there is nothing left to ask.
+    # Keep this recovery fixture independent of other tests and of the application's
+    # ephemeral table owner. Its checkpoints survive the full application shutdown.
     purge_leftover_session_records()
 
     stop_application()
 
     if context[:no_data_dir], do: Application.delete_env(:ouroboros, :data_dir)
+
+    Application.put_env(
+      :ouroboros,
+      :interactive_storage,
+      {Ouroboros.Storage.DurableFile, path: Path.join(base, "interactive")}
+    )
 
     Application.put_env(:ouroboros, :workspace_allowed_roots, [workspace])
 
@@ -124,9 +126,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
       purge_leftover_session_records()
       stop_application()
 
-      Jido.Storage.ETS.put_checkpoint({:ouroboros, :interactive_sessions, 1}, %{},
-        table: :ouroboros_interactive
-      )
+      Application.put_env(:ouroboros, :interactive_storage, previous_storage)
 
       restore_env(:ouroboros, :data_dir, previous_data_dir)
       restore_env(:ouroboros, :workspace_allowed_roots, previous_roots)
@@ -341,11 +341,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     stop_application()
 
     assert :ok =
-             Jido.Storage.ETS.put_checkpoint(
-               {:ouroboros, :interactive_sessions, 1},
-               %{session_id => skewed},
-               table: :ouroboros_interactive
-             )
+             checkpoint_sessions(%{session_id => skewed})
 
     assert {:ok, _started} = Application.ensure_all_started(:ouroboros)
     assert is_pid(Process.whereis(Ouroboros.Interactive.Store))
@@ -363,6 +359,11 @@ defmodule Ouroboros.ApplicationRecoveryTest do
 
     refute_receive {:ouroboros_test_model_started, _run_id, _request, _adapter}, 100
     assert_eventually(fn -> Workspace.list() == [] end)
+  end
+
+  defp checkpoint_sessions(records) do
+    {adapter, opts} = Application.fetch_env!(:ouroboros, :interactive_storage)
+    adapter.put_checkpoint({:ouroboros, :interactive_sessions, 1}, records, opts)
   end
 
   defp start_controlled_session(workspace, prefix) do

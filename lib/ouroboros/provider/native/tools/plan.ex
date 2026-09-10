@@ -17,7 +17,7 @@ defmodule Ouroboros.Provider.Native.Tools.Plan do
   model it must plan first.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "plan",
     description:
       "Record the current plan. Replaces the whole plan; send every step each time. " <>
@@ -36,8 +36,9 @@ defmodule Ouroboros.Provider.Native.Tools.Plan do
       explanation: [type: :string, default: "", doc: "One line on what the plan is for."]
     ]
 
-  @doc "The nested schema shown to the model; Jido's `:map` bridge cannot name map fields."
+  @doc "The nested schema shown to the model; the keyword schema converter cannot name map fields."
   @spec model_schema() :: map()
+  @impl true
   def model_schema do
     %{
       "type" => "object",

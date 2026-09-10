@@ -52,9 +52,9 @@ config :ouroboros,
   # the same posture the Computer Use tools take, so a model is never taught a name it
   # cannot use. Read as exactly `true`: a typo leaves it shut rather than widening it.
   native_forge_tool: false,
-  interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
-  grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
-  permissions_storage: {Jido.Storage.ETS, table: :ouroboros_permissions},
+  interactive_storage: {Ouroboros.Storage.ETS, table: :ouroboros_interactive},
+  grants_storage: {Ouroboros.Storage.ETS, table: :ouroboros_grants},
+  permissions_storage: {Ouroboros.Storage.ETS, table: :ouroboros_permissions},
   # Operator-authored permission rules, the highest scope `Ouroboros.Control.Permissions`
   # consults. Each entry is `{pattern, decision}` or `{pattern, decision, workspace}`;
   # `decision` is `:allow`, `:deny`, or `:ask`. Empty means every tool call this runtime
@@ -73,12 +73,12 @@ config :ouroboros,
   # Where permission decisions are recorded. The effect ledger is the answer; the key
   # exists so a test can point one engine at a ledger it is allowed to take away.
   permissions_ledger: Ouroboros.Agent.EffectLedger,
-  effect_ledger_storage: {Jido.Storage.ETS, table: :ouroboros_effect_ledger},
+  effect_ledger_storage: {Ouroboros.Storage.ETS, table: :ouroboros_effect_ledger},
   # Terminal entries retained per node. In-flight entries are never evicted, and every
   # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.
   effect_ledger_limit: 1_000,
-  capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
-  epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
+  capability_storage: {Ouroboros.Storage.ETS, table: :ouroboros_capabilities},
+  epoch_storage: {Ouroboros.Storage.ETS, table: :ouroboros_forge_epochs},
   # The `:signer` node a forge submits manifests to, and how long it waits.
   # `nil` means no remote signer is configured, which is what an unconfigured cluster
   # should mean: the forge refuses rather than guessing at a host.
@@ -104,7 +104,7 @@ config :ouroboros,
   # `Ouroboros.Storage.DurableFile` in production: a signature is never returned unless
   # its journal entry was acknowledged first, so this adapter's durability is the
   # durability of the audit trail.
-  signing_journal_storage: {Jido.Storage.ETS, table: :ouroboros_signing_journal},
+  signing_journal_storage: {Ouroboros.Storage.ETS, table: :ouroboros_signing_journal},
   # Deadline for one node's evaluation run during a capability rollout. It bounds an
   # `:erpc` into `Ouroboros.Upgrade.Rollout.Evaluation`, which enforces the artifact's
   # own `budget_ms` internally; this is the outer limit on a node that stops answering,
@@ -274,7 +274,7 @@ config :ouroboros,
   wasm_policy: nil,
   policy_allowable_tools: [],
   policy_decision_timeout_ms: 5_000,
-  policy_promotion_storage: {Jido.Storage.ETS, table: :ouroboros_policy_promotion},
+  policy_promotion_storage: {Ouroboros.Storage.ETS, table: :ouroboros_policy_promotion},
   policy_evidence_root: nil,
   policy_evidence_enabled: true,
   policy_shadow_every: 10

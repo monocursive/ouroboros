@@ -52,7 +52,7 @@ defmodule Ouroboros.InteractiveSession do
           {:ok, Ref.t()} | {:created, Ref.t(), term()} | {:error, term()}
   def start_for_gateway(opts) when is_list(opts) do
     if valid_options?(opts) do
-      id = Keyword.get_lazy(opts, :id, &Jido.Signal.ID.generate!/0)
+      id = Keyword.get_lazy(opts, :id, &Ouroboros.ID.generate!/0)
 
       with {:ok, session} <- State.new(id, opts),
            {:ok, persisted} <- create_or_match(session) do
@@ -784,7 +784,7 @@ defmodule Ouroboros.InteractiveSession do
 
   defp send_turn(session, mode, input, opts) do
     with :ok <- validate_options(opts, [:id | @turn_options]),
-         id = Keyword.get_lazy(opts, :id, &Jido.Signal.ID.generate!/0),
+         id = Keyword.get_lazy(opts, :id, &Ouroboros.ID.generate!/0),
          :ok <- validate_turn_id(id) do
       call(session, {:send_turn, mode, id, input, Keyword.delete(opts, :id)})
     end

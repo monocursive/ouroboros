@@ -90,7 +90,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("wasm_w8_journal_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -1228,7 +1228,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
            signer_id: @signer,
            rate_limit_per_minute: per_minute,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("wasm_w8_limited_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -1483,7 +1483,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     name = String.to_atom("wasm_w8_registry_#{System.unique_integer([:positive])}")
     table = String.to_atom("wasm_w8_rollouts_#{System.unique_integer([:positive])}")
 
-    {:ok, pid} = Registry.start_link(name: name, storage: {Jido.Storage.ETS, table: table})
+    {:ok, pid} = Registry.start_link(name: name, storage: {Ouroboros.Storage.ETS, table: table})
 
     on_exit(fn ->
       try do

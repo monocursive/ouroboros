@@ -2,12 +2,12 @@ defmodule Ouroboros.Provider.Native.Tools.Mcp do
   @moduledoc """
   The one module that answers every `mcp__<server>__<tool>` name.
 
-  ## Why this is not a `Jido.Action`
+  ## Why this is not a `Ouroboros.Action`
 
   Every other tool in this set is one, because every other tool has a schema known at
   compile time and `Tools.Schema` turns that schema into the JSON Schema a model
   sees. An MCP tool's schema arrives from a stranger's process at run time, and there
-  are as many of them as the configured servers advertise. A `Jido.Action` per MCP tool
+  are as many of them as the configured servers advertise. A `Ouroboros.Action` per MCP tool
   would mean generating modules — and therefore atoms — from a remote server's tool
   list, which is the shape of a memory leak somebody else controls.
 

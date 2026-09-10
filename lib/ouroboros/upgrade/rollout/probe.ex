@@ -183,7 +183,6 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     case Mesh.send_message(@probe_source, id, body, timeout: @call_timeout) do
       {:ok, agent} -> {:ok, agent}
       {:error, reason} -> {:error, {:probe_message_failed, reason}}
-      other -> {:error, {:probe_message_failed, {:unexpected_result, inspect(other)}}}
     end
   end
 
@@ -191,7 +190,7 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   # keeps a `:last_message` the way `Ouroboros.Wasm.Capability` does, that message must be
   # the one just sent — an agent that answers while ignoring its input is not ready.
   defp sane_reply?(agent, body) do
-    state = if is_struct(agent), do: Map.get(agent, :state), else: nil
+    state = if is_map(agent), do: Map.get(agent, :state), else: nil
 
     cond do
       not is_map(state) -> {:error, {:probe_reply_invalid, inspect(agent)}}

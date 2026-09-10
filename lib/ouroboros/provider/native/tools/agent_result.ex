@@ -25,7 +25,7 @@ defmodule Ouroboros.Provider.Native.Tools.AgentResult do
   own `provider_session_id`, and a second collection of the same id says it is unknown.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "agent_result",
     description:
       "Wait for a background subagent and return its summary. Give it the task_id " <>

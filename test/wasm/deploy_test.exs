@@ -71,7 +71,7 @@ defmodule Ouroboros.Wasm.DeployTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("wasm_deploy_journal_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -584,7 +584,7 @@ defmodule Ouroboros.Wasm.DeployTest do
            key_path: key_path,
            signer_id: @signer <> "-gateway",
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("w19_journal_#{System.unique_integer([:positive])}")}
          ]}
       )
@@ -923,7 +923,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   # and after a refusal, because "spent no epoch and wrote nothing" is a claim about the
   # bytes on the other side of the checkpoint rather than about what a listing renders.
   defp checkpoint(context) do
-    Jido.Storage.ETS.get_checkpoint(
+    Ouroboros.Storage.ETS.get_checkpoint(
       Ouroboros.Upgrade.Rollout.Registry.checkpoint_key(),
       table: context.registry_table
     )
@@ -1021,7 +1021,7 @@ defmodule Ouroboros.Wasm.DeployTest do
        ) do
     name = String.to_atom("wasm_deploy_registry_#{System.unique_integer([:positive])}")
 
-    {:ok, pid} = Registry.start_link(name: name, storage: {Jido.Storage.ETS, table: table})
+    {:ok, pid} = Registry.start_link(name: name, storage: {Ouroboros.Storage.ETS, table: table})
 
     on_exit(fn ->
       try do

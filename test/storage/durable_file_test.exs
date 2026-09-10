@@ -120,17 +120,6 @@ defmodule Ouroboros.Storage.DurableFileTest do
     assert Path.wildcard(Path.join([root, "checkpoints", "*.tmp-*"])) == [recent]
   end
 
-  test "unsupported thread operations fail closed", %{root: root} do
-    assert {:error, :thread_operations_not_supported} =
-             DurableFile.load_thread("thread", path: root)
-
-    assert {:error, :thread_operations_not_supported} =
-             DurableFile.append_thread("thread", [], path: root)
-
-    assert {:error, :thread_operations_not_supported} =
-             DurableFile.delete_thread("thread", path: root)
-  end
-
   defp drain_events(acc \\ []) do
     receive do
       {:durability, event} -> drain_events([event | acc])

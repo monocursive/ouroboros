@@ -155,7 +155,7 @@ Two placement facts the implementation must respect:
   without replacement and names the safe operator choices: inspect it and repair it
   only if it is truly yours, or choose a fresh absolute `OUROBOROS_DATA_DIR`. Every
   managed child gets umask 077, including Ring output, so
-  Jido stores and later log generations cannot inherit a normal caller's 022 posture.
+  Checkpoint stores and later log generations cannot inherit a normal caller's 022 posture.
   At the native execution boundary, shell subprocesses restore workspace
   umask 022, yielding conventional 0644 files and 0755 directories whether the runtime
   uses Ring or service output.
@@ -675,8 +675,8 @@ the *entire* term the moment one pid appears anywhere in it answers one opaque
 inspect string, and pids are everywhere by construction — `Mesh.list_agents/0`
 returns `%{id, pid, node, replicas}` maps
 ([mesh.ex:118](../lib/ouroboros/mesh.ex)), which `Ouroboros.status/0` embeds,
-and `Mesh.state/1` returns a `%Jido.AgentServer.State{}` dense with pids,
-refs, `:queue` tuples, and functions. Applied to `runtime.status` — the
+and `Mesh.state/1` returns an owned inspection map with logical identity and domain
+state. Domain state can itself contain pids, references, tuples, or functions. Applied to `runtime.status` — the
 Dashboard's whole data source — it would answer one string where the client
 needed a table ([wire.ex:5-14](../lib/ouroboros/gateway/wire.ex)).
 

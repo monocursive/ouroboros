@@ -1333,10 +1333,12 @@ defmodule Ouroboros.Wasm.Pool do
     |> drain()
   end
 
-  # The caller went away, but the helper still answered and a successful `load` still
-  # admitted a component to the shared cache — so it is still counted.
+  # A caller dying does not undo a request already dispatched. A late successful load
+  # still counts, and an instantiate still needs its deadline and owner recorded. If
+  # the owning server died with its linked caller, monitoring that dead PID immediately
+  # schedules reclaim; dropping this result would leave the helper's instance unowned.
   defp route(:orphaned, reply, state, inflight),
-    do: state |> count_hook(inflight, reply) |> drain()
+    do: state |> count_hook(inflight, reply) |> remember_instance(inflight, reply) |> drain()
 
   # A reclaim `drop` this pool issued for a dead owner. Nobody is waiting for the answer;
   # the bookkeeping it settles is this pool's own.
@@ -2246,7 +2248,10 @@ defmodule Ouroboros.Wasm.Pool do
           |> Map.put(instance, {seq, deadline})
           |> bound_instances(state.max_instances)
 
+        # A successful instantiate is a new generation of this stable name. A
+        # reclaim queued for its predecessor must never run against this instance.
         %{state | deadlines: deadlines, instance_seq: seq}
+        |> forget_pending_drop(instance)
         |> remember_owner(instance, Map.get(inflight, :owner), seq)
 
       _incomplete ->
@@ -2258,6 +2263,7 @@ defmodule Ouroboros.Wasm.Pool do
     instance = Map.get(params, "instance")
 
     %{state | deadlines: Map.delete(state.deadlines, instance)}
+    |> forget_pending_drop(instance)
     |> forget_owner(instance)
   end
 
@@ -2289,6 +2295,12 @@ defmodule Ouroboros.Wasm.Pool do
 
     %{state | owners: owners}
   end
+
+  # Reclaims wait behind admitted callers. A successful explicit drop settles any
+  # queued reclaim for that name, and a subsequent instantiate replaces its lifetime.
+  # The sequential helper wire makes completion the safe point to discard stale work.
+  defp forget_pending_drop(state, instance),
+    do: %{state | pending_drops: List.delete(state.pending_drops, instance)}
 
   defp forget_owner(state, instance) do
     case Map.pop(state.owners, instance) do

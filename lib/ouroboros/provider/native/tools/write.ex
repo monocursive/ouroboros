@@ -14,7 +14,7 @@ defmodule Ouroboros.Provider.Native.Tools.Write do
   something to restore from.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "write",
     description:
       "Write a file in the workspace, replacing it if it exists. Prefer `edit` for a " <>

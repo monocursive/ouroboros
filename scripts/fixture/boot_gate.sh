@@ -72,7 +72,11 @@ fi
 #    node's, so nothing is reserved under it and the recorded paths need not exist.
 rm -rf "$OUT"
 mkdir -p "$OUT/workspaces"
-tar -xzf "$TARBALL" -C "$OUT"
+# The frozen macOS archive carries AppleDouble metadata in `._*` entries. BSD tar
+# restores them as metadata; GNU tar otherwise creates ordinary files that inflate
+# the audit byte count. Extract the same canonical files on both hosts without
+# changing the archive or its recorded checksum.
+tar --exclude '*/._*' -xzf "$TARBALL" -C "$OUT"
 [ -d "$OUT/fixture-datadir" ] || fail "the tarball did not extract fixture-datadir/"
 
 # `expect LOG PATTERN LABEL`: the log must carry a line matching the pattern.
@@ -158,9 +162,23 @@ check() {
   expect "$log" '^policy promotion: .*allowable_tools: \["bash"\]' 'the promoted tool' || bad=1
   expect "$log" '^policy evidence: \{:ok, %\{.*records: 1' 'the evidence row' || bad=1
   audit=$(grep '^audit status' "$log" || true)
-  for pair in 'streams: 2' 'bytes: 227277' 'error: nil'; do
-    printf '%s' "$audit" | grep -q "$pair" || {
+  for pair in 'streams: 2' 'error: nil' 'durability: "file_and_directory_sync"'; do
+    printf '%s' "$audit" | grep -qE "$pair([,}])" || {
       echo "  audit status: no '$pair'"
+      bad=1
+    }
+  done
+  journal=$(grep '^audit journal' "$log" || true)
+  for pair in 'segments: 17' 'bytes: 58709' 'sha256: "5c7ba7e145cb1536664817519e7be3db7f6810fb3fc0449cc68e1b93e9e7de3c"'; do
+    printf '%s' "$journal" | grep -qE "$pair([,}])" || {
+      echo "  audit journal: no '$pair'"
+      bad=1
+    }
+  done
+  index=$(grep '^audit index' "$log" || true)
+  for pair in 'enabled: true' 'count: 73' 'error: nil'; do
+    printf '%s' "$index" | grep -qE "$pair([,}])" || {
+      echo "  audit index: no '$pair'"
       bad=1
     }
   done

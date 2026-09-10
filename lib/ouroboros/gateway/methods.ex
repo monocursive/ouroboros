@@ -322,7 +322,10 @@ defmodule Ouroboros.Gateway.Methods do
   must assert against the agent and not against a copy in this module.
   """
   @spec wasm_state_fields() :: [atom()]
-  def wasm_state_fields, do: WasmCapability.new().state |> Map.keys()
+  def wasm_state_fields do
+    {:ok, state} = WasmCapability.init_state(%{})
+    Map.keys(state)
+  end
 
   @doc "Every method name this build serves, as reported in the `hello` result."
   @spec names() :: [String.t()]

@@ -408,7 +408,31 @@ defmodule Ouroboros.Storage.RetiredAtoms do
     :transport_exit,
     :model_provider_required,
     :missing_version,
-    :unparseable_version
+    :unparseable_version,
+
+    # J3: action failures and message/agent/request tags nested in Interactive.Store
+    # history and EffectLedger classifications. These are data tags, never modules
+    # to load. The frozen pre-J3 corpus records the complete observed vocabulary.
+    :"Elixir.Jido.Action.Error.InvalidInputError",
+    :"Elixir.Jido.Action.Error.ExecutionFailureError",
+    :"Elixir.Jido.Action.Error.ConfigurationError",
+    :"Elixir.Jido.Action.Error.TimeoutError",
+    :"Elixir.Jido.Action.Error.InternalError",
+    :"Elixir.Jido.Action.Error.Internal.UnknownError",
+    :"Elixir.Jido.Signal",
+    :"Elixir.Jido.Agent",
+    :"Elixir.Jido.Instruction",
+    :"Elixir.Ouroboros.Jido",
+    :"Elixir.Jido.AgentServer",
+    :agent_module,
+    :vsn,
+    :specversion,
+    :datacontenttype,
+    :dataschema,
+    :extensions,
+    :jido_dispatch,
+    :jido_metadata,
+    :__exception__
   ]
 
   @doc """

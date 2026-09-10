@@ -251,7 +251,7 @@ defmodule Ouroboros.Self.Fixture do
            key_path: key_path,
            signer_id: signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("self_journal_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -299,7 +299,7 @@ defmodule Ouroboros.Self.Fixture do
       Registry.start_link(
         name: name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: String.to_atom("self_rollouts_#{System.unique_integer([:positive])}")}
       )
 
@@ -325,7 +325,7 @@ defmodule Ouroboros.Self.Fixture do
        [
          name: nil,
          storage:
-           {Jido.Storage.ETS,
+           {Ouroboros.Storage.ETS,
             table: String.to_atom("self_promotion_#{System.unique_integer([:positive])}")}
        ]},
       id: {PolicyPromotion, System.unique_integer([:positive])}

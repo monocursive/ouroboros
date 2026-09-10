@@ -20,7 +20,7 @@ defmodule Ouroboros.StoreRetentionTest do
           {InteractiveStore,
            name: name,
            key: {:ouroboros, :interactive_sessions_test, name},
-           storage: {Jido.Storage.ETS, table: name}}
+           storage: {Ouroboros.Storage.ETS, table: name}}
         )
 
       {:ok, store: pid}

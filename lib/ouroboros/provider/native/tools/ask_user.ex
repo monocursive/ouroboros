@@ -29,7 +29,7 @@ defmodule Ouroboros.Provider.Native.Tools.AskUser do
   again.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "ask_user",
     description:
       "Ask the operator one question and wait for their answer. Use it when a choice " <>

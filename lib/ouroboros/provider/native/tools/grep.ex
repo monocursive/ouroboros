@@ -22,7 +22,7 @@ defmodule Ouroboros.Provider.Native.Tools.Grep do
   the result says what it dropped.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "grep",
     description:
       "Search file contents for a regular expression, in the workspace. Returns " <>

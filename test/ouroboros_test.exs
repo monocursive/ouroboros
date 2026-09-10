@@ -1,14 +1,16 @@
 defmodule OuroborosTest.Agent do
   @moduledoc false
 
-  use Jido.Agent,
-    name: "ouroboros_test_agent",
-    description: "A minimal mesh agent, so the lifecycle claims below need no runtime plane",
-    schema: [
-      role: [type: :string, default: "reviewer"],
-      messages_received: [type: :non_neg_integer, default: 0],
-      last_message: [type: :any, default: nil]
-    ]
+  @behaviour Ouroboros.Mesh.Agent
+
+  @impl true
+  def init_state(initial),
+    do: {:ok, Map.merge(%{role: "reviewer", messages_received: 0, last_message: nil}, initial)}
+
+  @impl true
+  def handle_message(_message, _state, _context) do
+    {:error, :unsupported_message}
+  end
 end
 
 defmodule OuroborosTest do

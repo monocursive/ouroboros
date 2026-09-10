@@ -39,7 +39,7 @@ defmodule Ouroboros.Wasm.KeygenTest do
              key_path: key_path,
              signer_id: @signer_id,
              storage:
-               {Jido.Storage.ETS,
+               {Ouroboros.Storage.ETS,
                 table: String.to_atom("keygen_journal_#{System.unique_integer([:positive])}")}
            ]}
         )

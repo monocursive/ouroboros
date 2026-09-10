@@ -259,7 +259,7 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
     do: :erpc.call(target, module, function, arguments, timeout)
 
   defp ets_storage do
-    {Jido.Storage.ETS,
+    {Ouroboros.Storage.ETS,
      table: String.to_atom("wasm_policy_two_node_#{System.unique_integer([:positive])}")}
   end
 

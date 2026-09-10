@@ -752,13 +752,13 @@ defmodule Ouroboros.Control.Permissions do
          Application.get_env(
            :ouroboros,
            :permissions_storage,
-           {Jido.Storage.ETS, table: :ouroboros_permissions}
+           {Ouroboros.Storage.ETS, table: :ouroboros_permissions}
          )}
     end
   end
 
   defp normalize_storage(storage) do
-    {adapter, adapter_opts} = Jido.Storage.normalize_storage(storage)
+    {adapter, adapter_opts} = Ouroboros.Storage.normalize_storage(storage)
     {:ok, adapter, adapter_opts}
   rescue
     error -> {:error, {:invalid_permissions_storage, Exception.message(error)}}
@@ -775,7 +775,7 @@ defmodule Ouroboros.Control.Permissions do
       else: {:error, {:invalid_permissions_limit, limit}}
   end
 
-  defp durability_level(Jido.Storage.ETS), do: :ephemeral_checkpoint
+  defp durability_level(Ouroboros.Storage.ETS), do: :ephemeral_checkpoint
   defp durability_level(Ouroboros.Storage.DurableFile), do: :synced_checkpoint
   defp durability_level(_adapter), do: :durable_checkpoint
 

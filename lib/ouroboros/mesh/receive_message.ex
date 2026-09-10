@@ -7,11 +7,10 @@ defmodule Ouroboros.Mesh.ReceiveMessage do
   target agent with it; an agent that routes that signal here records it and answers with
   its own state, which is where `last_message` comes from. It lives beside the mesh rather
   than inside any one agent because every agent that joins the mesh needs the same answer:
-  a capability forged at runtime declares this module in its `signal_routes` and inherits
-  the bounds below without restating them.
+  an owned agent callback can call `handle_message/3` to adopt these explicit bounds.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "receive_agent_message",
     description: "Record a typed message from another agent",
     schema: [
@@ -44,11 +43,16 @@ defmodule Ouroboros.Mesh.ReceiveMessage do
     }
 
     {:ok,
-     %{
-       inbox: bound_inbox(agent.state.inbox ++ [message]),
+     Map.merge(agent.state, %{
+       inbox: bound_inbox(Map.get(agent.state, :inbox, []) ++ [message]),
        last_message: message,
-       messages_received: agent.state.messages_received + 1
-     }}
+       messages_received: Map.get(agent.state, :messages_received, 0) + 1
+     })}
+  end
+
+  @doc "Applies the bounded receive convention as a complete domain state transition."
+  def handle_message(message, state, context) do
+    run(message, Map.put(context, :agent, %{id: context.id, state: state}))
   end
 
   # Newest kept, oldest dropped, count first and then bytes. `external_size/1` measures a

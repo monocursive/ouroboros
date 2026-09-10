@@ -331,7 +331,7 @@ defmodule Ouroboros.Wasm.ForgeToolAcceptanceTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("forge_tool_acc_#{System.unique_integer([:positive])}")}
          ]}
       )

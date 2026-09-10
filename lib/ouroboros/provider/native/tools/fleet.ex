@@ -1,6 +1,6 @@
 defmodule Ouroboros.Provider.Native.Tools.Fleet do
   @moduledoc "Bounded live directory shared by the fleet tool and the labelled prompt snapshot."
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "fleet",
     description:
       "List fleet machines, live connectivity, advisory tags and toolchains. Read this before choosing a machine for agent.",

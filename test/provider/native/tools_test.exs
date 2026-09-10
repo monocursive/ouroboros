@@ -826,7 +826,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
     test "a tool that raises becomes an error result, not a crash", %{context: context} do
       defmodule Exploding do
-        use Jido.Action, name: "exploding", description: "raises", schema: []
+        use Ouroboros.Action, name: "exploding", description: "raises", schema: []
 
         @impl true
         def run(_params, _context), do: raise("boom")
@@ -839,7 +839,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
     test "a tool that hangs is killed at the timeout", %{context: context} do
       defmodule Hanging do
-        use Jido.Action, name: "hanging", description: "hangs", schema: []
+        use Ouroboros.Action, name: "hanging", description: "hangs", schema: []
 
         @impl true
         def run(_params, _context) do

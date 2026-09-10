@@ -12,12 +12,12 @@ defmodule Ouroboros.Control.PolicyPromotionTest.FlakyStorage do
   def fail!, do: Application.put_env(:ouroboros, @flag, true)
   def heal!, do: Application.delete_env(:ouroboros, @flag)
 
-  def get_checkpoint(key, opts), do: Jido.Storage.ETS.get_checkpoint(key, opts)
+  def get_checkpoint(key, opts), do: Ouroboros.Storage.ETS.get_checkpoint(key, opts)
 
   def put_checkpoint(key, data, opts) do
     if Application.get_env(:ouroboros, @flag, false),
       do: {:error, :storage_offline},
-      else: Jido.Storage.ETS.put_checkpoint(key, data, opts)
+      else: Ouroboros.Storage.ETS.put_checkpoint(key, data, opts)
   end
 end
 
@@ -350,7 +350,7 @@ defmodule Ouroboros.Control.PolicyPromotionTest do
 
     test "the record survives a restart of the authority", context do
       table = unique_table()
-      storage = {Jido.Storage.ETS, table: table}
+      storage = {Ouroboros.Storage.ETS, table: table}
       record = start_record!(context, storage)
 
       assert {:ok, _state} = promote(record, "guard", @sha, "bash", "mix test")
@@ -371,13 +371,14 @@ defmodule Ouroboros.Control.PolicyPromotionTest do
       table = unique_table()
 
       :ok =
-        Jido.Storage.ETS.put_checkpoint(PolicyPromotion.checkpoint_key(), %{version: 99},
+        Ouroboros.Storage.ETS.put_checkpoint(PolicyPromotion.checkpoint_key(), %{version: 99},
           table: table
         )
 
       assert {:error, {{:unsupported_policy_promotion_checkpoint, 99}, _spec}} =
                start_supervised(
-                 {PolicyPromotion, name: unique_name(), storage: {Jido.Storage.ETS, table: table}}
+                 {PolicyPromotion,
+                  name: unique_name(), storage: {Ouroboros.Storage.ETS, table: table}}
                )
     end
 
@@ -389,7 +390,7 @@ defmodule Ouroboros.Control.PolicyPromotionTest do
       table = unique_table()
 
       :ok =
-        Jido.Storage.ETS.put_checkpoint(
+        Ouroboros.Storage.ETS.put_checkpoint(
           PolicyPromotion.checkpoint_key(),
           %{
             version: 1,
@@ -406,7 +407,8 @@ defmodule Ouroboros.Control.PolicyPromotionTest do
 
       assert {:error, {{:unsupported_policy_promotion_checkpoint, 1}, _spec}} =
                start_supervised(
-                 {PolicyPromotion, name: unique_name(), storage: {Jido.Storage.ETS, table: table}}
+                 {PolicyPromotion,
+                  name: unique_name(), storage: {Ouroboros.Storage.ETS, table: table}}
                )
     end
   end
@@ -538,7 +540,7 @@ defmodule Ouroboros.Control.PolicyPromotionTest do
     ledger =
       start_supervised!(
         {EffectLedger,
-         name: name, storage: {Jido.Storage.ETS, table: unique_table()}, retention_limit: 100},
+         name: name, storage: {Ouroboros.Storage.ETS, table: unique_table()}, retention_limit: 100},
         id: name
       )
 
@@ -547,7 +549,7 @@ defmodule Ouroboros.Control.PolicyPromotionTest do
 
   defp start_record!(context, storage \\ nil, ledger \\ nil) do
     name = unique_name()
-    storage = storage || {Jido.Storage.ETS, table: unique_table()}
+    storage = storage || {Ouroboros.Storage.ETS, table: unique_table()}
 
     start_supervised!(
       {PolicyPromotion, name: name, storage: storage, ledger: ledger || context.ledger},

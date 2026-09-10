@@ -55,7 +55,7 @@ defmodule Ouroboros.ClusterTest do
     test "fleet compatibility has an explicit manual protocol revision" do
       runtime = Cluster.local_fleet_posture().runtime
 
-      assert runtime.fleet_protocol_revision == 4
+      assert runtime.fleet_protocol_revision == 5
 
       assert Cluster.runtime_compatible?(
                runtime,
@@ -240,7 +240,7 @@ defmodule Ouroboros.ClusterTest do
       before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
       assert before.compatibility == :compatible
       assert before.last_up_at
-      assert before.runtime.fleet_protocol_revision == 4
+      assert before.runtime.fleet_protocol_revision == 5
       assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
 
       assert %{status: :warning, guidance: roster_guidance} =
@@ -945,6 +945,17 @@ defmodule Ouroboros.ClusterTest do
       core = start_app_peer!()
       incompatible_version = "999.0.0-placement-test"
       replace_peer_version!(core, incompatible_version)
+      mesh_id = unique_id("mesh-on-incompatible-peer")
+
+      # The fixture installs an owner locally on the skewed peer. All public remote
+      # mesh paths below must refuse to dispatch to this otherwise healthy process.
+      assert {:ok, mesh_owner} =
+               :erpc.call(core, Mesh, :start_agent, [
+                 mesh_id,
+                 [agent: Ouroboros.Capability.DistributionReference]
+               ])
+
+      assert_eventually(fn -> Mesh.whereis(mesh_id) == mesh_owner end, 300)
 
       # The directory and live placement probe deliberately use the same contract. Force
       # an immediate refresh because this test changes an application spec without taking
@@ -975,6 +986,22 @@ defmodule Ouroboros.ClusterTest do
               {:runtime_incompatible, %{ouroboros_version: ^incompatible_version} = actual,
                ^expected}} =
                Cluster.ensure_placeable(core)
+
+      assert {:error, {:runtime_incompatible, ^actual, ^expected}} =
+               Mesh.send_message("root", mesh_id, :must_not_execute)
+
+      assert {:error, {:runtime_incompatible, ^actual, ^expected}} = Mesh.state(mesh_id)
+      assert {:error, {:runtime_incompatible, ^actual, ^expected}} = Mesh.stop_agent(mesh_id)
+
+      assert {:ok, %{agent: %{state: %{messages_received: 0}}}} =
+               :erpc.call(core, Mesh, :state, [mesh_id])
+
+      assert :erpc.call(core, Process, :alive?, [mesh_owner])
+
+      assert {:error, {:placement_refused, ^core, {:runtime_incompatible, ^actual, ^expected}}} =
+               Mesh.start_agent_on(core, unique_id("incompatible-mesh"),
+                 agent: Ouroboros.Capability.DistributionReference
+               )
 
       # Session routing includes every remote public start/control/approval/await
       # path. Even a harmless send proves that dispatch never reaches an old peer.
@@ -1849,7 +1876,7 @@ defmodule Ouroboros.ClusterTest do
       # None of the planes a core node owns exist here. A compromised builder has a
       # compiler on it, not a fleet's sessions, journals, or effect authority.
       for name <- [
-            Ouroboros.Jido,
+            Ouroboros.Mesh.Supervisor,
             Ouroboros.Agent.EffectLedger,
             Ouroboros.Mesh.Directory,
             Ouroboros.Interactive.Store,
@@ -2335,7 +2362,7 @@ defmodule Ouroboros.ClusterTest do
     put_peer_env!(
       peer_node,
       :interactive_storage,
-      {Jido.Storage.ETS, table: peer_table(peer_node)}
+      {Ouroboros.Storage.ETS, table: peer_table(peer_node)}
     )
 
     Enum.each(env, fn {key, value} -> put_peer_env!(peer_node, key, value) end)
@@ -2370,7 +2397,7 @@ defmodule Ouroboros.ClusterTest do
     put_peer_env!(
       peer_node,
       :signing_journal_storage,
-      {Jido.Storage.ETS, table: peer_table(peer_node)}
+      {Ouroboros.Storage.ETS, table: peer_table(peer_node)}
     )
 
     :ok =
@@ -2418,7 +2445,7 @@ defmodule Ouroboros.ClusterTest do
     put_peer_env!(
       peer_node,
       :interactive_storage,
-      {Jido.Storage.ETS, table: peer_table(peer_node)}
+      {Ouroboros.Storage.ETS, table: peer_table(peer_node)}
     )
 
     {:ok, _applications} =
@@ -2472,7 +2499,7 @@ defmodule Ouroboros.ClusterTest do
       :peer.call(peer, Application, :put_env, [
         :ouroboros,
         :interactive_storage,
-        {Jido.Storage.ETS, table: :ouroboros_formation_interactive}
+        {Ouroboros.Storage.ETS, table: :ouroboros_formation_interactive}
       ])
   end
 

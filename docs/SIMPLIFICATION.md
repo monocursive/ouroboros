@@ -17,7 +17,7 @@ its checkpoints to reconstruct reservations before admitting work.
 | Replaced owner | Must restart | Must survive |
 |---|---|---|
 | Durable directory owner or effect ledger | All execution consumers | No consumer may retain stale authority |
-| Model admission | Jido and downstream execution consumers | Effect ledger |
+| Model admission | Mesh and downstream execution consumers | Effect ledger |
 | Workspace manager | Session coordinators and downstream surfaces | Durable stores |
 | Interactive registry | Interactive task supervisor and recovery | Workspace reservations |
 | WASM supervisor | Its pool, then boot recovery | MCP and web |
