@@ -1,7 +1,7 @@
 # Runtime simplification, September 2026
 
 The audit led to shared mechanisms at existing boundaries. Interactive sessions, native
-subagents, and BEAM/WASM upgrades retain their distinct lifetimes and APIs.
+subagents, and the WebAssembly capability lane retain their distinct lifetimes and APIs.
 
 > The coding, team, orchestration and control planes this document also covered were
 > deleted in September 2026; see [the core reduction](proposals/core.md) §3 D3. The
@@ -39,16 +39,23 @@ application startup and bypass removal of the gateway and runtime-owner markers.
 
 ## Checkpoint publication
 
-`Storage.Records` is the shared record store; Interactive is its remaining owner today.
-Owners retain validation, version checks, and domain transitions. Updating an existing
-record writes only that record, including its own retained history.
+`Storage.Records` is the per-record store, and `Interactive.Store` is the only store built
+on it: one `Storage.DurableFile` checkpoint per session plus a versioned index. Every other
+durable store — grants, permissions, the effect ledger, policy promotion, the rollout
+register, the signing journal, the epoch watermark, the cluster's session-owner record —
+keeps one aggregate checkpoint. The owner retains validation, version checks, and domain
+transitions. Updating an existing record writes only that record, including its own
+retained history.
 
 - Creation: sync the record, then publish its id in the versioned index.
 - Deletion: publish the reduced index, then remove orphan files.
 - Migration: retain the legacy aggregate until every record is written and the new
   index is published. Interactive retains its existing `:session` record-key format.
 - Corruption: fail closed on an unreadable index; quarantine an unreadable individual
-  record, keeping its bytes for inspection and loading the remaining records.
+  record, keeping its bytes for inspection and loading the remaining records. The
+  aggregate stores that can hold a name no build can spell — grants and the effect
+  ledger — apply the same doctrine at file granularity; see "Durable checkpoints across
+  builds" below.
 - Ambiguous commit: stop the store for reconciliation; never claim a definite refusal
   or undo a possibly published record.
 
@@ -86,9 +93,9 @@ cell tests separately pin local rendering behavior.
   buffer, noise budget, and protocol-specific encoders.
 - `Session.Recovery`, `Session.Routing`, and `Workspace.Admission` own the common sweep,
   routing budgets, and bounded retry for the same owner's stale lease.
-- `Control.Permissions.Engine` maps missing/failed/malformed engines to asks. Native
-  plan-mode refusal and transport-specific approval delivery remain separate. An engine
-  failure does not supply a persistent-rule suggestion.
+- `Control.Permissions.Engine` maps missing/failed/malformed engines to asks. The native
+  plan-mode refusal remains separate. An engine failure does not supply a persistent-rule
+  suggestion.
 - `ToolAttempt` carries the validated call, classification, effect id, hook context and
   authority together through live admission and execution. A hook rewrite replaces the
   call and subject together. Replay substitutes recorded results before constructing a
@@ -108,6 +115,23 @@ cell tests separately pin local rendering behavior.
   in the existing startup path. Fleet service installation was deleted with the rest of
   the enrollment product (`proposals/core.md` §3).
 
-The separate BEAM and WASM upgrade engines remain supported. Removing an extension
-lane, merging batch and interactive persistence schemas, or replacing the effect ledger
-with a new storage engine would require a separate compatibility and product decision.
+## Durable checkpoints across builds
+
+Every `Storage.DurableFile` checkpoint is decoded with
+`:erlang.binary_to_term(binary, [:safe])`, which refuses to create an atom, so a build
+that deletes the last module spelling an atom has changed the durable format whatever
+else it did. Three mechanisms, one per kind of name, keep a data directory written by an
+older build readable: `Ouroboros.Storage.RetiredAtoms` for a name no module of this build
+spells any more; `DurableFile.get_checkpoint_or_quarantine/2` for a name no build can
+spell — the node that wrote a record, or a capability module minted at runtime; and
+`DurableFile.ensure_build_loaded/0` for a name this build spells in a module that has not
+loaded yet. The cost of a miss depends on the store: a `Storage.Records` store drops one
+record from its index and boots, and a whole-file store would lose the file, which is why
+grants and the effect ledger quarantine the file and start empty rather than stop the
+node. The contract, both blast radii, and what an operator sees afterwards are in
+[ARCHITECTURE.md](ARCHITECTURE.md#durable-checkpoints), and `make boot-gate` is the
+proof: a data directory written by `dev` at `3bc8887` booting on this tree, twenty times.
+
+There is one extension lane, WebAssembly, and one persistence schema for sessions, the
+interactive one. Adding a second lane, or replacing the effect ledger with a different
+storage engine, would require a separate compatibility and product decision.
