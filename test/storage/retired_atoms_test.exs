@@ -19,6 +19,7 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
   alias Ouroboros.Control.Permissions.{Matcher, Request, Rule}
   alias Ouroboros.EventPresentation
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Interactive.{State, Store}
   alias Ouroboros.Storage.{DurableFile, RetiredAtoms}
 
   @fixtures Path.expand("../support/retired_atoms", __DIR__)
@@ -32,9 +33,22 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
                    Elixir.Ouroboros.Agent.Worker Elixir.Ouroboros.Agent.Coordinator)
   @grants_names ~w(Elixir.Ouroboros.Agent.Worker Elixir.Ouroboros.Agent.Coordinator)
 
+  # ── C2 (native is the only provider). Two committed stores an older node wrote: an
+  # interactive session record naming a removed provider, a vendor transport, three retired
+  # `provider_options` keys and an ACP failure atom in `error`; and an effect-ledger
+  # `:tool_call` entry whose `attempt.provider` names the removed provider. Strings, so
+  # reading this file interns nothing.
+  @c2_provider_names ~w(claude)
+  @c2_transport_names ~w(acp)
+  @c2_provider_option_names ~w(cli_path betas no_ide)
+  @c2_error_names ~w(provider_transport_unavailable)
+  @c2_fixture_names @c2_provider_names ++
+                      @c2_transport_names ++ @c2_provider_option_names ++ @c2_error_names
+
   # Every name a committed `DurableFile` fixture holds. The session record below is base64
   # rather than a store, so it is guarded separately.
-  @fixture_names @permissions_names ++ @desktop_ledger_names ++ @ledger_names ++ @grants_names
+  @fixture_names @permissions_names ++
+                   @desktop_ledger_names ++ @ledger_names ++ @grants_names ++ @c2_fixture_names
 
   # An interactive session's own `delegations` field, captured as base64 rather than as a
   # `DurableFile` directory because what matters about it is the nine names, not the store.
@@ -146,6 +160,44 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
     end
   end
 
+  describe "an interactive session record from a provider this build lost" do
+    test "loads through Interactive.Store and lists with its retired atoms intact" do
+      store = start!(Store, "interactive")
+
+      assert [record] = Store.list(store)
+      assert record.id == "fixture-retired-claude"
+
+      # The provider, the transport, three provider_options keys, and the ACP failure atom
+      # in `error` are all names no line of this build spells any more.
+      assert Atom.to_string(record.provider) in @c2_provider_names
+      assert Atom.to_string(record.options.transport) in @c2_transport_names
+
+      assert record.options.provider_options
+             |> Map.keys()
+             |> Enum.map(&Atom.to_string/1)
+             |> Enum.sort() == Enum.sort(@c2_provider_option_names)
+
+      assert Atom.to_string(record.error) in @c2_error_names
+
+      # History this build can show and cannot run: it loads and lists, and it is exactly
+      # the record `Interactive.Task` refuses to hand to a provider.
+      assert State.loadable?(record)
+      refute State.requestable?(record)
+      assert State.removed_provider(record) == record.provider
+    end
+  end
+
+  describe "an effect-ledger checkpoint whose attempt named a provider this build lost" do
+    test "loads and lists the :tool_call entry with attempt.provider intact" do
+      ledger = start!(EffectLedger, "effect-ledger-provider")
+
+      assert {:ok, [entry]} = EffectLedger.list([], ledger)
+      assert entry.effect == :tool_call
+      assert entry.status == :ok
+      assert Atom.to_string(entry.attempt.provider) in @c2_provider_names
+    end
+  end
+
   describe "an effect-ledger checkpoint the deleted agent-effect runner wrote" do
     setup do
       {:ok, ledger: start!(EffectLedger, "agent-effects")}
@@ -231,9 +283,21 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
     end
 
     test "is exercised by them, so a thinner fixture cannot pass for a proof" do
+      # Decode the way the stores do — with the build's atoms preloaded — so a Records-index
+      # file's own structural keys (`:ids`, `:version`) are interned before the raw read.
+      # This says nothing about which names the list interns; the two guards above do that.
+      DurableFile.ensure_build_loaded()
+
       in_fixtures =
-        ["permissions", "effect-ledger", "agent-effects", "grants"]
-        |> Enum.map(&fixture!/1)
+        [
+          "permissions",
+          "effect-ledger",
+          "agent-effects",
+          "grants",
+          "interactive",
+          "effect-ledger-provider"
+        ]
+        |> Enum.flat_map(&fixture_terms/1)
         |> Enum.flat_map(&(&1 |> File.read!() |> :erlang.binary_to_term([:safe]) |> atoms()))
         |> MapSet.new(&Atom.to_string/1)
         |> MapSet.intersection(retired_names())
@@ -263,10 +327,8 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
     name
   end
 
-  defp fixture!(directory) do
-    [path] = Path.wildcard(Path.join([@fixtures, directory, "checkpoints", "*.term"]))
-    path
-  end
+  defp fixture_terms(directory),
+    do: Path.wildcard(Path.join([@fixtures, directory, "checkpoints", "*.term"]))
 
   # `Permissions.list/2` answers the wire projection, which renders a pattern as its text.
   # The parsed pattern the matcher is asked about comes from the server's own state.
