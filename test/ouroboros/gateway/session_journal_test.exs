@@ -213,6 +213,33 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
     end
   end
 
+  # The refusal lane that used to be a fake-transport test: with no live native transport,
+  # `journal` says so as structured wire data rather than answering with an empty record.
+  describe "liveness" do
+    test "journal with no live transport refuses as wire data, naming the verb", context do
+      id = context.id
+      session = start_native(id, context, [[{:text, "hi"}, {:finish, :stop}]])
+
+      {:ok, info} = InteractiveSession.info(session)
+      provider_session_id = info.provider_session_id
+
+      if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
+        Process.exit(pid, :kill)
+
+        wait_until(fn ->
+          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
+        end)
+      end
+
+      assert {:error, -32_006, _message, ["native_transport_unavailable", details]} =
+               Methods.invoke("interactive.journal", %{"id" => id})
+
+      assert details["verb"] == "journal"
+
+      retire_session(id)
+    end
+  end
+
   # ------------------------------------------------------------------ helpers
 
   defp start_native(id, context, script, overrides \\ []) do

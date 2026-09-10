@@ -372,6 +372,37 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
       retire_session(id)
     end
+
+    test "rewind with no live transport refuses as wire data, naming the verb", context do
+      id = unique_id("native-rewind-unstarted")
+
+      {:ok, session} =
+        InteractiveSession.start(
+          id: id,
+          provider: :native,
+          workspace: context.workspace,
+          model: elem(NativeModelScript.start([[{:text, "hi"}, {:finish, :stop}]]), 0),
+          workspace_mode: :shared_read,
+          approval_mode: :auto_approve
+        )
+
+      {:ok, %State{provider_session_id: provider_session_id}} = InteractiveSession.info(session)
+
+      if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
+        Process.exit(pid, :kill)
+
+        wait_until(fn ->
+          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
+        end)
+      end
+
+      assert {:error, -32_006, _message, ["native_transport_unavailable", details]} =
+               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => 0})
+
+      assert details["verb"] == "rewind"
+
+      retire_session(id)
+    end
   end
 
   # The model script that makes a compaction possible: enough conversation to fold, and a
