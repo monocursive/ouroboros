@@ -18,6 +18,16 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// `--provider` was removed with the wrapped vendor CLIs (docs/proposals/core.md §3 D2).
+/// The flag is kept hidden on the start subcommands only so an operator who still types it
+/// learns *why* and where a model goes, instead of clap's generic "unexpected argument".
+/// The parser always fails, so the value never reaches a `StartRequest`.
+fn provider_removed(_value: &str) -> Result<String, String> {
+    Err("`--provider` was removed: `native` is the only provider. \
+         Name a model with `--model` instead (for example `--model anthropic:claude-sonnet-5`)."
+        .to_string())
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ouro",
@@ -72,6 +82,11 @@ pub enum Command {
         /// A full direct model spec. Omitted, `[defaults].model` or the runtime default.
         #[arg(long, value_name = "SPEC")]
         model: Option<String>,
+
+        /// Removed. Hidden, and always refused with a message that says so; see
+        /// `provider_removed`.
+        #[arg(long, hide = true, value_name = "PROVIDER", value_parser = provider_removed)]
+        provider: Option<String>,
 
         /// The directory the session works in. Local relative paths resolve where this
         /// command is typed. With --machine, this must already be an absolute destination
@@ -334,6 +349,11 @@ pub enum Command {
 /// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
 #[derive(Debug, Args)]
 pub struct AcpArgs {
+    /// Removed. Hidden, and always refused with a message that says so; see
+    /// `provider_removed`.
+    #[arg(long, hide = true, value_name = "PROVIDER", value_parser = provider_removed)]
+    pub provider: Option<String>,
+
     /// The directory a session works in when the editor's `session/new` names no `cwd`.
     /// An editor that speaks ACP always sends one, so this is a fallback and not an
     /// override: the editor knows which project the person opened.
@@ -1345,6 +1365,11 @@ pub struct RunArgs {
     #[arg(long, value_name = "SPEC")]
     pub model: Option<String>,
 
+    /// Removed. Hidden, and always refused with a message that says so; see
+    /// `provider_removed`.
+    #[arg(long, hide = true, value_name = "PROVIDER", value_parser = provider_removed)]
+    pub provider: Option<String>,
+
     /// The directory the session works in. With --machine it must be an absolute
     /// destination path on that machine.
     #[arg(long, value_name = "PATH")]
@@ -1860,6 +1885,31 @@ mod tests {
         };
 
         assert_eq!(model, None);
+    }
+
+    /// `--provider` is refused on every start subcommand, and the refusal names the
+    /// removal and points at `--model` rather than showing clap's generic message, so an
+    /// operator who still types it learns why (docs/proposals/core.md §3 D2).
+    #[test]
+    fn provider_flag_is_refused_with_a_message_that_names_the_removal() {
+        for args in [
+            vec!["ouro", "new", "--provider", "native"],
+            vec!["ouro", "run", "--provider", "native", "echo"],
+            vec!["ouro", "acp", "--provider", "native"],
+        ] {
+            let rendered = Cli::try_parse_from(&args)
+                .expect_err("`--provider` must be refused")
+                .to_string();
+
+            assert!(
+                rendered.contains("--model"),
+                "the refusal must point at --model, got: {rendered}"
+            );
+            assert!(
+                rendered.contains("only provider"),
+                "the refusal must name the removal, got: {rendered}"
+            );
+        }
     }
 
     #[test]

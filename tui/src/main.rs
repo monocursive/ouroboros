@@ -155,6 +155,8 @@ async fn run(cli: Cli) -> Result<()> {
         None => attach_local(&paths, cli.dev, config, continue_from).await,
         Some(Command::New {
             model,
+            // Always `None`: the value parser refuses `--provider` before we get here.
+            provider: _,
             workspace,
             approval_mode,
             sandbox_mode,

@@ -1192,7 +1192,7 @@ async fn set_mode_configures_the_session_and_a_mode_never_advertised_is_refused(
         let mut replies = open_replies();
         replies.push((
             "interactive.configure",
-            json!({"options": {"approval_mode": "auto_edit"}, "applies": "next_turn"}),
+            json!({"options": {"approval_mode": "auto_edit"}, "applies": "now"}),
         ));
         replies
     })
@@ -1283,7 +1283,7 @@ async fn a_configured_status_event_becomes_a_current_mode_update() {
                 "status",
                 json!({
                     "kind": "configured",
-                    "applies": "next_turn",
+                    "applies": "now",
                     "changed": {"approval_mode": "auto_approve"}
                 }),
             )
