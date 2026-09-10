@@ -21,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 44] = [
+pub(crate) const COMMANDS: [(&str, &str); 39] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -42,8 +42,6 @@ pub(crate) const COMMANDS: [(&str, &str); 44] = [
     ("/handoff", "hand this work to a fresh session (<prompt>)"),
     ("/context", "what fills this session's context window"),
     ("/rewind", "go back to an earlier turn"),
-    ("/delegate", "hand work to a coding task (<objective>)"),
-    ("/delegations", "the coding tasks this conversation started"),
     ("/model", "change the model on this session"),
     ("/plan", "plan without editing anything ([on|off])"),
     (
@@ -57,10 +55,7 @@ pub(crate) const COMMANDS: [(&str, &str); 44] = [
     ("/mcp", "the MCP servers this node runs"),
     ("/editor", "edit this prompt in $EDITOR"),
     ("/connect", "connect or inspect ChatGPT"),
-    ("/runtime", "open runtime and distribution"),
-    ("/agents", "open agents"),
-    ("/teams", "open teams"),
-    ("/plans", "open plans and control"),
+    ("/runtime", "open the runtime dashboard"),
     ("/upgrades", "open upgrades"),
     ("/capabilities", "list workspace capability proposals"),
     ("/preview", "preview a capability proposal"),
