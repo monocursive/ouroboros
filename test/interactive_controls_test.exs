@@ -322,7 +322,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       # A second prompt does not rename the conversation: the first one is the one that
       # says what it is about.
       assert :ok = HarnessAdapter.finish(adapter)
-      assert_eventually(fn -> idle?(ref) end)
+      assert_eventually(fn -> ready_for_next_turn?(ref) end)
 
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "now do something else entirely",
@@ -382,7 +382,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       assert renamed.title_source == :human
 
       assert :ok = HarnessAdapter.finish(adapter)
-      assert_eventually(fn -> idle?(ref) end)
+      assert_eventually(fn -> ready_for_next_turn?(ref) end)
 
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "another prompt", id: unique_id("turn"))
@@ -806,8 +806,17 @@ defmodule Ouroboros.InteractiveControlsTest do
     adapter
   end
 
-  defp idle?(ref) do
-    match?({:ok, %State{status: :idle}}, InteractiveSession.info(ref))
+  defp ready_for_next_turn?(ref) do
+    # The coordinator's status is cached, and this fixture's managed transport emits
+    # completion before consuming its task result. Wait for both to finish before
+    # sending another prompt; observing :idle alone can still race a :busy refusal.
+    with {:ok, %State{status: :idle, harness_session_id: id}} <- InteractiveSession.info(ref),
+         [{worker, _}] <- Registry.lookup(Jido.Harness.SessionRegistry, id),
+         %{status: :idle, active: nil, handle: transport} <- :sys.get_state(worker) do
+      match?(%{active: nil, task: nil}, :sys.get_state(transport))
+    else
+      _not_ready -> false
+    end
   end
 
   defp accepted_inputs(ref) do
