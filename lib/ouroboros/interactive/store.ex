@@ -13,6 +13,7 @@ defmodule Ouroboros.Interactive.Store do
           node: node(),
           status: State.status(),
           terminal?: boolean(),
+          removed_provider?: boolean(),
           updated_at: String.t()
         }
 
@@ -34,7 +35,8 @@ defmodule Ouroboros.Interactive.Store do
   @doc """
   Returns the projection recovery needs, computed inside the store process.
 
-  Each entry is `%{id:, node:, status:, terminal?:, updated_at:}`. Recovery runs on a
+  Each entry is `%{id:, node:, status:, terminal?:, removed_provider?:, updated_at:}`.
+  Recovery runs on a
   one-second tick, and deep-copying every retained event list and turn map on every
   tick is the cost this exists to avoid.
   """
