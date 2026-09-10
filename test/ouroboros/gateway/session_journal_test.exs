@@ -2,12 +2,11 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
   @moduledoc """
   R1's read verb on the wire: `interactive.journal`.
 
-  Two lanes, the same split `SessionContextTest` makes. The refusal lane runs against the
-  ordinary test harness adapter, because what is under test there is that a transport with
-  no turn journal says so as wire data rather than answering with an empty record. The
-  native lane runs a real `provider: :native` session through `Ouroboros.InteractiveSession`
-  with the deterministic model script, because the only way to prove the verb hands back a
-  session's record is to make a session record something.
+  Run against a real session with the deterministic model script, because the only way to
+  prove the verb hands back a session's record is to make a session record something. The
+  "a transport with no journal" lane this file used to carry went with the wrapped vendor
+  providers: there is one transport and it keeps a journal, so a session that has recorded
+  nothing yet still answers with the record of being opened — which the next test asserts.
   """
 
   use ExUnit.Case, async: false
@@ -18,7 +17,6 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.NativeModelScript
 
   @provider :native
@@ -41,12 +39,6 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
     previous_native_model = Application.get_env(:ouroboros, :native_model_module)
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
-
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
 
     Application.put_env(
       :jido_harness,
@@ -118,19 +110,6 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
                Methods.invoke("interactive.journal", %{"id" => "no-such-session"})
 
       assert message =~ "no such record"
-    end
-  end
-
-  describe "a transport with no journal" do
-    test "is refused as wire data naming the verb, not answered with an empty record",
-         %{id: id} do
-      start_session(id)
-
-      assert {:error, -32_006, _message, ["unsupported_on_transport", details]} =
-               Methods.invoke("interactive.journal", %{"id" => id})
-
-      assert details["verb"] == "journal"
-      retire_session(id)
     end
   end
 
@@ -276,12 +255,6 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
       value ->
         value
     end
-  end
-
-  defp start_session(id, opts \\ []) do
-    opts = Keyword.merge([id: id, provider: @provider, workspace: File.cwd!()], opts)
-    assert {:ok, ref} = InteractiveSession.start(opts)
-    ref
   end
 
   defp retire_session(id) do

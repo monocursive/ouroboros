@@ -14,7 +14,6 @@ defmodule Ouroboros.InteractiveControlsTest do
   alias Jido.Harness.{RunRequest, Session, SessionInfo}
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Provider
   alias Ouroboros.Test.HarnessAdapter
 
   @provider :native

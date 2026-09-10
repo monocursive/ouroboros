@@ -153,7 +153,7 @@ defmodule Ouroboros.Gateway.OperateTest do
              ]
 
       assert call(client, "interactive.send_message", %{"id" => "x"})["error"]["code"] == -32602
-      assert call(client, "interactive.start", %{"provider" => 7})["error"]["code"] == -32602
+      assert call(client, "interactive.start", %{"event_limit" => 7.5})["error"]["code"] == -32602
     end
 
     test "a post-dispatch checkpoint failure is outcome-unknown, not a refusal" do
@@ -296,7 +296,7 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert hello(client)["result"]
 
       response =
-        call(client, "interactive.start", %{"provider" => "codex", "env" => %{"KEY" => "value"}})
+        call(client, "interactive.start", %{"env" => %{"KEY" => "value"}})
 
       assert response["error"]["code"] == -32602
       assert response["error"]["message"] =~ "env"
@@ -307,14 +307,17 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert response["error"]["message"] =~ "runtime_exposure"
     end
 
-    test "an unknown provider is a parameter error, not a new atom", %{client: client} do
+    # `interactive.start` has no `provider` parameter at all since the core reduction, so
+    # a name this node does not serve never reaches the atom table by that door: it is an
+    # unsupported field, refused against the closed list the table publishes.
+    test "a provider name is an unsupported field, not a new atom", %{client: client} do
       assert hello(client)["result"]
 
       response =
         call(client, "interactive.start", %{"provider" => "definitely_not_a_provider_atom"})
 
       assert response["error"]["code"] == -32602
-      assert response["error"]["message"] =~ "must name a provider this node serves"
+      assert response["error"]["message"] =~ "unsupported fields: provider"
 
       # The atom table is never garbage collected, so "was it refused" is not the whole
       # question — "did the refusal cost an atom" is the other half, and this is the only
@@ -439,13 +442,11 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       assert call(client, "interactive.start", %{
                "id" => holder_id,
-               "provider" => "ouroboros_test",
                "workspace" => workspace
              })["result"]["id"] == holder_id
 
       interactive_params = %{
         "id" => interactive_id,
-        "provider" => "ouroboros_test",
         "workspace" => workspace
       }
 
