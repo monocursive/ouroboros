@@ -125,6 +125,16 @@ rerun successfully: `cargo test`, `cargo test --features embed`, `cargo fmt
 All 49 real-helper WASM CLI tests passed in each configuration. The already
 passing Elixir and boot phases were not repeated for this environment correction.
 
+The first hosted boot-gate run exposed a platform-dependent audit byte assertion.
+GNU tar materialized the macOS archive's AppleDouble metadata as ordinary files,
+adding 3,749 bytes to the audit inventory; SQLite's disposable index and WAL also
+vary with refresh timing. Extraction now excludes those metadata entries from
+disposable copies. The gate checks the canonical journal's exact SHA256 manifest,
+17 segments and 58,709 bytes, and separately requires a healthy index containing
+all 73 records. The frozen archive and its checksum are unchanged.
+Validation passed all 60 Linux boots, both clean production loading modes, and
+fresh lazy/preloaded original-fixture boots on both Linux and macOS.
+
 The production-only check rejects repository test code and retired executable
 modules, starts no runtime services, and checks both the original fixture and a
 temporary copy for writes or quarantine. All older fixture directories remain

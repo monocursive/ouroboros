@@ -192,6 +192,38 @@ safe.("audit status", fn ->
   Ouroboros.Audit.Store.status() |> Map.take([:streams, :bytes, :error, :durability])
 end)
 
+# SQLite's index and WAL footprint depends on the platform and refresh timing.
+# Pin the journal itself by both content and relative path, independently of that cache.
+safe.("audit journal", fn ->
+  root = leaf.("audit")
+
+  segments =
+    root
+    |> Ouroboros.Audit.Store.streams()
+    |> Enum.flat_map(fn stream ->
+      root |> Ouroboros.Audit.Store.stream_path(stream) |> Ouroboros.Audit.Store.segments()
+    end)
+    |> Enum.sort()
+    |> Enum.map(fn path -> {Path.relative_to(path, root), File.read!(path)} end)
+
+  manifest =
+    Enum.map_join(segments, fn {path, bytes} ->
+      Base.encode16(:crypto.hash(:sha256, bytes), case: :lower) <> "  " <> path <> "\n"
+    end)
+
+  %{
+    segments: length(segments),
+    bytes: Enum.reduce(segments, 0, fn {_, bytes}, total -> total + byte_size(bytes) end),
+    sha256: Base.encode16(:crypto.hash(:sha256, manifest), case: :lower)
+  }
+end)
+
+# This call waits behind the index's initial refresh and proves the old journal
+# still indexes successfully, separately from the canonical byte check above.
+safe.("audit index", fn ->
+  Ouroboros.Audit.Index.status() |> Map.take([:enabled, :count, :error])
+end)
+
 safe.("signing journal", fn ->
   storage = {Ouroboros.Storage.DurableFile, path: leaf.("signing-journal")}
   {adapter, opts} = Ouroboros.Storage.normalize_storage(storage)
