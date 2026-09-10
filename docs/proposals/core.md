@@ -1,9 +1,98 @@
 # Core: the reduction, September 2026
 
-Status: **plan, decided 2026-09-09.** Written against `dev` at `3bc8887`. Every count below
-was measured on that tree; every seam named was read. The four product decisions in §3 are
-the user's. The four assumed cuts in §4 follow from the thesis in §1 and are each one
-slice, so any of them can be vetoed without touching the others.
+Status: **landed on `core`, 2026-09-10.** The plan from §0 on is as decided on 2026-09-09,
+written against `dev` at `3bc8887`, with every count in it measured on that tree; this
+status section is the record of what happened to it. The four product decisions in §3 are
+the user's. The four assumed cuts in §4 follow from the thesis in §1 and were each one
+slice.
+
+## Status
+
+### What landed, in which commits
+
+Integration branch `core`, cut from `dev` at `3bc8887`; every slice was cherry-picked onto
+it after its gates and an adversarial review, and every review produced a fix wave that
+went with it.
+
+| Slice | What went | Integrated as |
+|---|---|---|
+| C5 (§4 A3, A4) and C3 (§4 A1) | `code_intel/`, `desktop/`, the computer-use crate and helper, `tui/src/desktop_cli.rs`; `upgrade/{forge/,beam,node_executor,coordinator,artifact,module_name,verifier,rollout}.ex`, `scripts/forge-linux-test.sh`; the `code_intel.*`, `computer_use.*`, `runtime.lsp.status` and `upgrade.*` methods | `974c3977` |
+| the preload fix | `Storage.DurableFile.ensure_build_loaded/0` (see below) | `6d497ed4` |
+| C1 (§3 D3) | `team/`, `coding/`, `orchestration/`, `control/{server,run,planner,evaluator,evidence_contract,jido_ai,store}.ex`, `agent/{effects,coordinator,worker}.ex`, `signals.ex`'s plane structs, 28 gateway methods | `d91b3d96` |
+| C6 (§3 D4) | `release/`, `web/live/machines_live.ex`, `tui/src/{fleet_add.rs,fleet/}`, the machines overlay, `scripts/{fleet-e2e.sh,install.sh,test-install.sh,dist-linux.sh,homebrew-formula.sh,check-release-workflow.*}`, `.github/workflows/release.yml`, the `dist*`/`fleet-e2e` targets, `dist/`; then (C6b) `Cluster.Revocations`, `ouro update`, `dist/release.pub`, `fleet.revoke` | `5e79771d` |
+| C4 (§4 A2) | `sandbox/helper.ex`, `tui/sandbox/`, `c_src/fs_filter.c`, `priv/sandbox/`, the `LD_PRELOAD` half of `bwrap.ex`, `protects_files?/1`, `hides_files?/1`, `read_fence`, `OUROBOROS_SELF_UNFENCED_KEY` | `c9729f79`, `c06f2b01` |
+| C2 (§3 D2) | the nine adapters, `process_driver.ex`, `removed_codex.ex`, `grok_auth.ex`, the ACP client under `provider/session/`, `Control.Permissions.Seam`, `interactive.request_approval`, `grok.account.*`, `interactive.start`'s `provider` and `interactive.configure`'s `mode`, `--provider`, `[defaults] provider` | `55ea4180` |
+| C7 | nothing: this status, the configuration surface, README, ARCHITECTURE, SIMPLIFICATION, the link sweep, and the integration record under `scripts/fixture/` and `test/support/integration_fixture/` | the commits after `55ea4180` |
+
+### What the reviews found that changed the plan
+
+- **Atoms in durable files.** The C5 review found that deleting the last line spelling an
+  atom is a durable-format change: `Storage.DurableFile` decodes with
+  `binary_to_term(bytes, [:safe])`, which refuses to create an atom, so an upgraded node
+  whose permission store held a `ComputerUse(…)` rule did not boot. The rule became part of
+  every slice's brief, and `Ouroboros.Storage.RetiredAtoms` — one list, 197 names, one doc
+  sentence each — is consumed at compile time by the adapter that decodes. The C1 review
+  found the same sweep had to be transitive (the effect ledger stores an error term's whole
+  atom skeleton) and that the blast radius differs by store: a `Storage.Records` store loses
+  one record, a whole-file store loses the boot.
+- **Quarantine.** The C3 review found the grants half of a hazard the slice had called
+  inherited: a `:forge` grant naming a capability module minted at runtime loaded on `dev`
+  only because the deleted node executor interned the name first, and no list can hold a
+  runtime-minted name. `DurableFile.get_checkpoint_or_quarantine/2` moves such a file aside
+  by name and the store starts empty; grants and the effect ledger read through it.
+- **The preload.** The integration fixture found that under interactive code loading the
+  atom table at the first decode is a function of boot order — 36 to 117 modules loaded at
+  the ledger's first read, run to run — so `dev` lost its own effect ledger on a loaded
+  machine. `DurableFile.ensure_build_loaded/0` loads the build once before the first
+  `[:safe]` decode. The three mechanisms are disjoint; ARCHITECTURE.md's "Durable
+  checkpoints" is the contract.
+- **The floor of D4.** The C6 review found that "sets the cluster environment by hand" was
+  unachievable as delivered: with a profile the launcher scrubs every `OUROBOROS_*` variable
+  an operator exports, and nothing left could sign a second machine's certificate. C6c added
+  `ouro fleet create --from`, `ouro fleet members add|remove`, `create --regenerate` and
+  `sessions restore`, each a local file operation and none an enrollment; FLEET.md's recipe
+  was run end to end. C6b had already deleted `Cluster.Revocations` (no producer),
+  `ouro update` (no publisher) and `fleet.revoke`, none of which D4 named.
+- **A1's list was wrong in both directions.** `upgrade/rollout.ex`, listed as staying, is
+  the BEAM lane's deploy driver and went; `:forge_module`, listed as going, is lane W's
+  injection seam and stayed.
+- **D2's edges.** `grok_auth.ex` went (no native lane reaches xAI through it);
+  `Control.Permissions.Seam` went with the ACP client that was its only caller; the approval
+  *relay* stayed, because native subagents carry a child's approval to its parent through
+  it. `Jido.Harness.Registry` merges the configured providers over nine bundled ones, so the
+  refusal lives in `Interactive.State.new/2`, before a lease. The C2 review found five verbs
+  failing a session record that names a removed provider and a permanent unowned
+  reservation on its workspace; such a record is now history that loads, lists, closes and
+  deletes, and reserves nothing.
+- **A2's edges.** The C4 review found a live Linux test asserting the deleted `.git`
+  semantic, two non-total questions, and a backend-less node that had started signing;
+  `Sandbox.label/1` and the three questions are total, a node with no backend starts no
+  signing service, and the Linux loss — a `.git` or `.ouroboros` created after the command
+  starts, below the top level of a writable root — is stated in the code and the docs.
+- **Integration.** Two `mode` functions the union of removals emptied were deleted; the
+  Permission-plane section C1 had swallowed from ARCHITECTURE.md was restored; 19 dead
+  `dialyzer.ignore-warnings` entries were removed, and the trap that file's by-line pinning
+  sets is recorded in CONTRIBUTING.md.
+
+### Measured, on the integrated tree, the way §0 measured
+
+| | `dev` at `3bc8887` | `core` after C7 |
+|---|---|---|
+| `lib/`, Elixir (`.ex`) | 151,765 | 111,597 |
+| `test/`, Elixir (`.exs`) | 123,312 | 97,504 |
+| `tui/src/`, Rust (`.rs`) | 116,766 | 98,708 |
+| application-environment keys read in `lib/` | 105 | 73 |
+| keys set in `config/config.exs` | 68 | 47 |
+| `OUROBOROS_*` variables read in `config/runtime.exs` | 53 | 41 |
+| gateway methods in `Gateway.Methods.Contract` | 126 | 83 |
+| names in `Ouroboros.Storage.RetiredAtoms` | 0 | 197 |
+
+Every key still set in `config/*.exs` has a reader in `lib/`; none needed deleting at C7.
+`Ouroboros.Runtime.Exposure` reads one key, `:signing_node`, and it exists.
+
+The integration gate is `make boot-gate`: the fixture data directory `dev` wrote at
+`3bc8887` (`test/support/integration_fixture/`), booted against this tree ten times plain
+and ten times with every module preloaded, every count compared against the record.
 
 ## 0. Why
 
@@ -207,12 +296,25 @@ door on them.
   archives, `tui/src/acp_serve.rs` and `mcp_serve.rs`, the interactive fork and
   handoff verbs, the web deck.
 - **Unwinding `jido_harness`** from the native session.
-- **Merging the interactive and coding persistence schemas** is moot once C1 lands;
-  the record in SIMPLIFICATION.md is updated by C7.
+- **Merging the interactive and coding persistence schemas** became moot when C1 landed;
+  SIMPLIFICATION.md records that the interactive store is the only `Storage.Records`
+  store.
+- **A seccomp filter for the bubblewrap backend.** Claude Code and Codex both add one;
+  after A2 this runtime has neither a seccomp belt nor a syscall bound on Linux, because
+  the deleted helper carried the only one. Named by C4 so the reduction is not read as
+  having decided against it.
+- **What a same-node boot of an old directory does.** `make boot-gate` boots the fixture
+  under a node name of its own, so recovery adopts none of its sessions and the counts are
+  the files'. Booted as the node that wrote it, the recovery sweep resumes every native
+  session it finds — starting fresh provider sessions, appending events, failing the one
+  whose recorded harness session is gone — before the operator has asked for anything.
+  Whether an upgraded node should resume sessions it cannot continue, or hold them as it
+  now holds a removed-provider record, is a product decision this reduction did not take.
 
 ## 8. What this does not claim
 
-The reduced tree is still about 100k lines of Elixir and 90k of Rust. That is one order
-of magnitude, not two, and it is the honest floor for four theses that each need a
-durable store, a supervision tree, a client, and a proof. A second reduction, if one is
+The reduced tree measured at C7 is 111,597 lines of Elixir under `lib/`, 97,504 under
+`test/`, and 98,708 of Rust under `tui/src/` — the plan said about 100k and 90k. That is
+one order of magnitude, not two, and it is the honest floor for four theses that each need
+a durable store, a supervision tree, a client, and a proof. A second reduction, if one is
 wanted, starts from §7's list and from a benchmark number, not from this document.

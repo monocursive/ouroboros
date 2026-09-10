@@ -7,7 +7,7 @@ defmodule Ouroboros.Control.Permissions do
   refuses it with the rule named; anything else becomes the approval prompt that exists
   today. The point is not to prompt less for its own sake — it is that 98.9% of analysed
   Claude Code configurations had zero deny rules because prompting for everything trains
-  people to stop reading ([AGENT_EXPERIENCE §2.5](../../../docs/AGENT_EXPERIENCE.md)).
+  people to stop reading ([AGENT_EXPERIENCE §2.5](../../../docs/research/agent-ux-2026/AGENT_EXPERIENCE.md)).
   A prompt that survives is one that was worth showing.
 
   ## The three calls

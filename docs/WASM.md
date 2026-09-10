@@ -15,7 +15,9 @@ changes that. Lane W is the forge. Everything below that describes lane B, compa
 against it, or reports a proof run under `scripts/forge-linux-test.sh` is the record of
 how this lane was designed and built, not a description of the tree. What lane W stands
 on — `upgrade/signing/`, `upgrade/rollout/`, `epoch.ex`, `wire.ex` — is unchanged, and
-the routing rule in §6 now has one destination.
+the routing rule in §6 now has one destination. Every `file:line` citation below into a
+file this tree no longer has resolves at `dev` `3bc8887`, the last commit before the
+reduction; read them there.
 
 **The `ouro-sandbox` backend is gone.** docs/proposals/core.md §4 A2 removed the second
 Linux OS-sandbox backend — `provider/native/sandbox/helper.ex`, the `tui/sandbox/` crate,
@@ -101,7 +103,7 @@ process, the distribution mesh.
 `provider/native/exec.ex:98-109`) with a filtered-but-ambient environment: `HOME`,
 `PATH`, the filesystem, the network. `Sandbox.wrap` has exactly two call sites —
 `tools/bash.ex:142` and, until the core reduction deleted it, the ACP terminal service —
-and hooks are not one of them (`docs/AGENT_EXPERIENCE.md` C5 row records this). The entire
+and hooks are not one of them (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md` C5 row records this). The entire
 mitigation is `Hooks.trusted?/2` (`hooks.ex:452-479`): operator-configured
 `:trusted_workspaces`, deliberately never an in-repo marker. Consequence: a cloned
 repository's hooks and `[checks]` are declined wholesale. Containment would let them
@@ -248,7 +250,7 @@ template `ouro-wasm` was built from, not code that still ships.
   put it behind the same setting (D27), and the core reduction later deleted the lane.
 - Classifier auto mode (C6): no code, only the reserved
   `actor: :rule | :human | :classifier` in the ledger entry type
-  (`permissions.ex:92`) and AGENT_EXPERIENCE.md rows.
+  (`permissions.ex:92`) and research/agent-ux-2026/AGENT_EXPERIENCE.md rows.
 - MCP is the worked precedent for a dynamic tool lane: one seam in
   `tools.ex:262-269` (`resolve_module` returns `{McpTool, name}`), specs appended
   behind a gate, opaque `{module, name}` dispatch, honest `:execute` classification
@@ -4293,4 +4295,4 @@ Each slice is PR-sized, lands green, and is useful alone.
   https://component-model.bytecodealliance.org. wasmex (fallback path):
   https://hexdocs.pm/wasmex — `Wasmex.Components`, 0.15.1.
 - In-repo: ARCHITECTURE.md (milestone 3, "Still external"), FLEET.md (§6 tags, F6),
-  REPLAY.md (the record/replay kernel lane A defers to), AGENT_EXPERIENCE.md (C5/C6 rows).
+  REPLAY.md (the record/replay kernel lane A defers to), research/agent-ux-2026/AGENT_EXPERIENCE.md (C5/C6 rows).

@@ -1,5 +1,11 @@
 # Ouroboros Agent Experience: the 2026 bar, the map, and the plan
 
+> Moved under `docs/research/` by the core reduction's last slice (September 2026), beside
+> the dated reports it synthesises. It is a survey and a plan, not a description of the
+> tree, and its scorecards are left as they were written; a citation below into a file the
+> reduction deleted resolves at `dev` `3bc8887`, and one into a file that predates that at
+> the `review-fixes` commit it names.
+
 Status: research and plan written 2026-08-22 on branch `review-fixes`, with a dated status
 section (§0a) recording what the implementation waves delivered. Below §0a nothing is
 implemented unless it links to code that exists today; every scorecard

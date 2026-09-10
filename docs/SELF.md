@@ -38,7 +38,7 @@ alone — the second and last module a config provider calls, and it earns that 
 | `OUROBOROS_SIGNING_NODE`, **or** `OUROBOROS_SIGNER_KEY_PATH` **and** `OUROBOROS_SIGNER_ID` | A lane-W signature comes from a `:signer` peer or from a service on this node, in that order (`Ouroboros.Wasm.Deploy`). | Refused, naming all three. |
 | `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`, non-empty | `config/config.exs` sets `allow_unsigned: true` outside production; the posture closes that and needs a listed key for anything to deploy. | Refused. A malformed entry or a duplicate id is refused too, never a quietly narrowed set. |
 | `config :ouroboros, :wasm_forge_placement` is `:local` | The posture forges where the effect lands. | Refused, naming the setting. |
-| `config :ouroboros, :signing_require_wasm_eval` is `true` | Lane W has no build peer behind it, so the signed eval spec is the whole test story. | Refused, naming the setting. |
+| `config :ouroboros, :signing_require_wasm_eval` is `true` | Nothing in this runtime compiles a component or runs its tests before the signature, so the signed eval spec is the whole test story. | Refused, naming the setting. |
 
 **What it sets.** `native_forge_tool: true` (S1's tool becomes visible), `permissions_engine:
 Ouroboros.Wasm.PolicyEngine` (S2's engine, and the only engine a promotion record means

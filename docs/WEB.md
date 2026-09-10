@@ -115,9 +115,10 @@ Facts the design stands on, each checked in the tree:
   machine by hand.
 - **Two corrections to prior internal notes**: `fleet.sessions` does not exist
   (the fleet-wide list is `interactive.list` fanning out over `:erpc`,
-  `lib/ouroboros/gateway/methods/present.ex:55-113`), and `OUROBOROS_DIST_TAILNET` is
-  spec-only in `docs/FLEET.md` — not implemented. This document mirrors the *pattern* of
-  the implemented refusals, not that flag.
+  `lib/ouroboros/gateway/methods/present.ex:55-113`), and `OUROBOROS_DIST_TAILNET` was
+  spec-only in an earlier `docs/FLEET.md` and was never implemented; the rewritten
+  cluster document no longer names it. This document mirrors the *pattern* of the
+  implemented refusals, not that flag.
 
 ## 2. Architecture
 
@@ -473,9 +474,9 @@ mailbox; resubscribe is preferred. `Watch.mailbox_lagged?/1` is the predicate. N
 wire protocol, no Wire byte caps.
 
 Session lists, status, providers, models: polled with the TUI's cadences and its
-visibility rule ("Only the visible tab" — `ui/app/mod.rs:2310`), which for LiveView means
+visibility rule ("Only the visible tab" — `ui/app/mod.rs:1912`), which for LiveView means
 "only mounted views poll, each for what it shows." Models are fetched where a picker will
-read them, never on a cadence (`mod.rs:107,249`).
+read them, never on a cadence.
 
 Multi-viewer honesty: two browsers answering one approval resolve by `request_id` — the
 second answer is refused upstream and rendered as the refusal, the reducer rule the
@@ -654,7 +655,7 @@ packages and gained nothing; no surviving crate moved versions.
   `preserve_order` motivation dies, the determinism argument stands; the comments get
   rewritten to say so.
 - **Docs:** `DESKTOP.md` replaced by a tombstone pointing here, since deleted; README's client matrix
-  updated; `AGENT_EXPERIENCE.md` client rows re-scored.
+  updated; `research/agent-ux-2026/AGENT_EXPERIENCE.md` client rows re-scored.
 
 ## 11. Risks and open questions
 

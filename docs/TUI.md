@@ -270,8 +270,8 @@ Every handler runs in a supervised task under a per-method gateway timeout
 (default **15_000ms**; exceptions in the table). Timeout → `-32005`. Every
 upstream call is made in the `safe_call` posture (`try/rescue/catch :exit`) —
 several planes exit rather than error when down (e.g.
-`Team.Store.list/1`'s bare `GenServer.call`,
-[team/store.ex:30](../lib/ouroboros/team/store.ex); `Ouroboros.status/0`
+`Interactive.Store.get/2`'s bare `GenServer.call`, which `interactive.info` reaches
+through `InteractiveSession.info/1`; `Ouroboros.status/0`
 itself only survives via its own `safe_value/2`) — a `:noproc`/`:timeout`
 exit becomes `-32004`/`-32005`, never a dead Conn.
 
@@ -1863,7 +1863,7 @@ what the `approval_requested` payload carries:
 **Five answers, and the fifth is two calls.** The four keyboard answers are unchanged and
 are exactly `Jido.Harness.ApprovalResponse`'s two enums crossed. A fifth — *approve, and
 don't ask again for `<suggested_rule>`* — appears when three things are true at once: the
-payload carried the `suggested_rule` that `Control.Permissions.Seam` computes on `:ask`,
+payload carried the `suggested_rule` that `Interactive.Task.Approvals` computes on `:ask`,
 this gateway serves `permissions.add`, and the session names a workspace to scope the rule
 to. Choosing it sends `interactive.respond_approval {decision: approve, scope: session}`
 **first** and `permissions.add {scope: "workspace", pattern, decision: "allow", workspace}`
@@ -2487,7 +2487,7 @@ work — says so rather than showing a live branch for a directory that may no l
 there. A session without one draws nothing at all: a row reading "WORKTREE no" would be
 narrating a default.
 
-### `[keys]` — keys are data (B8, [AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) D4)
+### `[keys]` — keys are data (B8, [research/agent-ux-2026/AGENT_EXPERIENCE.md](research/agent-ux-2026/AGENT_EXPERIENCE.md) D4)
 
 Every chord this client binds is a **named action**, and every action can be rebound from
 `[keys]` in `config.toml` (`~/.config/ouroboros/config.toml` — the same file the rest of
@@ -2586,7 +2586,7 @@ because a file had a typo in it is the same failure in the other direction. A `[
 whose value is not a string (`verbose = true`) is dropped and named rather than refusing
 the whole file.
 
-**The map is the authority, never a literal string** ([AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md)
+**The map is the authority, never a literal string** ([research/agent-ux-2026/AGENT_EXPERIENCE.md](research/agent-ux-2026/AGENT_EXPERIENCE.md)
 D14). The `?` panel, the footer's key hints, the `ctrl+x` which-key overlay, the command
 palette's shortcut column, the session rail, the first-run tips, and the approval snack bar
 all read the effective map, so a rebound key is what the UI shows. An action set to `"off"`
@@ -2676,13 +2676,13 @@ one notice says so, once per session. That is the whole of it.
 **This client never stops anything.** It has no authority to: a turn is the runtime's to
 run, and a client that paused, refused, or implied it had halted a session would be
 claiming a guarantee it cannot keep. Budgets that actually refuse work belong on the
-runtime side and are a later slice ([AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) I2 names
+runtime side and are a later slice ([research/agent-ux-2026/AGENT_EXPERIENCE.md](research/agent-ux-2026/AGENT_EXPERIENCE.md) I2 names
 `max_budget_usd` for the native agent and Claude's own flag through C2); until they land,
 `[budget]` is a number this client watches and reports against. A provider that reports no
 cost can never cross the limit, and the overlay says exactly that rather than leaving the
 row looking satisfied.
 
-### Capability-driven chrome (B0, [AGENT_EXPERIENCE.md](AGENT_EXPERIENCE.md) D14/X1/X2)
+### Capability-driven chrome (B0, [research/agent-ux-2026/AGENT_EXPERIENCE.md](research/agent-ux-2026/AGENT_EXPERIENCE.md) D14/X1/X2)
 
 `Interactive.State.public/1` projects `options.capabilities` — a map the runtime derives
 from the transport a session actually selected, with the keys `transport`, `process`,

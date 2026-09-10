@@ -1,5 +1,12 @@
 # M1 — Ouroboros display pipeline map (verified 2026-08-22)
 
+> **Superseded in part, September 2026.** This is a dated map of a runtime that drove
+> wrapped vendor CLIs and a coding plane. The core reduction made `:native` the only
+> provider and deleted the coding plane, the ACP client and the vendor adapters; see
+> [the core reduction](../../proposals/core.md) §3 D2 and D3. Every citation below into
+> `provider/session/`, `provider/codex_adapter.ex` or `coding/` names a file that resolves
+> only at `dev` `3bc8887`. The map is left as the record it is.
+
 ## 1. Normalized event taxonomy (Jido.Harness)
 
 The canonical envelope is `Jido.Harness.Event` (`deps/jido_harness/lib/jido_harness/event.ex`). 29 types at `event.ex:15-46`: run lifecycle (`:run_started/:run_completed/:run_failed/:run_cancelled`), session lifecycle (`:session_started/:session_ready/:session_idle/:session_closed/:session_failed/:session_cancelled`), turn/queue (`:input_accepted`, `:turn_queued`, `:turn_started`, `:turn_completed`, `:turn_failed`, `:turn_interrupted`, `:queue_changed`), output (`:output_text_delta`, `:output_text_final`, `:thinking_delta`, `:command_output_delta`, `:tool_call`, `:tool_result`, `:file_change`, `:plan_updated`, `:usage`), interaction (`:approval_requested`, `:approval_resolved`), escape hatch `:provider_event`.
