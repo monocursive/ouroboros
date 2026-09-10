@@ -310,8 +310,18 @@ defmodule Ouroboros.Application do
   # policy (`Ouroboros.Provider.Native.Sandbox`'s `hidden_files`), which is what makes
   # holding it here safe: without that fence the model's `bash` reads the seed, derives the
   # keypair with `:crypto`, and signs a manifest around the eval spec, the rate limit and the
-  # journal that are the only things this service adds. Both backends render the fence, so
-  # this no longer asks which one a node has.
+  # journal that are the only things this service adds.
+  #
+  # Both backends render the fence — Seatbelt with a `literal` deny, bubblewrap by binding
+  # `/dev/null` read-only over the path, and only where the file is there — so this no longer
+  # asks *which* backend a node has. It still asks whether it has one. `:none` renders no
+  # fence at all, and a node that cannot hide the seed from its own sessions is a node that
+  # declines to hold it: no backend, no service. There used to be one variable that turned
+  # that refusal off (`OUROBOROS_SELF_UNFENCED_KEY`); it went with the third backend, and the
+  # remedy is now a `:signer` peer or a backend (docs/proposals/core.md §4 A2).
+  #
+  # `Sandbox.detect/0` here rather than a fresh probe: it is cached in `:persistent_term`, so
+  # this is the same answer every `bash` call in the VM will get, decided once at boot.
   @doc false
   @spec self_signing_children() :: [Supervisor.child_spec() | {module(), keyword()}]
   def self_signing_children do
@@ -320,9 +330,30 @@ defmodule Ouroboros.Application do
     if Application.get_env(:ouroboros, :self_posture, false) == true and
          is_nil(Application.get_env(:ouroboros, :signing_node)) and
          is_binary(key_path) and key_path != "" do
-      [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+      signing_service_if_a_backend_is_there(key_path)
     else
       []
+    end
+  end
+
+  defp signing_service_if_a_backend_is_there(key_path) do
+    detection = Ouroboros.Provider.Native.Sandbox.detect()
+
+    if detection.backend == :none do
+      Logger.error(
+        "OUROBOROS_POSTURE=self names a signing key at #{key_path}, and this node has no OS " <>
+          "sandbox at all: with no backend nothing hides a named file from a read, so any " <>
+          "session on this node can read the signing seed and sign in this key's name — " <>
+          "around the signed evaluation spec, the rate limit and the signing journal " <>
+          "(docs/SELF.md §2, S-D49). No local signing service was started, so a forge here " <>
+          "ends at :no_signing_service. Name a `:signer` peer with OUROBOROS_SIGNING_NODE so " <>
+          "the key lives on another host, or install a backend: bubblewrap on Linux, or run " <>
+          "on macOS where `sandbox-exec` is present."
+      )
+
+      []
+    else
+      [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
     end
   end
 

@@ -78,7 +78,11 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   what is fenced is the credential, not the socket. A session may still connect to the
   gateway; it can no longer authenticate as this node's operator. Both backends render the
   deny: Seatbelt with `(deny file-read* (literal …))`, bubblewrap by binding `/dev/null`
-  read-only over the path.
+  read-only over the path — **and only where the file is there**. An absent credential is
+  left out of the bubblewrap argv deliberately, because `--ro-bind /dev/null` onto a path
+  under a read-only bind aborts the whole command; `Bwrap`'s `hidden_file_binds/1` records
+  the measurement and the one gap it leaves. Seatbelt has no such gap: a `literal` deny needs
+  no mount point.
 
   **The `.git` consequence is real and is not a bug.** A sandboxed `git commit` fails,
   because committing writes into `.git`. That is Codex's rule and it is kept for
@@ -117,8 +121,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   Landlock plus seccomp helper it built itself — with an `LD_PRELOAD` name filter beside
   both of them to deny creating a `.git` that did not exist when the command started.
   Helper, filter and semantic are gone (docs/proposals/core.md §4 A2). **A `.git` or
-  `.ouroboros` that was not there when the command started can be created on Linux**; one
-  that *was* there is still bound read-only, and Seatbelt still denies both by regex.
+  `.ouroboros` created after the command starts, anywhere *below the top level* of a writable
+  root, is no longer denied on Linux** — `deps/foo/.git`, and nothing a bind could have named
+  in advance. A writable root's *own* one is still covered either way: bound read-only over
+  itself when it is there, and covered by a read-only bind of the command's empty scratch
+  directory when it is not (`Bwrap.protected_segment_binds/1`). Seatbelt still denies every
+  case by regex.
   bubblewrap constrains the filesystem and the network namespace and not the syscall
   surface: there is no seccomp filter on this backend.
 
@@ -736,6 +744,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # A backend with no detection map to read `unshare_net` from is not one this can vouch for.
   def fences_network?(:bwrap), do: false
   def fences_network?(:none), do: false
+  # And a name this build does not recognise is not one it can vouch for either. Total for the
+  # reason `label/1` is: the refusal these three questions produce names the backend, and a
+  # question that raises instead of answering `false` turns a refusal into a crash.
+  def fences_network?(_unknown), do: false
 
   @doc """
   Whether this backend can seal a policy's **process** (W21, D25): exec only the executable
@@ -756,6 +768,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def seals_process?(:sandbox_exec), do: true
   def seals_process?(:bwrap), do: false
   def seals_process?(:none), do: false
+  # Total, for `fences_network?/1`'s reason: `process_posture/2` asks this about whatever
+  # backend a detection carries and must answer `:open`, not raise, for one it cannot name.
+  def seals_process?(_unknown), do: false
 
   @doc """
   The process posture a policy **actually** gets on this backend: `:sealed` only where the
