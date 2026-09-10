@@ -1,14 +1,12 @@
 defmodule Ouroboros.Test.ManagedSessionTransport do
   @moduledoc """
-  The managed session transport with an approvals channel.
+  A deterministic session transport with an approvals channel.
 
-  Turn mechanics delegate to `Jido.Harness.SessionAdapters.Managed`, so the one
-  emit/finish controller pattern drives these sessions exactly as before. The one thing
-  added is `respond_approval/3`: a session transport that declares no approvals cannot
-  be started under the plane's default `approval_mode: :prompt`
-  (`Ouroboros.Provider.safety_options/3`), because a managed CLI re-executed per turn
-  has nobody to ask and denies silently instead. A fixture standing in for the
-  approval-capable providers (Codex app-server, ACP) has to answer, not just declare.
+  Turn mechanics delegate to `Jido.Harness.SessionAdapters.Managed`, so one emit/finish
+  controller drives these sessions. `respond_approval/3` is the one thing added: a session
+  transport that declares no approvals cannot be started under the plane's default
+  `approval_mode: :prompt`, and a fixture standing in for the native transport has to
+  answer, not just declare.
   """
 
   @behaviour Jido.Harness.SessionAdapter
@@ -50,7 +48,12 @@ defmodule Ouroboros.Test.HarnessAdapter do
     SessionTransportSpec
   }
 
-  @provider :ouroboros_test
+  # Registered *as* `:native` by the tests that use it, because
+  # `Ouroboros.Interactive.State.new/2` refuses every other provider name at the boundary
+  # and `Jido.Harness.Registry.spec/1` refuses a spec whose `provider` disagrees with the
+  # key it was looked up under. What this adapter stands in for is the native transport
+  # with the model taken out: the session mechanics are real, the turns are scripted.
+  @provider :native
   @accepted_resume_ids_key :test_harness_adapter_accepted_resume_ids
 
   @impl true
@@ -66,12 +69,13 @@ defmodule Ouroboros.Test.HarnessAdapter do
           usage?: true,
           native_cancel?: true
         ),
-      default_session_transport: :managed,
-      session_transports: [managed_transport(), unanswerable_transport(), frozen_transport()],
+      default_session_transport: :native,
+      session_transports: [native_transport()],
       normalized_options: [
         :provider_session_id,
         :approval_mode,
         :sandbox_mode,
+        :model,
         # Prompt policy is normalized, not provider-specific: a test provider that
         # rejected it could not exercise an assembled agent profile at all.
         :system_prompt,
@@ -79,7 +83,7 @@ defmodule Ouroboros.Test.HarnessAdapter do
         :disallowed_tools
       ],
       normalized_values: accepted_resume_values(),
-      provider_options: [:fork_session]
+      provider_options: [:fork_session, :fork_to_turn]
     )
   end
 
@@ -93,69 +97,28 @@ defmodule Ouroboros.Test.HarnessAdapter do
   @spec fork_option() :: {atom(), term()}
   def fork_option, do: {:fork_session, true}
 
-  # Named `:managed` because that is the transport Harness would otherwise synthesize for
-  # an adapter that declares none, so every existing expectation about this provider's
-  # transport name still holds. `dynamic_model` is `false` rather than `:managed` because
-  # this adapter normalizes no `:model` — the same narrowing
-  # `Jido.Harness.Session.Manager.specialize_transport/2` applies to the synthetic one.
-  defp managed_transport do
+  # Named `:native` because that is the only provider, and this fixture is registered as
+  # it. What it declares is what it can actually do: the controller underneath re-executes
+  # per turn, so `process`, `multi_turn` and `interrupt` say so rather than borrowing the
+  # live loop's answers. `approvals: :native` is the one thing it must declare, because a
+  # transport with no approvals channel cannot be started under the plane's default
+  # `approval_mode: :prompt`.
+  defp native_transport do
     %{
-      SessionTransportSpec.managed(:managed)
+      SessionTransportSpec.managed(:native)
       | adapter: Ouroboros.Test.ManagedSessionTransport,
+        configuration_options: [:model, :reasoning_effort, :approval_mode, :sandbox_mode],
         capabilities:
           InteractionCapabilities.new!(
-            transport: :managed,
+            transport: :native,
+            maturity: :stable,
             process: :per_turn,
             multi_turn: :managed,
             follow_up: :managed,
             interrupt: :process,
             approvals: :native,
-            dynamic_model: false,
+            dynamic_model: :managed,
             dynamic_configuration: :managed
-          )
-    }
-  end
-
-  # The managed transport as the bundled ones actually ship it: no approvals channel.
-  # X1 is a rule about *this* shape, and a session cannot be started into `:prompt` here
-  # — which is exactly why the same rule has to hold on `interactive.configure`, where a
-  # session started into a mode that works could otherwise be moved into one that asks
-  # nobody. This transport is what lets that be tested end to end.
-  defp unanswerable_transport do
-    %{
-      SessionTransportSpec.managed(:managed_no_approvals)
-      | adapter: Jido.Harness.SessionAdapters.Managed,
-        capabilities:
-          InteractionCapabilities.new!(
-            transport: :managed_no_approvals,
-            process: :per_turn,
-            multi_turn: :managed,
-            follow_up: :managed,
-            interrupt: :process,
-            dynamic_model: false,
-            dynamic_configuration: :managed
-          )
-    }
-  end
-
-  # A transport that declares no dynamic configuration at all, as ACP does. Nothing about
-  # an open session on it can be changed, and the refusal has to come from the
-  # declaration rather than from a failed call.
-  defp frozen_transport do
-    %{
-      SessionTransportSpec.managed(:managed_frozen)
-      | adapter: Ouroboros.Test.ManagedSessionTransport,
-        configuration_options: [],
-        capabilities:
-          InteractionCapabilities.new!(
-            transport: :managed_frozen,
-            process: :per_turn,
-            multi_turn: :managed,
-            follow_up: :managed,
-            interrupt: :process,
-            approvals: :native,
-            dynamic_model: false,
-            dynamic_configuration: false
           )
     }
   end

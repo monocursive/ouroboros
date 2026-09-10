@@ -17,7 +17,7 @@ defmodule Ouroboros.InteractiveControlsTest do
   alias Ouroboros.Provider
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()
@@ -55,15 +55,16 @@ defmodule Ouroboros.InteractiveControlsTest do
   end
 
   describe "interactive.configure" do
-    test "a managed transport takes the change and says it lands on the next turn", %{id: id} do
+    test "a change is carried to the live session and the answer says when it lands",
+         %{id: id} do
       ref = start_session(id)
 
       assert {:ok, result} = InteractiveSession.configure(ref, %{approval_mode: :auto_approve})
 
-      # The honesty invariant, as data. A managed transport re-executes the CLI per turn,
-      # so the turn already running keeps the policy it started under and the answer says
-      # so rather than letting a footer imply otherwise.
-      assert result.applies == :next_turn
+      # `:now`, because the one transport carries the change to a live session process
+      # rather than to the next re-execution of a CLI. The field stays on the wire because
+      # a footer has to be able to state when a change lands rather than imply it.
+      assert result.applies == :now
       assert result.changed == [:approval_mode]
       assert result.options.approval_mode == :auto_approve
 
@@ -139,7 +140,7 @@ defmodule Ouroboros.InteractiveControlsTest do
 
       assert configured.payload == %{
                "kind" => "configured",
-               "applies" => "next_turn",
+               "applies" => "now",
                "changed" => %{"approval_mode" => :auto_approve}
              }
 
@@ -174,51 +175,17 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
-    test "X1 holds on the configure path: a mode that asks nobody is refused", %{id: id} do
-      # A transport with no approvals channel cannot be *started* into `:prompt`. The
-      # hole this closes is the other door: a session started into a mode that works
-      # being moved into one that is silently denied.
-      ref = start_session(id, transport: :managed_no_approvals, approval_mode: :auto_edit)
-
-      assert {:error, {:unsupported_approval_mode, details}} =
-               InteractiveSession.configure(ref, %{approval_mode: :prompt})
-
-      assert details.requested == :prompt
-      assert details.reason == :no_approval_channel
-      assert details.transport == :managed_no_approvals
-      assert details.supported == [:default, :auto_edit, :auto_approve]
-      assert details.message =~ "no approvals channel"
-
-      # Refused means nothing moved.
-      assert {:ok, session} = InteractiveSession.info(ref)
-      assert State.public(session).options.approval_mode == :auto_edit
-
-      retire_session(id)
-    end
-
-    test "a transport that declares no dynamic configuration refuses by declaration", %{id: id} do
-      ref = start_session(id, transport: :managed_frozen)
-
-      assert {:error, {:unconfigurable_session, details}} =
-               InteractiveSession.configure(ref, %{approval_mode: :auto_approve})
-
-      assert details.reason == :no_dynamic_configuration
-      assert details.transport == :managed_frozen
-      assert details.message =~ "declares no dynamic configuration"
-
-      retire_session(id)
-    end
-
     test "a field the transport cannot change is refused by name", %{id: id} do
       ref = start_session(id)
 
-      # This adapter normalizes no `:model`, so its managed transport's `dynamic_model`
-      # is false — the same narrowing the harness applies to the synthetic transport.
+      # This adapter normalizes no `:reasoning_effort`, so the field is outside the list a
+      # start is held to and a configure is refused by name rather than sent.
       assert {:error, {:unconfigurable_session, details}} =
-               InteractiveSession.configure(ref, %{model: "some-model"})
+               InteractiveSession.configure(ref, %{reasoning_effort: :high})
 
-      assert details.reason == :no_dynamic_model
-      assert details.message =~ "declares no dynamic model"
+      assert details.reason == :option_not_configurable
+      assert details.field == :reasoning_effort
+      assert details.message =~ "cannot change :reasoning_effort on an open session"
 
       retire_session(id)
     end
@@ -257,22 +224,21 @@ defmodule Ouroboros.InteractiveControlsTest do
 
     test "the model a session is running is on its public state, before and after a change" do
       # A context meter divides `usage.total_tokens` by the window `runtime.models` gives
-      # for *this* model, so the session has to say which model that is. Asserted against
-      # a provider that normalizes `:model`, without starting its CLI.
+      # for *this* model, so the session has to say which model that is.
       assert {:ok, session} =
                State.new("controls-model-projection",
-                 provider: :claude,
+                 provider: :native,
                  approval_mode: :auto_edit,
-                 model: "claude-sonnet-5"
+                 model: "anthropic:claude-sonnet-5"
                )
 
-      assert State.public(session).options.model == "claude-sonnet-5"
+      assert State.public(session).options.model == "anthropic:claude-sonnet-5"
 
-      configured = State.configure(session, %{model: "claude-opus-5"})
-      assert State.public(configured).options.model == "claude-opus-5"
+      configured = State.configure(session, %{model: "anthropic:claude-opus-5"})
+      assert State.public(configured).options.model == "anthropic:claude-opus-5"
 
       # And the request a resume rebuilds carries it, so the change is not projection-only.
-      assert State.request(configured).model == "claude-opus-5"
+      assert State.request(configured).model == "anthropic:claude-opus-5"
     end
 
     test "a terminal session is not configurable", %{id: id} do
@@ -558,63 +524,6 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
-    test "a transport that declares no branch verb refuses by capability", %{id: id} do
-      ref = start_session(id, transport: :managed_frozen, sandbox_mode: :read_only)
-      adapter = name_provider_session(ref)
-
-      # `:managed_frozen` is `Ouroboros.Test.ManagedSessionTransport` with no
-      # `configuration_options`; it still inherits the adapter's fork declaration, so the
-      # honest per-transport refusal is exercised through ACP below and through the
-      # capability map here.
-      assert Provider.session_capabilities(@provider, :managed_frozen).fork == :native
-
-      for provider <- [:opencode, :kimi] do
-        assert Provider.session_capabilities(provider).fork == false
-
-        assert {:error, {:unforkable_session, details}} =
-                 Provider.session_fork_options(provider)
-
-        assert details.transport == :acp
-        assert details.reason == :transport_cannot_fork
-        assert details.message =~ "declares no way to branch one"
-      end
-
-      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
-      retire_session(id)
-    end
-
-    # R3. This provider reaches its session over a managed transport, so its thread is the
-    # vendor's and branches where the vendor branches it. The refusal has to happen before
-    # anything is started: a child created and then found to be a tail fork is exactly the
-    # silent widening `to_turn` exists to prevent.
-    test "a vendor session refuses to be forked at a turn rather than branching at its tail",
-         %{id: id} do
-      ref = start_session(id, sandbox_mode: :read_only)
-      adapter = name_provider_session(ref)
-
-      planned = unique_id("no-such-branch")
-
-      assert {:error, {:unforkable_at_turn, details}} =
-               InteractiveSession.fork(ref, planned, %{to_turn: "t2"})
-
-      assert details.provider == @provider
-      assert details.to_turn == "t2"
-      assert details.reason == :vendor_forks_at_tail
-
-      # Nothing was created, and the parent did not count a branch it never started.
-      assert Store.get(planned) == :not_found
-      assert {:ok, %State{} = parent} = InteractiveSession.info(ref)
-      assert State.forks(parent) == 0
-
-      # And the same session forks perfectly well at its tail, which is the point: the
-      # refusal is about the parameter, not about this provider's ability to branch.
-      assert {:ok, child} = InteractiveSession.fork(ref, unique_id("tail-fork"))
-
-      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
-      retire_session(child.id)
-      retire_session(id)
-    end
-
     # R3. `model` is the one piece of the parent's start intent a fork may replace. It is
     # asserted on the plan because the plan *is* the child's start request — the projection
     # a client sees deliberately hides provider options — and because a plan starts
@@ -817,7 +726,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       # R3/D10. Present and false rather than absent: a client reads an absent capability
       # as offered, so omitting it here would advertise replay for a session that has no
       # journal because its tool loop ran in a vendor process.
-      assert row.options.capabilities.replay == false
+      assert row.options.capabilities.replay == true
 
       assert :ok = HarnessAdapter.finish(adapter)
       retire_session(id)

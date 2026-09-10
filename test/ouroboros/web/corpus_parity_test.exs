@@ -486,7 +486,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
       # `session_ready` is where the transport facts are; `session_started` names only its
       # working directory, which is not a sentence worth a line.
-      assert chat_note(cell("event_session_ready")) == "session ready · acp · stable"
+      assert chat_note(cell("event_session_ready")) == "session ready · native · stable"
 
       assert chat_note(cell("event_session_idle")) == "session idle"
 
@@ -805,16 +805,20 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert chat_note(cell("event_provider_event_plan_exit")) == "provider event · plan_exit"
     end
 
-    # Mirrors `an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind`.
-    # The must-render case. ACP wraps every update it does not map in
-    # `{"kind": "acp_update", "update": …}`, and the update's own `sessionUpdate` type is
-    # the informative half — so it is lifted out and both halves are named.
-    test "an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind" do
+    # Mirrors `an_unmodelled_provider_event_names_its_kind`. The must-render case: a
+    # `provider_event` whose kind this client does not model is a visible note naming the
+    # kind and whatever words the payload carried, never a dropped event. The ACP
+    # `{"kind": "acp_update", "update": …}` envelope this used to unwrap went with the ACP
+    # client.
+    test "an_unmodelled_provider_event_names_its_kind" do
       assert presentation("event_provider_event_unknown") ==
-               %ProviderNote{kind: "acp_update · terminal_output", detail: ""}
+               %ProviderNote{
+                 kind: "terminal_output",
+                 detail: "waiting for the container to come up"
+               }
 
       assert chat_note(cell("event_provider_event_unknown")) ==
-               "provider event · acp_update · terminal_output"
+               "provider event · terminal_output — waiting for the container to come up"
     end
   end
 
