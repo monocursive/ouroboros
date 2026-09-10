@@ -18,7 +18,7 @@
         "reasoning_tokens": 0,
         "total_tokens": 20500
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "semantic": {

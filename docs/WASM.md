@@ -87,8 +87,8 @@ process, the distribution mesh.
 `sh -c` through `Exec.run_shell` (`provider/native/hooks.ex:486`,
 `provider/native/exec.ex:98-109`) with a filtered-but-ambient environment: `HOME`,
 `PATH`, the filesystem, the network. `Sandbox.wrap` has exactly two call sites —
-`tools/bash.ex:142` and the ACP terminal service (`session/service.ex:628`) — and
-hooks are not one of them (`docs/AGENT_EXPERIENCE.md` C5 row records this). The entire
+`tools/bash.ex:142` and, until the core reduction deleted it, the ACP terminal service —
+and hooks are not one of them (`docs/AGENT_EXPERIENCE.md` C5 row records this). The entire
 mitigation is `Hooks.trusted?/2` (`hooks.ex:452-479`): operator-configured
 `:trusted_workspaces`, deliberately never an in-repo marker. Consequence: a cloned
 repository's hooks and `[checks]` are declined wholesale. Containment would let them
@@ -231,7 +231,7 @@ template `ouro-wasm` was built from, not code that still ships.
   (`provider/native/permissions.ex:67-69`) — **the cleanest existing plug for a wasm
   policy stage**. Note: at the time of this survey the ACP lane called
   `Control.Permissions` directly through `Seam` and was not covered by that seam; W18
-  put it behind the same setting (D27).
+  put it behind the same setting (D27), and the core reduction later deleted the lane.
 - Classifier auto mode (C6): no code, only the reserved
   `actor: :rule | :human | :classifier` in the ledger entry type
   (`permissions.ex:92`) and AGENT_EXPERIENCE.md rows.
@@ -1297,25 +1297,23 @@ the rule the node would record, and the guest's own log; it exits non-zero on a 
 worlds, and `examples/no-network-shell` is the worked one — it denies a `bash` whose command
 contains `curl`, `wget` or `nc `, with a stated rule, and asks about everything else.
 
-**Every seam reads one setting** (W18, D27). Four readers now: the native loop
+**Every seam reads one setting** (W18, D27). Three readers: the native loop
 (`Provider.Native.Permissions`), the interactive plane's external approvals
-(`Interactive.Task.Approvals`), the interactive shell (`Interactive.Task.Shell`, through
-`Approvals.permissions_engine/2`) and the ACP lane (`Control.Permissions.Seam` — both the
-`session/request_permission` a vendor process sends and the `fs/write_text_file` and
-`terminal/create` an agent asks this runtime to perform). A node given a policy component has
-one on every lane a permission question arrives on rather than on three seams out of four. The
-ACP seam takes `Interactive.Task.Approvals`' tolerance verbatim: an answer in none of the three
-shapes, an exception and an exit are each an ask, with the approval reaching the human exactly
-as it did before an engine was named. **No engine *failure* widens anything there** — and what
-an engine does answer is its own authority, an `{:allow, ref}` included, exactly as on the other
-three seams; the bound on a component's `allow` is `PolicyEngine`'s `:policy_allowable_tools`
-(D20) and there is deliberately no second one at the seam. `remember/4` and `forget_session/1`
-stay on `Control.Permissions` whatever engine is named — rule-store operations, not decisions
-(C13) — and so does the *pattern* a `:session` answer is written as, because that row is durable
-and its width is not something a named engine may widen from underneath. Proved end to end in
-`test/wasm/policy_acp_test.exs` against the real `no-network-shell`, signed and deployed through
-the real rollout, and asked both directly at the seam and through a real `Session.Jsonl` driving
-a vendor process.
+(`Interactive.Task.Approvals`) and the interactive shell (`Interactive.Task.Shell`, through
+`Approvals.permissions_engine/2`). A node given a policy component has one on every lane a
+permission question arrives on. There was a fourth, `Control.Permissions.Seam` — the ACP
+`session/request_permission` a vendor process sent, and the `fs/write_text_file` and
+`terminal/create` an ACP agent asked this runtime to perform — and it went with the wrapped
+vendor providers in September 2026 ([the core reduction](proposals/core.md) §3 D2), taking
+`test/wasm/policy_acp_test.exs` with it.
+
+**No engine *failure* widens anything** on the three that remain — and what an engine does
+answer is its own authority, an `{:allow, ref}` included; the bound on a component's `allow`
+is `PolicyEngine`'s `:policy_allowable_tools` (D20) and there is deliberately no second one at
+a seam. `remember/4` and `forget_session/1` stay on `Control.Permissions` whatever engine is
+named — rule-store operations, not decisions (C13) — and so does the *pattern* a `:session`
+answer is written as, because that row is durable and its width is not something a named
+engine may widen from underneath.
 
 A model-backed classifier (the original C6 sketch) remains possible *behind* the same engine
 interface; the wasm module is the deterministic, offline-testable version, and it is the one

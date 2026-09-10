@@ -10,7 +10,7 @@
         "kind": "message",
         "text": "Check the workspace is clean, then run the suite."
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "semantic": {

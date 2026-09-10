@@ -27,7 +27,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
   # `Ouroboros.Gateway.Wire` writes the provider as its string; the in-process subscriber
   # holds the atom the runtime minted.
-  @providers %{"claude_code" => :claude_code, "native" => :native}
+  @providers %{"native" => :native}
 
   # ------------------------------------------------------------------------------------
   # One fixture's event, decoded the way the transport hands it to the model.
@@ -335,28 +335,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
       assert summary(hd(settled.calls)) ==
                {"Read", "lib/ouroboros/gateway/wire.ex:120-159", "→ 3 lines"}
-    end
-
-    # Mirrors `an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried`. The ACP
-    # dialect names a call in prose and says what it *is* only in `kind`. The summariser
-    # reads both: the title is the row's name, the kind is what picks the verb.
-    test "an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried" do
-      edit = tool(cell("event_tool_call_acp_edit"))
-
-      assert edit.name == "Edit lib/ouroboros/web/transcript.ex"
-      assert edit.kind == "edit"
-
-      assert summary(edit) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
-    end
-
-    # Mirrors `an_acp_status_of_completed_settles_the_edit_without_an_is_error_field`.
-    test "an_acp_status_of_completed_settles_the_edit_without_an_is_error_field" do
-      projected = cells(["event_tool_call_acp_edit", "event_tool_result_acp_edit"])
-
-      assert length(projected) == 1, inspect(projected)
-      assert tool(hd(projected)).state == :completed
-
-      assert summary(hd(projected)) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
     end
   end
 
@@ -897,10 +875,8 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_session_started",
         "event_status_resumed",
         "event_thinking_delta",
-        "event_tool_call_acp_edit",
         "event_tool_call_bash",
         "event_tool_call_read",
-        "event_tool_result_acp_edit",
         "event_tool_result_bash",
         "event_tool_result_read",
         "event_turn_completed",

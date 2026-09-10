@@ -17,7 +17,7 @@
           "Glob"
         ]
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "sequence": 129,

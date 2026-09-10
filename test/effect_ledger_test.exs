@@ -281,7 +281,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
         attempt: %{
           tool: "bash",
           mode: :execute,
-          provider: :codex,
+          provider: :native,
           fingerprint: %{sha256: String.duplicate("a", 64), bytes: 12},
           command: @secret
         },
@@ -304,7 +304,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       assert entry.attempt == %{
                tool: "bash",
                mode: :execute,
-               provider: :codex,
+               provider: :native,
                fingerprint: %{sha256: String.duplicate("a", 64), bytes: 12}
              }
 
@@ -494,7 +494,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                      session_id: "s1",
                      request_id: "req-1",
                      tool: "bash",
-                     provider: :codex,
+                     provider: :native,
                      node: node(),
                      subject: %{command_sha256: String.duplicate("b", 64)},
                      reason: @secret

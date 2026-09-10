@@ -7,7 +7,7 @@
       "harness_session_id": "harness-0000000000000000001",
       "id": "evt-0000000000000000000000125",
       "payload": {},
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "sequence": 125,

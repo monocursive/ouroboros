@@ -18,7 +18,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
          {:ok,
           %{
             request: state.request,
-            provider: state.request[:provider] || :claude,
+            provider: state.request[:provider] || :native,
             provider_session_id: state.request[:provider_session_id] || "vendor-session",
             principal_id: state.id
           }}, state}
@@ -284,7 +284,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
   test "unknown vendor allowlist entries never become unrestricted native defaults", context do
     assert {:ok, request} =
              SubagentBridge.native_request(%{
-               provider: :claude,
+               provider: :native,
                request: %{
                  cwd: context.root,
                  allowed_tools: ["Bash(git status)"],

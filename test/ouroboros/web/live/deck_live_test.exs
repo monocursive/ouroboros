@@ -77,7 +77,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
          # fixture would quietly stop testing.
          options: Keyword.get(opts, :options, %{}),
          last_turn: Keyword.get(opts, :last_turn),
-         provider: Keyword.get(opts, :provider, :claude_code),
+         provider: Keyword.get(opts, :provider, :native),
          workspace: Keyword.get(opts, :workspace, "/tmp/w"),
          # A scripted answer per verb, popped one at a time: `[{:error, …}, {:ok, …}]` is
          # how a refusal-then-retry is written without a mock framework.
@@ -262,7 +262,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       # rather than either half — so the two travel together or not at all.
       title: Keyword.get(opts, :title),
       title_source: if(Keyword.get(opts, :title), do: :human),
-      provider: :claude_code,
+      provider: :native,
       workspace: workspace,
       workspace_mode: :shared_read,
       status: Keyword.get(opts, :status, :running),

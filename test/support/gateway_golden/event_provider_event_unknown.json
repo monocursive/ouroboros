@@ -7,14 +7,11 @@
       "harness_session_id": "harness-0000000000000000001",
       "id": "evt-0000000000000000000000142",
       "payload": {
-        "kind": "acp_update",
-        "update": {
-          "output": "waiting for the container to come up",
-          "sessionUpdate": "terminal_output",
-          "terminalId": "term-0000000000000001"
-        }
+        "kind": "terminal_output",
+        "message": "waiting for the container to come up",
+        "terminal_id": "term-0000000000000001"
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "sequence": 142,

@@ -11,7 +11,7 @@
             "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           },
           "mode": "prompt",
-          "provider": "claude_code",
+          "provider": "native",
           "tool": "Bash"
         },
         "authority": {

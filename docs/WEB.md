@@ -12,6 +12,17 @@ paragraph it corrects, rather than by editing the paragraph into agreement with 
 A spec that has been quietly rewritten to match what shipped cannot tell you what was
 learned. The as-built notes are in §9 (per slice) and in D10 and D14 (per decision).
 
+> **Superseded in part, September 2026.** The provider picker this document specifies —
+> in the new-session form, in `/settings`, and in `web.prefs.json`'s `[defaults]` — is
+> gone, and so is the SpaceXAI subscription card and the `grok.account.*` calls behind it:
+> `:native` is the only provider and `interactive.start` no longer takes a `provider`
+> parameter. See [the core reduction](proposals/core.md) §3 D2. The ChatGPT device-code
+> card stays, because the native `openai_codex:` model lane needs it, and so do the
+> Anthropic and xAI API-key cards. The paragraphs below are left as the dated spec they
+> are, per this document's own **As built** convention; §6's "provider aliases now have a
+> runtime owner" is now "there are no provider aliases", and the semantic-record contract
+> it describes is unchanged.
+
 The decision this document specifies: retire the GPUI desktop client (`ouro-desktop`) and
 replace it with **Ouroboros.Web**, a Phoenix LiveView surface served by the daemon itself.
 The Ratatui client (`ouro`) stays, unchanged in role: the flagship surface, the CLI, and

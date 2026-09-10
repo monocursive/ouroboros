@@ -27,7 +27,6 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
 
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.Permissions.Request
-  alias Ouroboros.Control.Permissions.Seam
   alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Control.PolicyEvidenceTest.DeadLedger
   alias Ouroboros.Wasm.PolicyEngine
@@ -265,42 +264,6 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
       assert PolicyEvidence.enabled?()
     end
 
-    test "the ACP lane's actor is the one its client declared, too (H4)", context do
-      # `Control.Permissions.Seam` is the fourth seam a human answer arrives on, and it
-      # hard-coded `actor: :human` for every one of them. Its answer is the same
-      # `Jido.Harness.ApprovalResponse` the native loop reads, so the declared actor is in
-      # `provider_options` and this reads it from there.
-      session = "seam-" <> Integer.to_string(System.unique_integer([:positive]))
-      on_exit(fn -> Permissions.forget_session(session) end)
-
-      :ok = Seam.bind(%{cwd: context.dir}, %{session_id: session, provider: :codex}, :stdio)
-
-      :ok =
-        Seam.answered(:acp, Seam.decision_id("seam-headless"), acp_stash(), %{
-          decision: :approve,
-          scope: :once,
-          reason: nil,
-          provider_options: %{"actor" => "headless"}
-        })
-
-      assert rows() == []
-
-      # And a person answering the same question is evidence, so "nothing is evidence any
-      # more" cannot pass for a fix here either.
-      :ok =
-        Seam.answered(:acp, Seam.decision_id("seam-human"), acp_stash(), %{
-          decision: :approve,
-          scope: :once,
-          reason: nil,
-          provider_options: %{}
-        })
-
-      assert [row] = rows()
-      assert row["tool"] == "bash"
-      assert row["decision"] == "approve"
-      assert row["document"] =~ "ls -la"
-    end
-
     test "an answer with no request writes nothing", context do
       assert :ok =
                Permissions.record("evid-bare-#{context.session}", %{
@@ -483,13 +446,6 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
       Process.sleep(100)
       await(fun, attempts - 1)
     end
-  end
-
-  defp acp_stash do
-    %{
-      method: "session/request_permission",
-      params: %{"toolCall" => %{"name" => "bash", "rawInput" => %{"command" => "ls -la"}}}
-    }
   end
 
   defp human(decision),

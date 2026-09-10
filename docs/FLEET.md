@@ -48,7 +48,7 @@ ouro fleet service start
 # Either machine
 ouro fleet status
 ouro fleet doctor
-ouro new --machine laptop --provider native --workspace /absolute/path/on/laptop/project
+ouro new --machine laptop --workspace /absolute/path/on/laptop/project
 
 # If an expected invitation is abandoned, publish the signed membership change
 ouro fleet invite cancel --machine laptop --out fleet.ouro-roster
@@ -407,22 +407,25 @@ lost parent process or distribution link cannot authorize target cleanup. Return
 refs are retained for inspection and may be removed explicitly with
 `git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.
 
-## Vendor sessions and native children
+## The subagent bridge and native children
 
-Interactive Claude Code sessions receive `agent`, `agent_result`, and `fleet` through
-`ouro mcp-serve` in every approval posture. Their children use the same native dispatch,
-permission rules, hooks, effect ledger and approval channel as native sessions. The
-owner's current configuration is read for each call. The gateway accepts the session ID
-and tool input; it does not accept a caller-supplied principal or permission posture.
-Closing the owner closes its sidecar and children. A stable request ID prevents an
-ambiguous spawn response from becoming a duplicate child on retry.
+`ouro mcp-serve` is a stdio MCP server that offers `agent`, `agent_result` and `fleet` to
+an external MCP client bound to one session. Children spawned through it use the same
+native dispatch, permission rules, hooks, effect ledger and approval channel as any other
+child. The owner's current configuration is read for each call. The gateway accepts the
+session ID and tool input; it does not accept a caller-supplied principal or permission
+posture. Closing the owner closes its sidecar and children. A stable request ID prevents
+an ambiguous spawn response from becoming a duplicate child on retry.
+
+The approval half of that server — the `approve` tool Claude Code was pointed at with
+`--permission-prompt-tool`, and the `interactive.request_approval` verb behind it — went
+with the wrapped vendor providers in September 2026; see
+[the core reduction](proposals/core.md) §3 D2.
 
 Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
-`:native_model` setting, using an existing native credential source. Vendor model aliases
-are not native model specifications. The selected worker also needs credentials for
-the child's native model. After a child is created, result and stop remain
-available even if the native default is removed. The previously removed Codex CLI
-transport remains removed; this bridge does not reintroduce it.
+`:native_model` setting, using an existing native credential source. The selected worker
+also needs credentials for the child's native model. After a child is created, result and
+stop remain available even if the native default is removed.
 
 ## Historical design record (pre-implementation snapshot)
 

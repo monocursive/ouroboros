@@ -107,12 +107,21 @@ remote-reachable send cannot grow an agent's state without limit, and it is what
 
 ### Session execution plane
 
-`Jido.Harness` owns provider processes, provider-specific argv/protocol mapping,
-normalized events, cancellation, and short-lived retained journals.
+> The nine wrapped vendor CLIs that used to sit beside the native loop — and the ACP
+> client, the per-provider capability matrix, and the transport-specific approval bridge
+> that existed for them — were deleted in September 2026. See
+> [the core reduction](proposals/core.md) §3 D2. `:native` is the only provider;
+> `Ouroboros.Interactive.State.new/2` refuses any other name before a workspace lease is
+> taken, and a session record that names one still loads and lists.
+
+`Jido.Harness` remains the session and run machinery: normalized events, cancellation, and
+short-lived retained journals. The native session is registered as a `jido_harness`
+provider and `Interactive.Task` still speaks `Jido.Harness.Session`; unwinding that is
+[§7](proposals/core.md#7-what-comes-after), not this reduction.
 
 `Ouroboros.InteractiveSession` owns domain truth:
 
-- the workspace, provider, owner node, and normalized request policy;
+- the workspace, owner node, and normalized request policy;
 - the Harness session ID and provider resume ID;
 - a durable exclusive Harness cursor and a separate Ouroboros event sequence;
 - bounded redacted replay, per-turn outcomes, and explicit loss state; and
@@ -159,15 +168,13 @@ touching them.
 
 #### The native provider
 
-`Ouroboros.Provider.Native` is the one exception to "Ouroboros does not wrap those CLIs
-in a second tool loop": it *is* the loop. It registers through `:jido_harness, :providers`
-beside the three adapters this runtime already overrides, declares one session transport
-whose adapter is a supervised GenServer in this VM, and emits the same normalized events
-into the same journals, gateway stream, and cells as every vendor provider. Nothing about
-a vendor session changes because it exists.
+`Ouroboros.Provider.Native` *is* the tool loop. It registers through
+`:jido_harness, :providers` as the only provider, declares one session transport whose
+adapter is a supervised GenServer in this VM, and emits normalized events into the
+journals, the gateway stream and the cells.
 
-Because the loop is here, three things are possible that are structurally impossible for
-a managed transport: a tool call can be blocked on a human approval before it runs, a
+Because the loop is here, three things are possible that are structurally impossible for a
+CLI driven from outside: a tool call can be blocked on a human approval before it runs, a
 steered message can be delivered between two tool calls of a running turn, and an
 interrupt can stop the turn after the current tool rather than by killing a process. It
 is therefore where hooks, permission rules, compaction, file checkpoints, and MCP
@@ -308,10 +315,9 @@ run becomes lost only when its confirmed owner reports `:not_found`.
 
 `Ouroboros.InteractiveSession` applies the same ownership model to Harness sessions.
 It checkpoints session configuration, logical turn intents, Harness turn IDs,
-redacted events, terminal results, and an exclusive cursor. Multi-turn follow-ups,
-native steering, approval responses, and interruption remain provider-capability
-gated. A coordinator restart reattaches to the same live Harness session; a full
-Harness/BEAM restart cannot reconstruct the provider process and resolves to `:lost`.
+redacted events, terminal results, and an exclusive cursor. A coordinator restart
+reattaches to the same live Harness session; a full Harness/BEAM restart cannot
+reconstruct the session process and resolves to `:lost`.
 
 ### Evolution plane
 
@@ -485,10 +491,10 @@ durably forget.
 ### Permission plane
 
 `Ouroboros.Control.Permissions` is the second deny-by-default authority, and it answers a
-different question from grants: not what an *agent* may do to the cluster, but what a
-*provider* may do to this machine. It is consulted at the only two pre-tool seams this
-runtime has — `Dialect.ACP.approval_request/2` and `Dialect.Codex.approval_request/2` —
-before any `approval_requested` event is emitted.
+different question from grants: not what an *agent* may do to the cluster, but what the
+model may do to this machine. It is consulted at the pre-tool seam the native loop owns —
+`Ouroboros.Provider.Native.Permissions.evaluate/1` — before any `approval_requested` event
+is emitted, and at the interactive plane's external approvals and operator shell.
 
 A rule is `{pattern, decision, scope}`. The pattern language is `Bash(<prefix> *)` with a
 word boundary, path globs for `Read`/`Edit`/`Write` canonicalised through
@@ -587,9 +593,8 @@ replace the module deciding what code may do.
 - The authority is node-local: one `Grants` process per node over that node's own
   checkpoint. An agent granted an effect on one node is not granted it on another, and
   nothing replicates or reconciles the two.
-- Permission rules decide what the in-process Native loop and remaining ACP permission
-  seam may execute. They are not an OS sandbox and do not reach a vendor transport that
-  runs a tool without asking. Prefix matching is defeated by construction by command
+- Permission rules decide what the in-process Native loop may execute. They are not an OS
+  sandbox. Prefix matching is defeated by construction by command
   substitution, `eval`, variable expansion, aliases, and `sh -c`: nothing is expanded, and
   a rule matches the literal command line the provider reported. This is why the posture
   is an allowlist plus protected paths rather than a denylist, and why argument-
