@@ -862,12 +862,9 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  # Store cleanup waits for the coordinator to persist its terminal state. The stores'
-  # ETS belongs to :jido, so a record can survive a restart of :ouroboros — and
-  # ApplicationRecoveryTest boots Workspace.Manager against each non-terminal record it
-  # finds, under allowed roots that do not include the workspace these sessions ran in.
-  # One leaked record fails that boot and everything after it. So every record is driven
-  # terminal, its coordinator retired, and the record deleted before the module lets go.
+  # Store cleanup waits for the coordinator to persist its terminal state before
+  # deleting it. The explicit storage owner survives individual store restarts;
+  # each test leaves no session that a later recovery sweep could adopt.
   defp cleanup_stores do
     Enum.each(Ouroboros.Interactive.Store.list(), fn session ->
       unless Ouroboros.Interactive.State.terminal?(session) do

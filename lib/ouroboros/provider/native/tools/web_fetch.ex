@@ -41,7 +41,7 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
   result says the page was converted, so a model reading a mangled table knows why.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "web_fetch",
     description:
       "Fetch an http(s) URL with GET and return its text. HTML is converted to text. " <>

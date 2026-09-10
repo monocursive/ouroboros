@@ -27,7 +27,7 @@ defmodule Ouroboros.Provider.Native.Tools.Edit do
   numbers, so the next attempt is an informed one rather than a re-roll.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "edit",
     description:
       "Replace an exact string in a workspace file. Read the file first. `old_string` " <>

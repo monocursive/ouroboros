@@ -136,9 +136,8 @@ defmodule Ouroboros.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:jido, "~> 2.3"},
-      # The native tool schema adapter calls Jido.Action.Schema directly.
-      {:jido_action, "~> 2.3"},
+      # Owned actions use keyword-schema validation without an agent framework.
+      {:nimble_options, "~> 1.1"},
       # Ouroboros calls ReqLLM directly from the in-process provider.
       {:req_llm, "~> 1.20"},
       {:req, "~> 0.7"},
@@ -164,8 +163,7 @@ defmodule Ouroboros.MixProject do
       # `web.assets` alias below; the CSS is hand-authored. Node is used only by the
       # Playwright browser acceptance suite.
       #
-      # `phoenix_pubsub` arrives transitively and is already optional-compatible with
-      # `jido_signal`, so it needs no declaration of its own.
+      # `phoenix_pubsub` arrives transitively through Phoenix.
       {:phoenix, "~> 1.8"},
       {:phoenix_live_view, "~> 1.2"},
       {:phoenix_html, "~> 4.3"},

@@ -306,6 +306,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     File.mkdir_p!(workspace)
 
     previous_roots = Application.get_env(:ouroboros, :workspace_allowed_roots)
+    previous_storage = Application.fetch_env!(:ouroboros, :interactive_storage)
 
     # The workspace manager reads its allowed roots once, at boot. Restoring the env
     # without stopping the runtime would leave this test's temporary root in force for
@@ -313,6 +314,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     on_exit(fn ->
       stop_application()
       restore_ouroboros_env(:workspace_allowed_roots, previous_roots)
+      Application.put_env(:ouroboros, :interactive_storage, previous_storage)
       File.rm_rf(base)
     end)
 
@@ -333,12 +335,19 @@ defmodule Ouroboros.InteractiveResumeTest do
 
     stop_application()
     Application.put_env(:ouroboros, :workspace_allowed_roots, [workspace])
+    checkpoint_opts = [path: Path.join(base, "interactive")]
+
+    Application.put_env(
+      :ouroboros,
+      :interactive_storage,
+      {Ouroboros.Storage.DurableFile, checkpoint_opts}
+    )
 
     assert :ok =
-             Jido.Storage.ETS.put_checkpoint(
+             Ouroboros.Storage.DurableFile.put_checkpoint(
                {:ouroboros, :interactive_sessions, 1},
                %{id => checkpointed},
-               table: :ouroboros_interactive
+               checkpoint_opts
              )
 
     assert {:ok, _started} = Application.ensure_all_started(:ouroboros)

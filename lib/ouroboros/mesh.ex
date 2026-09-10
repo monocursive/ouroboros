@@ -2,8 +2,8 @@ defmodule Ouroboros.Mesh do
   @moduledoc """
   Distribution-native lifecycle and messaging for logical agents.
 
-  Every agent is a supervised Jido process. Local directories join those processes to
-  a distributed `:pg` group keyed by logical agent ID, so ordinary Jido calls work
+  Every agent is an owned supervised mesh process. Local directories join those processes to
+  a distributed `:pg` group keyed by logical agent ID, so ordinary server calls work
   across connected BEAM nodes. `:global.trans/2` narrows duplicate-start races in a
   healthy connected cluster; it is intentionally not presented as partition-safe
   consensus.
@@ -26,6 +26,8 @@ defmodule Ouroboros.Mesh do
   """
 
   alias Ouroboros.Mesh.Directory
+  alias Ouroboros.Mesh.Server
+  alias Ouroboros.Mesh.Supervisor, as: MeshSupervisor
   alias Ouroboros.Signals.AgentMessage
 
   @scope Ouroboros.Mesh.Scope
@@ -87,7 +89,7 @@ defmodule Ouroboros.Mesh do
   @spec start_agent_on(node(), agent_id(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent_on(target_node, id, opts \\ [])
       when is_atom(target_node) and is_binary(id) and is_list(opts) do
-    case Ouroboros.Cluster.ensure_placeable(target_node) do
+    case ensure_mesh_placement(target_node) do
       :ok -> place_agent(target_node, id, opts)
       {:error, reason} -> {:error, {:placement_refused, target_node, reason}}
     end
@@ -167,10 +169,10 @@ defmodule Ouroboros.Mesh do
 
   @doc "Sends a typed CloudEvents-style message to an agent."
   @spec send_message(agent_id(), agent_id(), term(), keyword()) ::
-          {:ok, Jido.Agent.t()} | {:error, term()}
+          {:ok, map()} | {:error, term()}
   def send_message(from, to, body, opts \\ [])
       when is_binary(from) and is_binary(to) and is_list(opts) do
-    correlation_id = Keyword.get_lazy(opts, :correlation_id, &Jido.Signal.ID.generate!/0)
+    correlation_id = Keyword.get_lazy(opts, :correlation_id, &Ouroboros.ID.generate!/0)
 
     with {:ok, pid} <- locate(to),
          {:ok, signal} <-
@@ -190,8 +192,8 @@ defmodule Ouroboros.Mesh do
     end
   end
 
-  @doc "Returns the full inspectable Jido process state for an agent."
-  @spec state(agent_id()) :: {:ok, Jido.AgentServer.State.t()} | {:error, term()}
+  @doc "Returns the owned logical ID and committed domain state for an agent."
+  @spec state(agent_id()) :: {:ok, %{agent: %{id: agent_id(), state: map()}}} | {:error, term()}
   def state(id) when is_binary(id) do
     case locate(id) do
       {:ok, pid} -> agent_state(pid)
@@ -207,10 +209,12 @@ defmodule Ouroboros.Mesh do
         {:error, reason}
 
       {:ok, pid} when node(pid) == node() ->
-        Ouroboros.Jido.stop_agent(pid)
+        MeshSupervisor.stop_agent(pid)
 
       {:ok, pid} ->
-        :erpc.call(node(pid), Ouroboros.Jido, :stop_agent, [pid], @remote_call_timeout_ms)
+        with :ok <- Ouroboros.Cluster.ensure_compatible(node(pid)) do
+          :erpc.call(node(pid), MeshSupervisor, :stop_agent, [pid], @remote_call_timeout_ms)
+        end
     end
   catch
     kind, reason -> {:error, {:remote_stop_failed, {kind, reason}}}
@@ -229,23 +233,44 @@ defmodule Ouroboros.Mesh do
   end
 
   defp do_start_agent(id, agent_module, start_opts) do
-    case whereis(id) do
-      nil ->
-        with {:ok, pid} <- Ouroboros.Jido.start_agent(agent_module, start_opts),
-             :ok <- Directory.register(id, pid) do
-          {:ok, pid}
+    case members(id) do
+      [] ->
+        with {:ok, pid} <- MeshSupervisor.start_agent(agent_module, start_opts) do
+          try do
+            case Directory.register(id, pid) do
+              :ok ->
+                {:ok, pid}
+
+              {:error, reason} ->
+                MeshSupervisor.stop_agent(pid)
+                {:error, reason}
+            end
+          catch
+            kind, reason ->
+              MeshSupervisor.stop_agent(pid)
+              {:error, {:directory_registration_failed, kind, reason}}
+          end
         end
 
-      pid ->
+      [pid] ->
         {:error, {:already_started, pid}}
+
+      pids ->
+        {:error, {:ambiguous_replicas, id, length(pids)}}
     end
   end
 
   defp check_agent_module(module) do
-    if agent_module_allowed?(module) do
-      :ok
-    else
-      {:error, {:agent_module_not_allowed, module}}
+    cond do
+      not agent_module_allowed?(module) ->
+        {:error, {:agent_module_not_allowed, module}}
+
+      Code.ensure_loaded?(module) and function_exported?(module, :init_state, 1) and
+          function_exported?(module, :handle_message, 3) ->
+        :ok
+
+      true ->
+        {:error, {:unsupported_agent_contract, module}}
     end
   end
 
@@ -273,20 +298,29 @@ defmodule Ouroboros.Mesh do
     |> Keyword.merge(id: id, initial_state: initial_state)
   end
 
-  # Jido.AgentServer.call/3 and state/1 are plain GenServer calls, so they exit on
+  # Server.call/3 and state/1 are plain GenServer calls, so they exit on
   # timeout, :noproc, and :noconnection. Agent visibility here is eventually
   # consistent and a handler may legitimately outrun the call timeout, which makes
   # those ordinary outcomes rather than caller bugs.
   defp call_agent(pid, signal, timeout) do
-    Jido.AgentServer.call(pid, signal, timeout)
+    with :ok <- ensure_owner_compatible(pid), do: Server.call(pid, signal, timeout)
   catch
     kind, reason -> {:error, {:agent_call_failed, kind, reason}}
   end
 
   defp agent_state(pid) do
-    Jido.AgentServer.state(pid)
+    with :ok <- ensure_owner_compatible(pid), do: Server.state(pid)
   catch
     kind, reason -> {:error, {:agent_call_failed, kind, reason}}
+  end
+
+  defp ensure_owner_compatible(pid) when node(pid) == node(), do: :ok
+  defp ensure_owner_compatible(pid), do: Ouroboros.Cluster.ensure_compatible(node(pid))
+
+  defp ensure_mesh_placement(target) do
+    with :ok <- Ouroboros.Cluster.ensure_compatible(target),
+         :ok <- Ouroboros.Cluster.ensure_placeable(target),
+         do: :ok
   end
 
   defp deterministic_owner([]), do: nil

@@ -281,6 +281,59 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     assert {:ok, %{state: :quarantined}} = Registry.get(artifact.id, context.registry)
   end
 
+  @tag @needs_live
+  test "deployment refuses an incompatible peer even when placement role checks are disabled",
+       context do
+    [target | _] = context.nodes
+    name = unique_name()
+    artifact = artifact!(context, name: name, start: %{id: start_id(name), config: @config})
+    replace_peer_version!(target, "0.0.0-j3-incompatible")
+
+    previous = Application.get_env(:ouroboros, :placement_role_check)
+    Application.put_env(:ouroboros, :placement_role_check, false)
+    on_exit(fn -> restore(:placement_role_check, previous) end)
+
+    assert {:error, {:node_not_deployable, ^target, {:runtime_incompatible, _, _}}} =
+             deploy(artifact, context)
+
+    assert Registry.list(context.registry) == []
+
+    for peer <- context.nodes do
+      assert {:error, {:unknown_component, _}} =
+               call(peer, Store, :path, [artifact.component_sha256, []])
+    end
+  end
+
+  @tag @needs_live
+  test "rollback cannot stop a wrapper on a peer that became incompatible", context do
+    [target | _] = context.nodes
+    context = %{context | nodes: [target]}
+    name = unique_name()
+    id = start_id(name)
+    artifact = artifact!(context, name: name, start: %{id: id, config: @config})
+    assert {:ok, %{state: :live}} = deploy(artifact, context)
+
+    # Changing the application contract requires an application restart. The driver owns
+    # this rollout's registry, so recreate the peer's wrapper after that restart and prove
+    # it owns a working instance before asking the driver to roll it back.
+    replace_peer_version!(target, "0.0.0-j3-incompatible")
+
+    assert {:ok, owner} =
+             call(target, Ouroboros.Mesh, :start_agent, [
+               id,
+               [agent: Ouroboros.Wasm.Capability, initial_state: Rollout.start_state(artifact)]
+             ])
+
+    assert {:ok, before} =
+             call(target, Ouroboros.Mesh, :send_message, ["rollback-test", id, %{"before" => 1}])
+
+    assert {:ok, outcome} = Rollout.rollback(name, registry: context.registry)
+    assert outcome.state == :quarantined
+    assert outcome.recovery == %{target => :quarantined}
+    assert call(target, Process, :alive?, [owner])
+    assert {:ok, %{agent: ^before}} = call(target, Ouroboros.Mesh, :state, [id])
+  end
+
   ## Fixtures
 
   defp deploy(artifact, context, extra \\ []) do
@@ -401,6 +454,20 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     :ok = :erpc.call(peer_node, Application, :put_env, [:ouroboros, key, value])
   end
 
+  defp replace_peer_version!(peer_node, version) do
+    spec = call(peer_node, Application, :spec, [:ouroboros])
+    env = call(peer_node, Application, :get_all_env, [:ouroboros])
+    :ok = call(peer_node, Application, :stop, [:ouroboros])
+    :ok = call(peer_node, Application, :unload, [:ouroboros])
+    changed = Keyword.put(spec, :vsn, String.to_charlist(version))
+    :ok = call(peer_node, :application, :load, [{:application, :ouroboros, changed}])
+    Enum.each(env, fn {key, value} -> put_env!(peer_node, key, value) end)
+    {:ok, _} = call(peer_node, Application, :ensure_all_started, [:ouroboros])
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
   defp peer_of(peer_node), do: Process.get({__MODULE__, :peer, peer_node})
 
   defp stop_peer(peer) do
@@ -463,7 +530,7 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   end
 
   defp ets_storage do
-    {Jido.Storage.ETS,
+    {Ouroboros.Storage.ETS,
      table: String.to_atom("wasm_two_node_#{System.unique_integer([:positive])}")}
   end
 

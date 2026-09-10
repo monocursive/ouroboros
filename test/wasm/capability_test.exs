@@ -23,6 +23,40 @@ defmodule Ouroboros.Wasm.CapabilityTest do
   # `test/wasm/capability_acceptance_test.exs`, against a real component.
 
   describe "lazy: the first message is what loads and instantiates" do
+    test "owner death while instantiate is in flight reclaims the late instance" do
+      %{id: id, pool: pool, journal: journal} = capability(instantiate_sleep: 1)
+      owner = Mesh.whereis(id)
+      caller = Task.async(fn -> Mesh.send_message("tester", id, %{seq: 1}) end)
+      await_condition(fn -> "instantiate" in methods(journal) end)
+      worker = :sys.get_state(owner).active.pid
+      worker_monitor = Process.monitor(worker)
+      Process.exit(owner, :kill)
+      assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 1_000
+      assert {:error, {:agent_call_failed, :exit, _}} = Task.await(caller)
+      await_condition(fn -> match?(%{inflight: %{kind: :orphaned}}, :sys.get_state(pool)) end)
+      await_condition(fn -> "drop" in methods(journal) end)
+      await_condition(fn -> Pool.status(pool).instances == 0 end)
+      assert Pool.status(pool).owned == 0
+      refute "call" in methods(journal)
+    end
+
+    test "disjoint guest replies replace the entire previous answer" do
+      %{id: id} =
+        capability(
+          call: [
+            result(%{
+              "payload" => ~s({"old":{"stale":true},"shared":{"old":1}}),
+              "fuel_used" => 1
+            }),
+            result(%{"payload" => ~s({"new":2,"shared":{"new":2}}), "fuel_used" => 1})
+          ]
+        )
+
+      assert {:ok, _} = Mesh.send_message("tester", id, %{seq: 1})
+      assert {:ok, _} = Mesh.send_message("tester", id, %{seq: 2})
+      assert state(id).last_answer == %{"new" => 2, "shared" => %{"new" => 2}}
+    end
+
     test "load, instantiate, call — in that order, once" do
       %{id: id, journal: journal} =
         capability(call: [result(%{"payload" => ~s({"echo":"one","n":1}), "fuel_used" => 42})])
@@ -110,7 +144,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
   describe "an instance belongs to the agent whose id derived it (F1)" do
     test "a seeded instance naming somebody else's is ignored, not adopted" do
       # `Mesh.start_agent/2` is remote-reachable and merges the caller's `initial_state`
-      # wholesale — Jido does not validate it against the schema — so a thief can ask to be
+      # wholesale — authority is checked where it is used — so a thief can ask to be
       # started holding the victim's instance name. Believing it handed the thief the
       # victim's live guest, its config, and its accumulated state.
       %{id: victim} =
@@ -143,9 +177,9 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       assert state(victim).instance == stolen
     end
 
-    test "a seeded instance equal to this agent's own derived name is honored" do
-      # The other half of the rule: the derived name depends only on the agent's own id, so
-      # an agent seeded with its own name is claiming nothing that was not already its own.
+    test "a seeded instance equal to this agent's own name is rebuilt with owned authority" do
+      # Even a correctly named seed cannot import a live handle without establishing
+      # ownership and applying this deployment's component, configuration and limits.
       id = "wasm-self-seeded-#{System.unique_integer([:positive])}"
 
       %{journal: journal} =
@@ -157,7 +191,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
 
       assert state(id).last_answer == %{"n" => 9}
-      assert methods(journal) == ["doctor", "call"]
+      assert methods(journal) == ["doctor", "load", "instantiate", "call"]
     end
   end
 
@@ -502,7 +536,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
 
       assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
 
-      assert state(id).error == %{stage: :call, reason: :unavailable}
+      assert state(id).error == %{stage: :load, reason: :unavailable}
       assert state(id).instance == nil
     end
 
@@ -519,7 +553,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     end
 
     test "an instance stranded under this agent's name is reclaimed, not orphaned" do
-      # The case Jido's missing terminate hook leaves open: a previous incarnation of this
+      # An asynchronous reclamation race: a previous incarnation of this
       # agent id stopped without dropping. The name belongs to this id, so it is taken back.
       %{id: id, journal: journal} =
         capability(
@@ -825,7 +859,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
 
   describe "the probe's budget is not spent on metadata (W13/F2)" do
     # F2, with a clock. This is the finding the review proved: the fetch used to be a
-    # synchronous pool round trip inside the caller's `Jido.AgentServer.call`, and
+    # synchronous pool round trip inside the caller's `Mesh.send_message/4`, and
     # `Ouroboros.Upgrade.Rollout.Probe` gives its one message five seconds — so a component
     # whose `describe` merely took six, while answering messages instantly and staying
     # inside every bound it was deployed under, failed its own health check and was rolled
@@ -1175,6 +1209,18 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     server_state.agent.state
   end
 
+  defp await_condition(fun, attempts \\ 300)
+  defp await_condition(_fun, 0), do: flunk("condition did not become true")
+
+  defp await_condition(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      await_condition(fun, attempts - 1)
+    end
+  end
+
   defp result(map), do: "result " <> JSON.encode!(map)
 
   defp refusal(code, name, message),
@@ -1232,6 +1278,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     # answers instantly, so a component under it is healthy by every bound it was deployed
     # under. It exists to hold F2 down — see the probe-budget test.
     sleep = Keyword.get(plans, :describe_sleep, 0)
+    instantiate_sleep = Keyword.get(plans, :instantiate_sleep, 0)
 
     files =
       Map.new([:call, :instantiate, :load, :drop, :describe], fn method ->
@@ -1259,6 +1306,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       sub(/.*"method":"/, "", method)
       sub(/".*/, "", method)
       if (describing && #{sleep} > 0) { system("sleep #{sleep}") }
+      if (method == "instantiate" && #{instantiate_sleep} > 0) { system("sleep #{instantiate_sleep}") }
       file = ""
       if (describing) { file = "#{files.describe}" } else if (method == "call") { file = "#{files.call}" } else if (method == "instantiate") { file = "#{files.instantiate}" } else if (method == "load") { file = "#{files.load}" } else if (method == "drop") { file = "#{files.drop}" }
       plan = ""

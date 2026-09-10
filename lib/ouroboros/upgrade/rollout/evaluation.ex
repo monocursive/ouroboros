@@ -520,11 +520,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp timed(result, started), do: Map.put(result, :ms, elapsed_since(started))
 
   defp exchange(id, input, timeout) do
-    case Mesh.send_message(@source, id, input, timeout: timeout) do
-      {:ok, agent} -> {:ok, agent}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_result, describe(other)}}
-    end
+    Mesh.send_message(@source, id, input, timeout: timeout)
   end
 
   defp judge(_id, _probe, {:error, reason}, _elapsed, _spec),
@@ -585,9 +581,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp agent_state(id) do
     case Mesh.state(id) do
       {:ok, %{agent: %{state: state}}} when is_map(state) -> {:ok, state}
-      {:ok, other} -> {:error, {:unexpected_agent_state, describe(other)}}
       {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_agent_state, describe(other)}}
     end
   end
 

@@ -612,7 +612,7 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
          table \\ String.to_atom("wasm_policy_rollouts_#{System.unique_integer([:positive])}")
        ) do
     name = String.to_atom("wasm_policy_registry_#{System.unique_integer([:positive])}")
-    {:ok, pid} = Registry.start_link(name: name, storage: {Jido.Storage.ETS, table: table})
+    {:ok, pid} = Registry.start_link(name: name, storage: {Ouroboros.Storage.ETS, table: table})
 
     on_exit(fn ->
       try do

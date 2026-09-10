@@ -1118,7 +1118,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("wasm_forge_operator_#{System.unique_integer([:positive])}")}
          ]}
       )
@@ -1160,7 +1160,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("wasm_forge_journal_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -1183,7 +1183,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
       Registry.start_link(
         name: registry_name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: String.to_atom("wasm_forge_rollouts_#{System.unique_integer([:positive])}")}
       )
 

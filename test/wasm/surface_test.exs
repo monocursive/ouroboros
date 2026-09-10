@@ -755,7 +755,8 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       Registry.start_link(
         name: name,
         storage:
-          {Jido.Storage.ETS, table: :"wasm_surface_store_#{System.unique_integer([:positive])}"}
+          {Ouroboros.Storage.ETS,
+           table: :"wasm_surface_store_#{System.unique_integer([:positive])}"}
       )
 
     on_exit(fn ->

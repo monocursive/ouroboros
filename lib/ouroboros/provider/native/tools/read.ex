@@ -12,7 +12,7 @@ defmodule Ouroboros.Provider.Native.Tools.Read do
   is what `Ouroboros.Provider.Native.Tools.Edit` checks before it rewrites the file.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "read",
     description:
       "Read a file from the workspace. Returns line-numbered text starting at `offset`. " <>

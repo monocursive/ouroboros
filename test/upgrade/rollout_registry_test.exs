@@ -1124,7 +1124,7 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
 
     storage =
       Keyword.get_lazy(opts, :storage, fn ->
-        {Jido.Storage.ETS,
+        {Ouroboros.Storage.ETS,
          table: String.to_atom("rollout_registry_#{System.unique_integer([:positive])}")}
       end)
 

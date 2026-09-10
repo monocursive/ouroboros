@@ -59,8 +59,8 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      # `jido_harness` is a git dependency pinned by ref, so the cache key has to move
-      # when the lock does or a stale checkout survives a re-pin.
+      # The lock selects an exact cache when available. Prefix restores can contain
+      # removed packages, so prune unused sources and builds after resolving the lock.
       - uses: actions/cache@v6
         with:
           path: |
@@ -69,7 +69,10 @@ jobs:
           key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
-      - run: mix deps.get
+      - name: Resolve and prune cached dependencies
+        run: |
+          mix deps.get
+          mix deps.clean --unused
 
       - run: mix format --check-formatted
       - run: sh scripts/test-dev.sh
@@ -161,6 +164,20 @@ jobs:
       - run: mix test
         env:
           OUROBOROS_REQUIRE_WASM: "1"
+      - run: make boot-gate
+      # A separate clean production build prevents test modules or stale cached
+      # dependency BEAMs from supplying historical atoms. Each smoke runs in a fresh
+      # VM and reads only its disposable copy of the frozen checkpoint corpus.
+      - name: Production graph and historical checkpoints
+        env:
+          MIX_ENV: prod
+          MIX_BUILD_PATH: _build/j3-prod-ci
+        run: |
+          rm -rf _build/j3-prod-ci
+          mix compile --warnings-as-errors
+          mix run --no-start --no-compile scripts/check_runtime_graph.exs
+          mix run --no-start --no-compile scripts/fixture/j3_production_check.exs
+          mix run --no-start --no-compile --preload-modules scripts/fixture/j3_production_check.exs
 
   browser:
     name: Browser journeys
@@ -219,7 +236,10 @@ jobs:
           key: ${{ runner.os }}-mix-dialyzer-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-dialyzer-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
-      - run: mix deps.get
+      - name: Resolve and prune cached dependencies
+        run: |
+          mix deps.get
+          mix deps.clean --unused
 
       # Gradual: `:error_handling` only, PLTs under `_build/plts`. Deliberately not part
       # of `make test`, which stays fast; this job is the gate.
@@ -350,7 +370,10 @@ jobs:
           key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
-      - run: mix deps.get
+      - name: Resolve and prune cached dependencies
+        run: |
+          mix deps.get
+          mix deps.clean --unused
 
       # The fixtures are the only thing the Elixir and Rust suites both read. Regenerating
       # them from the live gateway and finding a diff means the protocol moved and one
@@ -391,19 +414,20 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
-      # The script bind-mounts `deps/` as `/host-deps` and seeds a volume from it, because
-      # a checkout `.git` is a file pointing at a worktree the container cannot see, so
-      # `mix deps.get` inside cannot fetch the one git dependency. The host has to have
-      # fetched it first. `_build` stays out of this cache: the container uses its own
-      # volume for that, and an ELF object from the runner is what a linker in there
-      # would refuse.
+      # The script bind-mounts `deps/` as `/host-deps` to seed its dependency volume
+      # before resolving the current lock inside the container. All dependencies are
+      # locked Hex packages. `_build` stays out of this cache: the container owns its
+      # build volume and rebuilds native dependencies for its own toolchain.
       - uses: actions/cache@v6
         with:
           path: deps
           key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
-      - run: mix deps.get
+      - name: Resolve and prune cached dependencies
+        run: |
+          mix deps.get
+          mix deps.clean --unused
 
       # Same lift as the Elixir job. The script drops to an unprivileged uid inside
       # `--privileged` docker; Ubuntu 24.04's AppArmor profile for unprivileged user

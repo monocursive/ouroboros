@@ -1,7 +1,7 @@
 defmodule Ouroboros.Agent.EffectLedgerTest.RefusingStorage do
   @moduledoc false
 
-  def get_checkpoint(key, opts), do: Jido.Storage.ETS.get_checkpoint(key, opts)
+  def get_checkpoint(key, opts), do: Ouroboros.Storage.ETS.get_checkpoint(key, opts)
   def put_checkpoint(_key, _checkpoint, _opts), do: {:error, :storage_offline}
 end
 
@@ -252,10 +252,10 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
   test "a checkpoint from an unknown ledger version stops instead of erasing history" do
     table = unique_name("future_storage")
-    storage = {Jido.Storage.ETS, table: table}
+    storage = {Ouroboros.Storage.ETS, table: table}
 
     assert :ok =
-             Jido.Storage.ETS.put_checkpoint(
+             Ouroboros.Storage.ETS.put_checkpoint(
                EffectLedger.checkpoint_key(),
                %{version: 99, entries: [], next_sequence: 1},
                table: table
@@ -704,7 +704,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
   describe "the version-3 checkpoint (R1, S2)" do
     test "a version-1 checkpoint is upgraded on read rather than refused" do
       table = unique_name("v1_storage")
-      storage = {Jido.Storage.ETS, table: table}
+      storage = {Ouroboros.Storage.ETS, table: table}
 
       # Written the way a build that predates `:inference` and `:policy_promotion` would have
       # written it.
@@ -726,7 +726,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       }
 
       assert :ok =
-               Jido.Storage.ETS.put_checkpoint(
+               Ouroboros.Storage.ETS.put_checkpoint(
                  EffectLedger.checkpoint_key(),
                  %{version: 1, entries: [entry], next_sequence: 2},
                  table: table
@@ -753,7 +753,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                )
 
       assert {:ok, %{version: 3}} =
-               Jido.Storage.ETS.get_checkpoint(EffectLedger.checkpoint_key(), table: table)
+               Ouroboros.Storage.ETS.get_checkpoint(EffectLedger.checkpoint_key(), table: table)
     end
 
     test "a version-2 checkpoint is upgraded on read too" do
@@ -761,7 +761,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       # either — so a checkpoint written before this node had ever promoted a tool is read as
       # it stands rather than refused.
       table = unique_name("v2_storage")
-      storage = {Jido.Storage.ETS, table: table}
+      storage = {Ouroboros.Storage.ETS, table: table}
 
       entry = %Entry{
         sequence: 1,
@@ -781,7 +781,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       }
 
       assert :ok =
-               Jido.Storage.ETS.put_checkpoint(
+               Ouroboros.Storage.ETS.put_checkpoint(
                  EffectLedger.checkpoint_key(),
                  %{version: 2, entries: [entry], next_sequence: 2},
                  table: table
@@ -796,10 +796,10 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
     test "a checkpoint from a version this build does not know is still refused" do
       table = unique_name("v4_storage")
-      storage = {Jido.Storage.ETS, table: table}
+      storage = {Ouroboros.Storage.ETS, table: table}
 
       assert :ok =
-               Jido.Storage.ETS.put_checkpoint(
+               Ouroboros.Storage.ETS.put_checkpoint(
                  EffectLedger.checkpoint_key(),
                  %{version: 4, entries: [], next_sequence: 1},
                  table: table
@@ -1017,7 +1017,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
   defp start_ledger!(opts \\ []) do
     name = unique_name("effect_ledger")
-    storage = Keyword.get(opts, :storage, {Jido.Storage.ETS, table: unique_name("storage")})
+    storage = Keyword.get(opts, :storage, {Ouroboros.Storage.ETS, table: unique_name("storage")})
     retention_limit = Keyword.get(opts, :retention_limit, 1_000)
 
     start_supervised!(

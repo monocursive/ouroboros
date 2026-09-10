@@ -3,9 +3,9 @@ defmodule Ouroboros do
   A BEAM-native coding-agent runtime.
 
   Ouroboros treats an agent as supervised state plus typed messages. `Ouroboros.Mesh`
-  is the public runtime entry point; Jido supplies the pure agent/action/signal
-  primitives, while Ouroboros owns durable sessions, distributed placement, and
-  controlled code evolution.
+  is the public runtime entry point. Owned OTP processes serialize state transitions;
+  Ouroboros also owns actions, typed messages, durable sessions, distributed placement,
+  and verified WebAssembly deployment.
   """
 
   @doc "Returns a snapshot of the local runtime and connected BEAM cluster."

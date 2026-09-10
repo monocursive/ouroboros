@@ -46,7 +46,7 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
            key_path: key_path,
            signer_id: @signer,
            storage:
-             {Jido.Storage.ETS,
+             {Ouroboros.Storage.ETS,
               table: String.to_atom("epoch_nodes_journal_#{System.unique_integer([:positive])}")}
          ]},
         id: {Service, System.unique_integer([:positive])}
@@ -230,7 +230,7 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
   end
 
   defp ets_storage do
-    {Jido.Storage.ETS,
+    {Ouroboros.Storage.ETS,
      table: String.to_atom("epoch_nodes_store_#{System.unique_integer([:positive])}")}
   end
 

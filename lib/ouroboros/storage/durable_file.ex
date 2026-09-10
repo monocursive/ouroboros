@@ -1,6 +1,6 @@
 defmodule Ouroboros.Storage.DurableFile do
   @moduledoc """
-  A Jido storage adapter whose checkpoint commits are durable before success.
+  An owned checkpoint adapter whose commits are durable before success.
 
   Checkpoints are serialized to an exclusive temporary file, synced, atomically
   renamed over the checkpoint, and followed by a parent-directory sync. A failure
@@ -9,8 +9,7 @@ defmodule Ouroboros.Storage.DurableFile do
   but the directory entry was not proven durable. Callers must reconcile that outcome,
   never report it as a definite refusal while continuing with old in-memory state.
 
-  Thread operations fail closed because this adapter is intentionally limited to
-  Ouroboros mutation journals, which use checkpoint operations only.
+  The contract is limited to checkpoints used by Ouroboros mutation journals.
 
   A commit that dies between opening its temporary file and renaming it — the process is
   killed, the node goes down — leaves that file behind. Randomized names mean an orphan
@@ -73,7 +72,7 @@ defmodule Ouroboros.Storage.DurableFile do
 
   require Logger
 
-  @behaviour Jido.Storage
+  @behaviour Ouroboros.Storage
 
   # Old enough that no live commit could still be writing it, short enough that an
   # orphan does not outlive the boot that follows the crash which made it.
@@ -224,16 +223,6 @@ defmodule Ouroboros.Storage.DurableFile do
   rescue
     error -> {:error, error}
   end
-
-  @impl true
-  def load_thread(_thread_id, _opts), do: {:error, :thread_operations_not_supported}
-
-  @impl true
-  def append_thread(_thread_id, _entries, _opts),
-    do: {:error, :thread_operations_not_supported}
-
-  @impl true
-  def delete_thread(_thread_id, _opts), do: {:error, :thread_operations_not_supported}
 
   defp write_checkpoint(device, temporary, path, data, opts) do
     binary = :erlang.term_to_binary(data) |> Ouroboros.Audit.Content.encode()

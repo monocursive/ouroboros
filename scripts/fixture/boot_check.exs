@@ -194,7 +194,7 @@ end)
 
 safe.("signing journal", fn ->
   storage = {Ouroboros.Storage.DurableFile, path: leaf.("signing-journal")}
-  {adapter, opts} = Jido.Storage.normalize_storage(storage)
+  {adapter, opts} = Ouroboros.Storage.normalize_storage(storage)
 
   case adapter.get_checkpoint(Ouroboros.Upgrade.Signing.Service.checkpoint_key(), opts) do
     {:ok, checkpoint} ->

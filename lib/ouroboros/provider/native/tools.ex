@@ -9,8 +9,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   `plan` rather than a second tool, because two names for one behaviour in the schema
   list costs context in every request and teaches the model that they differ.
 
-  The schemas the model sees come from each tool's `Jido.Action` schema, converted by
-  `Ouroboros.Provider.Native.Tools.Schema` through the pinned Jido Action schema API.
+  The schemas the model sees come from each tool's `Ouroboros.Action` schema, converted by
+  `Ouroboros.Provider.Native.Tools.Schema` through the owned action schema converter.
   The generated schema is kept separate from final model overrides, local validation,
   and the transport's own `ReqLLM.Tool` construction.
 
@@ -674,7 +674,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp label({_module, name}), do: name
   defp label(module), do: module.name()
 
-  # `Jido.Action` schemas validate atom keys; the model sends strings. Only keys the
+  # `Ouroboros.Action` schemas validate atom keys; the model sends strings. Only keys the
   # tool actually declares are converted, so a hallucinated argument is dropped rather
   # than becoming a new atom on this node.
   defp atomize(module, input) do

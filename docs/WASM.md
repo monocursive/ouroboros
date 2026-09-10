@@ -368,9 +368,9 @@ of it changes what the helper enforces; containment is the linker (D5).
 
 A lane-W capability introduces **no module and no atom**. Its identity is the
 component's sha256; its runtime shape is one *static, shipped* wrapper agent —
-`Ouroboros.Wasm.Capability`, a `Jido.Agent` whose `initial_state` names
+`Ouroboros.Wasm.Capability`, an owned `Mesh.Agent` whose `initial_state` names
 `%{component: <sha256>, config: <json>, name: <string>}` and whose
-`ouroboros.agent.message` action forwards the signal body as JSON to the instance and
+`handle_message/3` callback forwards the message body as JSON to the instance and
 writes the reply back into agent state as `:last_answer`, keeping `:last_message`
 updated. That last sentence is what makes `Rollout.Probe`'s echo check
 (`probe.ex:132-144`) and `Rollout.Evaluation`'s whole expectation grammar
@@ -397,8 +397,7 @@ Consequences, all verified against the seams in §4.1:
   spec* — `module | {module, initial_state}` — a small additive change; lane B passes
   the bare module and nothing observable changes for it (D7).
 - The wrapper's `initial_state` is validated where it is used, because
-  `Mesh.start_agent/2` is remote-reachable and Jido does not check it against the agent
-  schema: `:pool` must resolve to a live local process started as `Ouroboros.Wasm.Pool`,
+  `Mesh.start_agent/2` is remote-reachable: `:pool` must resolve to a live local process started as `Ouroboros.Wasm.Pool`,
   `:store_root` is honoured only under `config :ouroboros, :wasm,
   allow_store_root_override: true` (test env only), and `:limits` is clamped
   element-wise to `:capability_limits_max` with the clamp recorded in the agent's
@@ -1814,7 +1813,7 @@ machinery — it is a backend, not a lane (D9).
 
   It was on the message path, fetched after the first message, and that was wrong in a way
   only a clock reveals. The fetch is a synchronous pool round trip inside the caller's
-  `Jido.AgentServer.call`, and `Rollout.Probe` gives its one message five seconds — so a
+  `Mesh.send_message`, and `Rollout.Probe` gives its one message five seconds — so a
   component whose `describe` merely took six, while answering messages instantly and staying
   inside every bound it was deployed under, failed its own health check and was rolled back.
   A capability's liveness must not depend on how fast it can describe itself. Moving the

@@ -454,7 +454,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert is_pid(:erpc.call(signer, Process, :whereis, [Ouroboros.Cluster]))
 
       for name <- [
-            Ouroboros.Jido,
+            Ouroboros.Mesh.Supervisor,
             Ouroboros.Agent.EffectLedger,
             Ouroboros.Mesh.Directory,
             Ouroboros.Interactive.Store,
@@ -763,7 +763,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
   end
 
   defp ets_storage do
-    {Jido.Storage.ETS,
+    {Ouroboros.Storage.ETS,
      table: String.to_atom("signing_journal_#{System.unique_integer([:positive])}")}
   end
 end

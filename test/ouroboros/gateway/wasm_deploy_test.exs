@@ -42,7 +42,7 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
          key_path: key_path,
          signer_id: @signer,
          storage:
-           {Jido.Storage.ETS,
+           {Ouroboros.Storage.ETS,
             table: String.to_atom("gw_wasm_journal_#{System.unique_integer([:positive])}")}
        ]}
     )

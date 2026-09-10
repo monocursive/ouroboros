@@ -9,12 +9,12 @@ defmodule Ouroboros.Control.PermissionsTest.RefusingStorage do
   def fail!, do: Application.put_env(:ouroboros, @flag, true)
   def heal!, do: Application.delete_env(:ouroboros, @flag)
 
-  def get_checkpoint(key, opts), do: Jido.Storage.ETS.get_checkpoint(key, opts)
+  def get_checkpoint(key, opts), do: Ouroboros.Storage.ETS.get_checkpoint(key, opts)
 
   def put_checkpoint(key, data, opts) do
     if Application.get_env(:ouroboros, @flag, false),
       do: {:error, :storage_offline},
-      else: Jido.Storage.ETS.put_checkpoint(key, data, opts)
+      else: Ouroboros.Storage.ETS.put_checkpoint(key, data, opts)
   end
 end
 

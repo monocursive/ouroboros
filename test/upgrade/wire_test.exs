@@ -18,6 +18,128 @@ defmodule Ouroboros.Upgrade.WireTest do
   # keys would turn each one into that atom.
   @string_keys ["nil", "true", "false", "ok", "error", "input", "version"]
 
+  defmodule ConstructorTrap do
+    def __struct__, do: raise("a stored module tag executed its constructor")
+  end
+
+  test "a stored loaded module tag cannot execute an arbitrary struct constructor" do
+    decoded = Wire.load(%{"__struct__" => Atom.to_string(ConstructorTrap), "id" => "history"})
+    assert Map.fetch!(decoded, :__struct__) == ConstructorTrap
+    assert Map.fetch!(decoded, :id) == "history"
+  end
+
+  test "old pair-map artifacts preserve signed metadata before normalizing nested legacy tags" do
+    alias Ouroboros.Storage.DurableFile
+    opts = [path: Path.expand("../support/j3_fixture/data/interactive", __DIR__)]
+    key = {:ouroboros, :interactive_sessions, 1}
+    {:ok, %{ids: [id | _]}} = DurableFile.get_checkpoint(key, opts)
+    {:ok, %{^id => session}} = DurableFile.get_checkpoint({key, :session, 2, id}, opts)
+    [event] = session.events
+    legacy = event.payload["j3"]
+    signed = Map.put(legacy["signed_manifest"], "history_note", "historical annotation")
+
+    # Retain the captured OLD nested struct-form metadata, while representing the
+    # outer artifact exactly as the old encoder represented a struct with extra keys.
+    pairs =
+      Enum.map(legacy["signed_manifest_wire"], fn {key, value} ->
+        value = if key == "__struct__", do: %{"__atom__" => value}, else: value
+        [%{"__atom__" => key}, value]
+      end)
+
+    old_wire = %{"__map__" => pairs ++ [["history_note", "historical annotation"]]}
+    decoded = Wire.load(old_wire)
+    assert decoded === signed
+
+    assert :crypto.verify(
+             :eddsa,
+             :none,
+             Artifact.signing_payload(decoded, "j3-fixture-signer"),
+             decoded.signature.value,
+             [legacy["public_key"], :ed25519]
+           )
+  end
+
+  test "retired struct keys retain identity beside an otherwise identical plain-map key" do
+    tag =
+      Enum.find(
+        Ouroboros.Storage.SessionMigration.legacy_structs(),
+        &(Atom.to_string(&1) == "Elixir.Jido.Agent")
+      )
+
+    legacy_key = %{__struct__: tag, id: "same"}
+    plain_key = %{id: "same"}
+    history = %{legacy_key => "retired", plain_key => "plain"}
+    assert Ouroboros.Storage.SessionMigration.normalize(history) == history
+    assert Wire.load(Wire.dump(history)) == history
+  end
+
+  test "signed metadata keeps retired nested tags and exception flags as exact data" do
+    tag =
+      Enum.find(
+        Ouroboros.Storage.SessionMigration.legacy_structs(),
+        &(Atom.to_string(&1) == "Elixir.Jido.Signal")
+      )
+
+    metadata = %{
+      author: "signed history",
+      test_report: %{
+        failures: 0,
+        extra: %{
+          __struct__: tag,
+          __exception__: true,
+          id: "historical",
+          data: %{body: "evidence"}
+        }
+      }
+    }
+
+    {:ok, artifact} = artifact!(metadata)
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+
+    signature =
+      :crypto.sign(:eddsa, :none, Artifact.signing_payload(artifact, "legacy"), [
+        private,
+        :ed25519
+      ])
+
+    artifact = %{artifact | signature: %{signer: "legacy", value: signature}}
+
+    for decoded <- [
+          Ouroboros.Storage.SessionMigration.normalize(artifact),
+          Wire.load(Wire.dump(artifact))
+        ] do
+      assert decoded == artifact
+
+      assert :crypto.verify(
+               :eddsa,
+               :none,
+               Artifact.signing_payload(decoded, "legacy"),
+               signature,
+               [public, :ed25519]
+             )
+    end
+  end
+
+  test "retired core wire and raw struct tags become historical maps without a constructor" do
+    for tag <- Ouroboros.Storage.SessionMigration.legacy_structs(),
+        String.starts_with?(Atom.to_string(tag), "Elixir.Jido.Action.Error.") do
+      assert :code.which(tag) == :non_existing
+
+      assert %{message: "old refusal", details: %{reason: :timeout}} ==
+               Wire.load(%{
+                 "__struct__" => Atom.to_string(tag),
+                 "message" => "old refusal",
+                 "details" => %{"reason" => %{"__atom__" => "timeout"}},
+                 "__exception__" => true
+               })
+
+      assert %{message: "old refusal"} ==
+               Wire.load(%{__struct__: tag, __exception__: true, message: "old refusal"})
+
+      assert :code.which(tag) == :non_existing
+    end
+  end
+
   describe "exactness" do
     test "a string key stays a string, even one that spells an interned atom" do
       term = %{input: Map.new(@string_keys, &{&1, &1})}

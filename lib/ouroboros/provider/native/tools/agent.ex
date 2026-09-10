@@ -87,7 +87,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   ends — and a collection after that says `stopped` rather than pretending it finished.
   """
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "agent",
     description:
       "Spawn a child agent with its own context window and get a summary back. Use it " <>
@@ -247,7 +247,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       validate_spec(%{
         task_id: task_id(),
         prompt: prompt,
-        description: description(input),
+        description: task_description(input),
         subscriber: subscriber,
         node: placement.node,
         remote: placement.remote?,
@@ -933,7 +933,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
 
   # ---------------------------------------------------------------- helpers
 
-  defp description(input) do
+  defp task_description(input) do
     case input |> Map.get("description") |> text() do
       "" -> "subagent"
       text -> clip(text, @max_description_bytes)

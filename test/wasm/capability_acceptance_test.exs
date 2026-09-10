@@ -289,6 +289,62 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
       assert :ok = Mesh.stop_agent(id)
       await_census(pool, 0)
     end
+
+    @tag @needs_live
+    test "forced owner death reclaims a real instance and restarts lazily" do
+      %{id: id, pool: pool} = capability()
+      assert {:ok, _} = Mesh.send_message("acceptance", id, %{"hello" => "world"})
+      owner = Mesh.whereis(id)
+      assert census(pool) == 1
+      Process.exit(owner, :kill)
+      await_census(pool, 0)
+      assert Ouroboros.Mesh.Supervisor.whereis(id) != owner
+      assert Pool.status(pool).owned == 0
+    end
+
+    @tag @needs_live
+    test "a real instance is owned before directory registration and reclaimed after forced kill" do
+      %{pool: pool, start_spec: {module, initial}} = staged_capability()
+      id = "wasm-before-directory-#{System.unique_integer([:positive])}"
+      directory = Process.whereis(Ouroboros.Mesh.Directory)
+      :sys.suspend(directory)
+
+      try do
+        assert {:ok, owner} =
+                 Ouroboros.Mesh.Supervisor.start_agent(module, id: id, initial_state: initial)
+
+        on_exit(fn ->
+          case Ouroboros.Mesh.Supervisor.whereis(id) do
+            pid when is_pid(pid) -> Ouroboros.Mesh.Supervisor.stop_agent(pid)
+            _ -> :ok
+          end
+        end)
+
+        assert Mesh.members(id) == []
+
+        assert {:ok, signal} =
+                 Ouroboros.Signals.AgentMessage.new(
+                   %{
+                     from: "acceptance",
+                     body: %{"hello" => "before-directory"},
+                     correlation_id: Ouroboros.ID.generate!()
+                   },
+                   subject: id
+                 )
+
+        assert {:ok, %{state: %{error: nil}}} = Ouroboros.Mesh.Server.call(owner, signal, 5_000)
+        assert Mesh.members(id) == []
+        assert census(pool) == 1
+        assert Pool.status(pool).owned == 1
+        assert {:monitors, monitors} = Process.info(GenServer.whereis(pool), :monitors)
+        assert {:process, owner} in monitors
+        Process.exit(owner, :kill)
+        await_census(pool, 0)
+        assert Pool.status(pool).owned == 0
+      after
+        :sys.resume(directory)
+      end
+    end
   end
 
   describe "one agent's instance is not another's (F1/F2)" do

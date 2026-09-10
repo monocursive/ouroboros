@@ -100,12 +100,24 @@ defmodule Ouroboros.Upgrade.Wire do
   Exact for what `dump/1` wrote (see the moduledoc): a binary key stays a binary, an
   atom key comes back as that atom, a tag-shaped user map comes back as the map it was.
   A name that is not interned stays a binary or a tagged map rather than being created.
-  An already-decoded struct (a checkpoint written before this boundary existed) is
-  returned as-is: `[:safe]` could only have produced it in a VM that had the module.
+  Known retired boundary structs become ordinary historical maps. Map keys and
+  signed artifact envelopes retain their exact tags and fields as inert data.
+  Only the owned registry entry and signing journal receive default-field widening.
+  Other loaded struct types retain exactly their stored fields without invoking
+  their constructors. Only fixed owned domain modules are preloaded; a stored name
+  never loads code. Safe term decoding requires an existing atom, not an executable
+  module with that name.
   """
   @spec load(term()) :: term()
-  def load(%mod{} = struct) when is_atom(mod), do: struct
-  def load(term), do: decode(term)
+  def load(term) do
+    # Fixed owned domain constructors, independent of any name in the record. A
+    # bare peer may load a registry without loading its nested Entry module first.
+    # Arbitrary stored names still cannot cause module loading below.
+    Code.ensure_loaded!(Ouroboros.Upgrade.Rollout.Registry.Entry)
+    Code.ensure_loaded!(Ouroboros.Upgrade.Signing.Journal)
+    Code.ensure_loaded!(Ouroboros.Wasm.Artifact)
+    decode(term)
+  end
 
   @doc """
   Whether a term has an external form every VM can read back the same way.
@@ -270,14 +282,15 @@ defmodule Ouroboros.Upgrade.Wire do
   end
 
   defp loaded_struct_keys(mod) do
-    if Code.ensure_loaded?(mod),
+    if function_exported?(mod, :__struct__, 0),
       do: mod.__struct__() |> Map.keys() |> Enum.sort(),
       else: []
   rescue
     _not_a_struct_module -> []
   end
 
-  defp decode(%mod{} = struct) when is_atom(mod), do: struct
+  defp decode(%mod{} = struct) when is_atom(mod),
+    do: Ouroboros.Storage.SessionMigration.normalize(struct)
 
   # A tag is exactly one key. A map that carries a tag's name next to other keys is not
   # something `dump/1` writes, and reading it as the tag would drop the other keys.
@@ -289,13 +302,20 @@ defmodule Ouroboros.Upgrade.Wire do
   end
 
   defp decode(%{@map => pairs} = tag) when is_list(pairs) and map_size(tag) == 1 do
-    if Enum.all?(pairs, &match?([_key, _value], &1)),
-      do: Map.new(pairs, fn [key, value] -> {decode(key), decode(value)} end),
-      else: decode_bare(tag)
+    cond do
+      not Enum.all?(pairs, &match?([_key, _value], &1)) -> decode_bare(tag)
+      signed_artifact_pairs?(pairs) -> decode_signed(tag)
+      true -> Map.new(pairs, fn [key, value] -> {decode_signed(key), decode(value)} end)
+    end
   end
 
   defp decode(%{@dropped => reason} = tag) when is_binary(reason) and map_size(tag) == 1,
     do: tag
+
+  # Metadata is signed as an Erlang term, including all nested struct tags. Rebuild
+  # it as exact inert maps without constructors or newly introduced field defaults.
+  defp decode(%{@struct => "Elixir.Ouroboros.Wasm.Artifact"} = map),
+    do: decode_signed(map)
 
   defp decode(%{@struct => name} = map) when is_binary(name) do
     fields =
@@ -305,12 +325,13 @@ defmodule Ouroboros.Upgrade.Wire do
 
     case existing_atom(name) do
       {:ok, mod} ->
-        try do
-          struct(mod, fields)
-        rescue
-          ArgumentError -> Map.put(fields, @struct, name)
-          KeyError -> Map.put(fields, @struct, name)
-          UndefinedFunctionError -> Map.put(fields, @struct, name)
+        # A stored name must never load a module or invoke a retired constructor.
+        # Build preloading is explicit and independent of stored data. Known removed
+        # tags are plain historical maps even if another app installed that module.
+        if mod in Ouroboros.Storage.SessionMigration.legacy_structs() do
+          Map.delete(fields, :__exception__)
+        else
+          reconstruct_loaded(mod, fields, name)
         end
 
       :error ->
@@ -323,14 +344,72 @@ defmodule Ouroboros.Upgrade.Wire do
   defp decode(list) when is_list(list), do: Enum.map(list, &decode/1)
   defp decode(term), do: term
 
+  # An artifact with an extra field is intentionally encoded as a pair map by
+  # struct_form/1. Recognize its explicit encoded identity before interpreting any
+  # signed metadata. Last-key precedence matches Map.new/1; no stored name is loaded.
+  defp signed_artifact_pairs?(pairs) do
+    Enum.reduce(pairs, nil, fn [key, value], found ->
+      if key == %{@atom => "__struct__"}, do: value, else: found
+    end) == %{@atom => "Elixir.Ouroboros.Wasm.Artifact"}
+  end
+
+  defp decode_signed(%mod{} = value) when is_atom(mod), do: value
+
+  defp decode_signed(%{@struct => name} = map) when is_binary(name) do
+    fields = map |> Map.delete(@struct) |> signed_map()
+
+    case existing_atom(name) do
+      {:ok, module} -> Map.put(fields, :__struct__, module)
+      :error -> Map.put(fields, @struct, name)
+    end
+  end
+
+  defp decode_signed(%{@atom => name} = tag) when is_binary(name) and map_size(tag) == 1,
+    do: existing(name, name)
+
+  defp decode_signed(%{@tuple => items} = tag) when is_list(items) and map_size(tag) == 1,
+    do: items |> Enum.map(&decode_signed/1) |> List.to_tuple()
+
+  defp decode_signed(%{@map => pairs} = tag) when is_list(pairs) and map_size(tag) == 1 do
+    if Enum.all?(pairs, &match?([_key, _value], &1)),
+      do: Map.new(pairs, fn [key, value] -> {decode_signed(key), decode_signed(value)} end),
+      else: signed_map(tag)
+  end
+
+  defp decode_signed(%{@dropped => reason} = tag) when is_binary(reason) and map_size(tag) == 1,
+    do: tag
+
+  defp decode_signed(map) when is_map(map), do: signed_map(map)
+  defp decode_signed(list) when is_list(list), do: Enum.map(list, &decode_signed/1)
+  defp decode_signed(value), do: value
+
+  defp signed_map(map) do
+    Map.new(map, fn {key, value} ->
+      key = if is_binary(key), do: existing(key, key), else: decode_signed(key)
+      {key, decode_signed(value)}
+    end)
+  end
+
   # Bare keys are atom names — or, in a checkpoint written before keys were tagged,
   # strings that cannot be told from them. Either way this is the reading they get.
+  defp reconstruct_loaded(Ouroboros.Upgrade.Rollout.Registry.Entry, fields, _name),
+    do: struct(Ouroboros.Upgrade.Rollout.Registry.Entry, fields)
+
+  defp reconstruct_loaded(Ouroboros.Upgrade.Signing.Journal, fields, _name),
+    do: struct(Ouroboros.Upgrade.Signing.Journal, fields)
+
+  defp reconstruct_loaded(mod, fields, name) do
+    if function_exported?(mod, :__struct__, 0),
+      do: Map.put(fields, :__struct__, mod),
+      else: Map.put(fields, @struct, name)
+  end
+
   defp decode_bare(map) do
     Map.new(map, fn {key, value} -> {decode_key(key), decode(value)} end)
   end
 
   defp decode_key(key) when is_binary(key), do: existing(key, key)
-  defp decode_key(key), do: decode(key)
+  defp decode_key(key), do: decode_signed(key)
 
   defp existing(name, fallback) do
     case existing_atom(name) do

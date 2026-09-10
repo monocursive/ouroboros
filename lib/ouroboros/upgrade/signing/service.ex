@@ -787,17 +787,17 @@ defmodule Ouroboros.Upgrade.Signing.Service do
         Application.get_env(
           :ouroboros,
           :signing_journal_storage,
-          {Jido.Storage.ETS, table: :ouroboros_signing_journal}
+          {Ouroboros.Storage.ETS, table: :ouroboros_signing_journal}
         )
       end)
 
-    {adapter, adapter_opts} = Jido.Storage.normalize_storage(configured)
+    {adapter, adapter_opts} = Ouroboros.Storage.normalize_storage(configured)
     {:ok, adapter, adapter_opts}
   rescue
     error -> {:error, {:invalid_signing_journal_storage, Exception.message(error)}}
   end
 
-  defp durability_level(Jido.Storage.ETS), do: :ephemeral_checkpoint
+  defp durability_level(Ouroboros.Storage.ETS), do: :ephemeral_checkpoint
   defp durability_level(Ouroboros.Storage.DurableFile), do: :synced_checkpoint
   defp durability_level(_adapter), do: :durable_checkpoint
 

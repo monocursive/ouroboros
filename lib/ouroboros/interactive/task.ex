@@ -2209,7 +2209,7 @@ defmodule Ouroboros.Interactive.Task do
     )
   end
 
-  defp validate_fork_id(nil), do: {:ok, Jido.Signal.ID.generate!()}
+  defp validate_fork_id(nil), do: {:ok, Ouroboros.ID.generate!()}
 
   defp validate_fork_id(id) when is_binary(id) do
     if String.trim(id) != "", do: {:ok, id}, else: {:error, :invalid_fork_id}

@@ -121,17 +121,17 @@ defmodule Ouroboros.Provider.Native.ToolsSchemaParityTest do
     end
   end
 
-  test "conversion loads the pinned action converter after it has been unloaded" do
-    Code.ensure_loaded!(Jido.Action.Schema)
-    :code.purge(Jido.Action.Schema)
-    :code.delete(Jido.Action.Schema)
-    refute function_exported?(Jido.Action.Schema, :to_json_schema, 2)
+  test "conversion loads the owned action converter after it has been unloaded" do
+    Code.ensure_loaded!(Ouroboros.Action.Schema)
+    :code.purge(Ouroboros.Action.Schema)
+    :code.delete(Ouroboros.Action.Schema)
+    refute function_exported?(Ouroboros.Action.Schema, :to_json_schema, 2)
 
     try do
       assert Schema.from_action(Baseline.Defaults) ===
                @baseline["generated"][inspect(Baseline.Defaults)]
     after
-      Code.ensure_loaded!(Jido.Action.Schema)
+      Code.ensure_loaded!(Ouroboros.Action.Schema)
     end
   end
 end

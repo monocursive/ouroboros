@@ -690,7 +690,7 @@ defmodule Ouroboros.Self.BootTest do
              [
                name: nil,
                storage:
-                 {Jido.Storage.ETS,
+                 {Ouroboros.Storage.ETS,
                   table: String.to_atom("self_boot_journal_#{System.unique_integer([:positive])}")}
              ]},
           id: {module, System.unique_integer([:positive])}

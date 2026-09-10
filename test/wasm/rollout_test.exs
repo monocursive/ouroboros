@@ -7,18 +7,23 @@
 defmodule Ouroboros.Capability.RolloutTestSlowProbe do
   @moduledoc false
 
-  use Jido.Agent,
-    name: "ouroboros_capability_rollout_slow_probe",
-    description: "A capability that is slow to answer, so a probe deadline always fires",
-    schema: [last_message: [type: :any, default: nil]],
-    signal_routes: [{"ouroboros.agent.message", __MODULE__.Wait}]
+  @behaviour Ouroboros.Mesh.Agent
 
-  def actions, do: super() ++ [__MODULE__.Wait]
+  @impl true
+  def init_state(initial), do: {:ok, Map.merge(%{last_message: nil}, initial)}
+
+  @impl true
+  def handle_message(message, state, context) do
+    with {:ok, changes} <-
+           __MODULE__.Wait.run(message, Map.put(context, :agent, %{id: context.id, state: state})) do
+      {:ok, Map.merge(state, changes)}
+    end
+  end
 
   defmodule Wait do
     @moduledoc false
 
-    use Jido.Action,
+    use Ouroboros.Action,
       name: "rollout_slow_probe_wait",
       description: "Sleeps past any deadline this file sets, then echoes",
       schema: [
@@ -1110,7 +1115,7 @@ defmodule Ouroboros.Wasm.RolloutTest do
       Registry.start_link(
         name: name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: String.to_atom("wasm_rollout_rollouts_#{System.unique_integer([:positive])}")}
       )
 

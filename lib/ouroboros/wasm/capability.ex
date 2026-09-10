@@ -6,7 +6,7 @@ defmodule Ouroboros.Wasm.Capability do
   is the sha256 of its component bytes, and its runtime shape is *this* agent, shipped and
   protected, started with `initial_state` naming the component, the config the guest is
   initialized with, and a human name. `Ouroboros.Runtime.Manifesto` says a capability is "one
-  Jido agent … started through `Mesh.start_agent/2` with an id, routing
+  mesh agent started through `Mesh.start_agent/2` with an id, routing
   `ouroboros.agent.message` to an answering action"; this is that agent, once, for every
   component there will ever be.
 
@@ -28,10 +28,10 @@ defmodule Ouroboros.Wasm.Capability do
   `:name` is a label for a human, and putting it in an identity made
   `%{name: "n/mid", id: "tail"}` and `%{name: "n", id: "mid/tail"}` the same instance.
 
-  A seeded `:instance` that is not this agent's derived name is **ignored**, not adopted.
+  A seeded `:instance` is always ignored, including one matching this agent's derived name.
   `Ouroboros.Mesh.start_agent/2` is remote-reachable and merges the caller's `initial_state`
-  wholesale — Jido does not validate it against this schema — so trusting a seeded instance
-  handed any caller a live instance belonging to some other agent, with that agent's config
+  wholesale, with domain normalization applied where values are used. Trusting a seeded
+  instance would hand a caller a live instance belonging to some other agent, with that agent's config
   and that agent's accumulated guest state.
 
   ## Lazy, and repairable
@@ -60,7 +60,7 @@ defmodule Ouroboros.Wasm.Capability do
 
   It used to be fetched by this agent after the first message, and that was wrong in a way
   that only a clock reveals: the fetch is a synchronous pool round trip inside the caller's
-  `Jido.AgentServer.call`, and `Ouroboros.Upgrade.Rollout.Probe` gives its one message five
+  `Mesh.send_message/4`, and `Ouroboros.Upgrade.Rollout.Probe` gives its one message five
   seconds. A component whose `describe` merely took four seconds — inside every bound it
   was deployed under — failed its own health check and was rolled back. A capability's
   liveness must not depend on how fast it can describe itself, so the metadata moved to the
@@ -91,10 +91,10 @@ defmodule Ouroboros.Wasm.Capability do
   (`reason.refusal`) and are otherwise bounded before they are stored: a failure term built
   out of a `GenServer.call/3` argument list carries the whole outbound message inside it.
 
-  ## Nothing in `initial_state` is trusted, because nothing validates it
+  ## Caller state receives domain validation where it is used
 
   `Ouroboros.Mesh.start_agent/2` is remote-reachable and merges a caller's `initial_state`
-  wholesale; Jido does not check it against the schema above. So every key here that decides
+  wholesale; domain normalization is applied where values are used. Every key that decides
   *what runs, where, and under what bounds* is validated where it is used, not where it is
   declared (F3):
 
@@ -120,69 +120,47 @@ defmodule Ouroboros.Wasm.Capability do
   evaluation mean what it says. (`:instance` is the seventh and is safe unnamed, because a
   seeded instance is ignored above.)
 
-  ## What is not here yet
+  ## Ownership survives missing directory visibility
 
-  Jido exposes no terminate hook to an agent module — `Jido.Agent`'s callbacks are
-  `on_before_cmd`, `on_after_cmd`, `signal_routes`, `checkpoint` and `restore`, and
-  `Jido.AgentServer.terminate/2` delegates only to its own lifecycle module — so this agent
-  cannot drop its instance on the way out. What covers it instead is ownership in the pool:
-  `Ouroboros.Wasm.Pool.instantiate/6` is handed this agent's server pid, monitors it, and
-  schedules the `drop` when it goes. That covers the stop, the crash, and the throwaway
-  agents a rollout probe and an evaluation leave behind.
-
-  What remains: an instance stood up while this node's mesh directory does not yet know the
-  agent (`owner` resolves to `nil`) is unowned and is reclaimed by nothing here — the helper
-  keeps it until the pool reconnects onto a fresh child, and W3's rollback drops explicitly.
+  The server supplies its actual PID directly in the callback context. The pool monitors
+  that PID and reclaims instances on stop, crash, forced kill, and probe/evaluation cleanup.
+  Directory registration is not needed to establish ownership.
   """
 
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
 
-  use Jido.Agent,
-    name: "ouroboros_wasm_capability",
-    description: "The static wrapper a WebAssembly capability component runs inside",
-    schema: [
-      # The capability's identity: the sha256 of the component bytes, lower-case hex. Not an
-      # atom and not a module — that is the whole point of the lane (D2).
-      component: [type: :string, default: ""],
-      # Handed to the guest's `init` verbatim, once per instance.
-      config: [type: :string, default: "{}"],
-      # A label, for a log line. Deliberately not part of any identity — see the moduledoc.
-      name: [type: :string, default: "capability"],
-      # `%{fuel, memory_bytes, deadline_ms}`, all three or none, and each one clamped to this
-      # node's `capability_limits_max` ceiling. See `limits/1`.
-      limits: [type: :map, default: %{}],
-      # The live instance's name in the helper, or nil when none is standing. Only ever
-      # believed when it equals this agent's derived name.
-      instance: [type: :any, default: nil],
-      # The two keys the rollout machinery reads. See the moduledoc.
-      last_message: [type: :any, default: nil],
-      last_answer: [type: :any, default: nil],
-      messages_received: [type: :non_neg_integer, default: 0],
-      error: [type: :any, default: nil],
-      # Which pool to speak to, and which store to read. Both are the production values by
-      # default and exist so a test can point one agent at its own helper and its own
-      # directory without touching anything global. Both are **validated before they are
-      # used**, because `Mesh.start_agent/2` is remote-reachable and Jido merges a caller's
-      # `initial_state` without checking it against this schema (F3): `:pool` must name a
-      # live local `Ouroboros.Wasm.Pool` process, and `:store_root` is honoured only on a node
-      # whose config says `allow_store_root_override: true`.
-      pool: [type: :any, default: Ouroboros.Wasm.Pool],
-      store_root: [type: :any, default: nil],
-      # W8. The signed manifest's `precompiled` block, carried here by
-      # `Ouroboros.Wasm.Rollout.start_state/2` so a wrapper's first load — and a reboot's —
-      # takes the same fast path the deploy took. It is a hint, not authority: it names a
-      # digest, the store resolves the file, and the helper refuses a container that was not
-      # compiled from `component`, so a seeded block naming somebody else's artifact is a
-      # `precompiled_mismatch` and never a load of the wrong bytes.
-      precompiled: [type: :any, default: nil]
-    ],
-    signal_routes: [
-      {"ouroboros.agent.message", __MODULE__.HandleMessage}
-    ]
+  @behaviour Ouroboros.Mesh.Agent
 
-  @doc "Every action this agent can execute. There is exactly one."
-  def actions, do: super() ++ [__MODULE__.HandleMessage]
+  @impl true
+  def init_state(initial) do
+    defaults = %{
+      component: "",
+      config: "{}",
+      name: "capability",
+      limits: %{},
+      instance: nil,
+      last_message: nil,
+      last_answer: nil,
+      messages_received: 0,
+      error: nil,
+      pool: Ouroboros.Wasm.Pool,
+      store_root: nil,
+      precompiled: nil
+    }
+
+    # Preserve seeded domain values and their existing use-site normalization. A live
+    # instance is never imported from caller state, even if its name happens to match.
+    {:ok, defaults |> Map.merge(initial) |> Map.put(:instance, nil)}
+  end
+
+  @impl true
+  def handle_message(message, state, context) do
+    __MODULE__.HandleMessage.run(
+      message,
+      Map.put(context, :agent, %{id: context.id, state: state})
+    )
+  end
 
   @doc """
   The bounds an instance of this capability is stood up under.
@@ -194,10 +172,9 @@ defmodule Ouroboros.Wasm.Capability do
 
   Whichever of the two it is, **every value is clamped to this node's
   `Ouroboros.Wasm.capability_limits_max/0`** (F3). `:limits` arrives inside `initial_state`
-  on the remote-reachable `Ouroboros.Mesh.start_agent/2`, and Jido does not validate
-  `initial_state` against this agent's schema — so a declaration was simply obeyed, and a
-  remote starter helped itself to the helper's own maxima on a node that had agreed to none
-  of them. A clamp rather than a refusal because the node's ceiling is the node's answer to
+  on the remote-reachable `Ouroboros.Mesh.start_agent/2`, and initialization preserves
+  declared limits for this use-site clamp. Without the clamp, a remote starter could
+  request the helper's own maxima on a node that agreed to none of them. A clamp rather than a refusal because the node's ceiling is the node's answer to
   the question "how much may a capability have", and answering it is not the same as
   refusing to run the capability. What the clamp must never be is silent: `note/1` returns
   the fact, and `HandleMessage` records it in `:error` on every message.
@@ -581,21 +558,15 @@ defmodule Ouroboros.Wasm.Capability do
     @moduledoc """
     One mesh message into the component, one reply back into agent state.
 
-    The state write is a `ReplaceState` rather than a returned map because Jido merges an
-    action's result into agent state *deeply* (`Jido.Agent.State.merge/2`), and `:last_answer`
-    is whatever a guest decided to send: deep-merging two replies would leave keys from the
-    previous one standing inside the current one, which is a lie about what the capability
-    just answered. A schema of plain data shapes dodges the same merge;
-    this action cannot choose the guest's.
+    Each callback returns the complete next state. A guest reply replaces `:last_answer`
+    wholesale, so keys from an earlier reply cannot survive in the current answer.
     """
 
-    alias Jido.Agent.StateOp
-    alias Ouroboros.Mesh
     alias Ouroboros.Wasm
     alias Ouroboros.Wasm.Capability
     alias Ouroboros.Wasm.Pool
 
-    use Jido.Action,
+    use Ouroboros.Action,
       name: "wasm_capability_handle_message",
       description: "Forward a mesh message to a WebAssembly capability instance",
       schema: [
@@ -629,7 +600,7 @@ defmodule Ouroboros.Wasm.Capability do
     @max_key_bytes 128
 
     @impl true
-    def run(params, %{agent: agent}) do
+    def run(params, %{agent: agent, server_pid: server_pid}) do
       state = agent.state
 
       message = %{
@@ -643,7 +614,7 @@ defmodule Ouroboros.Wasm.Capability do
       # is inside this `try`, so there is no input for which this agent records nothing.
       outcome =
         try do
-          exchange(state, agent, params.body)
+          exchange(state, %{id: agent.id, server_pid: server_pid}, params.body)
         rescue
           error -> failed(:exception, Exception.message(error))
         catch
@@ -656,11 +627,11 @@ defmodule Ouroboros.Wasm.Capability do
           messages_received: next_message_count(state)
         })
 
-      {:ok, %{}, [%StateOp.ReplaceState{state: Map.merge(state, changes)}]}
+      {:ok, Map.merge(state, changes)}
     end
 
-    # `initial_state` crosses a remote-reachable boundary and Jido deliberately merges it
-    # without applying this agent's schema. Bookkeeping must therefore tolerate the same
+    # `initial_state` crosses a remote-reachable boundary and preserves supplied domain
+    # values until their use-site normalization. Bookkeeping must therefore tolerate the same
     # hostile seed as every authority-bearing field below: an invalid counter means no
     # messages have been counted, not an arithmetic exception outside `run/2`'s rescue.
     defp next_message_count(state) do
@@ -694,8 +665,8 @@ defmodule Ouroboros.Wasm.Capability do
     # actually a `Ouroboros.Wasm.Pool` on this node (F3).
     #
     # `:pool` is `type: :any` in the schema and arrives inside `initial_state` on the
-    # remote-reachable `Mesh.start_agent/2`, which Jido merges without checking it against
-    # that schema. Before this, whatever a starter wrote was handed straight to
+    # remote-reachable `Mesh.start_agent/2`, whose initialization preserves the supplied
+    # pool declaration until it is checked here. Before this, whatever a starter wrote was handed straight to
     # `GenServer.call/3`: a registered name, and the pool's own `{:request, …}` tuple was
     # delivered to somebody else's process — enough to kill an `Agent` on a `function_clause`
     # — or a pid, with the same effect. So the value is *resolved* and then *identified*:
@@ -905,16 +876,8 @@ defmodule Ouroboros.Wasm.Capability do
     defp identity(%{id: id}) when is_binary(id), do: id
     defp identity(agent), do: inspect(Map.get(agent, :id))
 
-    # The agent-server pid, asked for by id rather than taken from `self()`: Jido may run
-    # this action in a task it spawned for the signal call, so `self()` is not the agent. The
-    # *local* member specifically — the instance lives in this node's helper, so a remote
-    # twin's pid would be the wrong thing to monitor. `nil` leaves the instance unowned,
-    # which the module doc records as the one case nothing here reclaims.
-    defp owner_of(agent) do
-      agent
-      |> identity()
-      |> Mesh.members()
-      |> Enum.find(&(node(&1) == node()))
-    end
+    # Ownership is supplied explicitly by the serialized server, never discovered through
+    # eventually consistent directory membership and never inferred from the action task.
+    defp owner_of(%{server_pid: pid}) when is_pid(pid) and node(pid) == node(), do: pid
   end
 end

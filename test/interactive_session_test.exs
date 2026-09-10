@@ -1247,7 +1247,9 @@ defmodule Ouroboros.InteractiveSessionTest do
     name = String.to_atom("interactive_store_server_#{System.unique_integer([:positive])}")
     key = {:interactive_store_test, id}
 
-    start_supervised!({Store, name: name, storage: {Jido.Storage.ETS, table: table}, key: key})
+    start_supervised!(
+      {Store, name: name, storage: {Ouroboros.Storage.ETS, table: table}, key: key}
+    )
 
     first_id = id <> "-first"
     second_id = id <> "-second"
@@ -1257,15 +1259,15 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = Store.create(second, name)
 
     assert {:ok, %{version: 2, ids: ids}} =
-             Jido.Storage.ETS.get_checkpoint(key, table: table)
+             Ouroboros.Storage.ETS.get_checkpoint(key, table: table)
 
     assert ids == Enum.sort([first_id, second_id])
 
     assert {:ok, %{^first_id => ^first}} =
-             Jido.Storage.ETS.get_checkpoint({key, :session, 2, first_id}, table: table)
+             Ouroboros.Storage.ETS.get_checkpoint({key, :session, 2, first_id}, table: table)
 
     assert {:ok, %{^second_id => ^second}} =
-             Jido.Storage.ETS.get_checkpoint({key, :session, 2, second_id}, table: table)
+             Ouroboros.Storage.ETS.get_checkpoint({key, :session, 2, second_id}, table: table)
   end
 
   test "routes an interactive session through a real OS peer", %{id: id} do
@@ -1284,7 +1286,7 @@ defmodule Ouroboros.InteractiveSessionTest do
       :erpc.call(peer_node, Application, :put_env, [
         :ouroboros,
         :interactive_storage,
-        {Jido.Storage.ETS, table: String.to_atom("#{peer_name}_interactive")}
+        {Ouroboros.Storage.ETS, table: String.to_atom("#{peer_name}_interactive")}
       ])
 
     :ok =

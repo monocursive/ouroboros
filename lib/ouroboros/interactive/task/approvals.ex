@@ -149,7 +149,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # ---------------------------------------------------------------------------
 
   defp open_external_approval(runtime, request_ref, request, from) do
-    request_id = "ouro-approval-" <> Jido.Signal.ID.generate!()
+    request_id = "ouro-approval-" <> Ouroboros.ID.generate!()
     verdict = evaluate_permission(runtime, request)
 
     case Task.emit_runtime_event(

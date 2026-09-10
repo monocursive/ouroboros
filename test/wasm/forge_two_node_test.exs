@@ -221,7 +221,7 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
       |> Enum.map(&elem(&1, 0))
       |> Enum.sort()
 
-    assert ids == [Cluster, Wasm.Supervisor]
+    assert ids == [Cluster, Ouroboros.Storage.ETS, Wasm.Supervisor]
     assert call(builder.node, Process, :whereis, [Registry]) == nil
   end
 
@@ -416,7 +416,7 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
       Registry.start_link(
         name: registry_name,
         storage:
-          {Jido.Storage.ETS,
+          {Ouroboros.Storage.ETS,
            table: :"wasm_forge_two_node_rollouts_#{System.unique_integer([:positive])}"}
       )
 

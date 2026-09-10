@@ -267,8 +267,8 @@ imprecise or silent:
 ## 3. Dependencies and assets (D6)
 
 Added to `mix.exs`: `phoenix`, `phoenix_live_view`, `bandit`, `phoenix_html` (current
-stable lines at implementation time; `phoenix_pubsub` arrives transitively and is already
-optional-compatible via `jido_signal`). Nothing else is required at runtime.
+stable lines at implementation time; `phoenix_pubsub` arrives transitively through
+Phoenix). Nothing else is required at runtime.
 
 **No esbuild, no Tailwind, no production asset pipeline.** The release copies `priv/`
 verbatim. Node is a development/CI dependency only, used by Playwright to execute browser

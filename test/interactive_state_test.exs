@@ -121,10 +121,8 @@ defmodule Ouroboros.InteractiveStateTest do
                State.new("interactive-state-exposure-off", base ++ [runtime_exposure: false])
     end
 
-    # The boundary. `Jido.Harness.Registry` merges this node's provider map over nine
-    # bundled vendor-CLI adapters rather than replacing them, so `:claude` still *resolves*
-    # — which is exactly why the refusal has to be here and by name, before a workspace
-    # lease is taken.
+    # Retired provider names are refused at the owned runtime boundary before a
+    # workspace lease is taken, including names preserved in historical records.
     test "a provider this build no longer has is refused by name, before anything is held" do
       for provider <- [:codex, :claude, :grok, :kimi, :opencode, :amp, :pi, :gemini, :zai] do
         assert {:error, {:provider_removed, ^provider, message}} =

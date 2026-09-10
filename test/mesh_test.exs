@@ -1,15 +1,16 @@
 defmodule Ouroboros.MeshTest.ForgedAgent do
   @moduledoc false
 
-  use Jido.Agent,
-    name: "ouroboros_mesh_test_forged",
-    description: "Stands in for an agent module forged outside the reserved namespaces",
-    schema: [
-      role: [type: :string, default: "worker"],
-      objective: [type: :any, default: nil],
-      status: [type: :atom, default: :idle],
-      seed: [type: :any, default: nil]
-    ]
+  @behaviour Ouroboros.Mesh.Agent
+
+  @impl true
+  def init_state(initial),
+    do: {:ok, Map.merge(%{role: "worker", objective: nil, status: :idle, seed: nil}, initial)}
+
+  @impl true
+  def handle_message(_message, _state, _context) do
+    {:error, :unsupported_message}
+  end
 end
 
 defmodule Ouroboros.MeshTest do
@@ -42,10 +43,9 @@ defmodule Ouroboros.MeshTest do
       Application.put_env(:ouroboros, :placement_role_check, false)
       on_exit(fn -> Application.put_env(:ouroboros, :placement_role_check, previous) end)
 
-      assert {:error, {:remote_start_failed, ^target, {kind, _reason}}} =
+      assert {:error, {:placement_refused, ^target, :node_not_connected}} =
                Mesh.start_agent_on(target, id)
 
-      assert kind in [:error, :exit, :throw]
       assert Mesh.whereis(id) == nil
     end
 
@@ -157,8 +157,8 @@ defmodule Ouroboros.MeshTest do
       # The enumeration the prefix used to make necessary and the named entry makes cheap: if
       # a second agent module ever appears under lane W's namespace, this fails and whoever
       # added it decides — deliberately — whether `Ouroboros.Mesh`'s allow-list should name
-      # it too. `Jido.Agent` is what makes a module startable here, and it is `new/0` and
-      # `new/1` that `do_start_agent/3` calls.
+      # it too. The explicit `init_state/1` and `handle_message/3` callbacks are the
+      # owned contract that makes a module startable here.
       {:ok, modules} = :application.get_key(:ouroboros, :modules)
 
       startable =
@@ -166,7 +166,8 @@ defmodule Ouroboros.MeshTest do
         |> Enum.filter(&String.starts_with?(Atom.to_string(&1), "Elixir.Ouroboros.Wasm."))
         |> Enum.filter(fn module ->
           Code.ensure_loaded?(module) and
-            (function_exported?(module, :new, 0) or function_exported?(module, :new, 1))
+            function_exported?(module, :init_state, 1) and
+            function_exported?(module, :handle_message, 3)
         end)
 
       assert startable == [Ouroboros.Wasm.Capability]
@@ -255,6 +256,10 @@ defmodule Ouroboros.MeshTest do
 
       assert {:error, {:ambiguous_replicas, ^id, 2}} =
                Mesh.send_message("root", id, %{text: "hello"})
+
+      allow_agent_modules([ForgedAgent])
+      assert {:error, {:ambiguous_replicas, ^id, 2}} = Mesh.start_agent(id, agent: ForgedAgent)
+      assert {:error, {:ambiguous_replicas, ^id, 2}} = Mesh.stop_agent(id)
     end
   end
 

@@ -124,7 +124,8 @@ defmodule Ouroboros.Application do
   # {:pool_unavailable, …}}` — found the first time a forward crossed a real node boundary
   # (W22, §13 W-F31). The pool is lazy and owns nothing durable, so the posture is unchanged:
   # no stores, registries, workspaces or recovery loops exist on that host to be reached.
-  defp children(:builder), do: [Ouroboros.Cluster, Ouroboros.Wasm.Supervisor]
+  defp children(:builder),
+    do: [Ouroboros.Storage.ETS, Ouroboros.Cluster, Ouroboros.Wasm.Supervisor]
 
   # A `:signer` node is the same posture plus the one process its role names. The service
   # owns a key, a policy, and a durable decision journal; it refuses to boot without all
@@ -143,7 +144,7 @@ defmodule Ouroboros.Application do
       runtime_boundary_children([]) ++
         [
           # The effect ledger leads every process that can originate an effect. If its
-          # durable authority restarts, rest_for_one stops Jido's runners and agent
+          # durable authority restarts, rest_for_one stops mesh handler tasks and agent
           # servers too; unfinished acknowledged attempts then recover as ambiguous
           # instead of continuing beside a replacement empty ledger.
           Ouroboros.Agent.EffectLedger,
@@ -151,11 +152,11 @@ defmodule Ouroboros.Application do
           Ouroboros.Audit.Index,
           Ouroboros.Audit.Worker,
           # Native model admission is in-memory scheduling, not durable authority. It
-          # sits after the ledger and before Jido so a lease-server crash restarts the
+          # sits after the ledger and before the mesh so a lease-server crash restarts the
           # sessions that consume its leases — otherwise Finch connections outlive the
           # bound — without taking the ledger down with it.
           native_model_admission(),
-          Ouroboros.Jido,
+          Ouroboros.Mesh.Supervisor,
           %{
             id: Ouroboros.Mesh.Scope,
             start: {:pg, :start_link, [Ouroboros.Mesh.Scope]},
@@ -427,6 +428,8 @@ defmodule Ouroboros.Application do
   # no data directory retain their in-memory posture. Core adds provider cache setup at
   # this boundary; signer owns only its key, policy, and durable decision journal.
   defp runtime_boundary_children(after_owner) do
+    after_owner = [Ouroboros.Storage.ETS | after_owner]
+
     case Application.get_env(:ouroboros, :data_dir) do
       data_dir when is_binary(data_dir) and data_dir != "" ->
         [{Ouroboros.RuntimeOwner, data_dir: data_dir} | after_owner]

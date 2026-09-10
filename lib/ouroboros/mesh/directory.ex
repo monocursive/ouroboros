@@ -15,6 +15,9 @@ defmodule Ouroboros.Mesh.Directory do
     GenServer.call(__MODULE__, {:register, id, pid})
   end
 
+  @doc false
+  def register_async(id, pid), do: GenServer.cast(__MODULE__, {:register, id, pid})
+
   @spec group(String.t()) :: {:ouroboros_agent, String.t()}
   def group(id), do: {:ouroboros_agent, id}
 
@@ -33,9 +36,17 @@ defmodule Ouroboros.Mesh.Directory do
   end
 
   @impl true
+  def handle_cast({:register, id, pid}, state) do
+    case register_local(id, pid, state) do
+      {:ok, next_state} -> {:noreply, next_state}
+      {:error, _reason} -> {:noreply, state}
+    end
+  end
+
+  @impl true
   def handle_info(:reconcile_all, state) do
     next_state =
-      Enum.reduce(Ouroboros.Jido.list_agents(), state, fn {id, pid}, acc ->
+      Enum.reduce(Ouroboros.Mesh.Supervisor.list_agents(), state, fn {id, pid}, acc ->
         case register_local(id, pid, acc) do
           {:ok, registered} -> registered
           {:error, _reason} -> acc
@@ -57,7 +68,7 @@ defmodule Ouroboros.Mesh.Directory do
   end
 
   def handle_info({:reconcile, id}, state) do
-    case Ouroboros.Jido.whereis(id) do
+    case Ouroboros.Mesh.Supervisor.whereis(id) do
       pid when is_pid(pid) ->
         case register_local(id, pid, state) do
           {:ok, next_state} -> {:noreply, next_state}

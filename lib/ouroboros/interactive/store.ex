@@ -67,7 +67,7 @@ defmodule Ouroboros.Interactive.Store do
              Application.get_env(
                :ouroboros,
                :interactive_storage,
-               {Jido.Storage.ETS, table: :ouroboros_interactive}
+               {Ouroboros.Storage.ETS, table: :ouroboros_interactive}
              )
            end),
          key <- Keyword.get(opts, :key, @store_key),
@@ -212,7 +212,7 @@ defmodule Ouroboros.Interactive.Store do
   end
 
   defp normalize_storage(storage) do
-    {adapter, adapter_opts} = Jido.Storage.normalize_storage(storage)
+    {adapter, adapter_opts} = Ouroboros.Storage.normalize_storage(storage)
     {:ok, adapter, adapter_opts}
   rescue
     error -> {:error, {:invalid_interactive_storage, Exception.message(error)}}

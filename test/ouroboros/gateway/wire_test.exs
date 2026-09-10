@@ -288,22 +288,15 @@ defmodule Ouroboros.Gateway.WireTest do
     end
   end
 
-  test "a live agent-server state encodes without losing the parts a client renders" do
-    # The dense case the spec calls out: pids, refs, queues, and functions in one struct.
-    state = %{
-      __struct__: Jido.AgentServer.State,
-      agent: %{id: "agent-1", state: %{counter: 3}},
-      status: :idle,
-      pending_signals: :queue.new(),
-      reply_refs: %{make_ref() => self()},
-      dispatch: {:pid, [target: self()]}
-    }
+  test "the owned agent inspection shape has stable wire fields" do
+    # Mesh.Server builds this literal public projection, independent of its internals.
+    state = %{agent: %{id: "agent-1", state: %{counter: 3, owner: self()}}}
 
-    encoded = roundtrip(state)
-
-    assert encoded["_struct"] == "Jido.AgentServer.State"
-    assert encoded["status"] == "idle"
-    assert encoded["agent"]["state"]["counter"] == 3
-    assert encoded["dispatch"] == ["pid", [["target", %{"_opaque" => inspect(self())}]]]
+    assert roundtrip(state) == %{
+             "agent" => %{
+               "id" => "agent-1",
+               "state" => %{"counter" => 3, "owner" => %{"_opaque" => inspect(self())}}
+             }
+           }
   end
 end

@@ -1,6 +1,6 @@
 defmodule Ouroboros.Storage.SessionMigration do
   @moduledoc """
-  In-memory reader for session checkpoints written before the owned runtime contract.
+  In-memory reader for checkpoints written before the owned runtime contracts.
 
   Safe term decoding has already checked the finite atom vocabulary. Historical data
   never selects a module to load or a constructor to call. Retired boundary structs
@@ -22,13 +22,28 @@ defmodule Ouroboros.Storage.SessionMigration do
     :"Elixir.Jido.Harness.RunRequest",
     :"Elixir.Jido.Harness.RunResult",
     :"Elixir.Jido.Harness.RunInfo",
-    :"Elixir.Jido.Harness.ProcessInfo"
+    :"Elixir.Jido.Harness.ProcessInfo",
+    # J3's finite core shapes are historical values; no missing constructor is called.
+    :"Elixir.Jido.Action.Error.InvalidInputError",
+    :"Elixir.Jido.Action.Error.ExecutionFailureError",
+    :"Elixir.Jido.Action.Error.ConfigurationError",
+    :"Elixir.Jido.Action.Error.TimeoutError",
+    :"Elixir.Jido.Action.Error.InternalError",
+    :"Elixir.Jido.Action.Error.Internal.UnknownError",
+    :"Elixir.Jido.Signal",
+    :"Elixir.Jido.Agent",
+    :"Elixir.Jido.Instruction"
   ]
 
   @doc "The retired struct tags the boundary is allowed to normalize."
   def legacy_structs, do: @legacy_structs
 
   @doc "Normalizes only known retired tags, recursively, without constructing modules."
+  # Every manifest field, including arbitrary nested metadata, participates in the
+  # signature. Keep this owned envelope byte-exact as inert data: stripping a legacy
+  # tag or exception flag inside it would invalidate an otherwise valid old signature.
+  def normalize(%{__struct__: Ouroboros.Wasm.Artifact} = artifact), do: artifact
+
   def normalize(%{__struct__: :"Elixir.Jido.Harness.SessionRequest"} = value) do
     value
     |> Map.drop([:__struct__, :__exception__])
@@ -109,5 +124,7 @@ defmodule Ouroboros.Storage.SessionMigration do
 
   defp migrate_plan(fields), do: fields
 
-  defp normalize_pair({key, value}), do: {normalize(key), normalize(value)}
+  # Keys are identity, including maps/tuples containing retired tags. Rewriting a
+  # key can collide with an existing plain-map key and silently discard history.
+  defp normalize_pair({key, value}), do: {key, normalize(value)}
 end

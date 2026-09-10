@@ -4,7 +4,7 @@ defmodule Ouroboros.DistributionTest do
   alias Ouroboros.Capability.DistributionReference
   alias Ouroboros.Mesh
 
-  test "routes a typed agent message to a supervised Jido process on an OS peer" do
+  test "routes a typed agent message to a supervised mesh process on an OS peer" do
     ensure_distributed!()
 
     peer_name = String.to_atom("ouroboros_peer_#{System.unique_integer([:positive])}")
@@ -15,7 +15,7 @@ defmodule Ouroboros.DistributionTest do
 
     on_exit(fn -> :peer.stop(peer) end)
 
-    storage = {Jido.Storage.ETS, table: peer_name}
+    storage = {Ouroboros.Storage.ETS, table: peer_name}
 
     :ok =
       :erpc.call(peer_node, Application, :put_env, [:ouroboros, :interactive_storage, storage])
@@ -64,14 +64,12 @@ defmodule Ouroboros.DistributionTest do
 
     assert Mesh.whereis(id) == nil
 
-    # And with the check disabled the remote start still fails as an error tuple rather
-    # than escaping: the start exits on the peer's missing supervisor, and `:erpc`
-    # surfaces that as `:exit`, not `:error`, which used to crash the placing caller.
+    # Disabling role placement checks cannot bypass mesh protocol/runtime admission.
     previous = Application.get_env(:ouroboros, :placement_role_check, true)
     Application.put_env(:ouroboros, :placement_role_check, false)
     on_exit(fn -> Application.put_env(:ouroboros, :placement_role_check, previous) end)
 
-    assert {:error, {:remote_start_failed, ^peer_node, {:exit, _reason}}} =
+    assert {:error, {:placement_refused, ^peer_node, :runtime_not_running}} =
              Mesh.start_agent_on(peer_node, id, agent: DistributionReference)
 
     assert Mesh.whereis(id) == nil

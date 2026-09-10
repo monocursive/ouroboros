@@ -849,14 +849,14 @@ defmodule Ouroboros.Control.PolicyPromotion do
 
       :error ->
         case Application.get_env(:ouroboros, :policy_promotion_storage) do
-          nil -> {:ok, {Jido.Storage.ETS, table: :ouroboros_policy_promotion}}
+          nil -> {:ok, {Ouroboros.Storage.ETS, table: :ouroboros_policy_promotion}}
           storage -> {:ok, storage}
         end
     end
   end
 
   defp normalize_storage(storage) do
-    {adapter, adapter_opts} = Jido.Storage.normalize_storage(storage)
+    {adapter, adapter_opts} = Ouroboros.Storage.normalize_storage(storage)
     {:ok, adapter, adapter_opts}
   rescue
     error -> {:error, {:invalid_policy_promotion_storage, Exception.message(error)}}
@@ -870,7 +870,7 @@ defmodule Ouroboros.Control.PolicyPromotion do
     kind, reason -> {:error, {:adapter_failure, kind, inspect(reason)}}
   end
 
-  defp durability_level(Jido.Storage.ETS), do: :ephemeral_checkpoint
+  defp durability_level(Ouroboros.Storage.ETS), do: :ephemeral_checkpoint
   defp durability_level(Ouroboros.Storage.DurableFile), do: :synced_checkpoint
   defp durability_level(_adapter), do: :durable_checkpoint
 

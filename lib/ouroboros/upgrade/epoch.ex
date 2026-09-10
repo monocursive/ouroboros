@@ -176,11 +176,11 @@ defmodule Ouroboros.Upgrade.Epoch do
         Application.get_env(
           :ouroboros,
           :epoch_storage,
-          {Jido.Storage.ETS, table: :ouroboros_forge_epochs}
+          {Ouroboros.Storage.ETS, table: :ouroboros_forge_epochs}
         )
       end)
 
-    {adapter, adapter_opts} = Jido.Storage.normalize_storage(configured)
+    {adapter, adapter_opts} = Ouroboros.Storage.normalize_storage(configured)
 
     if Keyword.keyword?(adapter_opts) do
       {:ok, %{adapter: adapter, opts: adapter_opts}}

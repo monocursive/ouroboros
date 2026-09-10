@@ -471,18 +471,15 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
     defmodule #{inspect(module)} do
       @vsn 1
 
-      use Jido.Agent,
-        name: "ouroboros_capability_eval_echo",
-        description: "A capability agent that records what it is told",
-        schema: [
-          role: [type: :string, default: "capability"],
-          inbox: [type: :list, default: []],
-          last_message: [type: :any, default: nil],
-          messages_received: [type: :non_neg_integer, default: 0]
-        ],
-        signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
-        ]
+      @behaviour Ouroboros.Mesh.Agent
+
+      @impl true
+      def init_state(initial), do: {:ok, Map.merge(%{role: "capability", inbox: [], last_message: nil, messages_received: 0}, initial)}
+
+      @impl true
+      def handle_message(message, state, context) do
+        Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
+      end
     end
     """
   end
@@ -494,19 +491,15 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
     defmodule #{inspect(@answering)} do
       @vsn 1
 
-      use Jido.Agent,
-        name: "ouroboros_capability_eval_answering",
-        description: "A capability agent that publishes a constant answer",
-        schema: [
-          role: [type: :string, default: "capability"],
-          inbox: [type: :list, default: []],
-          last_message: [type: :any, default: nil],
-          last_answer: [type: :any, default: "pong"],
-          messages_received: [type: :non_neg_integer, default: 0]
-        ],
-        signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
-        ]
+      @behaviour Ouroboros.Mesh.Agent
+
+      @impl true
+      def init_state(initial), do: {:ok, Map.merge(%{role: "capability", inbox: [], last_message: nil, last_answer: "pong", messages_received: 0}, initial)}
+
+      @impl true
+      def handle_message(message, state, context) do
+        Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
+      end
     end
     """
   end
@@ -516,21 +509,19 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
     defmodule #{inspect(@faulty)} do
       @vsn 1
 
-      use Jido.Agent,
-        name: "ouroboros_capability_eval_faulty",
-        description: "A capability agent whose message handler always fails",
-        schema: [
-          role: [type: :string, default: "capability"],
-          inbox: [type: :list, default: []],
-          last_message: [type: :any, default: nil],
-          messages_received: [type: :non_neg_integer, default: 0]
-        ],
-        signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
-        ]
+      @behaviour Ouroboros.Mesh.Agent
 
       @impl true
-      def on_before_cmd(_agent, _action) do
+      def init_state(initial), do: {:ok, Map.merge(%{role: "capability", inbox: [], last_message: nil, messages_received: 0}, initial)}
+
+      @impl true
+      def handle_message(message, state, context) do
+        Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
+      end
+
+      defoverridable handle_message: 3
+      @impl true
+      def handle_message(_message, _state, _context) do
         raise "forged capability handler is broken"
       end
     end
@@ -542,23 +533,21 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
     defmodule #{inspect(@slow)} do
       @vsn 1
 
-      use Jido.Agent,
-        name: "ouroboros_capability_eval_slow",
-        description: "A capability agent that answers, eventually",
-        schema: [
-          role: [type: :string, default: "capability"],
-          inbox: [type: :list, default: []],
-          last_message: [type: :any, default: nil],
-          messages_received: [type: :non_neg_integer, default: 0]
-        ],
-        signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
-        ]
+      @behaviour Ouroboros.Mesh.Agent
 
       @impl true
-      def on_before_cmd(agent, action) do
+      def init_state(initial), do: {:ok, Map.merge(%{role: "capability", inbox: [], last_message: nil, messages_received: 0}, initial)}
+
+      @impl true
+      def handle_message(message, state, context) do
+        Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
+      end
+
+      defoverridable handle_message: 3
+      @impl true
+      def handle_message(message, state, context) do
         Process.sleep(120)
-        {:ok, agent, action}
+        Ouroboros.Mesh.ReceiveMessage.handle_message(message, state, context)
       end
     end
     """

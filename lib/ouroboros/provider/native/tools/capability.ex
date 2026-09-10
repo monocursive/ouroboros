@@ -68,7 +68,7 @@ defmodule Ouroboros.Provider.Native.Tools.Capability do
   alias Ouroboros.Wasm.Capability, as: Wrapper
   alias Ouroboros.Wasm.Rollout
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "capability",
     description:
       "Reach a deployed WebAssembly capability on this node. `list` shows the live " <>
@@ -95,12 +95,13 @@ defmodule Ouroboros.Provider.Native.Tools.Capability do
 
   Hand-written for one reason: `message` is `type: :any` in the action schema, because a
   message body is whatever the capability's own contract says and NimbleOptions' `:map`
-  accepts atom keys only — and Jido's bridge renders `:any` as `string`, which would have
+  accepts atom keys only — and the generated schema renders `:any` as `string`, which would have
   told every model to send its JSON body as an encoded string. That is not a cosmetic
   difference: a string body reaches the guest as a JSON *string* rather than the object it
   wrote, and the capability refuses it.
   """
   @spec model_schema() :: map()
+  @impl true
   def model_schema do
     %{
       "type" => "object",

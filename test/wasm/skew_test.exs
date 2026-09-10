@@ -291,7 +291,7 @@ defmodule Ouroboros.Wasm.SkewTest do
     name = String.to_atom("wasm_skew_registry_#{System.unique_integer([:positive])}")
     table = String.to_atom("wasm_skew_rollouts_#{System.unique_integer([:positive])}")
 
-    {:ok, pid} = Registry.start_link(name: name, storage: {Jido.Storage.ETS, table: table})
+    {:ok, pid} = Registry.start_link(name: name, storage: {Ouroboros.Storage.ETS, table: table})
 
     on_exit(fn ->
       try do

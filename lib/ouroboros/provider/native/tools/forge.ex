@@ -115,7 +115,7 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Verifier
 
-  use Jido.Action,
+  use Ouroboros.Action,
     name: "forge",
     description:
       "Build, sign and deploy a WebAssembly capability this node will then run as a " <>
@@ -171,12 +171,13 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
 
   Hand-written for `Tools.Capability`'s reason and nothing else: `eval` is `type: :any` in
   the action schema, because an evaluation spec is a JSON object with string keys and
-  NimbleOptions' `:map` accepts atom keys only — and Jido's bridge renders `:any` as
+  NimbleOptions' `:map` accepts atom keys only — and the generated schema renders `:any` as
   `string`, which would have told every model to send its spec as an encoded string. A
   string there is not the object `Ouroboros.Upgrade.Rollout.Evaluation.validate/1` reads,
   and the forge would refuse it.
   """
   @spec model_schema() :: map()
+  @impl true
   def model_schema do
     %{
       "type" => "object",
