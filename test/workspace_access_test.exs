@@ -186,10 +186,28 @@ defmodule Ouroboros.WorkspaceAccessTest do
       assert result.is_error, "unexpected write to #{target}"
     end
 
+    # The nested protected name inside the delivery exception, case-insensitively — and for a
+    # name that is **there when the command starts**, which is the half both backends still
+    # claim. Seatbelt spells it `\.[gG][iI][tT]` in `OURO_EXCEPTION_DENY`; bubblewrap's walk
+    # downcases both sides and re-binds the directory read-only over the exception's own
+    # read-write bind. This used to be `mkdir .ouroboros/deliver/.GIT`, a *create*, which on
+    # Linux was denied only by the `LD_PRELOAD` name filter docs/proposals/core.md §4 A2
+    # deleted: no bind can name a destination that does not exist when the namespace is built.
+    # The Linux-only pair in `test/provider/native/sandbox_test.exs` states both halves of that
+    # narrowing; this file asserts only what is true on both backends.
+    nested_git = Path.join(c.tree.root, ".ouroboros/deliver/.GIT")
+    File.mkdir_p!(nested_git)
+
     nested =
-      Tools.execute(Bash, %{"command" => "mkdir .ouroboros/deliver/.GIT"}, approved, 30_000)
+      Tools.execute(
+        Bash,
+        %{"command" => "printf bad > '#{Path.join(nested_git, "config")}'"},
+        approved,
+        30_000
+      )
 
     assert nested.is_error
+    refute File.exists?(Path.join(nested_git, "config"))
   end
 
   defp git!(cwd, args) do
