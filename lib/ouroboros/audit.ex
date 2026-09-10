@@ -40,15 +40,17 @@ defmodule Ouroboros.Audit do
       else: {:ok, nil}
   end
 
-  def coverage(provider) do
-    native = provider in [:native, "native", Ouroboros.Provider.Native]
-
+  # One provider, and it runs its tool loop in this VM: every call crosses the runtime
+  # boundary here and the request is serialized before it reaches a transport. There is no
+  # longer a wrapped vendor process whose invocations this node could only take the
+  # provider's word for.
+  def coverage do
     %{
-      invocation: if(native, do: "runtime_boundary", else: "provider_reported"),
-      transport: if(native, do: "serialized_request_before_transport", else: "opaque"),
+      invocation: "runtime_boundary",
+      transport: "serialized_request_before_transport",
       downstream: "not_observable_without_instrumentation",
       capture: to_string(Config.current().capture),
-      required_supported: native
+      required_supported: true
     }
   end
 
@@ -96,12 +98,6 @@ defmodule Ouroboros.Audit do
     end
   catch
     _, _ -> {:error, :remote_audit_policy_unavailable}
-  end
-
-  def admit_provider(provider) do
-    if required?() and not coverage(provider).required_supported,
-      do: {:error, :provider_audit_coverage_insufficient},
-      else: :ok
   end
 
   def admit_scope(scope) do

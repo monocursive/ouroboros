@@ -1256,13 +1256,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp reasoning_efforts(assigns) do
     open_row = row(assigns.rows, assigns.open)
-
-    provider =
-      (open_row && open_row.provider) || (assigns.info && Map.get(assigns.info, :provider))
-
     model = reported(assigns, :model) || (open_row && open_row.model)
 
-    Ouroboros.Models.reasoning_efforts(provider, model)
+    Ouroboros.Models.reasoning_efforts(model)
   end
 
   # ------------------------------------------------------------------------------------
@@ -2351,9 +2347,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> Enum.map_join(" · ", &to_string/1)
   end
 
+  # A record written before the reduction still names the provider it ran under, and it is
+  # still listed with its history; the name it carries is drawn as it was stored.
   defp provider_name(:native), do: "Ouroboros AI"
-  defp provider_name(:claude_code), do: "Claude Code"
-  defp provider_name(:openai_codex), do: "Codex"
   defp provider_name(provider), do: provider
 
   # `unrestricted` is the one sandbox posture worth a tag: it is the session that can do

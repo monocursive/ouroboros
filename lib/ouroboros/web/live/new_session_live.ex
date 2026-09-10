@@ -87,21 +87,17 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:account, nil)
       |> assign(:login, nil)
       |> assign(:polling_account?, false)
-      |> assign(:grok_account, nil)
-      |> assign(:grok_login, nil)
-      |> assign(:polling_grok_account?, false)
       |> assign(:api_key_dialog?, false)
       |> assign(:api_key_error, nil)
       |> assign(:starting?, false)
       |> assign(:refusal, nil)
-      |> assign(:provider_invalid?, false)
       |> assign(:initial_message, starter(params["starter"]))
       |> assign(:default_workspace, File.cwd!())
       |> assign(:started_id, nil)
 
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
-    # serves no providers.
+    # knows of no models.
     {:ok, if(connected?(socket), do: socket |> load_machines() |> load(), else: socket)}
   end
 
@@ -114,7 +110,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           form
           | machine: machine,
             workspace: "",
-            provider: nil,
             model_choice: :runtime_default,
             model_text: "",
             effort: nil
@@ -184,15 +179,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     |> assign(:account, nil)
     |> assign(:login, nil)
     |> assign(:polling_account?, false)
-    |> assign(:grok_account, nil)
-    |> assign(:grok_login, nil)
-    |> assign(:polling_grok_account?, false)
     |> assign(:api_key_dialog?, false)
     |> assign(:api_key_error, nil)
     |> assign(:browse, nil)
     |> assign(:browse_refusal, nil)
     |> assign(:browse_open?, false)
-    |> assign(:provider_invalid?, false)
     |> assign(:refusal, nil)
     |> load_machines()
     |> load()
@@ -233,14 +224,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   def handle_event("change", params, socket) do
     form = params |> read_form(socket.assigns.form) |> reconcile(socket)
 
-    provider_invalid? =
-      socket.assigns.provider_invalid? and blank?(form.provider)
-
     {:noreply,
      socket
      |> assign(:form, form)
      |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
-     |> assign(:provider_invalid?, provider_invalid?)
      |> assign(:refusal, nil)}
   end
 
@@ -290,24 +277,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # on the *daemon's* 127.0.0.1, and this page may well be open on another machine over a
   # tailnet; a device code is the one flow that is correct either way.
   def handle_event("connect-chatgpt", _params, socket) do
-    case Ouroboros.Web.Live.AccountConnection.connect(socket, :chatgpt, &call/3, @account_poll) do
+    case Ouroboros.Web.Live.AccountConnection.connect(socket, &call/3, @account_poll) do
       {:ok, updated} -> {:noreply, assign(updated, :refusal, nil)}
       {:error, updated} -> {:noreply, updated}
     end
   end
 
   def handle_event("cancel-chatgpt", _params, socket),
-    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, :chatgpt, &call/3)}
-
-  def handle_event("connect-grok", _params, socket) do
-    case Ouroboros.Web.Live.AccountConnection.connect(socket, :grok, &call/3, @account_poll) do
-      {:ok, updated} -> {:noreply, assign(updated, :refusal, nil)}
-      {:error, updated} -> {:noreply, updated}
-    end
-  end
-
-  def handle_event("cancel-grok", _params, socket),
-    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, :grok, &call/3)}
+    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, &call/3)}
 
   def handle_event("open-anthropic-key", _params, socket) do
     cond do
@@ -445,11 +422,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
     api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
 
-    grok_account =
-      NewSession.grok_account_card(socket.assigns.grok_account, socket.assigns.grok_login)
-
-    grok_required? = NewSession.requires_grok?(form)
-
     cond do
       form.machine != "" and blank?(form.workspace) ->
         {:noreply,
@@ -465,28 +437,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
            detail: "Wait a moment, then start the session."
          })}
 
-      blank?(form.provider) ->
-        {:noreply,
-         socket
-         |> assign(:provider_invalid?, true)
-         |> assign(:refusal, nil)
-         |> push_event("focus-invalid", %{selector: "#provider"})}
-
-      not available_provider?(socket.assigns.providers, form.provider) ->
-        {:noreply,
-         assign(socket, :refusal, %{
-           message: "That AI provider is not available on this computer.",
-           detail: "Choose one marked available under Advanced settings."
-         })}
-
-      grok_required? and not grok_account.usable? and not (api_key && api_key.usable?) ->
-        {:noreply,
-         assign(socket, :refusal, %{
-           message: "Grok needs a SpaceXAI subscription or an xAI API key.",
-           detail: "Connect the first-party Grok CLI, or add an API key under Advanced settings."
-         })}
-
-      match?(%{managed?: false, usable?: false}, api_key) ->
+      match?(%{usable?: false}, api_key) ->
         {:noreply,
          assign(socket, :refusal, %{
            message: "A #{api_key.provider} API key is not available to the Ouroboros service.",
@@ -498,25 +449,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         {:noreply, send_initial(socket, socket.assigns.started_id)}
 
       true ->
-        case NewSession.start_params(form, field(socket)) do
-          {:error, message} ->
-            {:noreply, assign(socket, :refusal, %{message: message, detail: nil})}
-
-          {:ok, params} ->
-            {:noreply, start(socket, params)}
-        end
+        {:noreply, start(socket, NewSession.start_params(form, field(socket)))}
     end
   end
 
   @impl true
   def handle_info(:poll_account, socket),
-    do:
-      {:noreply,
-       Ouroboros.Web.Live.AccountConnection.poll(socket, :chatgpt, &call/3, @account_poll)}
-
-  def handle_info(:poll_grok_account, socket),
-    do:
-      {:noreply, Ouroboros.Web.Live.AccountConnection.poll(socket, :grok, &call/3, @account_poll)}
+    do: {:noreply, Ouroboros.Web.Live.AccountConnection.poll(socket, &call/3, @account_poll)}
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
@@ -534,8 +473,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     # A login this runtime already has in flight — started from the TUI, or from another
     # browser — is one this page should follow rather than ignore.
     |> maybe_poll_account()
-    |> read_grok_account()
-    |> maybe_poll_grok_account()
   end
 
   defp load_providers(socket) do
@@ -545,7 +482,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
         socket
         |> assign(:providers, rows)
-        |> assign(:form, choose_provider(socket.assigns.form, rows))
 
       refused ->
         assign(socket, :providers_error, message(refused))
@@ -572,16 +508,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # Read whenever the card is on screen, which is what makes "checking" a state that
   # resolves rather than a spinner.
   defp read_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.read(socket, :chatgpt, &call/3)
-
-  defp read_grok_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.read(socket, :grok, &call/3)
+    do: Ouroboros.Web.Live.AccountConnection.read(socket, &call/3)
 
   defp maybe_poll_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, :chatgpt, @account_poll)
-
-  defp maybe_poll_grok_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, :grok, @account_poll)
+    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, @account_poll)
 
   defp browse(socket, path) do
     params = if is_binary(path), do: %{"path" => path}, else: %{}
@@ -756,8 +686,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp read_form(params, form) do
     %{
       form
-      | provider: Map.get(params, "provider", form.provider),
-        workspace: Map.get(params, "workspace", form.workspace),
+      | workspace: Map.get(params, "workspace", form.workspace),
         model_text: Map.get(params, "model_text", form.model_text),
         model_search: Map.get(params, "model_search", form.model_search),
         model_choice: model_choice(params, form),
@@ -765,30 +694,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     }
   end
 
-  defp choose_provider(form, rows) do
-    available = Enum.filter(rows, & &1.detected?)
-
-    provider =
-      cond do
-        Enum.any?(available, &(&1.name == form.provider)) -> form.provider
-        Enum.any?(available, &(&1.name == "native")) -> "native"
-        available != [] -> hd(available).name
-        true -> nil
-      end
-
-    %{form | provider: provider}
-  end
-
-  defp available_provider?(rows, provider) when is_list(rows) do
-    Enum.any?(rows, &(&1.name == provider and &1.detected?))
-  end
-
-  defp available_provider?(_rows, _provider), do: false
-
-  # A model chosen under the previous provider is not necessarily a row under the new one,
-  # so the choice is re-checked against the field the change produced rather than carried.
+  # A model chosen before the catalogue arrived is not necessarily a row in it, so the
+  # choice is re-checked against the field the change produced rather than carried.
   defp reconcile(form, socket) do
-    field = NewSession.model_field(socket.assigns.catalogue, form.provider)
+    field = NewSession.model_field(socket.assigns.catalogue)
 
     form =
       if NewSession.offers?(field, form.model_choice),
@@ -800,8 +709,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       else: %{form | effort: nil}
   end
 
-  defp field(socket),
-    do: NewSession.model_field(socket.assigns.catalogue, socket.assigns.form.provider)
+  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue)
 
   defp model_choice(%{"model_choice" => value}, _form), do: NewSession.choice(value)
   defp model_choice(_params, form), do: form.model_choice
@@ -817,23 +725,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   @impl true
   def render(assigns) do
-    field = NewSession.model_field(assigns.catalogue, assigns.form.provider)
+    field = NewSession.model_field(assigns.catalogue)
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
-    grok_account = NewSession.grok_account_card(assigns.grok_account, assigns.grok_login)
-    grok_gated? = NewSession.requires_grok?(assigns.form)
     api_key = NewSession.api_key_card(assigns.form, field, assigns.providers)
     chatgpt_ready? = not gated? or account.usable?
-    grok_ready? = not grok_gated? or grok_account.usable? or (api_key && api_key.usable?)
-    api_key_required? = match?(%{managed?: false, usable?: false}, api_key)
-
-    advanced_required? =
-      assigns.provider_invalid?
-
+    api_key_required? = match?(%{usable?: false}, api_key)
     can_start? = Call.available?(assigns.scope, "interactive.start")
-
-    provider_ready? =
-      assigns.loaded? and available_provider?(assigns.providers, assigns.form.provider)
 
     assigns =
       assigns
@@ -847,20 +745,15 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:account_card, account)
       |> assign(:gated?, gated?)
       |> assign(:chatgpt_ready?, chatgpt_ready?)
-      |> assign(:grok_account_card, grok_account)
-      |> assign(:grok_gated?, grok_gated?)
-      |> assign(:grok_ready?, grok_ready?)
       |> assign(:api_key_card, api_key)
       |> assign(:api_key_required?, api_key_required?)
-      |> assign(:advanced_required?, advanced_required?)
       |> assign(
         :can_set_api_key?,
         Call.available?(assigns.scope, credential_method(api_key))
       )
       |> assign(:can_start?, can_start?)
-      |> assign(:provider_ready?, provider_ready?)
       |> assign(:can_browse?, Call.available?(assigns.scope, "workspace.browse"))
-      |> assign(:provider_label, provider_label(assigns.form.provider))
+      |> assign(:provider_label, NewSession.provider_route().name)
       |> assign(:machine_label, machine_label(assigns))
       |> assign(:locked?, not is_nil(assigns.pending_start) or not is_nil(assigns.started_id))
       |> assign(
@@ -951,15 +844,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             <p class="ouro-new-hint">This becomes the first message in the session.</p>
           </section>
 
-          <section :if={@gated? or @grok_gated? or is_map(@api_key_card)} aria-label="AI connection">
+          <section :if={@gated? or is_map(@api_key_card)} aria-label="AI connection">
             <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
             <.account_card :if={@gated?} card={@account_card} scope={@scope} />
-            <.grok_account_card
-              :if={@grok_gated?}
-              card={@grok_account_card}
-              scope={@scope}
-              api_key={@api_key_card}
-            />
             <.api_key_card
               :if={is_map(@api_key_card)}
               card={@api_key_card}
@@ -969,8 +856,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
           <details
             class="ouro-new-advanced"
-            data-ouro-disclosure={"setup:#{@advanced_required?}"}
-            open={@advanced_required?}
+            data-ouro-disclosure="setup:false"
           >
             <summary>
               <span>Advanced settings</span>
@@ -982,14 +868,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
                   )} · {sandbox_title(@form.sandbox)}
               </span>
             </summary>
-
-            <.provider_field
-              rows={@providers}
-              error={@providers_error}
-              invalid={@provider_invalid?}
-              loaded={@loaded?}
-              chosen={@form.provider}
-            />
 
             <.model_field
               field={@field}
@@ -1021,8 +899,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             disabled={
               not @can_start? or @starting? or
                 (not @locked? and
-                   (not @provider_ready? or (@form.machine != "" and @form.workspace == "") or
-                      not @chatgpt_ready? or not @grok_ready? or @api_key_required?))
+                   ((@form.machine != "" and @form.workspace == "") or
+                      not @chatgpt_ready? or @api_key_required?))
             }
           >
             {if @locked?,
@@ -1032,18 +910,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
                   @can_start?,
                   @starting?,
                   @chatgpt_ready?,
-                  @grok_ready?,
                   @api_key_required?,
                   @api_key_card
                 )}
           </button>
         </footer>
 
-        <p :if={not @loaded? and is_nil(@providers_error)} class="ouro-new-note" role="status">
-          Finding the available AI provider…
-        </p>
-        <p :if={@loaded? and not @provider_ready?} class="ouro-new-note" role="alert">
-          No supported AI provider is available on this computer.
+        <p :if={@providers_error} class="ouro-new-note" role="alert">
+          The runtime's provider status could not be read: {@providers_error}
         </p>
         <p :if={not @can_start?} class="ouro-new-note">
           This link is view-only. Ask the person who set up Ouroboros for permission to start
@@ -1064,81 +938,18 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     """
   end
 
-  defp start_label(false, _starting?, _chatgpt?, _grok?, _key?, _card), do: "Start session"
-  defp start_label(_can?, true, _chatgpt?, _grok?, _key?, _card), do: "Starting…"
-  defp start_label(_can?, _starting?, false, _grok?, _key?, _card), do: "Connect ChatGPT first"
+  defp start_label(false, _starting?, _chatgpt?, _key?, _card), do: "Start session"
+  defp start_label(_can?, true, _chatgpt?, _key?, _card), do: "Starting…"
+  defp start_label(_can?, _starting?, false, _key?, _card), do: "Connect ChatGPT first"
 
-  defp start_label(_can?, _starting?, _chatgpt?, false, _key?, _card),
-    do: "Connect Grok or add API key first"
-
-  defp start_label(_can?, _starting?, _chatgpt?, _grok?, true, card),
+  defp start_label(_can?, _starting?, _chatgpt?, true, card),
     do: "Add #{card.provider} API key first"
 
-  defp start_label(_can?, _starting?, _chatgpt?, _grok?, _key?, _card),
-    do: "Start session"
+  defp start_label(_can?, _starting?, _chatgpt?, _key?, _card), do: "Start session"
 
   defp credential_method(%{key: "anthropic"}), do: "credentials.anthropic.set"
   defp credential_method(%{key: "xai"}), do: "credentials.xai.set"
   defp credential_method(_card), do: "credentials.anthropic.set"
-  defp provider_label(provider), do: NewSession.provider_route(provider).name
-
-  defp provider_option_label(provider) do
-    route = NewSession.provider_route(provider)
-    "#{route.name} — #{route.short}"
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Provider
-  # ------------------------------------------------------------------------------------
-
-  attr :rows, :any, required: true
-  attr :error, :any, required: true
-  attr :invalid, :boolean, required: true
-  attr :loaded, :boolean, required: true
-  attr :chosen, :any, required: true
-
-  def provider_field(assigns) do
-    assigns = assign(assigns, :footnote, NewSession.provider_footnote(assigns.rows || []))
-
-    ~H"""
-    <section class="ouro-new-field" aria-labelledby="provider-label">
-      <div class="ouro-new-label-row">
-        <label class="ouro-new-label" id="provider-label" for="provider">AI provider</label>
-        <span class="ouro-new-aside">Automatically selected</span>
-      </div>
-
-      <select
-        id="provider"
-        class="ouro-new-select"
-        phx-hook="FocusInvalid"
-        name="provider"
-        required
-        disabled={not @loaded}
-        aria-invalid={to_string(@invalid)}
-        aria-describedby={if @invalid, do: "provider-error", else: nil}
-      >
-        <option value="" selected={is_nil(@chosen) or @chosen == ""}>No provider available</option>
-        <option
-          :for={row <- @rows || []}
-          value={row.name}
-          selected={@chosen == row.name}
-          disabled={not row.detected?}
-          class={if not row.detected?, do: "ouro-new-dim"}
-        >
-          {provider_option_label(row.name)}{if row.name == "native" and row.detected?,
-            do: " — recommended"}{if row.note, do: " — unavailable: #{row.note}"}
-        </option>
-      </select>
-
-      <p :if={@invalid} id="provider-error" class="ouro-refusal" role="alert">
-        choose an available AI provider before starting
-      </p>
-      <p :if={@error} class="ouro-refusal">The provider list could not be loaded: {@error}</p>
-      <p :if={not @loaded and is_nil(@error)} class="ouro-new-hint">Finding providers…</p>
-      <p :if={@footnote} class="ouro-new-hint">{@footnote}</p>
-    </section>
-    """
-  end
 
   # ------------------------------------------------------------------------------------
   # Model
@@ -1151,7 +962,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   attr :error, :any, required: true
 
   def model_field(assigns) do
-    assigns = assign(assigns, :route, NewSession.provider_route(assigns.form.provider))
+    assigns = assign(assigns, :route, NewSession.provider_route())
 
     ~H"""
     <section class="ouro-new-field" aria-labelledby="model-label">
@@ -1215,7 +1026,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       assigns
       |> assign(:rows, rows)
       |> assign(:recommended_rows, Enum.filter(rows, &(&1.choice == :runtime_default)))
-      |> assign(:model_groups, NewSession.model_groups(rows, assigns.form.provider))
+      |> assign(:model_groups, NewSession.model_groups(rows))
       |> assign(:custom_rows, Enum.filter(rows, &(&1.choice == :custom)))
       |> assign(:matched, NewSession.listed(assigns.visible))
       |> assign(:custom?, assigns.form.model_choice == :custom)
@@ -1622,97 +1433,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp account_aside(:connected), do: "Connected"
   defp account_aside(:waiting), do: "Waiting"
   defp account_aside(:required), do: "Required"
-
-  # ------------------------------------------------------------------------------------
-  # Grok subscription
-  # ------------------------------------------------------------------------------------
-
-  attr :card, :map, required: true
-  attr :scope, :atom, required: true
-  attr :api_key, :any, required: true
-
-  def grok_account_card(assigns) do
-    assigns =
-      assign(
-        assigns,
-        :can_login?,
-        Call.available?(assigns.scope, "grok.account.login.start")
-      )
-
-    ~H"""
-    <section class="ouro-new-field ouro-account" aria-labelledby="grok-account-label">
-      <div class="ouro-new-label-row">
-        <span class="ouro-new-label" id="grok-account-label">SpaceXAI subscription</span>
-        <span class="ouro-new-aside">
-          {grok_account_aside(@card.state, @api_key)}
-        </span>
-      </div>
-
-      <p :if={@card.state == :checking} class="ouro-new-hint">
-        Reading Grok CLI account readiness…
-      </p>
-
-      <p :if={@card.state == :connected} class="ouro-new-hint">
-        The first-party Grok Build CLI is connected{if @card.identity,
-          do: " as #{@card.identity}"}. It owns and refreshes the subscription tokens;
-        Ouroboros never reads them.
-      </p>
-
-      <p :if={@card.state == :required} class="ouro-new-hint">
-        Connect an eligible SpaceXAI subscription through the first-party Grok Build CLI.
-        You can use an xAI API key instead; API usage is billed separately from a subscription.
-      </p>
-
-      <div :if={@card.state == :waiting} class="ouro-account-wait">
-        <p class="ouro-new-hint">
-          Open the link, confirm that the code matches, then come back here.
-        </p>
-        <p :if={@card.code} class="ouro-account-code ouro-mono">{@card.code}</p>
-        <p :if={@card.url}>
-          <a
-            :if={NewSession.https?(@card.url)}
-            href={@card.url}
-            rel="noreferrer noopener"
-            target="_blank"
-          >
-            {@card.url}
-          </a>
-          <span :if={not NewSession.https?(@card.url)} class="ouro-mono">
-            {@card.url} — shown but not linked: it is not https.
-          </span>
-        </p>
-      </div>
-
-      <p :if={@card.error} class="ouro-refusal">{@card.error}</p>
-
-      <div class="ouro-new-row">
-        <button
-          :if={@card.state in [:required, :checking]}
-          type="button"
-          class="ouro-new-secondary"
-          phx-click="connect-grok"
-          disabled={not @can_login?}
-        >
-          Connect subscription
-        </button>
-        <button
-          :if={@card.state == :waiting}
-          type="button"
-          class="ouro-new-secondary"
-          phx-click="cancel-grok"
-        >
-          Cancel
-        </button>
-      </div>
-    </section>
-    """
-  end
-
-  defp grok_account_aside(:checking, _api_key), do: "Checking"
-  defp grok_account_aside(:connected, _api_key), do: "Connected"
-  defp grok_account_aside(:waiting, _api_key), do: "Waiting"
-  defp grok_account_aside(:required, %{usable?: true}), do: "Optional"
-  defp grok_account_aside(:required, _api_key), do: "One option required"
 
   # ------------------------------------------------------------------------------------
   # Direct API key

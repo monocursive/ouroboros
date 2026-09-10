@@ -155,11 +155,6 @@ config :ouroboros,
       do: Ouroboros.Test.OpenAIAccountAdapter,
       else: Ouroboros.Provider.OpenAIAuth
     ),
-  grok_account_adapter:
-    if(config_env() == :test,
-      do: Ouroboros.Test.GrokAccountAdapter,
-      else: Ouroboros.Provider.GrokAuth
-    ),
   # MCP servers the native agent may call (D4). Somebody else's program on the end of a
   # pipe, so everything here is a bound and `Ouroboros.Provider.Native.Mcp.Config`
   # refuses a value that would remove one. Empty by default: nothing is spawned that an

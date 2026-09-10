@@ -9,7 +9,7 @@ defmodule Ouroboros.Web.Prefs do
   no such file, and the daemon it is driving may be on a different machine entirely, so
   `docs/WEB.md` §4 (D10) gives the web surface its own home in the data directory. The
   split it draws is the one this module implements: things that describe *the work* —
-  which provider, which model, which workspace, what sandbox, how much thinking — are
+  which model, which workspace, what sandbox, how much thinking — are
   facts about this runtime and belong beside it; per-browser conveniences (the theme, a
   collapsed section) stay in `localStorage`, where a second operator's tab cannot inherit
   them.
@@ -57,7 +57,7 @@ defmodule Ouroboros.Web.Prefs do
   # The setup choices `interactive.start` takes, including the computer owning the folder.
   # `id` is deliberately absent: it is minted per form and idempotency is the whole reason
   # it exists, so a remembered one would adopt a session the operator already finished.
-  @keys ["machine", "provider", "model", "workspace", "sandbox_mode", "reasoning_effort"]
+  @keys ["machine", "model", "workspace", "sandbox_mode", "reasoning_effort"]
 
   # Closed vocabularies, restated here rather than reached for through the LiveView layer:
   # this module is read at mount and must not depend on anything that draws.
