@@ -25,7 +25,7 @@ to it — line-framed JSON-RPC over loopback TCP (`lib/ouroboros/gateway/listene
 — has the bounded outbound queue and the `stream.lagged` protocol the in-process path
 lacks (`lib/ouroboros/gateway/conn.ex:849-913`), and a browser cannot speak it because the
 gateway has no HTTP or WebSocket transport; that was filed as roadmap item **H4** and is
-still `pending` (`docs/AGENT_EXPERIENCE.md:162`, `:863`). The option-preserving move is to
+still `pending` (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md:162`, `:863`). The option-preserving move is to
 grow that transport and let the existing LiveView become a client of it, which retires
 `Web.Call` and the pid subscription while keeping Phoenix, `Phoenix.LiveViewTest`, and the
 transcript parity lock — the three things the GPUI deletion was paid for. The alternative
@@ -122,9 +122,9 @@ slice.
   the LiveView makes. The `@replay_limit 500` bound belongs to `*.replay`
   (`lib/ouroboros/gateway/methods.ex:142`, `:635`), not to `subscribe`.
 - **H4 is the roadmap trace.** `| H4 | pending | HTTP/SSE |`
-  (`docs/AGENT_EXPERIENCE.md:162`); scoped as "**H4 HTTP/SSE bridge** — `ouro serve --http`
+  (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md:162`); scoped as "**H4 HTTP/SSE bridge** — `ouro serve --http`
   for web clients and an OpenCode-style SDK shape", size M, Phase 4, and with its
-  Acceptance column left as `—` (`AGENT_EXPERIENCE.md:863`); scheduled in Phase 4
+  Acceptance column left as `—` (`research/agent-ux-2026/AGENT_EXPERIENCE.md:863`); scheduled in Phase 4
   (`:912`); and §11 Deferred names "a web dashboard and phone surface beyond what ACP
   clients and H4 provide" (`:1010`). So the transport has a roadmap slot, no acceptance
   criteria, and no owner.
@@ -319,7 +319,7 @@ harness.
 
 There is a genuine case for B — a browser client over a documented protocol is what an
 external SDK consumer would use, and it is the shape H4 gestures at
-(`AGENT_EXPERIENCE.md:863`, "an OpenCode-style SDK shape"). It is not a case that should be
+(`research/agent-ux-2026/AGENT_EXPERIENCE.md:863`, "an OpenCode-style SDK shape"). It is not a case that should be
 made seven days after the opposite decision, on a surface whose acceptance checklist has
 not yet been walked once end to end (`WEB.md:601-608`).
 
@@ -544,7 +544,7 @@ learn a second discovery mechanism. `web.json` carries `birth` the same way
 
 ### What the transport deliberately does not do
 
-No SSE. H4 names "HTTP/SSE" (`AGENT_EXPERIENCE.md:162`, `:863`), and SSE is the wrong
+No SSE. H4 names "HTTP/SSE" (`research/agent-ux-2026/AGENT_EXPERIENCE.md:162`, `:863`), and SSE is the wrong
 shape for this protocol: it is one-directional, so requests would need a second channel,
 and the `Conn` would then own two half-connections whose lifecycles could disagree. If an
 SSE bridge is ever wanted for a consumer that cannot hold a socket, it is a separate
@@ -733,7 +733,7 @@ of it written in the language the server is written in. Today the protocol's onl
 client is Rust, which means every claim about "the protocol is enough to build a surface
 on" is a claim about one implementation by one author in one language. T2 plus T4 would
 make the web an existence proof, and the corpus would keep it honest. It delivers H4's
-substance (`AGENT_EXPERIENCE.md:863`) at H4's stated size, with the acceptance criteria
+substance (`research/agent-ux-2026/AGENT_EXPERIENCE.md:863`) at H4's stated size, with the acceptance criteria
 that row has never had. And it turns "should the runtime be a daemon" from an argument
 into a measurement: after T4 the browser's latency, its behaviour under lag, and its
 behaviour under caps are all observable facts rather than predictions.

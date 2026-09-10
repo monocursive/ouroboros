@@ -5,7 +5,7 @@ defmodule Ouroboros.Provider.Native do
   Every other provider drives a vendor CLI. Ouroboros hands it a request, polls its
   events, and is never in the loop where a tool actually runs — so it cannot ask before
   a command executes, fold a conversation it does not hold, or veto anything
-  (`docs/AGENT_EXPERIENCE.md` §3.3 F1/F2/F5). This adapter is the one place that is not
+  (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md` §3.3 F1/F2/F5). This adapter is the one place that is not
   true: the model call, the tool dispatch, and the file writes all happen here, which is
   why it is the only honest home for permission rules, MCP, hooks, compaction and
   checkpoints (§4.3, D1).

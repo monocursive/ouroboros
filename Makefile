@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -26,7 +26,8 @@ help:
 	@echo "make stop             everything down: daemon, and any stray daemons"
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
-	@echo "make test             formatting, script checks, mix test, cargo test/fmt/clippy"
+	@echo "make test             formatting, script checks, mix test, the boot gate, cargo test/fmt/clippy"
+	@echo "make boot-gate        the pre-reduction data directory booted against this tree, 10x per mode"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make self-export      write this node's promoted policy + record into priv/self/"
@@ -196,15 +197,28 @@ wasm-skew-test:
 # client never waits on a release, which also means the extractor is not compiled — and an
 # extractor nobody compiled is an extractor nobody tested.
 test:
-	@echo "==> test: formatting and scripts, then mix and Rust with both feature sets"
+	@echo "==> test: formatting and scripts, then mix, the boot gate, and Rust with both feature sets"
 	$(MIX) format --check-formatted
 	sh scripts/test-dev.sh
 	SHELL="$(SHELL)" $(MIX) test
+	$(MAKE) boot-gate
 	cd tui && $(CARGO) test
 	cd tui && $(CARGO) test --features embed
 	cd tui && $(CARGO) fmt --check
 	cd tui && $(CARGO) clippy --all-targets -- -D warnings
 	cd tui && $(CARGO) clippy --all-targets --features embed -- -D warnings
+
+# The integration gate of the core reduction (docs/proposals/core.md, "Status"): the data
+# directory `dev` wrote at 3bc8887, holding every durable shape the reduction retired, booted
+# against this tree ten times under interactive code loading and ten times with every module
+# preloaded, each against a fresh copy, with every count compared against the record in
+# test/support/integration_fixture/README.md. It needs an `ouro` binary for the
+# process-incarnation helper (`make ouro`'s, or a debug build it makes itself) and it boots in
+# the development environment, where that helper is required exactly as it is on a real node.
+boot-gate:
+	@echo "==> boot-gate: the pre-reduction data directory, booted against this tree"
+	MIX_ENV=dev $(MIX) compile
+	sh scripts/fixture/boot_gate.sh
 
 # Deliberately not part of `make test`: the first run builds a PLT and even incremental
 # runs are minutes, not the seconds `mix test` is supposed to stay. CI has its own job.

@@ -1,15 +1,21 @@
 # Ouroboros Agent Experience: the 2026 bar, the map, and the plan
 
+> Moved under `docs/research/` by the core reduction's last slice (September 2026), beside
+> the dated reports it synthesises. It is a survey and a plan, not a description of the
+> tree, and its scorecards are left as they were written; a citation below into a file the
+> reduction deleted resolves at `dev` `3bc8887`, and one into a file that predates that at
+> the `review-fixes` commit it names.
+
 Status: research and plan written 2026-08-22 on branch `review-fixes`, with a dated status
 section (§0a) recording what the implementation waves delivered. Below §0a nothing is
 implemented unless it links to code that exists today; every scorecard
-claim about the field cites a report in [research/agent-ux-2026/](research/agent-ux-2026/)
+claim about the field cites a report in [research/agent-ux-2026/]()
 and every claim about this codebase was re-read in the source. Companion to
-[ARCHITECTURE.md](ARCHITECTURE.md), [TUI.md](TUI.md), and [FLEET.md](FLEET.md).
+[ARCHITECTURE.md](../../ARCHITECTURE.md), [TUI.md](../../TUI.md), and [FLEET.md](../../FLEET.md).
 
 > **Superseded in part, September 2026.** Everything this document records about teams,
 > delegation (G1), the orchestration DAG and the control planner describes a plane that
-> was deleted; see [the core reduction](proposals/core.md) §3 D3. The rows are left as
+> was deleted; see [the core reduction](../../proposals/core.md) §3 D3. The rows are left as
 > the dated record they are. A session hands work to a child through the native `agent`
 > tool now, and the child's progress arrives as `subagent` events in its parent's
 > transcript.
@@ -18,7 +24,7 @@ and every claim about this codebase was re-read in the source. Companion to
 > the ACP client, the per-provider capability matrix, the C2 Claude approval bridge
 > (`--permission-prompt-tool` → `mcp__ouroboros__approve` → `interactive.request_approval`)
 > and the E3 `mcp-serve` code-intelligence tools are all deleted; `:native` is the only
-> provider. See [the core reduction](proposals/core.md) §3 D2. Every scorecard row that
+> provider. See [the core reduction](../../proposals/core.md) §3 D2. Every scorecard row that
 > compares this runtime to Claude Code, Codex, Gemini, OpenCode, Amp, Grok, Kimi, Pi or
 > Z.ai is a dated reading of *those products*, and stays; every row that describes
 > Ouroboros *driving* one of them describes a plane that is gone.
@@ -71,7 +77,7 @@ nobody holds.
 > `ouro hook post-tool-use` — and desktop automation — `desktop_state`, `desktop_act`,
 > the `computer_use.*` verbs and the helper — no longer exist. Every E1/E2/E3 and
 > Computer Use line below, and row 13 of both scorecards, is a record of what was built,
-> not of what ships. See [docs/proposals/core.md](proposals/core.md) §4 A3 and A4.
+> not of what ships. See [docs/proposals/core.md](../../proposals/core.md) §4 A3 and A4.
 
 Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
 was. This section records what the implementation waves of 2026-08-22/23 delivered on
@@ -165,7 +171,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire); client `/rewind` as a menu with per-row warnings then a three-way `what` chooser, `Esc Esc` offers `r` where checkpoints exist; the facade now admits turn-id strings, not only ordinals |
 | D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire. Until 2026-08-23 no session could write inside a worktree on a node with a data directory — worktrees live under `<data_dir>/worktrees` and the protected-path rule denied the whole data directory; neither D7 test wrote through a session's tools. The rule now exempts the worktree root (its `.git`/`.ouroboros` stay protected) and both OS-sandbox backends re-allow a writable root nested in a protected one |
 | D8 | landed | Terminal-Bench adapter (`bench/terminal-bench/`, needs Linux + docker + a key for a number) and the local corpus (`make bench-local`: 17 scripted-model tasks through a real daemon and the real `ouro run`, 17 / 17); the corpus caught a stale-binary resolver bug and a `files_changed` double count |
-| E1 | removed | was: a per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops. Deleted by the core reduction (§4 A3 of [core.md](proposals/core.md)) |
+| E1 | removed | was: a per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops. Deleted by the core reduction (§4 A3 of [core.md](../../proposals/core.md)) |
 | E2 | removed | was: diagnostics after edit in the native loop, and a `PostToolUse` hook for bridged Claude sessions. Deleted by the core reduction |
 | E3 | removed | was: the `code_intel` tool, the `code_intel.*` wire verbs, and three `mcp-serve` tools for Claude. Deleted by the core reduction |
 | E4 | dropped | `@symbol`, jump-to-definition — the plane it would have been built on is gone |
@@ -208,7 +214,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
 | 11 | Sandboxing / isolation | 1 | 3 (worktrees on both planes; native `bash` under `sandbox-exec` on macOS with `.git` and the runtime's own config read-only and network off by default; `bwrap` argv pinned but unverified; no seccomp, no domain allowlist; command hooks and checks sandboxed when a backend exists, ignored otherwise) |
 | 12 | MCP & tool ecosystem | 0 | 2 (native agent consumes stdio MCP servers by name with bounds and permissions; Ouroboros also *serves* MCP to Claude; hooks and skills landed; no HTTP/OAuth, no `ouro mcp add`) |
-| 13 | LSP / semantic navigation | 0 | 0 (built to 3, then deleted by the core reduction: [core.md](proposals/core.md) §4 A3) |
+| 13 | LSP / semantic navigation | 0 | 0 (built to 3, then deleted by the core reduction: [core.md](../../proposals/core.md) §4 A3) |
 | 14 | Git-native flow | 0 | 1 (worktrees) |
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway; `ouro --continue` finds this directory's newest session on any machine) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
@@ -289,7 +295,7 @@ offer a first-party tool. That is no longer true for `:native`.
 `Ouroboros.Provider.Native` is an in-process agent with its own tool loop — read, edit,
 bash, grep, MCP, approvals, sandbox. Vendor sessions still
 run their tools inside the vendor CLI; Native does not wrap those CLIs in a second
-loop. See [docs/REPLAY.md](REPLAY.md) §11 and `lib/ouroboros/provider/native.ex`.
+loop. See [docs/REPLAY.md](../../REPLAY.md) §11 and `lib/ouroboros/provider/native.ex`.
 ACP fs/terminal methods exist beside that loop. Historical F1 remains the constraint
 on **vendor** transports.
 
@@ -306,52 +312,52 @@ primary source for every non-obvious claim and to tag anything it could not conf
 
 | Report | Lens | Where |
 |---|---|---|
-| R1 | Interaction model: compose, modes, turn control, sessions, multi-agent, onboarding | [research/agent-ux-2026/R1-interaction-model.md](research/agent-ux-2026/R1-interaction-model.md) |
-| R2 | Display and rendering: transcript, tool cells, diffs, footer, widgets, performance | [R2-display-rendering.md](research/agent-ux-2026/R2-display-rendering.md) |
-| R3 | Tool surface, permissions, extensibility, embedding protocols | [R3-tools-permissions-extensibility.md](research/agent-ux-2026/R3-tools-permissions-extensibility.md) |
-| R4 | LSP and code intelligence | [R4-lsp-code-intelligence.md](research/agent-ux-2026/R4-lsp-code-intelligence.md) |
-| R5 | The 2026 landscape, complaints, demand signals, and a 25-row scorecard | [R5-landscape-and-scorecard.md](research/agent-ux-2026/R5-landscape-and-scorecard.md) |
+| R1 | Interaction model: compose, modes, turn control, sessions, multi-agent, onboarding | [research/agent-ux-2026/R1-interaction-model.md](R1-interaction-model.md) |
+| R2 | Display and rendering: transcript, tool cells, diffs, footer, widgets, performance | [R2-display-rendering.md](R2-display-rendering.md) |
+| R3 | Tool surface, permissions, extensibility, embedding protocols | [R3-tools-permissions-extensibility.md](R3-tools-permissions-extensibility.md) |
+| R4 | LSP and code intelligence | [R4-lsp-code-intelligence.md](R4-lsp-code-intelligence.md) |
+| R5 | The 2026 landscape, complaints, demand signals, and a 25-row scorecard | [R5-landscape-and-scorecard.md](R5-landscape-and-scorecard.md) |
 
 Three read-only codebase maps over this branch (`review-fixes`, 665 Elixir + 501 Rust tests):
 
 | Report | Scope | Where |
 |---|---|---|
-| M1 | Provider event → gateway stream → TUI cell: every kind, every limit | [M1-display-pipeline-map.md](research/agent-ux-2026/M1-display-pipeline-map.md) |
-| M2 | Keys, slash commands, composer, gateway methods, what the TUI never calls | [M2-interaction-map.md](research/agent-ux-2026/M2-interaction-map.md) |
-| M3 | Harness adapters, dialects, ownership line, extension seams | [M3-provider-tool-layer-map.md](research/agent-ux-2026/M3-provider-tool-layer-map.md) |
+| M1 | Provider event → gateway stream → TUI cell: every kind, every limit | [M1-display-pipeline-map.md](M1-display-pipeline-map.md) |
+| M2 | Keys, slash commands, composer, gateway methods, what the TUI never calls | [M2-interaction-map.md](M2-interaction-map.md) |
+| M3 | Harness adapters, dialects, ownership line, extension seams | [M3-provider-tool-layer-map.md](M3-provider-tool-layer-map.md) |
 
 Every codebase claim that a decision below rests on was re-read in the source by the
 author of this document, not taken from a report. The verified set: the `Ignore` arm that
-drops 19 of 29 event kinds ([model/transcript.rs:163](../tui/src/model/transcript.rs));
-the one-line tool result ([transcript_cells.rs:880](../tui/src/ui/transcript_cells.rs));
-`DIFF_LINES = 12` and the other render caps ([transcript_cells.rs:26-34](../tui/src/ui/transcript_cells.rs));
-the subject-only approval modal ([view.rs:395-411](../tui/src/ui/view.rs)); the 29 Harness
-event types ([event.ex:15-46](../deps/jido_harness/lib/jido_harness/event.ex)); the absence
+drops 19 of 29 event kinds ([model/transcript.rs:163](../../../tui/src/model/transcript.rs));
+the one-line tool result ([transcript_cells.rs:880](../../../tui/src/ui/transcript_cells.rs));
+`DIFF_LINES = 12` and the other render caps ([transcript_cells.rs:26-34](../../../tui/src/ui/transcript_cells.rs));
+the subject-only approval modal ([view.rs:395-411](../../../tui/src/ui/view.rs)); the 29 Harness
+event types ([event.ex:15-46](../../../deps/jido_harness/lib/jido_harness/event.ex)); the absence
 of any bell, OSC 9/777 notification, or tab-title write (only OSC 52 exists,
-[mod.rs:300](../tui/src/ui/mod.rs)); the structured turn envelope
-([methods.ex:1433-1447](../lib/ouroboros/gateway/methods.ex)) and `@start_options`
-([methods.ex:261-275](../lib/ouroboros/gateway/methods.ex)); zero TUI call sites for
+[mod.rs:300](../../../tui/src/ui/mod.rs)); the structured turn envelope
+([methods.ex:1433-1447](../../../lib/ouroboros/gateway/methods.ex)) and `@start_options`
+([methods.ex:261-275](../../../lib/ouroboros/gateway/methods.ex)); zero TUI call sites for
 `teams.delegate`/`teams.add_worker`; `steer/3` returning `{:error, :unsupported}` in both
-dialects ([acp.ex:107](../lib/ouroboros/provider/session/dialect/acp.ex),
-[codex.ex:101](../lib/ouroboros/provider/session/dialect/codex.ex)) with only `pi`
-declaring `steer: :native` ([pi.ex:142](../deps/jido_harness/lib/jido_harness/adapters/pi.ex));
-`mcp_config` in `@rejected_inline_options` ([task_state.ex:28](../lib/ouroboros/coding/task_state.ex));
+dialects ([acp.ex:107](../../../lib/ouroboros/provider/session/dialect/acp.ex),
+[codex.ex:101](../../../lib/ouroboros/provider/session/dialect/codex.ex)) with only `pi`
+declaring `steer: :native` ([pi.ex:142](../../../deps/jido_harness/lib/jido_harness/adapters/pi.ex));
+`mcp_config` in `@rejected_inline_options` ([task_state.ex:28](../../../lib/ouroboros/coding/task_state.ex));
 managed transports declaring no `approvals` capability
-([transport_spec.ex:56-83](../deps/jido_harness/lib/jido_harness/session/transport_spec.ex));
+([transport_spec.ex:56-83](../../../deps/jido_harness/lib/jido_harness/session/transport_spec.ex));
 the Claude adapter's argv carrying `--permission-mode` but never `--permission-prompt-tool`
-([claude.ex:87-108,161-163](../deps/jido_harness/lib/jido_harness/adapters/claude.ex));
-the per-turn prompt seam `expose_turn_request/2` ([task.ex:811-817](../lib/ouroboros/interactive/task.ex));
+([claude.ex:87-108,161-163](../../../deps/jido_harness/lib/jido_harness/adapters/claude.ex));
+the per-turn prompt seam `expose_turn_request/2` ([task.ex:811-817](../../../lib/ouroboros/interactive/task.ex));
 the ACP catch-all that turns `diff` into an opaque `provider_event`
-([acp.ex:190-200](../lib/ouroboros/provider/session/dialect/acp.ex)); the Codex app-server
-capabilities omitting `multimodal` ([codex.ex:25-36](../lib/ouroboros/provider/session/dialect/codex.ex));
+([acp.ex:190-200](../../../lib/ouroboros/provider/session/dialect/acp.ex)); the Codex app-server
+capabilities omitting `multimodal` ([codex.ex:25-36](../../../lib/ouroboros/provider/session/dialect/codex.ex));
 `:settings` absent from `@durable_provider_options`; no DEC-2026 synchronized-output
 bracket anywhere in `tui/src`; `provider_session_id` durable in `Interactive.State`
-([state.ex:30,87,365](../lib/ouroboros/interactive/state.ex)) while recovery still calls
-`lose/2` on `:not_found` ([task.ex:384](../lib/ouroboros/interactive/task.ex)).
+([state.ex:30,87,365](../../../lib/ouroboros/interactive/state.ex)) while recovery still calls
+`lose/2` on `:not_found` ([task.ex:384](../../../lib/ouroboros/interactive/task.ex)).
 
-One docs/code drift was found on the way and is listed under §6: [TUI.md](TUI.md) says
+One docs/code drift was found on the way and is listed under §6: [TUI.md](../../TUI.md) says
 `Ctrl-E` toggles event details; the code binds `Ctrl-O`
-([app.rs:5929](../tui/src/ui/app/)) and `Ctrl-E` opens `$EDITOR`.
+([app.rs:5929](../../../tui/src/ui/app/)) and `Ctrl-E` opens `$EDITOR`.
 
 Caveats carried over from the reports: the Stack Overflow 2026 survey has not published
 results (articles citing it recycle 2025 data); Codex TUI key tables and Antigravity
@@ -494,38 +500,38 @@ has it and Ouroboros neither adds to nor surfaces it.
 
 | # | Capability | Score | Evidence |
 |---|---|---|---|
-| 1 | Edit reliability & self-verification | 1 (inherited) | Ouroboros runs no tool loop; every tool executes inside the vendor CLI child ([M3 §1.3](research/agent-ux-2026/M3-provider-tool-layer-map.md)). Nothing in `lib/` verifies an edit, runs a test, or feeds a diagnostic back. |
+| 1 | Edit reliability & self-verification | 1 (inherited) | Ouroboros runs no tool loop; every tool executes inside the vendor CLI child ([M3 §1.3](M3-provider-tool-layer-map.md)). Nothing in `lib/` verifies an edit, runs a test, or feeds a diagnostic back. |
 | 2 | Benchmark standing | 0 | Not submitted; as a harness-of-harnesses it would score whatever the vendor scores. |
-| 3 | Token efficiency & cost | 0 | `:usage` events (with `input_tokens`, `output_tokens`, `total_tokens`, and for Claude `cost_usd`/`duration_ms`/`num_turns`, [claude_stream.ex:61-71,122-128](../deps/jido_harness/lib/jido_harness/adapters/cli_mapper/claude_stream.ex)) reach the client and hit the `Ignore` arm. No cost or context figure is shown anywhere. |
-| 4 | Responsiveness | 1 | Streaming deltas work end to end. But every managed-transport turn (claude, gemini, amp, grok, zai, codex-exec) is a fresh process: `process: :per_turn` ([transport_spec.ex:62](../deps/jido_harness/lib/jido_harness/session/transport_spec.ex)), `claude --print --resume <id>` each time — a CLI cold start per turn. The coordinator polls Harness at 25 ms ([task.ex:16](../lib/ouroboros/interactive/task.ex)). ACP and Codex app-server sessions are persistent. |
-| 5 | Steering mid-turn | 1 | Esc/Ctrl-C → `interactive.interrupt` works. `follow_up` is a durable server-side queue, but the client refuses a second Enter while one call is unacknowledged and shows no queue ([app.rs:6145-6154](../tui/src/ui/app/)). `steer` is `{:error, :unsupported}` for every provider except `pi` — the durable-steer work on this branch is live for one provider. |
-| 6 | Plan / approval flow | 0 | No plan mode. The approval modal renders a one-line subject and four fixed answers; it never shows a diff, cwd, or the provider's own option labels ([view.rs:395-411](../tui/src/ui/view.rs)). Approvals exist only on Codex app-server and ACP (`approvals: :native`); managed transports declare none, and the Claude adapter never passes `--permission-prompt-tool` — so a Claude session under the plane default `approval_mode: :prompt` has its permission-needing tools **silently denied** by `claude --print`, and a working Claude session requires `auto_edit` or `auto_approve`. There is no human in the loop for the most-used provider. |
-| 7 | Input ergonomics | 1 | The composer is genuinely good: grapheme-accurate readline, 100-entry history, `/` and `@` completion over a 4,000-file index, bracketed paste, `$EDITOR`, OSC 52 copy ([editor.rs](../tui/src/ui/editor.rs)). But `@path` is text substitution — the structured `{prompt, attachments[≤32], reasoning_effort}` envelope the gateway accepts ([methods.ex:1433-1447](../lib/ouroboros/gateway/methods.ex)) is never sent ([app.rs:6191-6194](../tui/src/ui/app/)); no image paste; no `!`; no vim; no session/agent mentions; 28 compile-time slash commands, all navigation. |
-| 8 | TUI rendering correctness | 1 | ratatui alt-screen, 80 ms tick, no synchronized-output bracket, mouse captured for wheel only (native selection dead, no hint), no scrollback escape hatch, no images ([mod.rs:209-227,451-459](../tui/src/ui/mod.rs)). Hand-rolled unicode-width wrapping and a measured viewport are solid. |
-| 9 | Work visibility | 1 | Tool rows correlate call/result by `call_id`; file and diff cells exist. But `thinking_delta`, `plan_updated`, `turn_completed`, `usage`, `queue_changed`, `provider_event` are all dropped ([model/transcript.rs:163](../tui/src/model/transcript.rs)); a tool result shows **one** wrapped line; a diff shows 12 raw lines; Ctrl-O is a flat `key=value` dump, not a tree; Agents/Teams tabs are read-only JSON explorers. |
-| 10 | Permission model | 1 | `approval_mode` ∈ default/prompt/auto_edit/auto_approve and `sandbox_mode` ∈ default/read_only/workspace_write/unrestricted, **at start only** ([methods.ex:239-251](../lib/ouroboros/gateway/methods.ex)); a read-only session cannot be promoted, a new one is started ([app.rs:5513-5520](../tui/src/ui/app/)). No allow/deny rules, no classifier, no per-tool scope. `Control.Grants` gate six mesh effects, never a vendor tool call ([grants.ex:68-78](../lib/ouroboros/control/grants.ex)). |
-| 11 | Sandboxing / isolation | 1 | Vendor sandboxes are selected by argv (Codex `sandboxPolicy`, Claude `--settings` sandbox block). Ouroboros-owned isolation is real but narrow: symlink-safe workspace admission with exclusive/shared-read leases ([workspace.ex:71-78](../lib/ouroboros/workspace.ex)), umask 077 on the runtime / 022 on provider children. No worktrees ("intentionally outside this component", [workspace.ex:10-13](../lib/ouroboros/workspace.ex)); no OS sandbox of its own. |
-| 12 | MCP & tool ecosystem | 0 | `mcp_config` is refused at Ouroboros's own API on both planes ([task_state.ex:28,198-199](../lib/ouroboros/coding/task_state.ex)) although claude/zai/amp (`--mcp-config`) and ACP (`mcpServers` on `session/new`, [acp.ex:72](../lib/ouroboros/provider/session/dialect/acp.ex)) could carry it. No MCP client, no hooks, no plugins, no skills reachable (`AgentProfile.skills` exists but `agent_profile` is not a start option). |
+| 3 | Token efficiency & cost | 0 | `:usage` events (with `input_tokens`, `output_tokens`, `total_tokens`, and for Claude `cost_usd`/`duration_ms`/`num_turns`, [claude_stream.ex:61-71,122-128](../../../deps/jido_harness/lib/jido_harness/adapters/cli_mapper/claude_stream.ex)) reach the client and hit the `Ignore` arm. No cost or context figure is shown anywhere. |
+| 4 | Responsiveness | 1 | Streaming deltas work end to end. But every managed-transport turn (claude, gemini, amp, grok, zai, codex-exec) is a fresh process: `process: :per_turn` ([transport_spec.ex:62](../../../deps/jido_harness/lib/jido_harness/session/transport_spec.ex)), `claude --print --resume <id>` each time — a CLI cold start per turn. The coordinator polls Harness at 25 ms ([task.ex:16](../../../lib/ouroboros/interactive/task.ex)). ACP and Codex app-server sessions are persistent. |
+| 5 | Steering mid-turn | 1 | Esc/Ctrl-C → `interactive.interrupt` works. `follow_up` is a durable server-side queue, but the client refuses a second Enter while one call is unacknowledged and shows no queue ([app.rs:6145-6154](../../../tui/src/ui/app/)). `steer` is `{:error, :unsupported}` for every provider except `pi` — the durable-steer work on this branch is live for one provider. |
+| 6 | Plan / approval flow | 0 | No plan mode. The approval modal renders a one-line subject and four fixed answers; it never shows a diff, cwd, or the provider's own option labels ([view.rs:395-411](../../../tui/src/ui/view.rs)). Approvals exist only on Codex app-server and ACP (`approvals: :native`); managed transports declare none, and the Claude adapter never passes `--permission-prompt-tool` — so a Claude session under the plane default `approval_mode: :prompt` has its permission-needing tools **silently denied** by `claude --print`, and a working Claude session requires `auto_edit` or `auto_approve`. There is no human in the loop for the most-used provider. |
+| 7 | Input ergonomics | 1 | The composer is genuinely good: grapheme-accurate readline, 100-entry history, `/` and `@` completion over a 4,000-file index, bracketed paste, `$EDITOR`, OSC 52 copy ([editor.rs](../../../tui/src/ui/editor.rs)). But `@path` is text substitution — the structured `{prompt, attachments[≤32], reasoning_effort}` envelope the gateway accepts ([methods.ex:1433-1447](../../../lib/ouroboros/gateway/methods.ex)) is never sent ([app.rs:6191-6194](../../../tui/src/ui/app/)); no image paste; no `!`; no vim; no session/agent mentions; 28 compile-time slash commands, all navigation. |
+| 8 | TUI rendering correctness | 1 | ratatui alt-screen, 80 ms tick, no synchronized-output bracket, mouse captured for wheel only (native selection dead, no hint), no scrollback escape hatch, no images ([mod.rs:209-227,451-459](../../../tui/src/ui/mod.rs)). Hand-rolled unicode-width wrapping and a measured viewport are solid. |
+| 9 | Work visibility | 1 | Tool rows correlate call/result by `call_id`; file and diff cells exist. But `thinking_delta`, `plan_updated`, `turn_completed`, `usage`, `queue_changed`, `provider_event` are all dropped ([model/transcript.rs:163](../../../tui/src/model/transcript.rs)); a tool result shows **one** wrapped line; a diff shows 12 raw lines; Ctrl-O is a flat `key=value` dump, not a tree; Agents/Teams tabs are read-only JSON explorers. |
+| 10 | Permission model | 1 | `approval_mode` ∈ default/prompt/auto_edit/auto_approve and `sandbox_mode` ∈ default/read_only/workspace_write/unrestricted, **at start only** ([methods.ex:239-251](../../../lib/ouroboros/gateway/methods.ex)); a read-only session cannot be promoted, a new one is started ([app.rs:5513-5520](../../../tui/src/ui/app/)). No allow/deny rules, no classifier, no per-tool scope. `Control.Grants` gate six mesh effects, never a vendor tool call ([grants.ex:68-78](../../../lib/ouroboros/control/grants.ex)). |
+| 11 | Sandboxing / isolation | 1 | Vendor sandboxes are selected by argv (Codex `sandboxPolicy`, Claude `--settings` sandbox block). Ouroboros-owned isolation is real but narrow: symlink-safe workspace admission with exclusive/shared-read leases ([workspace.ex:71-78](../../../lib/ouroboros/workspace.ex)), umask 077 on the runtime / 022 on provider children. No worktrees ("intentionally outside this component", [workspace.ex:10-13](../../../lib/ouroboros/workspace.ex)); no OS sandbox of its own. |
+| 12 | MCP & tool ecosystem | 0 | `mcp_config` is refused at Ouroboros's own API on both planes ([task_state.ex:28,198-199](../../../lib/ouroboros/coding/task_state.ex)) although claude/zai/amp (`--mcp-config`) and ACP (`mcpServers` on `session/new`, [acp.ex:72](../../../lib/ouroboros/provider/session/dialect/acp.ex)) could carry it. No MCP client, no hooks, no plugins, no skills reachable (`AgentProfile.skills` exists but `agent_profile` is not a start option). |
 | 13 | LSP / semantic navigation | 0 | Zero language-server code in `lib/` or `tui/`. |
-| 14 | Git-native flow | 0 | No git awareness anywhere; Codex is started with `skip_git_repo_check: true` precisely because nothing guarantees a repo ([provider.ex:54](../lib/ouroboros/provider.ex)). |
-| 15 | Persistence & resume | 2 | Sessions are caller-independent by construction; a closed terminal loses nothing; `interactive.subscribe` with a cursor gets an atomic backlog; `Interactive.Recovery` re-registers coordinators 1 s after a crash; sessions live on an owner node and are routed over distribution from any fleet gateway. What stops this being a 3: the Harness subprocess dies with the BEAM/host and recovery then marks the session `:lost` ([task.ex:384](../lib/ouroboros/interactive/task.ex)) even though `provider_session_id` is durable and every transport can resume (`claude --resume`, Codex `thread/resume`, ACP `session/load`); no fork; no `ouro --continue`. |
+| 14 | Git-native flow | 0 | No git awareness anywhere; Codex is started with `skip_git_repo_check: true` precisely because nothing guarantees a repo ([provider.ex:54](../../../lib/ouroboros/provider.ex)). |
+| 15 | Persistence & resume | 2 | Sessions are caller-independent by construction; a closed terminal loses nothing; `interactive.subscribe` with a cursor gets an atomic backlog; `Interactive.Recovery` re-registers coordinators 1 s after a crash; sessions live on an owner node and are routed over distribution from any fleet gateway. What stops this being a 3: the Harness subprocess dies with the BEAM/host and recovery then marks the session `:lost` ([task.ex:384](../../../lib/ouroboros/interactive/task.ex)) even though `provider_session_id` is durable and every transport can resume (`claude --resume`, Codex `thread/resume`, ACP `session/load`); no fork; no `ouro --continue`. |
 | 16 | Context management | 0 | Nothing summarises, measures, or compacts; vendor compaction is invisible. |
-| 17 | Memory & instructions | 0 | No `CLAUDE.md`/`AGENTS.md` handling (the vendor CLIs read their own); `Ouroboros.AgentProfile` + `Prompt.Assembler` are a real, delimiter-safe, digest-traced prompt policy ([agent_profile.ex](../lib/ouroboros/agent_profile.ex), [assembler.ex](../lib/ouroboros/prompt/assembler.ex)) reachable only from `Team.Server`. |
+| 17 | Memory & instructions | 0 | No `CLAUDE.md`/`AGENTS.md` handling (the vendor CLIs read their own); `Ouroboros.AgentProfile` + `Prompt.Assembler` are a real, delimiter-safe, digest-traced prompt policy ([agent_profile.ex](../../../lib/ouroboros/agent_profile.ex), [assembler.ex](../../../lib/ouroboros/prompt/assembler.ex)) reachable only from `Team.Server`. |
 | 18 | In-session parallelism | 1 | Teams, delegation, the orchestration DAG, and the control planner are durable, recoverable, and tested — and `teams.delegate`/`add_worker`/`cancel`/`close` have **zero** TUI call sites; the Plans tab's `s`/`c` are the only operate actions outside sessions. A conversation cannot spawn a worker. |
 | 19 | Background handoff + remote attach | 2 | `--machine` places a session on a fleet node; any fleet gateway lists, routes, replays, and follows it; a detached daemon survives the client. No phone/web surface; no handoff of a *running* conversation to another executor. |
-| 20 | Cross-machine / fleet coordination | 2 | One Erlang cluster over a private network, `fleet.status`/`fleet.doctor`, and remote sessions ([FLEET.md](FLEET.md)). The signed membership roster and the Machines menu were deleted with the fleet product (`proposals/core.md` §3). Vendor-neutral, no relay. Missing for 3: agent-to-agent messaging the user can see and address, and owner-loss migration of a live provider process. |
-| 21 | Programmability | 1 | The gateway is a real, golden-fixture-tested JSON-RPC API with 53 methods and streaming — but there is no hooks system, no plugin or skill loader, no SDK, no ACP server mode, no HTTP/SSE, and `--print` emits prose only ([main.rs:447-575](../tui/src/main.rs)). |
+| 20 | Cross-machine / fleet coordination | 2 | One Erlang cluster over a private network, `fleet.status`/`fleet.doctor`, and remote sessions ([FLEET.md](../../FLEET.md)). The signed membership roster and the Machines menu were deleted with the fleet product (`proposals/core.md` §3). Vendor-neutral, no relay. Missing for 3: agent-to-agent messaging the user can see and address, and owner-loss migration of a live provider process. |
+| 21 | Programmability | 1 | The gateway is a real, golden-fixture-tested JSON-RPC API with 53 methods and streaming — but there is no hooks system, no plugin or skill loader, no SDK, no ACP server mode, no HTTP/SSE, and `--print` emits prose only ([main.rs:447-575](../../../tui/src/main.rs)). |
 | 22 | Install / update / auth polish | 1 | One binary with the release embedded, a boot screen, XDG config, a managed ChatGPT sign-in flow for Codex in-app. But the binary is valid only on the machine that built it, there is no signed download, no release channel, no auto-update, and Claude/Gemini auth is whatever the vendor CLI has on disk. |
 | 23 | Provider freedom & pricing transparency | 2 | Nine providers through one normalised API, bring-your-own everything, zero markup. No cost display (row 3). |
 | 24 | Audit & governance | 2 | A content-minimised effect ledger that checkpoints authority and intent before an action runs and records restarted work as ambiguous; deny-by-default grants; a signing decision journal; per-session event journals with redaction. Node-local; covers six mesh effects, not tool calls. |
-| 25 | Vendor honesty & stability | 1 | The docs' honesty invariant is exemplary and every limit is written down. But there is no public release, changelog, or versioned docs yet ([README "Current limits"](../README.md)). |
+| 25 | Vendor honesty & stability | 1 | The docs' honesty invariant is exemplary and every limit is written down. But there is no public release, changelog, or versioned docs yet ([README "Current limits"](../../../README.md)). |
 
 Totals: **23 / 75**. Table-stakes rows (1–3, 5, 8–12, 15, 18–19, 21–22) average 1.0;
 the four open-slot rows (15, 16, 20, 24) average 1.5 with two of them already at 2 —
 the inverse of every incumbent, which is exactly the shape of an opportunity.
 
 > **Client surface note (W9).** The GPUI desktop client was removed
-> ([`WEB.md` §10](WEB.md#10-gpui-removal-d13)); the client
+> ([`WEB.md` §10](../../WEB.md#10-gpui-removal-d13)); the client
 > rows above are retired to the TUI and the web surface that replaces it. **The scores
 > have not been re-run** — they date from the 2026-08 wave and are read against the
 > client of that day. Row 19's "No phone/web surface" is the one line this removal is
@@ -538,25 +544,25 @@ implements, tests, and exposes on the wire that the client never calls.
 
 | Capability | Server | Client |
 |---|---|---|
-| Structured turn input `{prompt, attachments[≤32], reasoning_effort}` with workspace-canonicalised attachments | [methods.ex:1419-1448](../lib/ouroboros/gateway/methods.ex), [task.ex:859-895](../lib/ouroboros/interactive/task.ex) | always a bare string ([app.rs:6191-6194](../tui/src/ui/app/)) |
-| `model`, `system_prompt`, `max_turns`, `event_limit`, `reasoning_effort`, `runtime_exposure` at start | `@start_options` ([methods.ex:261-275](../lib/ouroboros/gateway/methods.ex)) | `StartRequest` sends `id, provider, workspace, approval_mode, sandbox_mode, machine` ([model.rs:1344+](../tui/src/model.rs)) |
+| Structured turn input `{prompt, attachments[≤32], reasoning_effort}` with workspace-canonicalised attachments | [methods.ex:1419-1448](../../../lib/ouroboros/gateway/methods.ex), [task.ex:859-895](../../../lib/ouroboros/interactive/task.ex) | always a bare string ([app.rs:6191-6194](../../../tui/src/ui/app/)) |
+| `model`, `system_prompt`, `max_turns`, `event_limit`, `reasoning_effort`, `runtime_exposure` at start | `@start_options` ([methods.ex:261-275](../../../lib/ouroboros/gateway/methods.ex)) | `StartRequest` sends `id, provider, workspace, approval_mode, sandbox_mode, machine` ([model.rs:1344+](../../../tui/src/model.rs)) |
 | Per-turn `reasoning_effort` | structured envelope | never |
-| `teams.add_worker`, `teams.delegate`, `teams.cancel`, `teams.close`, `agents.stop` | [methods.ex:215-221](../lib/ouroboros/gateway/methods.ex) | zero call sites |
-| `approval_requested.options` (ACP) and `kind ∈ sandbox_escalation \| file_change \| permissions` (Codex) | [acp.ex:376-381](../deps/jido_harness/lib/jido_harness/session/transports/acp.ex), [codex.ex:347-366](../lib/ouroboros/provider/session/dialect/codex.ex) | modal shows subject only |
+| `teams.add_worker`, `teams.delegate`, `teams.cancel`, `teams.close`, `agents.stop` | [methods.ex:215-221](../../../lib/ouroboros/gateway/methods.ex) | zero call sites |
+| `approval_requested.options` (ACP) and `kind ∈ sandbox_escalation \| file_change \| permissions` (Codex) | [acp.ex:376-381](../../../deps/jido_harness/lib/jido_harness/session/transports/acp.ex), [codex.ex:347-366](../../../lib/ouroboros/provider/session/dialect/codex.ex) | modal shows subject only |
 | `thinking_delta`, `plan_updated`, `usage`, `turn_*`, `queue_changed`, `run_started.model/tools` | journaled, replayed, streamed | `Ignore` |
-| `Event::raw` full tree + a working `TreeView` | — | Ctrl-O renders a flat `key=value` line per event ([sessions.rs:1088-1112](../tui/src/ui/sessions.rs)) |
-| `runtime.providers` `normalized_options`/`normalized_values`/`session_transports` | Wire-encoded | the `n` dialog cannot grey out choices a provider cannot take ([TUI.md §6](TUI.md)) |
-| Session timeouts `turn_runtime_timeout_ms`, `turn_idle_timeout_ms`, `session_idle_timeout_ms`, `approval_timeout_ms` | [state.ex:8-14](../lib/ouroboros/interactive/state.ex) | not in `@start_options` |
+| `Event::raw` full tree + a working `TreeView` | — | Ctrl-O renders a flat `key=value` line per event ([sessions.rs:1088-1112](../../../tui/src/ui/sessions.rs)) |
+| `runtime.providers` `normalized_options`/`normalized_values`/`session_transports` | Wire-encoded | the `n` dialog cannot grey out choices a provider cannot take ([TUI.md §6](../../TUI.md)) |
+| Session timeouts `turn_runtime_timeout_ms`, `turn_idle_timeout_ms`, `session_idle_timeout_ms`, `approval_timeout_ms` | [state.ex:8-14](../../../lib/ouroboros/interactive/state.ex) | not in `@start_options` |
 
 ### 3.3 Structural facts that constrain every choice below
 
-- **F1 — Ouroboros runs no tool loop (vendor transports; 2026-08-22 baseline).** Both planes handed a request to Harness and poll it; vendor tools execute inside the vendor CLI ([M3 §1.1](research/agent-ux-2026/M3-provider-tool-layer-map.md)). See **§0b**: Native now owns a first-party loop. `Jido.AI` is used only for control-plane planning ([jido_ai.ex:35,51](../lib/ouroboros/control/jido_ai.ex)). On a vendor session Ouroboros still cannot append a diagnostic to an edit result or veto a tool call inside that CLI's loop.
-- **F2 — Managed transports have no approvals channel.** `claude`, `gemini`, `amp`, `grok`, `zai`, and `codex exec` sessions run one process per turn with `interrupt: :process` and no `approvals` capability ([transport_spec.ex:56-83](../deps/jido_harness/lib/jido_harness/session/transport_spec.ex)). A pre-tool hook is structurally impossible there; only Codex app-server and ACP ask before acting.
-- **F3 — The only universal injection seam is prompt text.** `expose_turn_request/2` ([task.ex:811-817](../lib/ouroboros/interactive/task.ex)) already wraps every turn in a delimiter-checked `<ouroboros-runtime>` envelope whose captured bytes are durable and replay-exact. Anything that must reach every provider (diagnostics, instructions, context) rides there or in a `follow_up` turn.
-- **F4 — Three transports can carry MCP server definitions today** (claude/zai `--mcp-config`, amp `--mcp-config`, ACP `mcpServers`); Codex can only via `-c` pairs baked into the managed launcher ([provider.ex:458-470](../lib/ouroboros/provider.ex)); Gemini can only filter names. The block is Ouroboros's own refusal ([task_state.ex:28](../lib/ouroboros/coding/task_state.ex)), put there for a good reason — inline server commands in a durable checkpoint are an execution vector — that needs a durable-safety story, not deletion.
-- **F5 — No event bus for tool calls.** `Ouroboros.Signals` is nine mesh-agent signal types. Provider events reach consumers by `Session.replay` polling and `send/2` fan-out ([task.ex:1308-1310](../lib/ouroboros/interactive/task.ex)). A hook system has two in-band attachment points: the adapter `Stream.map` wrapper already used by `CodexAdapter.run/2` (post-hoc) and the dialect `approval_request/2` (the one pre-tool point).
+- **F1 — Ouroboros runs no tool loop (vendor transports; 2026-08-22 baseline).** Both planes handed a request to Harness and poll it; vendor tools execute inside the vendor CLI ([M3 §1.1](M3-provider-tool-layer-map.md)). See **§0b**: Native now owns a first-party loop. `Jido.AI` is used only for control-plane planning ([jido_ai.ex:35,51](../../../lib/ouroboros/control/jido_ai.ex)). On a vendor session Ouroboros still cannot append a diagnostic to an edit result or veto a tool call inside that CLI's loop.
+- **F2 — Managed transports have no approvals channel.** `claude`, `gemini`, `amp`, `grok`, `zai`, and `codex exec` sessions run one process per turn with `interrupt: :process` and no `approvals` capability ([transport_spec.ex:56-83](../../../deps/jido_harness/lib/jido_harness/session/transport_spec.ex)). A pre-tool hook is structurally impossible there; only Codex app-server and ACP ask before acting.
+- **F3 — The only universal injection seam is prompt text.** `expose_turn_request/2` ([task.ex:811-817](../../../lib/ouroboros/interactive/task.ex)) already wraps every turn in a delimiter-checked `<ouroboros-runtime>` envelope whose captured bytes are durable and replay-exact. Anything that must reach every provider (diagnostics, instructions, context) rides there or in a `follow_up` turn.
+- **F4 — Three transports can carry MCP server definitions today** (claude/zai `--mcp-config`, amp `--mcp-config`, ACP `mcpServers`); Codex can only via `-c` pairs baked into the managed launcher ([provider.ex:458-470](../../../lib/ouroboros/provider.ex)); Gemini can only filter names. The block is Ouroboros's own refusal ([task_state.ex:28](../../../lib/ouroboros/coding/task_state.ex)), put there for a good reason — inline server commands in a durable checkpoint are an execution vector — that needs a durable-safety story, not deletion.
+- **F5 — No event bus for tool calls.** `Ouroboros.Signals` is nine mesh-agent signal types. Provider events reach consumers by `Session.replay` polling and `send/2` fan-out ([task.ex:1308-1310](../../../lib/ouroboros/interactive/task.ex)). A hook system has two in-band attachment points: the adapter `Stream.map` wrapper already used by `CodexAdapter.run/2` (post-hoc) and the dialect `approval_request/2` (the one pre-tool point).
 - **F6 — Redaction is the ceiling on display.** The durable event has no `raw`; payloads pass `Jido.Harness.Redaction` before checkpoint. A transcript can never show more than the redacted payload — which is fine, but it means "show the full tool result" is bounded by what the adapter put in `payload`, and the ACP payload is the raw ACP update, never normalised.
-- **F7 — The wire has no byte cap on payloads**, only depth/node caps ([wire.ex:49-52](../lib/ouroboros/gateway/wire.ex)); a multi-megabyte diff crosses the socket whole on every replay, to be cut to 128 KiB client-side.
+- **F7 — The wire has no byte cap on payloads**, only depth/node caps ([wire.ex:49-52](../../../lib/ouroboros/gateway/wire.ex)); a multi-megabyte diff crosses the socket whole on every replay, to be cut to 128 KiB client-side.
 - **F8 — Cross-machine is real and vendor-neutral, and the runtime owns the session.** This is the asset. Every plan item that adds state must keep the invariants that make it true: checkpoint before broadcast, derived identities that embed `node()`, bounded calls, fail-closed auth, the unpatchable namespaces.
 
 ---
@@ -604,19 +610,19 @@ command, or compact a context it does not hold.
 
 Everything needed to own a loop already exists in the dependency tree: `Jido.AI.Agent`
 gives a tool-calling loop with streaming, checkpoints, quota, and skills
-([agent.ex:23-68](../deps/jido_ai/lib/jido_ai/agent.ex)); `ReqLLM` ships providers for
+([agent.ex:23-68](../../../deps/jido_ai/lib/jido_ai/agent.ex)); `ReqLLM` ships providers for
 `anthropic`, `openai`, `openai_codex`, `google`, `google_vertex`, `amazon_bedrock`,
 `azure`, `xai`, `zai`, `github_copilot`, `openrouter`, `ollama`, `vllm`, `groq`,
-`mistral`, `deepseek`, `moonshot_ai` and more ([deps/req_llm/lib/req_llm/providers](../deps/req_llm/lib/req_llm/providers));
+`mistral`, `deepseek`, `moonshot_ai` and more ([deps/req_llm/lib/req_llm/providers](../../../deps/req_llm/lib/req_llm/providers));
 `Jido.Harness.Adapter` requires only `spec/0`, `run/2`, `status/1`, and a session
-adapter only a pid handle ([M3 §4](research/agent-ux-2026/M3-provider-tool-layer-map.md)),
+adapter only a pid handle ([M3 §4](M3-provider-tool-layer-map.md)),
 so a native loop registers like any other provider and emits the same 29 normalised
 event kinds into the same journals, the same gateway stream, the same TUI cells.
 
 So: **ship `Ouroboros.Provider.Native` as a tenth provider.** It is where LSP, MCP,
 hooks, permission rules, compaction, file checkpoints, worktrees, and the effect ledger
 attach *natively*, because it is the only place Ouroboros is in the loop. It is also the
-only honest route to the self-improvement vision in [ARCHITECTURE.md](ARCHITECTURE.md):
+only honest route to the self-improvement vision in [ARCHITECTURE.md](../../ARCHITECTURE.md):
 a runtime-authored agent needs tools that are Elixir actions it can forge, grant, and
 audit. The vendor CLIs stay — they are how a user brings a subscription — and each is
 raised to its own ceiling (§7 Track C). Nothing in the native track is allowed to make a
@@ -645,14 +651,14 @@ Each maps to a track in §7; the order is the order of §8.
 
 **D1 — The native agent is a provider, not a replacement.** `Ouroboros.Provider.Native`
 registers through `:jido_harness, :providers` like `codex`/`kimi`/`opencode` already do
-([config.exs:127-133](../config/config.exs)), declares the full normalised option set,
+([config.exs:127-133](../../../config/config.exs)), declares the full normalised option set,
 and emits standard events. Vendor providers keep working unchanged; the `n` dialog lists
 `native` beside them. A user who only ever uses Claude through Ouroboros must notice
 nothing but improvements.
 
 **D2 — No `Ignore` arm.** Every one of the 29 Harness event kinds gets either a cell or
 a deliberate, documented hide in `PresentationEvent::from_event`
-([model/transcript.rs:93-164](../tui/src/model/transcript.rs)). Hidden kinds remain in
+([model/transcript.rs:93-164](../../../tui/src/model/transcript.rs)). Hidden kinds remain in
 Ctrl-O, which becomes a tree view over `Event::raw`, not a `key=value` line.
 
 **D3 — Keep the alternate screen; add every escape hatch the field learned to need.**
@@ -682,7 +688,7 @@ classifier-backed `auto` mode is a later slice on top of the same engine, never 
 replacement for rules.
 
 **D6 — MCP by reference, never inline.** The refusal of inline `mcp_config` in a durable
-checkpoint ([task_state.ex:28](../lib/ouroboros/coding/task_state.ex)) is correct: a
+checkpoint ([task_state.ex:28](../../../lib/ouroboros/coding/task_state.ex)) is correct: a
 server command in a checkpoint is an execution vector that survives the operator who
 typed it. The durable form is a *name* resolved against node configuration
 (`config :ouroboros, :mcp_servers` and `~/.config/ouroboros/mcp.toml`), validated at
@@ -704,7 +710,7 @@ position). A language-server failure never fails a write.
 
 **D8 — A session survives the runtime.** `provider_session_id` is durable; every
 transport can resume (`claude --resume`, `codex thread/resume`, ACP `session/load`).
-Recovery tries resume before `lose/2` ([task.ex:384](../lib/ouroboros/interactive/task.ex));
+Recovery tries resume before `lose/2` ([task.ex:384](../../../lib/ouroboros/interactive/task.ex));
 `:lost` is reserved for a resume that the provider refuses. `ouro --continue` and
 `ouro resume <id>` work from any fleet gateway because the session's owner node is
 already in the record.
@@ -763,24 +769,24 @@ product look worse than it is.
 
 | # | Defect | Where | Fix |
 |---|---|---|---|
-| X1 | A Claude session at the plane default `approval_mode: :prompt` has permission-needing tools silently denied by `claude --print`; nothing tells the user. | [claude.ex:161-163](../deps/jido_harness/lib/jido_harness/adapters/claude.ex), plane defaults [provider.ex:46](../lib/ouroboros/provider.ex) | Until the bridge (Track C2) lands: on managed transports, `interactive.start` with `:prompt` answers with a typed refusal naming the provider and the two modes that work; the `n` dialog greys the choice using the capability data it already receives. |
-| X2 | `s`/`/steer` are offered on every session; `steer/3` is `{:error, :unsupported}` on every provider but `pi`. | [acp.ex:107](../lib/ouroboros/provider/session/dialect/acp.ex), [codex.ex:101](../lib/ouroboros/provider/session/dialect/codex.ex), palette [app.rs:1812](../tui/src/ui/app/) | Advertise `steer` from `interactive.info.transport.capabilities`; the composer's Steer verb is shown only where it is true; where it is false, Enter-while-busy becomes a visible queued follow-up (Track B3). |
-| X3 | TUI.md documents `Ctrl-E` for event details; the code binds `Ctrl-O` and `Ctrl-E` opens `$EDITOR`. | [TUI.md §3.4](TUI.md), [app.rs:5929](../tui/src/ui/app/) | Fix the doc; `?` already is the authority. |
-| X4 | Mouse capture disables native text selection and consumes only the wheel; no hint, no opt-out. | [mod.rs:213,451-459](../tui/src/ui/mod.rs) | One-time hint line; `[terminal] mouse = false` in config.toml; `/raw` later (Track A9). |
-| X5 | No synchronized-output bracket; every frame can tear in tmux/VS Code. | [mod.rs](../tui/src/ui/mod.rs) draw loop | Wrap `terminal.draw` in crossterm `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`, cursor hide/show inside the bracket (the Codex cursor-flicker lesson). |
-| X6 | Outbound event payloads have no byte cap; a multi-MB `file_change` crosses the socket on every replay and subscribe. | [wire.ex:49-52](../lib/ouroboros/gateway/wire.ex), [conn.ex:813-828](../lib/ouroboros/gateway/conn.ex) | Server-side excerpting of string leaves above a per-field cap with a `_truncated: {bytes}` marker, plus `interactive.event_detail {id, sequence}` to fetch one full event on demand. |
-| X7 | Interactive Codex refuses every turn that carries an attachment: the app-server dialect omits `multimodal`, so `turn_options: :adapter` inherits `:attachments` and the validator rejects. | [codex.ex:25-36](../lib/ouroboros/provider/session/dialect/codex.ex), [request_validator.ex:77-78](../deps/jido_harness/lib/jido_harness/session/request_validator.ex) | Declare `multimodal: :native`; build image/file input blocks in `turn_params/2`. |
-| X8 | ACP `diff`, `available_commands_update`, and `current_mode_update` fall into the opaque catch-all, so an OpenCode/Kimi edit never becomes a `file_change` and their slash commands and modes are invisible. | [acp.ex:190-200](../lib/ouroboros/provider/session/dialect/acp.ex) | Map `diff → :file_change` (`{"changes" => [...]}` shape), commands and mode into `session_ready`/`status` payloads the TUI can show. |
-| X9 | Recovery marks a session `:lost` the moment Harness does not know it, although the provider session is resumable. | [task.ex:384](../lib/ouroboros/interactive/task.ex) | D8: start a new Harness session with `provider_session_id` first; `lose/2` only on a refused resume. |
-| X10 | `turn_completed`, `run_completed`, `session_idle`, `queue_changed` are dropped, so a finished turn has no terminator and a queued follow-up no indicator. | [model/transcript.rs:163](../tui/src/model/transcript.rs) | Turn-end divider with elapsed time; queue badge above the composer. Cheap, and it removes the "did it finish?" ambiguity. |
-| X11 | The approval modal never shows the diff or the provider's own options, though both are in the payload. | [view.rs:395-411](../tui/src/ui/view.rs), [transcript.rs:86-116](../tui/src/ui/transcript.rs) | Render `kind`, `command`+`cwd`, the `file_change` diff (Warp-style expanded while pending), and the provider's option labels; keep the four-way answer as the keyboard path. |
-| X12 | `plan_updated` (Codex `update_plan`, ACP `plan`) is journaled and dropped. | [model/transcript.rs:163](../tui/src/model/transcript.rs) | A plan cell and the `Ctrl+T` panel (Track A5). |
+| X1 | A Claude session at the plane default `approval_mode: :prompt` has permission-needing tools silently denied by `claude --print`; nothing tells the user. | [claude.ex:161-163](../../../deps/jido_harness/lib/jido_harness/adapters/claude.ex), plane defaults [provider.ex:46](../../../lib/ouroboros/provider.ex) | Until the bridge (Track C2) lands: on managed transports, `interactive.start` with `:prompt` answers with a typed refusal naming the provider and the two modes that work; the `n` dialog greys the choice using the capability data it already receives. |
+| X2 | `s`/`/steer` are offered on every session; `steer/3` is `{:error, :unsupported}` on every provider but `pi`. | [acp.ex:107](../../../lib/ouroboros/provider/session/dialect/acp.ex), [codex.ex:101](../../../lib/ouroboros/provider/session/dialect/codex.ex), palette [app.rs:1812](../../../tui/src/ui/app/) | Advertise `steer` from `interactive.info.transport.capabilities`; the composer's Steer verb is shown only where it is true; where it is false, Enter-while-busy becomes a visible queued follow-up (Track B3). |
+| X3 | TUI.md documents `Ctrl-E` for event details; the code binds `Ctrl-O` and `Ctrl-E` opens `$EDITOR`. | [TUI.md §3.4](../../TUI.md), [app.rs:5929](../../../tui/src/ui/app/) | Fix the doc; `?` already is the authority. |
+| X4 | Mouse capture disables native text selection and consumes only the wheel; no hint, no opt-out. | [mod.rs:213,451-459](../../../tui/src/ui/mod.rs) | One-time hint line; `[terminal] mouse = false` in config.toml; `/raw` later (Track A9). |
+| X5 | No synchronized-output bracket; every frame can tear in tmux/VS Code. | [mod.rs](../../../tui/src/ui/mod.rs) draw loop | Wrap `terminal.draw` in crossterm `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`, cursor hide/show inside the bracket (the Codex cursor-flicker lesson). |
+| X6 | Outbound event payloads have no byte cap; a multi-MB `file_change` crosses the socket on every replay and subscribe. | [wire.ex:49-52](../../../lib/ouroboros/gateway/wire.ex), [conn.ex:813-828](../../../lib/ouroboros/gateway/conn.ex) | Server-side excerpting of string leaves above a per-field cap with a `_truncated: {bytes}` marker, plus `interactive.event_detail {id, sequence}` to fetch one full event on demand. |
+| X7 | Interactive Codex refuses every turn that carries an attachment: the app-server dialect omits `multimodal`, so `turn_options: :adapter` inherits `:attachments` and the validator rejects. | [codex.ex:25-36](../../../lib/ouroboros/provider/session/dialect/codex.ex), [request_validator.ex:77-78](../../../deps/jido_harness/lib/jido_harness/session/request_validator.ex) | Declare `multimodal: :native`; build image/file input blocks in `turn_params/2`. |
+| X8 | ACP `diff`, `available_commands_update`, and `current_mode_update` fall into the opaque catch-all, so an OpenCode/Kimi edit never becomes a `file_change` and their slash commands and modes are invisible. | [acp.ex:190-200](../../../lib/ouroboros/provider/session/dialect/acp.ex) | Map `diff → :file_change` (`{"changes" => [...]}` shape), commands and mode into `session_ready`/`status` payloads the TUI can show. |
+| X9 | Recovery marks a session `:lost` the moment Harness does not know it, although the provider session is resumable. | [task.ex:384](../../../lib/ouroboros/interactive/task.ex) | D8: start a new Harness session with `provider_session_id` first; `lose/2` only on a refused resume. |
+| X10 | `turn_completed`, `run_completed`, `session_idle`, `queue_changed` are dropped, so a finished turn has no terminator and a queued follow-up no indicator. | [model/transcript.rs:163](../../../tui/src/model/transcript.rs) | Turn-end divider with elapsed time; queue badge above the composer. Cheap, and it removes the "did it finish?" ambiguity. |
+| X11 | The approval modal never shows the diff or the provider's own options, though both are in the payload. | [view.rs:395-411](../../../tui/src/ui/view.rs), [transcript.rs:86-116](../../../tui/src/ui/transcript.rs) | Render `kind`, `command`+`cwd`, the `file_change` diff (Warp-style expanded while pending), and the provider's option labels; keep the four-way answer as the keyboard path. |
+| X12 | `plan_updated` (Codex `update_plan`, ACP `plan`) is journaled and dropped. | [model/transcript.rs:163](../../../tui/src/model/transcript.rs) | A plan cell and the `Ctrl+T` panel (Track A5). |
 
 ---
 
 ## 7. Tracks and slices
 
-Conventions, inherited from [TUI.md §5](TUI.md) and [FLEET.md §14](FLEET.md): every slice
+Conventions, inherited from [TUI.md §5](../../TUI.md) and [FLEET.md §14](../../FLEET.md): every slice
 is one PR, green before the next, independently revertible, with its acceptance stated
 as something a test or a live run can show. Sizes are working days for one babysat
 agent on a disjoint file set: **S** ≤ 2, **M** 3–5, **L** 6–10, **XL** > 10 (split
@@ -796,17 +802,17 @@ Two prerequisites that every track shares:
 - **B0 — Capability-driven chrome.** The footer, palette, composer verbs, and the `n`
   dialog read `interactive.info.transport.capabilities` and `runtime.providers`
   (`normalized_values`, `session_transports`) and never a client-side table (D14). Adds
-  `capabilities` to `State.public/1` ([state.ex:194-236](../lib/ouroboros/interactive/state.ex)).
+  `capabilities` to `State.public/1` ([state.ex:194-236](../../../lib/ouroboros/interactive/state.ex)).
   Makes X1/X2 structural instead of special-cased. **S.**
 
 ### Track A — Transcript and display (client)
 
 | Slice | Scope | Acceptance | Size |
 |---|---|---|---|
-| **A1 Sync output + escape hatches** | DEC-2026 bracket around every `terminal.draw`, cursor hide/show inside it; `[` leaves the alternate screen, prints the expanded transcript into native scrollback, re-enters; `v` opens the transcript in `$EDITOR` (reuse [mod.rs:679-701](../tui/src/ui/mod.rs)); `/raw` toggle drops gutters and app wrapping; one-time selection hint; `[terminal] mouse = false`. | A pty test asserts `?2026h … ?2026l` around each frame; `[` output equals `/export`; `/raw` copies a paragraph as one logical line. | M |
+| **A1 Sync output + escape hatches** | DEC-2026 bracket around every `terminal.draw`, cursor hide/show inside it; `[` leaves the alternate screen, prints the expanded transcript into native scrollback, re-enters; `v` opens the transcript in `$EDITOR` (reuse [mod.rs:679-701](../../../tui/src/ui/mod.rs)); `/raw` toggle drops gutters and app wrapping; one-time selection hint; `[terminal] mouse = false`. | A pty test asserts `?2026h … ?2026l` around each frame; `[` output equals `/export`; `/raw` copies a paragraph as one logical line. | M |
 | **A2 Render all 29 kinds (D2)** | Thinking cell with Crush's three states (10 lines → tail 200 → full); turn-end divider with elapsed time; `run_started.model/tools` into the session header; idle/closed/ended markers; `queue_changed` badge; `provider_event` as a dim one-line kind; `usage` accumulated into the session model. Delete the `Ignore` arm. | One projection test per kind from the golden fixtures; no kind maps to `Ignore`. | M |
 | **A3 Tool cells v2** | Per-tool summarisers keyed on name and on ACP `kind` (`read\|edit\|delete\|move\|search\|execute\|think\|fetch`); grouped exploration cell ("Explored 7 files" collapsing consecutive read/search/list, flips from "Exploring…"); in-place expand with `Ctrl+O` on the focused cell (three states); head/tail truncation with "+N lines · ctrl+o" provenance; live timers; `command_output_delta` streamed as a tail window. | Fixture-driven snapshot tests per tool kind; a 10 k-line bash output renders in < 16 ms. | L |
-| **A4 Diffs v2** | Per-file grouping, hunk headers, line numbers, word-level emphasis, +N/−M per file, a post-turn diffstat cell, wrap not truncate, expandable; `/diff` overlay listing files changed by turn with Enter → full diff in a pager; syntax colour inside diffs via [code.rs](../tui/src/ui/code.rs); Warp's rule — expanded while an approval is pending, collapsed to the header after apply. | Snapshot tests for unified/multi-file/rename/binary; `/diff` for a three-turn fixture session. | L |
+| **A4 Diffs v2** | Per-file grouping, hunk headers, line numbers, word-level emphasis, +N/−M per file, a post-turn diffstat cell, wrap not truncate, expandable; `/diff` overlay listing files changed by turn with Enter → full diff in a pager; syntax colour inside diffs via [code.rs](../../../tui/src/ui/code.rs); Warp's rule — expanded while an approval is pending, collapsed to the header after apply. | Snapshot tests for unified/multi-file/rename/binary; `/diff` for a three-turn fixture session. | L |
 | **A5 Plan / tasks panel** | `plan_updated` cell; `Ctrl+T` panel with `◌ ● ✓` glyphs that stays visible while idle (Codex #18920); delegations join it in G1. | Fixture test; panel survives idle redraws. | S–M |
 | **A6 Markdown** | `pulldown-cmark`: headings, nested lists, tables wrapped to width (CJK-safe), blockquotes, bold/italic, links as OSC 8 where supported, inline code everywhere (not first-pair-only); streaming-safe by buffering open constructs (Goose's `MarkdownBuffer`). | Snapshot tests incl. a table at width 60 and a list at depth 4; a mid-stream unterminated fence never renders as garbage. | M |
 | **A7 Footer with a brain** | Model · permission mode · sandbox · context % · cost · "Working 4m 07s" · queue count · background count; `statusLine` command in `config.toml` fed debounced JSON (Claude Code's shape); tab title via OSC 0/2 with a spinner/state glyph; bell / OSC 9 on approval-needed and turn-complete when unfocused (focus tracking via `?1004h`). Runtime: `runtime.models` exposing window and pricing from `llm_db`. | Footer snapshot at 80/112/160 columns; notification fires only when unfocused. | M |
@@ -823,7 +829,7 @@ Two prerequisites that every track shares:
 | **B1 Modes + `interactive.configure`** | Shift+Tab cycles `prompt → auto_edit → plan → auto_approve` (the last gated by a confirm), label in the footer; runtime verb `interactive.configure {approval_mode \| sandbox_mode \| model \| reasoning_effort}` applied via the transport's `dynamic_configuration` (app-server: per-turn params already rebuilt in `turn_params/2`; ACP: `session/set_mode`; managed: next turn's argv; pi: native) and durable in `State`; the footer says "from next turn" when that is the truth. | Per-transport tests; a mode change mid-turn is reflected in the next `turn_started`. | M |
 | **B2 Plan mode** | Read-only posture (`sandbox_mode: read_only` + a plan instruction block via the `expose_turn_request` envelope for vendors; tool allowlist for native); exit through an approval "Yes, auto-accept edits / Yes, manual approvals / keep planning" that calls `configure` and queues the follow-up; the plan is captured as `plan_updated` (native) or the final message. | A vendor session in plan mode makes no `file_change`; exit path test. | M |
 | **B3 Queue and steer** | Visible queue (server `queue_changed` + local pending); Enter while busy = a queued follow-up row; steer offered only where the transport says so (pi today; Codex app-server after C3); Up pulls a queued draft back; Esc interrupts and keeps the queue (Claude Code #16905). | Queue/steer semantics pinned by tests that name the key and the transport. | M |
-| **B4 Structured input** | `@path` → `attachments[]` (server-canonicalised, [task.ex:859-895](../lib/ouroboros/interactive/task.ex)); `Ctrl+V` image paste (clipboard via `osascript`/`xclip`/`wl-paste` → a file under the session's data dir → attachment); per-turn `/effort`; `/model` via B1. Requires X7. | Wire test shows the object form; an image reaches Codex app-server as an input block. | M |
+| **B4 Structured input** | `@path` → `attachments[]` (server-canonicalised, [task.ex:859-895](../../../lib/ouroboros/interactive/task.ex)); `Ctrl+V` image paste (clipboard via `osascript`/`xclip`/`wl-paste` → a file under the session's data dir → attachment); per-turn `/effort`; `/model` via B1. Requires X7. | Wire test shows the object form; an image reaches Codex app-server as an input block. | M |
 | **B5 Esc semantics** | Esc always interrupts; Esc Esc opens a backtrack menu: "fork from this message" where the transport can (Codex `thread/fork` from any message; Claude `--fork-session` at the tail; native anywhere), else "edit and resend as a new turn" — named honestly per transport. | Menu entries come from capabilities; fork test on app-server. | M |
 | **B6 Sessions** | `ouro --continue`, `ouro resume <id\|name>` from any fleet gateway; `/rename`, auto-title from the first prompt (native: a cheap model; others: first line); picker with search and filters (workspace, machine, status, needs-input); `/fork`. Runtime: `interactive.rename`, `interactive.fork`, `title` in `State`. | Resume from a second machine's gateway; picker search test. | L |
 | **B7 `!cmd` and `/btw`** | `!cmd` runs in the session workspace on the owner node through a new operate-scope `workspace.exec` that is ledger-recorded and capability-gated to sessions already at `auto_approve` or to an explicit rule; output becomes a transcript note the agent can see next turn. `/btw` asks a side question in a throwaway native turn without touching the session. | `!` refused on a `prompt`-mode session until a rule allows it; ledger entry present. | M |
@@ -851,7 +857,7 @@ Two prerequisites that every track shares:
 | **D4 MCP client** | stdio + streamable HTTP; OAuth/DCR later; deferred tool loading (names first, schemas on demand); resources and prompts; per-server timeouts, 25 k-token output cap; servers by name (D6) from node config and `~/.config/ouroboros/mcp.toml`; `ouro mcp add\|list\|login`; the same catalogue rendered to vendor transports. | A stdio server's tool appears in native and in a Claude session; inline `mcp_config` still refused. | L |
 | **D5 Hooks** | Events: `SessionStart/End`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `Stop`, `SubagentStart/Stop`, `PreCompact`, `Notification`, `FileChanged`; Claude-compatible JSON contract (`permissionDecision`, `updatedInput`, `additionalContext`, exit 2 blocks); command hooks in the workspace with a timeout; repo-supplied hooks gated on workspace trust; configured in `ouroboros.toml` (project) and the user scope. | Hook corpus ported from Claude Code's docs; a `PreToolUse` deny blocks the tool. | M–L |
 | **D6 Checkpoints and rewind** | Content-addressed pre-write snapshots per session under the data dir; `/rewind` (conversation / files / both / summarise from here); says which files it cannot restore before acting. Vendor sessions fed from `file_change` where content exists (Codex `turn/diff`, ACP after C4). | Rewind restores byte-exact; a bash-made change is reported as unrestorable. | M |
-| **D7 Worktrees** | `--worktree` / `isolation: worktree`: `git worktree add` under the data dir without shell interpolation, lease acquired on the worktree path ([workspace.ex:71-78](../lib/ouroboros/workspace.ex)), cleanup as a recoverable operation; vendors get the same (`cwd`). | Two sessions on one repo edit in parallel without a lease conflict. | M |
+| **D7 Worktrees** | `--worktree` / `isolation: worktree`: `git worktree add` under the data dir without shell interpolation, lease acquired on the worktree path ([workspace.ex:71-78](../../../lib/ouroboros/workspace.ex)), cleanup as a recoverable operation; vendors get the same (`cwd`). | Two sessions on one repo edit in parallel without a lease conflict. | M |
 | **D8 Quality gate** | A Terminal-Bench 2.1 harness adapter for `native`; a local eval corpus; numbers published in docs whatever they are. | An official board submission. | L |
 
 ### Track E — Code intelligence (runtime, small client)

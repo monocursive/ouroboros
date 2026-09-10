@@ -3,6 +3,12 @@
 Status: **proposal**, 2026-09-08. Written against `dev` at `160ca08`; every file cited
 below was read at that ref. This document proposes work. Nothing in it is implemented.
 
+> *A record, as of September 2026.* This proposal names `Ouroboros.Agent.Effects.Runner`
+> and the BEAM fast-patch lane, and its recipes pass `--provider native`; all three went
+> with [the core reduction](core.md) (§3 D3, §4 A1, §3 D2). What was built is in
+> [docs/SELF.md](../SELF.md), and the plan it was built to is
+> [self-improvement-plan.md](self-improvement-plan.md).
+
 ## 0. The claim this plan builds toward
 
 Ouroboros self-improves when a session running inside it produces a change to its own

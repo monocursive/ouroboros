@@ -25,7 +25,9 @@ Every node boots as exactly one of three roles, from `config :ouroboros, :node_r
 
 An unrecognized role refuses the boot rather than defaulting to the most privileged one.
 `OUROBOROS_SIGNING_NODE` on a `core` node names the `signer` peer that lane-W signing is
-routed to; `OUROBOROS_FORGE_BUILDER_NODE` names the builder.
+routed to. `config :ouroboros, :wasm_forge_placement` (`:local`, the default, or
+`:builder`) decides whether a forge runs where the effect landed or is forwarded to a
+connected `builder`, and refuses by name when there is none.
 
 Role is a *placement* concept, not a security boundary — see "Trust" below.
 `Ouroboros.Cluster.ensure_role/2` and `ensure_placeable/1` refuse work sent to a node
@@ -132,7 +134,7 @@ Then, from either machine:
 ```sh
 ouro fleet status     # this machine's identity, plus the live roster when a runtime answers
 ouro fleet doctor     # local security and, when running, live connectivity and compatibility
-ouro new --machine vps --provider native --workspace /absolute/path/on/vps/project
+ouro new --machine vps --workspace /absolute/path/on/vps/project
 ```
 
 `create --from` refuses a directory that is not a complete copy of a fleet directory, and

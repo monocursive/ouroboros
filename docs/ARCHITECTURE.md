@@ -3,53 +3,65 @@
 The current shared mechanisms, storage migration, and restart matrix are documented in
 [runtime simplification](SIMPLIFICATION.md).
 
-## Definition of done for this slice
+## Definition of done
 
-This slice is complete when all of the following are executable and tested:
+This tree is what [the core reduction](proposals/core.md) left standing in September
+2026, and it is complete when all of the following are executable and tested. Each item
+describes a plane that exists; the first nine are local implementation claims backed by
+deterministic tests, and none of them implies the external claims in the tenth.
 
-1. A logical Jido worker can be supervised locally and addressed from another BEAM
-   node through a typed signal.
-2. A provider-neutral coding request can outlive its caller, emit durable ordered
-   events, be replayed without gaps, survive its Ouroboros coordinator crashing, and
-   resolve to explicit completed/failed/cancelled/lost state.
-3. *(Withdrawn with the BEAM hot-patch lane; see docs/proposals/core.md §4 A1.)*
-4. A durable DAG and opt-in planner/evaluator can dispatch through a supervised team,
-   revise within a fixed budget, and preserve cancellation intent across restart.
-5. A complete OTP upgrade archive can be inspected and its `:release_handler`
-   lifecycle can be gated and journaled through an injected deterministic adapter.
-6. An agent-authored Cargo project can be validated without being built, compiled to a
-   WebAssembly component under an OS sandbox with no network, signed through a seam the
+1. An interactive session outlives its caller, emits durable ordered events, is replayed
+   without gaps, survives its coordinator crashing, and resolves to explicit
+   completed/failed/cancelled/lost state. Its history can be rewound, forked and handed
+   off, and every effect it causes is in a ledger that is checkpointed before the effect
+   starts and settled after it.
+2. A native session spawns subagents on other nodes of the cluster over Erlang
+   distribution. Placement is a cluster fact (`Cluster.Facts`, operator tags); each child
+   holds its own git worktree lease, and the lease — never a PID — is the unit of
+   ownership. A mesh agent is supervised locally and addressed from another node through
+   a typed signal.
+3. Nodes form a cluster without anyone connecting them by hand, boot a role-shaped tree
+   (`:core` full, `:builder` formation plus the helper pool, `:signer` formation plus the
+   signing service), refuse to place work on a node that cannot run it, relocate forge
+   builds onto a least-privileged builder, and ship as one embedded release whose node
+   identity, cookie, and distribution transport are explicit and fail closed on the
+   distributed path — told nothing at all, the release boots a standalone single-machine
+   posture instead, with distribution off and no cookie in existence.
+4. The model's shell runs under an OS sandbox — macOS `sandbox-exec` or Linux
+   bubblewrap — whose label is honest or is refused: a `workspace_write` session on a
+   node with no backend does not run `bash` unsandboxed, protected paths and this node's
+   credentials are fenced by the backend rather than by a rule, and `:unrestricted` is
+   the operator asking for no sandbox by name.
+5. An agent-authored Cargo project can be validated without being built, compiled to a
+   WebAssembly component under that sandbox with no network, signed through a seam the
    forge cannot satisfy itself, stamped with a durably allocated epoch, deployed behind a
    per-node health probe, held to a declarative evaluation spec carried inside its own
    signature, and — when the probe or that spec fails — rolled back to absence on every
-   node, or quarantined when the evidence is ambiguous.
-7. An agent driven only by typed signals can do all of that itself — start and stop mesh
-   agents, message them, delegate through a team, forge a capability and deploy it —
-   with every attempt authorized against a durable deny-by-default grant for the
-   concrete target, identified from server-side agent state rather than the signal,
-   bounded so no effect blocks the agent, and recorded whether it ran or was refused.
-8. Nodes form a cluster without anyone connecting them by hand, boot a role-shaped tree
-   (`:core` full, `:builder` formation-only, `:signer` formation plus the signing
-   service), refuse to place work on a node that cannot run it, relocate forge builds
-   onto a least-privileged builder, and ship as one release whose node identity, cookie,
-   and distribution transport are explicit and fail closed on the distributed path —
-   told nothing at all, the release boots a standalone single-machine posture instead,
-   with distribution off and no cookie in existence.
-9. The signing authority runs on a `:signer` node rather than inside the application it
+   node, or quarantined when the evidence is ambiguous. A component's authority is its
+   import list, enforced by the helper's linker on the loading node.
+6. The signing authority runs on a `:signer` node rather than inside the application it
    authorizes: the key is read at boot from a file that node mounts, an independent
-   policy recomputes the whole submitted artifact and refuses anything outside
-   `Ouroboros.Capability.`, and every decision — issued and refused — is durably
-   journaled before any signature is returned.
-10. The documentation distinguishes those proofs from partition tolerance, full-host
-    provider durability, billing, real repository effects, OS-level sandboxing of
-    generated code, signing custody *outside the distribution trust domain*, evaluation
-    beyond a declared spec, a real packaged-release install/reboot rehearsal, any claim
-    that effect grants sandbox loaded code, and any claim that node roles, placement
-    checks, or signer isolation constrain a node that has already completed the
-    distribution handshake.
-
-The first nine are local implementation claims backed by deterministic tests. None
-imply the external claims in item ten.
+   policy recomputes the whole submitted manifest from the bytes and refuses a world its
+   kind does not require, and every decision — issued and refused — is durably journaled
+   before any signature is returned.
+7. Two deny-by-default authorities decide what may happen, both node-local and durable:
+   permission rules for what the model may do to this machine, grants for what an agent
+   may do to the cluster. Every rule-made decision, every human answer, and every forge
+   and deploy is recorded in the effect ledger whether it ran or was refused.
+8. Under the `self` posture a session forges a component this runtime then runs; what a
+   policy component may resolve is promoted on replayed evidence and can be withdrawn;
+   and the outer loop produces a change a human signs, merges and promotes, measured on
+   one fixed benchmark. Built and selftested ([SELF.md](SELF.md)); the first unattended
+   run is an operator's decision, not a claim here.
+9. A data directory written by the tree before the reduction — `dev` at `3bc8887` —
+   boots on this one: every surviving checkpoint decodes, or is quarantined by name and
+   reported, and `make boot-gate` proves it twenty times.
+10. The documentation distinguishes those proofs from partition tolerance, billing, a VM
+    boundary around the shell or the build, signing custody *outside the distribution
+    trust domain*, evaluation beyond a declared spec, any release-installation or
+    self-update lane, any claim that grants or permission rules sandbox loaded code, and
+    any claim that node roles, placement checks, or signer isolation constrain a node
+    that has already completed the distribution handshake.
 
 ## Planes and ownership
 
@@ -63,7 +75,6 @@ child is supervised — an unrecognized role raises rather than booting the priv
 tree. `:core` starts the full runtime. `:builder` starts formation and
 `Ouroboros.Wasm.Supervisor` — the helper pool a forwarded lane-W forge needs in order to
 read imports (W22) — and nothing that holds durable work: no stores and no sessions.
-A BEAM forge build is still `:peer.start/1` plus a call.
 `:signer` starts the durable-directory owner when a data directory is configured, then
 one process: `Upgrade.Signing.Service`, which holds the key, applies the signing policy,
 and journals every decision, then formation. That process leads the role-specific
@@ -271,7 +282,7 @@ ignored; only `deny` stops anything.
 ##### Checkpoints, and what rewind will not claim
 
 The conversation checkpoint gained a file checkpoint beside it. Before every `write`,
-`edit`, `apply_patch` and language-server rename the loop snapshots the file's prior
+`edit` and `apply_patch` the loop snapshots the file's prior
 bytes into `blobs/<sha256>` under the session directory, and records a per-turn manifest
 of `{path, before, after}` plus the message count at that turn's end. Content addressing
 keeps it affordable; a per-session byte budget (256 MiB) bounds it, and turns dropped to
@@ -387,8 +398,9 @@ recomputes every claim that can be recomputed — the component's sha256 and siz
 the bytes submitted beside the manifest — and refuses a world its `kind` does not
 require, with no configuration that widens that. It requires `metadata.author`, and by
 default (`:signing_require_wasm_eval`) a `Rollout.Evaluation` spec it can validate,
-because there is no build peer running a test suite here and the signed eval spec *is*
-the test story. What it deliberately does *not* check is anything only a target node
+because nothing in this runtime compiles a component or runs its tests before the
+signature, and the signed eval spec *is* the test story. What it deliberately does *not*
+check is anything only a target node
 knows: epoch ordering beyond a plausibility distance, and what the linker will actually
 accept — the boundary there is the helper's own linker, which defines exactly the
 world's imports and fails instantiation on anything else. Every failure is
@@ -519,6 +531,74 @@ reason: the only lane that deploys agent-authored code is lane W, whose componen
 inside a world whose imports do not reach the BEAM, so nothing an agent forges can
 replace the module deciding what code may do.
 
+### Durable checkpoints
+
+Every store above that survives a restart keeps its state in
+`Ouroboros.Storage.DurableFile` checkpoints, and every one of them is read with
+`:erlang.binary_to_term(binary, [:safe])`. `[:safe]` refuses to *create* an atom. That is
+an input-validation fence — a checkpoint is bytes on a disk another principal can write —
+and it is also a durable-format contract: a build that stops spelling an atom has changed
+the format of every checkpoint that holds it, and a file an older build wrote then fails
+to decode as a whole term. The reduction deleted planes whose atoms sat in every one of
+these stores. Three mechanisms keep the older directory readable, one per kind of name,
+and they are disjoint:
+
+- **`Ouroboros.Storage.RetiredAtoms`** covers a name *no module of this build spells any
+  more*: the deleted planes' pattern kinds, subject keys, provider names, transports,
+  statuses and module names — 197 names, each with the store that may still hold it.
+  `DurableFile` compiles the list into itself, so the module that decodes is the module
+  that interns them, and the reader that used to understand a value treats it as one
+  that matches nothing: a retired pattern kind matches nothing, a retired provider loads
+  as history a session can show and cannot run, a retired ledger key is a key nothing
+  reads. Never as a reason to crash.
+- **Quarantine** (`DurableFile.get_checkpoint_or_quarantine/2`) covers a name *no build
+  can spell*: the node a record was written by (`:"ouroboros@host"`) and a capability
+  module minted at runtime under `Ouroboros.Capability.`. Grants and the effect ledger
+  read through it. An undecodable file moves aside as `<hash>.quarantined-<unix>.term`
+  with every byte intact, one error line names the key, the old path and the new one,
+  and the store starts from no checkpoint.
+- **The preload** (`DurableFile.ensure_build_loaded/0`) covers a name *this build spells
+  in a module that has not loaded yet*. Under interactive code loading the atom table at
+  the first decode is a function of boot order — the integration fixture measured between
+  36 and 117 `Ouroboros.*` modules loaded at the effect ledger's first read, run to run,
+  and lost the ledger on a loaded machine. Before the first `[:safe]` decode in a VM the
+  adapter loads every module of this build and of its dependencies, once.
+
+Two blast radii. `Interactive.Store` is built on `Storage.Records` — one checkpoint per
+session plus an index — so a name it cannot intern costs one session, dropped from the
+index with a log line, and the node boots; quieter than a crash, and not better than one.
+Every other store is one file: grants, permissions, policy promotion, the effect ledger,
+the rollout register, the signing journal, the epoch watermark and the cluster's
+session-owner record. There a miss would cost the file and, for a supervised child, the
+boot — which is why the two stores that can hold a runtime-minted name quarantine rather
+than stop, and why the rest are covered by the list and the preload. The register, the
+journal and the WASM store write every atom through `Upgrade.Wire` as a tagged binary and
+need none of this.
+
+What an operator sees after upgrading a node whose grants named a capability forged at
+runtime is one `[error]` line at boot —
+
+```
+checkpoint {:ouroboros, :agent_grants, 1} at <data dir>/grants/checkpoints/<hash>.term
+could not be decoded (:invalid_term); quarantining it at
+<data dir>/grants/checkpoints/<hash>.quarantined-<unix>.term and starting from no checkpoint
+```
+
+— a file by that name beside the store, and no grants at all: every principal is denied
+every effect until someone grants again. That is deny-by-default reached from the
+direction that narrows, and it is a fact the operator has to be told, not a silent
+recovery. The effect ledger's version of the same event starts a new history at sequence
+1 beside the old bytes; `ledger.export`'s chain is computed over the history the node
+holds and claims nothing about the one it does not. Every *other* unreadable checkpoint —
+an I/O error, a content-integrity failure, a missing directory — still stops the store,
+because an authority that could not tell a broken disk from a build that moved on would
+be inventing an empty allow-list out of a hardware fault.
+
+The proof is `make boot-gate`: a data directory written by `dev` at `3bc8887`, holding
+every durable shape the reduction retired, booted on this tree ten times in each
+code-loading mode with every count compared against the record in
+[`test/support/integration_fixture/README.md`](../test/support/integration_fixture/README.md).
+
 ## Failure model
 
 | Failure | Current behavior | Required next behavior |
@@ -530,11 +610,7 @@ replace the module deciding what code may do.
 | Network partition during placement | `:global` cannot guarantee one owner | Consensus lease/admission service |
 | Store write fails | Cursor is not advanced and events are not broadcast | Backpressure/health alarms |
 | Workspace/registry owner restarts | Nonterminal durable roots remain reserved until the registered owner reclaims them | Cross-node consensus authority |
-| Fast patch migration fails | Reverse migrated state and restore preimages, or quarantine while keeping the artifact and preimages journaled | Done; release persistence remains separate |
-| Fast patch resume fails after loading | Compensate first; quarantine with retained rollback material only if compensation fails | Done |
-| Fast patch prepare reply is lost | Reservation is released by artifact id; no code was loaded | Done |
-| Introduced module is still running on rollback | `{:introduced_code_in_use, module}` and quarantine; never a brutal purge | Done |
-| Introduced module reappears after rollback | Restart reconciliation fails closed against the expected `:non_existing` identity | Done |
+| A checkpoint holds an atom this build cannot intern | A retired name is interned by `Storage.RetiredAtoms`; a name this build spells but has not loaded is preloaded; a name no build can spell quarantines the file (grants, the ledger) or the record (a session) by name, and the node boots — see "Durable checkpoints" | Operator re-grant; nothing self-heals |
 | Forged capability fails its health probe | Every committed node is rolled back, the module is absent again, and the registry records `:rolled_back` | Done |
 | Forged capability fails its signed evaluation spec | Rolled back before promotion, while the rollback material still exists, with the failing report recorded | Done |
 | Evaluation is unreachable, slow, or answers a shape this build cannot read | Compensation is attempted and the registry records `:quarantined`, never `:rolled_back` | Operator reconciliation tooling |
@@ -542,17 +618,18 @@ replace the module deciding what code may do.
 | Evaluation criteria are rewritten after signing | The manifest signature fails on every loading node | Done |
 | Capability rollout outcome is ambiguous anywhere | Registry records `:quarantined` and never `:rolled_back` | Operator reconciliation tooling |
 | Forge crashes between allocating an epoch and using it | The number is durably spent and never reissued | Done |
-| Build peer boot, compile, or tests hang | One deadline covers all three; the callback is killed and the peer stopped | Done |
-| Build peer compiles hostile source | The peer cannot reach the cluster; it can still reach the build host | Container/VM boundary with resource and network limits |
+| The cargo build hangs | One wall-clock ceiling covers the build; the sandboxed process group is killed | Done |
+| The forge compiles hostile source | The build runs under the OS sandbox with no network and writes confined to a scratch directory; it still shares the build host's kernel and user | Container/VM boundary with resource and network limits (proposals/core.md §7) |
 | Grant checkpoint write fails | A pre-rename failure is a definite refusal; a post-rename durability failure is `commit_outcome_unknown` and restarts the authority for reconciliation | Operator reconciliation tooling |
 | Effect authority is unreachable | Every attempt is refused; there is no path that fails open | Replicated policy authority |
-| Release mutation result is ambiguous | Journal enters quarantine; no false success | Operator reconciliation and deployment rehearsal |
 
 ## Safety boundaries
 
-- Development/test permits unsigned local patch tests. Production never does. Trusted
-  keys arrive through `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; boot fails on a malformed
-  entry and an unset variable trusts nobody.
+- Development and test permit an unsigned local component deploy
+  (`upgrade_trust_policy: [allow_unsigned: true]`). Production never does, and the
+  `self` posture closes it in every environment. Trusted keys arrive through
+  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; boot fails on a malformed entry and an unset
+  variable trusts nobody.
 - A forged capability's authority is its component's import list, enforced by the
   helper's linker on the loading node: it defines exactly the world's imports and fails
   instantiation on anything undeclared. The declared list in a manifest is provenance and
@@ -571,17 +648,18 @@ replace the module deciding what code may do.
   such a node gets is a policy decision — the world rule has no bypass for any caller,
   and the per-requester rate limit is keyed on a self-reported claim. Custody outside the
   distribution trust domain remains external.
-- Agent effect grants gate the *action layer* — the typed signals a well-behaved agent
-  flow travels through — and are deny-by-default, durable, and checked against the
-  concrete attempt. They are not a sandbox and not a capability system. Any code running
-  in this VM can call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Wasm.Forge.forge/2`, or
-  `Ouroboros.Control.Grants.grant/3` directly without passing an effect action at all,
-  because it retains full ambient VM authority. The hard boundaries remain the
-  component's import list, the signer's policy, and manifest signing whose production
-  default refuses.
-- No effect exists for granting, so an agent cannot widen its own authority through this
-  surface. That is a property of the surface, not of the VM, which is why signing
-  approval belongs outside this application.
+- Agent effect grants gate the forge and deploy path — the one a session's `forge` tool
+  and the operator's gateway travel through — and are deny-by-default, durable, and
+  checked against the concrete attempt. They are not a sandbox and not a capability
+  system. Any code running in this VM can call `Ouroboros.Wasm.Forge.forge/2`,
+  `Ouroboros.Mesh.start_agent/2`, or `Ouroboros.Control.Grants.grant/4` directly without
+  passing the tool at all, because it retains full ambient VM authority. The hard
+  boundaries remain the component's import list, the signer's policy, and manifest
+  signing whose production default refuses.
+- No tool and no gateway verb grants — `grants.list` is read-only, and `Grants.grant/4`
+  has no caller in `lib/` — so an agent cannot widen its own authority through any
+  surface it can reach. That is a property of the surface, not of the VM, which is why
+  signing approval belongs outside this application.
 - The authority is node-local: one `Grants` process per node over that node's own
   checkpoint. An agent granted an effect on one node is not granted it on another, and
   nothing replicates or reconciles the two.
@@ -598,12 +676,16 @@ replace the module deciding what code may do.
   an existing one — evicting a `deny` to admit an `allow` would be a storage limit that
   widens authority. A pre-commit rule-write failure leaves the previous state standing;
   post-rename ambiguity restarts the authority instead of continuing with divergent memory.
-- A session omits an unenforceable safety default rather than claiming one: where the
-  provider cannot enforce `sandbox_mode`/`approval_mode`, the option is left off the
-  request and the session runs under the provider's own behavior. Read-only is explicit
-  (`sandbox_mode: :read_only`).
-- Provider flags do not replace an OS sandbox. Untrusted work needs a separate
-  worktree/container/VM boundary with resource and network limits.
+- A session never claims a posture it cannot enforce. `sandbox_mode` is rendered by the
+  OS backend or refused by name, and `approval_mode` is applied by the loop that owns
+  the tool call. Read-only is explicit (`sandbox_mode: :read_only`).
+- The OS sandbox is a boundary and not a container: same kernel, same user. On Linux it
+  is mounts and a network namespace with no seccomp filter, and a `.git` or
+  `.ouroboros` created after the command starts, below the top level of a writable root,
+  is not denied there (Seatbelt denies both cases by regex; the `LD_PRELOAD` filter that
+  used to deny it on Linux went with proposals/core.md §4 A2). Untrusted work needs a
+  separate container/VM boundary with resource and network limits, which is §7 of that
+  plan.
 - A worktree (`worktree: true`) is *containment scoping*, not isolation. It narrows what
   the runtime's own path checks and the native agent's tools consider in-bounds — the
   lease and every containment test are taken on the canonicalised worktree path, so a
@@ -646,8 +728,9 @@ replace the module deciding what code may do.
   `:erpc` authority over every other, including loading code, reading application
   environment, and killing processes. `Ouroboros.Cluster`'s role checks — placement onto
   `:core` nodes, forge builds onto `:builder` nodes — are misconfiguration detection
-  above that fact, in exactly the same sense as the `Ouroboros.Capability.` namespace
-  policy. A hostile connected node never calls those functions at all.
+  above that fact: a check a cooperating node honours, in exactly the sense that the
+  signer's policy is a check a cooperating requester submits to. A hostile connected node
+  never calls those functions at all.
 - Node role narrows blast radius rather than containing a compromise. A `:builder` node
   boots cluster formation and the WASM helper pool, and nothing that holds sessions,
   journals or grants; a `:signer` node adds the signing
@@ -655,17 +738,17 @@ replace the module deciding what code may do.
   authorized members of the cluster. Containment requires the build and signing hosts
   outside the cluster's trust domain, reached through something narrower than Erlang
   distribution.
-- The OTP releases directory is deployment-owned infrastructure. Content addressing,
-  exclusive links, and fsync do not defend against another OS principal that can replace
-  files in that directory.
+- The data directory is deployment-owned infrastructure. `Storage.DurableFile`'s
+  write-sync-rename discipline and the content-addressed WASM store do not defend against
+  another OS principal that can replace files in that directory.
 
 ## Roadmap to a competitive coding system
 
 ### Milestone 1: reliable single-task execution
 
-- deterministic provider-contract tests;
-- real CLI fixture tests for argv, JSONL, process ownership, cancellation, and
-  timeout behavior;
+- deterministic contract tests for the native provider;
+- scripted-model tests for the loop's process ownership, cancellation, and timeout
+  behavior;
 - append-oriented event storage instead of rewriting the changed record's retained history;
 - ~~worktree provisioning and durable cleanup~~ (done: `Ouroboros.Workspace.Worktree`,
   above), explicit network policy, and the OS-level isolation a worktree does not give;
@@ -773,10 +856,12 @@ Still external:
   declares no spec is refused a signature outright by default
   (`:signing_require_wasm_eval`); what does not exist is any judgement about whether a
   declared spec is a *good* spec.
-- **package assembly and reboot rehearsal** around the implemented `.appup`/`.relup`
-  metadata/inspection lane. A forged component *does* survive a restart — the store is
-  content-addressed on disk and `Wasm.Boot` restarts what the register says is live — but
-  a change to the runtime itself still needs a release.
+- **any release-installation lane.** A forged component *does* survive a restart — the
+  store is content-addressed on disk and `Wasm.Boot` restarts what the register says is
+  live — but a change to the runtime itself still needs a release, and a release is
+  `make ouro` on the machine that will run it: the OTP release-installation lane and the
+  self-updater were deleted by proposals/core.md §3 D4, and nothing installs onto another
+  machine.
 
 Stop condition: the agent can propose a change, but cannot authorize its own patch;
 every rollout has a reproducible artifact, independent approval, canary evidence,
@@ -800,7 +885,7 @@ That architecture creates promising future capabilities:
 - long-running specialist subagents that retain independent cursors and provenance;
 - canary or cohort rollout of a behavior patch with health gates and retained rollback;
 - evaluator-driven repair loops whose execution identity survives coordinator churn;
-- heterogeneous provider workers selected by capability or policy; and
+- subagents placed by the facts and tags a machine advertises; and
 - build/sign/loader services an agent cannot self-approve. The least-privileged *roles*
   exist, forge builds already relocate onto a builder node, and the signing authority is
   a real service on a signer node with its own key and its own policy; what remains is
@@ -810,8 +895,6 @@ That architecture creates promising future capabilities:
 ## Primary references
 
 - [Jido documentation](https://jido.run/docs/getting-started/elixir-developers)
-- [Erlang code loading](https://www.erlang.org/doc/apps/kernel/code.html)
-- [Elixir `GenServer.code_change/3`](https://hexdocs.pm/elixir/GenServer.html#c:code_change/3)
-- [OTP release handling](https://www.erlang.org/doc/system/release_handling.html)
-- [SASL `release_handler`](https://www.erlang.org/doc/apps/sasl/release_handler.html)
-- [Mix release hot-upgrade limitation](https://hexdocs.pm/mix/Mix.Tasks.Release.html#module-hot-code-upgrades)
+- [Distributed Erlang](https://www.erlang.org/doc/system/distributed.html)
+- [`erlang:binary_to_term/2` and the `safe` option](https://www.erlang.org/doc/apps/erts/erlang.html#binary_to_term/2)
+- [The WebAssembly component model](https://component-model.bytecodealliance.org/)

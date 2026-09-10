@@ -131,7 +131,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   # alphabetically, so a new band appears in the reference the day it appears in the table.
   @band_order ~w(
     handshake runtime fleet account interactive permissions policy grants
-    ledger workspace capabilities upgrade signing wasm
+    ledger workspace capabilities signing wasm
   )
 
   @impl Mix.Task

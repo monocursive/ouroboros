@@ -676,25 +676,15 @@ through nothing else — it is not a mesh client.
   target's deadline plus the pool's call margin. That is stated in the tool's own description
   so a model can weigh it against a cheaper tool.
 
-### 6. `agents.message`, for a script
+### 6. From a script
 
-The operator's half of the same reach is the gateway verb `agents.message`, scope `:operate`:
-
-```json
-{"method": "agents.message", "params": {"to": "wasm/counter", "body": {"add": 40}}}
-```
-
-```json
-{"result": {"from": "gateway", "to": "wasm/counter",
-            "reply": {"count": 40, "messages": 1},
-            "truncated": false, "untrusted": true}}
-```
-
-It reaches *any* mesh agent, because the mesh already resolves an agent anywhere in the
-cluster and a weaker second answer would not change that. `untrusted: true` is the label in
-structured form; `truncated` says whether the reply was cut at the 64 KiB bound.
-`agents.state` is the `:read` sibling and labels and bounds the same two fields for a `wasm/`
-agent, because it returns them too.
+There is no gateway verb that messages a capability directly. `agents.message` and its
+`:read` sibling `agents.state` reached any mesh agent from a script, and they were deleted
+with the coordination stack ([the core reduction](proposals/core.md) §3 D3). What reaches a
+deployed capability now is the session's `capability` tool above — so a script drives one
+the way it drives anything else here, through a session (`ouro run "<prompt>"`, or
+`interactive.start` and `interactive.send_message` on the gateway) — and `wasm.list` and
+`wasm.status` report what is deployed and live without sending it anything.
 
 ---
 

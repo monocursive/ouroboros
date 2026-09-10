@@ -87,7 +87,7 @@ deletes an uncommitted change.
 
 **Stated non-claims.** FLEET.md: "No provisioning: nothing clones, fetches, or creates
 worktrees"; tags, logical workspace maps, and workspace provisioning are on the deferred
-list. AGENT_EXPERIENCE.md G3: "Still: one turn per child, no steering into one."
+list. research/agent-ux-2026/AGENT_EXPERIENCE.md G3: "Still: one turn per child, no steering into one."
 
 **Tests that already hold these seams.** `test/provider/native/subagent_test.exs`,
 `test/provider/native/subagent_remote_test.exs` (boots a real peer VM and proves
@@ -405,7 +405,7 @@ Every slice follows the protocol the last three waves settled on:
   only the union of slice gates, with one or two integration-fix commits budgeted;
 - a bounded live check on real machines for B, C, and D — the Mac ↔ VPS pair for
   provisioning and return, the dev cluster for the rest;
-- docs in the same PR: the G3 row and the capability table in AGENT_EXPERIENCE.md, the
+- docs in the same PR: the G3 row and the capability table in research/agent-ux-2026/AGENT_EXPERIENCE.md, the
   deferred list and the "What has been proven" paragraph in FLEET.md, PROTOCOL.md
   fixtures, and the TUI.md/WEB.md rows for the new cells. A claim goes into a document
   only after the test or live run that backs it exists.
