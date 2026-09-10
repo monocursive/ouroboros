@@ -315,12 +315,22 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     :ok
   end
 
-  @doc "The string a client shows for a backend: `sandbox-exec`, `bwrap`, or `none`."
+  @doc """
+  The string a client shows for a backend: `sandbox-exec`, `bwrap`, or `none`.
+
+  Total over atoms, because every refusal that names a backend reaches this function
+  *after* one of `fences_reads?/1`, `fences_network?/1` or `seals_process?/1` has answered
+  `false` for it (`Ouroboros.Wasm.Pool`'s `sandbox_status/1`, `Ouroboros.Wasm.Forge`'s
+  `sandbox_policy/5`), and those three answer for any term. A backend name this module does
+  not recognise has to be *nameable* inside the refusal that is already refusing it rather
+  than raise there.
+  """
   @spec label(detection() | backend()) :: String.t()
   def label(%{backend: backend}), do: label(backend)
   def label(:sandbox_exec), do: "sandbox-exec"
   def label(:bwrap), do: "bwrap"
   def label(:none), do: "none"
+  def label(other) when is_atom(other), do: Atom.to_string(other)
 
   @doc """
   The `sandbox` field a `bash` tool call carries, so a client can name it per command.
