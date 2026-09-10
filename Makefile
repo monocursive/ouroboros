@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -41,8 +41,6 @@ help:
 	@echo "make dist-linux       the same, for x86_64-unknown-linux-gnu, built in Docker"
 	@echo "make dist-linux-clean drop the dist-linux image and its cache volumes"
 	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
-	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
-	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make wasm-linux-test     prove the wasm suites under bubblewrap, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
@@ -85,39 +83,10 @@ reset:
 logs:
 	@sh scripts/dev.sh logs
 
-# The sandbox helper only enforces on Linux, so building it on a Mac produces a binary
-# whose `doctor` reports `"usable": false` and which `Sandbox.Helper.probe/1` therefore
-# declines to select. That is deliberate: the target stays runnable everywhere so the
-# install path is exercised on the machine the code is written on, and detection falls
-# through to sandbox-exec exactly as it would with no helper at all.
-sandbox:
-	@echo "==> sandbox: release helper into priv/sandbox/"
-	cd tui && $(CARGO) build --release -p ouro-sandbox
-	mkdir -p priv/sandbox
-	cp tui/target/release/ouro-sandbox priv/sandbox/ouro-sandbox
-	chmod 0755 priv/sandbox/ouro-sandbox
-	@for env in dev test prod; do \
-	  dest="_build/$$env/lib/ouroboros/priv/sandbox"; \
-	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
-	    mkdir -p "$$dest"; \
-	    cp priv/sandbox/ouro-sandbox "$$dest/ouro-sandbox"; \
-	    chmod 0755 "$$dest/ouro-sandbox"; \
-	  fi; \
-	done
-	@echo "==> sandbox: what this build can enforce here"
-	@priv/sandbox/ouro-sandbox doctor
-
-# The Linux enforcement proof, reproducible from a Mac. The helper's unit tests run
-# anywhere; `tui/sandbox/tests/linux_enforcement.rs` only means something on a kernel with
-# Landlock, and user namespaces need a privileged container to be creatable at all.
-sandbox-linux-test:
-	@echo "==> sandbox-linux-test: enforcement suite in a privileged Linux container"
-	scripts/sandbox-linux-test.sh
-
-# The WebAssembly containment helper. Unlike the sandbox helper this one enforces the same on
-# every platform — the boundary is wasmtime's linker, not a kernel feature — so there is no
-# per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a newer Rust than the rest of
-# this workspace; see the rust-version note in tui/wasm/Cargo.toml.
+# The WebAssembly containment helper, and the only helper this repository builds. It
+# enforces the same on every platform — the boundary is wasmtime's linker, not a kernel
+# feature — so there is no per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a
+# newer Rust than the rest of this workspace; see the rust-version note in tui/wasm/Cargo.toml.
 wasm:
 	@echo "==> wasm: release helper into priv/wasm/"
 	cd tui && $(CARGO) build --release -p ouro-wasm
@@ -212,9 +181,9 @@ wasm-sdk-cache:
 	@echo "==> wasm-sdk-cache: crates now cached"
 	@find "$(FORGE_CARGO_HOME)/registry/cache" -name '*.crate' | wc -l
 
-# Lane W under bubblewrap: the backend the hosted CI job runs every wasm suite under, and
-# the one no Mac exercises. `ouro-sandbox` is disabled by name inside the container so
-# detection falls through to `bwrap`, which is what found W16's merged-`/usr` namespace hole.
+# Lane W under bubblewrap: the Linux backend, the one the hosted CI job runs every wasm
+# suite under, and the one no Mac exercises. It is what found W16's merged-`/usr`
+# namespace hole.
 wasm-linux-test:
 	@echo "==> wasm-linux-test: the wasm suites under bubblewrap on a Linux kernel"
 	scripts/wasm-linux-test.sh
@@ -310,7 +279,7 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: sandbox wasm
+release-tarball: wasm
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

@@ -718,7 +718,7 @@ defmodule Bench.Self.Workspace do
   alias Bench.Self.{Env, Exec, Fs, Git}
 
   @cloned ~w(deps _build)
-  @seeded ~w(priv/wasm priv/sandbox)
+  @seeded ~w(priv/wasm)
   @test_output_cap 8 * 1024 * 1024
 
   @type prepared :: %{setup_ms: non_neg_integer(), log: Path.t() | nil}
@@ -727,10 +727,9 @@ defmodule Bench.Self.Workspace do
   The paths this module puts into a tree that the tree's own commit does not carry.
 
   `Bench.Self.Change` needs them by name. `.gitignore` at an older commit does not
-  necessarily ignore all four — `priv/wasm` and `priv/sandbox` are recent entries — so
-  without this list the sealed helper binaries read as files the *agent* added, land in
-  the graded diff, and the patch then fails to apply against a grading tree that was
-  handed the same binaries.
+  necessarily ignore all three — `priv/wasm` is a recent entry — so without this list the
+  sealed helper binary reads as a file the *agent* added, lands in the graded diff, and the
+  patch then fails to apply against a grading tree that was handed the same binary.
   """
   @spec seeded() :: [String.t()]
   def seeded, do: @cloned ++ @seeded

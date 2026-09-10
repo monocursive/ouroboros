@@ -9,7 +9,6 @@ defmodule Ouroboros.MixProject do
       version: "0.1.0",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
-      compilers: Mix.compilers() ++ [:ouroboros_fs_filter],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       # Gradual success typing. PLTs live under `_build/plts` (already gitignored with

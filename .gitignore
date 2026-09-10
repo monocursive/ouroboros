@@ -65,7 +65,6 @@ ouroboros-*.tar
 !/dist/docker/
 
 # Built helpers; never source artifacts.
-/priv/sandbox/
 /priv/wasm/
 
 # The two JavaScript bundles `mix web.assets` copies out of the dependencies on every

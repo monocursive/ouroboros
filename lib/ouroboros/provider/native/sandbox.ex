@@ -61,10 +61,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   reads to decide which programs run before and after every tool call. The engine denies a
   write to it too, but the engine only sees the paths a call *declares*, and a shell declares
   none: `cp x ouroboros.toml`, `mv`, `tee`, `sed -i`, `dd` and `python3 -c` reach it without
-  a redirect for the engine to read, which is why this one has to be a kernel rule. Seatbelt
-  and bubblewrap can express it; `ouro-sandbox` cannot, says so through `protects_files?/1`,
-  and `Hooks.trusted?/2` declines that workspace's shell hooks rather than trusting a fence
-  that is not there.
+  a redirect for the engine to read, which is why this one has to be a kernel rule. Both
+  backends express it — Seatbelt with a `literal` deny, bubblewrap with a read-only bind —
+  so a caller no longer has a backend to ask about before believing the fence is there.
 
   **This node's own credentials are fenced against a READ (S4).** `hidden_files/0` names the
   signing seed, the gateway and web tokens, and the web cookie secret, and `policy/2` puts
@@ -77,10 +76,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   node's own gateway. **The loopback exception below stands** — `mix` and `cargo` coordinate
   concurrent compilers over `localhost` and a build that cannot open one fails `:eperm` — so
   what is fenced is the credential, not the socket. A session may still connect to the
-  gateway; it can no longer authenticate as this node's operator. On a backend that cannot
-  hide a file `hides_files?/1` is `false`, `detect/0`'s notes say so (which is what
-  `capabilities.preview` shows), and `Ouroboros.Application.self_signing_children/0` starts
-  no local signing service there unless the operator sets `OUROBOROS_SELF_UNFENCED_KEY=1`.
+  gateway; it can no longer authenticate as this node's operator. Both backends render the
+  deny: Seatbelt with `(deny file-read* (literal …))`, bubblewrap by binding `/dev/null`
+  read-only over the path.
 
   **The `.git` consequence is real and is not a bug.** A sandboxed `git commit` fails,
   because committing writes into `.git`. That is Codex's rule and it is kept for
@@ -114,68 +112,47 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   ## What it does not do
 
-  Linux has two backends and they are not equally strong. `ouro-sandbox`
-  (`Sandbox.Helper`) is preferred where the kernel supports it: read-only mounts *and* a
-  Landlock domain for the filesystem, an unshared network namespace, and a small seccomp
-  denylist. `bwrap` is the fallback and constrains the filesystem and the network namespace
-  but not the syscall surface.
+  One backend per operating system: Seatbelt on macOS, bubblewrap on Linux. Claude Code and
+  Codex each run one Linux backend too, and this runtime used to run a second one — a
+  Landlock plus seccomp helper it built itself — with an `LD_PRELOAD` name filter beside
+  both of them to deny creating a `.git` that did not exist when the command started.
+  Helper, filter and semantic are gone (docs/proposals/core.md §4 A2). **A `.git` or
+  `.ouroboros` that was not there when the command started can be created on Linux**; one
+  that *was* there is still bound read-only, and Seatbelt still denies both by regex.
+  bubblewrap constrains the filesystem and the network namespace and not the syscall
+  surface: there is no seccomp filter on this backend.
 
-  **Both** still depend on the `LD_PRELOAD` name filter for one case: denying the creation
-  of a `.git` / `.ouroboros` directory that did not exist when the command started. Landlock
-  attaches rights to inodes, so it cannot write a rule for a path that does not exist, and
-  the only right that would cover it — `MAKE_DIR` on the parent — would deny every
-  legitimate `mkdir` in the workspace. Static binaries that never call libc are outside that
-  net, on either backend. `Sandbox.Helper`'s moduledoc has the layer-by-layer table.
-
-  All three backends now fence **reads** as well, in the one policy that asks for it:
+  Both backends fence **reads** as well, in the one policy that asks for it:
   `builder_policy/1` names its read roots and everything else is denied — Seatbelt by
-  `(deny default)`, bubblewrap by never binding `/` into the namespace, `ouro-sandbox` by a
-  Landlock read set that is the allow-list rather than `/`. `fences_reads?/1` is the
-  question a caller asks first, and for `ouro-sandbox` it is answered by the probed helper
-  rather than by the backend's name, because a helper binary older than the field would
-  apply the rest of the policy and silently drop the fence.
+  `(deny default)`, bubblewrap by never binding `/` into the namespace. `fences_reads?/1`
+  is the question a caller asks first, and the only answer that is not a yes is a node with
+  no backend at all.
 
   No domain allowlist and no proxy: external network is on or off, never "these hosts". A
-  network-denied macOS command retains loopback for build-tool IPC; both Linux backends
-  keep an isolated network namespace with loopback up. `sandbox-exec` is deprecated by
-  Apple — it still works on macOS 26 and it is what Codex ships, but it carries that
-  warning.
+  network-denied macOS command retains loopback for build-tool IPC; bubblewrap keeps an
+  isolated network namespace with loopback up. `sandbox-exec` is deprecated by Apple — it
+  still works on macOS 26 and it is what Codex ships, but it carries that warning.
 
   Live bubblewrap behaviour is claimed only where the live suite runs: Linux CI on
-  ubuntu-24.04, which installs `bwrap` and exercises the filesystem denials. The
-  `ouro-sandbox` helper's enforcement was observed on Linux 7.0 with Landlock ABI 8 —
-  filesystem denials, the network posture, capability drop, the seccomp belt, and the
-  builder read fence (a build reads the roots it was given, is refused a canary beside them
-  with `Permission denied`, and gets no root at all from an empty allow-set) — by
-  `tui/sandbox/tests/linux_enforcement.rs`, which is skipped with a printed reason where
-  the kernel or the container cannot enforce. Neither Linux suite runs on a Mac.
+  ubuntu-24.04, which installs `bwrap` and exercises the filesystem denials, and
+  `scripts/wasm-linux-test.sh`, which is the same proof in a privileged container. Neither
+  runs on a Mac.
   """
 
   require Logger
 
   alias Ouroboros.Provider.Native.Sandbox.Bwrap
-  alias Ouroboros.Provider.Native.Sandbox.Helper
   alias Ouroboros.Provider.Native.Sandbox.SandboxExec
 
   @typedoc "Which OS mechanism this node can actually use."
-  @type backend :: :sandbox_exec | :ouro_sandbox | :bwrap | :none
+  @type backend :: :sandbox_exec | :bwrap | :none
 
-  @typedoc """
-  What `detect/0` found, once, for this node.
-
-  `read_fence` says whether this particular backend, as installed here, can enforce a
-  builder policy's read allow-set. It is part of the detection rather than a property of
-  the backend name because one of the three backends is a helper binary this repository
-  ships: an `ouro-sandbox` older than W17 is the same backend under the same name with no
-  read allow-set in its wire format, and `fences_reads?/1` asks the probe rather than the
-  name so that node refuses to forge instead of forging unfenced.
-  """
+  @typedoc "What `detect/0` found, once, for this node."
   @type detection :: %{
           backend: backend(),
           executable: String.t() | nil,
           version: String.t() | nil,
-          notes: String.t(),
-          read_fence: boolean()
+          notes: String.t()
         }
 
   @typedoc """
@@ -195,16 +172,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   is what `helper_policy/1` asks for: the child may exec only the executable it was spawned
   as, may not fork, has no `mach-lookup`, reads `sysctl` only under the `hw.` prefix, and can
   `stat` only the root directory itself and what it may already read. Only Seatbelt can
-  express it (`seals_process?/1`); the two Linux backends render a sealed policy exactly as
-  they render an open one, and the pool's status says which of the two actually applied.
+  express it (`seals_process?/1`); bubblewrap renders a sealed policy exactly as it renders
+  an open one, and the pool's status says which of the two postures actually applied.
 
   `protected_files` (S1) is the third fence beside `protected` and `protected_segments`, and
   it is the one that names **files**: concrete absolute paths that may not be written *or
   created*, whether or not they exist when the command starts. `protected` denies a subtree
   and `protected_segments` denies a directory *name* at any depth; neither can say "this one
   path, which may not exist yet". The workspace hook manifest is exactly that path — see
-  `protected_files/2` — and `protects_files?/1` is the question a caller asks before
-  believing the fence is there, because one of the three backends cannot express it.
+  `protected_files/2`. Both backends express it: Seatbelt writes a `literal` deny, and
+  bubblewrap binds the path read-only over itself or over the empty scratch directory.
 
   `hidden_files` (S4) is the fourth, and the only one that fences a **read**. Every other
   policy this module makes allows `file-read*` everywhere, because a shell that cannot read
@@ -212,8 +189,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   seed and this node's gateway token, derive the keypair, and sign or drive the operator
   surface in the runtime's own name. So a small, named set of the node's own credentials is
   denied for read and for write on every session in every mode but `:unrestricted` — see
-  `hidden_files/0` — and `hides_files?/1` is the question a caller asks before believing it,
-  because the same backend that cannot express `protected_files` cannot express this either.
+  `hidden_files/0`. Both backends express it too, Seatbelt with a `literal` read deny and
+  bubblewrap with a `/dev/null` bind.
   """
   @type policy :: %{
           optional(:readable) => [String.t()],
@@ -267,13 +244,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     "/Applications/Xcode.app"
   ]
 
-  # Observed under both Linux backends on kernel 7.0.14. The script that proved it
+  # Observed on Linux, kernel 7.0.14. The script that proved it
   # (`scripts/forge-linux-test.sh`) went with the BEAM forge lane in
-  # docs/proposals/core.md §4 A1; `scripts/sandbox-linux-test.sh` is the helper's own
-  # enforcement suite and `scripts/wasm-linux-test.sh` runs lane W's under bubblewrap.
-  # Either way the forge's escape tests — `include_str!` of a planted secret, a `#[path]`
-  # module outside the project — are red without the fence, with the honest fixture
-  # building beside them.
+  # docs/proposals/core.md §4 A1; `scripts/wasm-linux-test.sh` runs lane W's under
+  # bubblewrap. Either way the forge's escape tests — `include_str!` of a planted secret, a
+  # `#[path]` module outside the project — are red without the fence, with the honest
+  # fixture building beside them.
   #
   # Two things this list does not fence, on any backend, and both are D26's to state: `/etc`
   # is in it, so an operator's secrets under `/etc` are readable by build-time code; and a
@@ -285,9 +261,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # namespace, and a read-only bind of the host's over the top of either replaces it — which
   # is how the first cut of this list produced a build whose very first act was
   # `cannot create /dev/null: Permission denied`. They are the backend's to provide, not
-  # this list's to name. `ouro-sandbox` keeps both writable in every mode for the same
-  # reason and adds them to the builder read set itself, so neither belongs here for either
-  # backend.
+  # this list's to name.
   @linux_readable ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt"]
 
   @scratch_prefix "ouroboros-sandbox-"
@@ -300,10 +274,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     backend: :none,
     executable: nil,
     version: nil,
-    notes:
-      "no OS sandbox on this node: none of ouro-sandbox, sandbox-exec, or bwrap is available",
-    unshare_net: false,
-    read_fence: false
+    notes: "no OS sandbox on this node: neither sandbox-exec nor bwrap is available",
+    unshare_net: false
   }
 
   # ------------------------------------------------------------------ detection
@@ -347,7 +319,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   @spec label(detection() | backend()) :: String.t()
   def label(%{backend: backend}), do: label(backend)
   def label(:sandbox_exec), do: "sandbox-exec"
-  def label(:ouro_sandbox), do: "ouro-sandbox"
   def label(:bwrap), do: "bwrap"
   def label(:none), do: "none"
 
@@ -595,8 +566,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   Empty under `:read_only`, which has no writable root to protect one in: nothing there is
   writable to begin with, and a deny for a path inside a tree that is already denied is a
   rule that says nothing.
-
-  `protects_files?/1` says whether the backend that will render this can actually enforce it.
   """
   @spec protected_files(map(), :read_only | :workspace_write | :workspace_write_escalated) ::
           [String.t()]
@@ -659,8 +628,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   `builder_policy/1`'s shape with the scratch already attached: closed by default on reads,
   a named read allow-set, writable only where the caller says, no network, and — since W21
   — **sealed as a process**. The mode is **`:builder`** and that is deliberate — `:builder`
-  is this module's vocabulary for "closed on reads", every backend already implements it
-  (`SandboxExec.profile/1`, `Bwrap.options/3`, and W17's `ouro-sandbox` request). What
+  is this module's vocabulary for "closed on reads", both backends already implement it
+  (`SandboxExec.profile/1` and `Bwrap.options/3`). What
   differs between a build and the helper is the *lists* and the *process posture*, and both
   are fields of the policy rather than a profile of their own: `loopback` was added that way
   in W16 and `process` the same way here, so the Seatbelt profile is a function of the
@@ -700,8 +669,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   compilers over loopback and a build without it fails `:eperm`. The helper speaks stdio; a
   loopback socket buys it nothing and reaches every service on this machine — this node's own
   gateway among them. So `loopback: false`, which is what `SandboxExec.network_rules/1` reads.
-  The two Linux backends unshare the network namespace outright, so the host's loopback is not
-  in the child's namespace to begin with and there is nothing there to take away.
+  bubblewrap unshares the network namespace outright, so the host's loopback is not in the
+  child's namespace to begin with and there is nothing there to take away.
   """
   @spec helper_policy(keyword()) :: policy()
   def helper_policy(opts) do
@@ -746,9 +715,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   reporting a child as sandboxed when it is not.
 
   Seatbelt denies `network*` in the profile itself, and since W16 a `loopback: false` policy
-  emits no local exception either. `ouro-sandbox` unshares the network namespace in its own
-  plan and fails to apply — exit 125, which `backend_failure/3` surfaces — rather than running
-  the command unfenced.
+  emits no local exception either.
   """
   @spec fences_network?(detection() | backend()) :: boolean()
   def fences_network?(%{backend: :bwrap} = detection),
@@ -756,7 +723,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   def fences_network?(%{backend: backend}), do: fences_network?(backend)
   def fences_network?(:sandbox_exec), do: true
-  def fences_network?(:ouro_sandbox), do: true
   # A backend with no detection map to read `unshare_net` from is not one this can vouch for.
   def fences_network?(:bwrap), do: false
   def fences_network?(:none), do: false
@@ -772,89 +738,14 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   and says so in its status. Seatbelt is the one backend whose policy language names
   `process-exec`, `process-fork`, `mach-lookup` and `sysctl-read` as operations, so it is the
   one that seals. Bubblewrap binds the readable roots into a namespace in which `/usr/bin` is
-  readable and executable, and `ouro-sandbox`'s Landlock domain fences reads by inode and does
-  not fence `stat` or `execve` at all; both render a sealed policy exactly as they render an
-  open one, and `Bwrap.options/3` and `Helper.request/2` are pinned to that.
+  readable and executable; it renders a sealed policy exactly as it renders an open one, and
+  `Bwrap.options/3` is pinned to that.
   """
   @spec seals_process?(detection() | backend()) :: boolean()
   def seals_process?(%{backend: backend}), do: seals_process?(backend)
   def seals_process?(:sandbox_exec), do: true
-  def seals_process?(:ouro_sandbox), do: false
   def seals_process?(:bwrap), do: false
   def seals_process?(:none), do: false
-
-  @doc """
-  Whether this backend can fence a policy's `protected_files` — one named path, whether or
-  not it exists when the command starts (S1, docs/SELF.md S-D19).
-
-  The fourth question beside `fences_reads?/1`, `fences_network?/1` and `seals_process?/1`,
-  and it is asked for one reason: `Ouroboros.Provider.Native.Hooks.trusted?/2` will not treat
-  a workspace as trusted for shell hooks on a node whose sandbox cannot keep the shell out of
-  that workspace's `#{@hook_manifest}`. A trust that the kernel does not back is a trust the
-  session can grant itself.
-
-  Two of the three answer yes by name:
-
-    * **Seatbelt** writes `(deny file-write* (literal (param …)))`, and SBPL matches a path
-      the kernel resolves whether or not anything is there — a create is a write to that
-      path, so `cp`, `mv`, `tee` and `sed -i` are all denied by the one rule.
-    * **bubblewrap** binds the path read-only over itself when the file exists and binds
-      `/dev/null` read-only onto it when it does not; bubblewrap creates the mount point, so
-      the destination exists, is read-only, and is busy — a write fails `EROFS` and an unlink
-      or a rename over it fails `EBUSY`.
-
-  **`ouro-sandbox` answers no, and that is the honest answer rather than a missing feature
-  in this file.** Landlock attaches rights to inodes, so it cannot write a rule for a path
-  that does not exist — the same limitation this module already states for creating a `.git`
-  that was not there — and the one right that would cover it, `MAKE_REG` on the parent, would
-  deny every legitimate file creation in the workspace. The `LD_PRELOAD` name filter that
-  carries the `.git` case is a libc filter: a static binary is outside it, so it is defence
-  in depth and not a fence to hang a trust decision on. So the helper backend reports `false`
-  here and the node declines shell hooks instead of pretending the file is fenced. A helper
-  that grows a real per-path deny is what changes this answer, not this function.
-  """
-  @spec protects_files?(detection() | backend()) :: boolean()
-  def protects_files?(%{backend: backend}), do: protects_files?(backend)
-  def protects_files?(:sandbox_exec), do: true
-  def protects_files?(:bwrap), do: true
-  def protects_files?(:ouro_sandbox), do: false
-  def protects_files?(:none), do: false
-  def protects_files?(_unknown), do: false
-
-  @doc """
-  Whether this backend can hide a `hidden_files` path from a **read** (S4, docs/SELF.md
-  S-D49).
-
-  The fifth question, and a separate one from `protects_files?/1` even though the two
-  backends answer alike today, because they are different rules: one denies a write to a
-  path that may not exist, and this denies the *contents* of a path that does. A caller that
-  asked the write question and got a yes would be trusting a fence nobody rendered.
-
-    * **Seatbelt** writes `(deny file-read* (literal (param …)))` beside the write deny, last
-      in the profile, so it survives the delivery re-allow and the base `(allow file-read*)`
-      that every shell policy opens with.
-    * **bubblewrap** binds `/dev/null` read-only over the path, and only where the file is
-      there — see `Bwrap`'s `hidden_file_binds/1` for what happens otherwise. Measured
-      against bubblewrap 0.8.0 in a privileged `debian:bookworm-slim` container: a `cat` of
-      a masked credential is `Permission denied` and the bytes never appear, a write to it
-      is denied, and the host's file is unchanged. That was the `bwrap` argv directly; no
-      Linux host has run it through this module, which is CI's ubuntu-24.04 job to do.
-
-  **`ouro-sandbox` answers no** for `protects_files?/1`'s reason turned around: Landlock
-  attaches rights to inodes and its wire format carries a read *allow*-set, not a deny, so
-  the only way to hide one file would be to enumerate everything else — and a helper that
-  fenced reads by allow-list for a shell would be a different sandbox. So the helper backend
-  says `false`, `detect/0`'s notes say it in a sentence, and
-  `Ouroboros.Application.self_signing_children/0` refuses to hold a signing key on such a
-  node unless `OUROBOROS_SELF_UNFENCED_KEY=1` accepts that every session can read it.
-  """
-  @spec hides_files?(detection() | backend()) :: boolean()
-  def hides_files?(%{backend: backend}), do: hides_files?(backend)
-  def hides_files?(:sandbox_exec), do: true
-  def hides_files?(:bwrap), do: true
-  def hides_files?(:ouro_sandbox), do: false
-  def hides_files?(:none), do: false
-  def hides_files?(_unknown), do: false
 
   @doc """
   The process posture a policy **actually** gets on this backend: `:sealed` only where the
@@ -870,40 +761,32 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   @doc """
   Whether this backend can enforce a builder policy's read fence.
 
-  Two of the three answer by name. Seatbelt's `(deny default)` and bubblewrap's refusal to
-  bind `/` are properties of mechanisms an operator installs and this repository does not
-  version, so `builder_policy/1` either compiles to a fence there or it does not compile
-  at all.
+  Both answer by name. Seatbelt's `(deny default)` and bubblewrap's refusal to bind `/` are
+  properties of mechanisms an operator installs and this repository does not version, so
+  `builder_policy/1` either compiles to a fence there or it does not compile at all. A node
+  with no backend is the only `false`, and failing closed there costs it the forge rather
+  than the fence the forge's whole claim rests on (docs/WASM.md D26).
 
-  `ouro-sandbox` is the exception and the reason this takes a detection: it is a binary
-  *this* repository ships, and one installed before W17 speaks the same protocol version,
-  applies the same shell policies, and has no `readable` field to fence a build with. So
-  the answer comes from what the probed helper said about itself (`read_fence`, from
-  `doctor`'s `features.read_allow_set`), and a detection with no such key — a stale cache,
-  a map a test built by hand — is a `false`. Failing closed here costs a node the forge;
-  failing open would cost it the fence the forge's whole claim rests on (docs/WASM.md D26).
+  It stays a question rather than becoming `backend != :none` because the callers —
+  `Ouroboros.Wasm.Forge`, `Ouroboros.Wasm.Pool`, `Ouroboros.Wasm.Deploy` — are asking about
+  the read fence and not about the presence of a backend, and a future backend that bounds
+  writes and not reads is answered here rather than in three call sites.
   """
   @spec fences_reads?(detection() | backend()) :: boolean()
-  def fences_reads?(%{backend: :ouro_sandbox} = detection),
-    do: Map.get(detection, :read_fence, false) == true
-
   def fences_reads?(%{backend: backend}), do: fences_reads?(backend)
   def fences_reads?(:sandbox_exec), do: true
   def fences_reads?(:bwrap), do: true
-  # A bare `:ouro_sandbox` is a backend name with no probe behind it, and the capability is
-  # the helper's to claim rather than the name's, so the name alone claims nothing.
-  def fences_reads?(:ouro_sandbox), do: false
   def fences_reads?(:none), do: false
+  def fences_reads?(_unknown), do: false
 
-  # Canonicalised, because a root that is a symlink is its *target* to every backend that
-  # applies one: Seatbelt's `subpath` resolves it and Landlock's `O_PATH` open follows it, so
-  # a policy naming the link would grant the thing it points at under a name that does not
-  # say so. `Wasm.Forge.read_set/2` already canonicalises what it puts in the list; doing it
-  # here as well means the property belongs to the policy rather than to one caller.
+  # Canonicalised, because a root that is a symlink is its *target* to a backend that
+  # resolves one: Seatbelt's `subpath` does, so a policy naming the link would grant the
+  # thing it points at under a name that does not say so. `Wasm.Forge.read_set/2` already
+  # canonicalises what it puts in the list; doing it here as well means the property belongs
+  # to the policy rather than to one caller.
   #
   # A path that cannot be canonicalised — it does not exist yet — is kept exactly as it was
-  # written. Dropping it would narrow the policy silently, and a relative one left in is a
-  # refusal the helper makes out loud (exit 125) rather than a fence with a hole.
+  # written. Dropping it would narrow the policy silently.
   # Each root as it was named **and** as the kernel resolves it, when the two differ. Seatbelt
   # matches the resolved form (`/var/folders/…` is `/private/var/folders/…` by the time `open`
   # sees it), so the canonical spelling is the one that carries the rule there. Bubblewrap
@@ -1019,7 +902,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   Only bubblewrap makes any — it has to create a mount point for an absent hook manifest
   or an absent `.git`/`.ouroboros` under a writable root, inside the host's own directory,
   and its teardown never unlinks it (`Bwrap.mount_point_stubs/1`). Seatbelt's `literal`
-  deny and the Landlock helper's rules need no mount point, so they answer `[]`.
+  deny needs no mount point, so it answers `[]`.
   """
   @spec stubs(policy(), detection()) :: [String.t()]
   def stubs(policy, %{backend: :bwrap}) when is_map(policy), do: Bwrap.mount_point_stubs(policy)
@@ -1062,9 +945,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   def wrap(command, scope, policy, %{backend: :sandbox_exec, executable: executable}),
     do: SandboxExec.wrap(command, scope, policy, executable)
-
-  def wrap(command, scope, policy, %{backend: :ouro_sandbox, executable: executable}),
-    do: Helper.wrap(command, scope, policy, executable)
 
   def wrap(command, scope, policy, %{backend: :bwrap, executable: executable} = detection),
     do: Bwrap.wrap(command, scope, policy, executable, Map.get(detection, :unshare_net, true))
@@ -1266,9 +1146,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def no_backend_refusal(detection) do
     "this session runs with sandbox_mode: read_only and this node has no OS sandbox " <>
       "backend — #{detection.notes}. Without one a shell cannot be made read-only, so " <>
-      "read_only refuses `bash` entirely rather than pretending. Install the " <>
-      "`ouro-sandbox` helper or bubblewrap (Linux), or run on macOS where `sandbox-exec` " <>
-      "is present. `workspace_write` on this node also refuses `bash` unless " <>
+      "read_only refuses `bash` entirely rather than pretending. Install bubblewrap " <>
+      "(Linux), or run on macOS where `sandbox-exec` is present. `workspace_write` on " <>
+      "this node also refuses `bash` unless " <>
       "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1; `unrestricted` is an unsandboxed shell asked " <>
       "for by name."
   end
@@ -1278,9 +1158,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def workspace_write_without_backend_refusal(detection) do
     "this session runs with sandbox_mode: workspace_write and this node has no OS sandbox " <>
       "backend — #{detection.notes}. Without one a shell cannot be contained, so " <>
-      "workspace_write refuses `bash` rather than running it unsandboxed. Install the " <>
-      "`ouro-sandbox` helper or `bwrap` (bubblewrap) on Linux, run on macOS where " <>
-      "`sandbox-exec` is present, or set OUROBOROS_ALLOW_UNSANDBOXED_BASH=1 to accept an " <>
+      "workspace_write refuses `bash` rather than running it unsandboxed. Install " <>
+      "`bwrap` (bubblewrap) on Linux, run on macOS where `sandbox-exec` is present, or " <>
+      "set OUROBOROS_ALLOW_UNSANDBOXED_BASH=1 to accept an " <>
       "unsandboxed shell on this node."
   end
 
@@ -1305,7 +1185,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
           executable: path,
           # `sandbox-exec` has no version flag; claiming one would mean inventing it.
           version: nil,
-          read_fence: true,
           notes:
             "macOS Seatbelt through #{path}. Apple marks sandbox-exec deprecated; it is " <>
               "still functional and is the mechanism Codex CLI and Cursor use."
@@ -1313,54 +1192,17 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     end
   end
 
-  # `ouro-sandbox` first, bubblewrap second. The helper is preferred where it can actually
-  # enforce — it adds a Landlock domain and a seccomp filter over the same mount semantics
-  # — and `Helper.probe/1` returns `nil` rather than a detection when it cannot, so a node
-  # whose kernel predates Landlock falls through to bubblewrap instead of selecting a
-  # backend that would refuse every command.
-  defp probe_linux do
-    case probe_helper() do
-      nil -> probe_bwrap()
-      detection -> detection
-    end
-  end
-
-  defp probe_helper do
-    with path when is_binary(path) <- Helper.executable(),
-         %{version: version, notes: notes, read_fence: read_fence} <- Helper.probe(path) do
-      %{
-        backend: :ouro_sandbox,
-        executable: path,
-        version: version,
-        # What the helper said about itself, not what this node hopes: a binary from before
-        # the read allow-set existed reports no feature and this stays `false`.
-        read_fence: read_fence,
-        notes:
-          "Linux ouro-sandbox through #{path}. #{notes}. Filesystem via read-only mounts " <>
-            "and a Landlock domain, network via an unshared namespace, and a minimal " <>
-            "seccomp denylist#{read_fence_note(read_fence)}. Creating a `.git` that did " <>
-            "not exist when the command started is still carried by the LD_PRELOAD " <>
-            "filter, not by the kernel. It cannot deny one named path (Landlock attaches " <>
-            "rights to inodes), so this node's own credentials are not hidden from a " <>
-            "session's shell and a signing key must not be kept beside it (S-D49)."
-      }
-    else
-      _absent_or_unusable -> nil
-    end
-  end
-
-  defp read_fence_note(true),
-    do: ", and a Landlock read allow-set for builder policies"
-
-  defp read_fence_note(false),
-    do:
-      ". This build has no read allow-set, so a builder policy cannot be fenced with it " <>
-        "(docs/WASM.md D26)"
+  # One Linux backend (docs/proposals/core.md §4 A2). A Landlock plus seccomp helper this
+  # repository built and preferred here was deleted with the `LD_PRELOAD` name filter both
+  # backends loaded: Claude Code and Codex each run bubblewrap alone, and the one semantic
+  # the helper's own moduledoc could not carry without that filter — denying the creation of
+  # a `.git` that did not exist when the command started — went with it.
+  defp probe_linux, do: probe_bwrap()
 
   defp probe_bwrap do
     case System.find_executable("bwrap") do
       nil ->
-        %{@none | notes: "Linux without ouro-sandbox or bwrap (bubblewrap) on PATH"}
+        %{@none | notes: "Linux without bwrap (bubblewrap) on PATH"}
 
       path ->
         case Bwrap.probe(path) do
@@ -1369,7 +1211,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
               backend: :bwrap,
               executable: path,
               version: version,
-              read_fence: true,
               notes:
                 "Linux bubblewrap through #{path}. #{notes}. Filesystem and network " <>
                   "namespace only: no seccomp filter, so the syscall surface is not narrowed.",
@@ -1381,7 +1222,6 @@ defmodule Ouroboros.Provider.Native.Sandbox do
               backend: :bwrap,
               executable: path,
               version: version,
-              read_fence: true,
               notes:
                 "Linux bubblewrap through #{path}. #{notes}. Filesystem namespace only: " <>
                   "the host refused an unshared network, so commands keep the host network. " <>

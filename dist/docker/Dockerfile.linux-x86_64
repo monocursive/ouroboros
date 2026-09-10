@@ -23,10 +23,9 @@ FROM hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1
 # a bisect does not need a new file.
 ARG RUST_VERSION=1.95
 
-# `mix compile` runs a custom compiler that builds `c_src/fs_filter.c` with whichever of
-# cc/gcc/clang it finds (lib/mix/tasks/compile.ouroboros_fs_filter.ex), `ring` needs a C
-# toolchain, `jido_harness` is a git dependency pinned by ref, and the in-container build
-# runs the repository's own `make dist`. rsync stages the source into the build volume.
+# `ring` needs a C toolchain, `jido_harness` is a git dependency pinned by ref, and the
+# in-container build runs the repository's own `make dist`. rsync stages the source into
+# the build volume.
 #
 # `libsctp1` is not optional garnish. Without it OTP's socket NIF cannot dlopen
 # `libsctp.so.1` and prints an `=ESOCK WARNING MSG=` block — on **stdout**, because a

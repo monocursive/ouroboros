@@ -2,20 +2,14 @@
 # Lane W under bubblewrap, proved on a Linux kernel from a Mac (the hosted CI job's shape).
 #
 # The hosted Elixir job already runs every wasm suite on Ubuntu with bubblewrap as the
-# sandbox backend. This script is the same proof inside a container, so a Mac checkout can
-# see the Linux form of that backend — and so CI can prove the *script*, not only the
-# suites. `--privileged` is what allows `unshare(CLONE_NEWUSER)`; Docker's default seccomp
-# profile denies it, which is a fact about the container and not about bubblewrap needing
-# privilege — see `scripts/sandbox-linux-test.sh`, which says the same thing for the same
-# reason. On Ubuntu 24.04 that is not enough: AppArmor still denies unprivileged writes
-# to `/proc/self/setgroups` unless `kernel.apparmor_restrict_unprivileged_userns=0`.
-# The script writes that sysctl when it can; the hosted job also sets it on the host.
-#
-# It is **not** the Landlock proof. `OUROBOROS_SANDBOX_HELPER` is pointed at a path that
-# is not a file, so detection falls through to bubblewrap, and `make sandbox` is not run.
-# `make sandbox-linux-test` is the job that builds `ouro-sandbox` and exercises Landlock.
-# A header that still said this script selected the preferred backend would be describing
-# a different proof.
+# sandbox backend — the only Linux backend there is. This script is the same proof inside a
+# container, so a Mac checkout can see the Linux form of that backend — and so CI can prove
+# the *script*, not only the suites. `--privileged` is what allows `unshare(CLONE_NEWUSER)`;
+# Docker's default seccomp profile denies it, which is a fact about the container and not
+# about bubblewrap needing privilege. On Ubuntu 24.04 that is not enough: AppArmor still
+# denies unprivileged writes to `/proc/self/setgroups` unless
+# `kernel.apparmor_restrict_unprivileged_userns=0`. The script writes that sysctl when it
+# can; the hosted job also sets it on the host.
 #
 # What the container has to build before it can test: the helper (`make wasm`) and the
 # acceptance guest and examples (`make wasm-guest`, `make wasm-examples`), because the
@@ -38,9 +32,6 @@ VOLUME_DEPS=ouro-forge-deps
 # the container's ELF helper would land on top of the Mach-O one this Mac's own `mix test`
 # uses, and cargo would rebuild every crate on every switch between the two hosts.
 VOLUME_HELPER=ouro-forge-helper
-# Its own, empty: the forge proof builds `ouro-sandbox` into its volume, and a helper on disk
-# would be detected ahead of bubblewrap by any test that clears the override this script sets.
-VOLUME_SANDBOX_HELPER=ouro-wasm-sandbox-helper-empty
 VOLUME_PRIV_NATIVE=ouro-forge-priv-native
 VOLUME_TUI_TARGET=ouro-forge-tui-target
 VOLUME_GUEST_TARGET=ouro-forge-guest-target
@@ -52,14 +43,14 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 if ! command -v docker >/dev/null 2>&1; then
   echo "wasm-linux-test: docker is not on PATH." >&2
   echo "  On a Linux host with bubblewrap and rustup you can instead run:" >&2
-  echo "    OUROBOROS_SANDBOX_HELPER=/nonexistent/ouro-sandbox OUROBOROS_REQUIRE_WASM=1 mix test test/wasm/" >&2
+  echo "    OUROBOROS_REQUIRE_WASM=1 mix test test/wasm/" >&2
   exit 1
 fi
 
 EXAMPLES="counter deny-writes lintcheck verdicts no-network-shell"
 
 for volume in "$VOLUME_CARGO" "$VOLUME_RUSTUP" "$VOLUME_BUILD" "$VOLUME_DEPS" \
-  "$VOLUME_HELPER" "$VOLUME_SANDBOX_HELPER" "$VOLUME_PRIV_NATIVE" "$VOLUME_TUI_TARGET" \
+  "$VOLUME_HELPER" "$VOLUME_PRIV_NATIVE" "$VOLUME_TUI_TARGET" \
   "$VOLUME_GUEST_TARGET" "$VOLUME_SDK_TARGET"; do
   docker volume create "$volume" >/dev/null
 done
@@ -78,7 +69,6 @@ exec docker run --rm --privileged \
   -v "$VOLUME_DEPS:/src/deps" \
   -v "$root/deps:/host-deps:ro" \
   -v "$VOLUME_HELPER:/src/priv/wasm" \
-  -v "$VOLUME_SANDBOX_HELPER:/src/priv/sandbox" \
   -v "$VOLUME_PRIV_NATIVE:/src/priv/native" \
   -v "$VOLUME_TUI_TARGET:/src/tui/target" \
   -v "$VOLUME_GUEST_TARGET:/src/test/support/wasm/echo-guest/target" \
@@ -107,8 +97,8 @@ exec docker run --rm --privileged \
     echo "==> bwrap: $(bwrap --version)"
 
     # Ubuntu 24.04 (the hosted runner) runs unprivileged user namespaces under an
-    # AppArmor profile that denies /proc/self/setgroups. bwrap and ouro-sandbox both
-    # write that file to enter a user namespace. --privileged does not change a host
+    # AppArmor profile that denies /proc/self/setgroups. bwrap writes that file to
+    # enter a user namespace. --privileged does not change a host
     # sysctl. The Elixir job already writes 0 on this kernel; do it here too so the
     # script works when run by hand on the same kind of host.
     if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
@@ -138,7 +128,7 @@ exec docker run --rm --privileged \
     fi
     mkdir -p /home/builder
     chown -R "$builder_uid:$builder_gid" /home/builder /cargo /rustup /src/_build /src/deps \
-      /src/priv/wasm /src/priv/sandbox /src/priv/native /src/tui/target \
+      /src/priv/wasm /src/priv/native /src/tui/target \
       /src/test/support/wasm/echo-guest/target \
       /src/tui/wasm/guest/target /src/tui/wasm/guest/examples/*/target
 
@@ -149,14 +139,11 @@ export CARGO_HOME=/cargo
 export RUSTUP_HOME=/rustup
 export MIX_ENV=test
 export OUROBOROS_REQUIRE_WASM=1
-# An absolute path that is not a file disables the ouro-sandbox backend by name, so detection
-# falls through to bubblewrap: the backend the hosted CI job runs every wasm suite under.
-export OUROBOROS_SANDBOX_HELPER=/nonexistent/ouro-sandbox
 
-echo "==> userns probe (this uid must be able to enter one; bwrap and ouro-sandbox both do)"
+echo "==> userns probe (this uid must be able to enter one; bwrap does)"
 if ! bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true; then
   echo "wasm-linux-test: bwrap could not apply a read-only mount as uid $(id -u)." >&2
-  echo "  ouro-sandbox fails the same way: open /proc/self/setgroups: Permission denied." >&2
+  echo "  It fails as: open /proc/self/setgroups: Permission denied." >&2
   echo "  Cause: Ubuntu 24.04 kernel.apparmor_restrict_unprivileged_userns. The outer" >&2
   echo "  script writes 0 when that sysctl is writable. On GitHub Actions the workflow" >&2
   echo "  also sets it on the host before docker runs." >&2
@@ -193,9 +180,9 @@ git config --global --add safe.directory "*" || true
 cd /src
 
 # `_build` is a volume that outlives one run, and `mix` links `.../lib/ouroboros/priv` at
-# the priv directory of the checkout. The install loop in `make wasm` / `make sandbox`
-# would then copy a file onto itself, which coreutils refuses — so the second run of this
-# script would die inside `make` rather than in a test. `mix compile` remakes the link.
+# the priv directory of the checkout. The install loop in `make wasm` would then copy a
+# file onto itself, which coreutils refuses — so the second run of this script would die
+# inside `make` rather than in a test. `mix compile` remakes the link.
 #
 # Exactly that one link, by full path. A `find -name priv -type l` over `_build` also takes
 # every dependency’s own priv link with it, and erlexec’s is the port binary every native
@@ -207,7 +194,6 @@ for env in dev test prod; do
 done
 
 make wasm
-# no `make sandbox`: this proof is about the bubblewrap backend CI runs under
 make wasm-guest
 make wasm-examples
 
@@ -219,18 +205,16 @@ mix local.rebar --force >/dev/null
 mix deps.get >/dev/null
 mix compile
 
-# Which backend the suite is about to run under, recorded before it runs: an
-# `ouro-sandbox` that reported itself unusable would fall through to bubblewrap silently,
-# and this run would then prove the fallback twice over rather than the preferred backend
-# once. `mix compile` has remade the priv link by now, so this is the path detection reads.
+# Which backend the suite is about to run under, recorded before it runs: a host whose
+# container policy refuses the namespace reports no backend at all, and this run would then
+# prove nothing while staying green. `mix compile` has remade the priv link by now, so this
+# is the path detection reads.
 cat > /tmp/wasm-linux-backend.exs <<"EXS"
 detection = Ouroboros.Provider.Native.Sandbox.detect()
 
 IO.puts([
   "    backend: ",
   to_string(detection.backend),
-  ", read_fence: ",
-  inspect(Map.get(detection, :read_fence)),
   ", fences_reads?: ",
   inspect(Ouroboros.Provider.Native.Sandbox.fences_reads?(detection)),
   "\n    executable: ",

@@ -52,7 +52,6 @@ rsync -a --delete \
     --exclude 'tmp/' \
     --exclude '.elixir_ls/' \
     --exclude 'tui/target/' \
-    --exclude 'priv/sandbox/' \
     --exclude '/dist/ouro-*' \
     --exclude '/dist/.ouro-dist-linux-artifact' \
     "$SRC/" "$WORK/"

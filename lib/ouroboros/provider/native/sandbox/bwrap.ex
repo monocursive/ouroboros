@@ -35,9 +35,9 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       shell tools.
     * `--bind <root> <root>` per writable root (`workspace_write` only).
     * `--ro-bind <path> <path>` for each protected directory that exists.
-    * `--ro-bind <scratch> <path>` for each protected segment that does not exist yet.
-      The empty scratch directory is a read-only placeholder at that destination, so a
-      command cannot create `.git` or `.ouroboros` after admission.
+    * `--ro-bind <scratch> <path>` for each protected segment that does not exist yet at a
+      writable root's top level. The empty scratch directory is a read-only placeholder at
+      that destination.
     * `--ro-bind <path> <path>` for each protected *file* that exists, and
       `--ro-bind /dev/null <path>` for each that does not (S1). That is the workspace hook
       manifest: one path per writable root, denied whether or not it is there.
@@ -45,8 +45,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       at the same path the macOS backend makes writable, so both backends give the
       shell the same `$TMPDIR` contract.
     * `--unshare-net` when the policy denies the network.
-    * `--chdir <root>`, then `--setenv LD_PRELOAD` / `OUROBOROS_FS_DENY` when the
-      name-based create filter is on disk, then `--` and the program.
+    * `--chdir <root>`, then `--` and the program.
 
   `--new-session` is deliberately absent. It is a real hardening (it blocks `TIOCSTI`
   push-back into a controlling terminal), but this provider's children are spawned onto
@@ -54,33 +53,35 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   process group the tool's TERM-then-close reaping does not reach. A hardening that
   costs a deadline its teeth, for a channel that does not exist here, is a bad trade.
 
-  ## Protected segments
+  ## Protected segments, and the one this backend cannot fence
 
   Bubblewrap has no path-regex rule. Existing `.git` and `.ouroboros` paths are rebound
-  read-only. Missing ones are covered by read-only bind mounts of the command's empty
-  scratch directory. Both cases deny creation and writes at the protected destination;
-  a path being absent when the command starts is not an authority to create it.
+  read-only. A writable root's own missing one is covered by a read-only bind mount of the
+  command's empty scratch directory, because that destination is known before the namespace
+  is set up.
 
   A protected segment is not only the writable root's own: a submodule's or a vendored
   dependency's `.git` is bound read-only too, found by a walk bounded in depth and in
   directories visited. Where Seatbelt writes one regex — `/\\.git($|/)` — that covers
   every such path for free, bubblewrap needs one bind per directory, and a bind can only
-  name a destination that is known when the namespace is set up. A `.git` created after
-  the command starts is therefore denied by an `LD_PRELOAD` filter inside the sandbox
-  (`libouro_fs_filter.so`, `OUROBOROS_FS_DENY`) rather than by a bind: the filter refuses
-  mkdir/open/rename of any path component named in the policy's protected segments.
-  Static binaries that never call libc are outside that net; ordinary `mkdir`, `git`,
-  and `/bin/sh` are not.
+  name a destination that is known when the namespace is set up.
+
+  **So a `.git` or `.ouroboros` created *after* the command starts, anywhere below the top
+  level of a writable root, is not denied here.** It used to be, by an `LD_PRELOAD` name
+  filter this repository built (`c_src/fs_filter.c`) and loaded into every sandboxed
+  command — a libc filter, which a static binary walked past, and the only reason that C
+  file existed. Claude Code and Codex do not try to deny that creation either; the filter
+  and the semantic went together in docs/proposals/core.md §4 A2. Everything that *is*
+  there when the command starts is still bound read-only, and Seatbelt still denies both
+  cases by regex.
 
   ## Protected files (S1)
 
-  A protected *file* is a bind rather than a filter, and unlike a protected segment it needs
-  no `LD_PRELOAD` half: the path is known before the namespace is set up, so the destination
-  can be created and made read-only whether or not anything is there. `/dev/null` is the
-  source for the absent case — a read-only character device is a mount point a create cannot
-  overwrite, a rename cannot replace and an unlink cannot remove, and it reads back as an
-  empty file rather than as the `EISDIR` an empty directory would give. Verified live by
-  `scripts/sandbox-linux-test.sh`.
+  A protected *file* is a bind, and the path is known before the namespace is set up, so the
+  destination can be created and made read-only whether or not anything is there. The empty
+  scratch directory is the source for the absent case — see `protected_file_binds/1` for why
+  it is a directory and not `/dev/null`. That is what makes the hook manifest fenceable on
+  this backend, and it is the fence `Ouroboros.Provider.Native.Hooks.trusted?/2` stands on.
   """
 
   # The walk is bounded twice: a repository with a deep `node_modules` must not turn
@@ -155,9 +156,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       when is_binary(executable) and is_boolean(unshare_net) do
     case argv(command) do
       {:ok, target} ->
-        {:ok,
-         {executable,
-          options(scope, policy, unshare_net) ++ filter_env(policy) ++ ["--"] ++ target}}
+        {:ok, {executable, options(scope, policy, unshare_net) ++ ["--"] ++ target}}
 
       {:error, _reason} = error ->
         error
@@ -202,36 +201,6 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       chdir(scope)
   end
 
-  # The filter is argv of `wrap/4`, not of `options/2`: the options half is pinned
-  # byte-for-byte and must not grow when a `.so` happens to be on disk.
-  defp filter_env(policy) do
-    # The segment names the filter has always refused, then the protected files' basenames
-    # (S1): the filter denies any path *component* in the list, so `ouroboros.toml` here is
-    # what refuses a create of the hook manifest beneath a writable root, where no root-level
-    # bind reaches.
-    segments =
-      (List.wrap(policy.protected_segments) ++
-         Enum.map(Map.get(policy, :protected_files, []), &String.downcase(Path.basename(&1))))
-      |> Enum.uniq()
-
-    case {segments, filter_library()} do
-      {[_ | _] = names, path} when is_binary(path) ->
-        ["--setenv", "LD_PRELOAD", path, "--setenv", "OUROBOROS_FS_DENY", Enum.join(names, ":")] ++
-          if Map.has_key?(policy, :write_exceptions) do
-            [
-              "--setenv",
-              "OUROBOROS_FS_WRITE_EXCEPTIONS",
-              Enum.map_join(policy.write_exceptions, ":", &Base.encode16(&1, case: :lower))
-            ]
-          else
-            []
-          end
-
-      _absent ->
-        []
-    end
-  end
-
   defp exception_binds(policy) do
     roots = Map.get(policy, :write_exceptions, [])
 
@@ -241,13 +210,6 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       end)
 
     Enum.flat_map(roots, &["--bind", &1, &1]) ++ Enum.flat_map(nested, &["--ro-bind", &1, &1])
-  end
-
-  defp filter_library do
-    path = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
-    if File.regular?(path), do: path, else: nil
-  rescue
-    ArgumentError -> nil
   end
 
   defp writable(policy), do: Enum.reject(policy.writable, &(&1 == policy.scratch))
@@ -329,9 +291,12 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # file", `rm -rf` of it `EBUSY`, and `git add -A && git commit` in the same tree succeeds.
   # `Ouroboros.Provider.Native.Hooks` reads the manifest as a file, so a directory at that
   # path is no manifest at all — and the directory is gone from the host again once the bash
-  # tool clears the stubs (`mount_point_stubs/1`). The name also joins `OUROBOROS_FS_DENY`
-  # (`filter_env/1`), so a create *beneath* a writable root — `sub/ouroboros.toml`, which no
-  # root-level bind covers — is refused by the same libc filter that refuses a new `.git`.
+  # tool clears the stubs (`mount_point_stubs/1`).
+  #
+  # One bind per *writable root*, which is the whole of what a hook manifest is
+  # (`Hooks.load/2` reads exactly `Path.join(root, "ouroboros.toml")`). A file of that name
+  # further down the tree is an ordinary file here; the permission engine still refuses a
+  # declared write to it.
   defp protected_file_binds(policy) do
     policy
     |> Map.get(:protected_files, [])

@@ -772,9 +772,9 @@ step_worktree() {
     fi
   done
 
-  # The sealed helpers. A worktree finds them at priv/, never by walking a cwd: a path
+  # The sealed helper. A worktree finds it at priv/, never by walking a cwd: a path
   # derived from a cwd that reaches a Cargo.toml is code execution.
-  for _dir in priv/wasm priv/sandbox; do
+  for _dir in priv/wasm; do
     if [ -d "$repo/$_dir" ]; then
       print_cmd cp -R "$repo/$_dir" "$wt/$_dir"
       if [ "$dry_run" != 1 ]; then

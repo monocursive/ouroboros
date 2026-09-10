@@ -51,7 +51,6 @@ defmodule Ouroboros.Self.Posture do
   @signer_id_env "OUROBOROS_SIGNER_ID"
   @trusted_signers_env "OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
   @self_ship_env "OUROBOROS_SELF_SHIP"
-  @unfenced_key_env "OUROBOROS_SELF_UNFENCED_KEY"
 
   @self "self"
 
@@ -61,23 +60,6 @@ defmodule Ouroboros.Self.Posture do
   @doc "The variable that names a posture."
   @spec posture_env() :: String.t()
   def posture_env, do: @posture_env
-
-  @doc """
-  The variable an operator sets to keep a signing key on a node that cannot fence it (S-D49).
-
-  Not one of `variables/0` and not read by `configure/2`: this posture is a pure function
-  over an environment map, and whether the sandbox can hide a file is a fact about the
-  machine that `Ouroboros.Provider.Native.Sandbox.detect/0` has to probe. So the name lives
-  here, beside the posture it belongs to, and `Ouroboros.Application.self_signing_children/0`
-  is what reads it — after the tree is up and the probe means something.
-
-  Without it, a node whose sandbox reports `hides_files?: false` starts no local
-  `Ouroboros.Upgrade.Signing.Service` and says why. With it, the service starts and the log
-  says exactly what was accepted: any session on this node can read the signing seed and sign
-  in this key's name.
-  """
-  @spec unfenced_key_env() :: String.t()
-  def unfenced_key_env, do: @unfenced_key_env
 
   @doc "Every variable this posture reads, in the order the documentation introduces them."
   @spec variables() :: [String.t()]
