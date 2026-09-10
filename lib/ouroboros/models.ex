@@ -272,8 +272,9 @@ defmodule Ouroboros.Models do
 
   defp native_catalog(_unknown), do: nil
 
-  defp model_id(nil, id), do: id
-  defp model_id(prefix, id), do: prefix <> ":" <> id
+  # Every id a native lane offers carries the transport prefix ReqLLM must be given, so a
+  # client that echoes an id back is echoing a complete model spec.
+  defp model_id(prefix, id) when is_binary(prefix), do: prefix <> ":" <> id
 
   defp native_model_provider do
     case Ouroboros.Provider.Native.Model.configured_model() do
