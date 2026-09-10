@@ -271,7 +271,6 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
         assert {:ok, %{is_error: false, output: pending_return}} =
                  Session.bridge_tool(
                    handle,
-                   nil,
                    %{
                      id: "stop-return",
                      name: "agent_result",

@@ -259,12 +259,8 @@ defmodule Ouroboros.Gateway.Methods do
   # the session its id promised. Whether any one of these four is actually changeable is
   # the transport's answer, asked per session rather than encoded here.
   #
-  # C4. `mode` is the sixth, and it is not a member of any vocabulary this gateway knows:
-  # it carries the *agent's own* mode id, which an ACP agent published in `session/new`
-  # and which `Ouroboros.Provider.Session.Dialect.ACP` validates against that list before
-  # sending `session/set_mode`. A `:string` here rather than an enum is the honest type —
-  # the allowed values belong to the agent, not to this table — and every transport whose
-  # dialect declares no modes refuses it by name.
+  # C4's `mode` was a sixth, carrying an ACP agent's own mode id for `session/set_mode`. It
+  # went with the ACP client; the one transport has no modes of its own to be told.
   @configuration_options Contract.configuration_options()
 
   # ---------------------------------------------------------------------------------
