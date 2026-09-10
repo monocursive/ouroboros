@@ -12,20 +12,16 @@ defmodule Ouroboros.Provider.Native.Loop do
       :native_interrupt                     stop after the current tool
       {:native_approval, id, response}      the answer to an `approval_requested`
 
-  ## Why not `Jido.AI.Agent`
+  ## Runtime ownership
 
-  `Jido.AI.Agent` is a complete agent server: its ReAct runtime owns the request
-  lifecycle and, critically, **executes the tools itself**. Every capability this slice
-  exists to deliver lives exactly at the boundary that runtime owns — blocking a tool on
-  a human approval, injecting a steered message between two tools, stopping after the
-  current tool on interrupt, refusing the third identical call. Reaching each of those
-  through a strategy's internals would be a deeper coupling to `jido_ai` than driving
-  the model directly, and it would put a second supervised process inside a session the
-  harness already supervises.
+  Ouroboros owns the tool lifecycle: blocking on human approval, delivering steering
+  between tools, stopping after the current tool on interrupt, and refusing repeated
+  calls. The loop drives the model directly within the session the harness supervises.
 
-  So the loop is here, and `jido_ai` is used for the one thing it does that we would
-  otherwise duplicate: `Jido.AI.ToolAdapter` turns a `Jido.Action` schema into the JSON
-  Schema a model sees (`Ouroboros.Provider.Native.Tools`). Models are reached through
+  `Ouroboros.Provider.Native.Tools.Schema` converts each `Jido.Action` schema into
+  the generated JSON Schema. Tools applies its description and model schema overrides;
+  argument validation, permission dispatch, and execution remain separate boundaries.
+  Models are reached through
   `Ouroboros.Provider.Native.Model`, whose ReqLLM implementation opens all thirty-odd
   ReqLLM providers.
 

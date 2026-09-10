@@ -5,7 +5,7 @@ defmodule Ouroboros.Provider.Native.Tools.Mcp do
   ## Why this is not a `Jido.Action`
 
   Every other tool in this set is one, because every other tool has a schema known at
-  compile time and `Jido.AI.ToolAdapter` turns that schema into the JSON Schema a model
+  compile time and `Tools.Schema` turns that schema into the JSON Schema a model
   sees. An MCP tool's schema arrives from a stranger's process at run time, and there
   are as many of them as the configured servers advertise. A `Jido.Action` per MCP tool
   would mean generating modules — and therefore atoms — from a remote server's tool

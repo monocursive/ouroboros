@@ -137,9 +137,9 @@ defmodule Ouroboros.MixProject do
   defp deps do
     [
       {:jido, "~> 2.3"},
-      {:jido_ai, "~> 2.3"},
-      # Ouroboros calls ReqLLM directly from the in-process provider. Keep that boundary
-      # explicit rather than relying on Jido.AI's transitive dependency.
+      # The native tool schema adapter calls Jido.Action.Schema directly.
+      {:jido_action, "~> 2.3"},
+      # Ouroboros calls ReqLLM directly from the in-process provider.
       {:req_llm, "~> 1.20"},
       {:req, "~> 0.7"},
       # Optional at runtime: the audit journal works without an index. Ship SQLite in
