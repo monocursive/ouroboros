@@ -112,7 +112,15 @@ defmodule Ouroboros.WorkspaceAccessTest do
     assert escalated.write_exceptions == [delivery | git]
     assert escalated.protected_segments == [".git", ".ouroboros"]
     refute Map.has_key?(Sandbox.policy(c.scope, :read_only), :write_exceptions)
-    assert Sandbox.Helper.request(escalated, c.scope)["write_exceptions"] == [delivery | git]
+
+    escalated_binds =
+      Sandbox.Bwrap.options(c.scope, Sandbox.with_scratch(escalated, c.root), false)
+      |> Enum.chunk_every(3, 1, :discard)
+
+    for root <- [delivery | git], File.exists?(root) do
+      assert ["--bind", root, root] in escalated_binds
+    end
+
     File.write!(Path.join(c.tree.git_dir, "gitdir"), Path.join(c.sibling.root, ".git"))
     assert is_nil(Access.grants(c.tree.root))
     invalid = Sandbox.policy(c.scope, :workspace_write_escalated)
@@ -122,7 +130,7 @@ defmodule Ouroboros.WorkspaceAccessTest do
   end
 
   test "real bash delivery and approved detached Git commit preserve neighboring fences", c do
-    unless Sandbox.detect().backend in [:sandbox_exec, :ouro_sandbox, :bwrap],
+    unless Sandbox.detect().backend in [:sandbox_exec, :bwrap],
       do: flunk("OS sandbox required")
 
     assert %{is_error: false} =

@@ -47,7 +47,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
   # `Sandbox.denial_line?/1` recognises both; these assertions have to expect the one this
   # node's backend produces, or they pass only on the platform they were written on.
   @denial (case @backend do
-             backend when backend in [:bwrap, :ouro_sandbox] -> "Read-only file system"
+             :bwrap -> "Read-only file system"
              _other -> "Operation not permitted"
            end)
 

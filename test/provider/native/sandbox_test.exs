@@ -7,7 +7,6 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Sandbox.Bwrap
-  alias Ouroboros.Provider.Native.Sandbox.Helper
   alias Ouroboros.Provider.Native.Sandbox.SandboxExec
   alias Ouroboros.Provider.Native.Tools.Bash
 
@@ -48,7 +47,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     backend: :none,
     executable: nil,
     version: nil,
-    notes: "no OS sandbox on this node: none of ouro-sandbox, sandbox-exec, or bwrap is available"
+    notes: "no OS sandbox on this node: neither sandbox-exec nor bwrap is available"
   }
 
   setup do
@@ -133,10 +132,6 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
   defp restore_sys_env(name, nil), do: System.delete_env(name)
   defp restore_sys_env(name, value), do: System.put_env(name, value)
-
-  defp env_value(["--setenv", key, value | _rest], key), do: value
-  defp env_value([_head | rest], key), do: env_value(rest, key)
-  defp env_value([], _key), do: nil
 
   describe "the macOS Seatbelt profile" do
     test "denies everything, opens reads, and makes only the scratch directory writable under read_only" do
@@ -374,258 +369,75 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Enum.take(args, -4) == ["--", "/bin/sh", "-c", "echo hi"]
     end
 
-    test "injects the name-based create filter when the library is on disk" do
-      path = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
+    # Re-pinned without the `LD_PRELOAD` pair (docs/proposals/core.md §4 A2). `wrap/5` used
+    # to append `--setenv LD_PRELOAD <so> --setenv OUROBOROS_FS_DENY <names>` between the
+    # options and the `--`, so the whole argv was `options ++ filter_env ++ ["--" | argv]`
+    # and only the options half was pinned. There is no filter and no third half: this
+    # asserts the *entire* argv, byte for byte, so a `--setenv` growing back here reddens.
+    test "is exactly the options, a --, and the program: no environment is set at all" do
+      scope = %{root: "/ws"}
+      policy = fixed_policy(:workspace_write)
 
       assert {:ok, {"/usr/bin/bwrap", args}} =
-               Bwrap.wrap(
-                 {:shell, "echo hi"},
-                 %{root: "/ws"},
-                 fixed_policy(:workspace_write),
-                 "/usr/bin/bwrap"
-               )
+               Bwrap.wrap({:shell, "echo hi"}, scope, policy, "/usr/bin/bwrap")
 
-      assert Enum.take(args, -4) == ["--", "/bin/sh", "-c", "echo hi"]
+      assert args ==
+               [
+                 "--die-with-parent",
+                 "--ro-bind",
+                 "/",
+                 "/",
+                 "--dev",
+                 "/dev",
+                 "--proc",
+                 "/proc",
+                 "--bind",
+                 "/ws",
+                 "/ws",
+                 "--bind",
+                 "/ws-extra",
+                 "/ws-extra",
+                 "--ro-bind",
+                 "/scratch",
+                 "/ws/.git",
+                 "--ro-bind",
+                 "/scratch",
+                 "/ws/.ouroboros",
+                 "--ro-bind",
+                 "/scratch",
+                 "/ws-extra/.git",
+                 "--ro-bind",
+                 "/scratch",
+                 "/ws-extra/.ouroboros",
+                 "--tmpfs",
+                 "/scratch",
+                 "--unshare-net",
+                 "--chdir",
+                 "/ws",
+                 "--",
+                 "/bin/sh",
+                 "-c",
+                 "echo hi"
+               ]
 
-      if File.regular?(path) do
-        assert env_value(args, "LD_PRELOAD") == path
-        assert env_value(args, "OUROBOROS_FS_DENY") == ".git:.ouroboros"
-      else
-        refute "LD_PRELOAD" in args
-      end
+      refute "--setenv" in args
+      assert args == Bwrap.options(scope, policy) ++ ["--", "/bin/sh", "-c", "echo hi"]
     end
   end
 
-  # The helper's argv is one flag and a JSON document, so what is pinned here is the
-  # *decoded* request rather than a byte string: a map comparison is exactly as strict and
-  # does not make the suite depend on the key order a JSON encoder happens to emit.
-  describe "the ouro-sandbox request" do
-    test "carries the same policy the bubblewrap argv expresses" do
-      request = Helper.request(fixed_policy(:workspace_write), %{root: "/ws"})
-
-      assert request["version"] == 1
-      assert request["mode"] == "workspace_write"
-      assert request["cwd"] == "/ws"
-      assert request["scratch"] == "/scratch"
-      # Scratch is mounted by the helper itself and must not appear twice.
-      assert request["writable"] == ["/ws", "/ws-extra"]
-      assert request["protected"] == ["/srv/ouroboros/data", "/home/agent/.config/ouroboros"]
-      assert request["denied_names"] == [".git", ".ouroboros"]
-      assert request["network"] == false
-    end
-
-    test "a read_only policy grants no writable root at all" do
-      request = Helper.request(fixed_policy(:read_only), %{root: "/ws"})
-
-      assert request["mode"] == "read_only"
-      assert request["writable"] == []
-      assert request["scratch"] == "/scratch"
-    end
-
-    test "an escalated policy carries only the fence the operator did not lift" do
-      policy = %{fixed_policy(:workspace_write) | mode: :workspace_write_escalated}
-      policy = %{policy | protected_segments: [".ouroboros"]}
-
-      request = Helper.request(policy, %{root: "/ws"})
-
-      assert request["mode"] == "workspace_write_escalated"
-      assert request["denied_names"] == [".ouroboros"]
-    end
-
-    test "the network posture is the policy's, and nothing else moves with it" do
-      denied = Helper.request(fixed_policy(:workspace_write, false), %{root: "/ws"})
-      allowed = Helper.request(fixed_policy(:workspace_write, true), %{root: "/ws"})
-
-      assert denied["network"] == false
-      assert allowed["network"] == true
-      assert Map.delete(denied, "network") == Map.delete(allowed, "network")
-    end
-
-    test "a session with no root sends no cwd rather than an empty one" do
-      refute Map.has_key?(Helper.request(fixed_policy(:read_only), %{}), "cwd")
-    end
-
-    test "wraps a shell line as exec --request <json> -- /bin/sh -c" do
-      assert {:ok, {"/opt/ouro-sandbox", args}} =
-               Helper.wrap(
-                 {:shell, "echo hi"},
-                 %{root: "/ws"},
-                 fixed_policy(:workspace_write),
-                 "/opt/ouro-sandbox"
-               )
-
-      assert ["exec", "--request", encoded | rest] = args
-      assert rest == ["--", "/bin/sh", "-c", "echo hi"]
-      assert {:ok, decoded} = JSON.decode(encoded)
-      assert decoded == Helper.request(fixed_policy(:workspace_write), %{root: "/ws"})
-    end
-
-    test "wraps an explicit argv without a shell in front of it" do
-      assert {:ok, {_executable, args}} =
-               Helper.wrap(
-                 {:argv, ["git", "status"]},
-                 %{root: "/ws"},
-                 fixed_policy(:read_only),
-                 "/opt/ouro-sandbox"
-               )
-
-      assert Enum.take(args, -3) == ["--", "git", "status"]
-    end
-
-    test "refuses a command it cannot interpret rather than guessing" do
-      assert {:error, {:uninterpretable_command, :nonsense}} =
-               Helper.wrap(
-                 :nonsense,
-                 %{root: "/ws"},
-                 fixed_policy(:read_only),
-                 "/opt/ouro-sandbox"
-               )
-    end
-
-    test "a shell request is exactly these keys and no others" do
-      # L5, and the reason it is a whole-map comparison rather than a field-by-field one:
-      # W17 added a key to this request and the pinned tests all still passed, because every
-      # one of them asserted on the keys it knew about. A future field that leaks into a
-      # shell policy has to redden something, and this is the something.
-      expected = %{
-        "version" => 1,
-        "mode" => "workspace_write",
-        "cwd" => "/ws",
-        "scratch" => "/scratch",
-        "writable" => ["/ws", "/ws-extra"],
-        "protected" => ["/srv/ouroboros/data", "/home/agent/.config/ouroboros"],
-        "denied_names" => [".git", ".ouroboros"],
-        "network" => false
-      }
-
-      # The one conditional key: present exactly when this build has the `.so` on disk.
-      library = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
-
-      expected =
-        if File.regular?(library),
-          do: Map.put(expected, "fs_filter_library", library),
-          else: expected
-
-      assert Helper.request(fixed_policy(:workspace_write), %{root: "/ws"}) == expected
-    end
-
-    test "a builder policy carries its read allow-set, and no other mode carries one" do
-      # C10 on the wire. Red without `Helper.request/2`'s `readable` clause: a builder
-      # request with no allow-set is one the helper fences to its writable roots alone, so
-      # the omission would not be a wider build — it would be a build that cannot read its
-      # own toolchain, which is a failure nobody would read as a policy bug.
-      policy =
-        Sandbox.builder_policy(writable: ["/build"], readable: ["/toolchain"])
-        |> Sandbox.with_scratch("/scratch")
-
-      request = Helper.request(policy, %{root: "/build"})
-
-      assert request["mode"] == "builder"
-      assert request["writable"] == ["/build"]
-      assert "/toolchain" in request["readable"]
-      # Every platform root the builder policy starts from travels too.
-      for root <- Sandbox.platform_readable(),
-          do: assert(canonical_root(root) in request["readable"])
-
-      # A builder has no name fence and no protected roots: the read allow-set is the
-      # fence, and the helper refuses a builder request that carries `denied_names`.
-      assert request["denied_names"] == []
-      assert request["network"] == false
-
-      # And no preload library. It rode along on every builder request until a review
-      # noticed the helper was silently discarding it while §14 said it was refused; the
-      # helper refuses the field under `builder` now, so sending it would be a backend
-      # failure rather than a courtesy. Red without `filter_library/1`'s builder clause.
-      refute Map.has_key?(request, "fs_filter_library")
-
-      # And the field belongs to that mode alone. A shell's read set is `/`, so a
-      # `readable` in one of these would be a fence the helper refuses outright.
-      for mode <- [:read_only, :workspace_write, :workspace_write_escalated] do
-        refute Map.has_key?(Helper.request(fixed_policy(mode), %{root: "/ws"}), "readable"),
-               "mode #{mode} must not carry a read allow-set"
-      end
-    end
-
-    test "carries the fs_filter library when this build has one, because Landlock cannot" do
-      # The documented gap: denying the *creation* of a `.git` that does not exist yet is
-      # not expressible in Landlock, so the helper is handed the same LD_PRELOAD shim the
-      # bubblewrap backend uses. When no `.so` was built the key is absent, not empty —
-      # an empty LD_PRELOAD would make every exec inside the sandbox fail.
-      path = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
-      request = Helper.request(fixed_policy(:workspace_write), %{root: "/ws"})
-
-      if File.regular?(path) do
-        assert request["fs_filter_library"] == path
-      else
-        refute Map.has_key?(request, "fs_filter_library")
-      end
-    end
-  end
-
-  describe "detecting the ouro-sandbox helper" do
-    test "an override pointing at nothing is not a helper" do
-      # Restored, not deleted: the variable is how a host that has an `ouro-sandbox` on disk
-      # says "not this one" (the bubblewrap proof in a container sets it), and a test that
-      # deleted it handed every later detection in the run the helper it had been told to
-      # ignore.
-      previous = System.get_env("OUROBOROS_SANDBOX_HELPER")
-      System.put_env("OUROBOROS_SANDBOX_HELPER", Path.join(System.tmp_dir!(), "absent-helper"))
-
-      on_exit(fn ->
-        case previous do
-          nil -> System.delete_env("OUROBOROS_SANDBOX_HELPER")
-          value -> System.put_env("OUROBOROS_SANDBOX_HELPER", value)
-        end
-      end)
-
-      assert Helper.executable() == nil
-    end
-
-    test "a binary that cannot answer `doctor` is not selected", %{root: root} do
-      # The detection contract: `probe/1` returns nil for anything that is not a working
-      # helper, so `probe_linux` falls through to bubblewrap instead of choosing a backend
-      # that would refuse every command.
-      fake = Path.join(root, "not-a-helper")
-      File.write!(fake, "#!/bin/sh\nexit 1\n")
-      File.chmod!(fake, 0o755)
-
-      assert Helper.probe(fake) == nil
-    end
-
-    test "a helper reporting itself unusable is not selected", %{root: root} do
-      # Exactly what a kernel older than 5.13 produces: the binary runs, answers, and says
-      # it cannot enforce.
-      fake = Path.join(root, "unusable-helper")
-      File.write!(fake, ~s(#!/bin/sh\necho '{"usable":false,"notes":"no landlock"}'\n))
-      File.chmod!(fake, 0o755)
-
-      assert Helper.probe(fake) == nil
-    end
-
-    test "a helper reporting itself usable is selected, with its version", %{root: root} do
-      fake = Path.join(root, "usable-helper")
-
-      File.write!(
-        fake,
-        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","landlock":{"abi":8}}'\n)
-      )
-
-      File.chmod!(fake, 0o755)
-
-      assert %{version: "0.1.0 (landlock abi 8)", notes: "ok"} = Helper.probe(fake)
-    end
-
-    test "a readable root that is a symlink is the thing it points at, by name", %{root: root} do
-      # L4. Landlock opens a rule's path with `O_PATH` and Seatbelt's `subpath` resolves the
-      # same way, so a policy naming a link grants its target under a name that does not say
-      # so — a `readable` of `/opt/toolchain` that happens to point at `/home/me/secrets`
-      # would have been a fence with the secret inside it. Red without `canonical_root/1`.
-      # Built under the *canonical* temp root, because `Workspace.Path.canonicalize/1` has a
-      # defect of its own on this platform (see the report): its symlink-cycle guard is one
-      # set for the whole resolution, so an absolute link target that re-traverses macOS's
-      # `/var` link is reported as a cycle. That is why the helper refuses a symlinked
-      # `readable` as well — this half is the daemon naming what it grants, and it is not
-      # the only half.
+  # `builder_policy/1` names every root it is given under both spellings, and canonicalises
+  # the one the kernel resolves. Split out of the deleted helper describe (L4): the half
+  # that pinned what the `ouro-sandbox` request dropped went with that backend, and this is
+  # the half about the policy, which both surviving backends read.
+  describe "the roots a builder policy names" do
+    test "a readable root that is a symlink is named as itself and as its target", %{root: root} do
+      # Seatbelt's `subpath` resolves a link, so a policy naming only the link grants its
+      # target under a name that does not say so — a `readable` of `/opt/toolchain` that
+      # happens to point at `/home/me/secrets` would have been a fence with the secret
+      # inside it. Red without `canonical_root/1`. Built under the *canonical* temp root,
+      # because `Workspace.Path.canonicalize/1` has a defect of its own on this platform
+      # (see the report): its symlink-cycle guard is one set for the whole resolution, so an
+      # absolute link target that re-traverses macOS's `/var` link is reported as a cycle.
       {:ok, base} = Ouroboros.Workspace.Path.canonicalize(root)
       target = Path.join(base, "real-toolchain")
       link = Path.join(base, "toolchain-link")
@@ -634,59 +446,16 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       policy = Sandbox.builder_policy(writable: [], readable: [link])
 
-      # The policy names both: the target under its own name, and the link because bubblewrap
-      # binds by name and a namespace with no `/bin` in it runs no `#!/bin/sh` (the hosted CI
-      # job found exactly that on a merged-`/usr` Ubuntu). What reaches *this* helper is the
-      # target alone — it refuses a symlinked root by design, and Landlock's rule attaches to
-      # the inode the target already names.
+      # Both: the target under its own name, and the link because bubblewrap binds by name
+      # and a namespace with no `/bin` in it runs no `#!/bin/sh` (the hosted CI job found
+      # exactly that on a merged-`/usr` Ubuntu).
       assert target in policy.readable
       assert link in policy.readable
 
-      request = Helper.request(Sandbox.with_scratch(policy, Path.join(base, "scratch")), %{})
-      assert target in request["readable"]
-      refute link in request["readable"]
-
       # A root that does not exist yet cannot be canonicalised and is carried through
-      # unchanged, because dropping it would narrow the policy without saying so — and the
-      # helper is what refuses it, out loud, if it turns out to be a link.
+      # unchanged, because dropping it would narrow the policy without saying so.
       absent = Path.join(base, "not-created-yet")
       assert absent in Sandbox.builder_policy(writable: [], readable: [absent]).readable
-    end
-
-    test "the read fence is claimed by the helper's own report, never by its name", %{root: root} do
-      # C11. Delete the `read_fence:` key from `probe/1` and the second half goes red; make
-      # it a constant `true` and the first half does. A helper installed before the read
-      # allow-set existed reports no feature, and a node that inferred the fence from the
-      # backend's name would run a build under one it does not have.
-      stale = Path.join(root, "stale-helper")
-      File.write!(stale, ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok"}'\n))
-      File.chmod!(stale, 0o755)
-
-      assert %{read_fence: false} = Helper.probe(stale)
-
-      current = Path.join(root, "current-helper")
-
-      File.write!(
-        current,
-        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","features":{"read_allow_set":true}}'\n)
-      )
-
-      File.chmod!(current, 0o755)
-
-      assert %{read_fence: true} = Helper.probe(current)
-
-      # A `features` that is not an object is a helper that claims nothing, not an
-      # exception on the detection path every `bash` call crosses.
-      odd = Path.join(root, "odd-helper")
-
-      File.write!(
-        odd,
-        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","features":"yes"}'\n)
-      )
-
-      File.chmod!(odd, 0o755)
-
-      assert %{read_fence: false} = Helper.probe(odd)
     end
   end
 
@@ -805,9 +574,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       message = Sandbox.workspace_write_without_backend_refusal(detection)
       assert message =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
-      assert message =~ "ouro-sandbox"
       assert message =~ "sandbox-exec"
       assert message =~ "bwrap"
+      refute message =~ "ouro-sandbox"
     end
 
     test "runs a workspace_write shell unsandboxed when the operator opts in", %{scope: scope} do
@@ -936,7 +705,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       first = Sandbox.detect()
       assert :persistent_term.get({Sandbox, :detection}) == first
       assert Sandbox.detect() == first
-      assert first.backend in [:sandbox_exec, :ouro_sandbox, :bwrap, :none]
+      assert first.backend in [:sandbox_exec, :bwrap, :none]
     end
 
     test "lets configuration turn the sandbox off ahead of the cache, without a restart" do
@@ -972,7 +741,6 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
     test "names each backend the way a client shows it" do
       assert Sandbox.label(:sandbox_exec) == "sandbox-exec"
-      assert Sandbox.label(:ouro_sandbox) == "ouro-sandbox"
       assert Sandbox.label(:bwrap) == "bwrap"
       assert Sandbox.label(:none) == "none"
     end
@@ -1171,13 +939,10 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Sandbox.violation(policy, "cat: /etc/shadow: Permission denied\n", 1) == nil
     end
 
-    # The reason the helper's Landlock layer is kept congruent with its mount layer rather
-    # than made stricter: a Landlock denial is EACCES, which the clause above correctly
-    # refuses to treat as a sandbox signal. Keeping the two layers in agreement means the
-    # read-only mount always decides first, and the denial a command can actually provoke
-    # is the EROFS this asserts. Observed on Linux by
-    # `tui/sandbox/tests/linux_enforcement.rs`; asserted here as the contract.
-    test "reads an ouro-sandbox denial, which is the same EROFS bubblewrap produces" do
+    # A read-only bind denies a write with `EROFS`, not the `EPERM` Seatbelt produces, and
+    # the escalation offer has to read both. Observed on Linux by CI's ubuntu-24.04 job and
+    # by `scripts/wasm-linux-test.sh`; asserted here as the contract.
+    test "reads a bubblewrap denial, which is EROFS rather than Seatbelt's EPERM" do
       policy = fixed_policy(:workspace_write)
       output = "/bin/sh: 1: cannot create .git/HEAD: Read-only file system\n"
 
@@ -1187,27 +952,26 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert evidence == "/bin/sh: 1: cannot create .git/HEAD: Read-only file system"
       assert Sandbox.escalatable?(violation, policy, "echo x > .git/HEAD")
 
-      escalation = Sandbox.escalation(violation, policy, "ouro-sandbox")
-      assert escalation =~ "ouro-sandbox, sandbox_mode: workspace_write"
+      escalation = Sandbox.escalation(violation, policy, "bwrap")
+      assert escalation =~ "bwrap, sandbox_mode: workspace_write"
       assert escalation =~ "ask_user"
       assert escalation =~ "Do not retry the same command"
     end
 
-    test "tells an ouro-sandbox backend failure apart from the command's own failure" do
-      # The helper prefixes every policy-application failure with its own label and exits
-      # 125, which is what makes this distinguishable at all.
+    test "tells a bubblewrap backend failure apart from the command's own failure" do
+      # bubblewrap prefixes every namespace-application failure with its own label, which is
+      # what makes this distinguishable at all.
       assert Sandbox.backend_failure(
-               "ouro-sandbox",
-               "ouro-sandbox: unshare(CLONE_NEWUSER|CLONE_NEWNS): Operation not permitted\n",
-               125
-             ) ==
-               "ouro-sandbox: unshare(CLONE_NEWUSER|CLONE_NEWNS): Operation not permitted"
+               "bwrap",
+               "bwrap: Creating new namespace failed: Operation not permitted\n",
+               1
+             ) == "bwrap: Creating new namespace failed: Operation not permitted"
 
-      # A command that merely mentions the helper is not a backend failure.
-      assert Sandbox.backend_failure("ouro-sandbox", "built ouro-sandbox ok\n", 1) == nil
+      # A command that merely mentions the backend is not a backend failure.
+      assert Sandbox.backend_failure("bwrap", "built bwrap ok\n", 1) == nil
       # Nor is a denial, which is the command's own exit status and must stay one.
       assert Sandbox.backend_failure(
-               "ouro-sandbox",
+               "bwrap",
                "/bin/sh: 1: cannot create x: Read-only file system\n",
                2
              ) == nil
@@ -1274,19 +1038,6 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Sandbox.builder_policy(writable: ["/tmp"]).protected_files == []
     end
 
-    # The honest answer, per backend, and the one `Hooks.trusted?/2` reads.
-    test "protects_files? is true only where the backend can deny a path that need not exist" do
-      assert Sandbox.protects_files?(:sandbox_exec)
-      assert Sandbox.protects_files?(:bwrap)
-      refute Sandbox.protects_files?(:ouro_sandbox)
-      refute Sandbox.protects_files?(:none)
-
-      # A detection map answers by its backend, and a bare `%{}` answers no.
-      assert Sandbox.protects_files?(%{backend: :sandbox_exec, read_fence: true})
-      refute Sandbox.protects_files?(%{backend: :ouro_sandbox, read_fence: true})
-      refute Sandbox.protects_files?(%{})
-    end
-
     test "Seatbelt writes one literal deny per protected file, after the segment denies" do
       policy = Map.put(fixed_policy(:workspace_write), :protected_files, ["/ws/ouroboros.toml"])
       profile = SandboxExec.profile(policy)
@@ -1324,17 +1075,14 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       refute ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
       assert ["--ro-bind", present, present] |> subsequence_of?(argv)
 
-      # And the manifest's name joins the create filter's list, where this build has the
-      # library — that is what refuses a create beneath a writable root, which no root-level
-      # bind reaches.
+      # And the bind is the whole of the fence: the `LD_PRELOAD` name filter that used to
+      # carry a create of `sub/ouroboros.toml` beneath a writable root is gone with the
+      # helper (docs/proposals/core.md §4 A2), so `wrap/5` sets no environment at all.
       assert {:ok, {_bwrap, wrapped}} =
                Bwrap.wrap({:shell, "echo hi"}, scope, policy, "/usr/bin/bwrap")
 
-      if File.regular?(Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")) do
-        assert env_value(wrapped, "OUROBOROS_FS_DENY") == ".git:.ouroboros:ouroboros.toml"
-      else
-        refute "OUROBOROS_FS_DENY" in wrapped
-      end
+      refute "--setenv" in wrapped
+      assert wrapped == argv ++ ["--", "/bin/sh", "-c", "echo hi"]
 
       # After the writable bind that would otherwise have made it writable.
       assert index_of(argv, scope.root) < index_of(argv, present)
@@ -1452,17 +1200,6 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Sandbox.builder_policy(writable: ["/tmp"]).hidden_files == []
     end
 
-    test "hides_files? is true only where the backend can deny one named path a read" do
-      assert Sandbox.hides_files?(:sandbox_exec)
-      assert Sandbox.hides_files?(:bwrap)
-      refute Sandbox.hides_files?(:ouro_sandbox)
-      refute Sandbox.hides_files?(:none)
-
-      assert Sandbox.hides_files?(%{backend: :sandbox_exec, read_fence: true})
-      refute Sandbox.hides_files?(%{backend: :ouro_sandbox, read_fence: true})
-      refute Sandbox.hides_files?(%{})
-    end
-
     test "Seatbelt denies read and write, last of all the file rules" do
       policy =
         fixed_policy(:workspace_write)
@@ -1532,20 +1269,6 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       refute ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
       refute ["--ro-bind", "/dev/null", directory] |> subsequence_of?(argv)
     end
-
-    # The helper's wire format has a read *allow*-set and no per-path deny, so it sends
-    # nothing and says so through `hides_files?/1`.
-    test "the ouro-sandbox request carries no hidden_files field", %{scope: scope, root: root} do
-      policy =
-        Sandbox.policy(scope, :workspace_write)
-        |> Map.put(:hidden_files, [Path.join(root, "data/gateway.token")])
-        |> Sandbox.with_scratch(Path.join(root, "scratch"))
-
-      request = Helper.request(policy, scope)
-
-      refute Map.has_key?(request, "hidden_files")
-      refute request |> JSON.encode!() |> String.contains?("gateway.token")
-    end
   end
 
   describe "bash on a node with no backend" do
@@ -1588,9 +1311,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert result.output =~ "workspace_write"
       assert result.output =~ "no OS sandbox backend"
       assert result.output =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
-      assert result.output =~ "ouro-sandbox"
       assert result.output =~ "sandbox-exec"
       assert result.output =~ "bwrap"
+      refute result.output =~ "ouro-sandbox"
       refute File.exists?(Path.join(workspace, "unsandboxed.txt"))
     end
 
@@ -1723,7 +1446,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
         Application.put_env(:ouroboros, :signer_key_path, key)
 
         detection = Sandbox.detect()
-        assert Sandbox.hides_files?(detection), "this backend cannot hide a file"
+        assert detection.backend == :sandbox_exec, "this describe needs Seatbelt"
 
         {:sandboxed, _label, policy} = Sandbox.decide(scope, detection)
         {:ok, scratch} = Sandbox.scratch()
@@ -2010,7 +1733,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                executable: "/usr/bin/bwrap"
              })
 
-      for backend <- [:sandbox_exec, :ouro_sandbox, :none] do
+      for backend <- [:sandbox_exec, :none] do
         assert Sandbox.stubs(policy, %{backend: backend, executable: nil}) == []
       end
     end

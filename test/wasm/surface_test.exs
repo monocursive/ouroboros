@@ -499,11 +499,11 @@ defmodule Ouroboros.Wasm.SurfaceTest do
           sandbox: %{
             posture: :refused,
             process: nil,
-            backend: "ouro-sandbox",
-            reason: {:cannot_fence_reads, :ouro_sandbox},
+            backend: "bwrap",
+            reason: {:cannot_fence_network, :bwrap},
             readable: []
           },
-          broken_reason: {:helper_sandbox_unavailable, {:cannot_fence_reads, :ouro_sandbox}}
+          broken_reason: {:helper_sandbox_unavailable, {:cannot_fence_network, :bwrap}}
         })
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
@@ -513,9 +513,9 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       assert live.sandbox.posture == :refused
       # W21: nothing was spawned, so no process posture was taken either.
       assert live.sandbox.process == nil
-      assert live.sandbox.backend == "ouro-sandbox"
+      assert live.sandbox.backend == "bwrap"
       assert is_binary(live.sandbox.reason)
-      assert live.sandbox.reason =~ "cannot_fence_reads"
+      assert live.sandbox.reason =~ "cannot_fence_network"
       assert live.sandbox.readable == []
 
       # `:refused` means there is no helper on that node, so the two halves agree.

@@ -3360,7 +3360,7 @@ impl WasmHelper {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmSandbox {
     pub posture: Option<String>,
-    /// `sandbox-exec`, `bwrap`, `ouro-sandbox`, or `none`.
+    /// `sandbox-exec`, `bwrap`, or `none`.
     pub backend: Option<String>,
     /// Why a `refused` node refused, in the runtime's words. `None` when nothing went wrong.
     pub reason: Option<String>,
@@ -5026,14 +5026,14 @@ mod tests {
         let refused = WasmStatus::decode(&serde_json::json!({
             "sandbox": {
                 "posture": "refused",
-                "backend": "ouro-sandbox",
-                "reason": "{:cannot_fence_reads, :ouro_sandbox}"
+                "backend": "bwrap",
+                "reason": "{:cannot_fence_reads, :bwrap}"
             }
         }));
 
         assert!(refused.sandbox.refused());
         assert!(!refused.sandbox.sandboxed());
-        assert_eq!(refused.sandbox.backend.as_deref(), Some("ouro-sandbox"));
+        assert_eq!(refused.sandbox.backend.as_deref(), Some("bwrap"));
         assert!(refused.sandbox.reason.is_some(), "a refusal says why");
         assert!(
             refused.sandbox.readable.is_empty(),

@@ -612,43 +612,22 @@ defmodule Ouroboros.Self.BootTest do
       assert Ouroboros.Application.self_signing_children() == []
     end
 
-    # S4 fix wave, HIGH-1. Holding a signing seed on a node whose sandbox cannot hide it
-    # from a session's own shell is holding it in public: the review read the seed out
-    # through `bash`, derived the keypair with `:crypto`, and signed arbitrary bytes.
-    # `native_sandbox: :none` is the seam — it is what `detect/0` reads before its cache, and
-    # a node with no backend is the honest worst case of one that cannot hide a file.
-    test "a node whose sandbox cannot hide the key starts no service, and says why", context do
-      key = unfenceable_key(context)
-
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert Ouroboros.Application.self_signing_children() == []
-        end)
-
-      assert log =~ "cannot hide a named file from a read"
-      assert log =~ "can read the signing seed and sign in this key's name"
-      assert log =~ "OUROBOROS_SIGNING_NODE"
-      assert log =~ Ouroboros.Self.Posture.unfenced_key_env()
-      assert log =~ key
-    end
-
-    test "unless the operator says they accept that, in one variable", context do
-      key = unfenceable_key(context)
-      System.put_env(Ouroboros.Self.Posture.unfenced_key_env(), "1")
-      on_exit(fn -> System.delete_env(Ouroboros.Self.Posture.unfenced_key_env()) end)
-
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert [{Ouroboros.Upgrade.Signing.Service, [key_path: ^key]}] =
-                   Ouroboros.Application.self_signing_children()
-        end)
-
-      # It starts, and the log says exactly what was accepted rather than nothing at all.
-      assert log =~ "can read the signing seed and sign in this key's name"
-    end
-
+    # S4. The seed this service loads is what `Sandbox.hidden_files/0` denies a **read** of
+    # in every session's policy, which is what makes holding it here safe at all — the review
+    # that found this read the seed out through `bash`, derived the keypair with `:crypto`,
+    # and signed arbitrary bytes. This decision used to ask `Sandbox.hides_files?/1` first,
+    # because one of the three backends could not render that deny; there are two backends
+    # now and both can, so the question and `OUROBOROS_SELF_UNFENCED_KEY` are gone
+    # (docs/proposals/core.md §4 A2). The fence itself is pinned live in
+    # `test/provider/native/sandbox_test.exs`, which reads the seed under a real Seatbelt
+    # profile and gets `Operation not permitted`.
     test "a fleet posture is unaffected: the key is on another host", context do
-      _key = unfenceable_key(context)
+      key = Path.join(context.tmp, "fleet-signer.key")
+      File.write!(key, :crypto.strong_rand_bytes(32))
+      File.chmod!(key, 0o600)
+
+      Application.put_env(:ouroboros, :self_posture, true)
+      Application.put_env(:ouroboros, :signer_key_path, key)
       Application.put_env(:ouroboros, :signing_node, :signer@fleet)
 
       assert Ouroboros.Application.self_signing_children() == []
@@ -758,32 +737,6 @@ defmodule Ouroboros.Self.BootTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
-
-  # The posture, a real key file, and a node whose sandbox cannot hide it.
-  defp unfenceable_key(context) do
-    saved = Application.get_env(:ouroboros, :native_sandbox)
-
-    on_exit(fn ->
-      restore(:native_sandbox, saved)
-      Ouroboros.Provider.Native.Sandbox.forget()
-    end)
-
-    key = Path.join(context.tmp, "signer-#{System.unique_integer([:positive])}.key")
-    File.write!(key, :crypto.strong_rand_bytes(32))
-    File.chmod!(key, 0o600)
-
-    Application.put_env(:ouroboros, :self_posture, true)
-    Application.delete_env(:ouroboros, :signing_node)
-    Application.put_env(:ouroboros, :signer_key_path, key)
-    Application.put_env(:ouroboros, :native_sandbox, :none)
-    Ouroboros.Provider.Native.Sandbox.forget()
-
-    refute Ouroboros.Provider.Native.Sandbox.hides_files?(
-             Ouroboros.Provider.Native.Sandbox.detect()
-           )
-
-    key
-  end
 
   defp drain do
     receive do
