@@ -38,12 +38,6 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
 
     Application.put_env(
       :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
-
-    Application.put_env(
-      :jido_harness,
       :provider_config,
       Map.put(map_or_empty(previous_provider_config), @provider, %{
         test_pid: self(),
@@ -70,7 +64,26 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
     {:ok, id: unique_id("approval-ledger"), workspace: workspace}
   end
 
-  describe "the Claude bridge (interactive.request_approval)" do
+  # The deterministic fixture stands in for the native transport in these two describes,
+  # because what they exercise is the coordinator's approval bookkeeping rather than a
+  # model. `describe "the native agent"` below wants the real adapter, so the registration
+  # is scoped here rather than file-wide.
+  defp register_fixture_adapter do
+    previous = Application.get_env(:jido_harness, :providers)
+
+    Application.put_env(
+      :jido_harness,
+      :providers,
+      Map.put(map_or_empty(previous), @provider, HarnessAdapter)
+    )
+
+    on_exit(fn -> restore_harness_env(:providers, previous) end)
+    :ok
+  end
+
+  describe "an approval asked from outside this session's transport" do
+    setup do: register_fixture_adapter()
+
     test "one entry per human answer, written before the caller is told", %{id: id} do
       ref = start_bridge_session(id)
 
@@ -305,6 +318,8 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
   end
 
   describe "a transport with its own approvals channel" do
+    setup do: register_fixture_adapter()
+
     test "the answer is recorded before it is forwarded, and stamps the resolution",
          %{id: id, workspace: workspace} do
       ref = start_transport_session(id, workspace)

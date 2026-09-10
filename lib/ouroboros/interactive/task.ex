@@ -150,11 +150,12 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) or runtime.subagent_bridge_closed do
       {:reply, {:error, :session_terminal}, runtime}
     else
+      # `provider_session_id` is the whole snapshot the bridge acts on: it names the live
+      # native transport the child runs on. `principal_id` is what the effect ledger and
+      # the permission engine see.
       {:reply,
        {:ok,
         %{
-          request: State.request(session),
-          provider: session.provider,
           provider_session_id: session.provider_session_id,
           principal_id: session.harness_session_id || session.id
         }}, runtime}

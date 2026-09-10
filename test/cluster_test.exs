@@ -1555,7 +1555,6 @@ defmodule Ouroboros.ClusterTest do
           assert {:ok, %Ouroboros.Interactive.Ref{id: ^id, node: ^core}} =
                    Methods.invoke("interactive.start", %{
                      "id" => id,
-                     "provider" => "ouroboros_test",
                      "workspace" => File.cwd!(),
                      "node" => Atom.to_string(core)
                    })
@@ -1626,7 +1625,6 @@ defmodule Ouroboros.ClusterTest do
             Task.async(fn ->
               Methods.invoke("interactive.start", %{
                 "id" => id,
-                "provider" => "native",
                 "workspace" => File.cwd!(),
                 "node" => Atom.to_string(core)
               })
