@@ -27,7 +27,7 @@ help:
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
 	@echo "make test             formatting, script checks, mix test, the boot gate, cargo test/fmt/clippy"
-	@echo "make boot-gate        the pre-reduction data directory booted against this tree, 10x per mode"
+	@echo "make boot-gate        pre-reduction and pre-J2 data booted against this tree, 10x per mode"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make self-export      write this node's promoted policy + record into priv/self/"
@@ -215,10 +215,12 @@ test:
 # test/support/integration_fixture/README.md. It needs an `ouro` binary for the
 # process-incarnation helper (`make ouro`'s, or a debug build it makes itself) and it boots in
 # the development environment, where that helper is required exactly as it is on a real node.
+# The additional pre-J2 corpus exercises retired session structs under both loading modes.
 boot-gate:
 	@echo "==> boot-gate: the pre-reduction data directory, booted against this tree"
 	MIX_ENV=dev $(MIX) compile
 	sh scripts/fixture/boot_gate.sh
+	sh scripts/fixture/j2_boot_gate.sh
 
 # Deliberately not part of `make test`: the first run builds a PLT and even incremental
 # runs are minutes, not the seconds `mix test` is supposed to stay. CI has its own job.
@@ -291,4 +293,3 @@ ouro: release-tarball
 	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
 	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features embed
 	@ls -l tui/target/release/ouro
-

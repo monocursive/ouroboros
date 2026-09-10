@@ -39,10 +39,10 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
   # fail the feature, it lies about it.
   @moduletag timeout: 180_000
 
-  alias Jido.Harness.ApprovalResponse
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Session.ApprovalResponse
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Provider.Native.Subagent
   alias Ouroboros.Test.NativeModelScript
 
@@ -363,7 +363,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
           owner: nil,
           adapter: Ouroboros.Provider.Native,
           config: %{},
-          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          process_manager: Ouroboros.Provider.Native.ProcessSignal,
           telemetry_context: %{}
         },
         worktree: false,
@@ -823,7 +823,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
 
@@ -843,8 +843,8 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   defp collect_until(type, acc, timeout) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
-      {:session_adapter_event, event} -> collect_until(type, [event | acc], timeout)
+      {:native_test_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
+      {:native_test_event, event} -> collect_until(type, [event | acc], timeout)
     after
       timeout -> flunk("no #{type}; saw #{inspect(Enum.map(acc, & &1.type))}")
     end
@@ -862,11 +862,11 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   defp await_subagent_event(phase) do
     receive do
-      {:session_adapter_event,
+      {:native_test_event,
        %{type: :provider_event, payload: %{"kind" => "subagent", "phase" => ^phase}} = event} ->
         event
 
-      {:session_adapter_event, _} ->
+      {:native_test_event, _} ->
         await_subagent_event(phase)
     after
       90_000 -> flunk("no subagent #{phase}")
@@ -875,8 +875,8 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   defp await_approval(timeout \\ 60_000) do
     receive do
-      {:session_adapter_event, %{type: :approval_requested} = event} -> event
-      {:session_adapter_event, _other} -> await_approval(timeout)
+      {:native_test_event, %{type: :approval_requested} = event} -> event
+      {:native_test_event, _other} -> await_approval(timeout)
     after
       timeout -> flunk("no approval_requested within #{timeout}ms")
     end
@@ -958,9 +958,6 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   defp put_peer_env!(peer_node, key, value),
     do: :ok = :erpc.call(peer_node, Application, :put_env, [:ouroboros, key, value])
-
-  defp peer_table(peer_node),
-    do: peer_node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9]/, "_") |> String.to_atom()
 
   defp code_path_args, do: Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
 

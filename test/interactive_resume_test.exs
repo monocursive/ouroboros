@@ -12,43 +12,29 @@ defmodule Ouroboros.InteractiveResumeTest do
 
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.{RunRequest, Session, SessionInfo}
+  alias Ouroboros.Test.ModelRequest, as: RunRequest
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.ControlledModel, as: HarnessAdapter
 
   @provider :native
-  @provider_session_id "ouroboros-test-session"
 
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
 
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
-
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
-
-    HarnessAdapter.reset_resume()
+    previous_native_dir = Application.get_env(:ouroboros, :native_data_dir)
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
+    Application.put_env(:ouroboros, :native_data_dir, journal_dir)
 
     on_exit(fn ->
-      HarnessAdapter.reset_resume()
       cleanup_sessions()
-      restore_env(:providers, previous_providers)
-      restore_env(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
+      restore_native_dir(previous_native_dir)
       File.rm_rf(journal_dir)
       assert {:ok, _started} = Application.ensure_all_started(:ouroboros)
     end)
@@ -63,7 +49,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     turn_id = unique_id("in-flight-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "start something", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{provider_session_id: nil},
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{provider_session_id: nil},
                     adapter},
                    1_000
 
@@ -71,11 +57,14 @@ defmodule Ouroboros.InteractiveResumeTest do
     # — which is the case the last test in this file covers.
     assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
 
-    %State{harness_session_id: gone, cursor: cursor_before} =
+    %State{harness_session_id: gone, provider_session_id: native_id, cursor: cursor_before} =
       assert_eventually(fn ->
         case InteractiveSession.info(ref) do
-          {:ok, %State{provider_session_id: @provider_session_id} = session} -> session
-          _other -> false
+          {:ok, %State{provider_session_id: provider_id} = session} when is_binary(provider_id) ->
+            session
+
+          _other ->
+            false
         end
       end)
 
@@ -96,7 +85,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     refute State.terminal?(resumed)
     assert resumed.status != :lost
     assert resumed.resumes == 1
-    assert resumed.provider_session_id == @provider_session_id
+    assert resumed.provider_session_id == native_id
 
     # The turn that was in flight at the break is finalised outcome-unknown. The
     # provider may well have finished it; nothing on this side can tell, and nothing
@@ -128,7 +117,7 @@ defmodule Ouroboros.InteractiveResumeTest do
 
     assert status_event.payload == %{
              "kind" => "resumed",
-             "provider_session_id" => @provider_session_id,
+             "provider_session_id" => native_id,
              "previous_harness_session_id" => gone
            }
 
@@ -151,8 +140,8 @@ defmodule Ouroboros.InteractiveResumeTest do
     next_turn_id = unique_id("after-resume-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "keep going", id: next_turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _resumed_run,
-                    %RunRequest{provider_session_id: @provider_session_id}, resumed_adapter},
+    assert_receive {:ouroboros_test_model_started, _resumed_run,
+                    %RunRequest{provider_session_id: ^native_id}, resumed_adapter},
                    2_000
 
     assert :ok = HarnessAdapter.finish(resumed_adapter)
@@ -167,7 +156,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 1_000
     assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
 
     %State{harness_session_id: first} =
@@ -188,7 +177,7 @@ defmodule Ouroboros.InteractiveResumeTest do
         end
       end)
 
-    assert lost.error == :harness_session_not_found
+    assert lost.error == :runtime_not_found
     assert lost.resumes == 1
     if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
     retire_session(id)
@@ -201,7 +190,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 1_000
     assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
 
     %State{harness_session_id: gone} =
@@ -209,7 +198,11 @@ defmodule Ouroboros.InteractiveResumeTest do
 
     # The provider still declares that it can resume; it just does not know this thread
     # any more. That is a refusal, and it is the only thing that may end as `:lost`.
-    HarnessAdapter.accept_resume(["some-other-thread"])
+    {:ok, current} = InteractiveSession.info(ref)
+    {:ok, runtime} = Session.info(current.harness_session_id)
+    checkpoint_path = :sys.get_state(runtime.pid).checkpoint_path
+    File.mkdir_p!(Path.dirname(checkpoint_path))
+    File.write!(checkpoint_path, "not valid checkpoint JSON")
     kill_harness_session(gone)
 
     lost =
@@ -234,7 +227,7 @@ defmodule Ouroboros.InteractiveResumeTest do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 1_000
     assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
 
     # Everything a resume needs is in place. What is missing is a reason to: the Harness
@@ -264,7 +257,7 @@ defmodule Ouroboros.InteractiveResumeTest do
 
     turn_id = unique_id("unnamed-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "never answered", id: turn_id)
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 1_000
 
     %State{harness_session_id: gone} =
       assert_eventually(fn ->
@@ -279,6 +272,10 @@ defmodule Ouroboros.InteractiveResumeTest do
 
     # The provider never emitted anything, so it never named a session. There is nothing
     # to resume with, and the honest answer is the one this branch always gave.
+    :sys.replace_state(Task.whereis(id), fn runtime ->
+      %{runtime | session: %{runtime.session | provider_session_id: nil}}
+    end)
+
     assert {:ok, %State{provider_session_id: nil}} = InteractiveSession.info(ref)
     kill_harness_session(gone)
 
@@ -290,19 +287,20 @@ defmodule Ouroboros.InteractiveResumeTest do
         end
       end)
 
-    assert lost.error == :harness_session_not_found
+    assert lost.error == :runtime_not_found
     assert lost.resumes == 0
 
-    assert %{status: :ambiguous, error: {:session_lost, :harness_session_not_found}} =
+    assert %{status: :ambiguous, error: {:session_lost, :runtime_not_found}} =
              lost.turns[turn_id]
 
-    refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
+    refute_receive {:ouroboros_test_model_started, _duplicate, _request, _adapter}, 100
     if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
     retire_session(id)
   end
 
   test "a session checkpointed before a full restart is resumed when the runtime returns" do
     id = unique_id("restart-resume")
+    native_id = "native-historical-checkpoint"
     base = unique_base()
     workspace = Path.join(base, "workspace")
     File.mkdir_p!(workspace)
@@ -326,8 +324,8 @@ defmodule Ouroboros.InteractiveResumeTest do
     checkpointed = %{
       session
       | status: :idle,
-        harness_session_id: "harness-session-that-died-with-the-beam",
-        provider_session_id: @provider_session_id,
+        runtime_id: "runtime-that-died-with-the-beam",
+        provider_session_id: native_id,
         cursor: 7,
         event_floor: 7,
         updated_at: aged_timestamp()
@@ -349,8 +347,8 @@ defmodule Ouroboros.InteractiveResumeTest do
       assert_eventually(
         fn ->
           case Store.get(id) do
-            {:ok, %State{harness_session_id: harness} = state}
-            when is_binary(harness) and harness != "harness-session-that-died-with-the-beam" ->
+            {:ok, %State{runtime_id: harness} = state}
+            when is_binary(harness) and harness != "runtime-that-died-with-the-beam" ->
               state
 
             _other ->
@@ -363,15 +361,15 @@ defmodule Ouroboros.InteractiveResumeTest do
     refute State.terminal?(resumed)
     assert resumed.status != :lost
     assert resumed.resumes == 1
-    assert resumed.provider_session_id == @provider_session_id
+    assert resumed.provider_session_id == native_id
 
     assert [status_event] = Enum.filter(resumed.events, &(&1.type == :status))
     assert status_event.sequence == 8
 
     assert status_event.payload == %{
              "kind" => "resumed",
-             "provider_session_id" => @provider_session_id,
-             "previous_harness_session_id" => "harness-session-that-died-with-the-beam"
+             "provider_session_id" => native_id,
+             "previous_harness_session_id" => "runtime-that-died-with-the-beam"
            }
 
     sequences = Enum.map(resumed.events, & &1.sequence)
@@ -384,8 +382,8 @@ defmodule Ouroboros.InteractiveResumeTest do
                id: unique_id("post-restart-turn")
              )
 
-    assert_receive {:ouroboros_test_adapter_started, _run,
-                    %RunRequest{provider_session_id: @provider_session_id}, adapter},
+    assert_receive {:ouroboros_test_model_started, _run,
+                    %RunRequest{provider_session_id: ^native_id}, adapter},
                    2_000
 
     assert :ok = HarnessAdapter.finish(adapter)
@@ -394,8 +392,11 @@ defmodule Ouroboros.InteractiveResumeTest do
 
   defp session_with_provider_session_id(ref) do
     case InteractiveSession.info(ref) do
-      {:ok, %State{provider_session_id: @provider_session_id} = session} -> session
-      _other -> false
+      {:ok, %State{provider_session_id: provider_id} = session} when is_binary(provider_id) ->
+        session
+
+      _other ->
+        false
     end
   end
 
@@ -413,7 +414,7 @@ defmodule Ouroboros.InteractiveResumeTest do
   # Removing the Harness session is the whole premise: from the coordinator's side it is
   # indistinguishable from the runtime having been restarted under it.
   defp kill_harness_session(harness_session_id) do
-    case Registry.lookup(Jido.Harness.SessionRegistry, harness_session_id) do
+    case Registry.lookup(Ouroboros.SessionRegistry, {:runtime, harness_session_id}) do
       [{pid, _value}] ->
         monitor = Process.monitor(pid)
         Process.exit(pid, :kill)
@@ -425,14 +426,14 @@ defmodule Ouroboros.InteractiveResumeTest do
     end
   end
 
-  # A stubbed provider session never answers `close`, so these coordinators are retired
-  # directly rather than left retrying for the rest of the suite.
   defp retire_session(id) do
+    _ = InteractiveSession.kill(id)
+
     case Task.whereis(id) do
       pid when is_pid(pid) ->
         DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, pid)
 
-      _absent ->
+      _ ->
         :ok
     end
 
@@ -441,7 +442,7 @@ defmodule Ouroboros.InteractiveResumeTest do
         _ = Store.put(%{session | status: :cancelled})
         _ = Store.delete(id)
 
-      _absent ->
+      _ ->
         :ok
     end
 
@@ -452,7 +453,9 @@ defmodule Ouroboros.InteractiveResumeTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -500,11 +503,8 @@ defmodule Ouroboros.InteractiveResumeTest do
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
 
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_env(key, value), do: Application.put_env(:jido_harness, key, value)
+  defp restore_native_dir(nil), do: Application.delete_env(:ouroboros, :native_data_dir)
+  defp restore_native_dir(value), do: Application.put_env(:ouroboros, :native_data_dir, value)
 
   defp restore_ouroboros_env(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore_ouroboros_env(key, value), do: Application.put_env(:ouroboros, key, value)

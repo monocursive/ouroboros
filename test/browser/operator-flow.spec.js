@@ -152,3 +152,49 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
 });
+
+
+test("native stream, approval, interrupt, reconnect and durable history", async ({ page }) => {
+  const path = require("node:path");
+  await signIn(page);
+  await page.goto("/new");
+  await liveConnected(page);
+  await page.locator("#workspace").fill(path.resolve(__dirname, "../../_build/playwright-workspace"));
+  await page.getByRole("button", { name: "Start session", exact: true }).click();
+  await expect(page).toHaveURL(/\/s\/interactive\//);
+  await liveConnected(page);
+  const url = page.url();
+  const composer = page.locator("#ouro-composer-input");
+  const send = page.getByRole("button", { name: "Send", exact: true });
+  const transcript = page.getByRole("log", { name: "Session transcript" });
+
+  await composer.fill("browser stream");
+  await send.click();
+  await expect(transcript).toContainText("Streaming proof complete.");
+  await expect(page.getByRole("button", { name: "Interrupt", exact: true })).toBeHidden();
+
+  await composer.fill("browser approval");
+  await send.click();
+  await page.locator(".ouro-approval-answers").getByRole("button", { name: "Allow once", exact: true }).click();
+  await expect(transcript).toContainText("Browser approval completed.");
+
+  await composer.fill("browser interrupt");
+  await send.click();
+  await expect(transcript).toContainText("Working on the interrupt proof.");
+  await page.getByRole("button", { name: "Interrupt", exact: true }).click();
+  await expect(transcript).toContainText("Interrupted");
+
+  await page.reload();
+  await liveConnected(page);
+  await expect(page).toHaveURL(url);
+  await expect(transcript).toContainText("Streaming proof complete.");
+  await expect(transcript).toContainText("Browser approval completed.");
+  await expect(transcript).toContainText("Interrupted");
+
+  await page.goto("/");
+  await liveConnected(page);
+  await page.goto(url);
+  await liveConnected(page);
+  await expect(transcript).toContainText("Streaming proof complete.");
+  await expect(transcript).toContainText("Browser approval completed.");
+});

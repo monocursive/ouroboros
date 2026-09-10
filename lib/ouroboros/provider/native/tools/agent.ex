@@ -205,7 +205,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   `{:ok, spec}` for `Ouroboros.Provider.Native.Subagent.spawn/1`, or `{:error, message}`.
 
   The spec carries `request_attrs` — a plain map — rather than a
-  `Jido.Harness.SessionRequest`, and `worktree` is the *request* for one rather than a
+  `Ouroboros.Session.Request`, and `worktree` is the *request* for one rather than a
   provisioned one. Both are deliberate and both are the same reason: `SessionRequest.new/1`
   validates `File.dir?(cwd)`, and a worktree is a directory on a disk. Building either here
   would answer a question about the **target's** filesystem by looking at this node's — the
@@ -235,6 +235,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
           allowed_tools: tools,
           disallowed_tools: parent.request.disallowed_tools,
           add_dirs: add_dirs(parent, placement),
+          plan: parent.approval_mode == :plan,
           approval_mode: child_approval_mode(parent.approval_mode),
           sandbox_mode: parent.scope.sandbox_mode,
           reasoning_effort: parent.request.reasoning_effort,
@@ -251,7 +252,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         node: placement.node,
         remote: placement.remote?,
         request_attrs: request_attrs,
-        # The parent's own harness context, so the child belongs to the parent's
+        # The parent's own execution context, so the child belongs to the parent's
         # interactive session — the same `session_id`, the same principal in every ledger
         # entry the child writes. `Subagent` replaces `owner` with itself; nothing else
         # about it changes, which is what makes a child the parent's and not a stranger's.
@@ -796,19 +797,19 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defp context(parent, true), do: portable_context(parent.context)
 
   @doc """
-  The parent's harness context in the shape it can cross a node boundary in.
+  The parent's execution context in the shape it can cross a node boundary in.
 
   Two things happen to it, and each has one reason:
 
     * every fun, port and reference is dropped, at any depth, because each of them names
       something only the parent's VM has. `config` is where one would arrive — it is
-      whatever an operator put in `:jido_harness, :provider_config` — and dropping the
+      whatever an operator put in `:ouroboros, :native_provider` — and dropping the
       offending entry rather than the whole map keeps the rest of the operator's
       configuration reaching the child;
     * `owner` is emptied rather than carried. `Ouroboros.Provider.Native.Subagent` sets it
       to itself on the target anyway, and a pid of the parent node left in the field a
       child session emits every raw event to would be one mistake away from a child
-      streaming its whole stream across the fleet into the parent's harness worker.
+      streaming its whole stream across the fleet into the parent's coordinator.
 
   Everything else — the session id that makes the child's ledger entries the parent's, the
   provider, the adapter and process-manager modules — is atoms and binaries, and means the
@@ -881,15 +882,10 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "subagent_parent" => parent.provider_session_id,
       "subagent_task_id" => child_id
     })
-    |> then(fn options ->
-      if parent.approval_mode == :plan, do: Map.put(options, "plan", true), else: options
-    end)
   end
 
-  # `:plan` is a loop-only mode: `Jido.Harness.SessionRequest` validates `approval_mode`
-  # against four members and would refuse it. A planning parent therefore hands its child
-  # `plan: true` in `provider_options` — the same channel a planning session is started
-  # through anywhere else — and `:prompt` as the mode underneath it.
+  # Plan posture is an explicit request setting; prompt remains the underlying approval
+  # mode restored when that posture ends.
   defp child_approval_mode(:plan), do: :prompt
   defp child_approval_mode(mode) when mode in [:prompt, :auto_edit, :auto_approve], do: mode
   defp child_approval_mode(_other), do: :prompt
@@ -924,7 +920,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     end
   end
 
-  # `provider_options` may arrive with either key spelling — the harness accepts both —
+  # `provider_options` may arrive with either key spelling — the request contract accepts both —
   # so both are looked up, and never by minting an atom from a string.
   defp option(options, key) when is_map(options) do
     Map.get(options, key) ||

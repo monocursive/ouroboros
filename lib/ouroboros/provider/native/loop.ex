@@ -16,7 +16,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   Ouroboros owns the tool lifecycle: blocking on human approval, delivering steering
   between tools, stopping after the current tool on interrupt, and refusing repeated
-  calls. The loop drives the model directly within the session the harness supervises.
+  calls. The loop drives the model directly within the supervised native session.
 
   `Ouroboros.Provider.Native.Tools.Schema` converts each `Jido.Action` schema into
   the generated JSON Schema. Tools applies its description and model schema overrides;
@@ -71,7 +71,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   A child session's tool calls are its own entries, under the child's `provider_session_id`
   and its own turn id — but under the **parent's** `session_id` and principal, because the
-  child is opened with the parent's harness context and belongs to the parent's interactive
+  child is opened with the parent's native runtime context and belongs to the parent's interactive
   session. The provider-session link rides in `authority.constraints` as `subagent_parent`
   and `subagent_task_id`, and the cause is `native.subagent.tool_call` rather than
   `native.tool_call`, so a reader can ask "everything a subagent of this session did"
@@ -143,7 +143,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   replay that dispatches real tools.
   """
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context.Instructions
@@ -212,6 +212,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     # R1's replay seams; see the moduledoc. `:live` dispatches tools and accounts for them;
     # anything else takes recorded results as authoritative and writes no ledger entries.
     tool_source: :live,
+    # Finite loops and replay own their marker; a live Native.Session emits it before dispatch.
+    lifecycle_owner: :loop,
     # A 1-arity function replacing `drain_control/1`, or `nil` for the mailbox.
     control_feed: nil,
     # The `.agents/rules` held back for lazy loading, and the ones already injected. A
@@ -325,14 +327,16 @@ defmodule Ouroboros.Provider.Native.Loop do
     # actually entered the conversation, not the ones the operator typed.
     state = journal(state, "prompt", prompt_record(user_message))
 
-    emit(state, :turn_started, %{
-      "model" => state.model_spec,
-      "tools" => Enum.map(tool_specs(state), & &1.name),
-      "approval_mode" => Atom.to_string(state.approval_mode),
-      "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode),
-      "hooks" => length(state.hooks.hooks),
-      "workspace_trusted" => state.hooks.trusted?
-    })
+    if state.lifecycle_owner == :loop do
+      emit(state, :turn_started, %{
+        "model" => state.model_spec,
+        "tools" => Enum.map(tool_specs(state), & &1.name),
+        "approval_mode" => Atom.to_string(state.approval_mode),
+        "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode),
+        "hooks" => length(state.hooks.hooks),
+        "workspace_trusted" => state.hooks.trusted?
+      })
+    end
 
     _ = report_hook_errors(state)
 
@@ -2223,7 +2227,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   # judgement. Optional, so the other eleven call sites are unchanged.
   # Who answered an approval this loop was waiting on (S2's fix wave).
   #
-  # `Jido.Harness.ApprovalResponse` has four fields and none of them is the actor, so a client
+  # `Ouroboros.Session.ApprovalResponse` has four fields and none of them is the actor, so a client
   # that answered with nobody at the keyboard — `ouro run --approve-all`, the TUI's auto-approve
   # toggle — reached here indistinguishable from a person, and every one of those answers was
   # recorded as a human decision and became evidence a policy promotion is measured against
@@ -2679,8 +2683,8 @@ defmodule Ouroboros.Provider.Native.Loop do
   # id the larger of the two would swallow the smaller. Under the child's — a real turn id,
   # of the turn that actually spent it — the plane accounts it as its own contribution and
   # adds it, which is what "folded into the session's usage" has to mean for `/cost` to be
-  # true. Leaving it blank is not an option: `Jido.Harness.Session.EventStore`'s
-  # `normalize_adapter_event/2` fills an absent turn id with the active one.
+  # true. The child turn identity remains explicit through retained runtime output
+  # and the coordinator's durable usage projection.
   defp fold_subagent_usage(state, spec, summary) do
     payload =
       %{
@@ -3532,20 +3536,20 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp describe(reason), do: inspect(reason)
 
   @doc """
-  Builds a Harness event for the session owner, redacted at the live boundary.
+  Builds an owned runtime event, redacted before it enters retained output.
 
-  `Jido.Harness.EventStore` redacts again before journalling. This first pass protects
-  live subscribers from a tool result that echoed a credential.
+  Native.Output applies explicit session secrets again before retention. Public
+  subscribers see only the coordinator's successfully checkpointed projection.
   """
-  @spec to_event(map(), atom(), String.t() | nil) :: Jido.Harness.Event.t()
+  @spec to_event(map(), atom(), String.t() | nil) :: Ouroboros.Session.RuntimeEvent.t()
   def to_event(event, provider, provider_session_id) do
-    Jido.Harness.Event.new!(
+    Ouroboros.Session.RuntimeEvent.new!(
       type: event.type,
       provider: provider,
       provider_session_id: provider_session_id,
       turn_id: event.turn_id,
       request_id: event.request_id,
-      payload: Jido.Harness.Redaction.redact(event.payload)
+      payload: Ouroboros.Redaction.redact(event.payload)
     )
   end
 

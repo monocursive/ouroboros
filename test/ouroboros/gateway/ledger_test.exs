@@ -333,8 +333,6 @@ defmodule Ouroboros.Gateway.LedgerTest do
 
     on_exit(fn -> stop_peer(peer) end)
 
-    table = peer_node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9]/, "_")
-
     {:ok, _applications} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
     peer_node
   end

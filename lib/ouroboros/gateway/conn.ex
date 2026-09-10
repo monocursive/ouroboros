@@ -308,6 +308,10 @@ defmodule Ouroboros.Gateway.Conn do
     |> maybe_stop()
   end
 
+  def handle_info({:ouroboros_interactive_resync, id, cursor}, state) do
+    state |> lag({:interactive, id}, cursor) |> flush_lagged() |> maybe_stop()
+  end
+
   def handle_info({:frame_written, count}, state) do
     %{state | outbound: max(state.outbound - count, 0)}
     |> flush_lagged()

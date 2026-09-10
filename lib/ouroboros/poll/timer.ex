@@ -3,19 +3,14 @@ defmodule Ouroboros.Poll.Timer do
 
   # One pending timer per message, not one per call.
   #
-  # Both session coordinators drive themselves with `Process.send_after(self(), :poll, …)`,
-  # and both have many paths that ask for a poll for the same reason at the same moment —
-  # a dispatch that checkpoints and then wants an immediate drain, a steer answered while
-  # the previous poll's timer is still outstanding. Armed naively, every extra timer became
-  # another self-perpetuating chain: each delivery scheduled its own successor, so the
-  # coordinator's real wakeup rate was `interval / number of chains` and climbed for the
-  # lifetime of the session.
+  # The interactive coordinator uses this only for explicit reconciliation and failed
+  # checkpoint retries. Native output normally wakes the coordinator by notification;
+  # there is no recurring active or idle output poll.
   #
   # The rule here is *earliest due wins*: a request for a wakeup no sooner than the one
   # already armed is dropped, and a request for an earlier one cancels its predecessor —
   # flushing the message if the cancel lost the race — so exactly one timer per key is ever
-  # outstanding. That invariant is what makes an adaptive interval mean anything: a decayed
-  # backoff that a second chain keeps re-arming at the fast interval is not a backoff.
+  # outstanding. Overlapping recovery requests cannot multiply the retry schedule.
 
   @type runtime :: map()
   @type key :: atom()

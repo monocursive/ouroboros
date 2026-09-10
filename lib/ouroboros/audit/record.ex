@@ -102,7 +102,7 @@ defmodule Ouroboros.Audit.Record do
   def capture(value, mode) when is_list(value), do: Enum.map(value, &capture(&1, mode))
 
   def capture(value, mode) when is_binary(value) and mode in [:redacted, :full],
-    do: Jido.Harness.Redaction.redact(value)
+    do: Ouroboros.Redaction.redact(value)
 
   def capture(value, _), do: value
 end

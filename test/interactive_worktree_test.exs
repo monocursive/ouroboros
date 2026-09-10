@@ -12,10 +12,10 @@ defmodule Ouroboros.InteractiveWorktreeTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Interactive.{State, Store}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Worktree
@@ -47,8 +47,8 @@ defmodule Ouroboros.InteractiveWorktreeTest do
       previous = %{
         roots: Application.get_env(:ouroboros, :workspace_allowed_roots),
         data_dir: Application.get_env(:ouroboros, :data_dir),
-        providers: Application.get_env(:jido_harness, :providers),
-        provider_config: Application.get_env(:jido_harness, :provider_config)
+        providers: nil,
+        provider_config: Ouroboros.Test.NativeConfig.snapshot()
       }
 
       journal_dir = Path.join(base, "journal")
@@ -56,15 +56,9 @@ defmodule Ouroboros.InteractiveWorktreeTest do
       Application.put_env(:ouroboros, :workspace_allowed_roots, [base])
       Application.put_env(:ouroboros, :data_dir, base)
 
-      Application.put_env(
-        :jido_harness,
-        :providers,
-        Map.put(Map.new(previous.providers || %{}), @provider, HarnessAdapter)
-      )
+      :ok
 
-      Application.put_env(
-        :jido_harness,
-        :provider_config,
+      Ouroboros.Test.NativeConfig.configure(
         previous.provider_config
         |> then(&Map.new(&1 || %{}))
         |> Map.put(@provider, %{test_pid: self(), retention: %{journal_dir: journal_dir}})
@@ -74,8 +68,8 @@ defmodule Ouroboros.InteractiveWorktreeTest do
         cleanup_sessions()
         restore(:ouroboros, :workspace_allowed_roots, previous.roots)
         restore(:ouroboros, :data_dir, previous.data_dir)
-        restore(:jido_harness, :providers, previous.providers)
-        restore(:jido_harness, :provider_config, previous.provider_config)
+        :ok
+        Ouroboros.Test.NativeConfig.configure(previous.provider_config)
         File.rm_rf(base)
       end)
 
@@ -197,7 +191,9 @@ defmodule Ouroboros.InteractiveWorktreeTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   end
 

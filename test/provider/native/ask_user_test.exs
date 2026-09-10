@@ -13,7 +13,7 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
   # blown), and the module ceiling to the waits a test can stack.
   @moduletag timeout: 120_000
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Tools

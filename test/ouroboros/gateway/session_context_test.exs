@@ -3,31 +3,26 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   The gateway half of D9's three context verbs — `interactive.compact`,
   `interactive.handoff`, `interactive.context` — and D7's `worktree` start option.
 
-  Two lanes, deliberately. The refusal lane runs against the ordinary test harness
-  adapter, because what is under test there is that a transport which cannot fold a
-  conversation says so as wire data rather than failing obscurely. The native lane runs a
-  real `provider: :native` session through `Ouroboros.InteractiveSession` with the
-  deterministic model script, because the only way to prove a compaction summary came
-  back is to compact something.
+  Sessions run through `Ouroboros.InteractiveSession` and the native runtime with a
+  deterministic model script. The tests cover both unavailable runtime refusals and
+  context operations against a real persisted conversation.
   """
 
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.NativeModelScript
 
-  @provider :native
-
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
 
     root = Path.join(System.tmp_dir!(), "gateway-context-#{System.unique_integer([:positive])}")
@@ -40,21 +35,13 @@ defmodule Ouroboros.Gateway.SessionContextTest do
     previous_native_dir = Application.get_env(:ouroboros, :native_data_dir)
     previous_native_model = Application.get_env(:ouroboros, :native_model_module)
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
-    Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
 
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
+    Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
 
     on_exit(fn ->
       cleanup_sessions()
-      restore_harness(:providers, previous_providers)
-      restore_harness(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
       restore_ouroboros(:native_data_dir, previous_native_dir)
       restore_ouroboros(:native_model_module, previous_native_model)
       File.rm_rf(journal_dir)
@@ -356,13 +343,8 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       # native process, leaving the durable record intact.
       {:ok, %State{provider_session_id: provider_session_id}} = InteractiveSession.info(session)
 
-      if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
-        Process.exit(pid, :kill)
-
-        wait_until(fn ->
-          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
-        end)
-      end
+      assert :ok = InteractiveSession.kill(session)
+      wait_until(fn -> Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil end)
 
       assert {:error, -32_006, _message, data} =
                Methods.invoke("interactive.compact", %{"id" => id})
@@ -388,13 +370,8 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
       {:ok, %State{provider_session_id: provider_session_id}} = InteractiveSession.info(session)
 
-      if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
-        Process.exit(pid, :kill)
-
-        wait_until(fn ->
-          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
-        end)
-      end
+      assert :ok = InteractiveSession.kill(session)
+      wait_until(fn -> Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil end)
 
       assert {:error, -32_006, _message, ["native_transport_unavailable", details]} =
                Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => 0})
@@ -491,7 +468,9 @@ defmodule Ouroboros.Gateway.SessionContextTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -507,12 +486,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_harness(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_harness(key, value), do: Application.put_env(:jido_harness, key, value)
 
   defp restore_ouroboros(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore_ouroboros(key, value), do: Application.put_env(:ouroboros, key, value)
@@ -558,7 +531,7 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
       on_exit(fn -> InteractiveSession.close(ref) end)
 
-      # The option is a session option on the wire and a provider option underneath.
+      # Planning is an owned session option on both sides of the wire.
       {:ok, %State{} = session} = InteractiveSession.info(ref)
       assert State.public(session).options.plan == true
       # C5. The owner node names the OS sandbox its shell runs under, as a string.
@@ -569,8 +542,8 @@ defmodule Ouroboros.Gateway.SessionContextTest do
              ]
 
       request = State.request(session)
-      assert request.provider_options[:plan] == true
-      refute Map.has_key?(request, :plan)
+      assert request.plan == true
+      refute Map.has_key?(request.provider_options, :plan)
 
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "plan the greeter", id: "turn-plan")

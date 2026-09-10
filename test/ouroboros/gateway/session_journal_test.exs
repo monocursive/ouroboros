@@ -13,19 +13,17 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.NativeModelScript
 
-  @provider :native
-
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
 
     root = Path.join(System.tmp_dir!(), "gateway-journal-#{System.unique_integer([:positive])}")
@@ -38,21 +36,13 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
     previous_native_dir = Application.get_env(:ouroboros, :native_data_dir)
     previous_native_model = Application.get_env(:ouroboros, :native_model_module)
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
-    Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
 
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
+    Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
 
     on_exit(fn ->
       cleanup_sessions()
-      restore_harness(:providers, previous_providers)
-      restore_harness(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
       restore_ouroboros(:native_data_dir, previous_native_dir)
       restore_ouroboros(:native_model_module, previous_native_model)
       File.rm_rf(journal_dir)
@@ -223,13 +213,8 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
       {:ok, info} = InteractiveSession.info(session)
       provider_session_id = info.provider_session_id
 
-      if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
-        Process.exit(pid, :kill)
-
-        wait_until(fn ->
-          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
-        end)
-      end
+      assert :ok = InteractiveSession.kill(session)
+      wait_until(fn -> Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil end)
 
       assert {:error, -32_006, _message, ["native_transport_unavailable", details]} =
                Methods.invoke("interactive.journal", %{"id" => id})
@@ -309,7 +294,9 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -325,12 +312,6 @@ defmodule Ouroboros.Gateway.SessionJournalTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_harness(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_harness(key, value), do: Application.put_env(:jido_harness, key, value)
 
   defp restore_ouroboros(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore_ouroboros(key, value), do: Application.put_env(:ouroboros, key, value)

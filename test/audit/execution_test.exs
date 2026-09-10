@@ -189,7 +189,11 @@ defmodule Ouroboros.Audit.ExecutionTest do
             send(
               self(),
               {:native_approval, event.request_id,
-               %Jido.Harness.ApprovalResponse{decision: :approve, scope: :once, reason: "answer"}}
+               %Ouroboros.Session.ApprovalResponse{
+                 decision: :approve,
+                 scope: :once,
+                 reason: "answer"
+               }}
             )
           end
         end

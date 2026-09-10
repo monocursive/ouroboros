@@ -1,57 +1,22 @@
 defmodule Ouroboros.Provider.Native.Session do
   @moduledoc """
-  The interactive transport for the native agent: one supervised GenServer per session.
+  The native execution owner, directly attached to the durable interactive coordinator.
 
-  `Jido.Harness.SessionAdapter` asks for an opaque handle with `open/send/interrupt/close`
-  and the three optional callbacks. This transport answers all of them, which is the
-  whole point — the loop is in this VM, so `steer/3`, `respond_approval/3`, and
-  `configure/2` are things this runtime can actually do rather than declare.
-
-  ## Division of labour with the session worker
-
-  The worker owns session and turn *bookkeeping*: it appends `session_started`,
-  `session_ready`, `session_idle`, `input_accepted`, `turn_started`, `queue_changed`,
-  `approval_resolved`, and it finishes a turn when it sees a terminal event or when its
-  own `interrupt` call returns `:ok`. This process owns everything a provider produces:
-  text, thinking, tool calls, tool results, file changes, plans, usage, approval
-  requests, and the terminal turn event.
-
-  Approvals therefore have two timers by design. The worker starts one from the
-  session's `approval_timeout_ms` and denies through `respond_approval/3` when it fires;
-  this process starts the same one in the loop so that a session driven directly — a
-  test, or a future embedding — still denies on time. Whichever fires first wins and the
-  other's `respond_approval` finds nothing pending, which is a no-op.
-
-  ## Checkpoint before broadcast
-
-  A turn's conversation is written to `Ouroboros.Provider.Native.Checkpoint` *before*
-  the terminal turn event reaches the owner. The failure that ordering chooses is
-  replaying one turn after a crash, over losing one — the same rule the interactive
-  coordinator already follows for its own checkpoints.
-
-  ## Why this process is findable by name
-
-  `info/1`, `compact/2` and `handoff/2` are not `SessionAdapter` callbacks — the harness
-  has no notion of a context window or a curated handoff packet, so there is no worker
-  method to pass them through, and the transport handle is private worker state. Rather
-  than reach into that state, this process registers itself under its own
-  `provider_session_id` in `Ouroboros.Provider.Native.Registry`, which the interactive
-  coordinator already holds durably. Registration is best effort and never fails an
-  open: a duplicate id (two coordinators resuming the same provider session at once) is
-  a state this runtime does not create, and the honest answer for the loser is that
-  these three verbs cannot reach a transport, not that the session refused to start.
+  This is the only live session process below the coordinator. It owns conversation,
+  native controls, scheduling, approval waiters, and a bounded acknowledged output
+  buffer. Losing the coordinator detaches delivery; it does not cancel execution.
+  Conversation checkpoints still precede terminal output. Public event authority
+  remains the coordinator's durable checkpoint, never this transport buffer.
   """
 
   use GenServer, restart: :temporary
 
-  @behaviour Jido.Harness.SessionAdapter
-
   require Logger
 
-  alias Jido.Harness.ApprovalResponse
-  alias Jido.Harness.Event
-  alias Jido.Harness.SessionAdapter
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.ApprovalResponse
+  alias Ouroboros.Session.RuntimeInfo
+  alias Ouroboros.Provider.Native.Output
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Provider.Native.Attachments
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context
@@ -71,6 +36,11 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @startup_timeout 30_000
   @checkpoint_timeout 15_000
+  @max_pending_turns 128
+  @max_known_turns 4096
+  @max_steering_requests 128
+  @max_input_bytes 8 * 1024 * 1024
+  @max_queued_input_bytes 32 * 1024 * 1024
 
   @registry Ouroboros.Provider.Native.Registry
 
@@ -108,61 +78,109 @@ defmodule Ouroboros.Provider.Native.Session do
   # read-only posture would put a planning session back to work without asking anyone.
   @posture_file "posture.json"
 
-  # ---------------------------------------------------------------- adapter
+  # ---------------------------------------------------------------- owned boundary
 
-  @impl Jido.Harness.SessionAdapter
-  def open(request, context) do
+  @doc false
+  def open(logical_id, request) when is_binary(logical_id) do
+    fingerprint = fingerprint(request)
+
+    case lookup({:logical, logical_id}) do
+      nil -> start_runtime(logical_id, request, fingerprint)
+      pid -> open_existing(pid, fingerprint)
+    end
+  end
+
+  defp start_runtime(logical_id, request, fingerprint, parent_context \\ %{}) do
+    runtime_id = "runtime-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+
+    context =
+      Map.merge(parent_context, %{
+        session_id: Map.get(parent_context, :session_id, runtime_id),
+        logical_id: logical_id,
+        provider: :native,
+        owner: nil,
+        runtime_id: runtime_id,
+        fingerprint: fingerprint
+      })
+
     case DynamicSupervisor.start_child(
-           Jido.Harness.SessionTransportSupervisor,
+           Ouroboros.SessionTransportSupervisor,
            {__MODULE__, {request, context}}
          ) do
       {:ok, pid} ->
-        case SessionAdapter.call(pid, :initialize, @startup_timeout) do
-          {:ok, provider_session_id} ->
-            SessionAdapter.emit(
-              context.owner,
-              Event.new!(
-                type: :provider_event,
-                provider: context.provider,
-                provider_session_id: provider_session_id,
-                payload: %{"kind" => "native_ready"}
-              )
-            )
+        case call(pid, :initialize, @startup_timeout) do
+          {:ok, _conversation_id} ->
+            {:ok, runtime_id}
 
-            {:ok, pid}
-
-          {:error, _reason} = error ->
-            DynamicSupervisor.terminate_child(Jido.Harness.SessionTransportSupervisor, pid)
+          {:error, _} = error ->
+            DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, pid)
             error
         end
 
-      {:error, _reason} = error ->
-        error
+      {:error, {:already_started, pid}} ->
+        open_existing(pid, fingerprint)
+
+      {:error, reason} ->
+        {:error, reason}
     end
-  catch
-    :exit, reason -> {:error, reason}
   end
 
-  @impl Jido.Harness.SessionAdapter
-  def send(handle, %TurnRequest{} = request, turn_id),
-    do: SessionAdapter.call(handle, {:send, request, turn_id})
+  def open_child(logical_id, request, context) do
+    fingerprint = fingerprint({request, Map.drop(context, [:owner])})
 
-  @impl Jido.Harness.SessionAdapter
-  def steer(handle, %TurnRequest{} = request, request_id),
-    do: SessionAdapter.call(handle, {:steer, request, request_id})
+    case lookup({:logical, logical_id}) do
+      nil -> start_runtime(logical_id, request, fingerprint, context)
+      pid -> open_existing(pid, fingerprint)
+    end
+  end
 
-  @impl Jido.Harness.SessionAdapter
-  def interrupt(handle, turn_id), do: SessionAdapter.call(handle, {:interrupt, turn_id})
+  defp open_existing(pid, fingerprint) do
+    with {:ok, runtime_id} <- call(pid, {:open_existing, fingerprint}),
+         {:ok, _conversation_id} <- call(pid, :initialize, @startup_timeout),
+         do: {:ok, runtime_id}
+  end
 
-  @impl Jido.Harness.SessionAdapter
+  def runtime_info(handle), do: call(handle, :runtime_info)
+  def attach(handle, coordinator, cursor), do: call(handle, {:attach, coordinator, cursor})
+  def submit(handle, turn_id, mode, request), do: call(handle, {:submit, turn_id, mode, request})
+  def steer(handle, request_id, request), do: call(handle, {:steer, request, request_id})
+  def interrupt(handle, turn_id), do: call(handle, {:interrupt, turn_id})
+
   def respond_approval(handle, request_id, %ApprovalResponse{} = response),
-    do: SessionAdapter.call(handle, {:respond_approval, request_id, response})
+    do: call(handle, {:respond_approval, request_id, response})
 
-  @impl Jido.Harness.SessionAdapter
-  def configure(handle, changes), do: SessionAdapter.call(handle, {:configure, changes})
+  def configure(handle, changes), do: call(handle, {:configure, changes})
+  def close(handle), do: call(handle, :close, @checkpoint_timeout + 5_000)
+  def kill(handle), do: call(handle, :kill)
+  def turn_result(handle, turn_id), do: call(handle, {:turn_result, turn_id})
 
-  @impl Jido.Harness.SessionAdapter
-  def close(handle), do: SessionAdapter.call(handle, :close)
+  def drain(attachment, cursor, limit),
+    do: call(attachment.runtime_id, {:drain, attachment, cursor, limit})
+
+  def ack(attachment, cursor), do: call(attachment.runtime_id, {:ack, attachment, cursor})
+
+  @doc false
+  def call(handle, message, timeout \\ 30_000) do
+    case if(is_pid(handle), do: handle, else: lookup({:runtime, handle})) do
+      nil -> {:error, :not_found}
+      pid -> GenServer.call(pid, message, timeout)
+    end
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, {:noproc, _} -> {:error, :not_found}
+    :exit, reason -> {:error, {:runtime_unavailable, reason}}
+  end
+
+  defp lookup(key) do
+    case Registry.lookup(Ouroboros.SessionRegistry, key) do
+      [{pid, _}] -> pid
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp fingerprint(value), do: :crypto.hash(:sha256, :erlang.term_to_binary(value))
 
   @doc """
   Rewinds this session to the end of `to_turn` — D10's `/rewind`, and its honesty.
@@ -200,7 +218,7 @@ defmodule Ouroboros.Provider.Native.Session do
   @spec rewind(pid(), String.t() | non_neg_integer() | :start, :files | :conversation | :both) ::
           {:ok, map()} | {:error, term()}
   def rewind(handle, to_turn, what \\ :both) when what in [:files, :conversation, :both],
-    do: SessionAdapter.call(handle, {:rewind, to_turn, what}, 60_000)
+    do: call(handle, {:rewind, to_turn, what}, 60_000)
 
   @doc """
   The turns this session can be rewound to, oldest first.
@@ -210,7 +228,7 @@ defmodule Ouroboros.Provider.Native.Session do
   that a turn is only partly undoable before they choose it.
   """
   @spec rewind_points(pid()) :: {:ok, [map()]} | {:error, term()}
-  def rewind_points(handle), do: SessionAdapter.call(handle, :rewind_points)
+  def rewind_points(handle), do: call(handle, :rewind_points)
 
   @doc """
   R1. A window of this session's turn journal, with the chain state that bounds it.
@@ -222,7 +240,7 @@ defmodule Ouroboros.Provider.Native.Session do
   states a record honestly reaches.
   """
   @spec journal(pid(), keyword()) :: {:ok, map()} | {:error, term()}
-  def journal(handle, opts \\ []), do: SessionAdapter.call(handle, {:journal, opts})
+  def journal(handle, opts \\ []), do: call(handle, {:journal, opts})
 
   @doc """
   Puts this session into, or out of, plan mode — B2's runtime half.
@@ -231,8 +249,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
     * `sandbox_mode` is forced to `:read_only` and what it displaced is remembered, so
       leaving gives the operator back the sandbox they chose;
-    * `write`, `edit`, `apply_patch` and `bash` are dropped from the tool list the model
-      sees, and every `:write` or `:execute` attempt is refused by
+    * the model retains the full tool list, and every `:write` or `:execute` attempt is refused by
       `Ouroboros.Provider.Native.Permissions` with a message that names planning — a rule
       that would have allowed it does not un-plan the session;
     * the system prompt carries a `## Plan mode` block telling the model to explore,
@@ -245,11 +262,9 @@ defmodule Ouroboros.Provider.Native.Session do
   It is durable: the posture is written beside the conversation, so a session resumed by
   id comes back planning rather than back at work.
 
-  This is a verb rather than an `interactive.configure` key because the pinned harness's
-  `Jido.Harness.Session.RequestValidator.normalize_configuration/1` refuses any key
-  outside `model`/`reasoning_effort`/`approval_mode`/`sandbox_mode`, and a fifth key on
-  that path would be advertised and then rejected one call later. It reaches a session the
-  way `compact/2`, `handoff/2` and `rewind/3` do — by name through the registry.
+  Plan posture is an explicit owned Request setting and a supported configuration
+  key. This convenience verb uses the same configuration path as model, reasoning,
+  approval, and sandbox changes.
   """
   @spec plan_mode(pid(), boolean()) :: :ok | {:error, term()}
   def plan_mode(handle, planning?) when is_boolean(planning?),
@@ -257,10 +272,14 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @doc "Whether this session is planning, and what it would go back to when it stops."
   @spec plan_state(pid()) :: {:ok, map()} | {:error, term()}
-  def plan_state(handle), do: SessionAdapter.call(handle, :plan_state)
+  def plan_state(handle), do: call(handle, :plan_state)
 
   @doc false
-  def start_link({request, context}), do: GenServer.start_link(__MODULE__, {request, context})
+  def start_link({request, context}),
+    do:
+      GenServer.start_link(__MODULE__, {request, context},
+        name: {:via, Registry, {Ouroboros.SessionRegistry, {:logical, context.logical_id}}}
+      )
 
   @doc """
   Finds the transport process serving one `provider_session_id`, or `nil`.
@@ -285,13 +304,18 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @doc false
   def bridge_tool(handle, call, emit),
-    do: GenServer.call(handle, {:bridge_tool, call, emit}, 15 * 60_000)
+    do: call(handle, {:bridge_tool, call, emit}, 15 * 60_000)
 
   # ---------------------------------------------------------------- lifecycle
 
   @impl GenServer
   def init({request, context}) do
-    options = Map.new(request.provider_options || %{})
+    Process.flag(:trap_exit, true)
+
+    options =
+      Map.new(request.provider_options || %{})
+      |> Map.put(:plan, request.plan || truthy_option(request.provider_options || %{}, "plan"))
+
     fork? = truthy_option(options, "fork_session")
     fork_to_turn = option(options, "fork_to_turn")
     requested_id = if(fork?, do: nil, else: request.provider_session_id)
@@ -319,7 +343,25 @@ defmodule Ouroboros.Provider.Native.Session do
       state = %{
         request: request,
         context: context,
-        owner_monitor: Process.monitor(context.owner),
+        owner_monitor: nil,
+        runtime_id: context.runtime_id,
+        logical_id: context.logical_id,
+        generation: Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false),
+        start_fingerprint: context.fingerprint,
+        initialized?: false,
+        output: Output.new(request),
+        status: :starting,
+        queue: :queue.new(),
+        submissions: %{},
+        steering: %{},
+        active_turn_id: nil,
+        pending_producer: nil,
+        approval_timers: %{},
+        turn_timers: %{},
+        session_idle_timer: nil,
+        started_at: DateTime.utc_now(),
+        finished_at: nil,
+        runtime_error: nil,
         provider_session_id: provider_session_id,
         scope: scope,
         session_dir: session_dir,
@@ -414,6 +456,9 @@ defmodule Ouroboros.Provider.Native.Session do
         {:ok, state} ->
           register(provider_session_id)
 
+          {:ok, _} =
+            Registry.register(Ouroboros.SessionRegistry, {:runtime, context.runtime_id}, nil)
+
           state =
             journal(
               state,
@@ -463,6 +508,9 @@ defmodule Ouroboros.Provider.Native.Session do
   # session whose operator wrote a slow start hook opens late; it does not hang a
   # supervisor.
   @impl GenServer
+  def handle_call(:initialize, _from, %{initialized?: true} = state),
+    do: {:reply, {:ok, state.provider_session_id}, state}
+
   def handle_call(:initialize, _from, state) do
     context =
       Hooks.session_start(
@@ -470,31 +518,174 @@ defmodule Ouroboros.Provider.Native.Session do
         Map.put(hook_base(state), "source", if(state.resumed?, do: "resume", else: "startup"))
       )
 
-    {:reply, {:ok, state.provider_session_id}, %{state | start_context: context}}
+    emit(state, %{type: :session_started, payload: %{"cwd" => state.request.cwd}})
+    emit(state, %{type: :session_ready, payload: %{"transport" => "native"}})
+    emit(state, %{type: :session_idle, payload: %{}})
+    emit(state, %{type: :provider_event, payload: %{"kind" => "native_ready"}})
+
+    state =
+      schedule_session_idle(%{state | initialized?: true, status: :idle, start_context: context})
+
+    {:reply, {:ok, state.provider_session_id}, state}
   end
 
-  def handle_call({:send, _request, _turn_id}, _from, %{loop: loop} = state)
-      when not is_nil(loop),
-      do: {:reply, {:error, :busy}, state}
+  def handle_call({:open_existing, fingerprint}, _from, state) do
+    reply =
+      if fingerprint == state.start_fingerprint,
+        do: {:ok, state.runtime_id},
+        else: {:error, :conflicting_start}
 
-  def handle_call({:send, request, turn_id}, _from, state) do
-    case start_turn(state, request, turn_id) do
-      {:ok, state} -> {:reply, :ok, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    {:reply, reply, state}
+  end
+
+  def handle_call(:runtime_info, _from, state),
+    do: {:reply, {:ok, runtime_snapshot(state)}, state}
+
+  def handle_call({:attach, coordinator, cursor}, {caller, _}, state) do
+    if caller == coordinator and authorized_coordinator?(state, coordinator) and
+         is_integer(cursor) and cursor >= 0 do
+      if state.owner_monitor, do: Process.demonitor(state.owner_monitor, [:flush])
+
+      attachment = %{
+        runtime_id: state.runtime_id,
+        generation: state.generation,
+        token: make_ref()
+      }
+
+      Output.attach(state.output, coordinator, attachment, cursor)
+
+      state = %{
+        state
+        | owner_monitor: Process.monitor(coordinator),
+          context: Map.put(state.context, :owner, coordinator)
+      }
+
+      {:reply, {:ok, attachment, runtime_snapshot(state)}, state}
+    else
+      {:reply, {:error, :unregistered_coordinator}, state}
     end
   end
 
-  def handle_call({:steer, _request, _request_id}, _from, %{loop: nil} = state),
-    do: {:reply, {:error, :no_active_turn}, state}
+  def handle_call({:drain, attachment, cursor, limit}, {caller, _}, state) do
+    reply =
+      case if(Output.authorized?(state.output, attachment, caller),
+             do: Output.drain(state.output, attachment, cursor, limit),
+             else: {:error, :stale_attachment}
+           ) do
+        {:ok, events} -> {:ok, events, runtime_snapshot(state)}
+        error -> error
+      end
 
-  def handle_call({:steer, request, _request_id}, _from, state) do
-    case Attachments.message(TurnRequest.text(request), request.attachments, state.session_dir) do
-      {:ok, message} ->
-        Kernel.send(state.loop.pid, {:native_steer, message})
-        {:reply, :ok, state}
+    {:reply, reply, state}
+  end
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+  def handle_call({:ack, attachment, cursor}, {caller, _}, state) do
+    case if(Output.authorized?(state.output, attachment, caller),
+           do: Output.ack(state.output, attachment, cursor),
+           else: {:error, :stale_attachment}
+         ) do
+      :ok ->
+        state = flush_producer(state)
+
+        if state.status in [:closed, :cancelled, :failed] and Output.empty?(state.output),
+          do: {:stop, :normal, :ok, state},
+          else: {:reply, :ok, state}
+
+      error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:turn_result, turn_id}, _from, state),
+    do: {:reply, Output.turn_result(state.output, turn_id), state}
+
+  def handle_call({:submit, turn_id, mode, request}, _from, state) do
+    digest = fingerprint({mode, request})
+
+    cond do
+      not is_binary(turn_id) or mode not in [:message, :follow_up] ->
+        {:reply, {:error, :invalid_submission}, state}
+
+      Map.has_key?(state.submissions, turn_id) ->
+        reply =
+          if state.submissions[turn_id] == digest,
+            do: {:ok, turn_id},
+            else: {:error, :conflicting_turn}
+
+        {:reply, reply, state}
+
+      state.status in [:closed, :cancelled, :failed, :closing] ->
+        {:reply, {:error, :closed}, state}
+
+      mode == :message and state.active_turn_id != nil ->
+        {:reply, {:error, :busy}, state}
+
+      map_size(state.submissions) >= @max_known_turns or
+          :queue.len(state.queue) >= @max_pending_turns ->
+        {:reply, {:error, :session_capacity}, state}
+
+      not Output.control_room?(state.output, 4) ->
+        {:reply, {:error, :output_backpressure}, state}
+
+      true ->
+        case validate_turn(state, request) do
+          :ok -> accept_turn(state, turn_id, mode, request, digest)
+          error -> {:reply, error, state}
+        end
+    end
+  end
+
+  def handle_call({:steer, request, request_id}, _from, state) do
+    digest = fingerprint(request)
+
+    cond do
+      Map.has_key?(state.steering, request_id) ->
+        reply =
+          if state.steering[request_id] == digest,
+            do: {:ok, request_id},
+            else: {:error, :conflicting_request}
+
+        {:reply, reply, state}
+
+      is_nil(state.loop) ->
+        {:reply, {:error, :no_active_turn}, state}
+
+      map_size(state.steering) >= @max_steering_requests ->
+        {:reply, {:error, :steering_capacity}, state}
+
+      not Output.control_room?(state.output, 1) ->
+        {:reply, {:error, :output_backpressure}, state}
+
+      true ->
+        with :ok <- validate_turn(state, request),
+             :ok <- validate_steering(request),
+             {:ok, message} <-
+               Attachments.message(
+                 TurnRequest.text(request),
+                 request.attachments,
+                 state.session_dir
+               ) do
+          event = %{
+            type: :input_accepted,
+            turn_id: state.active_turn_id,
+            request_id: request_id,
+            payload: %{"kind" => "steer", "text" => TurnRequest.text(request)}
+          }
+
+          case Output.control_admission(state.output, normalized_event(state, event)) do
+            :ok ->
+              Kernel.send(state.loop.pid, {:native_steer, message})
+              emit(state, event)
+
+              {:reply, {:ok, request_id},
+               %{state | steering: Map.put(state.steering, request_id, digest)}}
+
+            error ->
+              {:reply, error, state}
+          end
+        else
+          error -> {:reply, error, state}
+        end
     end
   end
 
@@ -514,7 +705,25 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_call({:interrupt, requested}, _from, state) do
     if requested in [:active, state.loop.turn_id] do
+      state = deny_approvals(state, "interrupted")
       Kernel.send(state.loop.pid, :native_interrupt)
+
+      state =
+        if state.pending_producer do
+          turn_id = state.active_turn_id
+          state = stop_loop(state)
+
+          emit(state, %{
+            type: :turn_interrupted,
+            turn_id: turn_id,
+            payload: %{"reason" => "interrupted"}
+          })
+
+          release(state)
+        else
+          state
+        end
+
       {:reply, :ok, state}
     else
       {:reply, {:error, :not_active}, state}
@@ -529,7 +738,11 @@ defmodule Ouroboros.Provider.Native.Session do
         _from,
         %{plan_exit: %{request_id: request_id}} = state
       ) do
-    {:reply, :ok, answer_plan_exit(state, response)}
+    if expired?(state.plan_exit.deadline) do
+      {:reply, {:error, :expired_request}, settle_plan_exit(state, :keep_planning, nil)}
+    else
+      {:reply, :ok, answer_plan_exit(state, response)}
+    end
   end
 
   def handle_call({:respond_approval, request_id, response}, _from, state)
@@ -549,8 +762,20 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_call({:respond_approval, request_id, response}, _from, state) do
     if MapSet.member?(state.approvals, request_id) and state.loop do
-      Kernel.send(state.loop.pid, {:native_approval, request_id, response})
-      {:reply, :ok, %{state | approvals: MapSet.delete(state.approvals, request_id)}}
+      if expired?(state.approval_timers[request_id].deadline) do
+        state =
+          resolve_approval(
+            state,
+            request_id,
+            ApprovalResponse.new!(%{decision: :deny, reason: "approval timeout"}),
+            "timeout"
+          )
+
+        {:reply, {:error, :expired_request}, state}
+      else
+        state = resolve_approval(state, request_id, response)
+        {:reply, :ok, state}
+      end
     else
       {:reply, {:error, :unknown_request}, state}
     end
@@ -562,7 +787,12 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_call({:configure, changes}, _from, state) do
     with {:ok, state} <- apply_configuration(state, changes),
          {:ok, state} <- build_context(state) do
-      {:reply, :ok, supersede_plan_exit_mode(state, changes)}
+      state =
+        commit_configuration(state, changes)
+        |> supersede_plan_exit_mode(changes)
+        |> persist_posture()
+
+      {:reply, :ok, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -634,7 +864,7 @@ defmodule Ouroboros.Provider.Native.Session do
     }
 
     task =
-      Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+      Task.Supervisor.async(Ouroboros.SessionTaskSupervisor, fn ->
         {:bridge_result, Loop.run_tool(loop, call)}
       end)
 
@@ -697,30 +927,79 @@ defmodule Ouroboros.Provider.Native.Session do
     {:reply, %{running: running, tracked: map_size(state.subagents)}, state}
   end
 
+  def handle_call(:close, _from, %{status: status} = state)
+      when status in [:closed, :cancelled, :failed],
+      do: {:reply, :ok, state}
+
   def handle_call(:close, _from, state) do
-    # A held terminal event goes out before the session does. A client whose turn never
-    # ended because the plan-exit question was still open would be waiting on a session
-    # that no longer exists.
-    state = state |> release_held_terminal() |> stop_loop() |> stop_subagents("session closed")
+    state = %{state | status: :closing}
+
+    state =
+      state
+      |> release_held_terminal()
+      |> terminate_turns("closed")
+      |> stop_subagents("session closed")
 
     case checkpoint(state) do
       {:ok, _digest} ->
         _ = session_end(state, "closed")
         state = journal(state, "session_closed", %{"status" => "closed"})
-
-        emit(state, %{
-          type: :session_closed,
-          payload: %{"reason" => "closed"},
-          turn_id: nil,
-          request_id: nil
-        })
-
-        {:stop, :normal, :ok, state}
+        emit(state, %{type: :session_closed, payload: %{"reason" => "closed"}})
+        {:reply, :ok, %{state | status: :closed, finished_at: DateTime.utc_now()}}
 
       {:error, reason} ->
         {:reply, {:error, {:checkpoint_failed, reason}}, state}
     end
   end
+
+  def handle_call(:kill, _from, %{status: status} = state)
+      when status in [:closed, :cancelled, :failed],
+      do: {:reply, :ok, state}
+
+  def handle_call(:kill, _from, state) do
+    state = %{state | status: :closing}
+
+    state =
+      state
+      |> discard_held_terminal(:killed)
+      |> terminate_turns("killed")
+      |> stop_subagents("session killed")
+
+    emit(state, %{type: :session_cancelled, payload: %{"reason" => "killed"}})
+    {:reply, :ok, %{state | status: :cancelled, finished_at: DateTime.utc_now()}}
+  end
+
+  # Only the current loop can submit a producer event. Its synchronous call bounds
+  # outstanding submissions to one; a full buffer holds that caller without blocking
+  # this process's control mailbox.
+  def handle_call(
+        {:native_event, turn_id, event},
+        {pid, _} = from,
+        %{loop: %{turn_id: turn_id, pid: pid}} = state
+      ) do
+    case Output.admission(state.output, normalized_event(state, event)) do
+      :ok ->
+        {:reply, :ok, receive_event(state, event)}
+
+      :full ->
+        {:noreply, %{state | pending_producer: %{from: from, event: event}}}
+
+      {:error, reason} ->
+        emit(state, %{
+          type: :turn_failed,
+          turn_id: turn_id,
+          payload: %{
+            "reason" => Atom.to_string(reason),
+            "error" => "native output event exceeds retained size limit"
+          }
+        })
+
+        {:reply, {:error, reason}, release(stop_loop(state))}
+    end
+  end
+
+  def handle_call({:native_event, _turn_id, _event}, _from, state),
+    do: {:reply, {:error, :stale_producer}, state}
 
   # The loop calls this synchronously, immediately before it emits the terminal turn
   # event. Returning `:ok` from here is the guarantee that the conversation on disk is
@@ -783,36 +1062,74 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   @impl GenServer
-  def handle_info({:native_event, turn_id, event}, %{loop: %{turn_id: turn_id}} = state) do
-    state =
-      state
-      |> track_approval(event)
-      |> track_usage(event)
-      |> track_plan(event)
-      |> track_text(event)
+  def handle_info(:start_next, %{active_turn_id: nil, status: :idle} = state) do
+    if Output.control_room?(state.output, 4) do
+      case :queue.out(state.queue) do
+        {{:value, {turn_id, request}}, queue} ->
+          state = %{state | queue: queue}
+          emit_queue(state)
 
-    cond do
-      # B2. A planning turn that finished is not a finished turn: the operator still has to
-      # say what happens to the plan. The terminal event is *held* — not emitted and then
-      # followed by a question — because `Jido.Harness.Session.Lifecycle` denies any
-      # approval request whose turn is no longer the worker's active one, so an exit
-      # approval raised after `turn_completed` would be auto-denied as stale. Holding it
-      # also states the truth: from a client's point of view the turn is still running,
-      # and it is, because the answer decides whether it continues.
-      plan_exit?(state, event) ->
-        {:noreply, raise_plan_exit(state, event)}
+          case begin_turn(state, request, turn_id) do
+            {:ok, state} ->
+              {:noreply, state}
 
-      event.type in [:turn_completed, :turn_failed, :turn_interrupted] ->
-        emit(state, event)
-        {:noreply, release(state)}
+            {:error, reason} ->
+              emit(state, %{
+                type: :turn_failed,
+                turn_id: turn_id,
+                payload: %{"error" => inspect(reason)}
+              })
 
-      true ->
-        emit(state, event)
-        {:noreply, state}
+              Kernel.send(self(), :start_next)
+              {:noreply, state}
+          end
+
+        {:empty, _} ->
+          {:noreply, state}
+      end
+    else
+      {:noreply, state}
     end
   end
 
-  def handle_info({:native_event, _stale_turn_id, _event}, state), do: {:noreply, state}
+  def handle_info(:start_next, state), do: {:noreply, state}
+
+  def handle_info({:native_approval_timeout, request_id}, state) do
+    if Map.has_key?(state.approval_timers, request_id) do
+      response = ApprovalResponse.new!(%{decision: :deny, reason: "approval timeout"})
+      {:noreply, resolve_approval(state, request_id, response, "timeout")}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:native_session_timeout, kind, token}, state) do
+    expected =
+      if kind == :session_idle, do: state.session_idle_timer, else: state.turn_timers[kind]
+
+    if match?({_, ^token}, expected) do
+      if kind == :session_idle and is_nil(state.active_turn_id) do
+        {:reply, _reply, state} = handle_call(:close, nil, state)
+        {:noreply, state}
+      else
+        turn_id = state.active_turn_id
+        state = state |> deny_approvals("timeout") |> stop_loop()
+
+        emit(state, %{
+          type: :turn_failed,
+          turn_id: turn_id,
+          payload: %{
+            "error" => "turn #{kind} timeout exceeded",
+            "timeout" => Atom.to_string(kind)
+          }
+        })
+
+        {:noreply, release(state)}
+      end
+    else
+      {:noreply, state}
+    end
+  end
 
   def handle_info(
         {:plan_exit_timeout, request_id},
@@ -855,7 +1172,21 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_info({ref, :ok}, %{loop: %{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, release(state)}
+
+    if state.plan_exit do
+      {:noreply, %{state | loop: nil}}
+    else
+      emit(state, %{
+        type: :turn_failed,
+        turn_id: state.active_turn_id,
+        payload: %{
+          "reason" => "missing_terminal",
+          "error" => "native loop returned without terminal output"
+        }
+      })
+
+      {:noreply, release(state)}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{loop: %{ref: ref}} = state) do
@@ -893,9 +1224,9 @@ defmodule Ouroboros.Provider.Native.Session do
     {:noreply, mark_subagent_settled(state, task_id)}
   end
 
-  # The harness only accepts turn-owned approvals. Interactive children instead use
-  # the coordinator's durable external channel, which remains open between turns.
-  # Direct adapter clients (including embedders) receive the ordinary event here.
+  # Background children use the coordinator's durable external approval channel,
+  # which remains open between turns. An embedded child aggregator receives the
+  # correlated native approval event here.
   def handle_info({:subagent, task_id, {:approval, child_request_id, payload}} = message, state) do
     case Map.get(state.subagents, task_id) do
       nil ->
@@ -929,7 +1260,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
           owner ->
             task =
-              Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+              Task.Supervisor.async(Ouroboros.SessionTaskSupervisor, fn ->
                 response = Ouroboros.InteractiveSession.relay_approval(owner, payload)
                 Subagent.respond(entry.pid, child_request_id, response)
               end)
@@ -952,7 +1283,7 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{owner_monitor: monitor} = state),
-    do: {:stop, :normal, state}
+    do: detach_coordinator(state)
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
     case Enum.find(state.background_approvals, fn {_id, entry} ->
@@ -1095,7 +1426,29 @@ defmodule Ouroboros.Provider.Native.Session do
 
   # A turn that ended leaves no loop and no pending approvals. Both are per-turn state:
   # a request_id from a finished turn must not be answerable afterwards.
-  defp release(state), do: %{state | loop: nil, approvals: MapSet.new()}
+  defp release(%{active_turn_id: nil} = state), do: %{state | loop: nil}
+
+  defp release(state) do
+    state = deny_approvals(state, "turn_finished")
+    Enum.each(state.turn_timers, fn {_, timer} -> cancel_timer(timer) end)
+
+    state = %{
+      state
+      | loop: nil,
+        active_turn_id: nil,
+        approvals: MapSet.new(),
+        pending_producer: nil,
+        turn_timers: %{}
+    }
+
+    if state.status == :closing do
+      state
+    else
+      emit(state, %{type: :session_idle, payload: %{}})
+      Kernel.send(self(), :start_next)
+      schedule_session_idle(%{state | status: :idle})
+    end
+  end
 
   # `:normal` is the `close` path, which already fired `SessionEnd` with its own reason.
   # Anything else is the session going away without being asked to, which is exactly the
@@ -1134,7 +1487,13 @@ defmodule Ouroboros.Provider.Native.Session do
       owner = self()
 
       loop = %Loop{
-        emit: fn event -> Kernel.send(owner, {:native_event, turn_id, event}) end,
+        lifecycle_owner: :session,
+        emit: fn event ->
+          case GenServer.call(owner, {:native_event, turn_id, event}, :infinity) do
+            :ok -> :ok
+            {:error, reason} -> exit({:output_refused, reason})
+          end
+        end,
         checkpoint: fn snapshot ->
           GenServer.call(owner, {:checkpoint, turn_id, snapshot}, @checkpoint_timeout)
         end,
@@ -1157,7 +1516,7 @@ defmodule Ouroboros.Provider.Native.Session do
         provider_session_id: state.provider_session_id,
         turn_id: turn_id,
         reasoning_effort: request.reasoning_effort || state.reasoning_effort,
-        # `:plan` is not one of the four modes `Jido.Harness.SessionRequest` accepts, and it
+        # `:plan` is not one of the four modes `Ouroboros.Session.Request` accepts, and it
         # never travels as one: it is set on the loop's own struct for the turns a planning
         # session runs, and `Loop.permission_request/2` copies it into `context.approval_mode`
         # where `Native.Permissions` reads it. That is the whole mechanism by which a
@@ -1171,7 +1530,7 @@ defmodule Ouroboros.Provider.Native.Session do
         session_grants: state.session_grants,
         max_iterations: state.max_iterations,
         tool_timeout_ms: state.tool_timeout_ms,
-        approval_timeout_ms: state.request.approval_timeout_ms,
+        approval_timeout_ms: :infinity,
         # G3. What the loop needs to be somebody's parent: the process that outlives the
         # turn, and the two values a child's own session is built from. Passing the
         # request and the context rather than a copied list of fields is the mechanism
@@ -1185,7 +1544,7 @@ defmodule Ouroboros.Provider.Native.Session do
       }
 
       task =
-        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+        Task.Supervisor.async(Ouroboros.SessionTaskSupervisor, fn ->
           {:ok, _finished} = Loop.run_turn(loop, user_message)
           :ok
         end)
@@ -1204,28 +1563,380 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  defp stop_loop(%{loop: nil} = state), do: state
+  defp stop_loop(%{loop: nil} = state), do: %{state | pending_producer: nil}
 
   defp stop_loop(%{loop: loop} = state) do
     if Map.has_key?(loop, :bridge_from),
       do: GenServer.reply(loop.bridge_from, {:error, :interrupted})
 
     Process.demonitor(loop.ref, [:flush])
-    _ = Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, loop.pid)
-    %{state | loop: nil, approvals: MapSet.new()}
+    _ = Task.Supervisor.terminate_child(Ouroboros.SessionTaskSupervisor, loop.pid)
+    %{state | loop: nil, pending_producer: nil, approvals: MapSet.new()}
   end
 
-  defp track_approval(state, %{type: :approval_requested, request_id: request_id})
-       when is_binary(request_id),
-       do: %{state | approvals: MapSet.put(state.approvals, request_id)}
+  defp track_approval(state, %{type: :approval_requested, request_id: request_id} = event)
+       when is_binary(request_id) do
+    timer =
+      case state.request.approval_timeout_ms do
+        :infinity -> nil
+        timeout -> Process.send_after(self(), {:native_approval_timeout, request_id}, timeout)
+      end
+
+    %{
+      state
+      | approvals: MapSet.put(state.approvals, request_id),
+        status: :awaiting_approval,
+        approval_timers:
+          Map.put(state.approval_timers, request_id, %{
+            timer: timer,
+            event: event,
+            deadline: deadline(state.request.approval_timeout_ms)
+          })
+    }
+  end
 
   defp track_approval(state, _event), do: state
 
   defp emit(state, event) do
-    SessionAdapter.emit(
-      state.context.owner,
-      Loop.to_event(event, state.context.provider, state.provider_session_id)
+    Output.append!(state.output, normalized_event(state, event))
+    :ok
+  end
+
+  defp normalized_event(state, event) do
+    event = event |> Map.put_new(:turn_id, nil) |> Map.put_new(:request_id, nil)
+    normalized = Loop.to_event(event, state.context.provider, state.provider_session_id)
+    %{normalized | session_id: state.runtime_id, sequence: Output.high_water(state.output) + 1}
+  end
+
+  # ---------------------------------------------------------------- runtime bookkeeping
+
+  defp authorized_coordinator?(state, coordinator) when is_pid(coordinator) do
+    Ouroboros.Interactive.Task.whereis(state.logical_id) == coordinator or
+      (lookup({:subagent, state.logical_id}) == coordinator and
+         Registry.lookup(@registry, {:subagent, state.logical_id}) == [{coordinator, nil}])
+  end
+
+  defp authorized_coordinator?(_state, _coordinator), do: false
+
+  defp detach_coordinator(state) do
+    Output.detach(state.output)
+    {:noreply, %{state | owner_monitor: nil, context: Map.put(state.context, :owner, nil)}}
+  end
+
+  defp runtime_snapshot(state) do
+    approvals =
+      Enum.map(state.approval_timers, fn {id, pending} ->
+        %{request_id: id, turn_id: pending.event.turn_id, payload: pending.event.payload}
+      end)
+
+    approvals =
+      if state.plan_exit,
+        do: [
+          %{request_id: state.plan_exit.request_id, turn_id: state.plan_exit.turn_id} | approvals
+        ],
+        else: approvals
+
+    approvals =
+      approvals ++
+        Enum.map(state.background_approvals, fn {id, pending} ->
+          %{request_id: id, turn_id: nil, task_id: pending.task_id}
+        end)
+
+    status =
+      if approvals != [] and state.status == :running, do: :awaiting_approval, else: state.status
+
+    %RuntimeInfo{
+      session_id: state.runtime_id,
+      runtime_id: state.runtime_id,
+      logical_id: state.logical_id,
+      native_conversation_id: state.provider_session_id,
+      provider_session_id: state.provider_session_id,
+      generation: state.generation,
+      status: status,
+      state: status,
+      provider: :native,
+      pid: self(),
+      active_turn_id: state.active_turn_id,
+      queued_turn_ids: Enum.map(:queue.to_list(state.queue), &elem(&1, 0)),
+      queued_turns: :queue.len(state.queue),
+      pending_approvals: length(approvals),
+      approval_requests: approvals,
+      output_high_water: Output.high_water(state.output),
+      output_cursor: Output.high_water(state.output),
+      error: state.runtime_error,
+      started_at: DateTime.to_iso8601(state.started_at),
+      finished_at: state.finished_at && DateTime.to_iso8601(state.finished_at),
+      metadata: Ouroboros.Redaction.redact(state.request.metadata),
+      journal_dir: state.session_dir,
+      transport: :native
+    }
+  end
+
+  defp accept_turn(state, turn_id, mode, request, digest) do
+    Output.register_turn(
+      state.output,
+      state.runtime_id,
+      turn_id,
+      request,
+      state.provider_session_id
     )
+
+    if mode == :follow_up do
+      state = %{
+        state
+        | queue: :queue.in({turn_id, request}, state.queue),
+          submissions: Map.put(state.submissions, turn_id, digest)
+      }
+
+      emit(state, %{type: :turn_queued, turn_id: turn_id, payload: %{}})
+      emit_queue(state)
+      if is_nil(state.active_turn_id), do: Kernel.send(self(), :start_next)
+      {:reply, {:ok, turn_id}, state}
+    else
+      case begin_turn(state, request, turn_id) do
+        {:ok, state} ->
+          {:reply, {:ok, turn_id},
+           %{state | submissions: Map.put(state.submissions, turn_id, digest)}}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    end
+  end
+
+  defp begin_turn(state, request, turn_id) do
+    case start_turn(state, request, turn_id) do
+      {:ok, state} ->
+        cancel_timer(state.session_idle_timer)
+        state = %{state | active_turn_id: turn_id, status: :running, session_idle_timer: nil}
+        emit(state, %{type: :input_accepted, turn_id: turn_id, payload: %{"kind" => "message"}})
+
+        emit(state, %{
+          type: :turn_started,
+          turn_id: turn_id,
+          payload: %{
+            "model" => state.model_spec,
+            "tools" => Enum.map(state.prompt_context.tools, & &1.name),
+            "approval_mode" => Atom.to_string(loop_approval_mode(state)),
+            "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode),
+            "hooks" => length(state.hooks.hooks),
+            "workspace_trusted" => state.hooks.trusted?
+          }
+        })
+
+        timers = %{
+          runtime: timer(:runtime, state.request.turn_runtime_timeout_ms),
+          turn_idle: timer(:turn_idle, state.request.turn_idle_timeout_ms)
+        }
+
+        {:ok, %{state | turn_timers: timers}}
+
+      error ->
+        error
+    end
+  end
+
+  defp emit_queue(state),
+    do:
+      emit(state, %{type: :queue_changed, payload: %{"queued_turns" => :queue.len(state.queue)}})
+
+  defp receive_event(state, event) do
+    cancel_timer(state.turn_timers[:turn_idle])
+
+    state =
+      state
+      |> track_approval(event)
+      |> track_usage(event)
+      |> track_plan(event)
+      |> track_text(event)
+
+    state = %{
+      state
+      | turn_timers:
+          Map.put(
+            state.turn_timers,
+            :turn_idle,
+            timer(:turn_idle, state.request.turn_idle_timeout_ms)
+          )
+    }
+
+    cond do
+      plan_exit?(state, event) ->
+        raise_plan_exit(state, event)
+
+      event.type in [:turn_completed, :turn_failed, :turn_interrupted] ->
+        state = deny_approvals(state, "turn_finished")
+        emit(state, event)
+        release(state)
+
+      true ->
+        emit(state, event)
+        state
+    end
+  end
+
+  defp flush_producer(%{pending_producer: nil} = state) do
+    if is_nil(state.active_turn_id) and state.status == :idle,
+      do: Kernel.send(self(), :start_next)
+
+    state
+  end
+
+  defp flush_producer(%{pending_producer: pending} = state) do
+    if Output.admission(state.output, normalized_event(state, pending.event)) == :ok do
+      state = receive_event(%{state | pending_producer: nil}, pending.event)
+      GenServer.reply(pending.from, :ok)
+      state
+    else
+      state
+    end
+  end
+
+  defp resolve_approval(state, request_id, response, reason \\ nil) do
+    {pending, timers} = Map.pop(state.approval_timers, request_id)
+    if pending && pending.timer, do: Process.cancel_timer(pending.timer)
+    payload = approval_payload(response)
+    payload = if reason, do: Map.put(payload, "reason", reason), else: payload
+
+    emit(state, %{
+      type: :approval_resolved,
+      turn_id: state.active_turn_id,
+      request_id: request_id,
+      payload: payload
+    })
+
+    if state.loop, do: Kernel.send(state.loop.pid, {:native_approval, request_id, response})
+    approvals = MapSet.delete(state.approvals, request_id)
+
+    status =
+      if state.status == :awaiting_approval and MapSet.size(approvals) == 0,
+        do: :running,
+        else: state.status
+
+    %{state | approvals: approvals, approval_timers: timers, status: status}
+  end
+
+  defp approval_payload(response),
+    do: %{
+      "decision" => Atom.to_string(response.decision),
+      "scope" => Atom.to_string(response.scope)
+    }
+
+  defp deny_approvals(state, reason) do
+    Enum.reduce(Map.keys(state.approval_timers), state, fn request_id, state ->
+      resolve_approval(
+        state,
+        request_id,
+        ApprovalResponse.new!(%{decision: :deny, reason: reason}),
+        reason
+      )
+    end)
+  end
+
+  defp terminate_turns(state, reason) do
+    cancel_timer(state.session_idle_timer)
+    Enum.each(state.turn_timers, fn {_, timer} -> cancel_timer(timer) end)
+    state = deny_approvals(state, reason)
+    turn_id = state.active_turn_id
+    state = stop_loop(state)
+
+    if turn_id,
+      do:
+        emit(state, %{type: :turn_interrupted, turn_id: turn_id, payload: %{"reason" => reason}})
+
+    Enum.each(:queue.to_list(state.queue), fn {id, _request} ->
+      emit(state, %{type: :turn_interrupted, turn_id: id, payload: %{"reason" => reason}})
+    end)
+
+    %{
+      state
+      | active_turn_id: nil,
+        queue: :queue.new(),
+        pending_producer: nil,
+        turn_timers: %{},
+        session_idle_timer: nil
+    }
+  end
+
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
+  defp expired?(:infinity), do: false
+  defp expired?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+
+  defp timer(_kind, :infinity), do: nil
+
+  defp timer(kind, timeout) do
+    token = make_ref()
+    {Process.send_after(self(), {:native_session_timeout, kind, token}, timeout), token}
+  end
+
+  defp cancel_timer(nil), do: :ok
+  defp cancel_timer({timer, _}), do: Process.cancel_timer(timer)
+
+  defp schedule_session_idle(state) do
+    cancel_timer(state.session_idle_timer)
+    %{state | session_idle_timer: timer(:session_idle, state.request.session_idle_timeout_ms)}
+  end
+
+  defp validate_turn(state, request) do
+    cond do
+      :erlang.external_size(request) > @max_input_bytes ->
+        {:error, Ouroboros.Session.Error.validation("turn input exceeds 8 MiB limit")}
+
+      Enum.reduce(:queue.to_list(state.queue), :erlang.external_size(request), fn {_, queued},
+                                                                                  bytes ->
+        bytes + :erlang.external_size(queued)
+      end) > @max_queued_input_bytes ->
+        {:error, Ouroboros.Session.Error.validation("queued turn input exceeds 32 MiB limit")}
+
+      not is_nil(request.output_schema) ->
+        {:error,
+         Ouroboros.Session.Error.validation("session transport does not support capability",
+           details: %{transport: :native, capability: :structured_output}
+         )}
+
+      unknown = unknown_turn_provider_option(request.provider_options) ->
+        {:error,
+         Ouroboros.Session.Error.validation("unknown turn provider option",
+           details: %{key: elem(unknown, 1)}
+         )}
+
+      path =
+          Enum.find(request.attachments, &(not File.regular?(Path.expand(&1, state.request.cwd)))) ->
+        {:error,
+         Ouroboros.Session.Error.validation("turn attachment must be an existing file",
+           details: %{path: path}
+         )}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp unknown_turn_provider_option(options) do
+    supported = Enum.map(Ouroboros.Provider.Native.spec().provider_options, &Atom.to_string/1)
+
+    Enum.find_value(Map.keys(options), fn key ->
+      if to_string(key) not in supported, do: {:unknown, key}
+    end)
+  end
+
+  defp validate_steering(request) do
+    field =
+      cond do
+        not is_nil(request.reasoning_effort) -> :reasoning_effort
+        not is_nil(request.output_schema) -> :output_schema
+        map_size(request.provider_options) > 0 -> :provider_options
+        true -> nil
+      end
+
+    if field,
+      do:
+        {:error,
+         Ouroboros.Session.Error.validation("session transport does not support steering option",
+           details: %{transport: :native, field: field}
+         )},
+      else: :ok
   end
 
   # ---------------------------------------------------------------- config
@@ -1245,17 +1956,23 @@ defmodule Ouroboros.Provider.Native.Session do
   # clause: this is the one place that knows a change was *applied* rather than refused,
   # and eight clauses each remembering to journal themselves is eight places for the ninth
   # to forget. A refused change writes nothing, which is correct — nothing changed.
-  defp apply_configuration(state, changes) do
-    Enum.reduce_while(changes, {:ok, state}, fn {key, value}, {:ok, state} ->
-      key = normalize_key(key)
-
-      case configure_one(state, key, value) do
-        {:ok, state} ->
-          {:cont, {:ok, journal(state, "configure", %{"key" => key, "value" => value})}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
+  defp apply_configuration(state, changes) when is_map(changes) do
+    Enum.reduce_while(changes, {:ok, state}, fn {key, value}, {:ok, candidate} ->
+      case configure_one(candidate, normalize_key(key), value) do
+        {:ok, updated} -> {:cont, {:ok, updated}}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
+    end)
+  end
+
+  defp apply_configuration(_state, _changes), do: {:error, :invalid_configuration}
+
+  defp commit_configuration(state, changes) do
+    changes = Map.new(changes, fn {key, value} -> {normalize_key(key), value} end)
+    state = %{state | request: struct(state.request, changes)}
+
+    Enum.reduce(changes, state, fn {key, value}, state ->
+      journal(state, "configure", %{"key" => key, "value" => value})
     end)
   end
 
@@ -1278,17 +1995,17 @@ defmodule Ouroboros.Provider.Native.Session do
   # would be a way past a mode rather than a change of one. It lands the moment plan mode
   # is left, which is what `sandbox_before_plan` is for.
   defp configure_one(%{plan_mode?: true} = state, :sandbox_mode, value)
-       when value in [:default, :read_only, :workspace_write] do
+       when value in [:default, :read_only, :workspace_write, :unrestricted] do
     {:ok, %{state | sandbox_before_plan: Loop.sandbox_mode(value)}}
   end
 
   defp configure_one(state, :sandbox_mode, value)
-       when value in [:default, :read_only, :workspace_write] do
+       when value in [:default, :read_only, :workspace_write, :unrestricted] do
     {:ok, %{state | scope: %{state.scope | sandbox_mode: Loop.sandbox_mode(value)}}}
   end
 
   # B2's key, and the reason it is `plan` rather than a fifth `approval_mode`: the pinned
-  # `Jido.Harness.SessionRequest` validates `approval_mode` against a four-member
+  # `Ouroboros.Session.Request` validates `approval_mode` against a four-member
   # `Zoi.enum`, so a `:plan` member would be refused at every session start and every
   # resume. A mode label a transport rejects is not a mode.
   #
@@ -1306,8 +2023,7 @@ defmodule Ouroboros.Provider.Native.Session do
        | plan_mode?: true,
          sandbox_before_plan: state.scope.sandbox_mode,
          scope: %{state.scope | sandbox_mode: :read_only}
-     }
-     |> persist_posture()}
+     }}
   end
 
   defp configure_one(state, :plan, false) do
@@ -1319,8 +2035,7 @@ defmodule Ouroboros.Provider.Native.Session do
        | plan_mode?: false,
          sandbox_before_plan: nil,
          scope: %{state.scope | sandbox_mode: restored}
-     }
-     |> persist_posture()}
+     }}
   end
 
   defp configure_one(_state, key, value),
@@ -1653,7 +2368,7 @@ defmodule Ouroboros.Provider.Native.Session do
   `prefix_fingerprint` and `context_window`/`context_used` from it.
   """
   @spec info(pid()) :: {:ok, map()} | {:error, term()}
-  def info(handle), do: SessionAdapter.call(handle, :context_info)
+  def info(handle), do: call(handle, :context_info)
 
   @doc """
   Compacts this session's conversation now, optionally focused.
@@ -1663,7 +2378,7 @@ defmodule Ouroboros.Provider.Native.Session do
   threshold.
   """
   @spec compact(pid(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def compact(handle, focus \\ nil), do: SessionAdapter.call(handle, {:compact, focus})
+  def compact(handle, focus \\ nil), do: call(handle, {:compact, focus})
 
   @doc """
   Starts a fresh native session in this workspace, seeded with a curated packet.
@@ -1680,21 +2395,17 @@ defmodule Ouroboros.Provider.Native.Session do
 
   ## `open_child`
 
-  `true` (the default) opens the child transport here, inheriting this session's
-  `context.owner` because a runtime-level handoff has nowhere else to send events.
+  `true` (the default) opens a distinct child runtime and returns both its
+  `runtime_id` and `pid`; its consumer attaches explicitly to its own output.
 
-  `false` writes the packet, names the child, and stops. That is the shape the
-  interactive plane needs: there, the child is a *session* with its own coordinator and
-  its own harness worker, and it opens its own transport from the checkpoint this call
-  already wrote. Opening one here as well would put two processes on one
-  `provider_session_id` and — because the worker adopts the `provider_session_id` of any
-  adapter event it receives ([session/worker.ex:289](../../../../deps/jido_harness/lib/jido_harness/session/worker.ex))
-  — the orphan's `native_ready` would rename the *parent's* provider session to the
-  child's.
+  `false` writes the packet and names the child conversation without starting it.
+  The interactive coordinator uses this path, records the handoff intent, and opens
+  the new logical session through the owned boundary. The parent conversation ID
+  and its attachment are never changed by the child's readiness event.
   """
   @spec handoff(pid(), String.t() | nil, keyword()) :: {:ok, map()} | {:error, term()}
   def handoff(handle, prompt \\ nil, opts \\ []),
-    do: SessionAdapter.call(handle, {:handoff, prompt, Keyword.get(opts, :open_child, true)})
+    do: call(handle, {:handoff, prompt, Keyword.get(opts, :open_child, true)})
 
   # ---------------------------------------------------------------- prefix
 
@@ -2276,9 +2987,12 @@ defmodule Ouroboros.Provider.Native.Session do
     with {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(child_id),
          {:ok, _digest} <-
            Checkpoint.write(checkpoint_path, seeded, event_limit: state.checkpoint_limit),
-         {:ok, pid} <- maybe_open_child(state, child_id, open_child?) do
+         {:ok, runtime_id} <- maybe_open_child(state, child_id, open_child?) do
+      pid = if runtime_id, do: lookup({:runtime, runtime_id}), else: nil
+
       result = %{
         provider_session_id: child_id,
+        runtime_id: runtime_id,
         pid: pid,
         packet_bytes: byte_size(packet),
         files: length(Map.keys(state.reads)),
@@ -2308,7 +3022,7 @@ defmodule Ouroboros.Provider.Native.Session do
   # decide.
   defp open_child(state, child_id) do
     request = %{state.request | provider_session_id: child_id}
-    open(request, state.context)
+    open("handoff-" <> child_id, request)
   end
 
   # `{:ok, nil}` rather than a separate result shape: the caller that asked for no child
@@ -2411,7 +3125,8 @@ defmodule Ouroboros.Provider.Native.Session do
           request_id: request_id,
           turn_id: terminal.turn_id,
           terminal: terminal,
-          timer: plan_exit_timer(state, request_id)
+          timer: plan_exit_timer(state, request_id),
+          deadline: deadline(state.request.approval_timeout_ms)
         }
     }
   end
@@ -2446,7 +3161,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
   defp answer_plan_exit(state, response) do
     choice = plan_exit_choice(response)
-    settle_plan_exit(state, choice, follow_up(response))
+    settle_plan_exit(state, choice, follow_up(response), response)
   end
 
   # How the three choices are read, in the order that keeps a client which has never heard
@@ -2501,11 +3216,23 @@ defmodule Ouroboros.Provider.Native.Session do
   # The one place the three answers become configuration. `keep_planning` deliberately
   # calls nothing: "leaves everything as it was" is a claim about the session, and the way
   # to keep it true is to not touch it.
-  defp settle_plan_exit(%{plan_exit: nil} = state, _choice, _follow_up), do: state
+  defp settle_plan_exit(state, choice, follow_up, response \\ nil)
+  defp settle_plan_exit(%{plan_exit: nil} = state, _choice, _follow_up, _response), do: state
 
-  defp settle_plan_exit(state, choice, follow_up) do
+  defp settle_plan_exit(state, choice, follow_up, response) do
     pending = state.plan_exit
     _ = pending.timer && Process.cancel_timer(pending.timer)
+
+    response =
+      response || ApprovalResponse.new!(%{decision: :deny, reason: "plan exit unanswered"})
+
+    emit(state, %{
+      type: :approval_resolved,
+      request_id: pending.request_id,
+      turn_id: pending.turn_id,
+      payload: approval_payload(response)
+    })
+
     state = %{state | plan_exit: nil}
 
     {state, applied} = apply_plan_exit(state, choice)
@@ -2538,7 +3265,10 @@ defmodule Ouroboros.Provider.Native.Session do
       # The answer is made durable here, not left to the plane. A person answered an
       # approval this runtime raised; a restart that put the session back to the mode it
       # was started with would lose their answer without saying so.
-      {persist_posture(%{state | plan_exit_mode: mode}), true}
+      {state
+       |> commit_configuration(changes)
+       |> Map.put(:plan_exit_mode, mode)
+       |> persist_posture(), true}
     else
       # A refused reconfiguration leaves the session planning and says so in the event
       # above rather than reporting a mode the session is not in. There is nothing here a
@@ -2552,7 +3282,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
   # Two ways a held turn ends. Without a follow-up the terminal event finally goes out and
   # the turn is over. With one, the *same* turn continues: the follow-up runs under the
-  # turn id the plan ran under, which is what keeps the harness worker's bookkeeping true —
+  # turn id the plan ran under, preserving the live runtime bookkeeping —
   # its active turn is still active, its approvals still route, and the terminal event it
   # eventually sees is the one that finishes the work it dispatched. A completed turn
   # followed by more work under a turn nobody started would be neither.
@@ -2591,6 +3321,14 @@ defmodule Ouroboros.Provider.Native.Session do
 
   defp release_held_terminal(%{plan_exit: pending} = state) do
     _ = pending.timer && Process.cancel_timer(pending.timer)
+
+    emit(state, %{
+      type: :approval_resolved,
+      request_id: pending.request_id,
+      turn_id: pending.turn_id,
+      payload: %{"decision" => "deny", "scope" => "once", "reason" => "session_closed"}
+    })
+
     emit_held(%{state | plan_exit: nil}, pending)
   end
 
@@ -2663,10 +3401,8 @@ defmodule Ouroboros.Provider.Native.Session do
   defp sandbox_atom("unrestricted"), do: :unrestricted
   defp sandbox_atom(_other), do: nil
 
-  # `provider_options` is where a start-time posture rides, the same channel
-  # `max_iterations`, `tool_timeout_ms` and `checkpoint_limit` already use — the harness's
-  # `SessionRequest` accepts it as a free map, which is the only reason plan mode can be
-  # asked for at start at all.
+  # init normalizes the explicit Request.plan setting into this private options map;
+  # restored posture still wins over start defaults on a resumed conversation.
   defp requested_plan?(options),
     do: Map.get(options, :plan) == true or Map.get(options, "plan") == true
 
@@ -2734,7 +3470,7 @@ defmodule Ouroboros.Provider.Native.Session do
     config = state.hooks
     base = Map.put(hook_base(state), "reason", reason)
 
-    case Task.Supervisor.start_child(Jido.Harness.SessionTaskSupervisor, fn ->
+    case Task.Supervisor.start_child(Ouroboros.SessionTaskSupervisor, fn ->
            Hooks.session_end(config, base)
          end) do
       {:ok, _pid} -> :ok

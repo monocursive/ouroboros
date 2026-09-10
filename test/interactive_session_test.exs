@@ -1,10 +1,13 @@
 defmodule Ouroboros.InteractiveSessionTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.{RunRequest, Session, SessionInfo, TurnRequest}
+  alias Ouroboros.Test.ModelRequest, as: RunRequest
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Interactive.{Event, Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.ControlledModel
   alias Ouroboros.Test.StubSession
 
   @provider :native
@@ -41,23 +44,19 @@ defmodule Ouroboros.InteractiveSessionTest do
   setup do
     cleanup_sessions()
 
-    old_providers = Application.get_env(:jido_harness, :providers)
-    old_config = Application.get_env(:jido_harness, :provider_config)
+    old_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
-
-    providers = Map.put(Map.new(old_providers || %{}), @provider, HarnessAdapter)
 
     provider_config =
       old_config
       |> then(&Map.new(&1 || %{}))
       |> Map.put(@provider, %{test_pid: self(), retention: %{journal_dir: journal_dir}})
 
-    Application.put_env(:jido_harness, :providers, providers)
-    Application.put_env(:jido_harness, :provider_config, provider_config)
+    :ok
+    Ouroboros.Test.NativeConfig.configure(provider_config)
 
     on_exit(fn ->
       cleanup_sessions()
-      restore_env(:providers, old_providers)
       restore_env(:provider_config, old_config)
       File.rm_rf(journal_dir)
     end)
@@ -76,7 +75,13 @@ defmodule Ouroboros.InteractiveSessionTest do
              )
 
     assert {:ok, backlog} = InteractiveSession.subscribe(ref, cursor: 0)
-    assert Enum.map(backlog, & &1.type) == [:session_started, :session_ready, :session_idle]
+
+    assert Enum.map(backlog, & &1.type) == [
+             :session_started,
+             :session_ready,
+             :session_idle,
+             :provider_event
+           ]
 
     first_id = unique_id("turn-one")
     second_id = unique_id("turn-two")
@@ -84,7 +89,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:ok, %{id: ^first_id, status: :running}} =
              InteractiveSession.send_message(ref, "inspect", id: first_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run_one, %RunRequest{prompt: first_prompt},
+    assert_receive {:ouroboros_test_model_started, _run_one, %RunRequest{prompt: first_prompt},
                     first_adapter},
                    1_000
 
@@ -99,17 +104,19 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:error, {:turn_id_conflict, ^first_id}} =
              InteractiveSession.send_message(ref, "different", id: first_id)
 
-    assert :ok = HarnessAdapter.emit(first_adapter, :output_text_final, %{"text" => "inspected"})
-    assert :ok = HarnessAdapter.finish(first_adapter)
+    assert :ok = ControlledModel.emit(first_adapter, :output_text_final, %{"text" => "inspected"})
+    assert :ok = ControlledModel.finish(first_adapter)
 
-    assert_receive {:ouroboros_test_adapter_started, _run_two, %RunRequest{prompt: second_prompt},
+    assert_receive {:ouroboros_test_model_started, _run_two, %RunRequest{prompt: second_prompt},
                     second_adapter},
                    1_000
 
     assert Ouroboros.Test.Prompt.wrapped?(second_prompt, "then explain")
 
-    assert :ok = HarnessAdapter.emit(second_adapter, :output_text_final, %{"text" => "explained"})
-    assert :ok = HarnessAdapter.finish(second_adapter)
+    assert :ok =
+             ControlledModel.emit(second_adapter, :output_text_final, %{"text" => "explained"})
+
+    assert :ok = ControlledModel.finish(second_adapter)
 
     assert {:ok, %{status: :completed, result: %{text: "inspected"}}} =
              InteractiveSession.await(ref, first_id, 2_000)
@@ -155,9 +162,9 @@ defmodule Ouroboros.InteractiveSessionTest do
     input = %{prompt: "Inspect the project"}
 
     assert {:ok, first} = InteractiveSession.send_message(ref, input)
-    assert_receive {:ouroboros_test_adapter_started, _, _, adapter}, 1_000
-    :ok = HarnessAdapter.emit(adapter, :run_failed, %{"error" => "temporary failure"})
-    :ok = HarnessAdapter.finish(adapter)
+    assert_receive {:ouroboros_test_model_started, _, _, adapter}, 1_000
+    :ok = ControlledModel.emit(adapter, :run_failed, %{"error" => "temporary failure"})
+    :ok = ControlledModel.finish(adapter)
     assert {:ok, %{status: :failed}} = InteractiveSession.await(ref, first.id, 2_000)
     assert_eventually(fn -> match?({:ok, %{status: :idle}}, InteractiveSession.info(ref)) end)
     assert {:ok, before} = Store.get(id)
@@ -178,14 +185,14 @@ defmodule Ouroboros.InteractiveSessionTest do
              Methods.invoke("interactive.retry_turn", %{"id" => id, "source_turn_id" => first.id})
 
     assert retry.id != first.id
-    assert_receive {:ouroboros_test_adapter_started, _, _, retry_adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _, _, retry_adapter}, 1_000
     assert {:ok, after_retry} = Store.get(id)
     assert after_retry.turns[retry.id].request == before.turns[first.id].request
     assert {:ok, same} = InteractiveSession.retry_turn(ref, first.id)
     assert same.id == retry.id
-    refute_receive {:ouroboros_test_adapter_started, _, _, _}, 100
+    refute_receive {:ouroboros_test_model_started, _, _, _}, 100
     assert {:error, :turn_not_retryable} = InteractiveSession.retry_turn(ref, retry.id)
-    :ok = HarnessAdapter.finish(retry_adapter)
+    :ok = ControlledModel.finish(retry_adapter)
     assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, retry.id, 2_000)
 
     assert {:error, -32_602, _} =
@@ -224,7 +231,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     session = %{
       session
       | status: :idle,
-        harness_session_id: harness_id,
+        runtime_id: harness_id,
         turns: %{source.id => source},
         options: Map.put(session.options, :runtime_exposure, false)
     }
@@ -259,8 +266,7 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "survive", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{prompt: prompt},
-                    adapter},
+    assert_receive {:ouroboros_test_model_started, _run_id, %RunRequest{prompt: prompt}, adapter},
                    1_000
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "survive")
@@ -282,10 +288,10 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert is_pid(replacement)
 
     assert {:ok, %State{harness_session_id: ^harness_session_id}} = InteractiveSession.info(ref)
-    refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
+    refute_receive {:ouroboros_test_model_started, _duplicate, _request, _adapter}, 100
 
-    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "survived"})
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "survived"})
+    assert :ok = ControlledModel.finish(adapter)
 
     assert {:ok, %{status: :completed, result: %{text: "survived"}}} =
              InteractiveSession.await(ref, turn_id, 2_000)
@@ -359,14 +365,13 @@ defmodule Ouroboros.InteractiveSessionTest do
     # the record exists to be failed durably. A provider *name* this build does not serve
     # is refused at the boundary before any record exists (`interactive_state_test.exs`),
     # which is a different claim; this one is about the checkpoint.
-    HarnessAdapter.accept_resume([])
-    on_exit(&HarnessAdapter.reset_resume/0)
 
     opts = [
       id: id,
       provider: @provider,
       workspace: File.cwd!(),
-      provider_session_id: "a-thread-this-provider-forgot"
+      provider_session_id: "a-thread-this-provider-forgot",
+      provider_options: %{fork_session: true}
     ]
 
     assert {:created, %Ref{id: ^id} = ref, {:session_start_failed, _reason}} =
@@ -394,7 +399,7 @@ defmodule Ouroboros.InteractiveSessionTest do
                id: unique_id("forged-turn")
              )
 
-    refute_receive {:ouroboros_test_adapter_started, _run, _request, _adapter}, 100
+    refute_receive {:ouroboros_test_model_started, _run, _request, _adapter}, 100
     assert :ok = InteractiveSession.close(ref)
   end
 
@@ -413,7 +418,7 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "inspect quietly", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt}, adapter},
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{prompt: prompt}, adapter},
                    1_000
 
     assert prompt == "inspect quietly"
@@ -421,7 +426,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:ok, public} = InteractiveSession.info(ref)
     assert public.turns[turn_id].prompt == "inspect quietly"
 
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.finish(adapter)
     assert :ok = InteractiveSession.close(ref)
   end
 
@@ -448,14 +453,14 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "build a Rust WebSocket server", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt}, adapter},
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{prompt: prompt}, adapter},
                    1_000
 
     assert prompt ==
              admitted.runtime_snapshot.envelope <> "\n\nbuild a Rust WebSocket server"
 
     refute prompt =~ "\nsigner: remote\n"
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.finish(adapter)
     assert :ok = InteractiveSession.close(ref)
   end
 
@@ -477,7 +482,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              Store.create(%{
                session
                | status: :idle,
-                 harness_session_id: harness_session_id
+                 runtime_id: harness_session_id
              })
 
     ref = Ref.new(id)
@@ -520,7 +525,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              Store.create(%{
                session
                | status: :idle,
-                 harness_session_id: harness_session_id
+                 runtime_id: harness_session_id
              })
 
     ref = Ref.new(id)
@@ -696,7 +701,7 @@ defmodule Ouroboros.InteractiveSessionTest do
                attachments: ["missing.txt"]
              )
 
-    refute_receive {:ouroboros_test_adapter_started, _run, _request, _adapter}, 100
+    refute_receive {:ouroboros_test_model_started, _run, _request, _adapter}, 100
     assert :ok = InteractiveSession.close(ref)
   end
 
@@ -764,7 +769,7 @@ defmodule Ouroboros.InteractiveSessionTest do
                metadata: %{api_token: "TURN-SECRET"}
              )
 
-    refute_receive {:ouroboros_test_adapter_started, _run, _request, _adapter}, 100
+    refute_receive {:ouroboros_test_model_started, _run, _request, _adapter}, 100
 
     turn_id = unique_id("private-turn")
 
@@ -774,7 +779,7 @@ defmodule Ouroboros.InteractiveSessionTest do
                metadata: %{private_note: "PRIVATE-METADATA"}
              )
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt}, adapter},
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{prompt: prompt}, adapter},
                    1_000
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "visible prompt")
@@ -785,14 +790,14 @@ defmodule Ouroboros.InteractiveSessionTest do
     refute inspect(public) =~ "PRIVATE-METADATA"
     assert State.public(public) == public
 
-    assert :ok = HarnessAdapter.emit(adapter, :provider_event, %{"api_token" => "EVENT-SECRET"})
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.emit(adapter, :provider_event, %{"api_token" => "EVENT-SECRET"})
+    assert :ok = ControlledModel.finish(adapter)
 
     assert {:ok, %{status: :completed, result: %{}}} =
              InteractiveSession.await(ref, turn_id, 2_000)
 
     assert {:ok, events} = InteractiveSession.replay(ref, cursor: 0)
-    secret_event = Enum.find(events, &(&1.type == :provider_event))
+    secret_event = Enum.find(events, &Map.has_key?(&1.payload, "api_token"))
     assert secret_event.payload["api_token"] == "[REDACTED]"
     refute inspect(events) =~ "EVENT-SECRET"
     assert :ok = InteractiveSession.close(ref)
@@ -805,13 +810,13 @@ defmodule Ouroboros.InteractiveSessionTest do
     turn_id = unique_id("timeout-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "keep running", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, _request, adapter}, 1_000
     assert {:error, :timeout} = InteractiveSession.await(ref, turn_id, 10)
-    refute_receive {:ouroboros_test_adapter_cancelled, _run_id}, 100
+    refute_receive {:ouroboros_test_model_cancelled, _run_id}, 100
     assert Process.alive?(adapter)
 
-    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "done"})
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "done"})
+    assert :ok = ControlledModel.finish(adapter)
 
     assert {:ok, %{status: :completed, result: %{text: "done"}}} =
              InteractiveSession.await(ref, turn_id, 2_000)
@@ -825,9 +830,9 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     close_turn = unique_id("close-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(close_ref, "close me", id: close_turn)
-    assert_receive {:ouroboros_test_adapter_started, close_run, _request, _adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _close_run, _request, close_adapter}, 1_000
     assert :ok = InteractiveSession.close(close_ref)
-    assert_receive {:ouroboros_test_adapter_cancelled, ^close_run}, 1_000
+    refute Process.alive?(close_adapter)
 
     assert {:ok, %{status: :interrupted, result: %{status: :interrupted}}} =
              InteractiveSession.await(close_ref, close_turn, 2_000)
@@ -845,9 +850,9 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     kill_turn = unique_id("kill-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(kill_ref, "kill me", id: kill_turn)
-    assert_receive {:ouroboros_test_adapter_started, kill_run, _request, _adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _kill_run, _request, kill_adapter}, 1_000
     assert :ok = InteractiveSession.kill(kill_ref)
-    assert_receive {:ouroboros_test_adapter_cancelled, ^kill_run}, 1_000
+    refute Process.alive?(kill_adapter)
 
     assert {:ok, %{status: :interrupted, result: %{status: :interrupted}}} =
              InteractiveSession.await(kill_ref, kill_turn, 2_000)
@@ -864,7 +869,7 @@ defmodule Ouroboros.InteractiveSessionTest do
          id: id
        } do
     assert {:ok, harness_id} =
-             Session.start(@provider, %{
+             Session.open(id, %{
                cwd: File.cwd!(),
                metadata: %{ouroboros_session_id: id, ouroboros_node: Atom.to_string(node())}
              })
@@ -882,7 +887,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              Store.create(%{
                session
                | status: :idle,
-                 harness_session_id: harness_id,
+                 runtime_id: harness_id,
                  turns: %{turn_id => turn}
              })
 
@@ -893,7 +898,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:error, {:turn_dispatch_ambiguous, ^turn_id}} =
              InteractiveSession.send_message(ref, "resume intent", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt}, adapter},
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{prompt: prompt}, adapter},
                    1_000
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "resume intent")
@@ -903,8 +908,8 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert {:ok, %{id: ^turn_id, status: :running}} =
              InteractiveSession.send_message(ref, "resume intent", id: turn_id)
 
-    refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
-    assert :ok = HarnessAdapter.finish(adapter)
+    refute_receive {:ouroboros_test_model_started, _duplicate, _request, _adapter}, 100
+    assert :ok = ControlledModel.finish(adapter)
     assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, turn_id, 2_000)
     assert :ok = InteractiveSession.close(ref)
   end
@@ -927,7 +932,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              Store.create(%{
                session
                | status: :idle,
-                 harness_session_id: harness_session_id
+                 runtime_id: harness_session_id
              })
 
     ref = Ref.new(id)
@@ -960,6 +965,46 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = retire_session(id)
   end
 
+  test "a timed-out submit remains durably ambiguous and a same-id retry never resubmits", %{
+    id: id
+  } do
+    runtime_id = unique_id("submit-timeout")
+
+    start_supervised!(
+      {StubSession,
+       session_id: runtime_id,
+       provider: @provider,
+       state: :idle,
+       send_message: {:observe, self(), {:error, :timeout}}},
+      id: {:stub_session, runtime_id}
+    )
+
+    assert {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+    assert :ok = Store.create(%{session | status: :idle, runtime_id: runtime_id})
+
+    ref = Ref.new(id)
+    turn_id = unique_id("timeout-ambiguous-turn")
+    input = "this submit may already have started"
+
+    assert {:error, {:turn_dispatch_ambiguous, ^turn_id}} =
+             InteractiveSession.send_message(ref, input, id: turn_id)
+
+    assert_receive {:stub_session_send_message, ^runtime_id, %TurnRequest{}}, 1_000
+
+    assert {:ok, %State{turns: %{^turn_id => %{status: :ambiguous, error: :timeout}}}} =
+             Store.get(id)
+
+    assert {:error, {:turn_dispatch_ambiguous, ^turn_id}} =
+             InteractiveSession.send_message(ref, input, id: turn_id)
+
+    refute_receive {:stub_session_send_message, ^runtime_id, _request}, 100
+
+    assert {:ok, %State{turns: %{^turn_id => %{status: :ambiguous, error: :timeout}}}} =
+             Store.get(id)
+
+    assert :ok = retire_session(id)
+  end
+
   test "a refused dispatch whose failure checkpoint is lost remains outcome-unknown", %{id: id} do
     harness_session_id = unique_id("refusing-session")
 
@@ -978,7 +1023,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              Store.create(%{
                session
                | status: :idle,
-                 harness_session_id: harness_session_id
+                 runtime_id: harness_session_id
              })
 
     ref = Ref.new(id)
@@ -1012,7 +1057,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     # intent. Recovery may therefore send it later; the caller must keep this exact id.
     assert {:error,
             {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, ^turn_id,
-             {:harness_refused, :busy}}} =
+             {:runtime_refused, :busy}}} =
              InteractiveSession.send_message(ref, "retain this logical turn", id: turn_id)
 
     if coordinator = Task.whereis(id) do
@@ -1088,27 +1133,28 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert :ok = retire_session(missing_attachment_id)
   end
 
-  test "loss of the Harness process fails closed without redispatching an active turn", %{id: id} do
+  test "loss of the native runtime resumes its conversation without redispatching the unknown turn",
+       %{id: id} do
     assert {:ok, ref} =
              InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
 
     turn_id = unique_id("lost-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "do not duplicate", id: turn_id)
-    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, _request, adapter}, 1_000
     assert {:ok, %State{harness_session_id: harness_id}} = InteractiveSession.info(ref)
     waiter = Elixir.Task.async(fn -> InteractiveSession.await(ref, turn_id, 2_000) end)
-    [{harness_pid, _value}] = Registry.lookup(Jido.Harness.SessionRegistry, harness_id)
+    [{harness_pid, _value}] = Registry.lookup(Ouroboros.SessionRegistry, {:runtime, harness_id})
     Process.exit(harness_pid, :kill)
 
     assert_eventually(fn ->
-      match?({:ok, %State{status: :lost}}, InteractiveSession.info(ref))
+      match?({:ok, %State{status: :idle, resumes: 1}}, InteractiveSession.info(ref))
     end)
 
-    assert {:ok, %{status: :ambiguous, error: {:session_lost, :harness_session_not_found}}} =
+    assert {:ok, %{status: :ambiguous, error: {:session_resumed, :outcome_unknown}}} =
              Elixir.Task.await(waiter, 2_500)
 
-    refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
-    if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+    refute_receive {:ouroboros_test_model_started, _duplicate, _request, _adapter}, 100
+    if Process.alive?(adapter), do: ControlledModel.finish(adapter)
   end
 
   # The same loss, landed in the window the suite only reaches under load. A poll asks
@@ -1118,35 +1164,36 @@ defmodule Ouroboros.InteractiveSessionTest do
   # the loss that followed — the loss is the fact, and the turn reports it. Suspending the
   # session makes the window a state rather than a race: every call the coordinator makes
   # queues behind the suspension, and the kill lands while the `await` is in flight.
-  test "a Harness session killed under the poll's await is reported as the session loss",
+  test "a runtime killed during drain keeps the turn outcome unknown across resume",
        %{id: id} do
     assert {:ok, ref} =
              InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
 
     turn_id = unique_id("killed-under-await")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "do not duplicate", id: turn_id)
-    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, _request, adapter}, 1_000
     assert {:ok, %State{harness_session_id: harness_id}} = InteractiveSession.info(ref)
-    [{harness_pid, _value}] = Registry.lookup(Jido.Harness.SessionRegistry, harness_id)
+    [{harness_pid, _value}] = Registry.lookup(Ouroboros.SessionRegistry, {:runtime, harness_id})
     coordinator = Task.whereis(id)
     assert is_pid(coordinator)
     waiter = Elixir.Task.async(fn -> InteractiveSession.await(ref, turn_id, 5_000) end)
 
     :ok = :sys.suspend(harness_pid)
-    kill_under_call(harness_pid, coordinator, &match?({:turn_result, _}, &1))
+    send(coordinator, :reconcile_output)
+    kill_under_call(harness_pid, coordinator, &match?({:drain, _, _, _}, &1))
 
     assert_eventually(fn ->
-      match?({:ok, %State{status: :lost}}, InteractiveSession.info(ref))
+      match?({:ok, %State{status: :idle, resumes: 1}}, InteractiveSession.info(ref))
     end)
 
-    assert {:ok, %{status: :ambiguous, error: {:session_lost, :harness_session_not_found}}} =
+    assert {:ok, %{status: :ambiguous, error: {:session_resumed, :outcome_unknown}}} =
              Elixir.Task.await(waiter, 2_500)
 
     assert {:ok, %State{turns: %{^turn_id => turn}}} = Store.get(id)
-    assert %{status: :ambiguous, error: {:session_lost, :harness_session_not_found}} = turn
+    assert %{status: :ambiguous, error: {:session_resumed, :outcome_unknown}} = turn
 
-    refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
-    if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+    refute_receive {:ouroboros_test_model_started, _duplicate, _request, _adapter}, 100
+    if Process.alive?(adapter), do: ControlledModel.finish(adapter)
   end
 
   test "subscription is atomic across backlog and live delivery", %{id: id} do
@@ -1155,7 +1202,7 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     turn_id = unique_id("subscription-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "race", id: turn_id)
-    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, _request, adapter}, 1_000
     assert {:ok, %State{cursor: cursor}} = InteractiveSession.info(ref)
     parent = self()
 
@@ -1166,7 +1213,7 @@ defmodule Ouroboros.InteractiveSessionTest do
         send(parent, {:subscription_live, self(), receive_marker_event(id, 500)})
       end)
 
-    assert :ok = HarnessAdapter.emit(adapter, :provider_event, %{"marker" => "race-event"})
+    assert :ok = ControlledModel.emit(adapter, :provider_event, %{"marker" => "race-event"})
     assert_receive {:subscription_backlog, ^subscriber, {:ok, backlog}}, 1_000
 
     live =
@@ -1182,7 +1229,7 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert length(projected) == 1
     assert hd(projected).payload["marker"] == "race-event"
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.finish(adapter)
     assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, turn_id, 2_000)
     assert :ok = InteractiveSession.close(ref)
   end
@@ -1242,16 +1289,23 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     :ok =
       :erpc.call(peer_node, Application, :put_env, [
-        :jido_harness,
-        :providers,
-        %{@provider => HarnessAdapter}
+        :ouroboros,
+        :native_model_module,
+        ControlledModel
       ])
 
     :ok =
       :erpc.call(peer_node, Application, :put_env, [
-        :jido_harness,
-        :provider_config,
-        %{@provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}}}
+        :ouroboros,
+        :native_provider,
+        %{test_pid: self(), retention: %{journal_dir: journal_dir}}
+      ])
+
+    :ok =
+      :erpc.call(peer_node, Application, :put_env, [
+        :ouroboros,
+        :native_model,
+        "scripted:controlled"
       ])
 
     assert {:ok, _apps} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
@@ -1266,15 +1320,14 @@ defmodule Ouroboros.InteractiveSessionTest do
     turn_id = unique_id("remote-turn")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "remote", id: turn_id)
 
-    assert_receive {:ouroboros_test_adapter_started, _run_id, %RunRequest{prompt: prompt},
-                    adapter},
+    assert_receive {:ouroboros_test_model_started, _run_id, %RunRequest{prompt: prompt}, adapter},
                    1_000
 
     assert Ouroboros.Test.Prompt.wrapped?(prompt, "remote")
 
     assert node(adapter) == peer_node
-    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "peer"})
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "peer"})
+    assert :ok = ControlledModel.finish(adapter)
 
     assert {:ok, %{status: :completed, result: %{text: "peer"}}} =
              InteractiveSession.await(ref, turn_id, 3_000)
@@ -1305,29 +1358,29 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     first = unique_id("usage-one")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "count", id: first)
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 1_000
 
     assert :ok =
-             HarnessAdapter.emit(adapter, :usage, %{
+             ControlledModel.emit(adapter, :usage, %{
                "input_tokens" => 12,
                "output_tokens" => 3,
                "cache_read_tokens" => 40,
                "total_tokens" => 15
              })
 
-    assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "counted"})
-    assert :ok = HarnessAdapter.finish(adapter)
+    assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "counted"})
+    assert :ok = ControlledModel.finish(adapter)
     assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, first, 2_000)
 
     second = unique_id("usage-two")
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "again", id: second)
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, next}, 1_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, next}, 1_000
 
     assert :ok =
-             HarnessAdapter.emit(next, :usage, %{"input_tokens" => 8, "total_tokens" => 8})
+             ControlledModel.emit(next, :usage, %{"input_tokens" => 8, "total_tokens" => 8})
 
-    assert :ok = HarnessAdapter.emit(next, :output_text_final, %{"text" => "again"})
-    assert :ok = HarnessAdapter.finish(next)
+    assert :ok = ControlledModel.emit(next, :output_text_final, %{"text" => "again"})
+    assert :ok = ControlledModel.finish(next)
     assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, second, 2_000)
 
     assert {:ok, %State{usage: usage}} = InteractiveSession.info(ref)
@@ -1367,7 +1420,7 @@ defmodule Ouroboros.InteractiveSessionTest do
                session
                | status: :idle,
                  workspace: workspace,
-                 harness_session_id: harness_session_id,
+                 runtime_id: harness_session_id,
                  turns: %{turn_id => State.new_turn(turn_id, :message, request)}
              })
 
@@ -1418,7 +1471,9 @@ defmodule Ouroboros.InteractiveSessionTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   end
 
@@ -1501,6 +1556,5 @@ defmodule Ouroboros.InteractiveSessionTest do
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
 
-  defp restore_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_env(key, value), do: Application.put_env(:jido_harness, key, value)
+  defp restore_env(:provider_config, value), do: Ouroboros.Test.NativeConfig.configure(value)
 end

@@ -5,27 +5,22 @@ defmodule Ouroboros.Interactive.Task do
 
   require Logger
 
-  alias Jido.Harness.{Session, SessionInfo, TurnResult}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Interactive.Task.{Approvals, Resume, Shell, Turns}
-  alias Ouroboros.Poll.{Cadence, Timer}
+  alias Ouroboros.Poll.Timer
   alias Ouroboros.Provider
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Session, as: NativeSession
   alias Ouroboros.ReasoningEffort
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Worktree
 
-  @poll_interval 25
-
-  # The ceiling the wakeup interval decays to once a conversation is genuinely between
-  # turns. See `Ouroboros.Poll.Cadence` for why a second is the right bound: everything a
-  # human does resets the cadence on the way in, so this delays only an out-of-band change
-  # — the provider process dying under an idle session — and nothing that is being watched.
-  @idle_poll_interval_max 1_000
+  @checkpoint_retry_ms 100
 
   @replay_limit 100
+  @max_subscriber_messages 1_000
   @terminal_retire_ms 100
   @workspace_reacquire_attempts 25
   @workspace_reacquire_delay_ms 4
@@ -71,7 +66,7 @@ defmodule Ouroboros.Interactive.Task do
           case State.removed_provider(session) do
             nil ->
               case admit_workspace(session) do
-                # A checkpoint this build cannot turn into a Harness request — a trace from
+                # A checkpoint this build cannot turn into a runtime request — a trace from
                 # a newer prompt format, a prompt that is no longer a binary — fails as
                 # itself, before any provider session, and releases what it holds.
                 {:ok, runtime} ->
@@ -109,7 +104,7 @@ defmodule Ouroboros.Interactive.Task do
     runtime = Approvals.deny_orphaned_external_approvals(runtime)
 
     if State.terminal?(runtime.session) do
-      {:noreply, runtime |> reply_ready_waiters() |> schedule_retire()}
+      {:noreply, recover_terminal_delivery(runtime)}
     else
       {:noreply, attach_or_start(runtime)}
     end
@@ -118,7 +113,7 @@ defmodule Ouroboros.Interactive.Task do
   # A record whose `provider` this build no longer has. It loads, it lists, and its history
   # is intact: this coordinator is a read-only holder of it (info, replay, journal,
   # rewind points), exactly as the store handed it over. It takes no workspace lease, opens
-  # no transport and schedules no poll, and every verb that would put it in front of a
+  # no transport and schedules no drain, and every verb that would put it in front of a
   # provider is refused by name. Failing it instead would rewrite an operator's record to
   # say something about this build rather than about the session, and would take the
   # workspace lease to do it.
@@ -162,7 +157,7 @@ defmodule Ouroboros.Interactive.Task do
        {:ok,
         %{
           provider_session_id: session.provider_session_id,
-          principal_id: session.harness_session_id || session.id
+          principal_id: session.runtime_id || session.id
         }}, runtime}
     end
   end
@@ -201,7 +196,7 @@ defmodule Ouroboros.Interactive.Task do
         runtime =
           if State.terminal?(runtime.session),
             do: runtime,
-            else: runtime |> put_subscriber(subscriber) |> reset_cadence()
+            else: put_subscriber(runtime, subscriber)
 
         {:reply, {:ok, backlog}, runtime}
 
@@ -262,15 +257,18 @@ defmodule Ouroboros.Interactive.Task do
       {:ok, input, opts} ->
         case ReasoningEffort.turn_request(input, opts) do
           {:ok, request} ->
-            case with_harness_session(runtime, &Session.steer(&1, request)) do
+            request_id =
+              "steer-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+
+            case with_runtime(runtime, &Session.steer(&1, request_id, request)) do
               {:ok, request_id} when is_binary(request_id) ->
                 {:reply, {:ok, request_id},
                  runtime
                  |> remember_steer(request_id, request)
-                 |> schedule_poll(0)}
+                 |> schedule_reconcile(0)}
 
               reply ->
-                {:reply, reply, schedule_poll(runtime, 0)}
+                {:reply, reply, schedule_reconcile(runtime, 0)}
             end
 
           {:error, reason} ->
@@ -315,8 +313,8 @@ defmodule Ouroboros.Interactive.Task do
       when scope not in [:once, :session],
       do: {:reply, {:error, :invalid_approval_response}, runtime}
 
-  # Routed ahead of the Harness clause, and only for an id this coordinator minted. A
-  # request id the Harness owns is not in this map and falls through to the clause below
+  # Routed ahead of the runtime clause, and only for an id this coordinator minted. A
+  # request id the runtime owns is not in this map and falls through to the clause below
   # untouched, which is what keeps the existing modal working for Codex and ACP.
   def handle_call({:respond_approval, request_id, response}, _from, runtime)
       when is_map_key(runtime.external_approvals, request_id) do
@@ -334,7 +332,7 @@ defmodule Ouroboros.Interactive.Task do
 
   def handle_call({:configure, changes}, _from, runtime) do
     case configure_session(runtime, changes) do
-      {:ok, result, runtime} -> {:reply, {:ok, result}, schedule_poll(runtime, 0)}
+      {:ok, result, runtime} -> {:reply, {:ok, result}, schedule_reconcile(runtime, 0)}
       {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
     end
   end
@@ -347,7 +345,7 @@ defmodule Ouroboros.Interactive.Task do
     case native_transport(runtime.session, :rewind) do
       {:ok, pid} ->
         result =
-          case safe_session_call(fn -> NativeSession.rewind(pid, to_turn, what) end) do
+          case safe_session_call(fn -> Session.rewind(pid, to_turn, what) end) do
             {:ok, report} when is_map(report) -> {:ok, durable(report)}
             {:error, reason} -> {:error, {:rewind_refused, durable(reason)}}
             other -> {:error, {:rewind_refused, durable(other)}}
@@ -368,7 +366,7 @@ defmodule Ouroboros.Interactive.Task do
     case native_transport(runtime.session, :journal) do
       {:ok, pid} ->
         result =
-          case safe_session_call(fn -> NativeSession.journal(pid, opts) end) do
+          case safe_session_call(fn -> Session.journal(pid, opts) end) do
             {:ok, window} -> {:ok, durable(window)}
             {:error, reason} -> {:error, {:journal_unavailable, durable(reason)}}
             other -> {:error, {:journal_unavailable, durable(other)}}
@@ -398,7 +396,7 @@ defmodule Ouroboros.Interactive.Task do
     case native_transport(runtime.session, :rewind_points) do
       {:ok, pid} ->
         result =
-          case safe_session_call(fn -> NativeSession.rewind_points(pid) end) do
+          case safe_session_call(fn -> Session.rewind_points(pid) end) do
             {:ok, points} -> {:ok, durable(points)}
             {:error, reason} -> {:error, {:rewind_refused, durable(reason)}}
             other -> {:error, {:rewind_refused, durable(other)}}
@@ -535,15 +533,15 @@ defmodule Ouroboros.Interactive.Task do
 
   def handle_call({:interrupt, turn_id}, _from, runtime) do
     reply =
-      case harness_turn_id(runtime.session, turn_id) do
-        {:ok, harness_turn_id} ->
-          with_harness_session(runtime, &Session.interrupt(&1, harness_turn_id))
+      case runtime_turn_id(runtime.session, turn_id) do
+        {:ok, runtime_turn_id} ->
+          with_runtime(runtime, &Session.interrupt(&1, runtime_turn_id))
 
         {:error, _reason} = error ->
           error
       end
 
-    {:reply, reply, schedule_poll(runtime, 0)}
+    {:reply, reply, schedule_reconcile(runtime, 0)}
   end
 
   def handle_call(:close, _from, %{session: session} = runtime)
@@ -551,7 +549,7 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, :ok, runtime}
   end
 
-  # A removed-provider record has no transport to close and no poll to run: ending it is a
+  # A removed-provider record has no transport to close and no drain to run: ending it is a
   # durable state change and nothing more. It transitions to `:closed` — the terminal
   # closed state, not `:failed`, because the operator asked to end it and this build never
   # ran it — so `delete` then works by the operator's explicit choice, and the coordinator
@@ -563,35 +561,42 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, :ok, close_removed_provider(runtime)}
   end
 
-  # A session the caller asked to end is not a session the runtime lost, so the Harness
+  # A session the caller asked to end is not a session the runtime lost, so the runtime
   # session going away after this is the answer, not a break to resume across. Settled
   # whether or not the call itself succeeded: the intent is the same either way, and
   # reviving a session someone asked to close would be the worse mistake.
-  def handle_call(:close, _from, runtime) do
-    Ouroboros.Provider.Native.SubagentBridge.close(self())
-    reply = with_harness_session(runtime, &Session.close/1)
-
-    {:reply, reply,
-     schedule_poll(Resume.settle_resume(%{runtime | subagent_bridge_closed: true}), 0)}
-  end
+  def handle_call(:close, _from, runtime), do: close_runtime(runtime, :close)
 
   def handle_call(:kill, _from, %{session: session} = runtime)
-      when session.status in [:closed, :cancelled] do
-    {:reply, :ok, runtime}
-  end
+      when session.status in [:closed, :cancelled], do: {:reply, :ok, runtime}
 
-  def handle_call(:kill, _from, runtime) do
-    Ouroboros.Provider.Native.SubagentBridge.close(self())
-    reply = with_harness_session(runtime, &Session.kill/1)
-
-    {:reply, reply,
-     schedule_poll(Resume.settle_resume(%{runtime | subagent_bridge_closed: true}), 0)}
-  end
+  def handle_call(:kill, _from, runtime), do: close_runtime(runtime, :kill)
 
   def handle_call(_message, _from, runtime),
     do: {:reply, {:error, :invalid_session_operation}, runtime}
 
-  # A steer's attachments reach the same transports as a turn's, but the Harness
+  # Shutdown intent is durable before the effect. A coordinator crash in the reply
+  # window must resume the shutdown, never reopen the conversation.
+  defp close_runtime(runtime, action) do
+    session = runtime.session |> Map.put(:close_intent, action) |> State.touch()
+
+    case persist(runtime, session, []) do
+      {:ok, runtime} ->
+        Ouroboros.Provider.Native.SubagentBridge.close(self())
+        reply = with_runtime(runtime, fn id -> apply(Session, action, [id]) end)
+
+        {:reply, reply,
+         runtime
+         |> Resume.settle_resume()
+         |> Map.put(:subagent_bridge_closed, true)
+         |> schedule_reconcile(0)}
+
+      {:error, runtime} ->
+        {:reply, {:error, :close_intent_checkpoint_failed}, runtime}
+    end
+  end
+
+  # A steer's attachments reach the same transports as a turn's, but the runtime
   # validates steer attachments for existence only, never containment — so this plane
   # applies the same workspace gate `Turns.dispatch_turn` enforces on messages. Without
   # it, a steer names any file the daemon user can read, and the native transport reads
@@ -605,8 +610,8 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  # `Jido.Harness.TurnRequest` accepts atom-keyed maps, string-keyed maps, and lists of
-  # key/value pairs. Check every representation before handing it to the Harness rather
+  # `Ouroboros.Session.TurnRequest` accepts atom-keyed maps, string-keyed maps, and lists of
+  # key/value pairs. Check every representation before handing it to the runtime rather
   # than accidentally making containment depend on which public API spelling a caller
   # chose.
   defp authorize_steer_input(input, workspace) when is_map(input) do
@@ -628,14 +633,14 @@ defmodule Ouroboros.Interactive.Task do
     if Enum.all?(input, &match?({_, _}, &1)) do
       input |> Map.new() |> authorize_steer_input(workspace)
     else
-      # Let the Harness produce its ordinary validation error for a non key/value list.
+      # Let the runtime produce its ordinary validation error for a non key/value list.
       {:ok, input}
     end
   end
 
   defp authorize_steer_input(input, _workspace), do: {:ok, input}
 
-  # Options are merged over the input by the Harness, so an `attachments:` option is the
+  # Options are merged over the input by the runtime, so an `attachments:` option is the
   # final attachment list and needs the same gate even when the input itself is a string.
   defp authorize_steer_options(opts, workspace) when is_list(opts) do
     case Keyword.fetch(opts, :attachments) do
@@ -661,7 +666,7 @@ defmodule Ouroboros.Interactive.Task do
       {_status, runtime} =
         emit_runtime_event(runtime, event.type, event.payload,
           provider: runtime.session.provider,
-          harness_session_id: runtime.session.harness_session_id,
+          harness_session_id: runtime.session.runtime_id,
           provider_session_id: runtime.session.provider_session_id,
           turn_id: nil,
           request_id: event.request_id
@@ -700,8 +705,21 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   @impl true
-  def handle_info(:poll, runtime),
-    do: {:noreply, runtime |> Timer.clear(:poll_timer) |> poll()}
+  def handle_info(:reconcile_output, runtime),
+    do: {:noreply, runtime |> Timer.clear(:reconcile_timer) |> reconcile()}
+
+  def handle_info({:session_output, id, generation, _cursor}, runtime)
+      when id == runtime.session.runtime_id and generation == runtime.session.runtime_generation,
+      do: {:noreply, schedule_reconcile(runtime, 0)}
+
+  def handle_info({:session_output, _id, _generation, _cursor}, runtime), do: {:noreply, runtime}
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, _reason},
+        %{runtime_monitor: monitor} = runtime
+      )
+      when not is_nil(monitor),
+      do: {:noreply, schedule_reconcile(%{runtime | runtime_monitor: nil, attachment: nil}, 0)}
 
   def handle_info(:ready_deadline, %{ready_waiters: []} = runtime),
     do: {:noreply, %{runtime | ready_timer: nil}}
@@ -710,7 +728,7 @@ defmodule Ouroboros.Interactive.Task do
     Logger.warning(
       "interactive session #{runtime.session.id} did not reach a ready or terminal " <>
         "state within the readiness deadline (#{readiness_deadline_ms()}ms); answering " <>
-        "start waiters as unresolved while polling continues " <>
+        "start waiters as unresolved while output reconciliation continues " <>
         "(last retry: #{inspect(runtime.retry.signature)})"
     )
 
@@ -730,6 +748,7 @@ defmodule Ouroboros.Interactive.Task do
 
     cond do
       not State.terminal?(runtime.session) -> {:noreply, runtime}
+      runtime.terminal_ack_pending -> {:noreply, schedule_reconcile(runtime, 0)}
       map_size(runtime.turn_waiters) == 0 -> {:stop, :normal, runtime}
       true -> {:noreply, schedule_retire(runtime)}
     end
@@ -785,10 +804,12 @@ defmodule Ouroboros.Interactive.Task do
       workspace_lease: lease,
       workspace_capability: capability,
       retry: no_retry(),
-      poll_timer: nil,
+      reconcile_timer: nil,
       retire_timer: nil,
-      cadence: Cadence.new(@poll_interval, @idle_poll_interval_max),
+      attachment: nil,
+      runtime_monitor: nil,
       terminal_observed_at: nil,
+      terminal_ack_pending: false,
       pending_steers: [],
       resume_settled: false,
       subagent_bridge_closed: false,
@@ -803,29 +824,41 @@ defmodule Ouroboros.Interactive.Task do
 
   defp no_retry, do: %{signature: nil, count: 0, delay: 0}
 
-  defp attach_or_start(%{session: %State{harness_session_id: id}} = runtime) when is_binary(id) do
+  defp attach_or_start(%{session: %State{runtime_id: id}} = runtime) when is_binary(id) do
     case safe_session_call(fn -> Session.info(id) end) do
-      {:ok, %SessionInfo{}} -> runtime |> clear_retry() |> schedule_poll(0)
-      {:error, :not_found} -> Resume.resume_or_lose(runtime, :harness_session_not_found)
-      {:error, reason} -> retry(runtime, :harness_session_info_failed, reason)
+      {:ok, %SessionInfo{}} ->
+        runtime = attach_runtime(runtime)
+
+        if runtime.session.close_intent in [:close, :kill],
+          do:
+            with_runtime(runtime, fn id -> apply(Session, runtime.session.close_intent, [id]) end)
+
+        runtime
+
+      {:error, :not_found} ->
+        Resume.resume_or_lose(runtime, :runtime_not_found)
+
+      {:error, reason} ->
+        retry(runtime, :runtime_info_failed, reason)
     end
   end
 
   defp attach_or_start(runtime) do
     case Resume.find_adoptable_session(runtime.session.id) do
       {:ok, id} -> Resume.adopt(runtime, id)
-      :not_found -> start_harness_session(runtime)
+      :not_found -> start_runtime(runtime)
       {:error, reason} -> fail_start(runtime, reason)
     end
   end
 
-  defp start_harness_session(runtime) do
+  defp start_runtime(runtime) do
     session = runtime.session
 
     case State.unrequestable_reason(session) do
       nil ->
         case safe_session_call(fn ->
-               ReasoningEffort.start_session(State.request(session))
+               with {:ok, request} <- ReasoningEffort.session_request(State.request(session)),
+                    do: Session.open(session.id, request)
              end) do
           {:ok, id} -> Resume.adopt(runtime, id)
           {:error, reason} -> fail_start(runtime, reason)
@@ -836,86 +869,119 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp poll(%{session: session} = runtime)
-       when session.status in [:closed, :failed, :cancelled, :lost],
-       do: runtime
-
-  # A record whose provider this build lost never enters the poll path. Left to
-  # `attach_or_start/1` below it, `start_harness_session/1` would answer
-  # `{:legacy_transport_unavailable, provider}` and `fail_start/2` would checkpoint it
-  # `:failed`. The mutating verbs are already refused before they can schedule a poll; this
-  # is the brace on the other side, so no stray zero-delay poll can fail the record.
-  defp poll(%{session: %State{provider: provider}} = runtime)
-       when is_atom(provider) and not is_nil(provider) and provider != :native,
-       do: runtime
-
-  defp poll(%{session: %State{harness_session_id: nil}} = runtime), do: attach_or_start(runtime)
-
-  # `Session.replay/2` re-reads and re-JSON-decodes the whole session journal even to
-  # answer that nothing is new, so a poll that opened with it paid O(conversation length)
-  # to find an empty conversation (docs/proposals/jido-harness-push-subscription.md §2.3).
-  # `Session.info/1` is in-memory struct construction, and its `output_cursor` is the same
-  # append counter replay serves from — the comparison `mirrored_through_result?/1`
-  # already stakes turn completion on. So peek first, and replay only past a cursor that
-  # has actually advanced. This fronts the poll with the info call, so an unreachable
-  # session now retries as `:harness_session_info_failed` rather than
-  # `:harness_session_replay_failed`.
-  defp poll(runtime) do
-    session = runtime.session
-
-    case safe_session_call(fn -> Session.info(session.harness_session_id) end) do
-      {:ok, %SessionInfo{output_cursor: output_cursor} = info} ->
-        if output_cursor > harness_cursor(session),
-          do: drain_replay(runtime),
-          else: refresh_session(runtime, info)
-
-      {:error, :not_found} ->
-        Resume.resume_or_lose(runtime, :harness_session_not_found)
-
-      {:error, reason} ->
-        retry(runtime, :harness_session_info_failed, reason)
-    end
-  end
-
-  defp drain_replay(runtime) do
-    session = runtime.session
-
+  # An attachment is ephemeral authority. Only its generation and consumed cursor are
+  # durable; monitors and attachment tokens are deliberately never checkpointed.
+  def attach_runtime(runtime) do
     case safe_session_call(fn ->
-           Session.replay(session.harness_session_id,
-             cursor: harness_cursor(session),
-             limit: @replay_limit
-           )
+           Session.attach(runtime.session.runtime_id, self(), runtime_cursor(runtime.session))
          end) do
-      {:ok, [_ | _] = events} ->
-        runtime |> clear_retry() |> persist_harness_events(rebase_sequences(session, events))
+      {:ok, attachment, info} ->
+        if runtime.runtime_monitor, do: Process.demonitor(runtime.runtime_monitor, [:flush])
+        monitor = if is_pid(info.pid), do: Process.monitor(info.pid), else: nil
+        runtime = %{runtime | attachment: attachment, runtime_monitor: monitor}
+        old_generation = Map.get(runtime.session, :runtime_generation)
 
-      # The peek said the cursor had advanced and the log answered with nothing — a
-      # journal that failed or rotated between the two calls. The peeked snapshot
-      # predates the replay attempt, so checkpoint from a fresh one.
-      {:ok, []} ->
-        refresh_session(runtime)
+        if old_generation not in [nil, info.generation] do
+          delivery_gap(runtime, {:generation_changed, old_generation, info.generation})
+        else
+          session =
+            runtime.session
+            |> Map.put(:runtime_generation, info.generation)
+            |> maybe_provider_session(info.provider_session_id)
+            |> State.touch()
+
+          case persist(runtime, session, []) do
+            {:ok, runtime} -> runtime |> clear_retry() |> schedule_reconcile(0)
+            {:error, runtime} -> retry(runtime, :attachment_checkpoint_failed, :storage_error)
+          end
+        end
 
       {:error, :not_found} ->
-        Resume.resume_or_lose(runtime, :harness_session_not_found)
+        Resume.resume_or_lose(runtime, :runtime_not_found)
 
       {:error, reason} ->
-        retry(runtime, :harness_session_replay_failed, reason)
+        retry(runtime, :runtime_attachment_failed, reason)
     end
   end
 
-  # A resumed session polls a Harness session whose log starts at one again, while the
-  # Ouroboros sequence a client holds must keep climbing. `sequence_offset` is the
-  # durable distance between the two, so the harness-side cursor is the Ouroboros one
-  # minus the offset, and every replayed event is shifted back into the session's own
-  # number space before anything downstream — projection, event ids, the checkpoint —
-  # sees it. Both are identities until the first resume.
-  defp harness_cursor(%State{} = session), do: session.cursor - State.sequence_offset(session)
+  defp reconcile(%{session: session} = runtime)
+       when session.status in [:closed, :failed, :cancelled, :lost],
+       do: recover_terminal_delivery(runtime)
+
+  defp reconcile(%{session: %State{provider: provider}} = runtime)
+       when provider != :native, do: runtime
+
+  defp reconcile(%{session: %State{runtime_id: nil}} = runtime), do: attach_or_start(runtime)
+  defp reconcile(%{attachment: nil} = runtime), do: attach_or_start(runtime)
+  defp reconcile(runtime), do: drain_output(runtime)
+
+  defp drain_output(runtime) do
+    case safe_session_call(fn ->
+           Session.drain(runtime.attachment, runtime_cursor(runtime.session), @replay_limit)
+         end) do
+      {:ok, [_ | _] = events, info} ->
+        expected = runtime_cursor(runtime.session) + 1
+
+        contiguous? =
+          Enum.with_index(events, expected)
+          |> Enum.all?(fn {event, cursor} -> event.sequence == cursor end)
+
+        if contiguous? and info.generation == runtime.session.runtime_generation do
+          persist_runtime_events(clear_retry(runtime), events, info)
+        else
+          delivery_gap(runtime, {:noncontiguous_runtime_output, expected})
+        end
+
+      {:ok, [], info} ->
+        # A previous commit may have succeeded immediately before coordinator death.
+        # Releasing those already durable rows is safe even on an empty redrain.
+        case safe_session_call(fn ->
+               Session.ack(runtime.attachment, runtime_cursor(runtime.session))
+             end) do
+          :ok -> refresh_session(runtime, info)
+          {:error, reason} -> retry(runtime, :output_ack_failed, reason)
+        end
+
+      {:error, :not_found} ->
+        Resume.resume_or_lose(%{runtime | attachment: nil}, :runtime_not_found)
+
+      {:error, {:retained_range_gap, _} = gap} ->
+        delivery_gap(runtime, gap)
+
+      {:error, reason} ->
+        retry(runtime, :runtime_drain_failed, reason)
+    end
+  end
+
+  defp delivery_gap(runtime, reason) do
+    session =
+      runtime.session
+      |> finalize_unresolved_turns({:runtime_output_gap, durable(reason)})
+      |> Map.put(:status, :lost)
+      |> Map.put(:error, {:runtime_output_gap, durable(reason)})
+      |> State.touch()
+
+    case persist(runtime, session, []) do
+      {:ok, runtime} ->
+        _ = with_runtime(runtime, &Session.kill/1)
+
+        runtime
+        |> release_workspace()
+        |> reply_ready_waiters()
+        |> reply_all_terminal_turn_waiters()
+        |> schedule_retire()
+
+      {:error, runtime} ->
+        retry(runtime, :gap_checkpoint_failed, reason)
+    end
+  end
+
+  defp runtime_cursor(%State{} = session),
+    do: Map.get(session, :runtime_cursor, session.cursor - State.sequence_offset(session))
 
   defp rebase_sequences(%State{} = session, events) do
-    case State.sequence_offset(session) do
-      0 -> events
-      offset -> Enum.map(events, &%{&1 | sequence: &1.sequence + offset})
-    end
+    offset = session.cursor - runtime_cursor(session)
+    Enum.map(events, &%{&1 | sequence: &1.sequence + offset})
   end
 
   # B2. A plan exit the native session applied changed the session's approval and
@@ -962,13 +1028,18 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp persist_harness_events(runtime, harness_events) do
-    projected = Enum.map(harness_events, &Event.from_harness(runtime.session.id, &1))
+  defp persist_runtime_events(runtime, runtime_events, info) do
+    consumed = List.last(runtime_events).sequence
 
-    # Harness deliberately records only that input was accepted. Ouroboros already owns
-    # the durable turn request, so correlate the Harness turn id and copy its prompt
+    projected =
+      runtime.session
+      |> rebase_sequences(runtime_events)
+      |> Enum.map(&Event.from_execution(runtime.session.id, &1))
+
+    # runtime deliberately records only that input was accepted. Ouroboros already owns
+    # the durable turn request, so correlate the runtime turn id and copy its prompt
     # through Redaction into the projected event. This gives every replaying client the
-    # user side of the chat without changing Harness or inventing client-local rows.
+    # user side of the chat without changing runtime or inventing client-local rows.
     reconciled = reconcile_turn_ids(runtime.session, projected)
     projected = Enum.map(projected, &enrich_chat_input(&1, reconciled))
 
@@ -978,6 +1049,7 @@ defmodule Ouroboros.Interactive.Task do
     {projected, pending_steers} =
       Enum.map_reduce(projected, runtime.pending_steers, &enrich_steer_input/2)
 
+    original_runtime = runtime
     runtime = %{runtime | pending_steers: pending_steers}
 
     session =
@@ -989,27 +1061,160 @@ defmodule Ouroboros.Interactive.Task do
       end)
       |> append_events(projected)
       |> apply_turn_event_statuses(projected)
+      |> fold_terminal_results(projected)
       |> apply_plan_exits(projected)
       |> mark_gap_ambiguities(projected)
       # What the session spent rides the same checkpoint as the events it was read from,
       # so a restart resumes the account rather than restarting it at zero.
       |> State.fold_usage(projected)
       |> auto_title(projected)
+      |> Map.put(:runtime_cursor, consumed)
+      |> Map.put(:runtime_generation, info.generation)
+      |> fold_batch_status(info, consumed)
       |> State.touch()
 
     case persist(runtime, session, projected) do
-      {:ok, runtime} -> runtime |> reply_all_terminal_turn_waiters() |> schedule_poll(0)
-      {:error, runtime} -> schedule_poll(runtime, @poll_interval)
+      {:ok, runtime} ->
+        case safe_session_call(fn -> Session.ack(runtime.attachment, consumed) end) do
+          :ok ->
+            complete_batch(runtime)
+
+          {:error, :not_found} ->
+            complete_batch(runtime)
+
+          {:error, reason} ->
+            runtime = runtime |> reply_all_terminal_turn_waiters() |> reply_ready_waiters()
+
+            if State.terminal?(runtime.session),
+              do: retry_terminal_ack(runtime, reason),
+              else: retry(runtime, :output_ack_failed, reason)
+        end
+
+      {:error, runtime} ->
+        schedule_reconcile(
+          %{runtime | pending_steers: original_runtime.pending_steers},
+          @checkpoint_retry_ms
+        )
     end
+  end
+
+  defp fold_batch_status(session, info, consumed) do
+    if consumed == info.output_cursor do
+      session
+      |> Map.put(:status, normalize_session_status(info.state))
+      |> Map.put(:error, durable(info.error))
+    else
+      session
+    end
+  end
+
+  defp complete_batch(runtime) do
+    runtime = runtime |> reply_all_terminal_turn_waiters() |> reply_ready_waiters()
+
+    if State.terminal?(runtime.session) do
+      runtime |> release_workspace() |> schedule_retire()
+    else
+      schedule_reconcile(runtime, 0)
+    end
+  end
+
+  # A terminal checkpoint can land before its acknowledgement. On coordinator
+  # recovery the durable outcome remains authoritative, but the same-generation
+  # native buffer still needs releasing. This path never starts, closes, kills or
+  # resumes execution and never acknowledges beyond the already checkpointed cursor.
+  defp recover_terminal_delivery(runtime) do
+    session = runtime.session
+
+    cond do
+      session.provider != :native or not is_binary(session.runtime_id) or
+          not is_binary(session.runtime_generation) ->
+        finish_terminal_ack(runtime)
+
+      true ->
+        case safe_session_call(fn -> Session.info(session.runtime_id) end) do
+          {:error, :not_found} ->
+            finish_terminal_ack(runtime)
+
+          {:ok, info} when info.generation != session.runtime_generation ->
+            # This ID no longer identifies the persisted generation. The replacement
+            # receives no attachment or acknowledgement from an old terminal record.
+            finish_terminal_ack(runtime)
+
+          {:ok, _info} ->
+            case safe_session_call(fn ->
+                   with {:ok, attachment, info} <-
+                          Session.attach(session.runtime_id, self(), runtime_cursor(session)),
+                        true <- info.generation == session.runtime_generation,
+                        :ok <- Session.ack(attachment, runtime_cursor(session)),
+                        do: :ok
+                 end) do
+              :ok -> finish_terminal_ack(runtime)
+              false -> finish_terminal_ack(runtime)
+              {:error, :not_found} -> finish_terminal_ack(runtime)
+              {:error, reason} -> retry_terminal_ack(runtime, reason)
+            end
+
+          {:error, reason} ->
+            retry_terminal_ack(runtime, reason)
+        end
+    end
+  end
+
+  defp retry_terminal_ack(runtime, reason) do
+    Timer.cancel(runtime.retire_timer, :retire)
+    {repeat?, runtime} = note_retry(runtime, {:terminal_output_ack_failed, durable(reason)})
+
+    unless repeat?,
+      do:
+        Logger.warning("terminal interactive output acknowledgement deferred: #{inspect(reason)}")
+
+    runtime
+    |> Map.put(:terminal_ack_pending, true)
+    |> Map.put(:retire_timer, nil)
+    |> release_workspace()
+    |> schedule_reconcile(runtime.retry.delay)
+  end
+
+  defp finish_terminal_ack(runtime) do
+    runtime
+    |> Map.put(:terminal_ack_pending, false)
+    |> clear_retry()
+    |> release_workspace()
+    |> reply_all_terminal_turn_waiters()
+    |> reply_ready_waiters()
+    |> schedule_retire()
+  end
+
+  # Terminal results, usage, events and the transport cursor share one checkpoint.
+  # Reading a live result never publishes it independently of its terminal event.
+  defp fold_terminal_results(session, events) do
+    events
+    |> Enum.filter(&(&1.type in [:turn_completed, :turn_failed, :turn_interrupted]))
+    |> Enum.reduce(session, fn event, session ->
+      with turn when is_map(turn) <- find_turn_by_runtime_id(session, event.turn_id),
+           {:ok, result} <-
+             safe_session_call(fn -> Session.turn_result(session.runtime_id, event.turn_id) end) do
+        updated =
+          turn
+          |> Map.put(:status, result.status)
+          |> Map.put(:result, Turns.turn_result_summary(result))
+          |> Map.put(:error, durable(result.error))
+          |> State.touch_turn()
+
+        put_in(session.turns[turn.id], updated)
+      else
+        _ -> session
+      end
+    end)
   end
 
   defp enrich_chat_input(
          %Event{type: :input_accepted, payload: %{"kind" => "message"}} = event,
          session
        ) do
-    with turn when is_map(turn) <- find_turn_by_harness_id(session, event.turn_id),
+    with turn when is_map(turn) <- find_turn_by_runtime_id(session, event.turn_id),
          prompt when is_binary(prompt) <- get_in(turn, [:request, :prompt]) do
-      %{event | payload: Map.put(event.payload, "text", Jido.Harness.Redaction.redact(prompt))}
+      %{event | payload: Map.put(event.payload, "text", Ouroboros.Redaction.redact(prompt))}
     else
       _missing -> event
     end
@@ -1044,7 +1249,7 @@ defmodule Ouroboros.Interactive.Task do
     end)
   end
 
-  # Harness records only *that* a steer was accepted (`input_accepted` with
+  # runtime records only *that* a steer was accepted (`input_accepted` with
   # `%{"kind" => "steer"}` and a fresh request id), never the text that produced it.
   # `remember_steer/3` held the prompt for exactly this moment: the first projected
   # acceptance carrying the matching request id is enriched with it — redacted like
@@ -1063,7 +1268,7 @@ defmodule Ouroboros.Interactive.Task do
       {^request_id, prompt} ->
         {%{
            event
-           | payload: Map.put(event.payload, "text", Jido.Harness.Redaction.redact(prompt))
+           | payload: Map.put(event.payload, "text", Ouroboros.Redaction.redact(prompt))
          }, List.keydelete(pending, request_id, 0)}
 
       nil ->
@@ -1095,19 +1300,6 @@ defmodule Ouroboros.Interactive.Task do
   defp turn_prompt(%{"prompt" => prompt}) when is_binary(prompt), do: prompt
   defp turn_prompt(_input), do: nil
 
-  defp refresh_session(runtime) do
-    case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
-      {:ok, %SessionInfo{} = info} ->
-        refresh_session(runtime, info)
-
-      {:error, :not_found} ->
-        Resume.resume_or_lose(runtime, :harness_session_not_found)
-
-      {:error, reason} ->
-        retry(runtime, :harness_session_info_failed, reason)
-    end
-  end
-
   defp refresh_session(runtime, %SessionInfo{} = info) do
     runtime = runtime |> clear_retry() |> collect_turn_results()
 
@@ -1124,10 +1316,10 @@ defmodule Ouroboros.Interactive.Task do
   defp callee_gone?({:shutdown, _reason}), do: true
   defp callee_gone?(_reason), do: false
 
-  defp harness_session_present?(runtime) do
+  defp runtime_present?(runtime) do
     match?(
       {:ok, %SessionInfo{}},
-      safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end)
+      safe_session_call(fn -> Session.info(runtime.session.runtime_id) end)
     )
   end
 
@@ -1137,14 +1329,14 @@ defmodule Ouroboros.Interactive.Task do
         State.terminal_turn?(turn) and not is_nil(turn.result) ->
           runtime
 
-        not is_binary(turn.harness_turn_id) ->
+        not is_binary(turn.runtime_turn_id) ->
           runtime
 
         true ->
           case safe_session_call(fn ->
-                 Session.await(runtime.session.harness_session_id, turn.harness_turn_id, 0)
+                 Session.turn_result(runtime.session.runtime_id, turn.runtime_turn_id)
                end) do
-            {:ok, %TurnResult{} = result} ->
+            {:ok, result} when is_map(result) ->
               # A turn result becomes readable in the same provider transition that
               # appends the turn's terminal event, so a result read here can be newer
               # than the mirrored event log. Finishing now would reply to an awaiter
@@ -1162,33 +1354,33 @@ defmodule Ouroboros.Interactive.Task do
             # for a session that is no longer there. Only the first is a fact about the
             # turn. If the session itself has gone, the diagnosis belongs to
             # `refresh_session`, which resumes or loses it; relabelling every in-flight
-            # turn here would pre-empt that decision with a sentence about a Harness
+            # turn here would pre-empt that decision with a sentence about a runtime
             # session rather than about what happened to the work.
             {:error, :not_found} ->
-              if harness_session_present?(runtime),
-                do: Turns.mark_turn_ambiguous(runtime, turn.id, :harness_turn_not_found),
+              if runtime_present?(runtime),
+                do: Turns.mark_turn_ambiguous(runtime, turn.id, :runtime_turn_not_found),
                 else: runtime
 
             # The same fact as `:not_found`, arriving one message earlier. The session
-            # answered this poll's `info` and died before the `await` reached it, so the
+            # answered this drain's `info` and died before the `await` reached it, so the
             # call exits with the reason the session died with rather than answering.
             # (`SessionManager.call/2` reads only `:noproc` as `:not_found`; a session
             # killed *during* the call is not `:noproc`.) Marking the turn from that exit
-            # would give it a sentence about a killed call that the loss diagnosed a poll
+            # would give it a sentence about a killed call that the loss diagnosed a drain
             # later could no longer replace — `:ambiguous` is terminal — so the diagnosis
             # is left to `refresh_session` exactly as it is for `:not_found`.
-            {:error, {:harness_call_exit, exit_reason} = reason} ->
-              if callee_gone?(exit_reason) and not harness_session_present?(runtime),
+            {:error, {:session_call_exit, exit_reason} = reason} ->
+              if callee_gone?(exit_reason) and not runtime_present?(runtime),
                 do: runtime,
                 else:
                   Turns.mark_turn_ambiguous(
                     runtime,
                     turn.id,
-                    {:harness_turn_await_failed, reason}
+                    {:runtime_turn_await_failed, reason}
                   )
 
             {:error, reason} ->
-              Turns.mark_turn_ambiguous(runtime, turn.id, {:harness_turn_await_failed, reason})
+              Turns.mark_turn_ambiguous(runtime, turn.id, {:runtime_turn_await_failed, reason})
           end
       end
     end)
@@ -1197,16 +1389,16 @@ defmodule Ouroboros.Interactive.Task do
   # Read the provider's cursor high-water mark *after* the result: whatever the
   # provider had emitted when the result existed is included in it, so a mirror that
   # has reached it has already checkpointed the turn's terminal event. Anything still
-  # missing is drained by the next poll, and a pruned event still advances the cursor,
+  # missing is drained by the next drain, and a pruned event still advances the cursor,
   # so this defers a turn at most until the mirror catches up. An unreachable session
   # fails open — `refresh_session` owns that diagnosis.
   defp mirrored_through_result?(runtime) do
-    case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
+    case safe_session_call(fn -> Session.info(runtime.session.runtime_id) end) do
       {:ok, %SessionInfo{output_cursor: output_cursor}} ->
-        harness_cursor(runtime.session) >= output_cursor
+        runtime_cursor(runtime.session) >= output_cursor
 
       _unavailable ->
-        true
+        false
     end
   end
 
@@ -1231,7 +1423,7 @@ defmodule Ouroboros.Interactive.Task do
       # A resolution whose checkpoint failed has not happened. Retry rather than
       # close the session over a turn the store never accepted as settled.
       if unresolved_result_turns?(runtime.session) do
-        schedule_poll(runtime, @poll_interval)
+        schedule_reconcile(runtime, @checkpoint_retry_ms)
       else
         persist_session_info(runtime, info)
       end
@@ -1296,11 +1488,11 @@ defmodule Ouroboros.Interactive.Task do
           |> reply_all_terminal_turn_waiters()
           |> schedule_retire()
         else
-          schedule_next_poll(runtime)
+          await_output(runtime)
         end
 
       {:error, runtime} ->
-        schedule_poll(runtime, @poll_interval)
+        schedule_reconcile(runtime, @checkpoint_retry_ms)
     end
   end
 
@@ -1326,7 +1518,7 @@ defmodule Ouroboros.Interactive.Task do
             {:error, runtime} ->
               # Never dispatch under a policy the durable same-id fingerprint does not
               # describe. Once storage is writable, the exact same recovery path retries
-              # the migration before it can cross into Harness.
+              # the migration before it can cross into runtime.
               {:retry, runtime, :checkpointed_turn_policy_migration_failed, :storage_error}
           end
         else
@@ -1399,7 +1591,7 @@ defmodule Ouroboros.Interactive.Task do
 
   defp unresolved_result_turns?(session) do
     Enum.any?(session.turns, fn {_id, turn} ->
-      is_binary(turn.harness_turn_id) and turn.status in [:queued, :running, :finishing]
+      is_binary(turn.runtime_turn_id) and turn.status in [:queued, :running, :finishing]
     end)
   end
 
@@ -1431,7 +1623,7 @@ defmodule Ouroboros.Interactive.Task do
     known =
       session.turns
       |> Map.values()
-      |> Enum.map(& &1.harness_turn_id)
+      |> Enum.map(& &1.runtime_turn_id)
       |> Enum.filter(&is_binary/1)
       |> MapSet.new()
 
@@ -1443,40 +1635,41 @@ defmodule Ouroboros.Interactive.Task do
       |> Enum.uniq()
       |> Enum.reject(&MapSet.member?(known, &1))
 
-    dispatching =
-      session.turns
-      |> Map.values()
-      |> Enum.filter(&(&1.status == :dispatching and is_nil(&1.harness_turn_id)))
-      |> Enum.sort_by(& &1.created_at)
-
+    # The owned runtime accepts the durable client turn ID verbatim. A delayed
+    # acknowledgement can therefore settle an ambiguous dispatch by exact identity.
+    # Arrival order cannot identify a request: an older timed-out admission may arrive
+    # while an unrelated newer intent is checkpointed. Legacy correlations already
+    # recorded in runtime_turn_id remain in `known`; unmatched output stays explicit.
     {session, remaining_ids} =
-      Enum.reduce(dispatching, {session, unknown_ids}, fn
-        turn, {session, [harness_turn_id | rest]} ->
-          status = status_for_harness_turn(events, harness_turn_id, turn.mode)
+      Enum.reduce(unknown_ids, {session, []}, fn runtime_turn_id, {session, remaining} ->
+        case Map.get(session.turns, runtime_turn_id) do
+          %{runtime_turn_id: nil, status: status} = turn
+          when status in [:dispatching, :ambiguous] ->
+            turn =
+              turn
+              |> Map.put(:runtime_turn_id, runtime_turn_id)
+              |> Map.put(:status, status_for_runtime_turn(events, runtime_turn_id, turn.mode))
+              |> Map.put(:error, nil)
+              |> State.touch_turn()
 
-          turn =
-            turn
-            |> Map.put(:harness_turn_id, harness_turn_id)
-            |> Map.put(:status, status)
-            |> State.touch_turn()
+            {put_in(session.turns[turn.id], turn), remaining}
 
-          {put_in(session.turns[turn.id], turn), rest}
-
-        _turn, {session, []} ->
-          {session, []}
+          _ ->
+            {session, [runtime_turn_id | remaining]}
+        end
       end)
 
-    Enum.reduce(remaining_ids, session, fn harness_turn_id, session ->
-      id = "recovered:" <> harness_turn_id
+    Enum.reduce(Enum.reverse(remaining_ids), session, fn runtime_turn_id, session ->
+      id = "recovered:" <> runtime_turn_id
       now = DateTime.utc_now() |> DateTime.to_iso8601()
 
       recovered = %{
         id: id,
         mode: :follow_up,
-        fingerprint: State.fingerprint(:follow_up, %{harness_turn_id: harness_turn_id}),
+        fingerprint: State.fingerprint(:follow_up, %{runtime_turn_id: runtime_turn_id}),
         request: %{},
-        harness_turn_id: harness_turn_id,
-        status: status_for_harness_turn(events, harness_turn_id, :follow_up),
+        runtime_turn_id: runtime_turn_id,
+        status: status_for_runtime_turn(events, runtime_turn_id, :follow_up),
         result: nil,
         error: :recovered_without_request_checkpoint,
         created_at: now,
@@ -1489,7 +1682,7 @@ defmodule Ouroboros.Interactive.Task do
 
   defp apply_turn_event_statuses(session, events) do
     Enum.reduce(events, session, fn event, session ->
-      case find_turn_by_harness_id(session, event.turn_id) do
+      case find_turn_by_runtime_id(session, event.turn_id) do
         nil ->
           session
 
@@ -1507,8 +1700,8 @@ defmodule Ouroboros.Interactive.Task do
     end)
   end
 
-  defp status_for_harness_turn(events, harness_turn_id, mode) do
-    types = events |> Enum.filter(&(&1.turn_id == harness_turn_id)) |> Enum.map(& &1.type)
+  defp status_for_runtime_turn(events, runtime_turn_id, mode) do
+    types = events |> Enum.filter(&(&1.turn_id == runtime_turn_id)) |> Enum.map(& &1.type)
 
     cond do
       Enum.any?(types, &(&1 in [:turn_completed, :turn_failed, :turn_interrupted])) -> :finishing
@@ -1518,26 +1711,26 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp find_turn_by_harness_id(_session, nil), do: nil
+  defp find_turn_by_runtime_id(_session, nil), do: nil
 
-  defp find_turn_by_harness_id(session, harness_turn_id) do
+  defp find_turn_by_runtime_id(session, runtime_turn_id) do
     Enum.find_value(session.turns, fn {_id, turn} ->
-      if turn.harness_turn_id == harness_turn_id, do: turn
+      if turn.runtime_turn_id == runtime_turn_id, do: turn
     end)
   end
 
-  defp harness_turn_id(_session, :active), do: {:ok, :active}
+  defp runtime_turn_id(_session, :active), do: {:ok, :active}
 
-  defp harness_turn_id(session, id) when is_binary(id) do
+  defp runtime_turn_id(session, id) when is_binary(id) do
     case Map.fetch(session.turns, id) do
-      {:ok, %{harness_turn_id: harness_turn_id}} when is_binary(harness_turn_id) ->
-        {:ok, harness_turn_id}
+      {:ok, %{runtime_turn_id: runtime_turn_id}} when is_binary(runtime_turn_id) ->
+        {:ok, runtime_turn_id}
 
       {:ok, _turn} ->
         {:error, :turn_not_dispatched}
 
       :error ->
-        if Enum.any?(session.turns, fn {_id, turn} -> turn.harness_turn_id == id end),
+        if Enum.any?(session.turns, fn {_id, turn} -> turn.runtime_turn_id == id end),
           do: {:ok, id},
           else: {:error, :not_found}
     end
@@ -1555,7 +1748,7 @@ defmodule Ouroboros.Interactive.Task do
         runtime |> release_workspace() |> reply_ready_waiters() |> schedule_retire()
 
       {:error, runtime} ->
-        schedule_poll(runtime, @poll_interval)
+        schedule_reconcile(runtime, @checkpoint_retry_ms)
     end
   end
 
@@ -1580,7 +1773,7 @@ defmodule Ouroboros.Interactive.Task do
 
   # Mid-session configuration, in the order that keeps the two records honest.
   #
-  # The provider is told first. `Jido.Harness.Session.configure/2` is a synchronous call
+  # The provider is told first. `Session.configure/2` is a synchronous call
   # whose answer is unambiguous — unlike a turn dispatch, nothing here can have half
   # happened — so a refusal leaves both the provider and the checkpoint on the old
   # options, which is the only outcome where "nothing changed" is true.
@@ -1594,9 +1787,9 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) do
       {:error, {:session_not_configurable, session.status}, runtime}
     else
-      # B2. `plan` is not a Harness configuration field: it mutates a different live
+      # B2. `plan` is not a runtime configuration field: it mutates a different live
       # surface. One call may target exactly one surface, because no transaction spans the
-      # native session's plan posture and Harness configuration. Refusing a mixed request
+      # native session's plan posture and runtime configuration. Refusing a mixed request
       # before the first mutation is the only outcome in which an error can still mean
       # "nothing changed".
       {plan, rest} = Map.pop(changes, :plan)
@@ -1654,7 +1847,7 @@ defmodule Ouroboros.Interactive.Task do
   # `provider_options: %{plan: true}`.
   defp apply_plan(%{session: session}, planning?) when is_boolean(planning?) do
     with {:ok, pid} <- native_transport(session, :plan) do
-      case safe_session_call(fn -> NativeSession.plan_mode(pid, planning?) end) do
+      case safe_session_call(fn -> Session.plan_mode(pid, planning?) end) do
         :ok -> :ok
         {:ok, _state} -> :ok
         {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
@@ -1664,7 +1857,7 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp apply_configuration(runtime, changes) do
-    case with_harness_session(runtime, &Session.configure(&1, changes)) do
+    case with_runtime(runtime, &Session.configure(&1, changes)) do
       :ok -> :ok
       {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
       other -> {:error, {:configure_refused, durable(other)}}
@@ -1677,7 +1870,7 @@ defmodule Ouroboros.Interactive.Task do
   # fact about the transport that a footer has to be able to state rather than imply.
   #
   # `sequence_offset` climbs with the cursor for exactly the reason it exists: the next
-  # poll asks Harness for events after `cursor - offset`, and moving one without the
+  # drain asks the runtime for events after `runtime_cursor`, and moving one without the
   # other would either skip a provider event or collide with it.
   defp record_configuration(runtime, changes, applies) do
     session = runtime.session
@@ -1693,7 +1886,7 @@ defmodule Ouroboros.Interactive.Task do
           "applies" => Atom.to_string(applies),
           "changed" => Map.new(changes, fn {key, value} -> {Atom.to_string(key), value} end)
         },
-        harness_session_id: session.harness_session_id,
+        harness_session_id: session.runtime_id,
         provider: session.provider,
         provider_session_id: session.provider_session_id
       )
@@ -1751,11 +1944,11 @@ defmodule Ouroboros.Interactive.Task do
   # left to answer is liveness: `native_transport_unavailable` means the verb exists, the
   # session has not opened its transport yet or it has gone away, and retrying is sensible.
   defp native_transport(%State{} = session, verb) do
-    case NativeSession.whereis(session.provider_session_id || "") do
-      pid when is_pid(pid) ->
-        {:ok, pid}
+    case safe_session_call(fn -> Session.info(session.runtime_id) end) do
+      {:ok, _info} ->
+        {:ok, session.runtime_id}
 
-      nil ->
+      _unavailable ->
         {:error,
          {:native_transport_unavailable,
           %{
@@ -1809,7 +2002,7 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp compact_native(pid, focus) do
-    case safe_session_call(fn -> NativeSession.compact(pid, focus) end) do
+    case safe_session_call(fn -> Session.compact(pid, focus) end) do
       {:ok, report} when is_map(report) -> {:ok, durable(report)}
       {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
       other -> {:error, {:compaction_refused, durable(other)}}
@@ -1842,7 +2035,7 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp native_context(pid) do
-    case safe_session_call(fn -> NativeSession.info(pid) end) do
+    case safe_session_call(fn -> Session.context_info(pid) end) do
       {:ok, info} when is_map(info) ->
         %{
           source: :native,
@@ -1889,7 +2082,7 @@ defmodule Ouroboros.Interactive.Task do
   # caller-owned id a real reconciliation key: a retry reuses the packet's provider
   # session id instead of writing a second packet and conflicting with the first child.
   # `open_child: false` remains load-bearing — a transport process opened here would
-  # inherit this session's harness owner and could rename the parent.
+  # inherit this session's runtime owner and could rename the parent.
   defp handoff_plan(runtime, prompt, id) do
     session = runtime.session
 
@@ -1903,7 +2096,7 @@ defmodule Ouroboros.Interactive.Task do
           with {:ok, pid} <- native_transport(session, :handoff),
                {:ok, result} <-
                  safe_session_call(fn ->
-                   NativeSession.handoff(pid, prompt, open_child: false)
+                   Session.handoff(pid, prompt, open_child: false)
                  end),
                opts = handoff_start_options(session, id, result.provider_session_id),
                {:ok, opts} <- reserve_handoff(session, opts) do
@@ -2090,13 +2283,13 @@ defmodule Ouroboros.Interactive.Task do
     delay = runtime.retry.delay
 
     if repeat? do
-      schedule_poll(runtime, delay)
+      schedule_reconcile(runtime, delay)
     else
       session = runtime.session |> Map.put(:error, error) |> State.touch()
 
       case persist(runtime, session, []) do
-        {:ok, runtime} -> schedule_poll(runtime, delay)
-        {:error, runtime} -> schedule_poll(runtime, delay)
+        {:ok, runtime} -> schedule_reconcile(runtime, delay)
+        {:error, runtime} -> schedule_reconcile(runtime, delay)
       end
     end
   end
@@ -2105,7 +2298,9 @@ defmodule Ouroboros.Interactive.Task do
     repeat? = retry.count > 0 and retry.signature == signature
 
     delay =
-      if retry.count == 0, do: @poll_interval, else: min(retry.delay * 2, @retry_backoff_max_ms)
+      if retry.count == 0,
+        do: @checkpoint_retry_ms,
+        else: min(retry.delay * 2, @retry_backoff_max_ms)
 
     {repeat?, %{runtime | retry: %{signature: signature, count: retry.count + 1, delay: delay}}}
   end
@@ -2137,11 +2332,8 @@ defmodule Ouroboros.Interactive.Task do
 
     case Store.put(session) do
       :ok ->
-        Enum.each(runtime.subscribers, fn {pid, _monitor} ->
-          Enum.each(events, &send(pid, {:ouroboros_interactive_event, session.id, &1}))
-        end)
-
-        {:ok, %{runtime | session: session}}
+        runtime = broadcast_checkpointed(%{runtime | session: session}, events)
+        {:ok, runtime}
 
       # A refused checkpoint is not a storage outage. Polling cannot make a session the
       # store will not accept acceptable, and the old shared retry path left exactly that
@@ -2152,6 +2344,38 @@ defmodule Ouroboros.Interactive.Task do
       {:error, _reason} ->
         {:error, runtime}
     end
+  end
+
+  # A slow consumer gets one resync signal and is detached. History remains durable;
+  # a subscriber cannot turn bounded runtime delivery into an unbounded mailbox.
+  defp broadcast_checkpointed(runtime, []), do: runtime
+
+  defp broadcast_checkpointed(runtime, events) do
+    Enum.reduce(runtime.subscribers, runtime, fn {pid, _monitor}, runtime ->
+      queued = subscriber_queue(pid)
+
+      if is_integer(queued) and queued + length(events) <= @max_subscriber_messages do
+        Enum.each(events, &send(pid, {:ouroboros_interactive_event, runtime.session.id, &1}))
+        runtime
+      else
+        send(pid, {:ouroboros_interactive_resync, runtime.session.id, runtime.session.cursor})
+        drop_subscriber(runtime, pid)
+      end
+    end)
+  end
+
+  defp subscriber_queue(pid) do
+    result =
+      if node(pid) == node(),
+        do: Process.info(pid, :message_queue_len),
+        else: :erpc.call(node(pid), Process, :info, [pid, :message_queue_len], 1_000)
+
+    case result do
+      {:message_queue_len, count} -> count
+      _ -> nil
+    end
+  catch
+    _, _ -> nil
   end
 
   defp abandon(%{session: session} = runtime, _rejected) do
@@ -2206,9 +2430,9 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   # A runtime-native event on the session's own log. `sequence_offset` moves with the
-  # cursor because it *is* the distance between the two number spaces: an event no Harness
-  # log contains widens that distance by exactly one, and `harness_cursor/1` has to go on
-  # pointing at the same Harness row or the next poll would skip one.
+  # cursor because it *is* the distance between the two number spaces: an event no runtime
+  # log contains widens that distance by exactly one, and `runtime_cursor/1` has to go on
+  # pointing at the same runtime row or the next drain would skip one.
   def emit_runtime_event(runtime, type, payload, fields) do
     session = runtime.session
     sequence = session.cursor + 1
@@ -2246,26 +2470,26 @@ defmodule Ouroboros.Interactive.Task do
 
   defp ready?(%State{status: status}), do: status in [:idle, :running, :awaiting_approval]
 
-  def with_harness_session(%{session: %State{harness_session_id: nil}}, _fun),
+  def with_runtime(%{session: %State{runtime_id: nil}}, _fun),
     do: {:error, :session_not_started}
 
-  def with_harness_session(runtime, fun) do
-    safe_session_call(fn -> fun.(runtime.session.harness_session_id) end)
+  def with_runtime(runtime, fun) do
+    safe_session_call(fn -> fun.(runtime.session.runtime_id) end)
   end
 
   # Everything that lands in durable session state goes through here. Redaction removes
-  # secrets; it leaves runtime authority alone, and a harness call exit reason carries
+  # secrets; it leaves runtime authority alone, and a runtime call exit reason carries
   # the pid it was calling. The store refuses such a checkpoint on every attempt, so a
   # session that wrote one used to retry that refusal for the rest of its life.
-  def durable(term), do: term |> Jido.Harness.Redaction.redact() |> State.durable_term()
+  def durable(term), do: term |> Ouroboros.Redaction.redact() |> State.durable_term()
 
   def safe_session_call(fun) do
     try do
       fun.()
     rescue
-      error -> {:error, {:harness_call_exception, error.__struct__, Exception.message(error)}}
+      error -> {:error, {:session_call_exception, error.__struct__, Exception.message(error)}}
     catch
-      :exit, reason -> {:error, {:harness_call_exit, reason}}
+      :exit, reason -> {:error, {:session_call_exit, reason}}
     end
   end
 
@@ -2441,56 +2665,13 @@ defmodule Ouroboros.Interactive.Task do
     %{runtime | ready_waiters: waiters}
   end
 
-  # A zero delay is this coordinator's existing vocabulary for "something just happened, or
-  # is about to — look now": it is what every verb that reaches a provider already passes.
-  # So it is also exactly the right place to reset the cadence. Nothing had to be taught a
-  # new list of triggers; the call sites that predict events were already marked.
-  def schedule_poll(runtime, 0) do
-    runtime
-    |> reset_cadence()
-    |> Timer.schedule(:poll_timer, :poll, 0)
+  # No periodic active or idle poll. Work, notifications and monitor failures ask
+  # for one reconciliation; only failed checkpoints and unavailable owners retry.
+  def schedule_reconcile(runtime, delay) do
+    Timer.schedule(runtime, :reconcile_timer, :reconcile_output, delay)
   end
 
-  # A non-zero delay is an error path's own backoff (`retry/3`) or a checkpoint that has to
-  # be tried again. Those own their timing; the cadence is left where it was.
-  def schedule_poll(runtime, delay) do
-    Timer.schedule(runtime, :poll_timer, :poll, delay)
-  end
-
-  # The steady-state loop, and the only site that decays. Reached once per poll that found
-  # nothing to drain and checkpointed a live session, so the cadence advances exactly once
-  # per wakeup — never twice, and never from two chains at once, which is what
-  # `Ouroboros.Poll.Timer` is there to guarantee.
-  defp schedule_next_poll(runtime) do
-    cadence = Cadence.advance(runtime.cadence, poll_idle?(runtime))
-
-    %{runtime | cadence: cadence}
-    |> Timer.schedule(:poll_timer, :poll, Cadence.interval(cadence))
-  end
-
-  def reset_cadence(runtime), do: %{runtime | cadence: Cadence.busy(runtime.cadence)}
-
-  # Idle is not "quiet for a while" — it is a positive statement the Harness session just
-  # made about itself in the checkpoint that landed a line ago: the session is `:idle`, so
-  # there is no active turn and nothing queued behind it. The rest of the conjunction is
-  # this coordinator's own unfinished business, each item something that will produce an
-  # event without anybody asking: an approval a human still owes an answer to, a dispatch
-  # whose outcome is unknown, a turn that has not reached a terminal status, a retry
-  # counting down. Any of them, and the session is polled at the fast interval.
-  defp poll_idle?(runtime) do
-    session = runtime.session
-
-    session.status == :idle and
-      runtime.retry.count == 0 and
-      map_size(runtime.external_approvals) == 0 and
-      Turns.unresolved_dispatches(session) == [] and
-      Enum.all?(session.turns, fn {_id, turn} -> State.terminal_turn?(turn) end)
-  end
-
-  @doc false
-  # A test seam, and deliberately the whole of one: the interval is a pure function of the
-  # cadence struct, so a test can assert the policy decayed without measuring a clock.
-  def poll_interval_ms(runtime), do: Cadence.interval(runtime.cadence)
+  defp await_output(runtime), do: runtime
 
   def schedule_retire(runtime),
     do: Timer.schedule(runtime, :retire_timer, :retire, @terminal_retire_ms)

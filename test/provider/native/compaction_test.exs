@@ -3,12 +3,12 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Provider.Native.Context.Archive
   alias Ouroboros.Provider.Native.Context.Compaction
   alias Ouroboros.Provider.Native.Context.Window
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -557,7 +557,7 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
 
@@ -573,11 +573,11 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
 
   defp await_terminal(acc \\ []) do
     receive do
-      {:session_adapter_event, %{type: type} = event}
+      {:native_test_event, %{type: type} = event}
       when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
         Enum.reverse([event | acc])
 
-      {:session_adapter_event, event} ->
+      {:native_test_event, event} ->
         await_terminal([event | acc])
     after
       15_000 -> flunk("no terminal turn event; got #{inspect(Enum.map(acc, & &1.type))}")
@@ -586,10 +586,10 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
 
   defp await_provider_event(kind, acc \\ []) do
     receive do
-      {:session_adapter_event, %{type: :provider_event, payload: %{"kind" => ^kind}} = event} ->
+      {:native_test_event, %{type: :provider_event, payload: %{"kind" => ^kind}} = event} ->
         event
 
-      {:session_adapter_event, event} ->
+      {:native_test_event, event} ->
         await_provider_event(kind, [event.type | acc])
     after
       5_000 -> flunk("no #{kind} provider event; saw #{inspect(Enum.reverse(acc))}")
@@ -598,7 +598,7 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
 
   defp drain do
     receive do
-      {:session_adapter_event, _event} -> drain()
+      {:native_test_event, _event} -> drain()
     after
       0 -> :ok
     end

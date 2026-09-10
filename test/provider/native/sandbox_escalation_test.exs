@@ -21,7 +21,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Sandbox
@@ -590,7 +590,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
   # The loop tests above drive the loop process directly. This one goes through the real
   # session transport, because that is where the approval *lifecycle* lives: the session
   # tracks the request id off the `approval_requested` event, `respond_approval/3` refuses
-  # an id it is not holding, and `Jido.Harness.Session.Lifecycle` auto-denies an approval
+  # an id it is not holding, and `Ouroboros.Test.NativeSessionFixture.Lifecycle` auto-denies an approval
   # raised for a turn that is no longer active. An escalation is raised mid-turn, before
   # any terminal event, so it must route like an ordinary tool approval does.
   describe "through the session transport" do
@@ -617,7 +617,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       {model_spec, _agent} = NativeModelScript.start(escape_script(context))
 
       request =
-        Jido.Harness.SessionRequest.new!(%{
+        Ouroboros.Session.Request.new!(%{
           provider: :native,
           cwd: context.workspace,
           model: model_spec,
@@ -626,25 +626,25 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
         })
 
       {:ok, handle} =
-        Ouroboros.Provider.Native.Session.open(request, %{
+        Ouroboros.Test.NativeSessionFixture.open(request, %{
           session_id: "sess-escalate-transport",
           provider: :native,
           owner: self(),
           adapter: Ouroboros.Provider.Native,
           config: %{},
-          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          process_manager: Ouroboros.Provider.Native.ProcessSignal,
           telemetry_context: %{}
         })
 
       on_exit(fn ->
-        if Process.alive?(handle), do: Ouroboros.Provider.Native.Session.close(handle)
+        if Process.alive?(handle), do: Ouroboros.Test.NativeSessionFixture.close(handle)
       end)
 
-      assert_receive {:session_adapter_event, %{type: :provider_event}}, 10_000
+      assert_receive {:native_test_event, %{type: :provider_event}}, 10_000
 
-      Ouroboros.Provider.Native.Session.send(
+      Ouroboros.Test.NativeSessionFixture.send(
         handle,
-        Jido.Harness.TurnRequest.new!("escape"),
+        Ouroboros.Session.TurnRequest.new!("escape"),
         "turn-1"
       )
 
@@ -655,14 +655,14 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       # holding meaningful: the escalation was tracked off its own `approval_requested`
       # event like any other approval, not admitted because something answered.
       assert {:error, :unknown_request} =
-               Ouroboros.Provider.Native.Session.respond_approval(
+               Ouroboros.Test.NativeSessionFixture.respond_approval(
                  handle,
                  "napp_not_a_real_request",
                  %ApprovalResponse{decision: :approve, scope: :once}
                )
 
       assert :ok =
-               Ouroboros.Provider.Native.Session.respond_approval(
+               Ouroboros.Test.NativeSessionFixture.respond_approval(
                  handle,
                  ask.request_id,
                  %ApprovalResponse{
@@ -678,8 +678,8 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
   defp await_session_event(type) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> event
-      {:session_adapter_event, _other} -> await_session_event(type)
+      {:native_test_event, %{type: ^type} = event} -> event
+      {:native_test_event, _other} -> await_session_event(type)
     after
       20_000 -> flunk("no #{type} within 20s")
     end

@@ -25,7 +25,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
       do: {:reply, :ok, %{state | request: Map.merge(state.request, changes)}}
 
     def handle_call({:session, session}, _, state),
-      do: {:reply, :ok, Map.put(state, :session, session)}
+      do: attach_session(session, state)
 
     def handle_call(:session, _, state), do: {:reply, state[:session], state}
 
@@ -34,12 +34,39 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
       {:noreply, state}
     end
 
+    def handle_info({:session_output, _runtime, _generation, _cursor}, state),
+      do: {:noreply, drain_session(state)}
+
     def handle_info(_event, state), do: {:noreply, state}
 
     def handle_cast({:subagent_bridge_event, event}, state) do
       send(state.test, {:bridge_event, event})
       {:noreply, state}
     end
+
+    defp attach_session(session, state) do
+      {:ok, attachment, _info} = Ouroboros.Session.attach(session, self(), 0)
+      state = Map.merge(state, %{session: session, attachment: attachment, cursor: 0, events: []})
+      {:reply, :ok, drain_session(state)}
+    end
+
+    defp drain_session(%{attachment: attachment, cursor: cursor} = state) do
+      case Ouroboros.Session.drain(attachment, cursor, 500) do
+        {:ok, [], _} ->
+          state
+
+        {:ok, events, _} ->
+          cursor = List.last(events).sequence
+          updated = %{state | cursor: cursor, events: state.events ++ events}
+          :ok = Ouroboros.Session.ack(attachment, cursor)
+          updated
+
+        {:error, :not_found} ->
+          state
+      end
+    end
+
+    defp drain_session(state), do: state
   end
 
   setup do
@@ -98,27 +125,23 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
         opts
       )
 
-    {:ok, request} = Jido.Harness.SessionRequest.new(attrs)
+    {:ok, request} = Ouroboros.Session.Request.new(attrs)
     {:ok, pid} = Owner.start_link({id, self(), request})
 
-    {:ok, session} =
-      Ouroboros.Provider.Native.Session.open(request, %{
-        session_id: id,
-        provider: :native,
-        owner: pid,
-        adapter: Ouroboros.Provider.Native.Session,
-        config: %{},
-        process_manager: Jido.Harness.ProcessManager,
-        telemetry_context: %{}
-      })
+    {:ok, runtime_id} = Ouroboros.Session.open(id, request)
+    {:ok, runtime} = Ouroboros.Session.info(runtime_id)
+    session = runtime.pid
 
-    provider_session_id = :sys.get_state(session).provider_session_id
+    provider_session_id = runtime.provider_session_id
     :ok = GenServer.call(pid, {:configure, %{provider_session_id: provider_session_id}})
     :ok = GenServer.call(pid, {:session, session})
 
     on_exit(fn ->
       SubagentBridge.close(pid)
-      if Process.alive?(session), do: Ouroboros.Provider.Native.Session.close(session)
+
+      if Process.alive?(session),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, session)
+
       if Process.alive?(pid), do: GenServer.stop(pid)
     end)
 
@@ -127,7 +150,8 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
 
   test "gateway spawn retries reuse one child, collection is scoped, and request IDs cannot change meaning",
        context do
-    {id, _owner} = owner(context)
+    {id, owner} = owner(context)
+    {:ok, runtime} = owner |> GenServer.call(:session) |> Ouroboros.Session.info()
 
     params = %{
       "id" => id,
@@ -173,7 +197,10 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     assert NativeModelScript.call_count(context.script) == 1
 
     assert {:ok, entries} =
-             Ouroboros.Agent.EffectLedger.list(principal: "session:" <> id, effect: :tool_call)
+             Ouroboros.Agent.EffectLedger.list(
+               principal: "session:" <> runtime.runtime_id,
+               effect: :tool_call
+             )
 
     assert Enum.any?(entries, &(&1.attempt.tool == "agent"))
   end
@@ -195,7 +222,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
   end
 
   test "a planning parent cannot spawn a child", context do
-    {id, _owner} = owner(context, %{provider_options: %{plan: true}})
+    {id, _owner} = owner(context, %{plan: true})
 
     assert {:ok, %{is_error: true, output: planning}} =
              SubagentBridge.call(id, "third", "agent", %{"prompt" => "plan", "background" => true})
@@ -225,7 +252,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     assert NativeModelScript.call_count(context.script) == 0
   end
 
-  test "tool dispatch leaves the owner responsive during approval and terminates its sidecar on owner death",
+  test "tool dispatch leaves the owner responsive and coordinator death removes its bridge while preserving the runtime",
        context do
     {id, owner} = owner(context, %{approval_mode: :prompt})
 
@@ -240,9 +267,12 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     assert {:ok, %{is_error: false}} = Task.await(pending, 10_000)
     [{bridge, _}] = Registry.lookup(Ouroboros.Interactive.Registry, {SubagentBridge, owner})
     session = :sys.get_state(bridge).session
-    monitor = Process.monitor(session)
+    monitor = Process.monitor(bridge)
     GenServer.stop(owner)
-    assert_receive {:DOWN, ^monitor, :process, ^session, _}, 5_000
+    assert_receive {:DOWN, ^monitor, :process, ^bridge, _}, 5_000
+    assert Process.alive?(session)
+    assert {:ok, info} = Ouroboros.Session.info(session)
+    assert info.logical_id == id
   end
 
   for stop_kind <- [:deadline, :interrupt, :owner] do
@@ -284,7 +314,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
 
       case stop_kind do
         :interrupt ->
-          assert :ok = Ouroboros.Provider.Native.Session.interrupt(session, :active)
+          assert :ok = Ouroboros.Test.NativeSessionFixture.interrupt(session, :active)
           assert {:error, :interrupted} = Task.await(pending, 5_000)
 
         :owner ->

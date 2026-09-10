@@ -1597,7 +1597,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert response.decision == :approve
       assert response.scope == :session
       refute Map.has_key?(response, :actor)
-      # Absent, not empty-and-meaningful: `%{}` is `Jido.Harness.ApprovalResponse`'s own
+      # Absent, not empty-and-meaningful: `%{}` is `Ouroboros.Session.ApprovalResponse`'s own
       # default for the key this answer never set.
       assert response.provider_options == %{}
     end

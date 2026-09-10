@@ -467,6 +467,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
+  def handle_info({:ouroboros_interactive_resync, _id, _cursor}, socket),
+    do: {:noreply, recover_from_mailbox_lag(socket)}
+
   def handle_info(:flush, socket) do
     case resync_if_mailbox_lagged(socket) do
       {:lagged, socket} -> {:noreply, socket}

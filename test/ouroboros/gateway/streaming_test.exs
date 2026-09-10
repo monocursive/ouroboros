@@ -1,16 +1,14 @@
 defmodule Ouroboros.Gateway.StreamingTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.Run
-  alias Jido.Harness.RunInfo
-  alias Jido.Harness.RunRequest
-  alias Jido.Harness.Session
-  alias Jido.Harness.SessionInfo
+  alias Ouroboros.Test.ModelRequest, as: RunRequest
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Gateway
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Listener
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.ControlledModel
 
   @moduletag :tmp_dir
   @moduletag :capture_log
@@ -33,22 +31,12 @@ defmodule Ouroboros.Gateway.StreamingTest do
   setup context do
     File.chmod!(context.tmp_dir, 0o700)
     cleanup_sessions()
-    cleanup_runs()
     cleanup_stores()
 
-    old_providers = Application.get_env(:jido_harness, :providers)
-    old_config = Application.get_env(:jido_harness, :provider_config)
+    old_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
 
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.merge(Map.new(old_providers || %{}), %{@provider => HarnessAdapter})
-    )
-
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
+    Ouroboros.Test.NativeConfig.configure(
       old_config
       |> then(&Map.new(&1 || %{}))
       |> Map.merge(%{@provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}}})
@@ -71,10 +59,8 @@ defmodule Ouroboros.Gateway.StreamingTest do
     on_exit(fn ->
       :gen_tcp.close(client)
       cleanup_sessions()
-      cleanup_runs()
       cleanup_stores()
-      restore_env(:providers, old_providers)
-      restore_env(:provider_config, old_config)
+      Ouroboros.Test.NativeConfig.configure(old_config)
       File.rm_rf(journal_dir)
     end)
 
@@ -95,23 +81,24 @@ defmodule Ouroboros.Gateway.StreamingTest do
       assert Enum.map(backlog, & &1["type"]) == [
                "session_started",
                "session_ready",
-               "session_idle"
+               "session_idle",
+               "provider_event"
              ]
 
-      assert Enum.map(backlog, & &1["sequence"]) == [1, 2, 3]
+      assert Enum.map(backlog, & &1["sequence"]) == [1, 2, 3, 4]
+      assert List.last(backlog)["payload"]["kind"] == "native_ready"
       assert Enum.all?(backlog, &(&1["_struct"] == "Ouroboros.Interactive.Event"))
       assert Enum.all?(backlog, &(&1["session_id"] == id))
 
       adapter = send_message(ref, "look around")
-      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "all quiet"})
+      assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "all quiet"})
+      assert :ok = ControlledModel.finish(adapter)
 
       event = await_event(client, "interactive.event", "output_text_final")
 
       assert event["params"]["id"] == id
       assert event["params"]["event"]["payload"]["text"] == "all quiet"
       assert event["params"]["event"]["sequence"] > 3
-
-      assert :ok = HarnessAdapter.finish(adapter)
     end
 
     test "dispatches the typed turn envelope without breaking string turns", %{client: client} do
@@ -145,14 +132,13 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
       assert response["result"]["id"] == "typed-turn"
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{prompt: prompt},
-                      adapter},
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{prompt: prompt}, adapter},
                      @receive_timeout
 
       assert Ouroboros.Test.Prompt.wrapped?(prompt, "inspect the typed envelope")
 
-      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "typed"})
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "typed"})
+      assert :ok = ControlledModel.finish(adapter)
       assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, "typed-turn", 2_000)
     end
 
@@ -162,7 +148,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       {_ref, id} = start_session()
 
       assert call(client, "interactive.subscribe", %{"id" => id, "cursor" => 2})["result"]
-             |> Enum.map(& &1["sequence"]) == [3]
+             |> Enum.map(& &1["sequence"]) == [3, 4]
     end
 
     test "unsubscribing stops the notifications", %{client: client} do
@@ -172,8 +158,8 @@ defmodule Ouroboros.Gateway.StreamingTest do
       assert call(client, "interactive.unsubscribe", %{"id" => id})["result"] == "ok"
 
       adapter = send_message(ref, "quietly")
-      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "unheard"})
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.emit(adapter, :output_text_final, %{"text" => "unheard"})
+      assert :ok = ControlledModel.finish(adapter)
 
       # A round trip after the emission: if a notification were coming it would be ahead
       # of this response in the socket, because one connection has one writer.
@@ -349,7 +335,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
              )
 
       adapter = send_message(ref, "change a file")
-      assert :ok = HarnessAdapter.emit(adapter, :file_change, %{"diff" => @diff})
+      assert :ok = ControlledModel.emit(adapter, :file_change, %{"diff" => @diff})
 
       # A 1 MiB read buffer is the assertion: before the cap this frame was five megabytes
       # and `recv` would have failed rather than decoded.
@@ -378,7 +364,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       assert [%{"sequence" => ^sequence} = from_replay] = replayed
       assert from_replay["payload"]["diff"] == event["payload"]["diff"]
 
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.finish(adapter)
       await_ingested(id, 0)
 
       backlog =
@@ -396,7 +382,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
              )
 
       adapter = send_message(ref, "change a file")
-      assert :ok = HarnessAdapter.emit(adapter, :file_change, %{"diff" => @diff})
+      assert :ok = ControlledModel.emit(adapter, :file_change, %{"diff" => @diff})
 
       sequence =
         await_event(client, "interactive.event", "file_change")["params"]["event"]["sequence"]
@@ -418,7 +404,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       # Below `detail_leaf_bytes`, so the leaf arrives as the plane recorded it.
       assert detail["payload"]["diff"] == @diff
 
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.finish(adapter)
     end
 
     test "a sequence the session never reached is not found", %{client: client} do
@@ -497,18 +483,15 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
       for index <- 1..60 do
         assert :ok =
-                 HarnessAdapter.emit(adapter, :output_text_final, %{
+                 ControlledModel.emit(adapter, :output_text_final, %{
                    "text" => "chunk #{index} " <> String.duplicate("x", 512)
                  })
       end
 
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.finish(adapter)
 
-      # `finish` returned when the stub accepted it, not when the plane has the turn:
-      # the coordinator ingests events from the harness on poll ticks, and under load
-      # that replay lags the adapter by whole seconds. The reconciliation below is
-      # answered from the plane's retained history, so the history must hold every
-      # output and the turn's completion before the count is taken. Once it does,
+      # The model consumes emissions asynchronously. Reconciliation is answered from
+      # retained history, so wait for every delta and the turn's completion. Once it does,
       # mailbox order does the rest: each event notification reaches the connection
       # ahead of any writer acknowledgement the resume releases, so every drop is
       # counted before the queue drains and `stream.lagged` is flushed.
@@ -567,12 +550,16 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
       for index <- 1..40 do
         assert :ok =
-                 HarnessAdapter.emit(adapter, :output_text_final, %{
+                 ControlledModel.emit(adapter, :output_text_final, %{
                    "text" => "chunk #{index} " <> String.duplicate("y", 512)
                  })
+
+        # This connection keeps reading while the first writer remains suspended.
+        event = await_event(other, "interactive.event", "output_text_delta", 400)
+        assert event["params"]["event"]["payload"]["text"] =~ "chunk #{index} "
       end
 
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.finish(adapter)
 
       # The healthy connection is unaffected: it receives its events and answers its
       # requests while the other one's queue is overflowing.
@@ -629,12 +616,12 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
       for index <- 1..40 do
         assert :ok =
-                 HarnessAdapter.emit(adapter, :output_text_final, %{
+                 ControlledModel.emit(adapter, :output_text_final, %{
                    "text" => "chunk #{index} " <> String.duplicate("z", 512)
                  })
       end
 
-      assert :ok = HarnessAdapter.finish(adapter)
+      assert :ok = ControlledModel.finish(adapter)
       await_ingested(id, 40)
       await_lagging(client)
 
@@ -701,7 +688,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       client: client
     } do
       {ref, id} = start_session()
-      wait_until_harness_attached(ref)
+      wait_until_runtime_attached(ref)
 
       refused = call(client, "interactive.steer", %{"id" => id, "input" => "too early"})
       assert refused["error"]["code"] == -32006
@@ -730,7 +717,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
   defp send_message(ref, input) do
     assert {:ok, _turn} = InteractiveSession.send_message(ref, input)
 
-    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, @receive_timeout
+    assert_receive {:ouroboros_test_model_started, _run, _request, adapter}, @receive_timeout
 
     adapter
   end
@@ -770,18 +757,18 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   # Session start returns before the coordinator has attached the Harness session; a
   # steer sent in that window is `:session_not_started`, not `:no_active_turn`.
-  defp wait_until_harness_attached(ref, attempts \\ 100)
+  defp wait_until_runtime_attached(ref, attempts \\ 100)
 
-  defp wait_until_harness_attached(_ref, 0), do: flunk("session never attached a provider")
+  defp wait_until_runtime_attached(_ref, 0), do: flunk("session never attached a provider")
 
-  defp wait_until_harness_attached(ref, attempts) do
+  defp wait_until_runtime_attached(ref, attempts) do
     case InteractiveSession.info(ref) do
       {:ok, %{harness_session_id: id}} when is_binary(id) ->
         :ok
 
       _other ->
         Process.sleep(25)
-        wait_until_harness_attached(ref, attempts - 1)
+        wait_until_runtime_attached(ref, attempts - 1)
     end
   end
 
@@ -875,10 +862,8 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  # The harness cleanup is asynchronous from the planes' point of view: a coordinator
-  # only notices its harness session vanished on a poll tick, and until that tick lands
-  # its store record is non-terminal. The stores' ETS belongs to :jido, not :ouroboros,
-  # so such a record outlives this module and every restart of the application — and
+  # Store cleanup waits for the coordinator to persist its terminal state. The stores'
+  # ETS belongs to :jido, so a record can survive a restart of :ouroboros — and
   # ApplicationRecoveryTest boots Workspace.Manager against each non-terminal record it
   # finds, under allowed roots that do not include the workspace these sessions ran in.
   # One leaked record fails that boot and everything after it. So every record is driven
@@ -896,7 +881,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
   end
 
   # Polls the plane's durable record until the whole turn is there: every output the
-  # adapter emitted and the turn's own completion. 1,500 attempts is the same ceiling
+  # model emitted and the turn's own completion. 1,500 attempts is the same ceiling
   # philosophy as @receive_timeout — the wait exits on its condition, and the budget
   # only has to absorb a starved scheduler without flaking.
   defp await_ingested(id, outputs, attempts \\ 1_500)
@@ -906,7 +891,8 @@ defmodule Ouroboros.Gateway.StreamingTest do
     ingested? =
       case Ouroboros.Interactive.Store.get(id) do
         {:ok, session} ->
-          Enum.count(session.events, &(&1.type == :output_text_final)) >= outputs and
+          Enum.count(session.events, &(&1.type == :output_text_delta)) >= outputs and
+            (outputs == 0 or Enum.any?(session.events, &(&1.type == :output_text_final))) and
             Enum.any?(session.turns, fn {_turn_id, turn} ->
               Ouroboros.Interactive.State.terminal_turn?(turn)
             end)
@@ -971,20 +957,9 @@ defmodule Ouroboros.Gateway.StreamingTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
-    end)
-  end
 
-  defp cleanup_runs do
-    @provider
-    |> then(&Run.list(providers: [&1]))
-    |> Enum.each(fn info ->
-      unless RunInfo.terminal?(info) do
-        _ = Run.cancel(info.run_id)
-        _ = Run.await(info.run_id, 1_000)
-      end
-
-      _ = Run.prune(info.run_id)
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   end
 
@@ -994,7 +969,4 @@ defmodule Ouroboros.Gateway.StreamingTest do
       "ouroboros-gateway-stream-#{System.unique_integer([:positive, :monotonic])}"
     )
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_env(key, value), do: Application.put_env(:jido_harness, key, value)
 end

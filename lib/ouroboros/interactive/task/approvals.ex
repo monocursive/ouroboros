@@ -3,7 +3,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
 
   require Logger
 
-  alias Jido.Harness.Session
+  alias Ouroboros.Session
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Interactive.{Event, State}
   alias Ouroboros.Interactive.Task
@@ -104,8 +104,8 @@ defmodule Ouroboros.Interactive.Task.Approvals do
     # answer holds however the provider asked the question.
     decision = if Map.get(response, :decision) == :approve, do: :allow, else: :deny
 
-    # S2's fix wave. `Jido.Harness.ApprovalResponse` has four fields and `:actor` is not one of
-    # them, so a declared non-human actor is dropped at the harness boundary and the native
+    # S2's fix wave. `Ouroboros.Session.ApprovalResponse` has four fields and `:actor` is not one of
+    # them, so a declared non-human actor is dropped at the runtime boundary and the native
     # loop labels every answer `:human`. `provider_options` is the one slot the struct has that
     # survives that trip, and this is where the fact is put into it — one place, so a gateway
     # client and a direct caller of `InteractiveSession.respond_approval/3` are read the same
@@ -114,7 +114,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
     response = declare_actor(response)
 
     runtime =
-      case harness_approval_subject(runtime, request_id) do
+      case runtime_approval_subject(runtime, request_id) do
         :unknown ->
           runtime
 
@@ -134,9 +134,9 @@ defmodule Ouroboros.Interactive.Task.Approvals do
       end
 
     reply =
-      Task.with_harness_session(runtime, &Session.respond_approval(&1, request_id, response))
+      Task.with_runtime(runtime, &Session.respond_approval(&1, request_id, response))
 
-    {reply, Task.schedule_poll(runtime, 0)}
+    {reply, Task.schedule_reconcile(runtime, 0)}
   end
 
   # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
            external_request_payload(runtime, request_id, request, verdict),
            request_id: request_id,
            provider: runtime.session.provider,
-           harness_session_id: runtime.session.harness_session_id,
+           harness_session_id: runtime.session.runtime_id,
            provider_session_id: runtime.session.provider_session_id
          ) do
       # Checkpoint before broadcast, and before the tool. A request that could not be
@@ -305,7 +305,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
     case Task.emit_runtime_event(runtime, :approval_resolved, payload,
            request_id: request_id,
            provider: runtime.session.provider,
-           harness_session_id: runtime.session.harness_session_id,
+           harness_session_id: runtime.session.runtime_id,
            provider_session_id: runtime.session.provider_session_id
          ) do
       {:ok, runtime} ->
@@ -670,7 +670,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # unbounded and untrue. `:unknown` is that case. A session that *is* waiting on an
   # approval whose request event has aged out of the retained window still records, with an
   # empty subject: the answer happened, and only its subject is beyond recall.
-  defp harness_approval_subject(runtime, request_id) do
+  defp runtime_approval_subject(runtime, request_id) do
     case Enum.find(runtime.session.events, fn event ->
            event.type == :approval_requested and event.request_id == request_id
          end) do

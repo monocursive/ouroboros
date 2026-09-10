@@ -1,12 +1,13 @@
 defmodule Ouroboros.ReasoningEffortTest do
   use ExUnit.Case, async: true
 
-  alias Jido.Harness.{SessionRequest, TurnRequest}
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Provider.Native
   alias Ouroboros.ReasoningEffort
 
-  test "the gateway, native adapter, and request bridge share the six-level vocabulary" do
+  test "the gateway, native adapter, and request contract share the six-level vocabulary" do
     atoms = [:none, :low, :medium, :high, :xhigh, :max]
     names = Enum.map(atoms, &Atom.to_string/1)
 
@@ -19,7 +20,7 @@ defmodule Ouroboros.ReasoningEffortTest do
     assert descriptor.type == {:enum, Map.new(Enum.zip(names, atoms))}
   end
 
-  test "session and turn requests retain values the pinned Harness schema does not yet name" do
+  test "session and turn requests retain values the native runtime supports" do
     for effort <- [:none, :xhigh, :max] do
       assert {:ok, %SessionRequest{reasoning_effort: ^effort}} =
                ReasoningEffort.session_request(%{cwd: File.cwd!(), reasoning_effort: effort})
@@ -29,7 +30,7 @@ defmodule Ouroboros.ReasoningEffortTest do
     end
   end
 
-  test "the compatibility seam remains closed to unknown values" do
+  test "the owned vocabulary remains closed to unknown values" do
     assert {:error, :invalid_reasoning_effort} =
              ReasoningEffort.session_request(%{
                cwd: File.cwd!(),

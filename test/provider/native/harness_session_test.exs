@@ -1,19 +1,16 @@
 defmodule Ouroboros.Provider.Native.HarnessSessionTest do
   @moduledoc """
-  The native transport driven the way the runtime actually drives it: through
-  `Jido.Harness.Session`, not by calling the adapter's callbacks directly.
-
-  The unit tests in `session_test.exs` prove the transport answers each callback. This
-  one proves the division of labour is right — that the worker's own `turn_started`,
-  `input_accepted`, `approval_resolved`, and turn bookkeeping compose with the events
-  this provider emits, rather than duplicating or dropping them.
+  The historical session-worker contracts now run through `Ouroboros.Session` and
+  a test consumer that attaches, drains, records, and acknowledges native output.
+  They preserve lifecycle, input, approval, and turn-bookkeeping assertions while
+  the native execution owner produces each runtime fact exactly once.
   """
 
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
 
-  alias Jido.Harness.Session
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   setup do

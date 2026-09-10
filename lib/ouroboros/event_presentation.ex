@@ -599,10 +599,9 @@ defmodule Ouroboros.EventPresentation do
 
   Payloads are **string-keyed**, with one enumerable exception.
 
-  * Everything that becomes a `Jido.Harness.Event` is string-keyed by construction:
-    `Event.new!/1` recursively stringifies payload keys
-    (`deps/jido_harness/lib/jido_harness/event.ex:138-149`), and the schema declares
-    `payload: Zoi.map(Zoi.string(), Zoi.any())` (`event.ex:63`). That is every
+  * Everything that becomes a `Ouroboros.Session.RuntimeEvent` is string-keyed by construction:
+    `RuntimeEvent.new!/1` recursively stringifies payload keys, and the owned schema
+    declares `payload: Zoi.map(Zoi.string(), Zoi.any())`. That is every
     `tool_call`, `tool_result`, `file_change`, `plan_updated`, `usage`,
     `approval_requested`, `provider_event` and lifecycle event.
   * Every runtime-native interactive emitter builds string keys literally —

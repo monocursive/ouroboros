@@ -4,9 +4,16 @@ defmodule Ouroboros.Session.Routing do
   @remote_margin_ms 5_000
   def route(owner, module, function, arguments, timeout \\ :infinity) do
     cond do
-      owner == node() -> apply(module, function, arguments)
-      owner not in Node.list() -> {:error, {:owner_unavailable, owner}}
-      true -> :erpc.call(owner, module, function, arguments, timeout)
+      owner == node() ->
+        apply(module, function, arguments)
+
+      owner not in Node.list() ->
+        {:error, {:owner_unavailable, owner}}
+
+      true ->
+        with :ok <- Ouroboros.Cluster.ensure_placeable(owner) do
+          :erpc.call(owner, module, function, arguments, timeout)
+        end
     end
   catch
     :error, {:erpc, reason} when reason in [:noconnection, :timeout] ->

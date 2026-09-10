@@ -182,15 +182,25 @@ defmodule Ouroboros.Application do
         self_signing_children() ++
         workspace_children() ++
         [
-          # D3/D9. The native transport's own name space, keyed by `provider_session_id`.
-          # `compact`/`handoff`/`context` are not harness callbacks, so the coordinator
-          # has no worker method to reach them through; this is how it finds the process
-          # without reading another supervisor's private state.
-          {Ouroboros.Application.RegistryOwner,
-           keys: :unique, name: Ouroboros.Provider.Native.Registry},
+          # Both failure domains sit below ledger, permissions and admission. A
+          # coordinator restart leaves its native owner alive and registered; an
+          # upstream authority restart stops both domains before replacing authority.
           subtree(
             Ouroboros.Session.Supervisor,
             [
+              subtree(
+                Ouroboros.Session.ExecutionSupervisor,
+                [
+                  {Ouroboros.Application.RegistryOwner,
+                   keys: :unique, name: Ouroboros.SessionRegistry},
+                  {Ouroboros.Application.RegistryOwner,
+                   keys: :unique, name: Ouroboros.Provider.Native.Registry},
+                  {Task.Supervisor, name: Ouroboros.SessionTaskSupervisor},
+                  {DynamicSupervisor,
+                   strategy: :one_for_one, name: Ouroboros.SessionTransportSupervisor}
+                ],
+                :rest_for_one
+              ),
               subtree(
                 Ouroboros.Interactive.Supervisor,
                 [

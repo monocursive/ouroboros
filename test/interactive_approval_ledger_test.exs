@@ -13,11 +13,12 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.ControlledModel
   alias Ouroboros.Test.NativeModelScript
 
   @provider :native
@@ -26,8 +27,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     previous_model = Application.get_env(:ouroboros, :native_model_module)
     journal_dir = unique_journal_dir()
 
@@ -36,21 +36,12 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
     File.mkdir_p!(Path.join(workspace, "lib"))
     File.write!(Path.join(workspace, "lib/a.ex"), "defmodule A do\n  def x, do: 1\nend\n")
 
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
-
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
 
     on_exit(fn ->
       cleanup_sessions()
-      restore_harness_env(:providers, previous_providers)
-      restore_harness_env(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
 
       case previous_model do
         nil -> Application.delete_env(:ouroboros, :native_model_module)
@@ -69,15 +60,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
   # model. `describe "the native agent"` below wants the real adapter, so the registration
   # is scoped here rather than file-wide.
   defp register_fixture_adapter do
-    previous = Application.get_env(:jido_harness, :providers)
-
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous), @provider, HarnessAdapter)
-    )
-
-    on_exit(fn -> restore_harness_env(:providers, previous) end)
+    Application.put_env(:ouroboros, :native_model_module, Ouroboros.Test.ControlledModel)
     :ok
   end
 
@@ -325,7 +308,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
       ref = start_transport_session(id, workspace)
       adapter = start_turn(ref)
 
-      HarnessAdapter.emit(
+      ControlledModel.emit(
         adapter,
         :approval_requested,
         %{
@@ -359,7 +342,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
       refute inspect(entry) =~ "git push"
 
       # The provider emits its own resolution; the coordinator stamps it with the entry.
-      HarnessAdapter.emit(adapter, :approval_resolved, %{"decision" => "approve"},
+      ControlledModel.emit(adapter, :approval_resolved, %{"decision" => "approve"},
         request_id: "req-transport-1"
       )
 
@@ -367,13 +350,13 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
       assert resolved.payload["ledger_ref"]["id"] == entry.id
       assert resolved.payload["ledger_ref"]["node"] == Atom.to_string(node())
 
-      HarnessAdapter.finish(adapter)
+      ControlledModel.finish(adapter)
       retire_session(id)
     end
   end
 
   describe "the native agent" do
-    test "a background child asks after its parent turn and reaches the human through the harness",
+    test "a background child asks after its parent turn and reaches the human through the runtime",
          %{id: id, workspace: workspace} do
       {child_spec, child_agent} =
         NativeModelScript.start([
@@ -507,7 +490,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
     test "a headless answer reaches the native loop as one, all the way down (H4)",
          %{id: id, workspace: workspace} do
       # The wire path the gateway's `--approve-all` client takes: the declared actor rides
-      # `provider_options`, which is the one field `Jido.Harness.ApprovalResponse` has that
+      # `provider_options`, which is the one field `Ouroboros.Session.ApprovalResponse` has that
       # survives the trip to the loop, and the loop labels the answer with it.
       root = Path.join(System.tmp_dir!(), "corpus-#{System.unique_integer([:positive])}")
       Application.put_env(:ouroboros, :policy_evidence_root, root)
@@ -607,7 +590,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
 
   defp start_turn(ref) do
     assert {:ok, _turn} = InteractiveSession.send_message(ref, "do it", id: "turn-1")
-    assert_receive {:ouroboros_test_adapter_started, _run_id, _request, adapter}, @receive_timeout
+    assert_receive {:ouroboros_test_model_started, _run_id, _request, adapter}, @receive_timeout
     adapter
   end
 
@@ -683,7 +666,9 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -699,10 +684,4 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_harness_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_harness_env(key, value), do: Application.put_env(:jido_harness, key, value)
 end

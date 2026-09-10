@@ -125,35 +125,60 @@ remote-reachable send cannot grow an agent's state without limit, and it is what
 > `Ouroboros.Interactive.State.new/2` refuses any other name before a workspace lease is
 > taken, and a session record that names one still loads and lists.
 
-`Jido.Harness` remains the session and run machinery: normalized events, cancellation, and
-short-lived retained journals. The native session is registered as a `jido_harness`
-provider and `Interactive.Task` still speaks `Jido.Harness.Session`; unwinding that is
-[§7](proposals/core.md#7-what-comes-after), not this reduction.
+The execution path has two session owners:
 
-`Ouroboros.InteractiveSession` owns domain truth:
+```text
+InteractiveSession / gateway -> Interactive.Task -> Native.Session -> Native.Loop
+```
 
-- the workspace, owner node, and normalized request policy;
-- the Harness session ID and provider resume ID;
-- a durable exclusive Harness cursor and a separate Ouroboros event sequence;
-- bounded redacted replay, per-turn outcomes, and explicit loss state; and
-- node-aware info/replay/subscribe/await/close routing.
+`Ouroboros.Session` is an owner-node facade, with owned request, turn, approval,
+runtime-event, and runtime-info types. It has no process and no provider registry.
+`Interactive.Task` owns workspace admission, durable intents and public domain truth;
+`Native.Session` owns conversation, live turn scheduling, approval waiters, cancellation,
+and retained output. Native execution tasks link to their owner and run under
+`Ouroboros.SessionTaskSupervisor`; runtimes run under
+`Ouroboros.SessionTransportSupervisor`. The execution and coordinator supervisors are
+separate failure domains below the ledger, permission, and admission authorities.
 
-One `Ouroboros.Interactive.Task` GenServer serializes transitions for a session. It
-persists cursor plus projected events in one checkpoint and only then broadcasts them.
-`subscribe/2` registers and snapshots the backlog in that same process, eliminating the
-replay-then-subscribe race.
+The public logical ID, ephemeral runtime ID, native conversation ID, and runtime
+generation remain separate. `open(logical_id, request)` finds the registered live
+runtime and rejects a conflicting start fingerprint. `submit` accepts the coordinator's
+durable turn ID and rejects conflicting retries. Identical retries in the same live
+generation do not dispatch another model or tool call. That is not an exactly-once
+promise for effects across a runtime or host crash.
 
-When workspace roots are configured, that same coordinator owns a symlink-resolved
-lease before it inspects or starts Harness. Read-only work shares a root; write work
-is exclusive against overlapping roots. The private release capability is never
+A registered coordinator attaches with its durable cursor. Native.Session retains
+unacknowledged events, assigns generation-local cursors, and sends a coalesced output
+wakeup. The coordinator drains a bounded contiguous batch and checkpoints events,
+usage, outcomes, runtime identity, generation, and cursor together. It acknowledges and
+broadcasts only after successful persistence. Repeated drains do not fold a batch twice;
+stale attachments and generations cannot acknowledge another owner's output. A retained
+range gap is explicit. There is no active 25 ms event-polling loop.
+
+The output queue is bounded at 4,096 events and 32 MiB; one event is bounded at 8 MiB.
+A separate 256-event / 8 MiB reserve keeps lifecycle and denial/cancellation output
+responsive while the loop's single synchronous producer call is backpressured. Node
+configuration can inject smaller limits for tests. Queue admission caps pending turns
+at 128 and queued input at 32 MiB, with an 8 MiB individual input limit. Submission
+fingerprints remain until runtime exit: after 4,096 accepted turn IDs, new IDs return
+`session_capacity`; after 128 steering IDs, new steering returns `steering_capacity`.
+No eviction permits an old accepted ID to execute again.
+
+Native.Session is the single live producer for readiness, accepted input, queue changes,
+turn starts, approval resolution, and terminal lifecycle events. Its turn-start payload
+retains the native model, tool, approval, sandbox, and hook posture. The Loop's journal
+retains its own execution record; standalone replay emits its own turn-start marker.
+These are distinct records, not duplicate public events. Steering acceptance retains
+redacted input text in the runtime event so coordinator loss cannot erase its enrichment.
+
+When workspace roots are configured, the coordinator takes a symlink-resolved lease
+before opening or attaching a runtime. Read-only work shares a root; write work is
+exclusive against overlapping roots. The private release capability is never
 checkpointed. A coordinator crash releases via monitoring, then recovery reacquires
-before reattachment. Durable nonterminal owners become fail-closed recovery
-reservations across manager or downstream-registry restart; only the exact registered
-coordinator can claim one. This authority is node-local.
-
-The coordinator scans live Harness metadata before starting a missing session. That
-closes the crash window between a start and saving the returned id, where an
-unconditional retry could otherwise launch duplicate billable work.
+before reattachment. Durable nonterminal owners remain fail-closed recovery
+reservations across an authority restart; only the registered coordinator can claim
+one. A detached native runtime retains its generation, active turn and unacknowledged
+output. Intentional close/kill remains terminal and retains final output until ack.
 
 #### Worktrees
 
@@ -179,10 +204,11 @@ touching them.
 
 #### The native provider
 
-`Ouroboros.Provider.Native` *is* the tool loop. It registers through
-`:jido_harness, :providers` as the only provider, declares one session transport whose
-adapter is a supervised GenServer in this VM, and emits normalized events into the
-journals, the gateway stream and the cells.
+`Ouroboros.Provider.Native` owns native capability declarations and reads
+`:ouroboros, :native_provider` configuration directly. `Native.Session` runs as a
+supervised GenServer in this VM and `Native.Loop` drives model and tool execution.
+Normalized output reaches gateway subscribers through the coordinator's checkpointed
+projection; the conversation checkpoint and execution journal retain their separate roles.
 
 Because the loop is here, three things are possible that are structurally impossible for a
 CLI driven from outside: a tool call can be blocked on a human approval before it runs, a
@@ -322,14 +348,15 @@ rules, ledgered with the component's sha256, and everything a component says bac
 model is bounded and labelled untrusted. docs/WASM.md §7.7 and D17 are the whole story,
 including what labelling does and does not buy.
 
-Harness run ownership is node-local. A disconnected remote owner is unavailable; a
-run becomes lost only when its confirmed owner reports `:not_found`.
+Runtime ownership is node-local. A disconnected remote owner is unavailable; the
+caller cannot start a replacement on another node because a reply was lost. The fleet
+protocol revision guards incompatible start/control requests before dispatch.
 
-`Ouroboros.InteractiveSession` applies the same ownership model to Harness sessions.
-It checkpoints session configuration, logical turn intents, Harness turn IDs,
-redacted events, terminal results, and an exclusive cursor. A coordinator restart
-reattaches to the same live Harness session; a full Harness/BEAM restart cannot
-reconstruct the session process and resolves to `:lost`.
+`Ouroboros.InteractiveSession` checkpoints session configuration, durable logical turn
+intents, runtime turn IDs, redacted events, terminal results and delivery cursors.
+Coordinator restart attaches to the same live runtime. Runtime or BEAM restart uses the
+existing native conversation checkpoint and bounded resume policy; unknown in-flight
+effects remain interrupted, lost or ambiguous, never permission to replay an effect.
 
 ### Evolution plane
 
@@ -604,9 +631,9 @@ code-loading mode with every count compared against the record in
 
 | Failure | Current behavior | Required next behavior |
 | --- | --- | --- |
-| Starting caller exits | Harness session and its coordinator continue | Done |
-| Interactive coordinator crashes | Reattaches to live Harness session and turn IDs | Done |
-| Harness/BEAM/host restarts | Task checkpoint remains; missing local run becomes `:lost` | Explicit resume/retry policy |
+| Starting caller exits | Native runtime and its coordinator continue | Done |
+| Interactive coordinator crashes | Reacquires admission and reattaches to the same native generation and turn IDs | Done |
+| Native runtime/BEAM/host restarts | Durable history remains; native checkpoint policy bounds resume and unknown effects stay explicit | No automatic effect replay |
 | Remote owner disconnects | Returns `owner_unavailable`; does not corrupt state | Retry/backoff and operator view |
 | Network partition during placement | `:global` cannot guarantee one owner | Consensus lease/admission service |
 | Store write fails | Cursor is not advanced and events are not broadcast | Backpressure/health alarms |

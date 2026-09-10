@@ -27,7 +27,7 @@ defmodule Ouroboros.HarnessRetryBackoffTest do
              InteractiveStore.create(%{
                state
                | status: :idle,
-                 harness_session_id: harness_session_id
+                 runtime_id: harness_session_id
              })
 
     on_exit(fn -> retire_session(id) end)
@@ -36,7 +36,7 @@ defmodule Ouroboros.HarnessRetryBackoffTest do
 
     assert_eventually(fn ->
       match?(
-        {:ok, %State{error: {:harness_session_replay_failed, :provider_wedged}}},
+        {:ok, %State{error: {:runtime_drain_failed, :provider_wedged}}},
         InteractiveStore.get(id)
       )
     end)

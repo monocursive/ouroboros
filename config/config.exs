@@ -288,9 +288,5 @@ config :ouroboros, Ouroboros.Web.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   render_errors: [formats: [html: Ouroboros.Web.ErrorHTML], layout: false]
 
-# `native` — the in-process tool loop — is the only provider. `Jido.Harness.Registry`
-# still carries nine bundled vendor-CLI adapters and *merges* this map over them, so this
-# key cannot remove them; `Ouroboros.Interactive.State` refuses any provider but `:native`
-# at the boundary instead, with a named error. Registering `native` here is what makes
-# `Jido.Harness.Registry.spec(:native)` answer this runtime's own adapter.
-config :jido_harness, providers: %{native: Ouroboros.Provider.Native}
+# Native execution settings are owned directly by the runtime.
+config :ouroboros, native_provider: %{}

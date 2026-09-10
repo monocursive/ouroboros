@@ -1,7 +1,8 @@
 defmodule Ouroboros.Interactive.Task.Turns do
   @moduledoc false
 
-  alias Jido.Harness.{Session, TurnRequest}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Task
   alias Ouroboros.ReasoningEffort
@@ -50,11 +51,11 @@ defmodule Ouroboros.Interactive.Task.Turns do
               {:error, {:turn_id_conflict, id}, runtime}
 
             # These are not acknowledgements. `:dispatching` is the last durable state
-            # both before a recovered send and after Harness accepted a turn whose
-            # correlation checkpoint failed; `:ambiguous` means the Harness call exited
+            # both before a recovered send and after runtime accepted a turn whose
+            # correlation checkpoint failed; `:ambiguous` means the runtime call exited
             # without a trustworthy answer. Replaying either as `{:ok, existing}` makes
             # a stable-id client clear its input even though nothing proved the turn was
-            # accepted. Keep the outcome unknown and let polling/transcript evidence
+            # accepted. Keep the outcome unknown and let runtime and transcript evidence
             # reconcile it without ever dispatching a duplicate here.
             existing.status in [:dispatching, :ambiguous] ->
               {:error, {:turn_dispatch_ambiguous, id}, runtime}
@@ -92,18 +93,14 @@ defmodule Ouroboros.Interactive.Task.Turns do
   end
 
   def dispatch_persisted_turn(runtime, turn, request) do
-    with {:ok, harness_request} <- expose_turn_request(runtime.session, request) do
-      call =
-        case turn.mode do
-          :message -> fn id -> Session.send_message(id, harness_request) end
-          :follow_up -> fn id -> Session.follow_up(id, harness_request) end
-        end
+    with {:ok, runtime_request} <- expose_turn_request(runtime.session, request) do
+      call = fn id -> Session.submit(id, turn.id, turn.mode, runtime_request) end
 
-      case Task.with_harness_session(runtime, call) do
-        {:ok, harness_turn_id} ->
+      case Task.with_runtime(runtime, call) do
+        {:ok, runtime_turn_id} ->
           updated =
             turn
-            |> Map.put(:harness_turn_id, harness_turn_id)
+            |> Map.put(:runtime_turn_id, runtime_turn_id)
             |> Map.put(:status, if(turn.mode == :follow_up, do: :queued, else: :running))
             |> State.touch_turn()
 
@@ -113,15 +110,21 @@ defmodule Ouroboros.Interactive.Task.Turns do
 
           case Task.persist(runtime, session, []) do
             {:ok, runtime} ->
-              {:ok, updated, Task.schedule_poll(runtime, 0)}
+              {:ok, updated, Task.schedule_reconcile(runtime, 0)}
 
             {:error, runtime} ->
               {:error, {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id},
-               Task.schedule_poll(runtime, 0)}
+               Task.schedule_reconcile(runtime, 0)}
           end
 
         {:error, reason}
-        when is_tuple(reason) and elem(reason, 0) in [:harness_call_exception, :harness_call_exit] ->
+        when reason == :timeout or
+               (is_tuple(reason) and
+                  elem(reason, 0) in [
+                    :session_call_exception,
+                    :session_call_exit,
+                    :runtime_unavailable
+                  ]) ->
           ambiguous =
             turn
             |> Map.put(:status, :ambiguous)
@@ -157,14 +160,14 @@ defmodule Ouroboros.Interactive.Task.Turns do
               {:error, {:turn_dispatch_failed, reason}, Task.reply_turn_waiters(runtime, turn.id)}
 
             {:error, runtime} ->
-              # Harness refused this call synchronously, but the failed checkpoint leaves
+              # runtime refused this call synchronously, but the failed checkpoint leaves
               # the durable turn at `:dispatching`. Recovery still owns that intent and
-              # may send it once the Harness session becomes idle, so the caller cannot
+              # may send it once the runtime session becomes idle, so the caller cannot
               # safely mint a replacement id. Preserve both the reconciliation id and the
               # original refusal as a diagnostic while classifying the outcome unknown.
               {:error,
                {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id,
-                {:harness_refused, reason}}, Task.schedule_poll(runtime, 0)}
+                {:runtime_refused, reason}}, Task.schedule_reconcile(runtime, 0)}
           end
       end
     else
@@ -184,12 +187,12 @@ defmodule Ouroboros.Interactive.Task.Turns do
             {:error, {:turn_dispatch_failed, reason}, Task.reply_turn_waiters(runtime, turn.id)}
 
           {:error, runtime} ->
-            # Exposure failed before Harness was called, but the only durable record is
+            # Exposure failed before runtime was called, but the only durable record is
             # still `:dispatching`. Recovery owns that intent and can send it after the
             # capture is repaired, so a fresh caller id could duplicate the recovered turn.
             {:error,
              {:turn_dispatch_checkpoint_failed, :dispatch_may_have_started, turn.id,
-              {:request_exposure_failed, reason}}, Task.schedule_poll(runtime, 0)}
+              {:request_exposure_failed, reason}}, Task.schedule_reconcile(runtime, 0)}
         end
     end
   end
@@ -255,7 +258,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
 
   `dispatch_turn` applies it to turn requests; `Ouroboros.Interactive.Task` applies the
   same check to steer inputs, because a steer's attachments reach the same transports
-  and the Harness validates them for existence only, never containment.
+  and the runtime validates them for existence only, never containment.
   """
   def authorize_attachment_paths([], _workspace), do: {:ok, []}
 
@@ -342,8 +345,8 @@ defmodule Ouroboros.Interactive.Task.Turns do
 
   # An ambiguity already recorded is not relabelled by a later, less specific one: the
   # first observation is the one this coordinator actually made. A turn finalised
-  # outcome-unknown at a resume would otherwise be rewritten on the next poll by the new
-  # Harness session's entirely correct "I have never heard of that turn" — a sentence
+  # outcome-unknown at a resume would otherwise be rewritten on the next reconciliation by the new
+  # runtime session's entirely correct "I have never heard of that turn" — a sentence
   # about a session that did not run it. It also stops a permanently unresolvable turn
   # from rewriting the whole session aggregate to disk every 25 ms to record the same
   # reason it already holds.
@@ -376,13 +379,13 @@ defmodule Ouroboros.Interactive.Task.Turns do
   def unresolved_dispatches(session) do
     session.turns
     |> Enum.filter(fn {_id, turn} ->
-      turn.status == :dispatching and is_nil(turn.harness_turn_id)
+      turn.status == :dispatching and is_nil(turn.runtime_turn_id)
     end)
     |> Enum.map(&elem(&1, 0))
     |> Enum.sort()
   end
 
-  defp turn_result_summary(result) do
+  def turn_result_summary(result) do
     %{
       session_id: result.session_id,
       turn_id: result.turn_id,
@@ -410,7 +413,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
       |> Map.from_struct()
       |> Map.take([:attachments, :output_schema, :metadata, :provider_options])
 
-    if Jido.Harness.Redaction.redact(private_options) == private_options,
+    if Ouroboros.Redaction.redact(private_options) == private_options,
       do: :ok,
       else: {:error, :secret_bearing_turn_options}
   end

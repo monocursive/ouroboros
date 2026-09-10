@@ -84,7 +84,7 @@ defmodule Ouroboros.Provider.Native.Tools.AskUser do
   def question(_input), do: {:error, :empty_question}
 
   @doc "The tool result for one answered — or unanswered — question."
-  @spec answer(map(), Jido.Harness.ApprovalResponse.t()) :: map()
+  @spec answer(map(), Ouroboros.Session.ApprovalResponse.t()) :: map()
   def answer(payload, %{decision: :approve} = response) do
     case answer_text(response) do
       "" ->

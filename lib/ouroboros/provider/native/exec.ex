@@ -108,7 +108,7 @@ defmodule Ouroboros.Provider.Native.Exec do
 
   # ---------------------------------------------------------------- internals
 
-  alias Jido.Harness.ProcessDriver.Erlexec
+  alias Ouroboros.Provider.Native.ProcessSignal
 
   defp spawn_and_collect(wrapper, args, separate_stderr?, opts) do
     timeout = timeout_ms(opts)
@@ -149,7 +149,7 @@ defmodule Ouroboros.Provider.Native.Exec do
           end
         rescue
           error in Ouroboros.Audit.Unavailable ->
-            Erlexec.signal(os_pid, :sigkill)
+            ProcessSignal.signal(os_pid, :sigkill)
             reraise error, __STACKTRACE__
         end
 
@@ -164,7 +164,7 @@ defmodule Ouroboros.Provider.Native.Exec do
   end
 
   defp terminate_group(exec_pid, os_pid, output, max_bytes) do
-    _ = Erlexec.signal(os_pid, :sigterm)
+    _ = ProcessSignal.signal(os_pid, :sigterm)
     deadline = System.monotonic_time(:millisecond) + @drain_ms
 
     case collect(exec_pid, os_pid, output, max_bytes, deadline) do
@@ -172,7 +172,7 @@ defmodule Ouroboros.Provider.Native.Exec do
         drained
 
       {:timeout, drained} ->
-        _ = Erlexec.signal(os_pid, :sigkill)
+        _ = ProcessSignal.signal(os_pid, :sigkill)
 
         case collect(
                exec_pid,

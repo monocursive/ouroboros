@@ -12,22 +12,21 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Runtime.Exposure
-  alias Ouroboros.Test.HarnessAdapter
 
   @provider :native
 
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
     journal_dir = unique_journal_dir()
 
@@ -39,25 +38,11 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
     File.mkdir_p!(data_dir)
     Application.put_env(:ouroboros, :data_dir, data_dir)
 
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
-
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
 
     on_exit(fn ->
       cleanup_sessions()
-      restore(:jido_harness, :providers, previous_providers)
-      restore(:jido_harness, :provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
       restore(:ouroboros, :data_dir, previous_data_dir)
       File.rm_rf(journal_dir)
       File.rm_rf(root)
@@ -525,7 +510,9 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -541,9 +528,6 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

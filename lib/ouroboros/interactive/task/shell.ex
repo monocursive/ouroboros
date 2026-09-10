@@ -49,7 +49,7 @@ defmodule Ouroboros.Interactive.Task.Shell do
            :provider_event,
            shell_event_payload(effect_id, outcome),
            provider: runtime.session.provider,
-           harness_session_id: runtime.session.harness_session_id,
+           harness_session_id: runtime.session.runtime_id,
            provider_session_id: runtime.session.provider_session_id
          ) do
       {:ok, runtime} ->

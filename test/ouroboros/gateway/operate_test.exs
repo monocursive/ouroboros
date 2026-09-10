@@ -12,7 +12,6 @@ defmodule Ouroboros.Gateway.OperateTest do
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Store, as: InteractiveStore
   alias Ouroboros.Interactive.Task, as: InteractiveTask
-  alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
@@ -370,21 +369,14 @@ defmodule Ouroboros.Gateway.OperateTest do
     } do
       assert hello(client)["result"]
 
-      previous_providers = Application.get_env(:jido_harness, :providers)
-      previous_config = Application.get_env(:jido_harness, :provider_config)
+      previous_config = Ouroboros.Test.NativeConfig.snapshot()
       suffix = System.unique_integer([:positive, :monotonic])
       workspace = Path.join(File.cwd!(), ".ouro-gateway-created-start-#{suffix}")
       File.mkdir_p!(workspace)
 
-      Application.put_env(
-        :jido_harness,
-        :providers,
-        Map.put(Map.new(previous_providers || %{}), :native, HarnessAdapter)
-      )
+      :ok
 
-      Application.put_env(
-        :jido_harness,
-        :provider_config,
+      Ouroboros.Test.NativeConfig.configure(
         previous_config
         |> then(&Map.new(&1 || %{}))
         |> Map.put(:native, %{test_pid: self()})
@@ -429,13 +421,7 @@ defmodule Ouroboros.Gateway.OperateTest do
           end
         end
 
-        if is_nil(previous_providers),
-          do: Application.delete_env(:jido_harness, :providers),
-          else: Application.put_env(:jido_harness, :providers, previous_providers)
-
-        if is_nil(previous_config),
-          do: Application.delete_env(:jido_harness, :provider_config),
-          else: Application.put_env(:jido_harness, :provider_config, previous_config)
+        Ouroboros.Test.NativeConfig.configure(previous_config)
 
         File.rm_rf(workspace)
       end)

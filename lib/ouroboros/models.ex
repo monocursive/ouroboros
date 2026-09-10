@@ -113,7 +113,7 @@ defmodule Ouroboros.Models do
       catalog: catalog(:native),
       catalogs: Enum.map(lanes, &elem(&1, 1)),
       default: default_model(:native),
-      model_option: model_option?(:native),
+      model_option: true,
       total: length(models),
       models:
         models
@@ -227,13 +227,6 @@ defmodule Ouroboros.Models do
 
   defp number(value) when is_integer(value) and value > 0, do: value
   defp number(_value), do: nil
-
-  defp model_option?(provider) do
-    case Jido.Harness.Registry.spec(provider) do
-      {:ok, spec} -> :model in spec.normalized_options
-      _unresolvable -> false
-    end
-  end
 
   defp known_catalog?(provider) do
     match?({:ok, _provider}, LLMDB.provider(provider))

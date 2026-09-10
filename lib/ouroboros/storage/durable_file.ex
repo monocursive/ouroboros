@@ -358,7 +358,8 @@ defmodule Ouroboros.Storage.DurableFile do
   # `[:safe]` decode in this module can run against an atom table this build has not filled.
   defp safe_binary_to_term(binary) do
     ensure_build_loaded()
-    {:ok, :erlang.binary_to_term(binary, [:safe])}
+    decoded = :erlang.binary_to_term(binary, [:safe])
+    {:ok, Ouroboros.Storage.SessionMigration.normalize(decoded)}
   rescue
     ArgumentError -> {:error, :invalid_term}
   end

@@ -14,11 +14,11 @@ defmodule Ouroboros.Provider.Native.SessionJournalTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Journal
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -204,7 +204,7 @@ defmodule Ouroboros.Provider.Native.SessionJournalTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
 
@@ -216,11 +216,11 @@ defmodule Ouroboros.Provider.Native.SessionJournalTest do
 
   defp await_terminal do
     receive do
-      {:session_adapter_event, %{type: type}}
+      {:native_test_event, %{type: type}}
       when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
         :ok
 
-      {:session_adapter_event, _other} ->
+      {:native_test_event, _other} ->
         await_terminal()
     after
       20_000 -> flunk("no terminal turn event within 20s")
