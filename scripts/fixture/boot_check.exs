@@ -71,13 +71,23 @@ end
 status = Ouroboros.status()
 
 # The recovery loops would resume the sessions this directory holds; the question here is
-# whether the checkpoints decode, not whether a provider is reachable.
+# whether the checkpoints decode, not whether a provider is reachable. The sweep runs once
+# inside `Ouroboros.Session.Recovery.init/1`, before the boot returns, and it adopts only
+# records whose `node` is this node's: under the node name that wrote the directory
+# (`nonode@nohost`) the coordinators are already resuming sessions and appending to them
+# by the time the store is read below, so the counts are a snapshot of a moving system;
+# under any other node name — which is what a data directory copied to another machine
+# looks like — nothing is adopted and the counts are the files'. `scripts/fixture/boot_gate.sh`
+# boots under its own name for that reason.
 Enum.each(
   [
     {Ouroboros.Interactive.Supervisor, Ouroboros.Interactive.Recovery},
     {Ouroboros.Coding.Supervisor, Ouroboros.Coding.Recovery}
   ],
-  fn {supervisor, child} -> _ = Supervisor.terminate_child(supervisor, child) end
+  fn {supervisor, child} ->
+    # A plane the reduction deleted has no supervisor; skip it rather than exit.
+    if is_pid(Process.whereis(supervisor)), do: _ = Supervisor.terminate_child(supervisor, child)
+  end
 )
 
 safe = fn label, fun ->
@@ -157,12 +167,14 @@ safe.("control runs", fn ->
   Enum.map(runs, fn r -> {r.id, r.status} end)
 end)
 
-safe.("cluster session owners", fn ->
-  %{
-    interactive: Ouroboros.Cluster.session_owners(:interactive),
-    coding: Ouroboros.Cluster.session_owners(:coding)
-  }
+# One plane per call. On a tree that deleted the coding plane, asking for both inside one
+# `safe` would hide whether the session-owner checkpoint — the one file that carries the
+# retired `:coding` atom — decodes at all.
+safe.("cluster session owners (interactive)", fn ->
+  Ouroboros.Cluster.session_owners(:interactive)
 end)
+
+safe.("cluster session owners (coding)", fn -> Ouroboros.Cluster.session_owners(:coding) end)
 
 safe.("rollout registry", fn ->
   Ouroboros.Upgrade.Rollout.Registry.list()

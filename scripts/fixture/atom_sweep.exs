@@ -5,11 +5,16 @@
 #     REDUCED_WORKTREES=/abs/c1,/abs/c3,/abs/c5,/abs/c6 \
 #       mix run --no-start scripts/fixture/atom_sweep.exs > sweep.tsv
 #
+# A column is named after its worktree's directory unless the entry is `name=/abs/path`,
+# which is how the committed sweep names the integrated tree `core`.
+#
 # Nothing is written outside stdout, and the reduced worktrees are only read: presence is
-# decided from the atom chunk of every `.beam` under each worktree's `_build/dev/lib`,
-# plus every `.beam` in this host's OTP installation. That is the same set
-# `String.to_existing_atom/1` would answer from with the whole tree loaded, computed
-# without starting anything in a worktree this session must not touch.
+# decided by loading every `.beam` under each worktree's `_build/dev/lib` into a throwaway
+# VM — one that never decodes the fixture, so nothing it reads can intern a name — and
+# asking `String.to_existing_atom/1` there. Nothing is started in the worktree. (The atom
+# chunk of a `.beam` is not enough: it omits atoms that occur only inside compound
+# literals, which is where a `@result_fields` map, a constraints table and the retired list
+# itself keep theirs; a sweep that read only the chunk marked such names retired.)
 
 data_dir = System.get_env("FIXTURE_DATA_DIR") || raise "FIXTURE_DATA_DIR is required"
 
@@ -17,6 +22,12 @@ worktrees =
   (System.get_env("REDUCED_WORKTREES") || "")
   |> String.split(",", trim: true)
   |> Enum.map(&String.trim/1)
+  |> Enum.map(fn entry ->
+    case String.split(entry, "=", parts: 2) do
+      [name, root] -> {name, root}
+      [root] -> {Path.basename(root), root}
+    end
+  end)
 
 wire_tag = "__atom__"
 
@@ -56,16 +67,42 @@ defmodule Sweep do
 
   defp collect(_other, acc), do: acc
 
-  def beam_atoms(paths) do
-    Enum.reduce(paths, MapSet.new(), fn path, acc ->
-      case :beam_lib.chunks(String.to_charlist(path), [:atoms]) do
-        {:ok, {_module, [atoms: atoms]}} ->
-          Enum.reduce(atoms, acc, fn {_index, atom}, inner -> MapSet.put(inner, atom) end)
+  # The names, as strings, that a fresh VM answers `String.to_existing_atom/1` for once every
+  # module under `root/_build/dev/lib` is loaded. Run out of process so that this script's own
+  # `binary_to_term/1` over the fixture — which creates every atom it meets — cannot leak.
+  @probe """
+  [names_file, root] = System.argv()
 
-        _unreadable ->
-          acc
-      end
-    end)
+  root
+  |> Path.join("_build/dev/lib/*/ebin")
+  |> Path.wildcard()
+  |> Enum.each(fn ebin ->
+    Code.prepend_path(ebin)
+
+    ebin
+    |> Path.join("*.beam")
+    |> Path.wildcard()
+    |> Enum.each(fn beam -> beam |> Path.basename(".beam") |> String.to_atom() |> Code.ensure_loaded() end)
+  end)
+
+  names_file
+  |> File.read!()
+  |> String.split("\\n", trim: true)
+  |> Enum.filter(fn name ->
+    try do
+      _ = String.to_existing_atom(name)
+      true
+    rescue
+      ArgumentError -> false
+    end
+  end)
+  |> Enum.join("\\n")
+  |> IO.write()
+  """
+
+  def present(root, names_file) do
+    {out, 0} = System.cmd("elixir", ["-e", @probe, names_file, root], stderr_to_stdout: false)
+    out |> String.split("\n", trim: true) |> MapSet.new()
   end
 end
 
@@ -85,19 +122,20 @@ candidates =
   per_file
   |> Enum.reduce(MapSet.new(), fn {_f, atoms, _w}, acc -> MapSet.union(acc, atoms) end)
 
-otp_beams =
-  :code.lib_dir()
-  |> to_string()
-  |> Path.join("*/ebin/*.beam")
-  |> Path.wildcard()
+names_file =
+  Path.join(
+    System.tmp_dir!(),
+    "atom-sweep-#{System.unique_integer([:positive, :monotonic])}.txt"
+  )
 
-otp_atoms = Sweep.beam_atoms(otp_beams)
+File.write!(names_file, candidates |> Enum.map(&Atom.to_string/1) |> Enum.join("\n"))
 
 presence =
-  Map.new(worktrees, fn root ->
-    beams = Path.wildcard(Path.join(root, "_build/dev/lib/*/ebin/*.beam"))
-    {Path.basename(root), MapSet.union(otp_atoms, Sweep.beam_atoms(beams))}
-  end)
+  try do
+    Map.new(worktrees, fn {name, root} -> {name, Sweep.present(root, names_file)} end)
+  after
+    File.rm(names_file)
+  end
 
 IO.puts(
   "file\tatom\t" <> Enum.map_join(Enum.sort(Map.keys(presence)), "\t", & &1) <> "\tretired?"
@@ -110,7 +148,9 @@ Enum.each(per_file, fn {file, atoms, wired} ->
     marks =
       presence
       |> Enum.sort_by(fn {name, _set} -> name end)
-      |> Enum.map(fn {_name, set} -> if MapSet.member?(set, atom), do: "yes", else: "NO" end)
+      |> Enum.map(fn {_name, set} ->
+        if MapSet.member?(set, Atom.to_string(atom)), do: "yes", else: "NO"
+      end)
 
     retired? = if Enum.any?(marks, &(&1 == "NO")), do: "RETIRED", else: ""
     IO.puts([file, "\t", inspect(atom), "\t", Enum.join(marks, "\t"), "\t", retired?])

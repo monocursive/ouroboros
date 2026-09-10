@@ -9,18 +9,25 @@
 ## Local test gate
 
 `make test` is the local gate — formatting (`mix format`, `cargo fmt`), the
-destructive-lifecycle script tests, the Elixir suite, and the Rust suite with both
-feature sets plus clippy — not the whole of CI:
+destructive-lifecycle script tests, the Elixir suite, the integration boot gate
+(`make boot-gate`: a data directory written before the core reduction, booted twenty
+times against this tree), and the Rust suite with both feature sets plus clippy — not the
+whole of CI:
 
 ```sh
 make test
 ```
 
 CI also runs Dialyzer, the suites with `OUROBOROS_REQUIRE_WASM` (a missing helper fails
-rather than skips), golden fixture drift, protocol-docs drift, browser journeys, the
-packaged three-node fleet, and the Linux container proofs (wasm, forge, sandbox). Run
-`make dialyzer` locally if you touched specs or types. If a Dialyzer failure looks
-garbled locally, use the default formatter — see the note in `.github/workflows/ci.yml`.
+rather than skips), golden fixture drift, protocol-docs drift, browser journeys, and the
+Linux container proof for the wasm suites under bubblewrap. Run `make dialyzer` locally
+if you touched specs or types. If a Dialyzer failure looks garbled locally, use the
+default formatter — see the note in `.github/workflows/ci.yml`.
+
+`dialyzer.ignore-warnings` pins each accepted warning by file *and line*, so adding or
+removing lines above a pinned one silently unpins it and the warning fires again: re-run
+`mix dialyzer` and re-pin whenever you edit a file that has an entry, and never pipe its
+output into `tail`, which hides the exit code.
 
 ## Golden fixtures
 
