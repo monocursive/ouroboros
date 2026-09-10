@@ -1311,7 +1311,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              HarnessAdapter.emit(adapter, :usage, %{
                "input_tokens" => 12,
                "output_tokens" => 3,
-               "cache_read_input_tokens" => 40,
+               "cache_read_tokens" => 40,
                "total_tokens" => 15
              })
 

@@ -479,10 +479,10 @@ defmodule Ouroboros.Interactive.State do
   end
 
   # B2. `plan` is a session option on the wire and a provider option underneath: the
-  # native session and the Claude adapter read `provider_options.plan`, and the pinned
-  # Harness request has no field of its own for it (a fifth `approval_mode` is refused by
-  # the dependency). A session started planning therefore carries it where the adapters
-  # look; one that is not carries nothing, so the request stays byte-identical to before.
+  # native session reads `provider_options.plan`, and the pinned Harness request has no
+  # field of its own for it (a fifth `approval_mode` is refused by the dependency). A
+  # session started planning therefore carries it where the native session looks; one that
+  # is not carries nothing, so the request stays byte-identical to before.
   defp fold_plan_option(%{plan: true} = request) do
     provider_options = Map.get(request, :provider_options) || %{}
 
@@ -900,21 +900,21 @@ defmodule Ouroboros.Interactive.State do
   Folds what a provider reported spending into the session's durable usage account.
 
   Reads `:usage` events for token counters and `:run_completed` for `cost_usd`, which is
-  the only event any bundled provider puts a cost on (`claude_stream.ex:61-71`). Provider
-  key spellings vary — `input_tokens`, `inputTokens`, `input`, `prompt_tokens` all mean
-  the same number — so each counter is looked up through a list of known variants and a
-  payload that carries none of them contributes nothing at all rather than a zero.
+  the event the native loop puts a cost on (`Ouroboros.Provider.Native.Cost.payload/2`).
+  That function is the one producer of these payloads now and emits a fixed set of
+  snake_case keys, so each counter is looked up through a one-entry list and a payload that
+  carries none of them contributes nothing at all rather than a zero. The list shape is
+  kept so a future producer can add a spelling without changing the fold.
 
   ## Why a turn's reports replace rather than add
 
-  Transports disagree about what a usage event means. Claude emits one per turn holding
-  that turn's totals; Codex app-server sends `thread/tokenUsage/updated` repeatedly, and
-  the name says it is a value being updated rather than a delta. Adding both shapes would
-  multiply the Codex numbers by however many times it happened to report. So within one
-  `turn_id` each counter keeps the **largest** figure that turn reported, and only
-  distinct turns are added together. This cannot inflate a total past the provider's own
-  largest claim for that turn; it would under-count only a transport that reported true
-  per-turn deltas, which none of the bundled ones does.
+  A turn can report usage more than once — a mid-turn `:usage` and the terminal
+  `:run_completed`, or a summary after a tool round — and those are the same turn's running
+  totals rather than deltas to sum. Adding them would multiply a turn's numbers by however
+  many times it reported. So within one `turn_id` each counter keeps the **largest** figure
+  that turn reported, and only distinct turns are added together. This cannot inflate a
+  total past the largest claim for that turn; it would under-count only a producer that
+  reported true per-turn deltas, which the native loop does not.
 
   Bounded: one map, whatever the turn count. Durable through the caller's checkpoint.
   """
@@ -1272,23 +1272,24 @@ defmodule Ouroboros.Interactive.State do
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
   defp present?(value), do: value not in [nil, "", [], %{}]
 
-  # The counters a session accounts for, each with the spellings a provider may use.
-  # Claude sends `input_tokens` and `cache_read_input_tokens`; the Codex app-server and
-  # ACP payloads are their server's own map passed through untouched; Harness's own
-  # adapter fixtures carry `input` and `totalTokens`. So each counter is a list of keys,
-  # not a key, and the first one present wins.
+  # The counters a session accounts for. There is one producer of a `:usage` /
+  # `:run_completed` payload now — `Ouroboros.Provider.Native.Cost.payload/2` — and it emits
+  # exactly these snake_case string keys. The vendor spellings this table used to carry
+  # (`inputTokens`, `prompt_tokens`, `cache_read_input_tokens`, `totalTokens`, …) were the
+  # nine wrapped CLIs' shapes, and `Ouroboros.EventPresentation.usage_report/1` — the other
+  # projection of the same payload — already lost them (§1.1). The list-of-keys shape is
+  # kept for one key each so the fold below is unchanged and a later producer can add a
+  # spelling in one place. See docs/proposals/core.md §3 D2.
   @usage_counters [
-    input_tokens: ~w(input_tokens inputTokens input prompt_tokens promptTokens),
-    output_tokens: ~w(output_tokens outputTokens output completion_tokens completionTokens),
-    cache_read_tokens:
-      ~w(cache_read_tokens cache_read_input_tokens cacheReadTokens cacheReadInputTokens cached_input_tokens cachedInputTokens),
-    cache_creation_tokens:
-      ~w(cache_creation_tokens cache_creation_input_tokens cacheCreationTokens cacheCreationInputTokens),
-    total_tokens: ~w(total_tokens totalTokens total)
+    input_tokens: ~w(input_tokens),
+    output_tokens: ~w(output_tokens),
+    cache_read_tokens: ~w(cache_read_tokens),
+    cache_creation_tokens: ~w(cache_creation_tokens),
+    total_tokens: ~w(total_tokens)
   ]
 
   @usage_counter_fields Keyword.keys(@usage_counters)
-  @usage_cost_keys ~w(cost_usd costUsd total_cost_usd totalCostUsd)
+  @usage_cost_keys ~w(cost_usd)
 
   # Not counters. The model's context window and the size of the last request are facts
   # about one request, so the newest report replaces the previous one rather than being
@@ -1315,8 +1316,8 @@ defmodule Ouroboros.Interactive.State do
     last: %{}
   }
 
-  # `:run_completed` is here for one field: no bundled provider puts a cost on a `:usage`
-  # event, and Claude's arrives as `cost_usd` on the run's terminator. Reading only
+  # `:run_completed` is here for one field: the native loop's `:usage` events carry token
+  # counts, and `Cost.payload/2` places `cost_usd` on the run's terminator. Reading only
   # `:usage` would ship a `cost_usd` that is structurally always `nil`.
   defp fold_usage_event(%Event{type: type, payload: payload, turn_id: turn_id}, state)
        when type in [:usage, :run_completed] and is_map(payload) do
