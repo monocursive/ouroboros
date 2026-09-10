@@ -65,7 +65,15 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     artifact = artifact!(context, name: name, start: %{id: id, config: @config})
 
     # Snapshotted before the deploy so the assertion afterwards is about what this rollout
-    # loaded, not about what a peer happened to boot with.
+    # loaded, not about what a peer happened to boot with. The build is loaded first on
+    # every node, because `DurableFile` does exactly that lazily at its first safe decode
+    # — which the deploy itself may be the first to trigger — and a snapshot taken before
+    # it would count the whole application, including the test build's own
+    # `Ouroboros.Capability.DistributionReference`, as something the deploy introduced.
+    for target <- context.nodes do
+      :ok = call(target, Ouroboros.Storage.DurableFile, :ensure_build_loaded, [])
+    end
+
     loaded_before = Map.new(context.nodes, &{&1, loaded_modules(&1)})
 
     assert {:ok, outcome} = deploy(artifact, context)
@@ -143,10 +151,16 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     # nothing about the artifact named a module. Asserted against what each peer's code
     # server actually holds, before and after — the whole point of lane W is that this
     # deployment is a file and a checkpoint, not a `:code.load_binary/3`.
+    #
+    # The claim is the *difference*, not the absolute set. The test build's `ebin` holds
+    # `Ouroboros.Capability.DistributionReference`, a mesh-agent fixture that has to live
+    # under the capability prefix because the mesh admits nothing else, and
+    # `Ouroboros.Storage.DurableFile.ensure_build_loaded/0` loads every module of the
+    # application before the first safe decode — so a booted node already has that one
+    # module loaded before any deploy. What lane W promises is that the deploy adds none.
     for target <- context.nodes do
       after_deploy = loaded_modules(target)
 
-      assert capability_modules(after_deploy) == []
       assert capability_modules(MapSet.difference(after_deploy, loaded_before[target])) == []
     end
   end
