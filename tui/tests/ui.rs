@@ -152,7 +152,7 @@ fn with_open_session() -> App {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-0000000000000000000001",
             "node": "ouroboros@golden",
-            "provider": "claude_code",
+            "provider": "native",
             "workspace": "/tmp/w",
             "status": "running",
             "options": {
@@ -297,7 +297,7 @@ fn session_rail_caps_visual_noise_and_keeps_the_complete_picker_available() {
                 "id": format!("session-000000000000000000000{number}"),
                 "title": format!("Task {number}"),
                 "node": "ouroboros@golden",
-                "provider": "codex",
+                "provider": "native",
                 "workspace": "/tmp/w",
                 "status": if number == 1 { "running" } else { "lost" },
                 "options": {
@@ -471,7 +471,7 @@ fn the_conversation_header_names_the_model_the_run_reported() {
 
     let before = render(&mut app, 120, 24);
     assert!(
-        before.contains("interactive \u{b7} claude_code"),
+        before.contains("interactive \u{b7} native"),
         "{}",
         before.text()
     );
@@ -488,7 +488,7 @@ fn the_conversation_header_names_the_model_the_run_reported() {
 
     let after = render(&mut app, 120, 24);
     assert!(
-        after.contains("interactive \u{b7} claude_code \u{b7} claude-sonnet-5"),
+        after.contains("interactive \u{b7} native \u{b7} claude-sonnet-5"),
         "{}",
         after.text()
     );
@@ -1298,21 +1298,22 @@ fn a_provider_probe_that_failed_is_not_reported_as_a_missing_provider() {
         &mut app,
         Tag::Providers,
         json!([
-            {
-                "provider": "claude_code",
-                "spec": {},
-                "status": { "installed": true, "compatible": true, "authenticated": "unknown" },
-                "error": null
-            },
-            { "provider": "codex", "spec": {}, "status": null, "error": "probe_timeout" }
+            { "provider": "native", "spec": {}, "status": null, "error": "probe_timeout" }
         ]),
     );
 
     let screen = render(&mut app, 120, 30);
 
-    assert!(screen.contains("claude_code"));
-    assert!(screen.row("claude_code").contains("installed"));
-    assert!(screen.row("codex").contains("probe failed: probe_timeout"));
+    assert!(
+        screen.row("native").contains("probe failed: probe_timeout"),
+        "a probe that failed is a different fact from a provider that is not there: {}",
+        screen.text()
+    );
+    assert!(
+        !screen.row("native").contains("not installed"),
+        "{}",
+        screen.text()
+    );
 }
 
 #[test]
@@ -2662,7 +2663,7 @@ fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
     // The same rule on the home composer, whose Enter starts rather than sends.
     let mut home = shell(full_hello());
     home.open_home();
-    home.config.defaults.provider = Some("claude".into());
+    home.config.defaults.model = Some("anthropic:claude-sonnet-5".into());
 
     let plain = render(&mut home, 120, 30);
     assert!(
@@ -3182,7 +3183,7 @@ fn every_remote_session_verb_keeps_the_owner_node_from_the_reference() {
         json!([{
             "id": remote_id,
             "node": remote_node,
-            "provider": "codex",
+            "provider": "native",
             "status": "running",
             "updated_at": "2026-01-01T00:00:00Z"
         }]),
@@ -3292,7 +3293,7 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
         json!([{
             "id": id,
             "node": first_owner,
-            "provider": "codex",
+            "provider": "native",
             "status": "running",
             "updated_at": "2026-01-01T00:00:00Z"
         }]),
@@ -3312,14 +3313,14 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
             {
                 "id": id,
                 "node": first_owner,
-                "provider": "codex",
+                "provider": "native",
                 "status": "running",
                 "updated_at": "2026-01-01T00:00:00Z"
             },
             {
                 "id": id,
                 "node": second_owner,
-                "provider": "codex",
+                "provider": "native",
                 "status": "running",
                 "updated_at": "2026-01-01T00:00:01Z"
             }
@@ -3346,7 +3347,7 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
         json!([{
             "id": id,
             "node": first_owner,
-            "provider": "codex",
+            "provider": "native",
             "status": "running",
             "updated_at": "2026-01-01T00:00:02Z"
         }]),
@@ -3396,7 +3397,7 @@ fn a_remote_machine_loss_retains_the_cursor_and_resubscribes_after_reconnect() {
         json!([{
             "id": remote_id,
             "node": remote_node,
-            "provider": "codex",
+            "provider": "native",
             "status": "running"
         }]),
     );
@@ -3585,7 +3586,7 @@ fn a_local_gateway_reconnect_waits_for_an_offline_remote_owner_then_resumes() {
         json!([{
             "id": remote_id,
             "node": remote_node,
-            "provider": "codex",
+            "provider": "native",
             "status": "running"
         }]),
     );
@@ -3748,7 +3749,7 @@ fn an_indeterminate_transport_failure_opening_a_remote_stream_enters_recovery() 
         json!([{
             "id": id,
             "node": owner,
-            "provider": "codex",
+            "provider": "native",
             "status": "running"
         }]),
     );
@@ -3845,7 +3846,7 @@ fn the_open_composer_names_the_provider_and_serializes_later_requests() {
     let mut app = with_open_session();
 
     let screen = render(&mut app, 180, 30);
-    assert!(screen.contains("claude_code"), "{}", screen.text());
+    assert!(screen.contains("native"), "{}", screen.text());
     assert!(!screen.contains("PROVIDER Codex"), "{}", screen.text());
     assert!(screen.contains("workspace /tmp/w"), "{}", screen.text());
     assert!(screen.contains("APPROVAL auto_edit"), "{}", screen.text());
@@ -3893,9 +3894,9 @@ fn the_open_composer_names_the_provider_and_serializes_later_requests() {
 }
 
 #[test]
-fn an_open_session_never_borrows_client_workspace_or_provider_defaults() {
+fn an_open_session_never_borrows_client_workspace_or_model_defaults() {
     let mut app = with_open_session();
-    app.config.defaults.provider = Some("codex".into());
+    app.config.defaults.model = Some("openai_codex:gpt-5.6-sol".into());
     app.config.defaults.workspace = Some("/wrong/client-default".into());
     app.launch_dir = Some("/wrong/local-cwd".into());
 
@@ -3909,7 +3910,7 @@ fn an_open_session_never_borrows_client_workspace_or_provider_defaults() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Provider unknown"), "{}", screen.text());
+    assert!(screen.contains("Model unknown"), "{}", screen.text());
     assert!(
         !screen.contains("/wrong/client-default"),
         "{}",
@@ -4130,7 +4131,7 @@ fn x_in_the_session_switcher_removes_a_terminal_session() {
             {
                 "id": "session-dead",
                 "status": "lost",
-                "provider": "codex",
+                "provider": "native",
                 "updated_at": "2026-01-01T00:00:01.000000Z"
             }
         ]),
@@ -4338,15 +4339,9 @@ fn ready_to_start() -> App {
         Tag::Providers,
         json!([
             {
-                "provider": "claude_code",
+                "provider": "native",
                 "spec": {},
                 "status": { "installed": true, "compatible": true, "authenticated": true },
-                "error": null
-            },
-            {
-                "provider": "gemini",
-                "spec": {},
-                "status": { "installed": false, "compatible": false, "authenticated": "unknown" },
                 "error": null
             }
         ]),
@@ -4365,7 +4360,7 @@ fn n_opens_a_form_whose_every_choice_is_visible() {
     let screen = render(&mut app, 120, 30);
 
     assert!(screen.contains("new session"), "{}", screen.text());
-    assert!(screen.contains("provider"));
+    assert!(screen.contains("model"));
     assert!(screen.contains("workspace"));
     assert!(screen.contains("approval"));
     assert!(screen.contains("[ start ]"));
@@ -4420,40 +4415,18 @@ fn new_session_can_choose_a_connected_machine_by_friendly_name() {
     assert!(form.contains("Connected checks reachability, not provider readiness"));
     assert!(form.contains("fleet invites never copy credentials"));
     assert!(
-        form.contains("claude_code — readiness unknown on destination"),
+        form.contains("Workspace paths are resolved on that destination machine"),
         "{}",
         form.text()
-    );
-    assert!(
-        !form.contains("claude_code (1/2)"),
-        "the local provider's green-ready label must not describe a remote machine: {}",
-        form.text()
-    );
-    assert_eq!(
-        form.colour_of("claude_code", "claude_code"),
-        Color::LightYellow,
-        "remote readiness is unknown even when the gateway has this provider"
     );
 
-    focus(&mut app, NewField::Provider);
-    app.apply(key(KeyCode::Right));
-    let remote_missing_locally = render(&mut app, 120, 30);
+    // The local probe is not evidence about the destination, and with a machine selected
+    // the form says so rather than repeating what it found here.
     assert!(
-        remote_missing_locally.contains("gemini — readiness unknown on destination"),
-        "{}",
-        remote_missing_locally.text()
+        !form.contains("no executable was found for it"),
+        "a local probe must not describe a remote machine: {}",
+        form.text()
     );
-    assert!(
-        !remote_missing_locally.contains("gemini — not installed"),
-        "the gateway's missing executable is not evidence about the destination: {}",
-        remote_missing_locally.text()
-    );
-    assert_eq!(
-        remote_missing_locally.colour_of("gemini", "gemini"),
-        Color::LightYellow,
-        "remote readiness is unknown even when the gateway lacks this provider"
-    );
-    app.apply(key(KeyCode::Left));
 
     focus(&mut app, NewField::Start);
     app.apply(key(KeyCode::Enter));
@@ -4517,47 +4490,48 @@ fn an_incompatible_connected_machine_is_not_offered_for_paid_work() {
     assert!(form.contains("This machine"), "{}", form.text());
 }
 
+/// A probe that found no executable is said, and it stops no start: "installed" means a
+/// file exists, and the runtime is the authority on whether a session can begin.
 #[test]
-fn the_provider_list_greys_an_uninstalled_provider_and_still_offers_it() {
+fn an_uninstalled_provider_is_said_and_still_starts() {
     let mut app = ready_to_start();
+    answer(
+        &mut app,
+        Tag::Providers,
+        json!([
+            {
+                "provider": "native",
+                "spec": {},
+                "status": { "installed": false, "compatible": false, "authenticated": "unknown" },
+                "error": null
+            }
+        ]),
+    );
     app.apply(key(KeyCode::Char('n')));
 
     let screen = render(&mut app, 120, 30);
 
     assert!(
-        screen.row("claude_code").contains("(1/2)"),
+        screen.contains("no executable was found for it"),
         "{}",
         screen.text()
     );
-    assert_eq!(screen.colour_of("claude_code", "claude_code"), Color::Green);
-
-    // Right moves to the uninstalled one, which is drawn dim and says why.
-    app.apply(key(KeyCode::Right));
-    let screen = render(&mut app, 120, 30);
-
-    assert!(
-        screen.row("gemini").contains("not installed"),
-        "{}",
-        screen.text()
-    );
-    assert_eq!(screen.colour_of("gemini", "gemini"), Color::DarkGray);
     assert!(
         screen.contains("the runtime decides, not this probe"),
         "an installed-probe is a heuristic and the runtime is the authority:\n{}",
         screen.text()
     );
 
-    // Selectable anyway: this client does not overrule the runtime on a probe.
+    // Startable anyway: this client does not overrule the runtime on a probe.
     focus(&mut app, NewField::Start);
     app.apply(key(KeyCode::Enter));
 
-    let call = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "interactive.start")
-        .expect("an uninstalled provider is still the operator's to try");
-
-    assert_eq!(call.params["provider"], "gemini");
+    assert!(
+        app.drain()
+            .into_iter()
+            .any(|call| call.method == "interactive.start"),
+        "a probe is not a veto"
+    );
 }
 
 #[test]
@@ -4565,7 +4539,7 @@ fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
     let mut app = ready_to_start();
     app.apply(key(KeyCode::Char('n')));
 
-    // provider stays claude_code; retype the workspace; pick `prompt`; start.
+    // retype the workspace; pick `prompt`; start.
     focus(&mut app, NewField::Workspace);
     for _ in 0..40 {
         app.apply(key(KeyCode::Backspace));
@@ -4592,7 +4566,11 @@ fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
         .find(|call| call.method == "interactive.start")
         .expect("a start");
 
-    assert_eq!(call.params["provider"], "claude_code");
+    assert!(
+        call.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        call.params
+    );
     assert_eq!(call.params["workspace"], "/srv/work");
     assert_eq!(call.params["approval_mode"], "prompt");
     assert_eq!(
@@ -4649,7 +4627,11 @@ fn write_starts_a_session_that_can_edit_when_this_one_cannot() {
         .expect("a writable start");
 
     assert_eq!(call.params["sandbox_mode"], "workspace_write");
-    assert_eq!(call.params["provider"], "claude_code");
+    assert!(
+        call.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        call.params
+    );
     assert_eq!(call.params["workspace"], "/tmp/w");
 }
 
@@ -4817,7 +4799,7 @@ fn a_generic_runtime_start_failure_reconciles_instead_of_minting_a_duplicate() {
 fn a_durable_failed_home_start_opens_the_session_without_dispatching_the_draft() {
     let mut app = shell(full_hello());
     app.open_home();
-    app.config.defaults.provider = Some("claude_code".into());
+    app.config.defaults.model = Some("anthropic:claude-sonnet-5".into());
     let input = "keep this prompt until the provider is repaired";
 
     type_text(&mut app, input);

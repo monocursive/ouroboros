@@ -157,7 +157,7 @@ async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_tr
         peer.result(
             &providers["id"],
             json!([{
-                "provider": "ouroboros_test",
+                "provider": "native",
                 "spec": {},
                 "status": { "installed": true, "compatible": true, "authenticated": true },
                 "error": null
@@ -169,7 +169,11 @@ async fn starting_a_session_subscribes_to_it_and_the_first_event_lands_in_the_tr
 
         // Exactly the allowlisted options, including the caller-owned retry identity.
         assert_eq!(start["params"]["id"], SESSION);
-        assert_eq!(start["params"]["provider"], "ouroboros_test");
+        assert!(
+            start["params"].get("provider").is_none(),
+            "`provider` is not a start option and sending it would be -32602: {}",
+            start["params"]
+        );
         assert_eq!(start["params"]["workspace"], "/srv/work");
         assert_eq!(
             start["params"].as_object().expect("an object").len(),

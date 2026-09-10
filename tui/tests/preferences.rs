@@ -11,8 +11,7 @@
 //!
 //! These cover live code that lost its tests when the quick-start screen's test file was
 //! rewritten for the coding-first shell: the overlay itself, `ui::persist`,
-//! `App::take_config_save`, `provider_choices`, the approval cycler, and the `n` dialog's
-//! prefill — including the two orders a late `runtime.providers` answer can arrive in.
+//! `App::take_config_save`, the approval cycler, and the `n` dialog's prefill.
 
 mod support;
 
@@ -26,8 +25,8 @@ use serde_json::json;
 use ouro::config::{self, Config, Defaults, Onboarding};
 use ouro::model::{ApprovalMode, Plane, SandboxMode};
 use ouro::ui::app::{
-    approval_at, approval_index, provider_choices, sandbox_at, sandbox_index, App, Msg, NewField,
-    Overlay, ProviderChoice, SettingsField, Tab, Tag,
+    approval_at, approval_index, sandbox_at, sandbox_index, App, Msg, NewField, Overlay,
+    SettingsField, Tab, Tag,
 };
 
 use support::{app, full_hello, render};
@@ -81,23 +80,15 @@ fn answer(app: &mut App, tag: Tag, value: serde_json::Value) {
     });
 }
 
+/// `runtime.providers`, which now answers with the one provider this runtime serves.
 fn providers() -> serde_json::Value {
     json!([
         {
-            "provider": "claude_code",
+            "provider": "native",
             "spec": {},
             "status": {
                 "installed": true, "compatible": true, "authenticated": true,
-                "version": "1.2.3", "executable": "/usr/bin/claude"
-            },
-            "error": null
-        },
-        {
-            "provider": "gemini",
-            "spec": {},
-            "status": {
-                "installed": false, "compatible": false, "authenticated": "unknown",
-                "executable": "gemini"
+                "version": "1.2.3", "executable": "/usr/bin/ouro"
             },
             "error": null
         }
@@ -216,11 +207,11 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
 
     app.apply(key(KeyCode::Char(',')));
 
-    // Nothing stored, so the picker starts on "unset" — a default is something an operator
-    // states, not something a first open invents.
+    // Nothing has been touched, so there is nothing to write — a default is something an
+    // operator states, not something a first open invents.
     let screen = render(&mut app, 120, 34);
     assert!(
-        screen.contains("unset — stated per session"),
+        screen.contains("unset — the plane's own default"),
         "{}",
         screen.text()
     );
@@ -230,11 +221,8 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
         screen.text()
     );
 
-    // Machines is the first row. Move to provider: unset -> claude_code.
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Right));
-
-    // workspace: clear the prefilled launch dir and type one
+    // Machines is the first row. workspace is the second: clear the prefilled launch dir
+    // and type one.
     app.apply(key(KeyCode::Down));
     for _ in 0..60 {
         app.apply(key(KeyCode::Backspace));
@@ -271,10 +259,6 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
     let loaded = config::load(path.clone());
 
     assert_eq!(
-        loaded.config.defaults.provider.as_deref(),
-        Some("claude_code")
-    );
-    assert_eq!(
         loaded.config.defaults.workspace.as_deref(),
         Some("/srv/work")
     );
@@ -305,6 +289,7 @@ fn esc_closes_settings_without_writing_anything() {
 
     app.apply(key(KeyCode::Char(',')));
     app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Esc));
 
@@ -329,9 +314,8 @@ fn a_save_with_nowhere_to_write_says_so_instead_of_claiming_success() {
 
     app.apply(key(KeyCode::Char(',')));
     app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
@@ -358,16 +342,15 @@ fn enter_on_a_field_row_moves_rather_than_saving() {
     app.apply(key(KeyCode::Enter));
 
     let Some(Overlay::Settings(settings)) = &app.overlay else {
-        panic!("Enter on the provider field must remain in Settings");
+        panic!("Enter on a field row must remain in Settings");
     };
-    assert_eq!(settings.field, SettingsField::Workspace);
+    assert_eq!(settings.field, SettingsField::ApprovalMode);
     assert!(app.take_config_save().is_none());
 }
 
 #[test]
 fn settings_open_on_whatever_the_file_already_said() {
     let mut app = with_providers(Defaults {
-        provider: Some("gemini".into()),
         workspace: Some("/srv/stored".into()),
         approval_mode: Some("auto_edit".into()),
         ..Defaults::default()
@@ -377,86 +360,12 @@ fn settings_open_on_whatever_the_file_already_said() {
 
     let screen = render(&mut app, 130, 34);
 
-    // Named in full rather than by the word alone: the shell header also carries the
-    // configured provider, and it is not the row this is about.
-    assert!(
-        screen.contains("gemini — no executable found (3/3)"),
-        "{}",
-        screen.text()
-    );
     assert!(screen.contains("/srv/stored"), "{}", screen.text());
     assert!(
         screen.contains("auto_edit — edit files without asking"),
         "{}",
         screen.text()
     );
-}
-
-#[test]
-fn a_stored_provider_this_runtime_does_not_serve_is_shown_rather_than_dropped() {
-    let mut app = with_providers(Defaults {
-        provider: Some("codex".into()),
-        ..Defaults::default()
-    });
-
-    app.apply(key(KeyCode::Char(',')));
-
-    let screen = render(&mut app, 140, 34);
-
-    assert!(
-        screen.contains("codex — from the config file; this runtime does not report it"),
-        "a default written on another machine is a fact, not a value to silently discard: {}",
-        screen.text()
-    );
-
-    // Still savable as itself: the runtime is the authority on whether a start works, and
-    // this client does not overrule a file the operator wrote.
-    for _ in 0..5 {
-        app.apply(key(KeyCode::Down));
-    }
-    app.apply(key(KeyCode::Enter));
-
-    let pending = app.take_config_save().expect("a save");
-    assert_eq!(pending.defaults.provider.as_deref(), Some("codex"));
-}
-
-#[test]
-fn the_provider_rows_are_unset_then_the_probe_then_an_unserved_default() {
-    let entries = ouro::model::ProviderEntry::decode_list(&providers());
-
-    let plain = provider_choices(&entries, None);
-    assert_eq!(
-        plain,
-        vec![
-            ProviderChoice::Unset,
-            ProviderChoice::Probed {
-                name: "claude_code".into(),
-                ready: true
-            },
-            ProviderChoice::Probed {
-                name: "gemini".into(),
-                ready: false
-            },
-        ]
-    );
-
-    // A stored default the runtime already reports does not get a second row.
-    assert_eq!(provider_choices(&entries, Some("gemini")), plain);
-
-    let unserved = provider_choices(&entries, Some("codex"));
-    assert_eq!(unserved.len(), 4);
-    assert_eq!(
-        unserved[3],
-        ProviderChoice::Unserved {
-            name: "codex".into()
-        }
-    );
-
-    assert_eq!(plain[0].name(), None);
-    assert_eq!(plain[1].name(), Some("claude_code"));
-
-    // Whitespace is not a stored default.
-    assert_eq!(provider_choices(&entries, Some("  ")), plain);
 }
 
 #[test]
@@ -596,7 +505,7 @@ fn ready_for_n(defaults: Defaults) -> App {
 #[test]
 fn the_start_dialog_opens_on_the_defaults_the_file_states() {
     let mut app = ready_for_n(Defaults {
-        provider: Some("gemini".into()),
+        model: Some("openai_codex:gpt-5.5".into()),
         workspace: Some("/srv/stored".into()),
         approval_mode: Some("auto_edit".into()),
         ..Defaults::default()
@@ -606,7 +515,11 @@ fn the_start_dialog_opens_on_the_defaults_the_file_states() {
 
     let screen = render(&mut app, 130, 34);
 
-    assert!(screen.row("gemini").contains("(2/2)"), "{}", screen.text());
+    assert!(
+        screen.contains("openai_codex:gpt-5.5"),
+        "the stored model is what the dialog opens on: {}",
+        screen.text()
+    );
     assert!(
         screen.contains("/srv/stored"),
         "the stored workspace beats the launch directory: {}",
@@ -620,9 +533,6 @@ fn the_start_dialog_opens_on_the_defaults_the_file_states() {
 
     // Prefill, not decision: everything is still editable, and the start carries whatever
     // the rows read at the moment it is pressed.
-    focus(&mut app, NewField::Provider);
-    app.apply(key(KeyCode::Left));
-
     focus(&mut app, NewField::Workspace);
     for _ in 0..60 {
         app.apply(key(KeyCode::Backspace));
@@ -641,21 +551,27 @@ fn the_start_dialog_opens_on_the_defaults_the_file_states() {
         .find(|call| call.method == "interactive.start")
         .expect("a start");
 
-    assert_eq!(call.params["provider"], "claude_code");
+    assert_eq!(call.params["model"], "openai_codex:gpt-5.5");
     assert_eq!(call.params["workspace"], "/elsewhere");
     assert_eq!(call.params["approval_mode"], "prompt");
+    assert!(
+        call.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        call.params
+    );
 }
 
 #[test]
-fn with_no_file_the_dialog_is_exactly_what_it_was() {
+fn with_no_file_the_dialog_opens_on_the_model_a_first_session_would_use() {
     let mut app = ready_for_n(Defaults::default());
     apply_leader(&mut app, 'N');
 
     let screen = render(&mut app, 130, 34);
 
     assert!(
-        screen.row("claude_code").contains("(1/2)"),
-        "no stored default means the first entry, as before: {}",
+        screen.contains(ouro::ui::app::DEFAULT_MODEL),
+        "no stored model means the one a first session runs on, stated rather than left \
+         blank: {}",
         screen.text()
     );
     assert!(
@@ -665,86 +581,6 @@ fn with_no_file_the_dialog_is_exactly_what_it_was() {
     );
     assert!(
         screen.contains("unset — the plane's own default"),
-        "{}",
-        screen.text()
-    );
-}
-
-/// The dialog and `runtime.providers` race, and the cursor has to land on the stored
-/// default whichever of them arrives first.
-#[test]
-fn a_provider_list_that_arrives_after_a_dialog_still_places_the_cursor() {
-    let mut app = connected(Defaults {
-        provider: Some("gemini".into()),
-        ..Defaults::default()
-    });
-
-    app.tab = Tab::Sessions;
-    answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    app.open_session(Plane::Interactive, "session-open".into());
-    apply_leader(&mut app, 'N');
-
-    let asked = app.drain();
-    assert!(
-        asked.iter().any(|call| call.method == "runtime.providers"),
-        "the dialog asks for the list it is about to draw: {asked:?}"
-    );
-
-    answer(&mut app, Tag::Providers, providers());
-
-    let screen = render(&mut app, 130, 34);
-    assert!(screen.row("gemini").contains("(2/2)"), "{}", screen.text());
-}
-
-#[test]
-fn a_late_provider_list_does_not_move_a_cursor_the_operator_already_moved() {
-    let mut app = ready_for_n(Defaults {
-        provider: Some("gemini".into()),
-        ..Defaults::default()
-    });
-
-    apply_leader(&mut app, 'N');
-    let _ = app.drain();
-
-    focus(&mut app, NewField::Provider);
-    app.apply(key(KeyCode::Right)); // gemini -> claude_code, wrapping
-
-    // A refresh answering the same list must not put the cursor back on the default.
-    answer(&mut app, Tag::Providers, providers());
-
-    let screen = render(&mut app, 130, 34);
-    assert!(
-        screen.row("claude_code").contains("(1/2)"),
-        "a default is applied once; the cursor is the operator's afterwards: {}",
-        screen.text()
-    );
-}
-
-#[test]
-fn a_default_provider_this_runtime_does_not_serve_is_said_rather_than_guessed_at() {
-    let mut app = ready_for_n(Defaults {
-        provider: Some("codex".into()),
-        ..Defaults::default()
-    });
-
-    apply_leader(&mut app, 'N');
-
-    let notice = app
-        .notice
-        .as_ref()
-        .expect("a notice about the missing default");
-
-    assert!(notice.text.contains("codex"), "{}", notice.text);
-    assert!(
-        notice.text.contains("this runtime reports"),
-        "{}",
-        notice.text
-    );
-
-    // The cursor stays where the list starts rather than pointing at nothing.
-    let screen = render(&mut app, 130, 34);
-    assert!(
-        screen.row("claude_code").contains("(1/2)"),
         "{}",
         screen.text()
     );

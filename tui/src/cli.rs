@@ -67,12 +67,8 @@ pub enum Command {
     /// nothing else is sent. Each one resolves the same way: the flag, then
     /// `[defaults]` in the config file, then whatever the plane does on its own.
     ///
-    /// With no `--provider` or stored default, the direct Native provider is used.
+    /// This runtime serves one provider, `native`, and every session starts on it.
     New {
-        /// A provider this runtime serves. Omitted, the config file's default and then
-        /// `native`.
-        #[arg(long, value_name = "NAME")]
-        provider: Option<String>,
         /// A full direct model spec. Omitted, `[defaults].model` or the runtime default.
         #[arg(long, value_name = "SPEC")]
         model: Option<String>,
@@ -90,7 +86,7 @@ pub enum Command {
 
         /// One of: default, read_only, workspace_write, unrestricted. Omitted, the config
         /// file's `defaults.sandbox_mode`, and with neither the plane starts a session that
-        /// can edit the workspace where the provider allows it.
+        /// can edit the workspace.
         #[arg(long, value_name = "MODE")]
         sandbox_mode: Option<String>,
 
@@ -274,9 +270,8 @@ pub enum Command {
     ///
     /// Not typed at a prompt: an ACP client — Zed, JetBrains, a Neovim or VS Code plugin —
     /// spawns this process and speaks newline-framed JSON-RPC to its stdio, so stdout is a
-    /// protocol and carries nothing else. Omitted provider selection falls back to the
-    /// direct Native provider; `--workspace` is only a fallback for a client that sends no
-    /// `cwd`.
+    /// protocol and carries nothing else. `--workspace` is only a fallback for a client that
+    /// sends no `cwd`.
     ///
     /// Register it with your editor's ACP agent configuration (Zed and JetBrains both use
     /// an `agent_servers` map): the command is this binary and the argument is `acp`.
@@ -286,14 +281,13 @@ pub enum Command {
     #[command(hide = true)]
     ServiceRun,
 
-    /// Serve the session's permission prompt to a vendor CLI over MCP on stdio.
+    /// Serve this session's native subagents and fleet status to an MCP client on stdio.
     ///
-    /// Never run by hand. `Ouroboros.Provider.ClaudeAdapter` names this subcommand in the
-    /// `--mcp-config` it composes for a Claude session, and Claude Code spawns it as the
-    /// server behind `--permission-prompt-tool mcp__ouroboros__approve`. It reads the
-    /// runtime to ask from `OUROBOROS_GATEWAY_ADDR`, `OUROBOROS_GATEWAY_TOKEN_FILE`,
+    /// Never run by hand: an MCP client spawns this process and speaks newline-framed
+    /// JSON-RPC to its stdio. It reads the runtime to ask, and the session it speaks for,
+    /// from `OUROBOROS_GATEWAY_ADDR`, `OUROBOROS_GATEWAY_TOKEN_FILE`,
     /// `OUROBOROS_SESSION_ID`, and `OUROBOROS_SESSION_NODE`; started without them, every
-    /// approval is denied with a message saying so.
+    /// call is refused with a message saying so.
     #[command(hide = true)]
     McpServe,
 
@@ -340,11 +334,6 @@ pub enum Command {
 /// are `ouro attach`'s, and naming either one attaches instead of starting a runtime.
 #[derive(Debug, Args)]
 pub struct AcpArgs {
-    /// A provider this runtime serves. Omitted, the config file's default and then
-    /// `native`.
-    #[arg(long, value_name = "NAME")]
-    pub provider: Option<String>,
-
     /// The directory a session works in when the editor's `session/new` names no `cwd`.
     /// An editor that speaks ACP always sends one, so this is a fallback and not an
     /// override: the editor knows which project the person opened.
@@ -1327,12 +1316,12 @@ pub struct RunArgs {
     pub prompt_file: Option<PathBuf>,
 
     /// Send the prompt into a session that already exists instead of starting one. The
-    /// start options are refused with it: that session's provider and workspace were
+    /// start options are refused with it: that session's model and workspace were
     /// chosen when it started.
     #[arg(
         long,
         value_name = "SESSION-ID",
-        conflicts_with_all = ["provider", "model", "workspace", "approval_mode", "sandbox_mode", "machine"]
+        conflicts_with_all = ["model", "workspace", "approval_mode", "sandbox_mode", "machine"]
     )]
     pub resume: Option<String>,
 
@@ -1352,10 +1341,6 @@ pub struct RunArgs {
     #[arg(long, requires = "continue_session")]
     pub or_new: bool,
 
-    /// A provider this runtime serves. Omitted, the config file's default and then
-    /// `native`.
-    #[arg(long, value_name = "NAME")]
-    pub provider: Option<String>,
     /// A full direct model spec. Omitted, `[defaults].model` or the runtime default.
     #[arg(long, value_name = "SPEC")]
     pub model: Option<String>,
@@ -1861,22 +1846,20 @@ mod tests {
         assert!(json);
     }
 
+    /// One provider is served, so there is no flag to name one and naming one is a typo
+    /// rather than a choice.
     #[test]
-    fn ouro_new_takes_a_provider_and_no_longer_requires_one() {
-        let Some(Command::New { provider, .. }) = parse(&["new", "--provider", "codex"]).command
-        else {
-            panic!("`ouro new --provider codex` must parse as New");
+    fn ouro_new_has_no_provider_flag_left_to_take() {
+        assert!(
+            Cli::try_parse_from(["ouro", "new", "--provider", "codex"]).is_err(),
+            "`--provider` must be gone from `ouro new`, not quietly accepted"
+        );
+
+        let Some(Command::New { model, .. }) = parse(&["new"]).command else {
+            panic!("`ouro new` must parse on its own");
         };
 
-        assert_eq!(provider.as_deref(), Some("codex"));
-
-        // The flag being absent is what makes the config file reachable; the refusal, when
-        // there is nothing in either place, is `config::resolve_start`'s and names both.
-        let Some(Command::New { provider, .. }) = parse(&["new"]).command else {
-            panic!("`ouro new` must parse without a provider");
-        };
-
-        assert_eq!(provider, None);
+        assert_eq!(model, None);
     }
 
     #[test]
@@ -2430,12 +2413,11 @@ mod tests {
         );
     }
 
-    /// A resumed session's provider and workspace were chosen when it started. Accepting
+    /// A resumed session's model and workspace were chosen when it started. Accepting
     /// them again would look like they applied.
     #[test]
     fn resume_refuses_the_start_options_rather_than_ignoring_them() {
         for flag in [
-            vec!["--provider", "native"],
             vec!["--model", "openai:gpt-5.6"],
             vec!["--workspace", "/srv/work"],
             vec!["--approval-mode", "auto_edit"],
@@ -2512,8 +2494,8 @@ mod tests {
         let Some(Command::Run(args)) = parse(&[
             "run",
             "fix the tests",
-            "--provider",
-            "codex",
+            "--model",
+            "openai_codex:gpt-5.6-sol",
             "--workspace",
             "/srv/work",
             "--approval-mode",
@@ -2537,7 +2519,7 @@ mod tests {
             panic!("a fully-specified `ouro run` must parse");
         };
 
-        assert_eq!(args.provider.as_deref(), Some("codex"));
+        assert_eq!(args.model.as_deref(), Some("openai_codex:gpt-5.6-sol"));
         assert_eq!(args.workspace, Some(PathBuf::from("/srv/work")));
         assert_eq!(args.approval_mode.as_deref(), Some("auto_edit"));
         assert_eq!(args.sandbox_mode.as_deref(), Some("workspace_write"));

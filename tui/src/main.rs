@@ -154,7 +154,6 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => attach_local(&paths, cli.dev, config, continue_from).await,
         Some(Command::New {
-            provider,
             model,
             workspace,
             approval_mode,
@@ -170,7 +169,6 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.dev,
                 config,
                 StartFlags {
-                    provider,
                     model,
                     workspace: workspace.map(workspace_argument).transpose()?,
                     approval_mode,
@@ -385,8 +383,7 @@ async fn new_session(
 
     paths.ensure_private_data_dir()?;
 
-    let resolved = config::resolve_start(&flags, &config.config.defaults)
-        .map_err(|missing| anyhow!("{}", missing.message(&config.path)))?;
+    let resolved = config::resolve_start(&flags, &config.config.defaults);
     // This identity exists before the mutation and survives its one safe reconciliation.
     let session_id = new_client_session_id()?;
     let machine = resolved.machine.unwrap_or_default();
@@ -394,7 +391,6 @@ async fn new_session(
     let request = StartRequest {
         id: session_id.clone(),
         plane: Plane::Interactive,
-        provider: resolved.provider.clone(),
         model: resolved.model.clone(),
         machine: machine.clone(),
         // A stored workspace is resolved the way a typed one is. A relative path across a
@@ -500,9 +496,7 @@ async fn new_session(
         .await);
     }
 
-    progress.report(BootEvent::StartingSession {
-        provider: resolved.provider.clone(),
-    });
+    progress.report(BootEvent::StartingSession);
 
     // Driven by the boot screen because it is allowed to take two minutes: provider
     // readiness is `:infinity` upstream, and this is the one call that waits for it. A
@@ -764,8 +758,8 @@ async fn new_session(
 /// `ouro run`: the session `ouro new` starts, streamed to a pipe instead of to a screen.
 ///
 /// This function is the seam and nothing else. Every refusal it can make happens *before*
-/// a runtime is started — a prompt with no provider must not leave a daemon behind it —
-/// and everything from `interactive.start` onwards belongs to [`ouro::run::drive`], which
+/// a runtime is started — a prompt this client will not send must not leave a daemon
+/// behind it — and everything from `interactive.start` onwards belongs to [`ouro::run::drive`], which
 /// the integration tests drive against a scripted gateway without any of this.
 async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> Result<()> {
     let options = ouro::run::Options {
@@ -831,7 +825,6 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     };
 
     let flags = StartFlags {
-        provider: args.provider,
         model: args.model,
         workspace: args.workspace.map(workspace_argument).transpose()?,
         approval_mode: args.approval_mode,
@@ -845,7 +838,6 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         ouro::run::start_plan(
             &flags,
             &config.config.defaults,
-            &config.path,
             new_client_session_id().map_err(|error| format!("{error:#}"))?,
             |machine, workspace| {
                 start_workspace(machine, workspace).map_err(|error| format!("{error:#}"))
@@ -1006,9 +998,8 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
     }
 
     // The same resolution `ouro new` and `ouro run` perform, against the same `[defaults]`,
-    // so an operator who stated a provider once does not state it again in editor config.
+    // so an operator who stated a model once does not state it again in editor config.
     let flags = ouro::config::StartFlags {
-        provider: args.provider,
         model: None,
         workspace: args.workspace.map(workspace_argument).transpose()?,
         approval_mode: args.approval_mode,
@@ -1016,8 +1007,7 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
         machine: None,
     };
 
-    let resolved = ouro::config::resolve_start(&flags, &config.config.defaults)
-        .map_err(|missing| anyhow!(missing.message(&config.path)))?;
+    let resolved = ouro::config::resolve_start(&flags, &config.config.defaults);
 
     // Validated here rather than at `session/new`: a mode this build cannot name would
     // otherwise become a `-32602` on the editor's first prompt, hours after it was typed
@@ -1090,7 +1080,6 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
         hello,
         notifications,
         ouro::acp_serve::Options {
-            provider: resolved.provider,
             workspace,
             approval_mode: resolved.approval_mode,
             sandbox_mode: resolved.sandbox_mode,
@@ -1116,7 +1105,6 @@ fn continue_ignores(args: &RunArgs) -> Option<String> {
     }
 
     let named: Vec<&str> = [
-        args.provider.as_ref().map(|_| "--provider"),
         args.model.as_ref().map(|_| "--model"),
         args.approval_mode.as_ref().map(|_| "--approval-mode"),
         args.sandbox_mode.as_ref().map(|_| "--sandbox-mode"),
@@ -3937,7 +3925,6 @@ mod tests {
         StartRequest {
             id: "test-start-id".into(),
             plane: Plane::Interactive,
-            provider: "stub".into(),
             model: None,
             machine: machine.into(),
             workspace: "/tmp/workspace".into(),
@@ -4003,7 +3990,6 @@ mod tests {
         assert_eq!(first, retry);
         assert_eq!(first["id"], id);
         assert_eq!(first["machine"], "studio-mini");
-        assert_eq!(first["provider"], "stub");
         assert_eq!(first["workspace"], "/tmp/workspace");
     }
 

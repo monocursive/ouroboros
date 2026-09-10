@@ -137,9 +137,6 @@ fn log(message: &str) {
 /// else is the operator's, stated once when they registered this agent with their editor.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// A provider this runtime serves. Required: this bridge will not let an editor's
-    /// default decide which vendor runs the operator's code.
-    pub provider: String,
     /// Used only when the editor's `session/new` names no `cwd`.
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
@@ -206,26 +203,20 @@ pub struct Mode {
 /// * `prompt` is additionally gated on `capabilities.approvals`, because
 ///   `interactive.start`/`configure` answer `["unsupported_approval_mode", …]` where no
 ///   transport can carry a question to a person;
-/// * `plan` is offered only for the one provider whose plan mode `Ouroboros.Provider.plan_mode/2`
-///   reports as `settable: :any_time`. `claude` is `:at_start` (a mid-session change is
-///   refused), `codex` is `:pending`, and every other provider is
-///   `transport_cannot_plan` — so none of them are offered a mode they would refuse.
+/// * `plan` is always offered. It is not an approval mode and does not travel on
+///   `dynamic_configuration`; it is its own field, and the one transport this runtime
+///   serves reports it as `settable: :any_time`, so a mid-session change is accepted.
 ///
 /// A refusal that happens anyway is relayed to the editor verbatim rather than swallowed.
-pub fn modes_for(provider: &str, capabilities: Option<&Value>, planning: bool) -> Vec<Mode> {
+pub fn modes_for(capabilities: Option<&Value>) -> Vec<Mode> {
     let configurable = capability(capabilities, "dynamic_configuration");
     let approvals = capability(capabilities, "approvals");
-    let mut modes = Vec::new();
 
-    // Plan is not an approval mode and does not travel on `dynamic_configuration`: it is
-    // its own field with its own per-provider answer.
-    if plan_settable(provider) || planning {
-        modes.push(Mode {
-            id: "plan".into(),
-            name: "Plan".into(),
-            description: "Read-only; produces a plan and asks before building it".into(),
-        });
-    }
+    let mut modes = vec![Mode {
+        id: "plan".into(),
+        name: "Plan".into(),
+        description: "Read-only; produces a plan and asks before building it".into(),
+    }];
 
     if configurable {
         if approvals {
@@ -248,22 +239,12 @@ pub fn modes_for(provider: &str, capabilities: Option<&Value>, planning: bool) -
         });
         modes.push(Mode {
             id: "default".into(),
-            name: "Provider default".into(),
-            description: "Whatever the provider does on its own".into(),
+            name: "Runtime default".into(),
+            description: "Whatever the runtime does on its own".into(),
         });
     }
 
     modes
-}
-
-/// Whether a mid-session `interactive.configure {plan: …}` is accepted for this provider.
-///
-/// Transcribed from `Ouroboros.Provider.plan_mode/2`'s own `plan_support/1` table, the
-/// same way [`crate::model::ApprovalMode`] transcribes `@approval_modes`, because there is
-/// no capability key that reports it. Wrong here is visible: the runtime refuses and the
-/// refusal reaches the editor.
-fn plan_settable(provider: &str) -> bool {
-    provider == "native"
 }
 
 fn capability(capabilities: Option<&Value>, key: &str) -> bool {
@@ -286,7 +267,7 @@ struct Prompt {
     id: Value,
     /// The caller-minted durable turn id — the gateway's reconciliation key.
     turn_id: String,
-    /// The id the provider's own events carry, once the send named it.
+    /// The id the runtime's own events carry, once the send named it.
     harness_turn: Option<String>,
     /// A `session/cancel` was asked for; whatever the stream says, this ends `cancelled`.
     cancelled: bool,
@@ -299,7 +280,6 @@ struct Prompt {
 struct Session {
     id: String,
     node: Option<String>,
-    provider: String,
     cursor: u64,
     pending: BTreeMap<u64, Event>,
     rounds: u32,
@@ -618,16 +598,6 @@ impl Agent {
             ));
         }
 
-        let provider = self.options.provider.trim();
-
-        if provider.is_empty() {
-            return Err(Refusal::new(
-                -32600,
-                "`ouro acp` was started without --provider, so there is no honest answer to \
-                 which vendor should run this workspace's code",
-            ));
-        }
-
         let workspace = match params.get("cwd").and_then(Value::as_str) {
             Some(cwd) if !cwd.trim().is_empty() => cwd.trim().to_string(),
             _absent => match self.options.workspace.clone() {
@@ -652,7 +622,6 @@ impl Agent {
         let session_id = model::new_session_id();
         let mut start = Map::new();
         start.insert("id".into(), json!(session_id));
-        start.insert("provider".into(), json!(provider));
         start.insert("workspace".into(), json!(workspace));
 
         if let Some(mode) = self.options.approval_mode.as_deref() {
@@ -699,7 +668,6 @@ impl Agent {
         let mut session = Session {
             id: started.id.clone(),
             node: started.node.clone(),
-            provider: provider.to_string(),
             cursor: 0,
             pending: BTreeMap::new(),
             rounds: 0,
@@ -732,11 +700,7 @@ impl Agent {
                 .and_then(|options| options.get("plan"))
                 .and_then(Value::as_bool)
                 == Some(true);
-            session.modes = modes_for(
-                provider,
-                options.and_then(|options| options.get("capabilities")),
-                session.planning,
-            );
+            session.modes = modes_for(options.and_then(|options| options.get("capabilities")));
             session.current_mode = Some(current_mode(options, session.planning));
         }
 
@@ -1095,8 +1059,7 @@ impl Agent {
             return Err(Refusal::new(
                 -32602,
                 &format!(
-                    "{mode} is not a mode this session offers; session/new advertised {} for \
-                     provider {}",
+                    "{mode} is not a mode this session offers; session/new advertised {}",
                     if session.modes.is_empty() {
                         "none".to_string()
                     } else {
@@ -1106,8 +1069,7 @@ impl Agent {
                             .map(|mode| mode.id.as_str())
                             .collect::<Vec<_>>()
                             .join(", ")
-                    },
-                    session.provider
+                    }
                 ),
             ));
         }
@@ -1130,7 +1092,7 @@ impl Agent {
             // Leaving plan mode is part of choosing an approval mode, and the two travel
             // in one call so the session is never briefly planning under a mode that says
             // otherwise. Sent only where this session was planning: a `plan: false` on a
-            // provider that cannot plan is a key the runtime would refuse.
+            // session that never was is a key the runtime has no use for.
             if session.planning {
                 changes.insert("plan".into(), Value::Bool(false));
             }

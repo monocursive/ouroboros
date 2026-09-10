@@ -427,42 +427,6 @@ fn a_read_folds_into_the_exploration_cell_and_counts_its_lines() {
     }
 }
 
-/// The ACP dialect names a call in prose and says what it *is* only in `kind`. The
-/// summariser reads both: the title is the row's name, the kind is what picks the verb.
-#[test]
-fn an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried() {
-    let projected = cell("event_tool_call_acp_edit");
-    let edit = tool(&projected);
-
-    assert_eq!(edit.name, "Edit lib/ouroboros/web/transcript.ex");
-    assert_eq!(edit.kind.as_deref(), Some("edit"));
-
-    assert_eq!(
-        summary(&projected),
-        (
-            "Edit".to_string(),
-            "lib/ouroboros/web/transcript.ex (+4 −3)".to_string(),
-            String::new()
-        )
-    );
-}
-
-#[test]
-fn an_acp_status_of_completed_settles_the_edit_without_an_is_error_field() {
-    let projected = cells(&["event_tool_call_acp_edit", "event_tool_result_acp_edit"]);
-
-    assert_eq!(projected.len(), 1, "{projected:?}");
-    assert_eq!(tool(&projected[0]).state, ToolState::Completed);
-    assert_eq!(
-        summary(&projected[0]),
-        (
-            "Edit".to_string(),
-            "lib/ouroboros/web/transcript.ex (+4 −3)".to_string(),
-            String::new()
-        )
-    );
-}
-
 // ---------------------------------------------------------------------------
 // What changed
 // ---------------------------------------------------------------------------
@@ -663,7 +627,7 @@ fn the_session_lifecycle_reads_as_one_line_each() {
     // working directory, which is not a sentence worth a line.
     assert_eq!(
         chat_note(&cell("event_session_ready")),
-        "session ready · acp · stable"
+        "session ready · native · stable"
     );
 
     assert_eq!(chat_note(&cell("event_session_idle")), "session idle");
@@ -1109,22 +1073,22 @@ fn the_runtimes_plan_exit_record_reads_as_a_named_provider_note() {
     );
 }
 
-/// The must-render case. ACP wraps every update it does not map in
-/// `{"kind": "acp_update", "update": …}`, and the update's own `sessionUpdate` type is the
-/// informative half — so it is lifted out and both halves are named.
+/// The must-render case. A `provider_event` this build does not model is still a line: its
+/// `kind` names what happened and whatever message it carried is the detail, because an
+/// event rendered as nothing is an event the operator was not told about.
 #[test]
-fn an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind() {
+fn an_unmodelled_provider_event_is_a_line_that_names_its_kind_and_message() {
     assert_eq!(
         presentation("event_provider_event_unknown"),
         PresentationEvent::ProviderNote {
-            kind: "acp_update · terminal_output".into(),
-            detail: String::new(),
+            kind: "terminal_output".into(),
+            detail: "waiting for the container to come up".into(),
         }
     );
 
     assert_eq!(
         chat_note(&cell("event_provider_event_unknown")),
-        "provider event · acp_update · terminal_output"
+        "provider event · terminal_output — waiting for the container to come up"
     );
 }
 
@@ -1185,10 +1149,8 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_session_started",
         "event_status_resumed",
         "event_thinking_delta",
-        "event_tool_call_acp_edit",
         "event_tool_call_bash",
         "event_tool_call_read",
-        "event_tool_result_acp_edit",
         "event_tool_result_bash",
         "event_tool_result_read",
         "event_turn_completed",

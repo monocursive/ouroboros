@@ -1,55 +1,41 @@
-//! `ouro mcp-serve`: session-bound approvals and fleet child tools.
+//! `ouro mcp-serve`: this session's native children and fleet, over MCP on stdio.
 //!
 //! ## Why this exists
 //!
-//! `claude --print` runs one process per turn and offers no approvals channel, so an
-//! Ouroboros session at `approval_mode: :prompt` used to have its permission-needing
-//! tools denied without a word. What Claude Code *does* offer headless is
-//! `--permission-prompt-tool <mcp tool name>`: instead of prompting, it calls one MCP
-//! tool and reads the decision out of the result. This module is that tool's server.
+//! An Ouroboros session can delegate work to native children and can read the fleet it
+//! belongs to. This module lends those two abilities to an external MCP client — an
+//! editor, another agent harness — so that a tool call made *there* is carried out by
+//! *this* session, under this session's ownership and permissions.
 //!
-//! It is not run by hand. `Ouroboros.Provider.ClaudeAdapter` composes an `--mcp-config`
-//! naming this binary and this subcommand, with the gateway address, the token *file*,
-//! and the session id in the child's environment; Claude Code spawns it, speaks MCP over
-//! its stdio, and the `approve` call lands here.
+//! It is not run by hand. The runtime spawns it with the gateway address, the token
+//! *file*, and the session id in the child's environment; the client speaks MCP over its
+//! stdio, and `agent`, `agent_result` and `fleet` land here.
 //!
-//! ## The two contracts, pinned
+//! ## The contract, pinned
 //!
 //! **MCP.** Revision `2026-07-28` (<https://modelcontextprotocol.io/specification>, whose
 //! schema is `schema/2026-07-28/schema.ts`). The stdio binding is newline-delimited
 //! JSON-RPC 2.0 on stdin/stdout — one message per line, no embedded newlines, and nothing
 //! that is not a message may be written to stdout, which is why every log here goes to
 //! stderr and only when `OUROBOROS_MCP_SERVE_VERBOSE=1`. `initialize` /
-//! `notifications/initialized` are the handshake of the initialization-based revisions
-//! that Claude Code speaks; the requested `protocolVersion` is echoed back when the client
-//! named one, because a server that insists on its own revision fails the negotiation the
-//! spec's backward-compatibility rules exist to make work.
+//! `notifications/initialized` are the handshake of the initialization-based revisions;
+//! the requested `protocolVersion` is echoed back when the client named one, because a
+//! server that insists on its own revision fails the negotiation the spec's
+//! backward-compatibility rules exist to make work.
 //!
-//! **The permission prompt tool.** `--permission-prompt-tool` takes an MCP tool name
-//! (<https://code.claude.com/docs/en/cli-reference>), and MCP tools are named
-//! `mcp__<server>__<tool>` (<https://code.claude.com/docs/en/mcp>) — so this server,
-//! registered as `ouroboros`, exposes `mcp__ouroboros__approve`. The call carries the
-//! tool being asked about (`tool_name`), the arguments it would run with (`input`), and
-//! the `tool_use_id` correlating it to the assistant's tool call. The answer is a JSON
-//! object inside a text content block, and it is exactly the `canUseTool` result shape:
-//! `{"behavior":"allow","updatedInput":{…}}` or `{"behavior":"deny","message":"…"}`
-//! (<https://code.claude.com/docs/en/agent-sdk/user-input>, "Respond to tool requests").
-//!
-//! ## Deny by default, and say why
+//! ## Refuse by default, and say why
 //!
 //! Every failure — no runtime, a refused token, a gateway that answered an error, a
-//! malformed call, a deadline — answers `deny` with a message naming the cause. There is
-//! no path here that allows because something did not happen. The one place `allow` comes
-//! from is a runtime that said so, which is a human or the permission engine on their
-//! behalf.
+//! malformed call, a deadline — answers with `isError` and a message naming the cause.
+//! Nothing here succeeds because something did not happen: a tool that fails silently is
+//! one the model will call again with the same arguments.
 //!
 //! The connection is opened on first use and held for the server's lifetime; a transport
 //! failure is retried exactly once against a fresh connection. A *timeout* is never
-//! retried: a call that ran out of time may be sitting in front of a person, and asking
-//! again would put a second question beside it. Native child calls also carry one
-//! bridge-generated request id across that reconnect, so the owning session can replay
-//! its result without spawning a second child. Session identity and owner routing come
-//! only from the bridge environment; model arguments cannot select another owner.
+//! retried. Child calls carry one bridge-generated request id across that reconnect, so
+//! the owning session can replay a result rather than spawn a second child. Session
+//! identity and owner routing come only from the bridge environment; tool arguments
+//! cannot select another owner.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -67,13 +53,10 @@ use crate::transport::{self, Client, ClientError, NoReconnectHook, Secret, Trans
 /// The MCP revision this server implements. Echoed only when the client did not name one.
 pub const PROTOCOL_VERSION: &str = "2026-07-28";
 
-/// The server name in `--mcp-config`. It is half of the tool name Claude Code is told to
-/// call, so it is a constant on both sides of the bridge rather than a string typed twice.
+/// The server name the client registers this bridge under. It is half of every
+/// `mcp__<server>__<tool>` name, so it is a constant on both sides rather than a string
+/// typed twice.
 pub const SERVER_NAME: &str = "ouroboros";
-
-/// The permission prompt. `mcp__ouroboros__approve` is what `--permission-prompt-tool`
-/// receives; it is called by the harness, never by the model.
-pub const TOOL_NAME: &str = "approve";
 
 /// The tools the *model* may call.
 pub const AGENT_TOOL: &str = "agent";
@@ -90,23 +73,14 @@ const SUBAGENT_SPAWN_TIMEOUT: Duration = Duration::from_secs(930);
 const SUBAGENT_RESULT_TIMEOUT: Duration = Duration::from_secs(75);
 const MAX_FLEET_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// The gateway method the permission tool forwards to.
-pub const APPROVAL_METHOD: &str = "interactive.request_approval";
-
 pub const ADDR_ENV: &str = "OUROBOROS_GATEWAY_ADDR";
 pub const TOKEN_FILE_ENV: &str = "OUROBOROS_GATEWAY_TOKEN_FILE";
 pub const SESSION_ID_ENV: &str = "OUROBOROS_SESSION_ID";
 pub const SESSION_NODE_ENV: &str = "OUROBOROS_SESSION_NODE";
-pub const TIMEOUT_ENV: &str = "OUROBOROS_APPROVAL_TIMEOUT_MS";
 pub const VERBOSE_ENV: &str = "OUROBOROS_MCP_SERVE_VERBOSE";
 
-/// Ten minutes, the same order as a person walking back to their terminal. Held below the
-/// gateway's own fifteen-minute ceiling on `interactive.request_approval` so that the
-/// answer is the runtime's decision rather than a killed task.
-pub const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 600_000;
-
-/// The most one MCP message may be. A permission prompt carries a tool's arguments, not a
-/// file, and a line that never ends is a peer growing this process's memory on its say-so.
+/// The most one MCP message may be. A tool call carries arguments, not a file, and a line
+/// that never ends is a peer growing this process's memory on its say-so.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// What the environment said about the runtime to ask. Every field is validated once, at
@@ -117,7 +91,6 @@ pub struct Bridge {
     pub token_file: PathBuf,
     pub session_id: String,
     pub node: Option<String>,
-    pub timeout: Duration,
 }
 
 impl Bridge {
@@ -142,24 +115,11 @@ impl Bridge {
             .ok()
             .filter(|value| !value.trim().is_empty());
 
-        let timeout = match std::env::var(TIMEOUT_ENV) {
-            Ok(value) => value
-                .trim()
-                .parse::<u64>()
-                .map_err(|error| anyhow!("{TIMEOUT_ENV} is not a whole number of ms: {error}"))?,
-            Err(_absent) => DEFAULT_APPROVAL_TIMEOUT_MS,
-        };
-
-        if timeout == 0 {
-            return Err(anyhow!("{TIMEOUT_ENV} must be greater than zero"));
-        }
-
         Ok(Self {
             addr,
             token_file: PathBuf::from(token_file),
             session_id,
             node,
-            timeout: Duration::from_millis(timeout),
         })
     }
 }
@@ -188,7 +148,7 @@ impl Gateway {
 
         let mut config = TransportConfig::new(bridge.addr, token);
         // A dropped connection is this module's to notice, not the transport's to paper
-        // over: an approval in flight when the socket died has to become a denial, and a
+        // over: a call in flight when the socket died has to become a refusal, and a
         // background reconnect would leave the caller waiting for its ceiling instead.
         config.reconnect = false;
 
@@ -232,8 +192,8 @@ impl Gateway {
                     ))
                 }
 
-                // A question that ran out of time may be in front of a person. Asking
-                // again would put a second one beside it, so this ends here.
+                // A call that ran out of time may have had an effect already. Asking
+                // again would risk a second one, so this ends here.
                 Err(ClientError::Timeout) => {
                     return Err(format!(
                         "no decision within {}ms",
@@ -329,7 +289,6 @@ impl Server {
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
         match name {
-            TOOL_NAME => Ok(tool_result(self.approve(arguments).await)),
             AGENT_TOOL | AGENT_RESULT_TOOL => Ok(match self.subagent(name, arguments).await {
                 Ok(result) => result,
                 Err(reason) => text_result(Err(reason)),
@@ -437,122 +396,6 @@ impl Server {
             )
         })
     }
-
-    /// The whole decision, as the behaviour object Claude Code reads.
-    async fn approve(&mut self, arguments: Value) -> Value {
-        let Some(request) = arguments.as_object() else {
-            return deny("the approve tool takes an object with a tool_name");
-        };
-
-        let Some(tool_name) = request
-            .get("tool_name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.trim().is_empty())
-        else {
-            return deny("the approve tool call carried no tool_name");
-        };
-
-        let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
-
-        if !input.is_object() {
-            return deny("the approve tool call carried an input that is not an object");
-        }
-
-        let bridge = match &self.bridge {
-            Ok(bridge) => bridge.clone(),
-            Err(reason) => {
-                return deny(&format!(
-                    "this approval bridge is not configured to reach a runtime ({reason}); \
-                     `ouro mcp-serve` is started by the runtime, not by hand"
-                ))
-            }
-        };
-
-        let mut forwarded = Map::new();
-        forwarded.insert("tool_name".into(), json!(tool_name));
-        forwarded.insert("input".into(), input.clone());
-
-        if let Some(tool_use_id) = request
-            .get("tool_use_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-        {
-            forwarded.insert("tool_use_id".into(), json!(tool_use_id));
-        }
-
-        if let Some(cwd) = current_dir() {
-            forwarded.insert("cwd".into(), json!(cwd));
-        }
-
-        let mut params = Map::new();
-        params.insert("id".into(), json!(bridge.session_id));
-        params.insert("request".into(), Value::Object(forwarded));
-
-        if let Some(node) = &bridge.node {
-            params.insert("node".into(), json!(node));
-        }
-
-        log(&format!("asking the runtime about {tool_name}"));
-
-        match self
-            .gateway
-            .call(
-                &bridge,
-                APPROVAL_METHOD,
-                Value::Object(params),
-                bridge.timeout,
-            )
-            .await
-        {
-            Ok(answer) => decision(&answer, input),
-            Err(reason) => deny(&format!("Ouroboros could not ask: {reason}")),
-        }
-    }
-}
-
-/// Maps the runtime's answer onto the permission-prompt tool's behaviour object. Anything
-/// that is not an explicit `"allow"` is a denial, including a shape this build does not
-/// recognise: a decision that cannot be read is not a decision to run the tool.
-fn decision(answer: &Value, input: Value) -> Value {
-    let decision = answer.get("decision").and_then(Value::as_str).unwrap_or("");
-    let reason = answer
-        .get("reason")
-        .and_then(Value::as_str)
-        .filter(|reason| !reason.trim().is_empty());
-    let source = answer.get("source").and_then(Value::as_str);
-
-    if decision == "allow" {
-        return json!({"behavior": "allow", "updatedInput": input});
-    }
-
-    let mut message = match (decision, source) {
-        ("deny", Some(source)) => format!("Ouroboros denied this ({source})"),
-        ("deny", None) => "Ouroboros denied this".to_string(),
-        (other, _) => {
-            format!("Ouroboros answered {other:?}, which this bridge cannot read as a decision")
-        }
-    };
-
-    if let Some(reason) = reason {
-        message.push_str(": ");
-        message.push_str(reason);
-    }
-
-    deny(&message)
-}
-
-fn deny(message: &str) -> Value {
-    json!({"behavior": "deny", "message": message})
-}
-
-/// The behaviour object rides inside a text content block, JSON-encoded, which is the
-/// shape the permission prompt tool's caller parses.
-fn tool_result(behavior: Value) -> Value {
-    let text = serde_json::to_string(&behavior).unwrap_or_else(|_unencodable| {
-        r#"{"behavior":"deny","message":"Ouroboros could not encode its own decision"}"#.to_string()
-    });
-
-    json!({"content": [{"type": "text", "text": text}], "isError": false})
 }
 
 /// What model-facing tools answer with. A refusal is `isError` and says what
@@ -641,7 +484,6 @@ fn optional_string(request: &Map<String, Value>, key: &str) -> Option<String> {
 /// answer about the top of the file instead of an error it has to reason about.
 fn tool_descriptors() -> Vec<Value> {
     vec![
-        tool_descriptor(),
         agent_descriptor(),
         agent_result_descriptor(),
         fleet_descriptor(),
@@ -687,37 +529,6 @@ fn fleet_descriptor() -> Value {
     })
 }
 
-fn tool_descriptor() -> Value {
-    json!({
-        "name": TOOL_NAME,
-        "title": "Ask Ouroboros for permission",
-        "description": "Ask the Ouroboros session that started this agent whether one \
-                        tool call may run. Answers with the permission-prompt behaviour \
-                        object: allow with the input to run, or deny with a reason. \
-                        Ouroboros is the approver; this tool never decides on its own.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "tool_name": {
-                    "type": "string",
-                    "description": "The tool the agent wants to use."
-                },
-                "input": {
-                    "type": "object",
-                    "description": "The arguments that tool would run with.",
-                    "additionalProperties": true
-                },
-                "tool_use_id": {
-                    "type": "string",
-                    "description": "The id of the tool call being asked about."
-                }
-            },
-            "required": ["tool_name", "input"],
-            "additionalProperties": true
-        }
-    })
-}
-
 fn initialize_result(params: &Value) -> Value {
     // Echo what the client asked for when it named a revision. The 2026-07-28 spec's
     // backward-compatibility rules exist precisely so that a server and a client of
@@ -734,12 +545,14 @@ fn initialize_result(params: &Value) -> Value {
         "capabilities": {"tools": {"listChanged": false}},
         "serverInfo": {
             "name": SERVER_NAME,
-            "title": "Ouroboros approvals",
+            "title": "Ouroboros session bridge",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "instructions": "Ouroboros serves one tool: approve. It is the permission prompt \
-                         for this session and is called by the agent harness, not by the \
-                         model."
+        "instructions": "Ouroboros lends this client the session that started it: `agent` \
+                         delegates work to a native child owned by that session, \
+                         `agent_result` collects or stops one, and `fleet` reads the \
+                         machines that session can reach. Ownership comes from the \
+                         session, never from these arguments."
     })
 }
 
@@ -751,12 +564,6 @@ fn encode(value: Value) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_unencodable| {
         r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"unencodable"}}"#.to_string()
     })
-}
-
-fn current_dir() -> Option<String> {
-    std::env::current_dir()
-        .ok()
-        .map(|path| path.display().to_string())
 }
 
 /// Speaks MCP on this process's stdio until stdin ends.
