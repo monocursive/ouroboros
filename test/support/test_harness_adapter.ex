@@ -1,38 +1,3 @@
-defmodule Ouroboros.Test.ManagedSessionTransport do
-  @moduledoc """
-  A deterministic session transport with an approvals channel.
-
-  Turn mechanics delegate to `Jido.Harness.SessionAdapters.Managed`, so one emit/finish
-  controller drives these sessions. `respond_approval/3` is the one thing added: a session
-  transport that declares no approvals cannot be started under the plane's default
-  `approval_mode: :prompt`, and a fixture standing in for the native transport has to
-  answer, not just declare.
-  """
-
-  @behaviour Jido.Harness.SessionAdapter
-
-  @impl true
-  defdelegate open(request, context), to: Jido.Harness.SessionAdapters.Managed
-
-  @impl true
-  defdelegate send(handle, request, turn_id), to: Jido.Harness.SessionAdapters.Managed
-
-  @impl true
-  defdelegate interrupt(handle, turn_id), to: Jido.Harness.SessionAdapters.Managed
-
-  @impl true
-  defdelegate close(handle), to: Jido.Harness.SessionAdapters.Managed
-
-  @impl true
-  def configure(handle, changes),
-    do: Jido.Harness.SessionAdapters.Managed.configure(handle, changes)
-
-  # A real transport would forward the decision to its provider process here. The worker
-  # has already resolved the pending approval, which is the part these tests observe.
-  @impl true
-  def respond_approval(_handle, _request_id, _response), do: :ok
-end
-
 defmodule Ouroboros.Test.HarnessAdapter do
   @moduledoc false
 
@@ -102,11 +67,12 @@ defmodule Ouroboros.Test.HarnessAdapter do
   # per turn, so `process`, `multi_turn` and `interrupt` say so rather than borrowing the
   # live loop's answers. `approvals: :native` is the one thing it must declare, because a
   # transport with no approvals channel cannot be started under the plane's default
-  # `approval_mode: :prompt`.
+  # `approval_mode: :prompt`, and `steer: :managed` for the same reason: a transport that
+  # declares no steering cannot be steered, and the seam under test is downstream of that.
   defp native_transport do
     %{
       SessionTransportSpec.managed(:native)
-      | adapter: Ouroboros.Test.ManagedSessionTransport,
+      | adapter: Ouroboros.Test.SessionTransport,
         configuration_options: [:model, :reasoning_effort, :approval_mode, :sandbox_mode],
         capabilities:
           InteractionCapabilities.new!(
@@ -117,6 +83,7 @@ defmodule Ouroboros.Test.HarnessAdapter do
             follow_up: :managed,
             interrupt: :process,
             approvals: :native,
+            steer: :managed,
             dynamic_model: :managed,
             dynamic_configuration: :managed
           )

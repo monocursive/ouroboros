@@ -20,7 +20,7 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
   alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.NativeModelScript
 
-  @provider :ouroboros_test
+  @provider :native
   @receive_timeout 5_000
 
   setup do

@@ -1478,21 +1478,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         subscription login are not used.
       </p>
 
-      <p
-        :if={@card.state == :required and @card.key == "xai" and not @card.managed?}
-        class="ouro-new-hint"
-      >
-        Direct Grok models use the xAI API. Add a key here, or set <code>{@card.env}</code>
-        in the Ouroboros service environment. SpaceXAI subscription
-        login is available through the managed Grok provider instead.
-      </p>
-
-      <p
-        :if={@card.state == :required and @card.key == "xai" and @card.managed?}
-        class="ouro-new-hint"
-      >
-        Add an xAI API key as an alternative to subscription login. The first-party CLI uses
-        a connected subscription first and this key as its fallback.
+      <p :if={@card.state == :required and @card.key == "xai"} class="ouro-new-hint">
+        Direct xAI models use the xAI API. Add a key here, or set <code>{@card.env}</code>
+        in the Ouroboros service environment.
       </p>
 
       <div :if={@can_set and @card.source != "environment"} class="ouro-new-row">
@@ -1631,7 +1619,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         <h2 id="xai-key-title">xAI API key</h2>
         <p>
           The key is stored in a private mode-0600 file on this runtime host. It is passed
-          only to direct xAI requests and the first-party Grok CLI, and is never shown again.
+          only to direct xAI requests, and is never shown again.
         </p>
         <label for="xai-api-key">API key</label>
         <input
@@ -1648,8 +1636,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           autofocus
         />
         <p class="ouro-new-hint">
-          Create API keys in the xAI Console. API usage and SpaceXAI subscriptions are
-          separate billing paths.
+          Create API keys in the xAI Console.
         </p>
         <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
         <div class="ouro-session-dialog-actions">

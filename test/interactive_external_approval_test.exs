@@ -52,7 +52,7 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
   alias Ouroboros.Test.AllowEverythingPermissions
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
   @receive_timeout 5_000
 
   setup do

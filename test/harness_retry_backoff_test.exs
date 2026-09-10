@@ -6,7 +6,7 @@ defmodule Ouroboros.HarnessRetryBackoffTest do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.StubSession
 
-  @provider :ouroboros_test
+  @provider :native
 
   test "a wedged interactive session checkpoints one error and backs off" do
     id = unique_id("wedged-session")

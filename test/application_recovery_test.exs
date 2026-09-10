@@ -10,7 +10,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
-  @provider :ouroboros_test
+  @provider :native
 
   test "the model admission boundary owns every session that consumes its leases" do
     admission = Process.whereis(Ouroboros.Provider.Native.Model.Admission)

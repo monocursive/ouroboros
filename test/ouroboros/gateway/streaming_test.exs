@@ -11,17 +11,12 @@ defmodule Ouroboros.Gateway.StreamingTest do
   alias Ouroboros.Gateway.Listener
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.HarnessAdapter
-  alias Ouroboros.Test.SessionHarnessAdapter
 
   @moduletag :tmp_dir
   @moduletag :capture_log
 
   @token String.duplicate("s", 48)
-  @provider :ouroboros_test
-  # Same run adapter behavior, but its sessions declare a steer-capable transport —
-  # the managed transport the base adapter synthesizes has no `steer`, which is why
-  # steer paths need this twin.
-  @session_provider :ouroboros_test_session
+  @provider :native
   # A ceiling, not a pace: every wait exits early on its condition. The full suite runs
   # this file alongside 100+ seconds of sync tests, and a starved scheduler has pushed
   # first-event latency past 5s before — the budget must absorb that without flaking.
@@ -48,10 +43,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
     Application.put_env(
       :jido_harness,
       :providers,
-      Map.merge(Map.new(old_providers || %{}), %{
-        @provider => HarnessAdapter,
-        @session_provider => SessionHarnessAdapter
-      })
+      Map.merge(Map.new(old_providers || %{}), %{@provider => HarnessAdapter})
     )
 
     Application.put_env(
@@ -59,10 +51,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       :provider_config,
       old_config
       |> then(&Map.new(&1 || %{}))
-      |> Map.merge(%{
-        @provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}},
-        @session_provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}}
-      })
+      |> Map.merge(%{@provider => %{test_pid: self(), retention: %{journal_dir: journal_dir}}})
     )
 
     config =
@@ -675,7 +664,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   describe "steering" do
     test "a steer is quoted by its own accepted event, durably", %{client: client} do
-      {ref, id} = start_session([], @session_provider)
+      {ref, id} = start_session()
 
       assert call(client, "interactive.subscribe", %{"id" => id, "cursor" => 0})["result"]
 
@@ -711,7 +700,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
     test "steering without an active turn names the refusal instead of hanging", %{
       client: client
     } do
-      {ref, id} = start_session([], @session_provider)
+      {ref, id} = start_session()
       wait_until_harness_attached(ref)
 
       refused = call(client, "interactive.steer", %{"id" => id, "input" => "too early"})

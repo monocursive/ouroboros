@@ -20,7 +20,7 @@ defmodule Ouroboros.InteractiveWorkspaceAdmissionTest do
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()

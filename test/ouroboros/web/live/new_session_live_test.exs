@@ -5,21 +5,26 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   ## Two halves, deliberately
 
   The rules live in `Ouroboros.Web.Live.NewSession`, which has no socket in it, so most of
-  this file drives that module directly with fixtures it fully controls — a runtime's
-  provider list is a property of the machine the suite runs on, and a test that asserted
-  "claude is dimmed here" would be asserting somebody's PATH.
+  this file drives that module directly with fixtures it fully controls.
 
   The rest drives the LiveView against the **real** methods through `Ouroboros.Web.Call`:
   `runtime.providers` and `runtime.models` answer from this node, and `workspace.browse`
   walks real directories under a root this file creates and points
-  `:workspace_allowed_roots` at. Those assertions are therefore written against structure
-  and against the form's own state, never against a particular provider being installed.
+  `:workspace_allowed_roots` at.
 
-  **Not** covered here: an actually-started session. `interactive.start` spawns a provider,
-  and a test that let it would be testing the interactive plane. What is covered is the
-  exact envelope the form builds — asserted on the form the operator's clicks produced —
-  and the deck's half of the `?open` contract, driven with a coordinator registered in the
-  real registry the way `Ouroboros.Web.Live.DeckLiveTest` does it.
+  ## One provider
+
+  There is exactly one provider — `native`, Ouroboros' own in-process agent loop — so the
+  form neither offers a choice nor sends a name. `runtime.providers` still answers, because
+  its row carries the credential probe the API-key cards read; what it no longer carries is
+  a decision. The model control's groups name the *company that made the model*, and every
+  one of them is reached the same way: a direct API call, no CLI.
+
+  **Not** covered here: an actually-started session. `interactive.start` runs an agent
+  turn, and a test that let it would be testing the interactive plane. What is covered is
+  the exact envelope the form builds — asserted on the form the operator's clicks produced
+  — and the deck's half of the `?open` contract, driven with a coordinator registered in
+  the real registry the way `Ouroboros.Web.Live.DeckLiveTest` does it.
   """
 
   use ExUnit.Case, async: false
@@ -70,8 +75,8 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     })
   end
 
-  defp with_xai_key(provider, present, source \\ nil) do
-    probed(provider, %{
+  defp native_with_xai_key(present, source \\ nil) do
+    probed(:native, %{
       installed: true,
       compatible: true,
       version: "1.0",
@@ -121,22 +126,25 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   end
 
   # ------------------------------------------------------------------------------------
-  # The provider picker
+  # The provider row
+  #
+  # One provider, so one row. It survives the deleted picker because its `credentials` are
+  # what the API-key cards read.
   # ------------------------------------------------------------------------------------
 
   describe "provider rows" do
     test "a probe that found no executable is annotated for visibility but not availability" do
-      rows = NewSession.provider_rows([ready(:claude), missing(:gemini)])
+      assert [%{name: "native", detected?: true, note: nil}] =
+               NewSession.provider_rows([ready(:native)])
 
-      assert [%{name: "claude", detected?: true, note: nil}, gemini] = rows
-      assert gemini.name == "gemini"
-      refute gemini.detected?
-      assert gemini.note == "no executable found"
-      assert Enum.map(rows, & &1.name) == ["claude", "gemini"]
+      assert [row] = NewSession.provider_rows([missing(:native)])
+      assert row.name == "native"
+      refute row.detected?
+      assert row.note == "no executable found"
     end
 
     test "a probe that did not run says that, rather than borrowing 'no executable'" do
-      rows = NewSession.provider_rows([probed(:kimi, nil) |> Map.put(:error, :probe_timeout)])
+      rows = NewSession.provider_rows([probed(:native, nil) |> Map.put(:error, :probe_timeout)])
 
       assert [%{detected?: false, note: "the probe did not answer: probe_timeout"}] = rows
     end
@@ -144,17 +152,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     test "an installed-but-incompatible probe names the version it found" do
       status = %{installed: true, compatible: false, version: "0.1", executable: "/bin/x"}
 
-      assert [%{detected?: false, note: note}] = NewSession.provider_rows([probed(:pi, status)])
+      assert [%{detected?: false, note: note}] =
+               NewSession.provider_rows([probed(:native, status)])
+
       assert note == "version 0.1 is not one this build can drive"
-    end
-
-    test "the footnote appears only when something is dimmed, and says what a probe knows" do
-      assert NewSession.provider_footnote(NewSession.provider_rows([ready(:claude)])) == nil
-
-      footnote = NewSession.provider_footnote(NewSession.provider_rows([missing(:gemini)]))
-
-      assert footnote ==
-               "Unavailable providers stay listed so you can see what this computer is missing."
     end
 
     test "keeps only Anthropic credential presence, never a key value" do
@@ -178,21 +179,17 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
   describe "the model field" do
     test "an adapter that normalizes no model option gets a control with nothing in it" do
-      field =
-        NewSession.model_field(catalogue([provider_row(:amp, model_option: false)]), "amp")
+      field = NewSession.model_field(catalogue([provider_row(:native, model_option: false)]))
 
       assert field == :unsupported
       assert NewSession.model_intent(field, :runtime_default, "").send == nil
     end
 
-    test "no catalogue, an unnamed provider, and no provider all fall back to free text" do
-      assert NewSession.model_field(nil, "claude") == {:text, nil}
+    test "no catalogue, and a catalogue with no native row, both fall back to free text" do
+      assert NewSession.model_field(nil) == {:text, nil}
 
-      assert NewSession.model_field(catalogue([]), nil) ==
-               {:text, "choose a provider to see its models"}
-
-      assert NewSession.model_field(catalogue([]), "claude") ==
-               {:text, "this runtime's model list does not mention claude"}
+      assert NewSession.model_field(catalogue([])) ==
+               {:text, "this runtime's model list does not mention native"}
     end
 
     test "rows put Recommended first and Custom last, with readable names and exact ids" do
@@ -207,8 +204,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                 model("bare-id")
               ]
             )
-          ]),
-          "native"
+          ])
         )
 
       assert {:rows, rows, 2} = field
@@ -225,7 +221,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert last.label == "Custom model…"
     end
 
-    test "groups model rows by provider while preserving each provider's ranking" do
+    test "groups model rows by the company that made the model, preserving the ranking" do
       field =
         NewSession.model_field(
           catalogue([
@@ -240,13 +236,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                 model("bare-model", name: "Bare model")
               ]
             )
-          ]),
-          "native"
+          ])
         )
 
       assert {:rows, rows, 6} = field
 
-      assert [anthropic, openai, other, xai] = NewSession.model_groups(rows, "native")
+      assert [anthropic, openai, other, xai] = NewSession.model_groups(rows)
       assert anthropic.label == "Anthropic · direct via Ouroboros (no CLI)"
       assert Enum.map(anthropic.rows, & &1.label) == ["Claude Opus 5", "Claude Sonnet 5"]
 
@@ -260,42 +255,18 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert Enum.map(xai.rows, & &1.label) == ["Grok 4.5"]
     end
 
-    test "a CLI provider groups every model under the CLI that will execute it" do
-      assert {:rows, rows, 2} =
-               NewSession.model_field(
-                 catalogue([
-                   provider_row(:claude,
-                     total: 2,
-                     models: [model("claude-opus-5"), model("claude-sonnet-5")]
-                   )
-                 ]),
-                 "claude"
-               )
-
-      assert [%{label: "Claude Code CLI", rows: models}] =
-               NewSession.model_groups(rows, "claude")
-
-      assert Enum.map(models, & &1.model) == ["claude-opus-5", "claude-sonnet-5"]
-    end
-
-    test "provider routes state direct versus CLI execution in human terms" do
+    test "the one route states direct execution in human terms" do
       assert %{
                name: "Ouroboros AI",
                badge: "Direct · no CLI",
-               short: "direct model APIs, no CLI"
-             } = NewSession.provider_route("native")
-
-      assert %{
-               name: "Claude",
-               badge: "CLI-backed",
-               short: "Claude Code CLI"
-             } = NewSession.provider_route("claude")
-
-      assert %{short: "Claude CLI configured for Z.ai", group: "Claude CLI for Z.ai"} =
-               NewSession.provider_route("zai")
+               short: "direct model APIs, no CLI",
+               title: "Ouroboros runs this model directly.",
+               detail: "Its built-in agent loop calls the model API; no model CLI is launched.",
+               group: "Direct via Ouroboros (no CLI)"
+             } = NewSession.provider_route()
     end
 
-    test "renders Recommended and Custom around provider optgroups" do
+    test "renders Recommended and Custom around the model-company optgroups" do
       field =
         NewSession.model_field(
           catalogue([
@@ -307,11 +278,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                 model("xai:grok-4.5", name: "Grok 4.5")
               ]
             )
-          ]),
-          "native"
+          ])
         )
 
-      form = %NewSession{NewSession.new() | provider: "native"}
+      form = NewSession.new()
 
       html =
         render_component(&Ouroboros.Web.Live.NewSessionLive.model_control/1,
@@ -334,9 +304,9 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert before?(html, "Grok 4.5", "Custom model…")
     end
 
-    test "a provider with no configured default says so without inventing one" do
+    test "a catalogue with no configured default says so without inventing one" do
       assert {:rows, [first | _rest], 0} =
-               NewSession.model_field(catalogue([provider_row(:pi)]), "pi")
+               NewSession.model_field(catalogue([provider_row(:native)]))
 
       assert first.label == "Recommended"
     end
@@ -355,11 +325,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                 model("openai_codex:gpt-5.4-nano", reasoning_efforts: ["low", "high"])
               ]
             )
-          ]),
-          "native"
+          ])
         )
 
-      default = %NewSession{NewSession.new() | provider: "native"}
+      default = NewSession.new()
 
       assert NewSession.efforts(default, field) == [
                "none",
@@ -373,10 +342,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       nano = %{default | model_choice: {:catalog, "openai_codex:gpt-5.4-nano"}}
       assert NewSession.efforts(nano, field) == ["low", "high"]
 
-      assert {:ok, params} = NewSession.start_params(%{default | effort: "max"}, field)
+      params = NewSession.start_params(%{default | effort: "max"}, field)
       assert params["reasoning_effort"] == "max"
 
-      assert {:ok, params} = NewSession.start_params(%{nano | effort: "max"}, field)
+      params = NewSession.start_params(%{nano | effort: "max"}, field)
       refute Map.has_key?(params, "reasoning_effort")
     end
   end
@@ -394,8 +363,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                 model("o4-thinker", name: "Deep Thinker")
               ]
             )
-          ]),
-          "native"
+          ])
         )
 
       {:ok, field: field}
@@ -442,8 +410,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
         NewSession.model_field(
           catalogue([
             provider_row(:native, default: "d", total: 1, models: [model("openai_codex:x")])
-          ]),
-          "native"
+          ])
         )
 
       cases = [
@@ -462,20 +429,15 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
         assert intent == %{send: send, hint: hint}
 
         # And the request reads that same `:send`, rather than recomputing it.
-        form = %NewSession{
-          NewSession.new()
-          | provider: "native",
-            model_choice: choice,
-            model_text: typed
-        }
+        form = %NewSession{NewSession.new() | model_choice: choice, model_text: typed}
 
-        assert {:ok, params} = NewSession.start_params(form, field)
+        params = NewSession.start_params(form, field)
         assert Map.get(params, "model") == send
       end
     end
 
     test "an empty Custom field sends nothing and says so, rather than implying a model" do
-      field = NewSession.model_field(catalogue([provider_row(:pi)]), "pi")
+      field = NewSession.model_field(catalogue([provider_row(:native)]))
       intent = NewSession.model_intent(field, :custom, "")
 
       assert intent.send == nil
@@ -488,12 +450,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # ------------------------------------------------------------------------------------
 
   describe "the start envelope" do
-    test "an untouched form carries safe file access with the provider" do
-      form = %NewSession{NewSession.new() | provider: "claude"}
+    test "an untouched form carries safe file access, and nothing else" do
+      params = NewSession.start_params(NewSession.new(), {:text, nil})
 
-      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
-      assert Map.keys(params) |> Enum.sort() == ["id", "provider", "sandbox_mode"]
-      assert params["provider"] == "claude"
+      assert Map.keys(params) |> Enum.sort() == ["id", "sandbox_mode"]
       assert params["sandbox_mode"] == "workspace_write"
       assert is_binary(params["id"]) and params["id"] != ""
 
@@ -501,25 +461,26 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       refute Map.has_key?(params, "model")
       refute Map.has_key?(params, "workspace")
       refute Map.has_key?(params, "title")
+
+      # There is one provider, so the envelope never names one.
+      refute Map.has_key?(params, "provider")
     end
 
     test "every field the operator states appears, with the value they stated" do
       form = %NewSession{
         NewSession.new()
-        | provider: "  native  ",
-          model_choice: :custom,
+        | model_choice: :custom,
           model_text: " openai_codex:x ",
           workspace: "  /srv/work  ",
           sandbox: "workspace_write",
           effort: "high"
       }
 
-      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+      params = NewSession.start_params(form, {:text, nil})
 
       assert Map.keys(params) |> Enum.sort() ==
-               ["id", "model", "provider", "reasoning_effort", "sandbox_mode", "workspace"]
+               ["id", "model", "reasoning_effort", "sandbox_mode", "workspace"]
 
-      assert params["provider"] == "native"
       assert params["model"] == "openai_codex:x"
       assert params["workspace"] == "/srv/work"
       assert params["sandbox_mode"] == "workspace_write"
@@ -527,43 +488,32 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
 
     test "the id survives, so a retry after an unknown outcome adopts the same intent" do
-      form = %NewSession{NewSession.new() | provider: "claude"}
+      form = NewSession.new()
 
-      assert {:ok, first} = NewSession.start_params(form, {:text, nil})
-      assert {:ok, second} = NewSession.start_params(form, {:text, nil})
+      first = NewSession.start_params(form, {:text, nil})
+      second = NewSession.start_params(form, {:text, nil})
       assert first["id"] == second["id"] and first["id"] == form.id
     end
 
     test "a value outside the gateway's own vocabulary is dropped rather than sent" do
-      form = %NewSession{
-        NewSession.new()
-        | provider: "claude",
-          sandbox: "sudo_everything",
-          effort: "maximum"
-      }
+      form = %NewSession{NewSession.new() | sandbox: "sudo_everything", effort: "maximum"}
 
-      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+      params = NewSession.start_params(form, {:text, nil})
       refute Map.has_key?(params, "sandbox_mode")
       refute Map.has_key?(params, "reasoning_effort")
-    end
-
-    test "no provider is refused before anything is built" do
-      assert {:error, message} = NewSession.start_params(NewSession.new(), {:text, nil})
-      assert message =~ "choose a provider"
     end
 
     test "each key the envelope may carry is one interactive.start's table accepts" do
       form = %NewSession{
         NewSession.new()
-        | provider: "claude",
-          model_choice: :custom,
+        | model_choice: :custom,
           model_text: "m",
           workspace: "/w",
           sandbox: "read_only",
           effort: "low"
       }
 
-      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+      params = NewSession.start_params(form, {:text, nil})
 
       # Read out of the method table rather than transcribed beside it, so a key this form
       # invents cannot pass by agreeing with a list somebody typed twice.
@@ -595,29 +545,27 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # ------------------------------------------------------------------------------------
 
   describe "stored defaults" do
-    test "a form with no stored values uses safe file access and awaits provider discovery" do
+    test "a form with no stored values uses safe file access and states nothing else" do
       form = NewSession.new(%{})
 
-      assert form.provider == nil
       assert form.model_choice == :runtime_default
       assert form.workspace == ""
       assert form.sandbox == "workspace_write"
       assert form.effort == nil
 
-      assert {:error, _no_provider} = NewSession.start_params(form, {:text, nil})
+      assert Map.keys(NewSession.start_params(form, {:text, nil})) |> Enum.sort() ==
+               ["id", "sandbox_mode"]
     end
 
     test "every stored key seeds its control" do
       form =
         NewSession.new(%{
-          "provider" => "native",
           "model" => "openai_codex:gpt-5.6-sol",
           "workspace" => "/srv/ouroboros",
           "sandbox_mode" => "workspace_write",
           "reasoning_effort" => "high"
         })
 
-      assert form.provider == "native"
       assert form.model_choice == :custom
       assert form.model_text == "openai_codex:gpt-5.6-sol"
       assert form.workspace == "/srv/ouroboros"
@@ -630,17 +578,16 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       # from the desktop's.
       form =
         NewSession.new(%{
-          "provider" => "native",
           "model" => "openai_codex:gpt-5.6-sol",
           "workspace" => "/srv/ouroboros",
           "sandbox_mode" => "workspace_write",
           "reasoning_effort" => "high"
         })
 
-      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+      params = NewSession.start_params(form, {:text, nil})
 
       assert Map.keys(params) |> Enum.sort() ==
-               ["id", "model", "provider", "reasoning_effort", "sandbox_mode", "workspace"]
+               ["id", "model", "reasoning_effort", "sandbox_mode", "workspace"]
 
       assert params["model"] == "openai_codex:gpt-5.6-sol"
       assert params["sandbox_mode"] == "workspace_write"
@@ -648,24 +595,24 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
 
     test "a key with no stored value is still absent, not defaulted" do
-      form = NewSession.new(%{"provider" => "native", "sandbox_mode" => "read_only"})
+      form = NewSession.new(%{"sandbox_mode" => "read_only"})
 
-      assert {:ok, params} = NewSession.start_params(form, {:text, nil})
+      params = NewSession.start_params(form, {:text, nil})
 
-      assert Map.keys(params) |> Enum.sort() == ["id", "provider", "sandbox_mode"]
+      assert Map.keys(params) |> Enum.sort() == ["id", "sandbox_mode"]
       refute Map.has_key?(params, "reasoning_effort")
       refute Map.has_key?(params, "model")
       refute Map.has_key?(params, "workspace")
     end
 
     test "the hint line says what the seed will actually send" do
-      form = NewSession.new(%{"provider" => "native", "model" => "openai_codex:x"})
+      form = NewSession.new(%{"model" => "openai_codex:x"})
 
       assert NewSession.model_intent(form, {:text, nil}).hint == "Using openai_codex:x"
     end
 
     test "a seeded model the catalogue lists is promoted to its own row" do
-      form = NewSession.new(%{"provider" => "native", "model" => "seeded-model"})
+      form = NewSession.new(%{"model" => "seeded-model"})
       field = seeded_field()
 
       promoted = NewSession.promote(form, field)
@@ -674,24 +621,22 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
       # And it sends exactly what it sent before being promoted: this changes the drawing,
       # never the request.
-      assert NewSession.start_params(promoted, field) |> elem(1) |> Map.get("model") ==
-               NewSession.start_params(form, field) |> elem(1) |> Map.get("model")
+      assert NewSession.start_params(promoted, field) |> Map.get("model") ==
+               NewSession.start_params(form, field) |> Map.get("model")
     end
 
     test "a seeded model no catalogue has heard of stays custom, and is still sent" do
-      form = NewSession.new(%{"provider" => "native", "model" => "some-private-build"})
+      form = NewSession.new(%{"model" => "some-private-build"})
       field = seeded_field()
 
       assert NewSession.promote(form, field).model_choice == :custom
-      assert {:ok, params} = NewSession.start_params(form, field)
-      assert params["model"] == "some-private-build"
+      assert NewSession.start_params(form, field)["model"] == "some-private-build"
     end
 
-    test "a provider that accepts no model option sends none, seeded or not" do
-      form = NewSession.new(%{"provider" => "native", "model" => "openai_codex:x"})
+    test "a runtime that accepts no model option sends none, seeded or not" do
+      form = NewSession.new(%{"model" => "openai_codex:x"})
 
-      assert {:ok, params} = NewSession.start_params(form, :unsupported)
-      refute Map.has_key?(params, "model")
+      refute Map.has_key?(NewSession.start_params(form, :unsupported), "model")
     end
   end
 
@@ -701,7 +646,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     test "the form opens where the last successful start left it", %{conn: conn} do
       {:ok, view, html} = live(conn, "/new")
 
-      assert form(view).provider == "native"
       assert form(view).workspace == "/srv/remembered"
       assert form(view).sandbox == "workspace_write"
       assert form(view).effort == "high"
@@ -712,33 +656,24 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     test "and the request it would build carries them", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
 
-      assert {:ok, params} = start_params(view)
+      params = start_params(view)
 
-      assert params["provider"] == "native"
       assert params["workspace"] == "/srv/remembered"
       assert params["sandbox_mode"] == "workspace_write"
       assert params["reasoning_effort"] == "high"
     end
 
     test "a refused start writes nothing over what is already there", %{conn: conn, dir: dir} do
-      {:ok, view, _html} = live(conn, "/new")
+      # A destination this node cannot reach clears the folder, and starting without one is
+      # refused by the form. The provider picker is gone; the property is not.
+      {:ok, view, _html} = live(conn, "/new?machine=offline-laptop")
 
-      _ = change(view, %{"provider" => "no-such-provider", "workspace" => "/srv/rejected"})
+      html = view |> element("form.ouro-new-form") |> render_submit()
 
-      html =
-        view
-        |> element("form.ouro-new-form")
-        |> render_submit(%{
-          "provider" => "no-such-provider",
-          "workspace" => "/srv/rejected",
-          "effort" => "high"
-        })
+      assert html =~ "Choose a project folder on this computer first."
 
-      assert html =~ "That AI provider is not available on this computer."
-
-      # A request the plane refused is not evidence about how the operator likes to work.
+      # A request that never left is not evidence about how the operator likes to work.
       assert Ouroboros.Web.Prefs.read(dir) == %{
-               "provider" => "native",
                "workspace" => "/srv/remembered",
                "sandbox_mode" => "workspace_write",
                "reasoning_effort" => "high"
@@ -753,7 +688,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       {:ok, view, html} = live(conn, "/new")
 
       assert html =~ "New session"
-      assert form(view).provider == "native"
       assert form(view).workspace == ""
       assert form(view).sandbox == "workspace_write"
     end
@@ -879,14 +813,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
               total: 1,
               models: [model("anthropic:claude-sonnet-5")]
             )
-          ]),
-          "native"
+          ])
         )
 
       form = %NewSession{
         NewSession.new()
-        | provider: "native",
-          model_choice: {:catalog, "anthropic:claude-sonnet-5"}
+        | model_choice: {:catalog, "anthropic:claude-sonnet-5"}
       }
 
       rows = NewSession.provider_rows([native_with_anthropic_key(false)])
@@ -896,7 +828,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                provider: "Anthropic",
                key: "anthropic",
                env: "ANTHROPIC_API_KEY",
-               managed?: false,
                workspace_env: "ANTHROPIC_WORKSPACE_ID",
                workspace_configured?: false,
                state: :required,
@@ -916,11 +847,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
               total: 1,
               models: [model("anthropic:claude-sonnet-5")]
             )
-          ]),
-          "native"
+          ])
         )
 
-      form = %NewSession{NewSession.new() | provider: "native"}
+      form = NewSession.new()
       rows = NewSession.provider_rows([native_with_anthropic_key(true, "stored", true)])
 
       assert %{
@@ -935,7 +865,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                provider: "Anthropic",
                key: "anthropic",
                env: "ANTHROPIC_API_KEY",
-               managed?: false,
                workspace_env: "ANTHROPIC_WORKSPACE_ID",
                workspace_configured?: false,
                state: :checking,
@@ -945,102 +874,58 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
 
     test "other model transports do not raise an Anthropic key requirement" do
-      form = %NewSession{
-        NewSession.new()
-        | provider: "native",
-          model_choice: :custom,
-          model_text: "openai:gpt-5.6"
-      }
+      form = %NewSession{NewSession.new() | model_choice: :custom, model_text: "openai:gpt-5.6"}
 
       assert NewSession.api_key_card(form, {:text, nil}, []) == nil
     end
   end
 
-  describe "the xAI API-key and Grok subscription cards" do
+  describe "the xAI API-key card" do
     test "a direct xAI model requires only its API key" do
       field =
         NewSession.model_field(
           catalogue([
             provider_row(:native, total: 1, models: [model("xai:grok-4.6")])
-          ]),
-          "native"
+          ])
         )
 
-      form = %NewSession{
-        NewSession.new()
-        | provider: "native",
-          model_choice: {:catalog, "xai:grok-4.6"}
-      }
+      form = %NewSession{NewSession.new() | model_choice: {:catalog, "xai:grok-4.6"}}
 
       card =
         NewSession.api_key_card(
           form,
           field,
-          NewSession.provider_rows([with_xai_key(:native, false)])
+          NewSession.provider_rows([native_with_xai_key(false)])
         )
 
       assert card == %{
                provider: "xAI",
                key: "xai",
                env: "XAI_API_KEY",
-               managed?: false,
                workspace_env: nil,
                workspace_configured?: false,
                state: :required,
                source: nil,
                usable?: false
              }
-
-      refute NewSession.requires_grok?(form)
     end
 
-    test "the managed Grok provider accepts either a subscription or an xAI API key" do
-      form = %NewSession{NewSession.new() | provider: "grok"}
-      rows = NewSession.provider_rows([with_xai_key(:grok, true, "stored")])
+    test "a stored key makes the same model usable" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native, total: 1, models: [model("xai:grok-4.6")])
+          ])
+        )
 
-      assert %{managed?: true, key: "xai", state: :available, usable?: true} =
-               NewSession.api_key_card(form, :unsupported, rows)
+      form = %NewSession{NewSession.new() | model_choice: {:catalog, "xai:grok-4.6"}}
 
-      assert NewSession.requires_grok?(form)
-
-      assert %{state: :required, usable?: false} =
-               NewSession.grok_account_card(
-                 %{
-                   "account" => nil,
-                   "requiresGrokAuth" => true,
-                   "login" => idle()
-                 },
-                 nil
+      assert %{key: "xai", state: :available, source: "stored", usable?: true} =
+               NewSession.api_key_card(
+                 form,
+                 field,
+                 NewSession.provider_rows([native_with_xai_key(true, "stored")])
                )
-
-      assert %{state: :connected, usable?: true, identity: "subscriber@example.test"} =
-               NewSession.grok_account_card(
-                 %{
-                   "account" => %{
-                     "type" => "grok_subscription",
-                     "label" => "subscriber@example.test"
-                   },
-                   "requiresGrokAuth" => false,
-                   "login" => idle()
-                 },
-                 nil
-               )
-    end
-
-    test "a pending Grok login exposes only its verification link and code" do
-      login = %{
-        login_id: "grok-device",
-        url: "https://auth.x.ai/device?user_code=WXYZ-5678",
-        code: "WXYZ-5678"
-      }
-
-      assert %{
-               state: :waiting,
-               usable?: false,
-               login_id: "grok-device",
-               code: "WXYZ-5678",
-               url: "https://auth.x.ai/device?user_code=WXYZ-5678"
-             } = NewSession.grok_account_card(nil, login)
     end
   end
 
@@ -1063,7 +948,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ "Project folder"
       assert html =~ "What should the agent do?"
       assert html =~ "Advanced settings"
-      assert html =~ "AI provider"
+      assert html =~ "Ouroboros AI"
       assert html =~ "Model"
       assert html =~ "Thinking"
       assert html =~ "File access"
@@ -1072,29 +957,9 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       refute has_element?(view, "details.ouro-new-advanced[open]")
     end
 
-    test "lists unavailable providers for diagnosis but disables them", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/new")
-
-      rows = NewSession.provider_rows(Ouroboros.Gateway.Methods.Present.providers())
-
-      for row <- rows do
-        assert html =~ ~s(value="#{row.name}"), "#{row.name} is missing from the picker"
-
-        if not row.detected? do
-          assert has_element?(view, ~s(option[value="#{row.name}"][disabled]))
-        end
-      end
-
-      if Enum.any?(rows, &(not &1.detected?)) do
-        assert html =~ "Unavailable providers stay listed"
-      end
-    end
-
-    test "the model control follows the provider, and the hint follows the control",
+    test "the model control is this runtime's own catalogue, and the hint follows it",
          %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/new")
-
-      html = change(view, %{"provider" => "native"})
+      {:ok, view, html} = live(conn, "/new")
 
       assert html =~ "Search models…"
       assert html =~ "Recommended"
@@ -1109,27 +974,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ intent(view).hint
     end
 
-    test "provider choices and a CLI model field name the executable path", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/new")
-
-      assert html =~ "Ouroboros AI — direct model APIs, no CLI — recommended"
-      assert html =~ "Claude — Claude Code CLI"
-      assert html =~ "Grok — Grok Build CLI"
-      assert html =~ "Z.ai — Claude CLI configured for Z.ai"
-
-      html = change(view, %{"provider" => "claude"})
-
-      assert html =~ "CLI-backed"
-      assert html =~ "Runs through Claude Code CLI."
-      assert html =~ "The CLI owns the model session and tools"
-      assert html =~ ~s(<optgroup label="Claude Code CLI">)
-    end
-
     test "a search narrows the list here, and never hides the two rows it must not",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
 
-      _ = change(view, %{"provider" => "native"})
       wide = NewSession.listed(field(view))
 
       html = change(view, %{"model_search" => "no-model-is-called-this"})
@@ -1144,8 +992,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     test "choosing a model moves the hint, and the request follows it", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
 
-      _ = change(view, %{"provider" => "native"})
-
       # Whatever this build's catalogue actually offers, rather than an id typed here that
       # a snapshot bump could retire.
       assert {:rows, rows, _total} = field(view)
@@ -1158,8 +1004,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert has_element?(view, ".ouro-new-advanced-summary", id)
       refute has_element?(view, ".ouro-new-advanced-summary", "Recommended model")
 
-      assert {:ok, params} = start_params(view)
-      assert params["model"] == id
+      assert start_params(view)["model"] == id
     end
   end
 
@@ -1175,17 +1020,13 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
       assert html =~ "Recommended"
       assert html =~ "The agent can edit files in the project folder."
-      _ = change(view, %{"provider" => "claude"})
 
-      assert {:ok, params} = start_params(view)
-      assert params["sandbox_mode"] == "workspace_write"
+      assert start_params(view)["sandbox_mode"] == "workspace_write"
     end
 
     test "a chosen card sends its own word, and the wire keeps `unrestricted`",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
-
-      _ = change(view, %{"provider" => "claude"})
 
       html =
         view
@@ -1196,8 +1037,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ "Full computer access"
       assert html =~ "The agent can access files outside the project folder."
 
-      assert {:ok, params} = start_params(view)
-      assert params["sandbox_mode"] == "unrestricted"
+      assert start_params(view)["sandbox_mode"] == "unrestricted"
     end
 
     test "the risky row wears the warning tone whether or not it is chosen", %{conn: conn} do
@@ -1216,15 +1056,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     test "thinking sends only when chosen", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
 
-      _ = change(view, %{"provider" => "claude"})
-      assert {:ok, params} = start_params(view)
-      refute Map.has_key?(params, "reasoning_effort")
+      refute Map.has_key?(start_params(view), "reasoning_effort")
 
-      html = change(view, %{"provider" => "claude", "effort" => "low"})
+      html = change(view, %{"effort" => "low"})
       assert html =~ "Thinking level: Low"
 
-      assert {:ok, chosen} = start_params(view)
-      assert chosen["reasoning_effort"] == "low"
+      assert start_params(view)["reasoning_effort"] == "low"
     end
   end
 
@@ -1310,54 +1147,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   end
 
   # ------------------------------------------------------------------------------------
-  # Refusal rendering, through the page
-  # ------------------------------------------------------------------------------------
-
-  describe "a refused start" do
-    setup :endpoint
-
-    test "rejects a stale unavailable provider without exposing a runtime validation error",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/new")
-
-      _ =
-        change(view, %{
-          "provider" => "no-such-provider",
-          "workspace" => "/srv/keep-me",
-          "effort" => "high"
-        })
-
-      html =
-        view
-        |> element("form.ouro-new-form")
-        |> render_submit(%{
-          "provider" => "no-such-provider",
-          "workspace" => "/srv/keep-me",
-          "effort" => "high"
-        })
-
-      assert html =~ "That AI provider is not available on this computer."
-      refute html =~ "params.provider"
-
-      # Nothing was cleared: a refusal is information about the request, and retyping the
-      # path would be the page punishing the operator for the runtime's answer.
-      assert form(view).workspace == "/srv/keep-me"
-      assert form(view).effort == "high"
-      assert html =~ ~s(value="/srv/keep-me")
-    end
-
-    test "starting with no provider is refused by the form before a call is made",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/new")
-
-      _ = change(view, %{"provider" => ""})
-      html = view |> element("form.ouro-new-form") |> render_submit()
-
-      assert html =~ "choose an available AI provider before starting"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
   # ChatGPT gating, through the page
   # ------------------------------------------------------------------------------------
 
@@ -1407,7 +1196,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     test "a model with no subscription prefix raises no card at all", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
 
-      _ = change(view, %{"provider" => "native"})
       _ = change(view, %{"model_choice" => "custom"})
       html = change(view, %{"model_text" => "openai:gpt-5"})
 
@@ -1541,16 +1329,14 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       :ok
     end
 
-    test "a direct Grok model explains xAI billing and disables Start without a key",
+    test "a direct xAI model explains xAI billing and disables Start without a key",
          %{conn: conn} do
       {:ok, view, _html} = live(conn, "/new")
       html = choose_xai(view)
 
       assert html =~ "xAI API"
       assert html =~ "XAI_API_KEY"
-      assert html =~ "Direct Grok models use the xAI API."
-      assert html =~ "SpaceXAI subscription"
-      assert html =~ "managed Grok provider"
+      assert html =~ "Direct xAI models use the xAI API."
       assert html =~ "Add xAI API key first"
       assert has_element?(view, "button[type=submit][disabled]")
     end
@@ -1588,48 +1374,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
   end
 
-  describe "Grok subscription gating" do
-    setup :endpoint
-
-    setup do
-      previous = System.get_env("XAI_API_KEY")
-      System.delete_env("XAI_API_KEY")
-      on_exit(fn -> restore_env("XAI_API_KEY", previous) end)
-      :ok
-    end
-
-    test "the managed provider offers subscription login or a separately billed API key",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/new")
-      html = change(view, %{"provider" => "grok"})
-
-      assert html =~ "SpaceXAI subscription"
-      assert html =~ "Connect an eligible SpaceXAI subscription"
-      assert html =~ "API usage is billed separately from a subscription"
-      assert html =~ "Connect Grok or add API key first"
-      assert has_element?(view, ~s(button[phx-click="connect-grok"]))
-      assert has_element?(view, ~s(button[phx-click="open-xai-key"]))
-      assert has_element?(view, "button[type=submit][disabled]")
-    end
-
-    test "Connect and Cancel use the bounded Grok device flow", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/new")
-      _ = change(view, %{"provider" => "grok"})
-
-      html = view |> element(~s(button[phx-click="connect-grok"])) |> render_click()
-
-      assert html =~ "Waiting"
-      assert html =~ "WXYZ-5678"
-      assert html =~ ~s(href="https://auth.x.ai/device?user_code=WXYZ-5678")
-      refute html =~ "cli-secret"
-
-      html = view |> element(~s(button[phx-click="cancel-grok"])) |> render_click()
-
-      refute html =~ "WXYZ-5678"
-      assert html =~ "One option required"
-    end
-  end
-
   # ------------------------------------------------------------------------------------
   # The deck's half of `?open`
   # ------------------------------------------------------------------------------------
@@ -1661,7 +1405,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       %Ouroboros.Interactive.State{
         id: state.id,
         node: node(),
-        provider: :claude_code,
+        provider: :native,
         workspace: "/tmp/w",
         workspace_mode: :shared_read,
         status: :running,
@@ -1785,14 +1529,9 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
 
     test "start params keep the computer and its folder together" do
-      form =
-        NewSession.new(%{
-          "machine" => "server",
-          "workspace" => "/srv/project",
-          "provider" => "native"
-        })
+      form = NewSession.new(%{"machine" => "server", "workspace" => "/srv/project"})
 
-      assert {:ok, %{"machine" => "server", "workspace" => "/srv/project"}} =
+      assert %{"machine" => "server", "workspace" => "/srv/project"} =
                NewSession.start_params(form, :unsupported)
     end
   end
@@ -1806,7 +1545,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   defp endpoint_seeded(context) do
     endpoint_with(context, :operate, fn dir ->
       Ouroboros.Web.Prefs.write(dir, %{
-        "provider" => "native",
         "workspace" => "/srv/remembered",
         "sandbox_mode" => "workspace_write",
         "reasoning_effort" => "high"
@@ -1817,7 +1555,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # And with one that cannot be read at all, which must cost the page nothing.
   defp endpoint_corrupt(context) do
     endpoint_with(context, :operate, fn dir ->
-      File.write!(Ouroboros.Web.Prefs.path(dir), "{\"provider\": ")
+      File.write!(Ouroboros.Web.Prefs.path(dir), "{\"workspace\": ")
     end)
   end
 
@@ -1828,7 +1566,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     previous_xai_key_file = Application.get_env(:ouroboros, :xai_api_key_file)
     Application.put_env(:ouroboros, :anthropic_api_key_file, Path.join(dir, "anthropic.key"))
     Application.put_env(:ouroboros, :xai_api_key_file, Path.join(dir, "xai.key"))
-    Ouroboros.Test.GrokAccountAdapter.reset()
     token_path = Path.join(dir, "gateway.token")
     File.write!(token_path, @token)
     File.chmod!(token_path, 0o600)
@@ -1847,8 +1584,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
         do: Application.put_env(:ouroboros, :xai_api_key_file, previous_xai_key_file),
         else: Application.delete_env(:ouroboros, :xai_api_key_file)
 
-      Ouroboros.Test.GrokAccountAdapter.reset()
-
       File.rm_rf(dir)
     end)
 
@@ -1866,8 +1601,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # need from a catalogue is whether it lists a given id.
   defp seeded_field do
     NewSession.model_field(
-      catalogue([provider_row(:native, total: 1, models: [model("seeded-model")])]),
-      "native"
+      catalogue([provider_row(:native, total: 1, models: [model("seeded-model")])])
     )
   end
 
@@ -1906,18 +1640,14 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     render_click(view, "browse-to", %{"path" => path})
   end
 
-  # Three steps, because each one is what puts the next control on the page: the model
-  # picker exists only once a provider is chosen, and the text input only once the picker
-  # is on its Custom row.
+  # Two steps, because the first is what puts the next control on the page: the text input
+  # exists only once the picker is on its Custom row.
   defp choose_codex(view) do
-    _ = change(view, %{"provider" => "native"})
     _ = change(view, %{"model_choice" => "custom"})
     change(view, %{"model_text" => "openai_codex:gpt-5.6-sol"})
   end
 
   defp choose_anthropic(view) do
-    _ = change(view, %{"provider" => "native"})
-
     {:rows, rows, _total} = field(view)
 
     choice =
@@ -1930,7 +1660,6 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   end
 
   defp choose_xai(view) do
-    _ = change(view, %{"provider" => "native"})
     _ = change(view, %{"model_choice" => "custom"})
     change(view, %{"model_text" => "xai:grok-4.6"})
   end
@@ -1945,7 +1674,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   defp form(view), do: :sys.get_state(view.pid).socket.assigns.form
   defp catalogue_of(view), do: :sys.get_state(view.pid).socket.assigns.catalogue
 
-  defp field(view), do: NewSession.model_field(catalogue_of(view), form(view).provider)
+  defp field(view), do: NewSession.model_field(catalogue_of(view))
   defp intent(view), do: NewSession.model_intent(form(view), field(view))
   defp start_params(view), do: NewSession.start_params(form(view), field(view))
 end

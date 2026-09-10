@@ -23,7 +23,7 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
   alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.NativeModelScript
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()

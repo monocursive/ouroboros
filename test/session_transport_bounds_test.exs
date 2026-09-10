@@ -6,7 +6,7 @@ defmodule Ouroboros.SessionTransportBoundsTest do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.StubSession
 
-  @provider :ouroboros_test
+  @provider :native
   @timeout_key :session_call_timeout
   @wedged_ms 1_500
 

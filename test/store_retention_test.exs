@@ -4,7 +4,7 @@ defmodule Ouroboros.StoreRetentionTest do
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Store, as: InteractiveStore
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     on_exit(fn -> Application.delete_env(:ouroboros, :terminal_retention_ms) end)

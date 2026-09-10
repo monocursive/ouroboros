@@ -376,7 +376,7 @@ defmodule Ouroboros.Gateway.OperateTest do
       Application.put_env(
         :jido_harness,
         :providers,
-        Map.put(Map.new(previous_providers || %{}), :ouroboros_test, HarnessAdapter)
+        Map.put(Map.new(previous_providers || %{}), :native, HarnessAdapter)
       )
 
       Application.put_env(
@@ -384,7 +384,7 @@ defmodule Ouroboros.Gateway.OperateTest do
         :provider_config,
         previous_config
         |> then(&Map.new(&1 || %{}))
-        |> Map.put(:ouroboros_test, %{test_pid: self()})
+        |> Map.put(:native, %{test_pid: self()})
       )
 
       unless is_pid(Process.whereis(WorkspaceManager)) do

@@ -8,7 +8,7 @@ defmodule Ouroboros.InteractiveDeadlineTest do
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
-  @provider :ouroboros_test
+  @provider :native
   @deadline_key :interactive_unresolved_turn_deadline_ms
 
   setup do

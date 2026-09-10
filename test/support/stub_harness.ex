@@ -43,7 +43,7 @@ defmodule Ouroboros.Test.StubSession do
     {:ok,
      %{
        session_id: Keyword.fetch!(opts, :session_id),
-       provider: Keyword.get(opts, :provider, :ouroboros_test),
+       provider: Keyword.get(opts, :provider, :native),
        state: Keyword.get(opts, :state, :idle),
        replay: Keyword.get(opts, :replay, {:ok, []}),
        send_message: Keyword.get(opts, :send_message, :ok),

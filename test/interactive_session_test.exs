@@ -7,7 +7,7 @@ defmodule Ouroboros.InteractiveSessionTest do
   alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.StubSession
 
-  @provider :ouroboros_test
+  @provider :native
 
   defmodule StorageFixture do
     @moduledoc false
