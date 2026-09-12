@@ -66,6 +66,28 @@ state. `make boot-gate` builds/selects its own process-identity helper. Do not
 globally export `OUROBOROS_PROCESS_ID_HELPER` for unrelated unit tests: that enables
 the real recovery-lock path in tests intended to exercise the in-memory seam.
 
+For a focused test that needs fresh durable runtime state, use
+`scripts/test-isolated.sh mix test <test-path>`. It creates and removes only its own
+private data leaf under `tmp/test-runtime`; it preserves the caller's HOME and
+Erlang settings. It does not replace the ordinary in-memory `mix test` gate.
+
+When an owned private test runner already supplies a fresh HOME and a loopback-only
+EPMD, use `scripts/test-isolated.sh --loopback-peers mix test <test-path>` if the
+machine's short hostname resolves outside loopback. The opt-in creates a private
+`ERL_INETRC` mapping that hostname to `127.0.0.1` and binds the test VM and inherited
+OS peers' distribution listeners to loopback. Canonical distributed assertions
+remain unchanged; no machine DNS, hosts files, or global EPMD settings are changed.
+The caller must supply `ERL_EPMD_ADDRESS=127.0.0.1` and a valid private
+`ERL_EPMD_PORT` other than the default 4369 or reserved 65358, and retains ownership
+of mapper startup/cleanup and private HOME. The wrapper does not read or copy
+credentials and does not discover or claim ownership of an existing mapper.
+
+This mode refuses an existing `ERL_INETRC` and nonempty `ERL_AFLAGS`, `ERL_FLAGS`,
+`ERL_ZFLAGS`, or `ELIXIR_ERL_OPTIONS`: arbitrary Erlang options may contradict its
+loopback interface, so it fails instead of replacing caller configuration. These
+restrictions apply only to `--loopback-peers`. Validate the wrapper without starting
+a VM or mapper with `sh scripts/test-isolated-test.sh`.
+
 CI also runs Dialyzer, the suites with `OUROBOROS_REQUIRE_WASM` (a missing helper fails
 rather than skips), golden fixture drift, protocol-docs drift, browser journeys, and the
 Linux container proof for the wasm suites under bubblewrap. Run `make dialyzer` locally
