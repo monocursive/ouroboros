@@ -18,8 +18,8 @@ binary download. Do not use old `dist/` files as current release artifacts.
 |---|---|
 | macOS Apple Silicon | Isolated embedded installation, standard ChatGPT browser sign-in, native Astra/xhigh documentation edit, explicitly approved sandboxed recipe check and retained resume demonstrated. Clean committed-source build also passed; these are separate artifact records, not general macOS compatibility qualification. |
 | Linux x86-64 GNU | Frozen `82a4c2dd` selected-source build passed in a full-system Ubuntu 24.04.5 x86-64 guest with normal-JIT OTP 29; install, PTY, web 401 and stop passed. A later TCG guest reused that binary, executed the corrected public AppArmor setup/rollback blocks and passed actual packaged shell controls; rollback restored stock/product refusal and actual guest exit was recorded. Full model-backed task/auth/recovery/browser qualification remains open. |
-| Linux AArch64 GNU | Older selected-source build and container/HVF install, PTY, web 401 and stop passed. Those environments refused the namespace probe. A later Ubuntu 24.04.5 ARM64 HVF guest proved an opt-in distro AppArmor profile correction, actual packaged shell execution with negative controls, and rollback; actual guest exit recorded. Full model-backed task/auth/recovery/browser qualification remains open. |
-| macOS Intel | No current dedicated build/install evidence. Not yet qualified as a preview target. |
+| Linux AArch64 GNU | Older selected-source build and container/HVF install, PTY, web 401 and stop passed; initial namespace probes refused. Later Ubuntu 24.04.5 ARM64 HVF guests proved the opt-in distro AppArmor correction and an ordinary ChatGPT-authenticated browser read/edit/check task with bwrap and once approvals. Useful work survived an owned idle restart; replay is bounded by the original failed inference. These are older-artifact observations, not an exact-current-source build/journey. |
+| macOS Intel | No current dedicated build/install evidence. An [opt-in hosted Intel build/smoke workflow](INTEL_MACOS.md) is prepared locally but has not run; ordinary authenticated task/recovery/browser evidence is also missing. Not yet qualified as a preview target. |
 
 macOS and Linux are the implemented OS families. No minimum macOS version, glibc
 floor or general Linux distribution range has yet been qualified. Windows, WSL,
@@ -33,15 +33,16 @@ four completed support certifications. macOS Intel remains in that scope with no
 dedicated evidence; it is not silently dropped. The goal of a useful preview across
 these targets is **not complete** merely because installation front doors work.
 
-### Candidate notes (2026-09-12, after platform runs and disk cleanup)
+### Candidate notes (2026-09-12, after Linux first use and local integration)
 
 Version **0.1.0**, integrated source baseline
-**`91b0c23263b4771d1e3ef94d09764cdceaac306e`**. This update to the release record is
-documentation-only. The exact revision of a checkout containing it is obtained with
-`git rev-parse HEAD`; do not substitute the baseline for a later documentation
-commit in a source manifest. No retained binary was rebuilt for either this update
-or the baseline. This is a local candidate record, not an announcement that its
-commits, source archive or binaries have been published.
+**`7cc878278860ac95cfc7fbe7953971325eb2a77f`**, which adopts the Linux candidate's
+packaging-check discoverability enhancement unchanged. This release-record update
+is documentation-only. The exact revision of a checkout containing it is obtained
+with `git rev-parse HEAD`; do not substitute the baseline for a later documentation
+commit in a source manifest. No retained binary was rebuilt for this update or the
+baseline. This is a local candidate record, not an announcement that its commits,
+source archive or binaries have been published.
 
 Build from a fresh checkout at the recorded candidate revision using the
 [source recipe below](#obtain-and-build) and its checked-in dependency locks.
@@ -111,14 +112,64 @@ implementation defect or general production support: the distro profile is opt-i
 experimental/unsupported and disabled by default. See the
 [preflight, administrator setup, verification and rollback recipe](LINUX_BUBBLEWRAP.md).
 
-The next qualification step is an ordinary authenticated useful task/check and
-retained recovery/browser journey on an owned Linux installation with approved
-containment. Each Linux architecture still needs that complete model-backed
-journey below with attributable source/build evidence; the two environment-remedy
-checks do not supply it. Helper presence is
-not component execution and web 401 is not authenticated-browser acceptance.
-macOS Intel still needs build/install and journey evidence. These remain missing
-requirements, not waivers; wider distribution/version ranges are not implied.
+**Subsequent ARM64 useful task:** a separate bounded Ubuntu HVF guest installed the
+same older `4841e6fb…` binary and used the approved AppArmor profile. Normal ChatGPT
+sign-in and authenticated browser use succeeded. Its native Astra/xhigh candidate
+worked on the complete 1,126-file source tree at `826aeb0e`, not the executable's
+build inputs. It authored only five added Makefile lines and eleven CONTRIBUTING
+lines to expose the existing check as `make release-packaging-test`, with help and
+prerequisites. The candidate ran the original script before editing and the new
+target afterward: each reported five recipe cases passed, exit 0. Help, exact diff,
+whitespace and final scope checks passed through actual bwrap shell calls with
+`workspace_write`, prompt mode and nine once approvals. The existing script, full
+`make test` gate and product-build recipes were not changed; producer-stub recipe
+checks are not real binary builds. Independent native packaging review found no
+necessary correction. Native main adopted the exact resulting file bytes in
+`7cc87827` and separately passed the focused target, help and whitespace locally.
+The installed candidate authored/tested; the Codex supervisor inspected/approved
+exact actions through the normal browser under user authority, rather than editing
+source or replacing candidate tests. The runtime's browser actor label is not proof
+that those clicks were made directly by a human.
+
+The initial browser task failed in about **26 ms with zero tools**, reporting generic
+`model_error`. An initial registry probe was uninitialized, not a diagnosis of that
+failure; initialized lookup/options/projection checks passed. One no-tools request
+through the same production adapter succeeded in **4.151 s**. A supported owned
+logging restart and one normal browser Retry then reached the useful task. The
+original cause remains **unresolved**, not a fixed catalogue defect or proven crash.
+The successful retry took **868.170 s wall time**, including **637.923 s** between
+nine approval requests and resolutions; recorded model-result durations totalled
+**228.701 s**, and tool-result durations **0.755 s**. Approval/supervisor waiting is
+not model latency; these spans are not a general performance benchmark.
+
+After useful work, a supported idle stop/start retained the account, named
+conversation and exact two-file diff in a new runtime incarnation. One ordinary
+authenticated browser continuation completed in **16.139 s**, recalling the change
+and checks with zero tools, zero approvals and no source changes. That is live
+retained-work resume, not replay or a repeat test. The model's statement that no
+failed/blocked command or restart was visible is scoped to its retained task view;
+it does not erase the original model failure or the two externally owned restarts.
+
+Replay before and after that recovery returned exit 0, with chain integrity through
+**63/63** and **69/69** records respectively, but **zero model turns verified** in
+both: `ambiguous_inference` at sequence 4 bounds execution verification at the
+original failed request. Neither chain integrity nor a zero CLI exit makes
+whole-history replay green, and the recovery turn was not independently verified
+by replay. The owner then used the advertised guest-local `account.logout`, confirmed
+account absence, and stopped the idle runtime through authenticated `ouro stop`
+with observed process absence. Rollback removed only the introduced profile while
+the global userns restriction remained `1`; this final cleanup did not rerun the
+stock/product denial probes. The guest's actual exit 0 was recorded at
+**16:02:55 UTC**, before its deadline. The SSH tunnel's terminal exit 255 after guest
+shutdown is recorded separately, not described as a successful transport command.
+
+Linux x86-64 still needs the ordinary authenticated useful-task/approval/recovery
+and browser journey. The ARM task advances that evidence but does not supply an
+exact-current-source binary installation or complete deterministic replay. Helper
+presence is not component execution, and web 401 is not authenticated-browser
+acceptance. macOS Intel still needs build/install and ordinary journey evidence;
+its locally prepared workflow is not a run. Wider distribution/version ranges are
+not implied, and the four-target preview objective remains open.
 
 Current source also includes the standalone fixture SDK-path correction and audit
 fixture recovery quiescence. A controlled orphan demonstrated one interference path
@@ -259,6 +310,32 @@ launcher may adopt a runtime in the selected data directory and headless runs ma
 leave it running. A connected BEAM node is **not** isolated.
 
 ## Known limitations and failure guidance
+
+### Prioritized first-use follow-ups
+
+The ARM journey exposed these issues in the **older installed artifact**, not yet
+confirmed against current source. They are retained for bounded current-source
+triage, not silently dismissed or treated as established current defects:
+
+1. **Reviewable edit approvals:** the pending edit card and Technical details showed
+   cwd/tool name, not the patch. Approval required extracting the exact tool-call
+   patch from the trajectory first. Persisted paths are not a rendered edit diff.
+2. **Actionable model errors:** the original generic 26 ms failure lost its useful
+   cause; initialized catalogue checks and a successful retry do not diagnose it.
+   Any diagnostic improvement must preserve credential/provider-output privacy.
+3. **Status availability:** safe status reported credential present `false` / source
+   unavailable during successful authenticated model use. Unknown/unavailable must
+   not be interpreted as confirmed absence or a reason to copy credentials.
+4. **Workspace default:** the browser initially selected the extracted release cache;
+   the supervisor explicitly selected the source project before submitting work.
+5. **Model discovery:** Astra search returned no rows, while Custom accepted the exact
+   model and real work succeeded. Catalogue coverage and resolver support differ.
+
+These follow-ups do not authorize new probes, paid retries, unrestricted fallback
+or work around a blocked review scope. Recovery summaries are model views of retained
+context, not independent evidence of every external restart or prior failure.
+
+### Existing boundaries
 
 - This is not a hardened multi-tenant service. OS shell sandboxing is not a VM;
   worktrees share Git objects/refs and are not a security boundary. Full access
