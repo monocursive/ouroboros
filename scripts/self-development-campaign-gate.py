@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Purpose-built hermetic campaign gate wrapper.
+"""Bounded process helper retained for local campaign regression tests.
 
-The controller supplies the validated artifact path and a canonical copy of the
-manifest environment. Validation receives exactly that declared environment; control
-variables are not forwarded. Combined output is drained incrementally with bounded
-memory. Overflow is marked in the artifact and makes the gate fail.
+run_bounded receives an explicit environment and artifact path. Combined output is
+drained with bounded memory; overflow marks the artifact and makes the gate fail.
+The old machine-specific command shortcuts are retired. New campaigns name an
+absolute executable directly in their manifest with artifact_mode: stdout.
 """
 import codecs
 import json
@@ -21,20 +21,6 @@ DECLARED_ENV = "OUROBOROS_CAMPAIGN_DECLARED_ENV"
 MAX_REPORT_BYTES = 64 * 1024 * 1024
 OVERFLOW_EXIT = 74
 OVERFLOW_MARKER = b"\n[OUROBOROS_CAMPAIGN_ARTIFACT_INCOMPLETE: output limit exceeded]\n"
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MIX = "/Users/monocursive/.local/share/mise/installs/elixir/1.20.2-otp-29/bin/mix"
-CARGO = "/Users/monocursive/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
-PYTHON = "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
-
-COMMANDS = {
-    "elixir": [MIX, "test"],
-    "elixir-owner-lifecycle": [MIX, "test", "test/ouroboros/runtime/safe_status_owner_lifecycle_test.exs"],
-    "python-campaign": [PYTHON, "scripts/test-self-development-campaign.py"],
-    "python-maintenance": [PYTHON, "scripts/test-self-development-maintenance.py"],
-    "python-status": [PYTHON, "scripts/test-self-development-status.py"],
-    "rust-cli": [CARGO, "test", "--manifest-path", "tui/Cargo.toml", "--no-default-features", "--features", "cli", "--lib"],
-    "rust-fmt": [CARGO, "fmt", "--manifest-path", "tui/Cargo.toml", "--", "--check"],
-}
 
 
 def _fit_utf8(value, maximum):
@@ -271,18 +257,10 @@ def declared_environment(raw):
     return value
 
 
-def main(argv):
-    artifact = os.environ.get(ARTIFACT_ENV)
-    declared = os.environ.get(DECLARED_ENV)
-    if not artifact or not os.path.isabs(artifact) or declared is None:
-        return 2
-    if len(argv) != 2 or argv[1] not in COMMANDS:
-        return 2
-    try:
-        environment = declared_environment(declared)
-        return run_bounded(COMMANDS[argv[1]], ROOT, environment, artifact)
-    except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError):
-        return 2
+def main(_argv):
+    print("campaign gate shortcuts are retired; use an absolute executable in a "
+          "validated manifest with artifact_mode: stdout", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

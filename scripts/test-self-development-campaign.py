@@ -103,6 +103,27 @@ class CampaignTests(unittest.TestCase):
             observed.pop(key, None)
         self.assertEqual(declared, observed)
 
+    def test_retired_machine_specific_gate_shortcuts_refuse_without_spawning(self):
+        artifact = os.path.join(self.workspace, "retired-gate.txt")
+        controls = {campaign_gate.ARTIFACT_ENV: artifact,
+                    campaign_gate.DECLARED_ENV: "{}"}
+        for name in ("elixir", "elixir-owner-lifecycle", "python-campaign",
+                     "python-maintenance", "python-status", "rust-cli", "rust-fmt"):
+            with self.subTest(name=name), mock.patch.dict(os.environ, controls, clear=True), \
+                    mock.patch.object(campaign_gate, "run_bounded") as run, \
+                    mock.patch("sys.stderr"):
+                self.assertEqual(2, campaign_gate.main([GATE_PROGRAM, name]))
+                run.assert_not_called()
+                self.assertFalse(os.path.exists(artifact))
+
+    def test_retired_gate_cli_explains_direct_manifest_replacement(self):
+        result = subprocess.run([PYTHON, GATE_PROGRAM, "python-maintenance"],
+                                env={}, capture_output=True, text=True, timeout=3)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("artifact_mode: stdout", result.stderr)
+        self.assertIn("absolute executable", result.stderr)
+
     def test_gate_streams_bounded_output_and_makes_overflow_nonpassing_explicit(self):
         artifact = os.path.join(self.workspace, "bounded.txt")
         exit_code = campaign_gate.run_bounded(

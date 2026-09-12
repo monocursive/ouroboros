@@ -1,5 +1,25 @@
 # Self-development campaigns
 
+## Source-preview command portability
+
+New campaigns should declare direct absolute executable paths and digests in the
+manifest and use `artifact_mode: stdout`. There are no portable built-in command
+shortcuts. The former `self-development-campaign-gate.py` shortcut CLI is retired:
+it exits 2 with migration guidance without spawning validation or creating an
+artifact. This includes `python-maintenance`; the private disposable maintenance
+controller, its tests and host-specific policy are not part of the source preview.
+Do not copy operator paths or private experiment state to make that command work.
+
+The gate's `run_bounded` helper and internal process supervisor remain only for
+regression coverage. The historical wrapper/control-variable descriptions below
+explain retained receipts, not a usable shortcut interface in this candidate.
+Historical source, manifests, receipts and failures are not rewritten. Replacing a
+shortcut requires a new explicit manifest and new execution evidence; prior passes
+do not certify the replacement. Run the portable regression suite with
+`PYTHONWARNINGS=error python3 scripts/test-self-development-campaign.py`.
+
+## Manifest and retained evidence contract
+
 `scripts/self-development-campaign.py` is a bounded local runner for deterministic
 validation campaigns and matched benchmark contracts. Manifests use schema version 2.
 Each command declares direct `argv`, a canonical workspace `cwd`, disjoint coverage
