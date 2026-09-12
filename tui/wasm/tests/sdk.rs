@@ -40,11 +40,13 @@
 //! `test/support/wasm_live_fixture.ex`: a green run that checked nothing should say so, and a
 //! run that was supposed to check should fail rather than say so.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -66,6 +68,11 @@ const TARGET: &str = "wasm32-wasip2";
 /// The switch that makes a skip a failure. Same name and same truthiness rule as the Elixir
 /// side's.
 const REQUIRE: &str = "OUROBOROS_REQUIRE_WASM";
+
+/// An optional existing parent beneath which this invocation atomically claims a private root.
+/// Campaign and CI runs set it to an owned absolute path outside the source roots. The parent may
+/// be shared as a container; mutable scaffold source, locks, and build output never are.
+const SCRATCH: &str = "OUROBOROS_SDK_TEST_ROOT";
 
 /// As `containment.rs`: long enough that a debug-build compile is never the reason a test
 /// fails, short enough that a stuck helper is a failure rather than a hang.
@@ -142,6 +149,136 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The repository is source by default. Only its explicit ignored evidence/output subtree is a
+/// permitted in-repository scratch parent; a newly added source root is therefore protected
+/// without teaching this test another list. Scratch outside the repository remains permitted.
+fn repository() -> PathBuf {
+    root()
+        .join("../..")
+        .canonicalize()
+        .expect("repository root exists")
+}
+
+fn in_repository_scratch() -> PathBuf {
+    repository().join("tmp")
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+/// Atomically claims a fresh invocation directory under an already-existing canonical parent.
+///
+/// Canonicalising before the first write means a symlinked parent is judged by its destination.
+/// Using that canonical destination for `create_dir` also prevents a later parent-symlink swap
+/// from redirecting the claim. `create_dir`, unlike `create_dir_all`, is the ownership boundary:
+/// success proves this invocation created the exact directory and a collision merely retries.
+fn claim_scratch(parent: &Path, protected: &[PathBuf], allowed: &[PathBuf]) -> io::Result<PathBuf> {
+    if !parent.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{SCRATCH} must be an absolute path"),
+        ));
+    }
+
+    let parent = parent.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("{SCRATCH} must name an existing parent directory: {error}"),
+        )
+    })?;
+    if !parent.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{SCRATCH} must name an existing parent directory"),
+        ));
+    }
+
+    let protected = protected
+        .iter()
+        .map(|path| path.canonicalize())
+        .collect::<io::Result<Vec<_>>>()?;
+    let allowed = allowed
+        .iter()
+        .map(|path| {
+            let canonical = path.canonicalize()?;
+            if !path.is_absolute() || canonical != *path {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "an allowed SDK scratch root must be an absolute canonical path",
+                ));
+            }
+            Ok(canonical)
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let explicitly_allowed = allowed.iter().any(|root| parent.starts_with(root));
+    if !explicitly_allowed
+        && protected
+            .iter()
+            .any(|source| paths_overlap(&parent, source))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{SCRATCH} resolves into or above protected source: {}",
+                parent.display()
+            ),
+        ));
+    }
+
+    static CLAIM: AtomicU64 = AtomicU64::new(0);
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for attempt in 0..128_u64 {
+        let serial = CLAIM.fetch_add(1, Ordering::Relaxed);
+        let claimed = parent.join(format!(
+            "invocation-{}-{epoch}-{serial}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&claimed) {
+            Ok(()) => {
+                let claimed = claimed.canonicalize()?;
+                if !claimed.starts_with(&parent)
+                    || (!explicitly_allowed
+                        && protected
+                            .iter()
+                            .any(|source| paths_overlap(&claimed, source)))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "the claimed SDK scratch directory escaped its canonical parent",
+                    ));
+                }
+                return Ok(claimed);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not atomically claim a fresh SDK scratch directory",
+    ))
+}
+
+/// A process-owned output root. The override names only a parent, never the mutable root itself;
+/// ordinary local runs atomically claim an equally isolated child under the OS temporary root.
+fn scratch() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+    ROOT.get_or_init(|| {
+        let parent = std::env::var_os(SCRATCH)
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        claim_scratch(&parent, &[repository()], &[in_repository_scratch()])
+            .unwrap_or_else(|error| panic!("the SDK test scratch root is claimed: {error}"))
+    })
+}
+
 /// Builds a guest project with a plain `cargo build --release --target wasm32-wasip2` and hands
 /// back the component it emitted.
 ///
@@ -151,12 +288,47 @@ fn root() -> PathBuf {
 /// `cargo build` produces an admissible component.
 fn build(project: &Path, artifact: &str) -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_unset| "cargo".to_string());
+    let relative_project = project
+        .strip_prefix(root())
+        .or_else(|_| project.strip_prefix(scratch()))
+        .unwrap_or(project);
+    let readable_key = relative_project
+        .file_name()
+        .unwrap_or(relative_project.as_os_str())
+        .to_string_lossy();
+    let mut key_hash = Sha256::new();
+    key_hash.update(relative_project.as_os_str().as_encoded_bytes());
+    let project_key = format!("{readable_key}-{:x}", key_hash.finalize());
+    let target = scratch().join("build").join(project_key);
 
-    // The component is looked for under the project's own `target/`, which is also what CI
-    // caches; a `CARGO_TARGET_DIR` inherited from the environment would put it elsewhere.
+    if !project.join("Cargo.lock").is_file() {
+        let lock = Command::new(&cargo)
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(project)
+            .output()
+            .unwrap_or_else(|error| panic!("cargo does not start to lock the scaffold: {error}"));
+        assert!(
+            lock.status.success(),
+            "{} does not lock offline:\n{}",
+            project.display(),
+            String::from_utf8_lossy(&lock.stderr)
+        );
+    }
+
+    // Keep every generated Cargo artifact out of the source project. `--target-dir` is a
+    // structured argument rather than inherited ambient state, so recursive builds have one
+    // observable destination even when the outer test uses another Cargo target directory.
     let output = Command::new(cargo)
-        .args(["build", "--release", "--target", TARGET])
-        .env_remove("CARGO_TARGET_DIR")
+        .args([
+            "build",
+            "--release",
+            "--target",
+            TARGET,
+            "--locked",
+            "--offline",
+        ])
+        .arg("--target-dir")
+        .arg(&target)
         .current_dir(project)
         .output()
         .unwrap_or_else(|error| panic!("cargo does not start: {error}"));
@@ -168,8 +340,7 @@ fn build(project: &Path, artifact: &str) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let component = project
-        .join("target")
+    let component = target
         .join(TARGET)
         .join("release")
         .join(format!("{artifact}.wasm"));
@@ -223,16 +394,9 @@ fn scaffold(name: &str, type_name: &str, shape: &str) -> PathBuf {
         .map(|(_, file)| *file)
         .unwrap_or_else(|| panic!("{shape} is not a scaffold shape"));
 
-    // A fixed path per shape under the SDK's own (gitignored, CI-cached) build directory rather
-    // than a fresh temp directory per run. Scaffolding into `temp_dir()` meant this test
-    // compiled serde_json and the SDK from scratch on every single run and on every CI job,
-    // because nothing could cache a directory whose name carried a nanosecond. The files are
-    // rewritten each time, so a change to the template is still picked up; only `target/`
-    // survives.
-    let target = root()
-        .join("guest")
-        .join("target")
-        .join(format!("template-scaffold-{shape}"));
+    // Both generated scaffold source and its Cargo.lock/build output live below the same owned
+    // scratch root. The fixed per-shape path remains cacheable without mutating included source.
+    let target = scratch().join("scaffold").join(shape);
 
     std::fs::create_dir_all(target.join("src")).expect("the scaffold directory is created");
 
@@ -257,6 +421,184 @@ fn scaffold(name: &str, type_name: &str, shape: &str) -> PathBuf {
     }
 
     target
+}
+
+// -------------------------------------------------------------- scratch ownership regression
+
+struct SyntheticLayout(PathBuf);
+
+impl SyntheticLayout {
+    fn new(label: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir();
+        for _ in 0..128 {
+            let candidate = base.join(format!(
+                "ouroboros-sdk-scratch-regression-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return Self(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("synthetic scratch layout is created: {error}"),
+            }
+        }
+        panic!("a unique synthetic scratch layout could not be claimed")
+    }
+}
+
+impl Drop for SyntheticLayout {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).expect("only the owned synthetic layout is removed");
+    }
+}
+
+#[test]
+fn scratch_claims_are_atomic_private_and_preserve_existing_children() {
+    let layout = SyntheticLayout::new("concurrent");
+    let parent = layout.0.join("shared-parent");
+    let protected = layout.0.join("synthetic-source");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::create_dir(&protected).unwrap();
+    std::fs::write(parent.join("caller-owned"), b"preserve me").unwrap();
+
+    let threads = (0..16)
+        .map(|_| {
+            let parent = parent.clone();
+            let protected = protected.clone();
+            std::thread::spawn(move || claim_scratch(&parent, &[protected], &[]).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let claims = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+
+    let canonical_parent = parent.canonicalize().unwrap();
+    assert_eq!(claims.len(), 16);
+    assert!(claims
+        .iter()
+        .all(|claim| claim.parent() == Some(canonical_parent.as_path())));
+    assert_eq!(
+        std::fs::read(parent.join("caller-owned")).unwrap(),
+        b"preserve me"
+    );
+}
+
+#[test]
+fn scratch_refuses_relative_source_nested_and_source_ancestor_parents_without_writing() {
+    let layout = SyntheticLayout::new("disjoint");
+    let protected = layout.0.join("synthetic-source");
+    let nested = protected.join("existing-output-parent");
+    std::fs::create_dir(&protected).unwrap();
+    std::fs::create_dir(&nested).unwrap();
+
+    assert_eq!(
+        claim_scratch(Path::new("relative"), std::slice::from_ref(&protected), &[])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        claim_scratch(&nested, std::slice::from_ref(&protected), &[])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        claim_scratch(&layout.0, std::slice::from_ref(&protected), &[])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(std::fs::read_dir(&nested).unwrap().next().is_none());
+}
+
+#[test]
+fn scratch_checks_every_protected_root_and_only_allows_the_bounded_output_subtree() {
+    let layout = SyntheticLayout::new("multi-root");
+    let source_one = layout.0.join("source-one");
+    let source_two = layout.0.join("source-two");
+    let second_nested = source_two.join("existing-parent");
+    let allowed = layout.0.join("owned-output");
+    std::fs::create_dir(&source_one).unwrap();
+    std::fs::create_dir(&source_two).unwrap();
+    std::fs::create_dir(&second_nested).unwrap();
+    std::fs::create_dir(&allowed).unwrap();
+    let protected = [source_one, source_two];
+
+    assert_eq!(
+        claim_scratch(&second_nested, &protected, &[])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(std::fs::read_dir(&second_nested).unwrap().next().is_none());
+
+    let canonical_allowed = allowed.canonicalize().unwrap();
+    let claim = claim_scratch(
+        &allowed,
+        &protected,
+        std::slice::from_ref(&canonical_allowed),
+    )
+    .unwrap();
+    assert_eq!(
+        claim.parent(),
+        Some(allowed.canonicalize().unwrap().as_path())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn scratch_refuses_a_carve_out_root_aliased_into_source_without_writing() {
+    use std::os::unix::fs::symlink;
+
+    let layout = SyntheticLayout::new("aliased-carve-out");
+    let repository = layout.0.join("repository");
+    let source = repository.join("test");
+    let parent = source.join("existing-parent");
+    let lexical_allowed = repository.join("tmp");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&parent).unwrap();
+    symlink(&source, &lexical_allowed).unwrap();
+
+    assert_eq!(
+        claim_scratch(&parent, &[repository], &[lexical_allowed])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(std::fs::read_dir(&parent).unwrap().next().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn scratch_judges_symlink_parents_by_their_canonical_destination() {
+    use std::os::unix::fs::symlink;
+
+    let layout = SyntheticLayout::new("symlink");
+    let protected = layout.0.join("synthetic-source");
+    let outside = layout.0.join("outside");
+    std::fs::create_dir(&protected).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let into_source = layout.0.join("into-source");
+    let into_outside = layout.0.join("into-outside");
+    symlink(&protected, &into_source).unwrap();
+    symlink(&outside, &into_outside).unwrap();
+
+    assert_eq!(
+        claim_scratch(&into_source, std::slice::from_ref(&protected), &[])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    let claim = claim_scratch(&into_outside, std::slice::from_ref(&protected), &[]).unwrap();
+    assert_eq!(
+        claim.parent(),
+        Some(outside.canonicalize().unwrap().as_path())
+    );
+    assert!(std::fs::read_dir(&protected).unwrap().next().is_none());
 }
 
 // ------------------------------------------------------------------------------ the helper
