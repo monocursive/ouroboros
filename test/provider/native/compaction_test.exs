@@ -10,6 +10,7 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
   alias Ouroboros.Provider.Native.Context.CompactionOperation
   alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.InteractiveSession
+  alias Ouroboros.Maintenance.Epoch
   alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
@@ -25,17 +26,22 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
     previous = %{
       dir: Application.get_env(:ouroboros, :native_data_dir),
       model: Application.get_env(:ouroboros, :native_model_module),
+      epoch: Application.get_env(:ouroboros, :native_epoch_server),
       window: Application.get_env(:ouroboros, :native_context_window),
       writer: Application.get_env(:ouroboros, :native_compaction_operation_writer),
       starter: Application.get_env(:ouroboros, :native_compaction_task_starter)
     }
 
+    epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(root, "epoch")})
+
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
+    Application.put_env(:ouroboros, :native_epoch_server, epoch)
 
     on_exit(fn ->
       restore(:native_data_dir, previous.dir)
       restore(:native_model_module, previous.model)
+      restore(:native_epoch_server, previous.epoch)
       restore(:native_context_window, previous.window)
       restore(:native_compaction_operation_writer, previous.writer)
       restore(:native_compaction_task_starter, previous.starter)
@@ -1269,7 +1275,7 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
     }
 
     {:ok, handle} = Session.open(request, session_context)
-    on_exit(fn -> if Process.alive?(handle), do: Session.close(handle) end)
+    cleanup_runtime(handle)
     %{handle: handle, agent: agent, model_spec: model_spec}
   end
 
@@ -1280,7 +1286,18 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       Ouroboros.Session.open(logical_id, resume_request(context, session, provider_session_id))
 
     {:ok, info} = Ouroboros.Session.info(runtime_id)
+    cleanup_runtime(info.pid)
     %{handle: info.pid, agent: session.agent, model_spec: session.model_spec}
+  end
+
+  defp cleanup_runtime(pid) do
+    # Native owners belong to the application supervisor. Reap the exact owner even
+    # after a failed assertion or after the test's private Epoch has stopped.
+    on_exit(fn ->
+      monitor = Process.monitor(pid)
+      DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, pid)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, _reason}, 1_000
+    end)
   end
 
   defp resume_request(context, session, provider_session_id) do

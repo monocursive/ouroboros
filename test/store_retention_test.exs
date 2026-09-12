@@ -3,6 +3,7 @@ defmodule Ouroboros.StoreRetentionTest do
 
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Store, as: InteractiveStore
+  alias Ouroboros.Maintenance.Epoch
 
   @provider :native
 
@@ -115,19 +116,27 @@ defmodule Ouroboros.StoreRetentionTest do
 
       key = {:ouroboros, :interactive_sessions_test, :quarantine}
       storage = {Ouroboros.Storage.DurableFile, path: path}
+
+      # This independent checkpoint repository needs its own durable write owner.
+      # The application's epoch may contain in-flight reservations from background
+      # sessions, which this private store cannot reconcile against its payload.
+      epoch =
+        start_supervised!({Epoch, name: nil, data_dir: Path.join(path, "maintenance")})
+
       survivor = unique_id("interactive-survivor")
       corrupt = unique_id("interactive-corrupt")
 
-      store = start_interactive_store!(:quarantine_first, key, storage)
+      store = start_interactive_store!(:quarantine_first, key, storage, epoch)
       assert :ok = InteractiveStore.create(session(survivor), store)
       assert :ok = InteractiveStore.create(session(corrupt), store)
+      assert %{pending: []} = Epoch.observe(epoch)
       stop_supervised!(:quarantine_first)
 
       truncate_session_checkpoint!(path, corrupt)
 
       # Booting is not all-or-nothing: one session nobody can read must not refuse the
       # interactive plane, and everything `rest_for_one` starts after it, to the operator.
-      store = start_interactive_store!(:quarantine_second, key, storage)
+      store = start_interactive_store!(:quarantine_second, key, storage, epoch)
 
       assert {:ok, %State{id: ^survivor}} = InteractiveStore.get(survivor, store)
       assert :not_found = InteractiveStore.get(corrupt, store)
@@ -137,11 +146,16 @@ defmodule Ouroboros.StoreRetentionTest do
       # does not have to rediscover it.
       assert {:ok, %{version: 2, ids: [^survivor]}} =
                Ouroboros.Storage.DurableFile.get_checkpoint(key, path: path)
+
+      assert %{pending: []} = Epoch.observe(epoch)
     end
   end
 
-  defp start_interactive_store!(id, key, storage) do
-    start_supervised!({InteractiveStore, name: nil, key: key, storage: storage}, id: id)
+  defp start_interactive_store!(id, key, storage, epoch) do
+    start_supervised!(
+      {InteractiveStore, name: nil, key: key, storage: storage, epoch_server: epoch},
+      id: id
+    )
   end
 
   defp truncate_session_checkpoint!(path, id) do
