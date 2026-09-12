@@ -15,6 +15,22 @@ defmodule Ouroboros.Test.BrowserModel do
       after_tool? ->
         {:ok, [{:text, "Browser approval completed."}, {:finish, :stop}]}
 
+      String.contains?(prompt, "browser patch approval") ->
+        {:ok,
+         [
+           {:tool_call,
+            %{
+              id: "browser-patch-" <> request.turn_id,
+              name: "apply_patch",
+              input: %{
+                "patch" =>
+                  "*** Begin Patch\n*** Add File: browser-patch-proof.txt\n" <>
+                    "+<script>review me, never execute me</script>\n*** End Patch"
+              }
+            }},
+           {:finish, :tool_calls}
+         ]}
+
       String.contains?(prompt, "browser approval") ->
         {:ok,
          [

@@ -198,3 +198,33 @@ test("native stream, approval, interrupt, reconnect and durable history", async 
   await expect(transcript).toContainText("Streaming proof complete.");
   await expect(transcript).toContainText("Browser approval completed.");
 });
+
+test("pending native patch is reviewable before denial", async ({ page }) => {
+  const path = require("node:path");
+  const fs = require("node:fs");
+  await signIn(page);
+  await page.goto("/new");
+  await liveConnected(page);
+  const workspace = path.resolve(__dirname, "../../_build/playwright-workspace");
+  const target = path.join(workspace, "browser-patch-proof.txt");
+  expect(fs.existsSync(target)).toBe(false);
+  await page.locator("#workspace").fill(workspace);
+  await page.getByRole("button", { name: "Start session", exact: true }).click();
+  await expect(page).toHaveURL(/\/s\/interactive\//);
+  await liveConnected(page);
+  await page.locator("#ouro-composer-input").fill("browser patch approval");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const preview = page.locator(".ouro-approval-change");
+  await expect(preview).toBeVisible();
+  await expect(preview).toContainText("*** Add File: browser-patch-proof.txt");
+  await expect(preview).toContainText("+<script>review me, never execute me</script>");
+  await expect(preview.locator("script")).toHaveCount(0);
+  expect(fs.existsSync(target)).toBe(false);
+  await page.reload();
+  await liveConnected(page);
+  await expect(preview).toContainText("*** End Patch");
+  await page.locator(".ouro-approval-answers").getByRole("button", { name: "Deny once", exact: true }).click();
+  await expect(page.getByRole("log", { name: "Session transcript" })).toContainText("Browser approval completed.");
+  await expect(preview).toHaveCount(0);
+  expect(fs.existsSync(target)).toBe(false);
+});

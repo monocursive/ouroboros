@@ -1698,6 +1698,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         "paths" => classified.paths,
         "reason" => reason_text(reason)
       }
+      |> Ouroboros.Provider.Native.FileApproval.attach(call)
 
     # Only where the engine had a pattern to offer. An absent key is a card with no
     # remember row; a key carrying anything `permissions.add` will not take is a row that
