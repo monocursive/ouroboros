@@ -5,6 +5,36 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
   alias Ouroboros.Session
   alias Ouroboros.Test.NativeModelScript
 
+  # Discovery coverage needs the complete registry, but must not checkpoint native
+  # owners left by unrelated tests. The real mailbox/durable behavior is exercised
+  # separately below against the exact native participants each fixture owns.
+  defmodule RegistryProjection do
+    def prepare_fence(pid, generation, _token) do
+      logical =
+        Enum.find_value(Registry.keys(Ouroboros.SessionRegistry, pid), fn
+          {:logical, id} -> id
+          _other -> nil
+        end)
+
+      if is_binary(logical) do
+        digest = :crypto.hash(:sha256, logical) |> Base.encode16(case: :lower)
+
+        {:ok,
+         %{
+           logical_id: logical,
+           runtime_id: "runtime-" <> digest,
+           provider_session_id: "provider-" <> digest,
+           fence_generation: generation,
+           root_digest: digest
+         }}
+      else
+        {:error, :participant_disappeared}
+      end
+    end
+
+    def release_fence(_pid, _generation, _token), do: :ok
+  end
+
   setup do
     root =
       Path.join(System.tmp_dir!(), "native-fence-runtime-#{System.unique_integer([:positive])}")
@@ -39,10 +69,46 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
     %{root: root}
   end
 
+  test "default discovery includes the complete logical registry and its exact owners" do
+    sentinel = "non-logical-discovery-#{System.unique_integer([:positive])}"
+
+    assert {:ok, _} =
+             Registry.register(Ouroboros.SessionRegistry, {:runtime, sentinel}, :sentinel)
+
+    owned =
+      for suffix <- ["a", "b"] do
+        logical = "native-discovery-#{System.unique_integer([:positive])}-#{suffix}"
+
+        pid =
+          start_supervised!(%{
+            id: {:discovery_owner, logical},
+            start:
+              {Agent, :start_link,
+               [
+                 fn ->
+                   {:ok, _} =
+                     Registry.register(Ouroboros.SessionRegistry, {:logical, logical}, nil)
+
+                   logical
+                 end
+               ]}
+          })
+
+        {logical, pid}
+      end
+
+    {registered, snapshot} = stable_registry_snapshot()
+    assert Enum.sort(snapshot.release.participants) == registered
+    assert Enum.map(snapshot.rows, & &1.logical_id) == Enum.map(registered, &elem(&1, 0))
+    assert Enum.all?(owned, &(&1 in snapshot.release.participants))
+    refute Enum.any?(snapshot.release.participants, fn {_logical, pid} -> pid == self() end)
+  end
+
   test "participant death before publication reopens Fence and replacement inherits no token", %{
     root: root
   } do
     context = open_session(root)
+    participants = [{context.logical, context.pid}]
     parent = self()
 
     barrier = fn generation, opts ->
@@ -55,14 +121,20 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
     end
 
     start_supervised!(
-      {Fence, name: :native_death_fence, data_dir: Path.join(root, "fence-a"), barrier: barrier}
+      {Fence,
+       name: :native_death_fence,
+       data_dir: Path.join(root, "fence-a"),
+       barrier: barrier,
+       barrier_opts: [participants: participants]}
     )
 
     enter = Task.async(fn -> Fence.enter("death-before-persist", 0, :native_death_fence) end)
 
-    assert_receive {:observed, worker, first}
+    assert_receive {:observed, worker, first}, 1_000
+    assert first.release.participants == participants
     send(worker, :return)
-    assert_receive {:observed, ^worker, second}
+    assert_receive {:observed, ^worker, second}, 1_000
+    assert second.release.participants == participants
     assert first.release.token == second.release.token
 
     ref = Process.monitor(context.pid)
@@ -100,15 +172,22 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
 
   test "participant death after publication cannot reopen durable Fence", %{root: root} do
     context = open_session(root)
+    participants = [{context.logical, context.pid}]
     fence_root = Path.join(root, "fence-b")
 
     barrier = fn generation, opts ->
-      with {:ok, native} <- NativeInventory.snapshot(generation, opts),
-           do: {:ok, barrier_value(generation, native)}
+      with {:ok, native} <- NativeInventory.snapshot(generation, opts) do
+        assert native.release.participants == participants
+        {:ok, barrier_value(generation, native)}
+      end
     end
 
     start_supervised!(
-      {Fence, name: :native_durable_fence, data_dir: fence_root, barrier: barrier}
+      {Fence,
+       name: :native_durable_fence,
+       data_dir: fence_root,
+       barrier: barrier,
+       barrier_opts: [participants: participants]}
     )
 
     assert {:ok, marker} = Fence.enter("durable-death", 0, :native_durable_fence)
@@ -128,7 +207,11 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
     stop_supervised!(Fence)
 
     start_supervised!(
-      {Fence, name: :native_durable_fence, data_dir: fence_root, barrier: barrier}
+      {Fence,
+       name: :native_durable_fence,
+       data_dir: fence_root,
+       barrier: barrier,
+       barrier_opts: [participants: participants]}
     )
 
     assert %{state: :fenced, generation: 1, transaction_id: "durable-death"} =
@@ -149,6 +232,18 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
     {model, _agent} = NativeModelScript.start([[{:text, "ok"}, {:finish, :stop}]])
     request = %{provider: :native, cwd: root, model: model, approval_mode: :auto_approve}
     {:ok, runtime} = Session.open(logical, request)
+    [{pid, _projection}] = Registry.lookup(Ouroboros.SessionRegistry, {:runtime, runtime})
+
+    # Native sessions belong to the application supervisor, not the test supervisor.
+    # Reap this exact owner even if an assertion fails before the explicit death;
+    # otherwise it survives after its private Epoch and directory have gone away.
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, pid)
+        wait_dead(pid)
+      end
+    end)
+
     {:ok, _attachment, info} = Session.attach(runtime, self(), 0)
     %{logical: logical, runtime: runtime, pid: info.pid}
   end
@@ -163,6 +258,39 @@ defmodule Ouroboros.Provider.Native.MaintenanceFenceIntegrationTest do
     else
       :ok
     end
+  end
+
+  defp stable_registry_snapshot(attempts \\ 20)
+  defp stable_registry_snapshot(0), do: flunk("logical registry kept changing during discovery")
+
+  defp stable_registry_snapshot(attempts) do
+    before = registered_participants()
+
+    result =
+      NativeInventory.snapshot(7,
+        maintenance_token: make_ref(),
+        native_session_module: RegistryProjection
+      )
+
+    if registered_participants() == before do
+      assert {:ok, snapshot} = result
+      {before, snapshot}
+    else
+      # Retry only observed membership changes, never an inventory mismatch on a
+      # stable registry. All projection calls here are read-only and immediate.
+      stable_registry_snapshot(attempts - 1)
+    end
+  end
+
+  defp registered_participants do
+    Registry.select(Ouroboros.SessionRegistry, [
+      {{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}
+    ])
+    |> Enum.flat_map(fn
+      {{:logical, logical}, pid} -> [{logical, pid}]
+      _non_logical -> []
+    end)
+    |> Enum.sort()
   end
 
   defp barrier_value(generation, native) do

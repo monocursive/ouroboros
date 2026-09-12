@@ -287,13 +287,18 @@ defmodule Ouroboros.InteractiveSessionTest do
     Process.exit(coordinator, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^coordinator, :killed}, 1_000
 
+    # Admitted coordinators now recover on the supervised sweep with fresh
+    # admission. Allow its restart grace and tick, as in periodic recovery below.
     replacement =
-      assert_eventually(fn ->
-        case Task.whereis(id) do
-          pid when is_pid(pid) and pid != coordinator -> pid
-          _other -> false
-        end
-      end)
+      assert_eventually(
+        fn ->
+          case Task.whereis(id) do
+            pid when is_pid(pid) and pid != coordinator -> pid
+            _other -> false
+          end
+        end,
+        800
+      )
 
     assert is_pid(replacement)
 
