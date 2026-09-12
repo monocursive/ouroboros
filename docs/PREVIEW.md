@@ -17,7 +17,7 @@ binary download. Do not use old `dist/` files as current release artifacts.
 | Target | Current evidence, not a compatibility promise |
 |---|---|
 | macOS Apple Silicon | Isolated embedded installation, standard ChatGPT browser sign-in, native Astra/xhigh documentation edit, explicitly approved sandboxed recipe check and retained resume demonstrated. Clean committed-source build also passed; these are separate artifact records, not general macOS compatibility qualification. |
-| Linux x86-64 GNU | Frozen `82a4c2dd` selected-source build passed in a full-system Ubuntu 24.04.5 x86-64 guest with normal-JIT OTP 29. Clean-PATH install, real PTY onboarding, unauthenticated web 401 and stop passed; actual guest exit recorded. Stock bubblewrap probe failed; useful model task, product containment and recovery journey remain unqualified. |
+| Linux x86-64 GNU | Frozen `82a4c2dd` selected-source build passed in a full-system Ubuntu 24.04.5 x86-64 guest with normal-JIT OTP 29; install, PTY, web 401 and stop passed. A later TCG guest reused that binary, executed the corrected public AppArmor setup/rollback blocks and passed actual packaged shell controls; rollback restored stock/product refusal and actual guest exit was recorded. Full model-backed task/auth/recovery/browser qualification remains open. |
 | Linux AArch64 GNU | Older selected-source build and container/HVF install, PTY, web 401 and stop passed. Those environments refused the namespace probe. A later Ubuntu 24.04.5 ARM64 HVF guest proved an opt-in distro AppArmor profile correction, actual packaged shell execution with negative controls, and rollback; actual guest exit recorded. Full model-backed task/auth/recovery/browser qualification remains open. |
 | macOS Intel | No current dedicated build/install evidence. Not yet qualified as a preview target. |
 
@@ -92,25 +92,30 @@ not the outcome of the successful full-system build.
 followed in those runs. The exact denying policy was not isolated then; the x86
 diagnostic additionally could not find `sysctl` on its restricted PATH.
 
-**Subsequent bounded correction:** a new Ubuntu 24.04.5 ARM64 HVF guest matched the
+**Subsequent bounded correction:** new Ubuntu 24.04.5 ARM64 HVF and x86-64 TCG
+guests independently matched the
 refusal to AppArmor's `unprivileged_userns` transition and `setpcap`/`net_admin`
 denials. Administrator-authorized activation of the exact Ubuntu experimental
 `bwrap-userns-restrict` profile restored the stock probe and actual packaged
-`Tools.Bash` execution using the older ARM64 binary above, without a source change
+`Tools.Bash` execution using the respective older binaries above, without a source change
 or rebuild. Read-only/outside/pre-existing protected-file writes, network isolation
 with a positive control, zero child CapPrm/CapEff/CapBnd sets and `NoNewPrivs: 1`,
-nested-child and unrelated-unprivileged-userns denials were checked. Global AppArmor userns
-restriction stayed `1`; removing only the profile restored the original refusal.
-The guest exited normally. This is a deployment-policy correction, not proof of an
+nested-child and unrelated-unprivileged-userns denials were checked on both.
+Global AppArmor userns restriction stayed `1`; removing only the profile restored
+the original stock refusal. The x86 run also reconfirmed actual product refusal
+after rollback. Both guests exited normally. The x86 run executed the corrected
+public acquisition, activation and rollback blocks unchanged, separately from the
+no-model product harnesses; it did not execute the interactive examples.
+This is a deployment-policy correction, not proof of an
 implementation defect or general production support: the distro profile is opt-in,
 experimental/unsupported and disabled by default. See the
 [preflight, administrator setup, verification and rollback recipe](LINUX_BUBBLEWRAP.md).
 
-The next platform step is an attributable x86-64 preflight/profile evaluation and
-actual contained shell controls on an owned, administrator-approved environment;
-the ARM64 result does not qualify x86. Each Linux architecture still needs ordinary
-account access and the complete model-backed task/check/recovery/authenticated-
-browser journey below with attributable source/build evidence. Helper presence is
+The next qualification step is an ordinary authenticated useful task/check and
+retained recovery/browser journey on an owned Linux installation with approved
+containment. Each Linux architecture still needs that complete model-backed
+journey below with attributable source/build evidence; the two environment-remedy
+checks do not supply it. Helper presence is
 not component execution and web 401 is not authenticated-browser acceptance.
 macOS Intel still needs build/install and journey evidence. These remain missing
 requirements, not waivers; wider distribution/version ranges are not implied.

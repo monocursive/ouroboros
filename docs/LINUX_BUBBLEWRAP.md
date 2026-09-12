@@ -5,7 +5,7 @@ AppArmor can allow unprivileged user-namespace creation while denying capabiliti
 inside it. A normal shell may show `unconfined` and still transition to the
 `unprivileged_userns` profile when bubblewrap starts.
 
-In a bounded Ubuntu 24.04.5 ARM64 guest, the loopback `RTM_NEWADDR` failure matched
+In bounded Ubuntu 24.04.5 ARM64 and x86-64 guests, the loopback `RTM_NEWADDR` failure matched
 kernel AppArmor denials for `setpcap` and `net_admin`. Enabling the exact distro
 profile below restored both the original probe and the actual packaged Ouroboros
 shell path; removing it restored the refusal. This established a deployment-policy
@@ -64,11 +64,12 @@ sharing; no upload is required.
 
 ## 2. Obtain and review the distro profile without installing other profiles
 
-Tested combination: Ubuntu 24.04.5, Linux 6.8.0-139, ARM64, bubblewrap
+Tested combinations: Ubuntu 24.04.5, Linux 6.8.0-139, ARM64 and x86-64, bubblewrap
 `0.9.0-1ubuntu0.1`, AppArmor and `apparmor-profiles`
 `4.0.1really4.0.1-0ubuntu0.24.04.7`. The profile comes from Ubuntu's
 `noble-updates/main` **apparmor-profiles** package, architecture `all`; the ARM64
-test obtained it through the normal Ubuntu ports repository. Use your configured
+test obtained it through Ubuntu ports; the x86 test used `archive.ubuntu.com`.
+Both downloaded the same package bytes. Use your configured
 official Ubuntu repositories and authenticated APT metadata, not a copied private
 test file or an arbitrary downloaded profile. The installed `apparmor` package
 supplies `/usr/sbin/apparmor_parser`, ABI files and tunables used below.
@@ -112,9 +113,9 @@ configurations. The `bwrap` setup profile has broad AppArmor allowances, includi
 capabilities. Executed children are stacked with `unpriv_bwrap`, which has
 `audit deny capability`. Neither the parent allowance nor package provenance is a
 production compatibility guarantee. Review the conditional local includes too;
-the guest was reported stock, but its receipts did not separately inventory those
-local-include paths. The explicit local-file checks below are an added precondition,
-not a measured historical absence claim.
+the ARM64 guest was reported stock, but its receipts did not separately inventory
+those local-include paths. The subsequent x86 run explicitly checked their absence
+using the public preflight below. Do not infer absence on another installation.
 
 ## 3. Administrator-approved activation
 
@@ -374,19 +375,18 @@ review record until reconciliation is complete.
 
 ## Evidence boundary
 
-The public shell blocks are administrator-oriented adaptations of the recorded
-operations, **not a verbatim end-to-end executed transcript**. The guest downloaded
-the repository's selected candidate version and printed its hashes; the public
-exact-version selector, unique review directory, checksum assertions, symlink and
-local-file preconditions, and failure-handling wrappers are added safeguards.
-The complete blocks have not been executed end to end here. Syntax checks passed;
-a small harmless-stub check separately verified acquisition success and failure
-status propagation (directory creation, download and both checksum failures),
-without downloads or policy commands. The tested guest operations were extraction
-of the identified package, installation of the unchanged profile, parser `-r`,
-stock/product controls, parser `-R` and removal of only the introduced file.
-The concrete public interactive examples and owned-runtime restart remain
-instructions for validation on the intended installation, not captured UI results.
+The public shell blocks are administrator-oriented adaptations, **not a claim that
+this entire guide was executed as one journey**. The ARM64 test used the core
+download/extraction, install/parser and rollback operations before the public
+guards were written. The later x86 test executed the corrected public acquisition,
+preflight, activation, probe/unprofiled checks and rollback blocks unchanged,
+including exact-version selection, checksum assertions and policy guards.
+Those executable blocks were hash-bound to the tested recipe; later edits to the
+separate interactive examples did not change them. A harmless-stub check also
+verified acquisition success and failure status propagation (directory creation,
+download and both checksum failures) without real downloads or policy commands.
+The concrete public interactive examples and owned-runtime restart were **not**
+executed by either guest test and remain instructions for the intended installation.
 
 On 2026-09-12, one Ubuntu 24.04.5 ARM64 HVF guest exercised the original probe,
 activation, actual packaged `Tools.Bash` through Sandbox/Exec/bwrap as a non-root
@@ -398,7 +398,19 @@ binary SHA-256 was
 [PREVIEW.md](PREVIEW.md#candidate-notes-2026-09-12-after-platform-runs-and-disk-cleanup)
 records its selected-source attribution. Actual guest exit `0` was recorded.
 
-This is not x86-64 remedy proof, current-HEAD binary qualification, full Linux
+An independent Ubuntu 24.04.5 x86-64 TCG guest then repeated the cause/remedy checks
+using the unchanged product harnesses and the retained normal-JIT binary SHA-256
+`d8dc487cd6676af167921a7731f1783d1f3e71b5d842ac26c7948ad3dbf1d47c`
+(863 selected files from `82a4c2dd`, detailed in PREVIEW). It passed the same actual
+packaged shell/file/network/child-capability controls with fresh BEAM release-eval
+VMs and no build or model. Removing only the profile restored both the stock
+loopback refusal and actual product refusal, with no requested file created.
+Global restriction and userns-clone values stayed `1`; actual guest exit `0` was
+recorded. Matching capability audit denials established the initial x86 cause;
+the rollback audit excerpt captured the transition but not renewed `setpcap`/
+`net_admin` lines, so that excerpt is not claimed as a second complete audit pair.
+
+These are two architecture-specific remedy checks, not current-HEAD binary qualification, full Linux
 auth/task/check/recovery/authenticated-browser acceptance, or a promise for other
 Ubuntu/package/kernel combinations. No reboot-persistence test was performed.
 The shell still has the [documented OS-sandbox limits](ARCHITECTURE.md#safety-boundaries),
