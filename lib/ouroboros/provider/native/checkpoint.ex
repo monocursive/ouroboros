@@ -203,11 +203,14 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
             publish_reserved(path, bytes, conversation_digest, server, reservation)
           end
 
-        {:committed, reservation} ->
+        {:committed, %{payload_digest: ^digest} = reservation} ->
           reconcile_committed(path, conversation_digest, reservation)
 
-        reservation ->
+        %{payload_digest: ^digest} = reservation ->
           reconcile_reserved(path, conversation_digest, server, reservation)
+
+        _conflicting_identity ->
+          {:error, {:maintenance_epoch, :write_id_conflict}}
       end
     end
   end
@@ -294,21 +297,21 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   end
 
   defp epoch_reservation(server, write_id) do
-    case epoch_call(fn -> Epoch.observe(server) end) do
-      {:ok, observation} when is_map(observation) ->
-        matches =
-          for status <- [:pending, :committed, :aborted],
-              reservation <- Map.get(observation, status, []),
-              reservation.write_id == write_id,
-              do: {status, Map.delete(reservation, :status)}
+    case epoch_call(fn -> Epoch.lookup(write_id, server) end) do
+      {:ok, :not_found} ->
+        {:ok, nil}
 
-        case matches do
-          [] -> {:ok, nil}
-          [{:pending, reservation}] -> {:ok, reservation}
-          [{:committed, reservation}] -> {:ok, {:committed, reservation}}
-          [{status, _reservation}] -> {:error, {:checkpoint_operation_already_settled, status}}
-          _ -> {:error, :invalid_epoch_observation}
-        end
+      {:ok, {:ok, %{status: :pending} = reservation}} ->
+        {:ok, Map.delete(reservation, :status)}
+
+      {:ok, {:ok, %{status: :committed} = reservation}} ->
+        {:ok, {:committed, Map.delete(reservation, :status)}}
+
+      {:ok, {:ok, %{status: :aborted}}} ->
+        {:error, {:checkpoint_operation_already_settled, :aborted}}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:maintenance_epoch, reason}}
 
       {:ok, _other} ->
         {:error, :invalid_epoch_observation}

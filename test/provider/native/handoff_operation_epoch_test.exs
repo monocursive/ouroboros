@@ -59,6 +59,57 @@ defmodule Ouroboros.Provider.Native.HandoffOperationEpochTest do
     assert File.read!(ctx.path) == "different"
   end
 
+  test "archived handoff commit retries without rewriting and cannot recreate missing payload",
+       ctx do
+    epoch =
+      start_supervised!(
+        {Epoch, name: nil, data_dir: Path.join(ctx.dir, "bounded"), max_entries: 1},
+        id: :bounded_epoch
+      )
+
+    operation = operation("archived", :failed)
+    assert {:ok, operations} = HandoffOperation.put(ctx.dir, %{}, operation, epoch_server: epoch)
+    bytes = File.read!(ctx.path)
+    inode = File.stat!(ctx.path).inode
+    assert {:ok, filler} = Epoch.reserve("filler", sha256("filler"), epoch)
+    assert :ok = Epoch.commit(filler, epoch)
+    assert %{archived_entries: 1} = Epoch.observe(epoch)
+
+    assert {:ok, ^operations} = HandoffOperation.put(ctx.dir, %{}, operation, epoch_server: epoch)
+    assert File.stat!(ctx.path).inode == inode
+    assert File.read!(ctx.path) == bytes
+
+    assert {:error, {:maintenance_epoch, :write_id_conflict}} =
+             HandoffOperation.put(ctx.dir, %{}, %{operation | error: "changed"},
+               epoch_server: epoch
+             )
+
+    assert File.read!(ctx.path) == bytes
+
+    File.rm!(ctx.path)
+
+    assert {:error, {:handoff_operation_committed_payload_invalid, :absent}} =
+             HandoffOperation.put(ctx.dir, %{}, operation, epoch_server: epoch)
+
+    refute File.exists?(ctx.path)
+  end
+
+  test "changed handoff bytes cannot settle a different pending payload", ctx do
+    operation = operation("conflicting", :failed)
+    original = HandoffOperation.encode_operations(%{operation.id => operation})
+    id = HandoffOperation.epoch_write_id(ctx.path, {operation.id, operation.status})
+    assert {:ok, pending} = Epoch.reserve(id, sha256(original), ctx.epoch)
+    changed = %{operation | error: "changed"}
+    bytes = HandoffOperation.encode_operations(%{changed.id => changed})
+    File.write!(ctx.path, bytes)
+
+    assert {:error, {:maintenance_epoch, :write_id_conflict}} =
+             HandoffOperation.put(ctx.dir, %{}, changed, epoch_server: ctx.epoch)
+
+    assert File.read!(ctx.path) == bytes
+    assert {:ok, %{status: :pending}} = Epoch.lookup(pending.write_id, ctx.epoch)
+  end
+
   defp operation(id, status),
     do: %{id: id, fingerprint: "fingerprint", status: status, error: "failed"}
 

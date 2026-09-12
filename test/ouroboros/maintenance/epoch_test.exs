@@ -78,18 +78,26 @@ defmodule Ouroboros.Maintenance.EpochTest do
     assert %{epoch: 1, aborted: [%{write_id: "write-1"}]} = Epoch.observe(restarted)
   end
 
-  test "retention capacity fails closed and survives restart", %{storage: storage} do
+  test "resident capacity archives finalized history and refuses a full pending set", %{
+    storage: storage
+  } do
     server = start_epoch!(storage, max_entries: 2)
     assert {:ok, first} = Epoch.reserve("write-1", digest("one"), server)
     assert :ok = Epoch.commit(first, server)
     assert {:ok, _second} = Epoch.reserve("write-2", digest("two"), server)
-    assert {:error, :epoch_capacity} = Epoch.reserve("write-3", digest("three"), server)
+    assert {:ok, %{epoch: 3}} = Epoch.reserve("write-3", digest("three"), server)
+    assert {:error, :epoch_capacity} = Epoch.reserve("write-4", digest("four"), server)
     assert {:ok, ^first} = Epoch.reserve("write-1", digest("one"), server)
+    assert {:ok, %{status: :committed}} = Epoch.lookup("write-1", server)
 
     GenServer.stop(server)
     restarted = start_epoch!(storage, max_entries: 2)
-    assert %{epoch: 2, retained_entries: 2, max_entries: 2} = Epoch.observe(restarted)
-    assert {:error, :epoch_capacity} = Epoch.reserve("write-3", digest("three"), restarted)
+
+    assert %{epoch: 3, retained_entries: 2, archived_entries: 1, max_entries: 2} =
+             Epoch.observe(restarted)
+
+    assert {:error, :epoch_capacity} = Epoch.reserve("write-4", digest("four"), restarted)
+    assert {:ok, ^first} = Epoch.reserve("write-1", digest("one"), restarted)
   end
 
   test "malformed and unreadable persistence fail startup", %{root: root, storage: storage} do

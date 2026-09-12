@@ -176,6 +176,8 @@ defmodule Ouroboros.Provider.Native.Journal do
   @spec sync(t() | nil) :: t() | nil
   def sync(nil), do: nil
 
+  def sync(%{authority_error: reason} = journal) when not is_nil(reason), do: journal
+
   def sync(%{audit_stream: stream} = journal) when is_binary(stream) do
     case Ouroboros.Audit.Store.read(journal.path) do
       {:ok, result} -> %{journal | seq: result.verified_through, prev: result.head, synced?: true}
@@ -219,6 +221,9 @@ defmodule Ouroboros.Provider.Native.Journal do
   head this process cannot name would produce a record that *looks* chained and is not,
   which is worse than a stated gap — so the gap is staged and the write is skipped. The
   tail read is retried first, because the failure that produced it may have been transient.
+
+  With an Epoch authority, a failed append requires reopening the journal so pending
+  publication is reconciled against the persisted line before any gap or record is added.
   """
   @spec append(t() | nil, String.t() | atom(), map()) :: t() | nil
   def append(nil, _kind, _fields), do: nil
@@ -233,6 +238,9 @@ defmodule Ouroboros.Provider.Native.Journal do
   end
 
   def append(%__MODULE__{} = journal, kind, fields), do: do_append(journal, kind, fields)
+
+  defp do_append(%{authority_error: reason} = journal, kind, _fields) when not is_nil(reason),
+    do: degrade(journal, to_string(kind), reason)
 
   defp do_append(%{synced?: false} = journal, kind, fields) do
     case resync(journal) do
@@ -268,6 +276,10 @@ defmodule Ouroboros.Provider.Native.Journal do
         end
     end
   end
+
+  defp write_record(%{authority_error: reason} = journal, kind, _fields)
+       when not is_nil(reason),
+       do: {:error, degrade(journal, kind, reason)}
 
   defp write_record(journal, kind, fields) do
     record = build(journal, kind, fields)
@@ -306,9 +318,7 @@ defmodule Ouroboros.Provider.Native.Journal do
 
     payload_digest = sha256(line)
 
-    with observation when is_map(observation) <-
-           epoch_call(fn -> Epoch.observe(journal.epoch_server) end),
-         {:ok, existing} <- journal_reservation(observation, write_id) do
+    with {:ok, existing} <- journal_reservation(journal.epoch_server, write_id) do
       case existing do
         nil ->
           with {:ok, reservation} <-
@@ -321,8 +331,11 @@ defmodule Ouroboros.Provider.Native.Journal do
             end
           end
 
-        reservation ->
+        %{payload_digest: ^payload_digest} = reservation ->
           reconcile_journal(journal, reservation, :recovered_pending)
+
+        _conflicting_reservation ->
+          {:error, {:maintenance_epoch, :write_id_conflict}}
       end
     else
       {:error, reason} -> {:error, {:maintenance_epoch, reason}}
@@ -381,18 +394,22 @@ defmodule Ouroboros.Provider.Native.Journal do
   @doc false
   def epoch_write_prefix(path), do: epoch_path_prefix(path)
 
-  defp journal_reservation(observation, write_id) do
-    matches =
-      for status <- [:pending, :committed, :aborted],
-          item <- Map.get(observation, status, []),
-          item.write_id == write_id,
-          do: {status, Map.delete(item, :status)}
+  defp journal_reservation(server, write_id) do
+    case epoch_call(fn -> Epoch.lookup(write_id, server) end) do
+      :not_found ->
+        {:ok, nil}
 
-    case matches do
-      [] -> {:ok, nil}
-      [{:pending, item}] -> {:ok, item}
-      [{status, _}] -> {:error, {:journal_operation_already_settled, status}}
-      _ -> {:error, :invalid_epoch_observation}
+      {:ok, %{status: :pending} = item} ->
+        {:ok, Map.delete(item, :status)}
+
+      {:ok, %{status: status}} when status in [:committed, :aborted] ->
+        {:error, {:journal_operation_already_settled, status}}
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        {:error, :invalid_epoch_observation}
     end
   end
 
@@ -537,7 +554,10 @@ defmodule Ouroboros.Provider.Native.Journal do
 
   defp degrade(journal, kind, reason) do
     stage_gap(journal, kind, reason)
-    %{journal | degraded?: true}
+
+    if is_nil(journal.epoch_server),
+      do: %{journal | degraded?: true},
+      else: authority_failed(journal, reason)
   end
 
   # The sidecar rather than the handle, because the writer that failed may not be the

@@ -186,38 +186,35 @@ defmodule Ouroboros.Provider.Native.Context.HandoffOperation do
             {:error, reason} -> reconcile_failure(target, digest, server, write_id, reason)
           end
 
-        {:committed, reserved} ->
+        {:committed, %{payload_digest: ^digest} = reserved} ->
           case observe(target, reserved.payload_digest) do
             :exact -> decode_operations(target)
             other -> {:error, {:handoff_operation_committed_payload_invalid, other}}
           end
 
-        reserved ->
+        %{payload_digest: ^digest} = reserved ->
           reconcile_existing(target, digest, server, reserved)
+
+        _conflicting_identity ->
+          {:error, {:maintenance_epoch, :write_id_conflict}}
       end
     end
   end
 
   defp reservation(server, write_id) do
-    with observation when is_map(observation) <- epoch_call(fn -> Epoch.observe(server) end) do
-      matches =
-        for status <- [:pending, :committed, :aborted],
-            item <- Map.get(observation, status, []),
-            item.write_id == write_id,
-            do: {status, Map.delete(item, :status)}
-
-      case matches do
-        [] -> {:ok, nil}
-        [{:pending, item}] -> {:ok, item}
-        [{:committed, item}] -> {:ok, {:committed, item}}
-        [{status, _}] -> {:error, {:handoff_operation_already_settled, status}}
-        _ -> {:error, :invalid_epoch_observation}
-      end
-    else
+    case epoch_call(fn -> Epoch.lookup(write_id, server) end) do
+      :not_found -> {:ok, nil}
+      {:ok, %{status: :pending} = item} -> {:ok, Map.delete(item, :status)}
+      {:ok, %{status: :committed} = item} -> {:ok, {:committed, Map.delete(item, :status)}}
+      {:ok, %{status: :aborted}} -> {:error, {:handoff_operation_already_settled, :aborted}}
       {:error, reason} -> {:error, {:maintenance_epoch_unavailable, reason}}
       _ -> {:error, :invalid_epoch_observation}
     end
   end
+
+  defp reconcile_existing(_target, digest, _server, %{payload_digest: reserved_digest})
+       when digest != reserved_digest,
+       do: {:error, {:maintenance_epoch, :write_id_conflict}}
 
   defp reconcile_existing(target, digest, server, reserved) do
     case observe(target, digest) do

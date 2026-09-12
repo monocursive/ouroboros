@@ -98,10 +98,11 @@ defmodule Ouroboros.Provider.Native.CheckpointEpochTest do
   test "pending confirmed absence aborts and never blindly publishes", ctx do
     identity = {:fork, "operation-2"}
     write_id = write_id(ctx.path, identity)
-    assert {:ok, _} = Epoch.reserve(write_id, String.duplicate("a", 64), ctx.epoch)
+    messages = [%{role: :user, content: "must not appear"}]
+    assert {:ok, _} = Epoch.reserve(write_id, payload_digest(ctx.path, messages), ctx.epoch)
 
     assert {:error, :checkpoint_payload_absent} =
-             Checkpoint.write(ctx.path, [%{role: :user, content: "must not appear"}],
+             Checkpoint.write(ctx.path, messages,
                epoch_server: ctx.epoch,
                operation_identity: identity
              )
@@ -110,20 +111,94 @@ defmodule Ouroboros.Provider.Native.CheckpointEpochTest do
     assert [%{write_id: ^write_id}] = Epoch.observe(ctx.epoch).aborted
   end
 
+  test "archived terminal identities still prevent checkpoint publication", ctx do
+    epoch =
+      start_supervised!(
+        {Epoch,
+         name: nil, data_dir: Path.join(Path.dirname(ctx.path), "bounded"), max_entries: 1},
+        id: :bounded_epoch
+      )
+
+    messages = [%{role: :user, content: "retained"}]
+    opts = [epoch_server: epoch, operation_identity: :archived_checkpoint]
+    assert {:ok, digest} = Checkpoint.write(ctx.path, messages, opts)
+    bytes = File.read!(ctx.path)
+    inode = File.stat!(ctx.path).inode
+    assert {:ok, filler} = Epoch.reserve("filler", sha256("filler"), epoch)
+    assert :ok = Epoch.commit(filler, epoch)
+    assert %{archived_entries: 1} = Epoch.observe(epoch)
+
+    assert {:ok, ^digest} = Checkpoint.write(ctx.path, messages, opts)
+    assert File.stat!(ctx.path).inode == inode
+    assert File.read!(ctx.path) == bytes
+
+    assert {:error, {:maintenance_epoch, :write_id_conflict}} =
+             Checkpoint.write(ctx.path, [%{role: :user, content: "changed"}], opts)
+
+    assert File.read!(ctx.path) == bytes
+
+    File.rm!(ctx.path)
+    assert {:error, _} = Checkpoint.write(ctx.path, messages, opts)
+    refute File.exists?(ctx.path)
+
+    absent_id = write_id(ctx.path, :archived_abort)
+    assert {:ok, absent} = Epoch.reserve(absent_id, sha256("absent"), epoch)
+    assert :ok = Epoch.abort(absent, :payload_absence_confirmed, epoch)
+    assert {:ok, _} = Epoch.reserve("later", sha256("later"), epoch)
+
+    assert {:error, {:checkpoint_operation_already_settled, :aborted}} =
+             Checkpoint.write(ctx.path, messages,
+               epoch_server: epoch,
+               operation_identity: :archived_abort
+             )
+
+    refute File.exists?(ctx.path)
+  end
+
   test "pending mismatched final bytes remain pending and are never overwritten", ctx do
     identity = {:session, "s2", :turn, "t2"}
     write_id = write_id(ctx.path, identity)
-    assert {:ok, _} = Epoch.reserve(write_id, String.duplicate("b", 64), ctx.epoch)
+    messages = [%{role: :user, content: "replacement"}]
+    assert {:ok, _} = Epoch.reserve(write_id, payload_digest(ctx.path, messages), ctx.epoch)
     File.write!(ctx.path, "other durable bytes")
 
     assert {:error, :checkpoint_payload_outcome_unknown} =
-             Checkpoint.write(ctx.path, [%{role: :user, content: "replacement"}],
+             Checkpoint.write(ctx.path, messages,
                epoch_server: ctx.epoch,
                operation_identity: identity
              )
 
     assert File.read!(ctx.path) == "other durable bytes"
     assert [%{write_id: ^write_id}] = Epoch.observe(ctx.epoch).pending
+  end
+
+  test "a changed retry cannot settle an older pending checkpoint or report its digest", ctx do
+    original = [%{role: :user, content: "original"}]
+    identity = :conflicting_pending
+    expected_digest = payload_digest(ctx.path, original)
+
+    assert {:ok, pending} =
+             Epoch.reserve(write_id(ctx.path, identity), expected_digest, ctx.epoch)
+
+    assert {:ok, _} = Checkpoint.write(ctx.path, original, updated_at: "1970-01-01T00:00:00Z")
+    bytes = File.read!(ctx.path)
+
+    assert {:error, {:maintenance_epoch, :write_id_conflict}} =
+             Checkpoint.write(ctx.path, [%{role: :user, content: "changed"}],
+               epoch_server: ctx.epoch,
+               operation_identity: identity
+             )
+
+    assert File.read!(ctx.path) == bytes
+    assert {:ok, %{status: :pending}} = Epoch.lookup(pending.write_id, ctx.epoch)
+  end
+
+  defp payload_digest(path, messages) do
+    expected = path <> ".expected"
+    assert {:ok, _} = Checkpoint.write(expected, messages, updated_at: "1970-01-01T00:00:00Z")
+    bytes = File.read!(expected)
+    File.rm!(expected)
+    sha256(bytes)
   end
 
   defp write_id(path, identity) do

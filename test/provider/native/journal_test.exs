@@ -96,6 +96,69 @@ defmodule Ouroboros.Provider.Native.JournalTest do
     assert File.read!(path) == line
   end
 
+  test "an archived commit refuses a stale journal handle without appending twice", ctx do
+    epoch =
+      start_supervised!({Epoch, name: nil, data_dir: Path.join(ctx.dir, "epoch"), max_entries: 1})
+
+    stale = Journal.open(ctx.dir, epoch_server: epoch)
+    first = Journal.append(stale, "prompt", %{"content" => "once"})
+    refute first.degraded?
+    bytes = File.read!(ctx.path)
+    assert {:ok, filler} = Epoch.reserve("filler", sha256("filler"), epoch)
+    assert :ok = Epoch.commit(filler, epoch)
+    assert %{archived_entries: 1} = Epoch.observe(epoch)
+
+    retry = Journal.append(stale, "prompt", %{"content" => "once"})
+    assert retry.degraded?
+    assert File.read!(ctx.path) == bytes
+    assert length(lines(ctx.path)) == 1
+  end
+
+  test "a conflicting pending retry cannot advance the chain before reopen", %{
+    dir: dir,
+    path: path
+  } do
+    epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(dir, "epoch")})
+    stale = Journal.open(dir, epoch_server: epoch)
+    record = build_record(1, Journal.seed(), "prompt", %{"content" => "published"})
+    line = Journal.canonical_json(record) <> "\n"
+    identity = :erlang.term_to_binary({path, 1, Journal.seed(), "prompt"}, [:deterministic])
+    write_id = Journal.epoch_write_prefix(path) <> "1/" <> sha256(identity)
+    assert {:ok, reservation} = Epoch.reserve(write_id, sha256(line), epoch)
+    File.write!(path, line)
+
+    retry = Journal.append(stale, "prompt", %{"content" => "different"})
+    assert retry.authority_error == {:maintenance_epoch, :write_id_conflict}
+    assert retry.degraded?
+    assert {retry.seq, retry.prev, retry.bytes} == {stale.seq, stale.prev, stale.bytes}
+    assert File.read!(path) == line
+    assert Epoch.lookup(write_id, epoch) == {:ok, Map.put(reservation, :status, :pending)}
+
+    # The failed attempt staged a gap. Neither it nor a changed kind may bypass the
+    # pending reservation by taking a different write ID on the stale handle.
+    blocked = retry |> Journal.sync() |> Journal.append("turn_settled", %{"status" => "complete"})
+    assert blocked.authority_error == retry.authority_error
+    assert {blocked.seq, blocked.prev, blocked.bytes} == {stale.seq, stale.prev, stale.bytes}
+    assert File.read!(path) == line
+
+    reopened = Journal.open(dir, epoch_server: epoch)
+    refute reopened.degraded?
+    assert reopened.authority_error == nil
+    assert {reopened.seq, reopened.prev, reopened.bytes} == {1, record["hash"], byte_size(line)}
+    assert Epoch.lookup(write_id, epoch) == {:ok, Map.put(reservation, :status, :committed)}
+
+    next = Journal.append(reopened, "turn_settled", %{"status" => "complete"})
+    refute next.degraded?
+
+    assert {:ok, %{records: [published, gap, settled], head: head, verified_through: 3}} =
+             Journal.verify(path)
+
+    assert published == record
+    assert gap["kind"] == "gap"
+    assert settled["kind"] == "turn_settled"
+    assert next.prev == head
+  end
+
   test "open aborts a pending append after confirmed absence", %{dir: dir, path: path} do
     epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(dir, "epoch")})
     write_id = Journal.epoch_write_prefix(path) <> "1/absent"
@@ -120,9 +183,16 @@ defmodule Ouroboros.Provider.Native.JournalTest do
       |> Journal.append("prompt", %{"content" => "once"})
 
     assert failed.degraded?
-    assert [_pending] = Epoch.observe(epoch).pending
+    assert [pending] = Epoch.observe(epoch).pending
     bytes = File.read!(path)
     inode = File.stat!(path).inode
+
+    blocked = Journal.append(failed, "turn_settled", %{"status" => "complete"})
+    assert blocked.degraded?
+    assert blocked.authority_error == failed.authority_error
+    assert {blocked.seq, blocked.prev, blocked.bytes} == {failed.seq, failed.prev, failed.bytes}
+    assert File.read!(path) == bytes
+    assert Epoch.observe(epoch).pending == [pending]
 
     reopened = Journal.open(dir, epoch_server: epoch)
     refute reopened.degraded?

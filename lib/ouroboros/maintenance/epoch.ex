@@ -8,15 +8,19 @@ defmodule Ouroboros.Maintenance.Epoch do
   that explicitly asserts it has confirmed payload absence. This module does not inspect,
   publish, or reconcile payloads itself.
 
-  Entries are never evicted. Once `:max_entries` is reached, new write ids are refused so
-  an old identity cannot become executable again. Persistence corruption or unavailability
-  fails startup, and a failed mutation stops this owner rather than continuing from an
-  in-memory state whose durable outcome may be unknown.
+  Identities are never forgotten. `:max_entries` bounds the resident history; when it
+  fills, finalized receipts move into an immutable durable index before space is reused.
+  Pending reservations are never removed to make room. An old identity cannot become
+  executable again, including when an indexed receipt is missing or unreadable.
+  Persistence corruption or unavailability fails startup, and a failed mutation stops
+  this owner rather than continuing from an in-memory state whose durable outcome may
+  be unknown.
   """
 
   use GenServer
 
   alias Ouroboros.Storage.DurableFile
+  alias Ouroboros.Maintenance.EpochReceipts
 
   @storage_key {:ouroboros, :maintenance_write_epoch, 1}
   @default_max_entries 4_096
@@ -53,7 +57,16 @@ defmodule Ouroboros.Maintenance.Epoch do
   def abort(reservation, confirmation, server \\ __MODULE__),
     do: GenServer.call(server, {:abort, reservation, confirmation})
 
-  @doc "Returns the epoch head and all retained pending/committed/aborted identities."
+  @doc "Returns an exact identity, including its status, from resident or archived history."
+  @spec lookup(String.t(), GenServer.server()) :: {:ok, map()} | :not_found | {:error, term()}
+  def lookup(write_id, server \\ __MODULE__), do: GenServer.call(server, {:lookup, write_id})
+
+  @doc """
+  Returns the epoch head, all pending identities, and bounded resident finalized history.
+
+  `lookup/2` is authoritative for an individual write ID; finalized identities may have
+  moved out of these lists into the immutable archive. `archived_entries` counts them.
+  """
   @spec observe(GenServer.server()) :: map()
   def observe(server \\ __MODULE__), do: GenServer.call(server, :observe)
 
@@ -65,7 +78,8 @@ defmodule Ouroboros.Maintenance.Epoch do
     with {:ok, storage} <- storage(opts),
          {:ok, max_entries} <- max_entries(opts),
          {:ok, checkpoint} <- load(storage),
-         :ok <- validate_checkpoint(checkpoint, max_entries) do
+         :ok <- validate_checkpoint(checkpoint, max_entries, storage),
+         {:ok, checkpoint} <- migrate(checkpoint, storage) do
       {:ok, %{storage: storage, max_entries: max_entries, checkpoint: checkpoint}}
     else
       {:error, reason} -> {:stop, {:maintenance_epoch_unavailable, reason}}
@@ -76,31 +90,34 @@ defmodule Ouroboros.Maintenance.Epoch do
   def handle_call({:reserve, write_id, digest}, _from, state) do
     with :ok <- valid_write_id(write_id),
          :ok <- valid_digest(digest) do
-      case find_entry(state.checkpoint.entries, write_id) do
-        {^write_id, epoch, ^digest, status} ->
+      case lookup_entry(state, write_id) do
+        {:ok, {^write_id, epoch, ^digest, status}} ->
           {:reply, {:ok, identity(write_id, epoch, digest, status)}, state}
 
-        {^write_id, _epoch, _other_digest, _status} ->
+        {:ok, {^write_id, _epoch, _other_digest, _status}} ->
           {:reply, {:error, :write_id_conflict}, state}
 
-        nil when length(state.checkpoint.entries) >= state.max_entries ->
-          {:reply, {:error, :epoch_capacity}, state}
+        :not_found ->
+          reserve_fresh(state, write_id, digest)
 
-        nil ->
-          epoch = state.checkpoint.epoch + 1
-          entry = {write_id, epoch, digest, :pending}
-
-          checkpoint = %{
-            state.checkpoint
-            | epoch: epoch,
-              entries: state.checkpoint.entries ++ [entry]
-          }
-
-          persist_reply(state, checkpoint, {:ok, identity(write_id, epoch, digest, :pending)})
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
       end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:lookup, write_id}, _from, state) do
+    result =
+      with :ok <- valid_write_id(write_id) do
+        case lookup_entry(state, write_id) do
+          {:ok, entry} -> {:ok, entry_identity(entry)}
+          other -> other
+        end
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:settle, reservation, :committed}, _from, state) do
@@ -125,6 +142,7 @@ defmodule Ouroboros.Maintenance.Epoch do
       committed: Map.get(grouped, :committed, []),
       aborted: Map.get(grouped, :aborted, []),
       retained_entries: length(state.checkpoint.entries),
+      archived_entries: state.checkpoint.archived_entries,
       max_entries: state.max_entries
     }
 
@@ -133,8 +151,8 @@ defmodule Ouroboros.Maintenance.Epoch do
 
   defp settle(state, reservation, target) do
     with {:ok, write_id, epoch, digest} <- reservation_identity(reservation) do
-      case find_entry(state.checkpoint.entries, write_id) do
-        {^write_id, ^epoch, ^digest, :pending} ->
+      case lookup_entry(state, write_id) do
+        {:ok, {^write_id, ^epoch, ^digest, :pending}} ->
           entries =
             Enum.map(state.checkpoint.entries, fn
               {^write_id, ^epoch, ^digest, :pending} -> {write_id, epoch, digest, target}
@@ -143,11 +161,14 @@ defmodule Ouroboros.Maintenance.Epoch do
 
           persist_reply(state, %{state.checkpoint | entries: entries}, :ok)
 
-        {^write_id, ^epoch, ^digest, ^target} ->
+        {:ok, {^write_id, ^epoch, ^digest, ^target}} ->
           {:reply, :ok, state}
 
-        nil ->
+        :not_found ->
           {:reply, {:error, :unknown_reservation}, state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
 
         _other ->
           {:reply, {:error, :reservation_identity_mismatch}, state}
@@ -157,25 +178,85 @@ defmodule Ouroboros.Maintenance.Epoch do
     end
   end
 
+  defp reserve_fresh(state, write_id, digest) do
+    case make_room(state) do
+      {:ok, checkpoint} ->
+        epoch = checkpoint.epoch + 1
+        entry = {write_id, epoch, digest, :pending}
+        checkpoint = %{checkpoint | epoch: epoch, entries: checkpoint.entries ++ [entry]}
+        persist_reply(state, checkpoint, {:ok, identity(write_id, epoch, digest, :pending)})
+
+      {:error, :epoch_capacity} ->
+        {:reply, {:error, :epoch_capacity}, state}
+
+      {:error, reason} ->
+        persist_failure(state, reason)
+    end
+  end
+
+  defp make_room(state) do
+    checkpoint = state.checkpoint
+
+    if length(checkpoint.entries) < state.max_entries do
+      {:ok, checkpoint}
+    else
+      case Enum.find(checkpoint.entries, &(elem(&1, 3) != :pending)) do
+        nil ->
+          {:error, :epoch_capacity}
+
+        entry ->
+          with {:ok, root} <-
+                 EpochReceipts.put(checkpoint.receipt_root, entry, state.storage) do
+            {:ok,
+             %{
+               checkpoint
+               | receipt_root: root,
+                 archived_entries: checkpoint.archived_entries + 1,
+                 entries: List.delete(checkpoint.entries, entry)
+             }}
+          end
+      end
+    end
+  end
+
+  defp lookup_entry(state, write_id) do
+    case find_entry(state.checkpoint.entries, write_id) do
+      nil -> EpochReceipts.lookup(state.checkpoint.receipt_root, write_id, state.storage)
+      entry -> {:ok, entry}
+    end
+  end
+
   defp persist_reply(state, checkpoint, success_reply) do
     case DurableFile.put_checkpoint(@storage_key, checkpoint, state.storage) do
       :ok ->
         {:reply, success_reply, %{state | checkpoint: checkpoint}}
 
       {:error, reason} ->
-        {:stop, {:maintenance_epoch_persist_failed, reason}, {:error, :epoch_unavailable}, state}
+        persist_failure(state, reason)
     end
   end
+
+  defp persist_failure(state, reason),
+    do: {:stop, {:maintenance_epoch_persist_failed, reason}, {:error, :epoch_unavailable}, state}
 
   defp load(storage) do
     case DurableFile.get_checkpoint(@storage_key, storage) do
-      :not_found -> {:ok, %{schema: 1, epoch: 0, entries: []}}
-      {:ok, checkpoint} -> {:ok, checkpoint}
-      {:error, reason} -> {:error, {:checkpoint_unreadable, reason}}
+      :not_found ->
+        {:ok, %{schema: 2, epoch: 0, entries: [], receipt_root: nil, archived_entries: 0}}
+
+      {:ok, checkpoint} ->
+        {:ok, checkpoint}
+
+      {:error, reason} ->
+        {:error, {:checkpoint_unreadable, reason}}
     end
   end
 
-  defp validate_checkpoint(%{schema: 1, epoch: epoch, entries: entries} = checkpoint, max_entries)
+  defp validate_checkpoint(
+         %{schema: 1, epoch: epoch, entries: entries} = checkpoint,
+         max_entries,
+         _storage
+       )
        when map_size(checkpoint) == 3 and is_integer(epoch) and epoch >= 0 and is_list(entries) do
     cond do
       length(entries) > max_entries ->
@@ -189,19 +270,81 @@ defmodule Ouroboros.Maintenance.Epoch do
     end
   end
 
-  defp validate_checkpoint(_checkpoint, _max_entries), do: {:error, :malformed_checkpoint}
+  defp validate_checkpoint(
+         %{
+           schema: 2,
+           epoch: epoch,
+           entries: entries,
+           receipt_root: root,
+           archived_entries: archived
+         } = checkpoint,
+         max_entries,
+         storage
+       )
+       when map_size(checkpoint) == 5 and is_integer(epoch) and epoch >= 0 and
+              is_list(entries) and is_integer(archived) and archived >= 0 do
+    cond do
+      length(entries) > max_entries ->
+        {:error, :checkpoint_over_capacity}
+
+      not (valid_resident_entries?(entries, epoch) and EpochReceipts.valid_root?(root)) ->
+        {:error, :malformed_checkpoint}
+
+      length(entries) + archived > epoch ->
+        {:error, :malformed_checkpoint}
+
+      true ->
+        with {:ok, metadata} <- EpochReceipts.validate(root, epoch, storage),
+             true <- metadata.count == archived,
+             true <- max(metadata.max_epoch, last_epoch(entries)) == epoch,
+             :ok <- validate_archive_separation(entries, root, storage) do
+          :ok
+        else
+          false -> {:error, :malformed_checkpoint}
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp validate_checkpoint(_checkpoint, _max_entries, _storage),
+    do: {:error, :malformed_checkpoint}
+
+  defp migrate(%{schema: 2} = checkpoint, _storage), do: {:ok, checkpoint}
+
+  defp migrate(%{schema: 1} = checkpoint, storage) do
+    migrated = Map.merge(checkpoint, %{schema: 2, receipt_root: nil, archived_entries: 0})
+
+    case DurableFile.put_checkpoint(@storage_key, migrated, storage) do
+      :ok -> {:ok, migrated}
+      {:error, reason} -> {:error, {:checkpoint_migration_failed, reason}}
+    end
+  end
+
+  defp validate_archive_separation(entries, root, storage) do
+    Enum.reduce_while(entries, :ok, fn {write_id, _, _, _}, :ok ->
+      case EpochReceipts.lookup(root, write_id, storage) do
+        :not_found -> {:cont, :ok}
+        {:ok, _entry} -> {:halt, {:error, :duplicate_archived_identity}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
 
   defp valid_entries?(entries, epoch) do
+    valid_resident_entries?(entries, epoch) and last_epoch(entries) == epoch
+  end
+
+  defp valid_resident_entries?(entries, epoch) do
     ids = Enum.map(entries, &entry_write_id/1)
     entry_epochs = Enum.map(entries, &entry_epoch/1)
 
     Enum.all?(entries, &valid_entry?/1) and Enum.uniq(ids) == ids and
       entry_epochs == Enum.sort(entry_epochs) and Enum.uniq(entry_epochs) == entry_epochs and
-      case entry_epochs do
-        [] -> epoch == 0
-        values -> List.last(values) == epoch
-      end
+      Enum.all?(entry_epochs, &(&1 <= epoch))
   end
+
+  defp last_epoch([]), do: 0
+  defp last_epoch(entries), do: entries |> List.last() |> elem(1)
 
   defp valid_entry?({write_id, epoch, digest, status}) do
     valid_write_id(write_id) == :ok and is_integer(epoch) and epoch > 0 and
