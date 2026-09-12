@@ -190,6 +190,22 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLMTest do
     refute_canaries(formatted)
   end
 
+  test "lazy streaming wrappers preserve structured API and transport causes" do
+    for {cause, expected} <- [
+          {Elixir.ReqLLM.Error.API.Request.exception(
+             status: 429,
+             provider_code: "rate_limit_exceeded",
+             retryable: true
+           ), "category=api status=429 provider_code=rate_limit_exceeded retryable=true"},
+          {Req.TransportError.exception(reason: :timeout),
+           "category=transport retryable=true diagnostic=transport failed: timeout"}
+        ] do
+      wrapped = %Elixir.ReqLLM.Error.API.Stream{reason: "SECRET signed URL cookie", cause: cause}
+      assert ReqLLM.format_error(wrapped) =~ expected
+      refute ReqLLM.format_error(wrapped) =~ "SECRET"
+    end
+  end
+
   defp refute_canaries(formatted) do
     refute formatted =~ @cookie_canary
     refute formatted =~ @authorization_canary
@@ -199,5 +215,34 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLMTest do
     refute formatted =~ "authorization"
     refute formatted =~ "request_body"
     refute formatted =~ "response_body"
+  end
+
+  test "provider-controlled codes and unknown Unicode messages cannot become diagnostics" do
+    for secret <- [
+          "sk-proj-secret",
+          "Bearer private",
+          "https://private/?sig=secret",
+          String.duplicate("é", 5000),
+          <<255>>
+        ] do
+      error =
+        Elixir.ReqLLM.Error.API.Request.exception(
+          status: 403,
+          provider_code: secret,
+          reason: secret
+        )
+
+      formatted = ReqLLM.format_error(error)
+      assert String.valid?(formatted)
+      assert byte_size(formatted) < 1024
+      assert formatted =~ "status=403"
+      assert formatted =~ "provider_code=redacted"
+      refute formatted =~ secret
+
+      assert Ouroboros.Provider.Native.Model.format_error(
+               __MODULE__,
+               RuntimeError.exception(secret)
+             ) =~ "category=unknown"
+    end
   end
 end

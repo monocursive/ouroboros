@@ -91,6 +91,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   defp unwrap_error(%{errors: [error | _]}), do: unwrap_error(error)
+
+  defp unwrap_error(%ReqLLM.Error.API.Stream{cause: cause}) when not is_nil(cause),
+    do: unwrap_error(cause)
+
   defp unwrap_error(reason), do: reason
 
   defp error_summary(%ReqLLM.Error.API.Request{} = error) do
@@ -148,7 +152,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp transport_diagnostic(_reason), do: "transport failed"
 
   defp policy_code?(code) when is_binary(code),
-    do: String.match?(code, ~r/(policy|safety|content_filter|blocked)/i)
+    do:
+      code in ~w(content_policy_violation content_filter policy_violation safety_violation request_blocked)
 
   defp policy_code?(_code), do: false
 
@@ -164,11 +169,20 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     |> Enum.join(" ")
   end
 
+  defp safe_provider_code(nil), do: nil
   defp safe_provider_code(code) when is_atom(code), do: safe_provider_code(Atom.to_string(code))
 
   defp safe_provider_code(code) when is_binary(code) do
-    value = code |> String.replace(~r/[^a-zA-Z0-9_.:-]/, "_") |> String.slice(0, 128)
-    if value == "", do: nil, else: "provider_code=#{value}"
+    # A syntactically tidy string can still be a token or a signed URL fragment.
+    # Preserve known operational codes, not arbitrary provider-controlled content.
+    if code in ~w(upstream_timeout server_is_overloaded overloaded rate_limit_exceeded
+                  insufficient_quota invalid_api_key invalid_request_error model_not_found
+                  context_length_exceeded content_policy_violation content_filter
+                  policy_violation safety_violation request_blocked) do
+      "provider_code=#{code}"
+    else
+      "provider_code=redacted"
+    end
   end
 
   defp safe_provider_code(_code), do: nil

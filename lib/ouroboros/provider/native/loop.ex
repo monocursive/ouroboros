@@ -678,7 +678,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         })
 
       settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
-      {:error, state, {:stream_failed, Exception.message(error)}}
+      {:error, state, {:stream_failed, Model.ReqLLM.format_error(error)}}
   catch
     :exit, reason ->
       _ =
@@ -689,7 +689,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         })
 
       settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
-      {:error, state, {:stream_exited, inspect(reason)}}
+      {:error, state, {:stream_exited, Model.ReqLLM.format_error(reason)}}
   end
 
   # The meter rides on `usage` because that is the event a client already subscribes to
@@ -3988,8 +3988,8 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp describe({:model_request_failed, message}) when is_binary(message), do: message
-  defp describe({:stream_failed, message}), do: message
-  defp describe({:stream_exited, reason}), do: reason
+  defp describe({:stream_failed, message}), do: "stream_failed " <> message
+  defp describe({:stream_exited, reason}), do: "stream_exited " <> reason
 
   @doc """
   Builds an owned runtime event, redacted before it enters retained output.

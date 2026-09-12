@@ -65,6 +65,19 @@ test("launch project and missing-catalogue model survive into a native request",
     await connected(page);
     await expect(page.locator("#workspace")).toHaveValue("");
     await expect(page.getByRole("button", { name: "Start session", exact: true })).toBeDisabled();
+
+    // A real loop stream-consumption failure, projected into the ordinary browser cell.
+    await page.goto(`/auth?${new URLSearchParams({ token, workspace })}`);
+    await connected(page);
+    await page.locator("#initial-message").fill("browser private failure");
+    await page.getByRole("button", { name: "Start session", exact: true }).click();
+    await expect(page).toHaveURL(/\/s\/interactive\//);
+    const transcript = page.getByRole("log", { name: "Session transcript" });
+    await expect(transcript).toContainText("The AI service limited the request.");
+    await expect(transcript).toContainText("marked retryable");
+    await transcript.locator(".ouro-technical summary").click();
+    await expect(transcript.locator(".ouro-technical pre")).toContainText("status=429");
+    await expect(transcript).not.toContainText("SYNTH_BROWSER_SECRET");
   } finally {
     fs.rmSync(project, { recursive: true });
   }

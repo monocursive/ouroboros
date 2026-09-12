@@ -134,17 +134,10 @@ defmodule Ouroboros.Provider.Native.Model do
     _error -> "category=unknown retryable=false diagnostic=model request failed"
   end
 
-  defp generic_error(reason) when is_binary(reason), do: clip(reason)
-  defp generic_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp generic_error(:no_credentials),
+    do: "category=credentials retryable=false diagnostic=no_credentials"
 
-  defp generic_error(%{__exception__: true} = error),
-    do: error |> Exception.message() |> clip()
-
-  defp generic_error(_reason),
-    do: "category=unknown retryable=false diagnostic=model request failed"
-
-  defp clip(text) when byte_size(text) <= 1_024, do: text
-  defp clip(text), do: binary_part(text, 0, 1_021) <> "..."
+  defp generic_error(reason), do: __MODULE__.ReqLLM.format_error(reason)
 
   @doc """
   The projection a digest is taken over, from the module that would send the request.

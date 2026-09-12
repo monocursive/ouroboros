@@ -646,6 +646,48 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert result.payload["output"] =~ "not a tool in this session"
       assert result.payload["output"] =~ "read, write, edit, apply_patch, bash, grep"
     end
+
+    test "stream consumption exceptions are classified before public events", context do
+      defmodule SensitiveStreamModel do
+        @behaviour Ouroboros.Provider.Native.Model
+        def stream(_, _) do
+          {:ok,
+           Stream.map([1], fn _ ->
+             cause =
+               Elixir.ReqLLM.Error.API.Request.exception(
+                 status: 429,
+                 provider_code: "rate_limit_exceeded",
+                 retryable: true,
+                 reason: "SECRET cookie signed URL hidden reasoning",
+                 headers: [{"authorization", "SECRET"}]
+               )
+
+             raise %Elixir.ReqLLM.Error.API.Stream{reason: "SECRET", cause: cause}
+           end)}
+        end
+      end
+
+      {loop, _} = start_loop(context, [])
+      run(%{loop | model_module: SensitiveStreamModel})
+      failed = collect() |> find(:turn_failed)
+      assert failed.payload["reason"] == "model_error"
+      assert failed.payload["error"] =~ "stream_failed category=api status=429"
+      assert failed.payload["error"] =~ "retryable=true"
+      refute inspect(Loop.to_event(failed, :native, "synthetic")) =~ "SECRET"
+    end
+
+    test "stream exits retain their phase but never inspect the arbitrary reason", context do
+      defmodule ExitingStreamModel do
+        @behaviour Ouroboros.Provider.Native.Model
+        def stream(_, _), do: {:ok, Stream.map([1], fn _ -> exit({:private, "SECRET"}) end)}
+      end
+
+      {loop, _} = start_loop(context, [])
+      run(%{loop | model_module: ExitingStreamModel})
+      failed = collect() |> find(:turn_failed)
+      assert failed.payload["error"] =~ "stream_exited category=unknown retryable=false"
+      refute inspect(Loop.to_event(failed, :native, "synthetic")) =~ "SECRET"
+    end
   end
 
   describe "approvals" do

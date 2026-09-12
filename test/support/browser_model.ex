@@ -12,6 +12,23 @@ defmodule Ouroboros.Test.BrowserModel do
     after_tool? = List.last(request.messages).role == :tool
 
     cond do
+      String.contains?(prompt, "browser private failure") ->
+        {:ok,
+         Stream.map([:text, :fail], fn phase ->
+           cause =
+             ReqLLM.Error.API.Request.exception(
+               status: 429,
+               provider_code: "rate_limit_exceeded",
+               retryable: true,
+               reason: "SYNTH_BROWSER_SECRET",
+               headers: [{"authorization", "SYNTH_BROWSER_SECRET"}]
+             )
+
+           if phase == :fail,
+             do: raise(%ReqLLM.Error.API.Stream{reason: "SYNTH_BROWSER_SECRET", cause: cause}),
+             else: {:text, "Partial response before failure. "}
+         end)}
+
       String.contains?(prompt, "first-use request proof") ->
         {:ok,
          [
