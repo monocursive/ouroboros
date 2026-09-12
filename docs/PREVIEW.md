@@ -1,0 +1,219 @@
+# Developer preview: source build and first use
+
+**Candidate preparation, not a published release or a supported binary download.**
+Ouroboros is an experimental runtime for coding work: durable BEAM sessions and
+recorded effects, native subagents with worktree ownership, OS-sandboxed shell and
+WebAssembly authority, and model-authored improvements under evidence and human
+signing, merge and promotion. A successful coding turn is not proof of autonomous
+self-improvement or safe unattended operation.
+
+## Platform and delivery contract
+
+Build `ouro` on the OS and architecture that will run it. It embeds BEAM/ERTS and
+the WebAssembly helper; the intermediate Mix tarball alone is not the supported
+deployment unit. There is no installer, updater, package-manager release or signed
+binary download. Do not use old `dist/` files as current release artifacts.
+
+| Target | Current evidence, not a compatibility promise |
+|---|---|
+| macOS Apple Silicon | Historical full embedded-runtime runs; current local source regression evidence. Fresh candidate installation and real-model first-use qualification still required. |
+| Linux x86-64 GNU | Ubuntu 24.04 CI is configured; a runner label is not a current candidate build/install result. Native-host namespace and ABI qualification still required. |
+| Linux AArch64 GNU | Historical helper/container evidence, not full `ouro` installation acceptance. Not yet qualified as a preview target. |
+| macOS Intel | No current dedicated build/install evidence. Not yet qualified as a preview target. |
+
+macOS and Linux are the implemented OS families. No minimum macOS version, glibc
+floor or general Linux distribution range has yet been qualified. Windows, WSL,
+musl and other targets are not established support. Accessing the local web UI
+from a browser does not establish runtime support for that browser's device.
+Before a public candidate claims any target, its release record must contain the
+per-target checks below. Missing checks must not be labeled passed.
+
+## Obtain and build
+
+Use the canonical repository's source at the exact revision identified by the
+maintainer's candidate notes. Until such a revision is announced, this is a
+contributor build recipe, not a reproducible released candidate. Start with a
+fresh checkout; retain your existing work and old build outputs elsewhere.
+
+Prerequisites:
+
+- Elixir 1.20, Erlang/OTP 29, Rust 1.95, `make`, Git and a native C/C++ toolchain.
+- macOS: Xcode command-line tools. Linux: compiler/linker and the system development
+  libraries required by OTP/native dependencies. The project's Ubuntu build recipe
+  uses `build-essential`, `pkg-config`, `libssl-dev` and `libsctp1`; that is not a
+  universal distribution package list.
+- Network access for dependency bootstrap. Use the checked-in Mix and Cargo locks;
+  do not update dependencies as part of reproducing a candidate.
+- Linux shell containment needs **usable** bubblewrap mount/network namespaces,
+  not merely an installed `bwrap` command. Host policy can refuse them. Do not turn
+  off machine-wide security to make a preview check green. macOS uses Seatbelt
+  (`sandbox-exec`). If the backend cannot enforce a requested posture, stop and
+  report the refusal; do not silently select full access.
+
+From the checkout root:
+
+```sh
+mix deps.get
+make ouro
+./tui/target/release/ouro --help
+```
+
+Install Hex/Rebar through the normal Mix prompts if requested. `make ouro` builds
+the WASM helper, assembles the production runtime and embeds the tarball into
+`tui/target/release/ouro`. Node is not required for production web assets; Node and
+Playwright are browser-test dependencies. Multiple release tarballs are refused
+rather than selecting an older version; use a fresh build checkout, not an
+indiscriminate cleanup of existing work.
+
+Run the resulting binary by absolute path from the repository you want to work
+on, or copy it into a private directory already on your `PATH`. Do not copy a
+binary built for another OS/architecture. Same architecture is necessary, not a
+promise of compatibility with every OS or system-library version.
+
+## Configure model access and start
+
+Native is the only runtime provider; no vendor CLI is required.
+
+1. Open `ouro` from a small repository you own. Check the selected workspace and
+   file permissions before submitting a task; `/options` exposes advanced setup.
+2. Submit a bounded task. If prompted, connect ChatGPT through the displayed
+   sign-in flow; the pending task starts after sign-in. Account entitlement,
+   provider availability and model access are external prerequisites, not bundled
+   with Ouroboros. Choose a model available to your account; do not assume an old
+   documented model name is still offered.
+3. Alternatively, before starting a **new** runtime, select
+   `OUROBOROS_NATIVE_MODEL=openai:<available-model>` with `OPENAI_API_KEY`,
+   `anthropic:<available-model>` with `ANTHROPIC_API_KEY`, or
+   `xai:<available-model>` with `XAI_API_KEY`. Anthropic/xAI keys can also be saved
+   through the local web setup. Identity-linked Anthropic keys may additionally
+   require `ANTHROPIC_WORKSPACE_ID`. These implemented alternatives require their
+   own setup smoke before being advertised as qualified preview lanes.
+
+Use your normal private credential mechanism. Never put keys, login codes, tokens
+or browser bootstrap URLs in prompts, source files, screenshots, shell transcripts
+or issue reports. Changing an environment variable does not reconfigure an
+already-running daemon. A new isolated data directory does not inherit its saved
+ChatGPT sign-in; authenticate it through the supported UI rather than copying
+private auth files.
+
+For the browser front door, run `ouro web` with the same environment/data directory.
+It serves locally by default. `ouro web --print` prints a credential-bearing URL:
+keep it private. Remote web exposure/TLS and fleet setup are separate operator
+work, not part of first use.
+
+## One useful first journey
+
+Use a non-sensitive repository with a clean baseline and existing tests. Do not
+plant a broken test merely to demonstrate a repair. Example prompt:
+
+> Read this project's setup instructions and the commands they describe. Identify
+> one concrete discrepancy that affects a new contributor, correct only that
+> discrepancy, and run the smallest existing relevant check. Do not install global
+> software, publish, change Git refs or access credentials. If no real discrepancy
+> exists, report that rather than inventing work. Finish with the exact diff,
+> checks and unresolved limitations.
+
+Keep approvals interactive. Read a command before approving it, and deny an
+unneeded action rather than giving blanket approval. Missing auth, an unavailable
+backend, a failed command or an operator denial is not success: the transcript
+and final report must say what did and did not run. A refusal alone is not evidence
+that another action was contained. In headless `ouro run`, approval requests are
+denied by default because no human can answer; avoid `--approve-all` for first use.
+
+After the task:
+
+- Inspect the actual diff and check results yourself. Use `/export` to retain a
+  local report; review/redact it before sharing. Exports can contain repository
+  text, prompts and local paths.
+- Keep the session idle rather than closing/deleting it. Leave and reopen the
+  client using `ouro --continue` from the same workspace, or use
+  `ouro run --resume SESSION-ID "Summarize the previous result; do not edit files"`.
+  Resuming is a **new model turn**, not a free replay. Check the named session
+  rather than assuming the most recent one is the intended one.
+- `ouro replay SESSION-ID` renders retained history; `ouro replay SESSION-ID --verify`
+  checks the recorded execution. Replay does not rerun live tools or inference.
+  A gap, boundary or divergence is not a verified pass. See [REPLAY.md](REPLAY.md)
+  for the bounded contract.
+- For a controlled restart check, use only an explicitly owned standalone test
+  runtime with no active work, record its data directory and stop/start it through
+  `ouro stop` / `ouro daemon` in that same environment. Never stop another user's
+  runtime or infer isolation from a second directory when BEAM peers are connected.
+  Reopen the retained session and inspect the diff for unwanted repeated effects.
+
+For disposable first-use testing, use fresh `HOME`, `XDG_CONFIG_HOME`,
+`XDG_DATA_HOME`, `XDG_CACHE_HOME` and an absolute `OUROBOROS_DATA_DIR`, with
+`OUROBOROS_DIST=none` and no fleet profile. Start from a clean environment without
+inherited cluster, Erlang or release flags; do not copy your ordinary runtime's
+state. Keep that exact environment for every command, including cleanup. The
+launcher may adopt a runtime in the selected data directory and headless runs may
+leave it running. A connected BEAM node is **not** isolated.
+
+## Known limitations and failure guidance
+
+- This is not a hardened multi-tenant service. OS shell sandboxing is not a VM;
+  worktrees share Git objects/refs and are not a security boundary. Full access
+  means unrestricted host authority. Linux has documented nested `.git`/`.ouroboros`
+  limitations. Read [Architecture: safety boundaries](ARCHITECTURE.md#safety-boundaries).
+- Connected fleet peers share full Erlang authority. Roles and placement checks do
+  not contain a hostile connected node. Start local; [FLEET.md](FLEET.md) is the
+  optional manual trust-domain setup.
+- Crash recovery is not exactly-once external effects. Inspect an ambiguous or
+  lost outcome before retrying a command. A transport timeout is not proof that
+  nothing happened. For APIs with caller-owned request IDs, reconcile the same
+  ID and identical request using the documented contract, not a duplicate start.
+- Long sessions are bounded. `steering_capacity` and
+  `compaction_operation_capacity` are operational refusals, not provider-policy
+  refusals. Do not erase operation history to free capacity. Preserve the report
+  and use a supported handoff to a new session; handoff can itself take long
+  enough for a caller timeout, requiring outcome reconciliation. Compaction is
+  model-authored and lossy, not unlimited memory.
+- During the self-development experiment, four independent review scopes remain
+  provider-policy blocked: P0 AR2/AR4, P1, P4 core and P2 review06. No retry,
+  rerouting or substitute clearance was obtained. Functional tests do not clear
+  these reviews or establish whole-program independent acceptance. Historical
+  wording “permanently” denotes that experiment's retained disposition, not a
+  prediction about every future provider policy or release outcome.
+- No protected installed-runtime acceptance, exhaustive maintenance fault/reboot
+  qualification, matched improvement benchmark or automatic promotion is claimed.
+  Humans retain signing, merging and promotion. Local integrity receipts are not
+  independent execution witnesses.
+
+## Candidate exit record (maintainers)
+
+Before announcing a public preview, retain and review:
+
+1. An attributable source revision/version and exact selected paths, including
+   integrated contributions; a few checkpoint commits cannot stand in for a larger
+   dirty tested tree. Exclude credentials, runtime state, logs, caches, private
+   experiments and unattributed old artifacts. Inspect the actual source bundle
+   and embedded tar contents for private data before sharing either.
+2. For **every claimed target**, exact OS/architecture/toolchain, revision and
+   dependency locks, a fresh build log, binary and embedded-tarball digests,
+   helper presence, system-library compatibility, install/start and clean shutdown.
+   Container/emulated evidence must be labeled, not called native-host acceptance.
+3. Terminal and local-browser first use, one supported provider's actual sign-in
+   or key setup, useful native read/edit/check work, an honest ordinary failure or
+   denial, retained work after resume/replay and a controlled owned-runtime restart.
+   Record model/runtime/source identities, result, duration and human interventions.
+4. Relevant automated checks on the candidate; explicit skipped/unavailable checks
+   and unresolved reviews. A historical source campaign is not a candidate install
+   test. Keep native subagent/worktree evidence and any real two-machine example
+   distinct from the first local task; do not drop those core features or overstate
+   their target coverage.
+5. Public notes listing qualified targets, chosen provider route, version/revision,
+   known limitations and feedback path. Only then follow the human maintainer
+   release procedure in [CONTRIBUTING.md](../CONTRIBUTING.md#releases-maintainers).
+   Publishing/tagging/pushing is a separate human action, not performed by this guide.
+
+## Feedback
+
+For ordinary bugs, open an issue in the canonical repository with revision/version,
+OS/architecture, toolchain versions for build failures, model lane (no credentials),
+workspace/approval/sandbox posture, minimal reproduction, expected versus actual
+result, exit code and sanitized short error excerpt. State whether the run used a
+fresh checkout, existing daemon, container or emulator, and what you retried.
+Do not upload whole data directories, journals, logs or auth-bearing screenshots.
+There is no automatic telemetry or upload step in this guide.
+
+For suspected vulnerabilities, **do not open a public issue**: follow the private
+reporting path in [SECURITY.md](../SECURITY.md).

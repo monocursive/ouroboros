@@ -75,6 +75,7 @@ jobs:
           mix deps.clean --unused
 
       - run: mix format --check-formatted
+      - run: sh scripts/test-release-packaging.sh
       - run: sh scripts/test-dev.sh
 
       # The tree is warning-free today, checked before this file was written. `--force`

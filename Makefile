@@ -199,6 +199,7 @@ wasm-skew-test:
 test:
 	@echo "==> test: formatting and scripts, then mix, the boot gate, and Rust with both feature sets"
 	$(MIX) format --check-formatted
+	sh scripts/test-release-packaging.sh
 	sh scripts/test-dev.sh
 	SHELL="$(SHELL)" $(MIX) test
 	$(MAKE) boot-gate
@@ -292,6 +293,10 @@ release-tarball: wasm
 # machine, with the same target.
 ouro: release-tarball
 	@echo "==> ouro: baking that tarball into tui/target/release/ouro"
-	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
-	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features embed
+	@set -eu; set -- "$$PWD"/_build/prod/$(RELEASE)-*.tar.gz; \
+	if [ "$$#" -ne 1 ] || [ ! -f "$$1" ] || [ -L "$$1" ]; then \
+	  echo "ouro: expected one regular release tarball; use a fresh build checkout (old artifacts are not deleted)" >&2; \
+	  exit 1; \
+	fi; \
+	cd tui && OUROBOROS_RELEASE_TARBALL="$$1" $(CARGO) build --release --features embed
 	@ls -l tui/target/release/ouro

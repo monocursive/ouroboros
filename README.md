@@ -48,14 +48,17 @@ Ouroboros for sensitive or unattended work.
 ## Quick start
 
 Building from source currently requires Elixir 1.20, Erlang/OTP 29, Rust 1.95,
-and `make`.
+`make`, Git, and a native C/C++ toolchain. Build on the machine that will run it.
+See the [developer preview guide](docs/PREVIEW.md) for platform qualification,
+first-use checks, and known limitations; there is no binary installer or updater.
 
 ```sh
+mix deps.get
 make ouro
 ./tui/target/release/ouro
 ```
 
-The first command builds the runtime and embeds it in the `ouro` terminal
+`make ouro` builds the runtime and embeds it in the `ouro` terminal
 client. Open it from the project you want to work on, describe a task, and press
 Enter. If needed, connect ChatGPT; your submitted task starts after sign-in.
 For a guided first task, press F2 to explore the project, edit the prompt, then
@@ -118,7 +121,7 @@ There are two paths, and both start with `ouro wasm new`:
   retire it without a rebuild.
 
 ```sh
-make wasm                        # build the containment helper (nothing else builds it)
+make wasm                        # build the helper separately (make ouro includes it)
 ouro wasm new my-guard --hook    # scaffold a project that builds
 ouro wasm inspect my_guard.wasm  # what it declares, and whether this runtime would admit it
 ```
