@@ -15,7 +15,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-ouroboros-guest = { path = "../../tui/wasm/guest" }
+ouroboros-guest = { path = "../../../tui/wasm/guest" }
 
 # The defaults, and they are not incidental: `panic = "abort"` keeps the unwinder out of the
 # component, and LTO with a size-shaped opt level let the linker drop what is unreachable —
