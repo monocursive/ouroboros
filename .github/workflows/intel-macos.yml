@@ -1,0 +1,89 @@
+name: Intel macOS candidate smoke
+
+on:
+  # Deliberate single validation branch: permits pre-merge execution without
+  # bootstrapping workflow_dispatch onto the default branch. No general push/PR trigger.
+  push:
+    branches: [validation/intel-macos]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Full reviewed commit SHA; must equal the selected workflow ref's commit"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intel-macos-candidate
+  cancel-in-progress: false
+
+env:
+  ELIXIR_VERSION: "1.20"
+  OTP_VERSION: "29"
+  RUST_VERSION: "1.95"
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require reviewed source and actual Intel host
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          if test "$GITHUB_EVENT_NAME" = push; then
+            test "$GITHUB_REF" = refs/heads/validation/intel-macos
+          else
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          fi
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = x86_64
+          test "$(sysctl -n machdep.cpu.vendor)" = GenuineIntel
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Same major-action and toolchain version conventions as ci.yml; resolved
+      # versions and the actual BEAM architecture are checked/reported below.
+      - uses: erlef/setup-beam@v1
+        timeout-minutes: 15
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Select Rust (no persistent build cache)
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          xcode-select -p
+
+      - name: Build and smoke the exact native candidate
+        timeout-minutes: 80
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.source_sha }}
+        run: python3 scripts/intel-macos-smoke.py run
+
+      - name: Reconcile owned runtime shutdown even after failure
+        if: ${{ always() }}
+        timeout-minutes: 3
+        run: |
+          if test -f scripts/intel-macos-smoke.py; then
+            python3 scripts/intel-macos-smoke.py cleanup
+          fi
+
+      # No upload-artifact/cache action: binaries, runtime state, token-bearing
+      # output and private command logs stay in the disposable runner only.
