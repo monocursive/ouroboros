@@ -8,6 +8,7 @@ defmodule Ouroboros.Interactive.Store do
   alias Ouroboros.Storage.Records
 
   @store_key {:ouroboros, :interactive_sessions, 1}
+  @epoch_write_prefix "interactive-store/v1/"
 
   @type recoverable :: %{
           id: String.t(),
@@ -440,7 +441,11 @@ defmodule Ouroboros.Interactive.Store do
 
     case epoch_call(fn -> Epoch.observe(state.epoch_server) end) do
       {:ok, %{pending: pending}} when is_list(pending) ->
-        Enum.reduce_while(pending, {:ok, state}, fn reservation, {:ok, acc} ->
+        # Epoch is shared by independent payload writers. This store can establish
+        # presence or retry authority only for its own stable reservation namespace.
+        pending
+        |> Enum.filter(&String.starts_with?(&1.write_id, @epoch_write_prefix))
+        |> Enum.reduce_while({:ok, state}, fn reservation, {:ok, acc} ->
           if reservation.payload_digest == digest do
             case epoch_call(fn ->
                    Epoch.commit(Map.delete(reservation, :status), acc.epoch_server)
@@ -480,7 +485,7 @@ defmodule Ouroboros.Interactive.Store do
   defp write_id(kind, identity) do
     encoded = :erlang.term_to_binary({kind, identity}, [:deterministic])
     hash = :crypto.hash(:sha256, encoded) |> Base.encode16(case: :lower)
-    "interactive-store/v1/#{kind}/#{hash}"
+    @epoch_write_prefix <> "#{kind}/#{hash}"
   end
 
   defp epoch_call(fun) do
