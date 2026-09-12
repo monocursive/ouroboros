@@ -12,8 +12,8 @@ in-process tool loop; see [docs/REPLAY.md](../../REPLAY.md) §11 and
 > [the core reduction](../../proposals/core.md) §3 D2. Read every section below that names
 > a vendor adapter or transport as the historical vendor/Harness map, not as what ships.
 
-Repo: `/Users/monocursive/code/ouroboros`, branch `review-fixes`. All paths absolute-relative
-to that root. Harness pinned at `mix.exs:59-60`
+Repository: Ouroboros checkout, branch `review-fixes`. All paths are relative to
+that root; the original machine-local prefix is omitted. Harness pinned at `mix.exs:59-60`
 (`{:jido_harness, github: "agentjido/jido_harness", ref: "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b"}`),
 vendored under `deps/jido_harness`. `{:jido_ai, "~> 2.3"}` is at `mix.exs:47`.
 
