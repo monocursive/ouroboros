@@ -28,6 +28,17 @@ whole of CI:
 make test
 ```
 
+For quick feedback when editing the release-packaging Makefile recipes:
+
+```sh
+make release-packaging-test
+```
+
+This focused check needs `make`, a POSIX `sh`, standard Unix utilities (including
+`mktemp`), and a writable temporary directory (`$TMPDIR` or `/tmp`). It uses producer
+stubs and does not build the product, so no Elixir/Erlang/Rust toolchains or fetched
+dependencies are needed. `make test` remains the full local gate.
+
 The ordinary gate permits explicitly reported missing-WASM skips. For a required
 WASM run from a fresh checkout, build the documented inputs **before** enabling
 the requirement (including the examples used by the self-policy tests):

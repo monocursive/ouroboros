@@ -14,6 +14,7 @@ RELEASE ?= ouroboros
 
 
 .PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox-host-test dev-host-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
+.PHONY: release-packaging-test
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -29,6 +30,7 @@ help:
 	@echo "make sandbox-host-test  macOS Seatbelt kernel gate (non-nested host context)"
 	@echo "make dev-host-test      launcher PID-safety gate (host process controls)"
 	@echo "make test             formatting, script checks, mix test, the boot gate, cargo test/fmt/clippy"
+	@echo "make release-packaging-test  check packaging recipes with producer stubs; does not build the product"
 	@echo "make boot-gate        pre-reduction, pre-J2 and pre-J3 data booted against this tree, 10x per mode"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
@@ -200,6 +202,9 @@ wasm-linux-test:
 wasm-skew-test:
 	@echo "==> wasm-skew-test: a precompiled artifact from another toolchain, refused by name"
 	scripts/wasm-skew-test.sh
+
+release-packaging-test:
+	sh scripts/test-release-packaging.sh
 
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
