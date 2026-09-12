@@ -16,7 +16,7 @@ binary download. Do not use old `dist/` files as current release artifacts.
 
 | Target | Current evidence, not a compatibility promise |
 |---|---|
-| macOS Apple Silicon | Candidate `8dd05e17` has a fresh committed-source build, verified embedded/extracted payloads, system-only native library dependencies, terminal startup, unauthenticated web refusal, owned restart/shutdown and packaged Seatbelt controls on macOS 26.6.2. Standard ChatGPT sign-in and Astra/xhigh read/edit/check/resume were demonstrated on older artifacts; those journeys have not been repeated on this candidate. |
+| macOS Apple Silicon | Candidate `bc3a24ad` has a committed-source build, verified embedded/extracted payloads, system-only native library dependencies, terminal startup, unauthenticated web refusal, owned restart/shutdown, packaged Seatbelt controls and fresh-browser model connection checks on macOS 26.6.2. Standard ChatGPT sign-in and Astra/xhigh read/edit/check/resume were demonstrated on older artifacts; those journeys have not been repeated on this candidate. |
 | Linux x86-64 GNU | Frozen `82a4c2dd` selected-source build passed in a full-system Ubuntu 24.04.5 x86-64 guest with normal-JIT OTP 29; install, PTY, web 401 and stop passed. A later TCG guest reused that binary, executed the corrected public AppArmor setup/rollback blocks and passed actual packaged shell controls; rollback restored stock/product refusal and actual guest exit was recorded. Full model-backed task/auth/recovery/browser qualification remains open. |
 | Linux AArch64 GNU | Older selected-source build and container/HVF install, PTY, web 401 and stop passed; initial namespace probes refused. Later Ubuntu 24.04.5 ARM64 HVF guests proved the opt-in distro AppArmor correction and an ordinary ChatGPT-authenticated browser read/edit/check task with bwrap and once approvals. Useful work survived an owned idle restart; replay is bounded by the original failed inference. These are older-artifact observations, not an exact-current-source build/journey. |
 | macOS Intel | No current dedicated build/install evidence. An [opt-in hosted Intel build/smoke workflow](INTEL_MACOS.md) is prepared locally but has not run; ordinary authenticated task/recovery/browser evidence is also missing. Not yet qualified as a preview target. |
@@ -35,18 +35,26 @@ these targets is **not complete** merely because installation front doors work.
 
 ### Candidate notes (2026-09-13, after implementation wrap-up)
 
-Version **0.1.0**, binary candidate **`8dd05e17f0c2f8fb253353dbfa9d297cd206821c`** on
-`codex/self-improvements`, superseding source baseline `7cc878278860ac95cfc7fbe7953971325eb2a77f`.
+Version **0.1.0**, binary candidate **`bc3a24ad80dc69255f48e1a4465af21918cbdc3c`** on
+`codex/self-improvements`, superseding binary candidate `8dd05e17f0c2f8fb253353dbfa9d297cd206821c`.
 This integrates admission/recovery and pending-delivery fixes, private test authorities,
 EPMD readiness corrections, and durable lifetime write identities with stricter retry
 checks. Extracted releases now use the complete artifact digest and a completion marker;
 concurrent cache repairs recheck under a bounded lock. The intentional Fable prompt/cache
 work is retained. See the
 [implementation and validation record](experiments/self-development-wrap-up-2026-09-12.md).
-The [macOS candidate record](experiments/public-preview-candidate-2026-09-13.md) identifies
-the exact source, binary, embedded tarball and installed checks. Later documentation
+The [current candidate and onboarding record](experiments/public-preview-onboarding-2026-09-13.md)
+identifies the exact source, binary, embedded tarball and installed checks. The
+[earlier candidate record](experiments/public-preview-candidate-2026-09-13.md) retains
+the extraction-cache findings and its separate artifact identities. Later documentation
 commits do not change the binary's source identity. This remains a local candidate;
 its commits, source archive and binaries have not been published.
+
+Recommended ChatGPT models and blank Custom input now show the same connection
+requirement as an explicit subscription model. The submit handler also checks local
+credential readiness, while an omitted model remains omitted from the request and
+saved preferences. During an uncertain start or failed first message, ChatGPT connection
+recovery remains available on the pinned computer without changing the original task.
 
 **Data-format boundary:** starting this code migrates an existing maintenance epoch to
 schema 2. Older builds refuse that format, so retain an independent pre-upgrade data
