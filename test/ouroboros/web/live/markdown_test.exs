@@ -103,6 +103,22 @@ defmodule Ouroboros.Web.Live.MarkdownTest do
   end
 
   describe "link hrefs" do
+    test "CVE-2026-48591 attribute payload cannot escape the owned AST renderer" do
+      # Earmark.Transform interpolates attribute values unsafely; the product uses
+      # Parser.as_ast plus its own escaping instead. Pin the advisory's payload
+      # and a title/entity variant without invoking the vulnerable transform.
+      for text <- [
+            ~s|[click]( http://example.com/?a=x" onerror="alert(1))|,
+            ~s|[click](https://example.com "&quot; onmouseover=&quot;alert(1)")|
+          ] do
+        out = html(text)
+        assert out =~ "click"
+        refute out =~ ~s(onerror=")
+        refute out =~ ~s(onmouseover=")
+        refute out =~ "<script"
+      end
+    end
+
     test "a javascript: link renders inert" do
       out = html("[click me](javascript:alert(document.cookie))")
 
