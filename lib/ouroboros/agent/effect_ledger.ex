@@ -1122,17 +1122,42 @@ defmodule Ouroboros.Agent.EffectLedger do
     payload = checkpoint_payload(checkpoint)
     digest = payload_digest(payload)
 
-    with {:ok, reservation} <- reserve_epoch(epoch_server, write_id, digest) do
-      case adapter_call(adapter, :put_checkpoint, [@store_key, payload, opts]) do
-        :ok ->
-          commit_epoch(epoch_server, reservation)
+    with {:ok, reservation} <- reserve_epoch(epoch_server, write_id, digest),
+         {:ok, status} <- reservation_status(epoch_server, reservation) do
+      case status do
+        :pending ->
+          publish_checkpoint(adapter, opts, payload, epoch_server, reservation)
 
-        {:error, reason} ->
-          reconcile_publish(adapter, opts, payload, epoch_server, reservation, reason)
+        :committed ->
+          observe_committed_payload(adapter, opts, payload)
 
-        other ->
-          exit({:effect_ledger_epoch_uncertain, {:invalid_storage_response, other}})
+        :aborted ->
+          {:error, {:maintenance_epoch, :reservation_aborted}}
       end
+    end
+  end
+
+  defp publish_checkpoint(adapter, opts, payload, epoch_server, reservation) do
+    case adapter_call(adapter, :put_checkpoint, [@store_key, payload, opts]) do
+      :ok ->
+        commit_epoch(epoch_server, reservation)
+
+      {:error, reason} ->
+        reconcile_publish(adapter, opts, payload, epoch_server, reservation, reason)
+
+      other ->
+        exit({:effect_ledger_epoch_uncertain, {:invalid_storage_response, other}})
+    end
+  end
+
+  defp observe_committed_payload(adapter, opts, payload) do
+    # A committed identity authorizes observation of an already published payload,
+    # never a second publication. Use the plain reader to preserve damaged evidence.
+    case adapter_call(adapter, :get_checkpoint, [@store_key, opts]) do
+      {:ok, ^payload} -> :ok
+      {:ok, _other} -> {:error, {:maintenance_epoch, :committed_payload_mismatch}}
+      :not_found -> {:error, {:maintenance_epoch, :committed_payload_mismatch}}
+      other -> exit({:effect_ledger_epoch_uncertain, {:payload_observation, other}})
     end
   end
 
@@ -1156,10 +1181,43 @@ defmodule Ouroboros.Agent.EffectLedger do
 
   defp reserve_epoch(epoch_server, write_id, digest) do
     case epoch_call(fn -> Epoch.reserve(write_id, digest, epoch_server) end) do
-      {:ok, {:ok, reservation}} -> {:ok, reservation}
-      {:ok, {:error, reason}} -> {:error, {:maintenance_epoch, reason}}
-      {:ok, other} -> exit({:effect_ledger_epoch_uncertain, {:invalid_epoch_response, other}})
-      {:uncertain, reason} -> exit({:effect_ledger_epoch_uncertain, {:reserve, reason}})
+      {:ok, {:ok, %{write_id: ^write_id, payload_digest: ^digest, epoch: epoch} = reservation}}
+      when is_integer(epoch) and epoch > 0 and map_size(reservation) == 3 ->
+        {:ok, reservation}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:maintenance_epoch, reason}}
+
+      {:ok, other} ->
+        exit({:effect_ledger_epoch_uncertain, {:invalid_epoch_response, other}})
+
+      {:uncertain, reason} ->
+        exit({:effect_ledger_epoch_uncertain, {:reserve, reason}})
+    end
+  end
+
+  defp reservation_status(epoch_server, reservation) do
+    case epoch_call(fn -> Epoch.lookup(reservation.write_id, epoch_server) end) do
+      {:ok, {:ok, %{status: status} = observed}}
+      when status in [:pending, :committed, :aborted] ->
+        if Map.delete(observed, :status) == reservation,
+          do: {:ok, status},
+          else: {:error, {:maintenance_epoch, :reservation_identity_mismatch}}
+
+      {:ok, {:ok, _other_identity}} ->
+        {:error, {:maintenance_epoch, :reservation_identity_mismatch}}
+
+      {:ok, :not_found} ->
+        {:error, {:maintenance_epoch, :unknown_reservation}}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:maintenance_epoch, reason}}
+
+      {:ok, other} ->
+        exit({:effect_ledger_epoch_uncertain, {:invalid_epoch_response, other}})
+
+      {:uncertain, reason} ->
+        exit({:effect_ledger_epoch_uncertain, {:lookup, reason}})
     end
   end
 

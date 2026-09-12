@@ -1340,7 +1340,10 @@ defmodule Ouroboros.Provider.Native.Session do
         rules_loaded: Map.get(snapshot, :rules_loaded, state.rules_loaded)
     }
 
-    case checkpoint(state, {:turn, turn_id}) do
+    # A plan-exit follow-up starts another loop under the same public turn ID.
+    # Its new conversation is a distinct publication; retries within that loop keep
+    # the same ordinal and therefore the same durable write identity.
+    case checkpoint(state, {:turn, turn_id, state.turns}) do
       {:ok, digest} -> {:reply, {:ok, digest}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end

@@ -63,6 +63,108 @@ defmodule Ouroboros.Interactive.StoreEpochTest do
     assert {:ok, ^state} = Store.get(state.id, ctx.store)
   end
 
+  test "an aborted create cannot publish on retry, including after archival and restart", ctx do
+    writes = start_supervised!({Agent, fn -> 0 end})
+
+    hook = fn
+      :before_write ->
+        Agent.get_and_update(writes, fn count ->
+          result = if count == 0, do: {:error, :injected_before_payload_write}, else: :ok
+          {result, count + 1}
+        end)
+
+      _stage ->
+        :ok
+    end
+
+    epoch =
+      start_supervised!(
+        {Epoch, name: nil, data_dir: Path.join(ctx.root, "aborted-owner"), max_entries: 1},
+        id: :aborted_owner
+      )
+
+    storage = {DurableFile, path: Path.join(ctx.root, "aborted-records"), durability_hook: hook}
+    opts = [name: nil, storage: storage, epoch_server: epoch]
+    store = start_supervised!({Store, opts}, id: :aborted_store)
+    {:ok, state} = State.new("aborted-create", workspace: File.cwd!())
+    assert {:error, :injected_before_payload_write} = Store.create(state, store)
+    assert [%{write_id: write_id, status: :aborted}] = Epoch.observe(epoch).aborted
+    assert Agent.get(writes, & &1) == 1
+
+    assert {:error, {:maintenance_epoch, :reservation_aborted}} = Store.create(state, store)
+    assert :not_found = Store.get(state.id, store)
+    assert Agent.get(writes, & &1) == 1
+
+    assert {:ok, filler} =
+             Epoch.reserve("archive-aborted-create", String.duplicate("f", 64), epoch)
+
+    assert :ok = Epoch.commit(filler, epoch)
+    assert %{archived_entries: 1} = Epoch.observe(epoch)
+    stop_supervised!(:aborted_store)
+    recovered = start_supervised!({Store, opts}, id: :aborted_store)
+    before_retry = Epoch.observe(epoch)
+
+    assert {:error, {:maintenance_epoch, :reservation_aborted}} = Store.create(state, recovered)
+    assert :not_found = Store.get(state.id, recovered)
+    assert {:ok, %{status: :aborted}} = Epoch.lookup(write_id, epoch)
+    assert Epoch.observe(epoch) == before_retry
+    assert Agent.get(writes, & &1) == 1
+  end
+
+  test "an archived committed put confirms equal bytes but cannot restore older or deleted state",
+       ctx do
+    writes = start_supervised!({Agent, fn -> 0 end})
+
+    hook = fn
+      :before_write -> Agent.update(writes, &(&1 + 1))
+      _stage -> :ok
+    end
+
+    epoch =
+      start_supervised!(
+        {Epoch, name: nil, data_dir: Path.join(ctx.root, "committed-owner"), max_entries: 1},
+        id: :committed_owner
+      )
+
+    storage = {DurableFile, path: Path.join(ctx.root, "committed-records"), durability_hook: hook}
+
+    store =
+      start_supervised!(
+        {Store, name: nil, storage: storage, epoch_server: epoch},
+        id: :committed_store
+      )
+
+    {:ok, state} = State.new("committed-put", workspace: File.cwd!())
+    assert :ok = Store.create(state, store)
+    assert :ok = Store.put(state, store)
+    [put] = Epoch.observe(epoch).committed
+    writes_before = Agent.get(writes, & &1)
+    epoch_before = Epoch.observe(epoch)
+    assert :ok = Store.put(state, store)
+    assert Agent.get(writes, & &1) == writes_before
+    assert Epoch.observe(epoch) == epoch_before
+
+    closed = %{state | status: :closed}
+    assert :ok = Store.put(closed, store)
+    assert {:ok, %{status: :committed}} = Epoch.lookup(put.write_id, epoch)
+    assert %{archived_entries: 2} = Epoch.observe(epoch)
+    writes_before = Agent.get(writes, & &1)
+    epoch_before = Epoch.observe(epoch)
+
+    assert {:error, {:maintenance_epoch, :committed_payload_mismatch}} = Store.put(state, store)
+    assert {:ok, ^closed} = Store.get(state.id, store)
+    assert Agent.get(writes, & &1) == writes_before
+    assert Epoch.observe(epoch) == epoch_before
+
+    assert :ok = Store.delete(state.id, store)
+    writes_before = Agent.get(writes, & &1)
+    epoch_before = Epoch.observe(epoch)
+    assert {:error, {:maintenance_epoch, :committed_payload_mismatch}} = Store.put(state, store)
+    assert :not_found = Store.get(state.id, store)
+    assert Agent.get(writes, & &1) == writes_before
+    assert Epoch.observe(epoch) == epoch_before
+  end
+
   test "delete has stable exact identity and absent retry adds no epoch", ctx do
     {:ok, state} = State.new("epoch-delete", workspace: File.cwd!())
     assert :ok = Store.create(%{state | status: :closed}, ctx.store)

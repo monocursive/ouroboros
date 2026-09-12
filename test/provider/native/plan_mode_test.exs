@@ -531,6 +531,11 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       completed = await_event(:turn_completed)
       assert completed.turn_id == "turn-1"
       assert File.read!(Path.join(context.workspace, "lib/b.ex")) == "built\n"
+      assert {:ok, info} = Session.info(handle)
+      checkpoint = Path.join([context.data_dir, info.provider_session_id, "conversation.json"])
+      assert {:ok, %{messages: messages}} = Ouroboros.Provider.Native.Checkpoint.load(checkpoint)
+      assert Enum.any?(messages, &(&1.role == :user and &1.content == "now build it"))
+      assert Enum.any?(messages, &(&1.role == :assistant and &1.content == "built it"))
       assert {:ok, events} = Session.replay(handle)
       assert Enum.count(events, &(&1.type == :turn_started)) == 1
 

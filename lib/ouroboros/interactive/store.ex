@@ -10,6 +10,16 @@ defmodule Ouroboros.Interactive.Store do
   @store_key {:ouroboros, :interactive_sessions, 1}
   @epoch_write_prefix "interactive-store/v1/"
 
+  defmodule EpochReadOnlyStorage do
+    @moduledoc false
+
+    def get_checkpoint(key, opts),
+      do: apply(opts[:adapter], :get_checkpoint, [key, opts[:opts]])
+
+    def put_checkpoint(_key, _value, _opts), do: {:error, :epoch_verification_read_only}
+    def delete_checkpoint(_key, _opts), do: {:error, :epoch_verification_read_only}
+  end
+
   @type recoverable :: %{
           id: String.t(),
           node: node(),
@@ -351,11 +361,36 @@ defmodule Ouroboros.Interactive.Store do
 
   defp reserve_and_publish(write_id, digest, desired, reply, state, publish) do
     case epoch_call(fn -> Epoch.reserve(write_id, digest, state.epoch_server) end) do
-      {:ok, {:ok, reservation}} ->
-        with {:ok, durable} <- load_sessions(state.repo) do
+      {:ok, {:ok, %{write_id: ^write_id, payload_digest: ^digest, epoch: epoch} = reservation}}
+      when map_size(reservation) == 3 and is_integer(epoch) and epoch > 0 ->
+        publish_reserved(reservation, desired, reply, state, publish)
+
+      {:ok, {:error, reason}} ->
+        {:reply, {:error, {:maintenance_epoch, reason}}, state}
+
+      {:ok, other} ->
+        stop_unknown({:invalid_epoch_response, other}, state)
+
+      {:uncertain, reason} ->
+        stop_unknown({:epoch_reserve_outcome_unknown, reason}, state)
+    end
+  end
+
+  defp publish_reserved(reservation, desired, reply, state, publish) do
+    # reserve/3 returns the same identity for terminal receipts too. It is not fresh
+    # publication authority: a committed retry may only confirm bytes already present.
+    case epoch_reservation_status(reservation, state.epoch_server) do
+      {:ok, :aborted} ->
+        {:reply, {:error, {:maintenance_epoch, :reservation_aborted}}, state}
+
+      {:ok, status} when status in [:pending, :committed] ->
+        with {:ok, durable} <- load_sessions(state.repo, status) do
           cond do
             durable == desired ->
               commit_epoch(reservation, desired, reply, state)
+
+            status == :committed ->
+              {:reply, {:error, {:maintenance_epoch, :committed_payload_mismatch}}, state}
 
             durable == state.sessions ->
               publish_and_commit(publish, reservation, desired, reply, state)
@@ -367,14 +402,27 @@ defmodule Ouroboros.Interactive.Store do
           {:error, reason} -> stop_unknown({:interactive_records_unreadable, reason}, state)
         end
 
+      {:error, reason} ->
+        stop_unknown(reason, state)
+    end
+  end
+
+  defp epoch_reservation_status(reservation, server) do
+    case epoch_call(fn -> Epoch.lookup(reservation.write_id, server) end) do
+      {:ok, {:ok, %{status: status} = observed}}
+      when status in [:pending, :committed, :aborted] ->
+        if Map.delete(observed, :status) == reservation,
+          do: {:ok, status},
+          else: {:error, :epoch_reservation_identity_mismatch}
+
       {:ok, {:error, reason}} ->
-        {:reply, {:error, {:maintenance_epoch, reason}}, state}
+        {:error, {:epoch_lookup_failed, reason}}
 
       {:ok, other} ->
-        stop_unknown({:invalid_epoch_response, other}, state)
+        {:error, {:invalid_epoch_lookup, other}}
 
       {:uncertain, reason} ->
-        stop_unknown({:epoch_reserve_outcome_unknown, reason}, state)
+        {:error, {:epoch_lookup_outcome_unknown, reason}}
     end
   end
 
@@ -472,6 +520,20 @@ defmodule Ouroboros.Interactive.Store do
   end
 
   defp load_sessions(repo), do: Records.load(repo, &decode_session/2)
+
+  defp load_sessions(repo, :pending), do: load_sessions(repo)
+
+  defp load_sessions(repo, :committed) do
+    # Records.load can migrate or quarantine damaged records. A terminal receipt only
+    # authorizes comparison; refuse those writes while retaining the existing decoder.
+    read_only = %{
+      repo
+      | adapter: EpochReadOnlyStorage,
+        opts: [adapter: repo.adapter, opts: repo.opts]
+    }
+
+    load_sessions(read_only)
+  end
 
   # This is the exact logical Records payload: every decoded session and the authoritative
   # membership represented by the map. `:deterministic` fixes map ordering before SHA-256.
