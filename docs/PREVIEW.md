@@ -17,8 +17,8 @@ binary download. Do not use old `dist/` files as current release artifacts.
 | Target | Current evidence, not a compatibility promise |
 |---|---|
 | macOS Apple Silicon | Isolated embedded installation, standard ChatGPT browser sign-in, native Astra/xhigh documentation edit, explicitly approved sandboxed recipe check and retained resume demonstrated. Clean committed-source build also passed; these are separate artifact records, not general macOS compatibility qualification. |
-| Linux x86-64 GNU | Ubuntu 24.04 CI is configured. Current ARM-hosted AMD64 emulation failed during OTP startup before product compilation. Needs a working native x86-64 host or full-system guest; no current candidate installation qualification. |
-| Linux AArch64 GNU | Full source build and runtime-only install/onboarding/clean stop passed in an ordinary Ubuntu 24.04 ARM64 container on OrbStack. Unauthenticated web returned 401. Namespace enforcement and real-model first use on Linux remain unqualified; container success is not native-host support. |
+| Linux x86-64 GNU | Frozen `82a4c2dd` selected-source build passed in a full-system Ubuntu 24.04.5 x86-64 guest with normal-JIT OTP 29. Clean-PATH install, real PTY onboarding, unauthenticated web 401 and stop passed; actual guest exit recorded. Stock bubblewrap probe failed; useful model task, product containment and recovery journey remain unqualified. |
+| Linux AArch64 GNU | Older selected-source build passed in an Ubuntu 24.04 ARM64 OrbStack container. The same binary also passed runtime-only install, real PTY onboarding, web 401 and stop in an independent Ubuntu 24.04.5 ARM64 HVF guest; actual guest exit recorded. Both environments refused the namespace probe; useful model task, product containment and recovery journey remain unqualified. |
 | macOS Intel | No current dedicated build/install evidence. Not yet qualified as a preview target. |
 
 macOS and Linux are the implemented OS families. No minimum macOS version, glibc
@@ -28,7 +28,35 @@ from a browser does not establish runtime support for that browser's device.
 Before a public candidate claims any target, its release record must contain the
 per-target checks below. Missing checks must not be labeled passed.
 
-### Evidence checkpoint (2026-09-12)
+The four targets above are the qualification scope of this source preview, not
+four completed support certifications. macOS Intel remains in that scope with no
+dedicated evidence; it is not silently dropped. The goal of a useful preview across
+these targets is **not complete** merely because installation front doors work.
+
+### Candidate notes (2026-09-12, after platform runs and disk cleanup)
+
+Version **0.1.0**, integrated source baseline
+**`91b0c23263b4771d1e3ef94d09764cdceaac306e`**. This update to the release record is
+documentation-only. The exact revision of a checkout containing it is obtained with
+`git rev-parse HEAD`; do not substitute the baseline for a later documentation
+commit in a source manifest. No retained binary was rebuilt for either this update
+or the baseline. This is a local candidate record, not an announcement that its
+commits, source archive or binaries have been published.
+
+Build from a fresh checkout at the recorded candidate revision using the
+[source recipe below](#obtain-and-build) and its checked-in dependency locks.
+The source boundary is that revision's complete Git tracked tree, not a tar of a
+developer's working directory. A source archive must identify its commit, member
+paths/modes and digest separately; it excludes untracked runtime state, private
+reports and caches. Optional Git/worktree benchmarks need a Git checkout, not just
+an extracted archive. A source recipe is not a byte-reproducible binary guarantee.
+
+**What works in the captured macOS journey:** ordinary ChatGPT sign-in, native
+Astra/xhigh read/edit/check work on a real small repository, an honest missing-
+approver denial followed by one exact approval, five recipe checks under Seatbelt,
+and retained work after an owned restart and model resume. This is separate from
+the clean-source build, not an exact-current-HEAD installation journey or evidence
+for every model. Terminal and local-browser entry points remain part of the preview.
 
 Local integrated source checkpoint `588dca58` was reconstructed from Git and built
 on macOS arm64. The earlier macOS first-use binary was built from an explicit
@@ -43,13 +71,55 @@ Of those inputs, 868 matched `588dca58`; only this guide changed. This compariso
 does not prove new-input completeness or relabel the build as that commit. The
 produced binary SHA-256 is
 `4841e6fbed1e1feda4abf625b4dc1d0cfc08d315793d40ad8de7637a80d91986`.
-The ordinary container's namespace probe was refused without security changes.
-AMD64 OTP interpreter-bootstrap investigation also stopped before product inputs;
-no product-source fix is established by these environment failures.
+The later ARM64 HVF guest reused exactly that binary; it did not compile source.
 
-Current validation retains an intermittent audit-test extra-session event: a
-same-seed diagnostic rerun passed, but no causal fix has been established. Test
-passes and these narrow installation records are not whole-program acceptance.
+The x86-64 full-system build used **863 selected files** from
+`82a4c2ddaf04be29ae9db08f8cc08e507d43a01b`, selected manifest SHA-256
+`1e9d2bb23e99fae964d9c41819e656f93c59fd0af313ac01f1e2c7874678598c`.
+`make ouro` passed in **47m39.828s** with Elixir/Mix 1.20.2, OTP 29 / ERTS 17.0.5
+(normal JIT) and Rust 1.95.0. The retained binary SHA-256 is
+`d8dc487cd6676af167921a7731f1783d1f3e71b5d842ac26c7948ad3dbf1d47c`.
+Its installed-copy and exported-artifact hashes matched. Both full-system guests
+ran Ubuntu 24.04.5, Linux 6.8.0-139 and glibc 2.39, but only those guest ABIs were
+exercised. The x86 install used a clean runtime PATH in the build guest, not a
+separate clean OS image. Neither selected-source set proves full candidate input
+completeness. Earlier user-space AMD64 OTP failures remain separate failed attempts,
+not the outcome of the successful full-system build.
+
+**The Linux qualification blocker remains:** each full-system guest ran one stock
+`bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/true` probe and got
+`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. No bypass or retry
+followed. The exact denying policy was not isolated; the x86 diagnostic additionally
+could not find `sysctl` on its restricted PATH. This is a failed environment check,
+not proof of an Ouroboros source defect or of actual product sandbox behavior.
+Helper presence/doctor is not component execution, and web 401 is not authenticated
+browser acceptance. Neither Linux architecture has a recorded useful model-backed
+setup/task/check/resume/replay/restart journey. These are missing requirements, not
+waivers that make the cross-platform goal complete.
+
+The next concrete step is bounded diagnosis of the stock Linux refusal, followed
+by a minimal supported correction and verification of the actual contained product
+path. This remediation is pending, not an accepted end-state or a request to disable
+host security. It needs an owned Linux host or disposable full-system environment
+with enough dedicated space, without recreating the discarded bulk build caches.
+A successful probe alone will not finish qualification: each Linux architecture
+still needs the complete model-backed journey below, ordinary account access, and
+attributable source/build evidence. macOS Intel still needs build/install and
+journey evidence. Wider distribution/version ranges are not implied by one host.
+
+Current source also includes the standalone fixture SDK-path correction and audit
+fixture recovery quiescence. A controlled orphan demonstrated one interference path
+and the isolated fixture passed; the original unrecorded extra session remains
+unattributed. Relevant selected/composed automated results are retained, not a new
+uninterrupted full-suite run or whole-program acceptance.
+
+The disk cleanup deliberately removed stopped guest disks/images, generated caches,
+owned stopped containers and Linux intermediate tarballs. Small source/manifests,
+failure and success receipts, and one representative binary per tested platform
+remain locally; historical hashes do not mean deleted artifacts remain available.
+No binary download channel is proposed. The [feedback routes](#feedback) remain
+ordinary issues and private vulnerability reporting; the latter was confirmed
+enabled on the canonical public repository on 2026-09-12. No report was submitted.
 
 ## Obtain and build
 
