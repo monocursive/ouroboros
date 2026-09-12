@@ -17,6 +17,20 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
         &{&1, Application.get_env(:ouroboros, &1)}
       )
 
+    # Serial ExUnit cases do not stop background recovery. An unrelated orphan can
+    # open a native session into this fixture's global audit store without a model
+    # call. Quiesce that producer before swapping the store; this does not stop
+    # coordinators that were already running. The original intermittent row's
+    # producer is still unknown.
+    :ok =
+      Supervisor.terminate_child(Ouroboros.Interactive.Supervisor, Ouroboros.Interactive.Recovery)
+
+    # Registered first, run last: restore audit settings/store before recovery.
+    on_exit(fn ->
+      {:ok, _} =
+        Supervisor.restart_child(Ouroboros.Interactive.Supervisor, Ouroboros.Interactive.Recovery)
+    end)
+
     :ok = Supervisor.terminate_child(Ouroboros.Supervisor, Store)
     Application.put_env(:ouroboros, :native_data_dir, Path.join(root, "native"))
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
@@ -82,7 +96,10 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
 
       {:ok, rows} = Ouroboros.Audit.Query.events(config.root)
       opened = Enum.filter(rows, &(&1["kind"] == "session_opened"))
-      assert length(opened) == 2
+
+      assert length(opened) == 2,
+             "expected exactly the two fixture openings, got: #{inspect(opened, limit: :infinity)}"
+
       assert Enum.all?(opened, &(&1["actor_id"] == "alice"))
 
       assert {:error, -32602, _} =
