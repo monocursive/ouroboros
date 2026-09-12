@@ -101,7 +101,8 @@ defmodule Ouroboros.Provider.Native.Model do
                 required(:provider) => atom(),
                 required(:env) => String.t(),
                 required(:present) => boolean(),
-                optional(:source) => atom() | nil
+                optional(:source) => atom() | nil,
+                optional(:credential_state) => :present | :absent | :invalid | :unavailable
               }
             ]
 
@@ -206,7 +207,8 @@ defmodule Ouroboros.Provider.Native.Model do
             required(:provider) => atom(),
             required(:env) => String.t(),
             required(:present) => boolean(),
-            optional(:source) => atom() | nil
+            optional(:source) => atom() | nil,
+            optional(:credential_state) => :present | :absent | :invalid | :unavailable
           }
         ]
   def credential_report do

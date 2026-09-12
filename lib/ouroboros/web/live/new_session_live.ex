@@ -1405,13 +1405,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       <p :if={@card.state == :checking} class="ouro-new-hint">reading account readiness…</p>
 
       <p :if={@card.state == :connected} class="ouro-new-hint">
-        Connected{if @card.identity, do: " as #{@card.identity}"}.
+        Local account{if @card.identity, do: " — #{@card.identity}"}.
       </p>
 
-      <p :if={@card.state == :required} class="ouro-new-hint">
-        This model runs on a ChatGPT subscription, and the runtime has no usable credential
-        for one. Tokens stay in the runtime; this page never sees them.
-      </p>
+      <p class="ouro-new-hint">{@card.credential_note}</p>
 
       <div :if={@card.state == :waiting} class="ouro-account-wait">
         <p class="ouro-new-hint">Open the link, enter the code, then come back here.</p>
@@ -1435,7 +1432,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       <div class="ouro-new-row">
         <button
-          :if={@card.state in [:required, :checking]}
+          :if={@card.state in [:required, :checking, :unavailable]}
           type="button"
           class="ouro-new-secondary"
           phx-click="connect-chatgpt"
@@ -1457,7 +1454,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp account_aside(:checking), do: "Checking"
-  defp account_aside(:connected), do: "Connected"
+  defp account_aside(:connected), do: "Local account"
+  defp account_aside(:unavailable), do: "Status unavailable"
   defp account_aside(:waiting), do: "Waiting"
   defp account_aside(:required), do: "Required"
 

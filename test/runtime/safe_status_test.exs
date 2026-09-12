@@ -33,6 +33,17 @@ defmodule Ouroboros.Runtime.SafeStatusTest do
     assert byte_size(JSON.encode!(status)) <= SafeStatus.limits().output_bytes
   end
 
+  test "credential observations are a closed enum and unknown cannot become false" do
+    for state <- [:invalid, :unavailable, @secret, nil] do
+      rows = [%{provider: :openai_codex, present: false, source: nil, credential_state: state}]
+      assert {:ok, status} = SafeStatus.session(Map.put(facts(), :credentials, rows), 1_100)
+      assert [row] = status["credentials"]
+      assert row["present"] == nil
+      assert row["credential_state"] in ["invalid", "unavailable"]
+      refute JSON.encode!(status) =~ @secret
+    end
+  end
+
   test "compatibility API is only consistency checking and refuses mismatches" do
     assert {:ok, _} =
              SafeStatus.project(Map.put(facts(), :scope, :session), %{

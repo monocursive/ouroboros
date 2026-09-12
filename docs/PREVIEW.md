@@ -365,6 +365,34 @@ context, not independent evidence of every external restart or prior failure.
   Humans retain signing, merging and promotion. Local integrity receipts are not
   independent execution witnesses.
 
+## First-use failure and credential status
+
+The browser's failed-turn cells distinguish reported authentication rejection, access
+refusal, request/model/context problems, quota/rate limits, service/transport failures,
+and unknown causes. Technical details retain bounded category, HTTP status, known
+provider code, stream phase and reported retryability; raw exception/response text is
+omitted. Unknown codes are marked `redacted`, not rewritten as a diagnosis. A retry
+suggestion is an operator choice, not an automatic retry or evidence that previous work
+had no effects. This does not diagnose the historical 26 ms failure above.
+
+ChatGPT connection cards distinguish local credential material present, absent, invalid
+store, and unavailable observation. Material present is **not** verified validity,
+provider acceptance or model entitlement. `account.read` adds `credentialState` and
+credential reports add `credential_state` (`present`, `absent`, `invalid`, `unavailable`).
+Legacy report `present` remains a boolean material/readiness hint; consumers needing
+absence truth must inspect the enum. Session safe status uses `present: null` for an
+invalid/unavailable observation, rather than claiming `false`. Older payloads without
+the enum have not reported that observation. Other provider-key rows retain their
+existing contracts; this increment classifies the managed Codex OAuth store.
+
+Status inspection does not refresh credentials or contact providers. The local OAuth
+observation accepts regular files up to 64 KiB; malformed/oversized stores are invalid,
+and failed reads/nonregular sources are unavailable. Restore a valid store before
+signing in if parsing failed; sign-in is not a repair path for corrupt JSON. No store
+path, token, decoder text or contents are included in the new status fields. Existing
+sign-in, request-time refresh and logout writers are unchanged. Browser account-read
+failure clears stale certainty and keeps following a pending login across recovery.
+
 ## Candidate exit record (maintainers)
 
 Before announcing a public preview, retain and review:

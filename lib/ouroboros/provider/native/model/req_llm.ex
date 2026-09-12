@@ -349,12 +349,14 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
           %{provider: provider, env: env, present: present?(env), source: source(env)}
         end)
 
-      oauth_present? = Ouroboros.Provider.OpenAIAuth.credential_present?()
+      oauth_state = Ouroboros.Provider.OpenAIAuth.credential_status()
+      oauth_present? = oauth_state == :present
 
       oauth = %{
         provider: :openai_codex,
         env: "OUROBOROS_OAUTH_FILE",
         present: oauth_present?,
+        credential_state: oauth_state,
         source: if(oauth_present?, do: :stored)
       }
 

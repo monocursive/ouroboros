@@ -2234,7 +2234,7 @@ defmodule Ouroboros.Interactive.Task do
 
     Model.credential_report()
     |> Enum.filter(&(to_string(Map.get(&1, :provider)) == selected))
-    |> Enum.map(&Map.take(&1, [:provider, :present, :source]))
+    |> Enum.map(&Map.take(&1, [:provider, :present, :source, :credential_state]))
   rescue
     _ -> []
   end

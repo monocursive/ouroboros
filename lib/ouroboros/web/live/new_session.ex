@@ -224,6 +224,7 @@ defmodule Ouroboros.Web.Live.NewSession do
               provider: provider,
               env: env,
               present: present,
+              credential_state: credential_state(value(row, :credential_state)),
               source: source,
               workspace_env: workspace_env,
               workspace_configured?: workspace_configured
@@ -734,12 +735,13 @@ defmodule Ouroboros.Web.Live.NewSession do
   the account surface projects an identity, a boolean, and a login status, and the token
   itself never leaves the runtime's private file.
 
-  Four states, and they are different facts rather than degrees of the same one:
+  Five display states, distinct from provider acceptance:
 
     * `:checking` — nothing has answered yet, so nothing is claimed.
-    * `:connected` — the runtime says the subscription model can run now.
-    * `:waiting` — a login is pending; the code and the verification link belong here.
-    * `:required` — resolved, and the answer was no.
+    * `:connected` — local account metadata exists; access is not verified.
+    * `:waiting` — a login is pending; the code and verification link belong here.
+    * `:required` — no credential material was reported.
+    * `:unavailable` — invalid store or failed observation, not confirmed absence.
   """
   @spec account_card(term(), term()) :: map()
   def account_card(read, login) do
@@ -750,11 +752,13 @@ defmodule Ouroboros.Web.Live.NewSession do
         not is_map(read) and not pending? -> :checking
         usable?(read) -> :connected
         pending? -> :waiting
+        value(read, :credentialState) in ["invalid", "unavailable"] -> :unavailable
         true -> :required
       end
 
     %{
       state: state,
+      credential_note: credential_note(read),
       usable?: usable?(read),
       identity: identity(read),
       code: login && login[:code],
@@ -766,9 +770,39 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   @doc "Whether the runtime says an `openai_codex:` model can run right now."
   @spec usable?(term()) :: boolean()
+  def usable?(%{"credentialState" => state}) when state in ["absent", "invalid", "unavailable"],
+    do: false
+
   def usable?(%{"account" => %{"type" => "chatgpt"}}), do: true
   def usable?(%{"requiresOpenaiAuth" => false}), do: true
   def usable?(_read), do: false
+
+  defp credential_state(state) when state in [:present, :absent, :invalid, :unavailable],
+    do: Atom.to_string(state)
+
+  defp credential_state(state) when state in ["present", "absent", "invalid", "unavailable"],
+    do: state
+
+  defp credential_state(_), do: "unavailable"
+
+  defp credential_note(read) do
+    case value(read, :credentialState) do
+      "present" ->
+        "Credential material found locally. Provider acceptance and model access are not verified."
+
+      "absent" ->
+        "No local ChatGPT credential material was found. Connect to sign in."
+
+      "invalid" ->
+        "The local credential store is malformed. Restore a valid local store, then connect again; its contents are not shown."
+
+      "unavailable" ->
+        "Credential status could not be determined. Check local store access and refresh; this does not mean credentials are missing."
+
+      _ ->
+        "Credential-source status was not reported. Provider acceptance and model access are not verified."
+    end
+  end
 
   @doc """
   Whether a URL may be offered as a link.
@@ -830,6 +864,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   defp pending_login?(%{"login" => %{"status" => "pending"}}), do: true
+  defp pending_login?(%{"followingLogin" => true}), do: true
   defp pending_login?(_read), do: false
 
   defp login_error(%{"login" => %{"error" => error}}) when is_binary(error) and error != "",
@@ -973,4 +1008,6 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
+  defp value(_, _), do: nil
 end

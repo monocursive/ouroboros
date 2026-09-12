@@ -41,8 +41,17 @@ defmodule Ouroboros.Web.Live.AccountConnection do
 
   def read(socket, call) do
     case call.(socket, "account.read", %{}) do
-      {:ok, value} when is_map(value) -> assign(socket, :account, value)
-      _refused -> socket
+      {:ok, value} when is_map(value) ->
+        assign(socket, :account, value)
+
+      _refused ->
+        assign(socket, :account, %{
+          "credentialState" => "unavailable",
+          "observationFailed" => true,
+          "followingLogin" =>
+            NewSession.account_card(socket.assigns[:account], socket.assigns[:login]).state ==
+              :waiting
+        })
     end
   end
 
@@ -66,6 +75,7 @@ defmodule Ouroboros.Web.Live.AccountConnection do
     end
   end
 
+  defp settled?(%{"observationFailed" => true}), do: false
   defp settled?(%{"login" => %{"status" => "pending"}}), do: false
   defp settled?(read), do: is_map(read)
 end

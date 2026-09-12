@@ -154,11 +154,29 @@ defmodule Ouroboros.Runtime.SafeStatus do
         provider = provider(row[:provider])
 
         if provider && not Map.has_key?(acc, provider) do
-          Map.put(acc, provider, %{
+          projected = %{
             "provider" => provider,
-            "present" => boolean(row[:present]),
+            "present" =>
+              if(
+                Map.has_key?(row, :credential_state) and
+                  row[:credential_state] not in [:present, :absent],
+                do: nil,
+                else: boolean(row[:present])
+              ),
             "source" => Map.get(@credential_sources, row[:source], "unavailable")
-          })
+          }
+
+          projected =
+            if Map.has_key?(row, :credential_state),
+              do:
+                Map.put(
+                  projected,
+                  "credential_state",
+                  enum(row[:credential_state], [:present, :absent, :invalid, :unavailable])
+                ),
+              else: projected
+
+          Map.put(acc, provider, projected)
         else
           acc
         end
