@@ -16,6 +16,46 @@ defmodule Ouroboros.ModelsTest do
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Models
 
+  @moduletag :tmp_dir
+  setup %{tmp_dir: dir} do
+    Ouroboros.Test.FirstUseIsolation.setup(dir)
+  end
+
+  test "missing configured exact model is pinned without fabricated metadata" do
+    id = "openai_codex:fixture-astra"
+    Application.put_env(:ouroboros, :native_model, id)
+    row = provider_row(:native)
+    assert [%{id: ^id, configured: true, metadata: :unavailable} = model | _] = row.models
+    assert model.context_window == nil
+    assert model.max_output_tokens == nil
+    assert model.pricing == nil
+    assert model.release_date == nil
+    assert "xhigh" in model.reasoning_efforts
+    assert length(row.models) == 40
+    assert Enum.count(row.models, &(&1.id == id)) == 1
+    assert Models.list() == Models.list()
+  end
+
+  test "older configured catalogue model survives the cap, retains metadata and is deduplicated" do
+    known =
+      LLMDB.models(:openai)
+      |> Enum.filter(
+        &(is_binary(&1.release_date) and &1.retired != true and &1.deprecated != true and
+            &1.catalog_only != true)
+      )
+      |> Enum.min_by(&{&1.release_date, &1.id})
+
+    id = "openai_codex:" <> known.id
+    Application.put_env(:ouroboros, :native_model, id)
+    row = provider_row(:native)
+    assert hd(row.models).id == id
+    assert hd(row.models).release_date == known.release_date
+    assert Enum.count(row.models, &(&1.id == id)) == 1
+    total = row.total
+    Application.put_env(:ouroboros, :native_model, "openai_codex:fixture-absent")
+    assert provider_row(:native).total == total + 1
+  end
+
   describe "the catalogue" do
     test "every provider this node serves gets a row, bounded and deterministic" do
       catalogue = Models.list()
