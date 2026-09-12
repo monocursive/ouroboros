@@ -82,6 +82,22 @@ fn approval_event(sequence: u64, kind: &str, turn: Option<&str>, request_id: &st
     approval
 }
 
+fn question_event(sequence: u64, request_id: &str) -> Value {
+    let mut question = event(
+        sequence,
+        "approval_requested",
+        Some(TURN),
+        json!({
+            "kind": "question",
+            "header": "Database",
+            "question": "Which database should I use?",
+            "options": ["SQLite", "Postgres"]
+        }),
+    );
+    question["request_id"] = Value::String(request_id.to_string());
+    question
+}
+
 fn start_plan(prompt: &str) -> Plan {
     let request = StartRequest {
         id: SESSION.to_string(),
@@ -219,7 +235,7 @@ where
 
     let script = tokio::spawn(async move {
         let peer = Peer::accept(&server).await;
-        let _ = script(peer).await;
+        script(peer).await.expect("script peer task did not panic");
     });
 
     let connected = transport::connect(config(address), hook())
@@ -227,6 +243,7 @@ where
         .expect("a handshake");
 
     let mut notifications = connected.notifications;
+    let mut lifecycle = connected.lifecycle;
     let mut out = Vec::new();
     let mut err = Vec::new();
 
@@ -241,6 +258,7 @@ where
             run::drive(
                 &connected.client,
                 &mut notifications,
+                &mut lifecycle,
                 &connected.hello,
                 plan,
                 &options,
@@ -252,12 +270,127 @@ where
     };
 
     connected.client.stop().await;
-    let _ = tokio::time::timeout(PATIENCE, script).await;
+    tokio::time::timeout(PATIENCE, script)
+        .await
+        .expect("script finished")
+        .expect("script accept task did not panic");
 
     Ran {
         report,
         out: String::from_utf8(out).expect("stdout is UTF-8"),
         err: String::from_utf8(err).expect("stderr is UTF-8"),
+    }
+}
+
+async fn run_against_reconnect<F>(plan: Plan, options: Options, script: F) -> Ran
+where
+    F: FnOnce(tokio::net::TcpListener) -> tokio::task::JoinHandle<()> + Send + 'static,
+{
+    let (server, address) = listener().await;
+    let script = script(server);
+    let mut transport_config = config(address);
+    transport_config.reconnect = true;
+    transport_config.backoff = ouro::transport::Backoff {
+        initial: Duration::from_millis(5),
+        max: Duration::from_millis(5),
+        factor: 1.0,
+        jitter: 0.0,
+    };
+    let connected = transport::connect(transport_config, hook())
+        .await
+        .expect("a handshake");
+    let mut notifications = connected.notifications;
+    let mut lifecycle = connected.lifecycle;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let report = {
+        let mut sinks = Sinks {
+            out: &mut out,
+            err: &mut err,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run::drive(
+                &connected.client,
+                &mut notifications,
+                &mut lifecycle,
+                &connected.hello,
+                plan,
+                &options,
+                &mut sinks,
+            ),
+        )
+        .await
+        .expect("reconciled run finished")
+    };
+    connected.client.stop().await;
+    tokio::time::timeout(PATIENCE, script)
+        .await
+        .expect("reconnect script finished")
+        .expect("reconnect script did not panic");
+    Ran {
+        report,
+        out: String::from_utf8(out).unwrap(),
+        err: String::from_utf8(err).unwrap(),
+    }
+}
+
+async fn run_against_reconnect_capacity<F>(
+    plan: Plan,
+    options: Options,
+    capacity: usize,
+    script: F,
+) -> Ran
+where
+    F: FnOnce(tokio::net::TcpListener) -> tokio::task::JoinHandle<()> + Send + 'static,
+{
+    let (server, address) = listener().await;
+    let script = script(server);
+    let mut transport_config = config(address);
+    transport_config.reconnect = true;
+    transport_config.notification_capacity = capacity;
+    transport_config.backoff = ouro::transport::Backoff {
+        initial: Duration::from_millis(5),
+        max: Duration::from_millis(5),
+        factor: 1.0,
+        jitter: 0.0,
+    };
+    let connected = transport::connect(transport_config, hook())
+        .await
+        .expect("a handshake");
+    let mut notifications = connected.notifications;
+    let mut lifecycle = connected.lifecycle;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let report = {
+        let mut sinks = Sinks {
+            out: &mut out,
+            err: &mut err,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            run::drive(
+                &connected.client,
+                &mut notifications,
+                &mut lifecycle,
+                &connected.hello,
+                plan,
+                &options,
+                &mut sinks,
+            ),
+        )
+        .await
+        .expect("pressure run finished")
+    };
+    connected.client.stop().await;
+    tokio::time::timeout(PATIENCE, script)
+        .await
+        .expect("pressure script finished")
+        .expect("pressure script did not panic");
+    Ran {
+        report,
+        out: String::from_utf8(out).unwrap(),
+        err: String::from_utf8(err).unwrap(),
     }
 }
 
@@ -1091,6 +1224,99 @@ async fn approve_all_answers_approve_once_instead() {
     assert_eq!(report.approvals_answered, 1);
 }
 
+#[tokio::test]
+async fn approve_all_declines_a_question_without_inventing_an_answer_and_keeps_streaming() {
+    let mut options = options(Output::Json);
+    options.approve_all = true;
+
+    let ran = run_against(start_plan("do the thing"), options, |mut peer| {
+        tokio::spawn(async move {
+            accept_start(&mut peer, json!([])).await;
+            peer.notify(
+                "interactive.event",
+                json!({"id": SESSION, "event": question_event(1, "question-1")}),
+            )
+            .await;
+
+            let answer = peer.request_for("interactive.respond_approval").await;
+            assert_eq!(answer["params"]["response"]["decision"], "deny");
+            assert_eq!(answer["params"]["response"]["scope"], "once");
+            assert_eq!(answer["params"]["response"]["actor"], "headless");
+            assert!(answer["params"]["response"]["reason"]
+                .as_str()
+                .expect("a reason")
+                .contains("no answer was supplied"));
+            assert!(answer["params"]["response"]
+                .get("provider_options")
+                .is_none());
+            peer.result(&answer["id"], json!({})).await;
+
+            for frame in [
+                text_event(
+                    2,
+                    "output_text_final",
+                    "I chose SQLite and disclosed the fallback.",
+                ),
+                event(3, "turn_completed", Some(TURN), json!({})),
+            ] {
+                peer.notify("interactive.event", json!({"id": SESSION, "event": frame}))
+                    .await;
+            }
+        })
+    })
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert!(ran.report().text.contains("chose SQLite"));
+    assert_eq!(ran.report().approvals_requested, 1);
+    assert_eq!(ran.report().approvals_answered, 1);
+    assert_eq!(ran.report().questions_unanswered.len(), 1);
+    let result = ran.objects().pop().expect("a result");
+    assert_eq!(
+        result["questions_unanswered"][0]["request_id"],
+        "question-1"
+    );
+    assert_eq!(
+        result["questions_unanswered"][0]["question"],
+        "Which database should I use?"
+    );
+}
+
+#[tokio::test]
+async fn default_headless_declines_a_question_and_reports_it_as_unanswered() {
+    let ran = run_against(
+        start_plan("do the thing"),
+        options(Output::Json),
+        |mut peer| {
+            tokio::spawn(async move {
+                accept_start(&mut peer, json!([])).await;
+                peer.notify(
+                    "interactive.event",
+                    json!({"id": SESSION, "event": question_event(1, "question-default")}),
+                )
+                .await;
+                let answer = peer.request_for("interactive.respond_approval").await;
+                assert_eq!(answer["params"]["response"]["decision"], "deny");
+                assert_eq!(answer["params"]["response"]["actor"], "headless");
+                peer.result(&answer["id"], json!({})).await;
+                peer.notify(
+                    "interactive.event",
+                    json!({"id": SESSION, "event": event(2, "turn_completed", Some(TURN), json!({}))}),
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().questions_unanswered.len(), 1);
+    assert_eq!(
+        ran.objects().pop().expect("result")["questions_unanswered"][0]["request_id"],
+        "question-default"
+    );
+}
+
 // ----- the endings ------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1172,6 +1398,286 @@ async fn a_connection_that_closes_before_the_turn_ends_is_lost_and_never_complet
         "{:?}",
         report.error
     );
+}
+
+#[tokio::test]
+async fn idless_historical_turn_events_before_send_are_not_the_new_turn() {
+    let historical = json!([
+        event(1, "output_text_final", None, json!({"text": "old answer"})),
+        approval_event(2, "approval_requested", None, "old-approval"),
+        event(3, "turn_completed", None, json!({})),
+    ]);
+
+    let ran = run_against(
+        start_plan("do the thing"),
+        options(Output::Json),
+        move |mut peer| {
+            tokio::spawn(async move {
+                accept_start(&mut peer, historical).await;
+                peer.notify(
+                    "interactive.event",
+                    json!({"id": SESSION, "event":
+                        text_event(4, "output_text_final", "new answer")
+                    }),
+                )
+                .await;
+                peer.notify(
+                    "interactive.event",
+                    json!({"id": SESSION, "event":
+                        event(5, "turn_completed", Some(TURN), json!({}))
+                    }),
+                )
+                .await;
+                match tokio::time::timeout(Duration::from_millis(100), peer.request()).await {
+                    Err(_) | Ok(None) => {}
+                    Ok(Some(request)) => panic!("historical approval caused a request: {request}"),
+                }
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().text, "new answer");
+    assert_eq!(ran.report().approvals_requested, 0);
+}
+
+#[tokio::test]
+async fn a_reconnected_run_replays_completion_without_resending_or_interrupting() {
+    let ran = run_against_reconnect(
+        start_plan("do the thing"),
+        options(Output::Json),
+        |server| {
+            tokio::spawn(async move {
+                let mut first = Peer::accept(&server).await;
+                accept_start(&mut first, json!([])).await;
+                first
+                    .notify(
+                        "interactive.event",
+                        json!({
+                            "id": SESSION,
+                            "event": text_event(1, "output_text_delta", "half an ans"),
+                        }),
+                    )
+                    .await;
+                drop(first);
+
+                let mut second = Peer::accept(&server).await;
+                second.hello(SERVES).await;
+                let subscribe = second.request_for("interactive.subscribe").await;
+                assert_eq!(subscribe["params"]["id"], SESSION);
+                assert_eq!(subscribe["params"]["cursor"], 1);
+                second
+                    .result(
+                        &subscribe["id"],
+                        json!([
+                            text_event(2, "output_text_delta", "wer"),
+                            text_event(3, "output_text_final", "half an answer"),
+                            event(4, "turn_completed", Some(TURN), json!({})),
+                        ]),
+                    )
+                    .await;
+
+                // Reconciliation performs no second send and no implicit interrupt.
+                match tokio::time::timeout(Duration::from_millis(100), second.request()).await {
+                    Err(_) | Ok(None) => {}
+                    Ok(Some(request)) => panic!("reconciliation sent an extra request: {request}"),
+                }
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().text, "half an answer");
+    assert!(ran.err.contains("reconciling"));
+}
+
+#[tokio::test]
+async fn reconnect_ignores_stale_terminal_and_file_events_then_waits_for_current_turn() {
+    let ran = run_against_reconnect(
+        start_plan("do the thing"),
+        options(Output::Json),
+        |server| {
+            tokio::spawn(async move {
+                let mut first = Peer::accept(&server).await;
+                accept_start(&mut first, json!([])).await;
+                drop(first);
+
+                let mut second = Peer::accept(&server).await;
+                second.hello(SERVES).await;
+                let subscribe = second.request_for("interactive.subscribe").await;
+                second
+                    .result(
+                        &subscribe["id"],
+                        json!([
+                            event(
+                                1,
+                                "file_change",
+                                Some("old-turn"),
+                                json!({"path": "old.txt"})
+                            ),
+                            event(2, "turn_completed", Some("old-turn"), json!({})),
+                        ]),
+                    )
+                    .await;
+                second
+                    .notify(
+                        "interactive.event",
+                        json!({"id": SESSION, "event":
+                            text_event(3, "output_text_final", "current answer")
+                        }),
+                    )
+                    .await;
+                second
+                    .notify(
+                        "interactive.event",
+                        json!({"id": SESSION, "event":
+                            event(4, "turn_completed", Some(TURN), json!({}))
+                        }),
+                    )
+                    .await;
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().text, "current answer");
+    assert!(ran.report().files_changed.is_empty());
+}
+
+#[tokio::test]
+async fn reconnect_with_a_still_running_turn_waits_for_its_later_terminal_event() {
+    let ran = run_against_reconnect(
+        start_plan("do the thing"),
+        options(Output::Json),
+        |server| {
+            tokio::spawn(async move {
+                let mut first = Peer::accept(&server).await;
+                accept_start(&mut first, json!([])).await;
+                drop(first);
+
+                let mut second = Peer::accept(&server).await;
+                second.hello(SERVES).await;
+                let subscribe = second.request_for("interactive.subscribe").await;
+                second.result(&subscribe["id"], json!([])).await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                second
+                    .notify(
+                        "interactive.event",
+                        json!({"id": SESSION, "event":
+                            text_event(1, "output_text_final", "eventual answer")
+                        }),
+                    )
+                    .await;
+                second
+                    .notify(
+                        "interactive.event",
+                        json!({"id": SESSION, "event":
+                            event(2, "turn_completed", Some(TURN), json!({}))
+                        }),
+                    )
+                    .await;
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().text, "eventual answer");
+}
+
+#[tokio::test]
+async fn reconnect_lifecycle_survives_a_full_ordinary_notification_queue() {
+    let ran = run_against_reconnect_capacity(
+        start_plan("do the thing"),
+        options(Output::Json),
+        1,
+        |server| {
+            tokio::spawn(async move {
+                let mut first = Peer::accept(&server).await;
+                accept_start(&mut first, json!([])).await;
+                first
+                    .notify("irrelevant.event", json!({"fills": "queue"}))
+                    .await;
+                drop(first);
+                let mut second = Peer::accept(&server).await;
+                second.hello(SERVES).await;
+                let subscribe = second.request_for("interactive.subscribe").await;
+                second
+                    .result(
+                        &subscribe["id"],
+                        json!([
+                            text_event(1, "output_text_final", "pressure answer"),
+                            event(2, "turn_completed", Some(TURN), json!({})),
+                        ]),
+                    )
+                    .await;
+            })
+        },
+    )
+    .await;
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().text, "pressure answer");
+}
+
+#[tokio::test]
+async fn reconnect_that_cannot_handshake_before_the_run_deadline_is_bounded_and_lost() {
+    let mut bounded = options(Output::Json);
+    bounded.timeout = Duration::from_millis(100);
+    let ran = run_against_reconnect(start_plan("do the thing"), bounded, |server| {
+        tokio::spawn(async move {
+            let mut first = Peer::accept(&server).await;
+            accept_start(&mut first, json!([])).await;
+            drop(first);
+            // Re-handshake just before expiry, then leave reconciliation unanswered.
+            // Its ordinary request timeout must not overrun the run deadline.
+            tokio::time::sleep(Duration::from_millis(70)).await;
+            let mut second = Peer::accept(&server).await;
+            second.hello(SERVES).await;
+            let subscribe = second.request_for("interactive.subscribe").await;
+            assert_eq!(subscribe["params"]["cursor"], 0);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+    })
+    .await;
+
+    assert_eq!(ran.report().status, Status::Lost);
+    assert!(ran
+        .report()
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("re-subscribing"));
+}
+
+#[tokio::test]
+async fn reconnect_that_never_rehandshakes_still_obeys_the_run_deadline() {
+    let mut bounded = options(Output::Json);
+    bounded.timeout = Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let ran = run_against_reconnect(start_plan("do the thing"), bounded, |server| {
+        tokio::spawn(async move {
+            let mut first = Peer::accept(&server).await;
+            accept_start(&mut first, json!([])).await;
+            drop(first);
+            // Accept the replacement socket but never answer hello. The actor remains in
+            // reconnect; the independent lifecycle/deadline path must still end the run.
+            let _silent = Peer::accept(&server).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        })
+    })
+    .await;
+
+    assert_eq!(ran.report().status, Status::Lost);
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(ran
+        .report()
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("unresolved"));
 }
 
 #[tokio::test]
@@ -1619,6 +2125,126 @@ async fn a_resumed_run_does_not_re_answer_the_approvals_in_its_history() {
         "nothing on this stream was this run's to answer: {}",
         ran.err
     );
+}
+
+#[tokio::test]
+async fn a_resumed_no_op_does_not_report_historical_file_changes() {
+    let plan = Plan::Resume {
+        session_id: SESSION.to_string(),
+        prompt: "report only".to_string(),
+    };
+
+    let ran = run_against(plan, options(Output::Json), |mut peer| {
+        tokio::spawn(async move {
+            peer.hello(SERVES).await;
+            let info = peer.request_for("interactive.info").await;
+            peer.result(
+                &info["id"],
+                json!({"id": SESSION, "status": "idle", "provider": "native"}),
+            )
+            .await;
+            let subscribe = peer.request_for("interactive.subscribe").await;
+            peer.result(
+                &subscribe["id"],
+                json!([
+                    event(
+                        1,
+                        "file_change",
+                        None,
+                        json!({"changes": [{"path": "removed-scratch.exs"}]})
+                    ),
+                    event(
+                        2,
+                        "file_change",
+                        Some("old-turn"),
+                        json!({"changes": [{"path": "lib/old.ex"}]})
+                    )
+                ]),
+            )
+            .await;
+            let send = peer.request_for("interactive.send_message").await;
+            let caller = send["params"]["turn_id"]
+                .as_str()
+                .expect("turn")
+                .to_string();
+            peer.result(
+                &send["id"],
+                json!({"id": caller, "status": "running", "harness_turn_id": "fresh"}),
+            )
+            .await;
+            for frame in [
+                event(
+                    3,
+                    "output_text_final",
+                    Some("fresh"),
+                    json!({"text": "no changes"}),
+                ),
+                event(4, "turn_completed", Some("fresh"), json!({})),
+            ] {
+                peer.notify("interactive.event", json!({"id": SESSION, "event": frame}))
+                    .await;
+            }
+        })
+    })
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert!(
+        ran.report().files_changed.is_empty(),
+        "{:?}",
+        ran.report().files_changed
+    );
+}
+
+#[tokio::test]
+async fn resume_without_a_cursor_ignores_an_old_terminal_before_the_new_turn_is_identified() {
+    let plan = Plan::Resume {
+        session_id: SESSION.to_string(),
+        prompt: "and again".to_string(),
+    };
+
+    let ran = run_against(plan, options(Output::Json), |mut peer| {
+        tokio::spawn(async move {
+            peer.hello(SERVES).await;
+
+            let info = peer.request_for("interactive.info").await;
+            peer.result(
+                &info["id"],
+                json!({ "id": SESSION, "status": "idle", "provider": "native", "_truncated": true }),
+            )
+            .await;
+
+            let subscribe = peer.request_for("interactive.subscribe").await;
+            assert_eq!(subscribe["params"]["cursor"], 0);
+            peer.result(
+                &subscribe["id"],
+                json!([
+                    event(1, "turn_interrupted", Some("old-turn"), json!({ "reason": "old" }))
+                ]),
+            )
+            .await;
+
+            let send = peer.request_for("interactive.send_message").await;
+            let caller_turn = send["params"]["turn_id"].as_str().expect("a turn id").to_string();
+            peer.result(
+                &send["id"],
+                json!({ "id": caller_turn, "status": "running", "harness_turn_id": "new-turn" }),
+            )
+            .await;
+
+            for frame in [
+                event(2, "output_text_final", Some("new-turn"), json!({ "text": "new answer" })),
+                event(3, "turn_completed", Some("new-turn"), json!({})),
+            ] {
+                peer.notify("interactive.event", json!({ "id": SESSION, "event": frame })).await;
+            }
+        })
+    })
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.report().text, "new answer");
+    assert!(ran.err.contains("carried no cursor"), "{}", ran.err);
 }
 
 #[tokio::test]

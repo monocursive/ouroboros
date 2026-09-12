@@ -85,6 +85,7 @@ defmodule Ouroboros.Gateway.Wire do
 
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
+  alias Ouroboros.Interactive.State, as: InteractiveState
 
   @max_depth 32
   @max_nodes 50_000
@@ -169,6 +170,21 @@ defmodule Ouroboros.Gateway.Wire do
   # for all three to obey it.
   defp walk(%InteractiveEvent{} = term, depth, ctx), do: walk_event(term, depth, ctx)
 
+  # An interactive info response carries its retained transcript in the same struct as the
+  # cursor and status a client needs to continue it. Walk bounded collections last so they
+  # cannot consume the node budget before the metadata that tells a client where it is.
+  defp walk(%InteractiveState{} = term, depth, ctx) do
+    map = Map.from_struct(term)
+    {bounded, metadata} = Map.split(map, [:events, :turns, :runtime_snapshot])
+
+    ordered =
+      Enum.sort_by(metadata, fn {key, _value} -> key_to_string(key) end) ++
+        Enum.sort_by(bounded, fn {key, _value} -> key_to_string(key) end)
+
+    {encoded, ctx} = walk_map_entries(ordered, depth, tick(ctx))
+    {Map.put(encoded, "_struct", inspect(InteractiveState)), ctx}
+  end
+
   defp walk(%module{} = term, depth, ctx) do
     {map, ctx} = walk_map(Map.from_struct(term), depth, tick(ctx))
     {Map.put(map, "_struct", inspect(module)), ctx}
@@ -203,8 +219,12 @@ defmodule Ouroboros.Gateway.Wire do
   end
 
   defp walk_map(map, depth, ctx) do
+    walk_map_entries(map, depth, ctx)
+  end
+
+  defp walk_map_entries(entries, depth, ctx) do
     {pairs, ctx} =
-      Enum.reduce_while(map, {[], ctx}, fn {key, value}, {pairs, ctx} ->
+      Enum.reduce_while(entries, {[], ctx}, fn {key, value}, {pairs, ctx} ->
         if ctx.nodes <= 0 do
           {:halt, {[{"_truncated", true} | pairs], exhaust(ctx)}}
         else

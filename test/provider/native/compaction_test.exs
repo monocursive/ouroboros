@@ -7,7 +7,9 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
   alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Provider.Native.Context.Archive
   alias Ouroboros.Provider.Native.Context.Compaction
+  alias Ouroboros.Provider.Native.Context.CompactionOperation
   alias Ouroboros.Provider.Native.Context.Window
+  alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
@@ -23,7 +25,9 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
     previous = %{
       dir: Application.get_env(:ouroboros, :native_data_dir),
       model: Application.get_env(:ouroboros, :native_model_module),
-      window: Application.get_env(:ouroboros, :native_context_window)
+      window: Application.get_env(:ouroboros, :native_context_window),
+      writer: Application.get_env(:ouroboros, :native_compaction_operation_writer),
+      starter: Application.get_env(:ouroboros, :native_compaction_task_starter)
     }
 
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
@@ -33,6 +37,8 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       restore(:native_data_dir, previous.dir)
       restore(:native_model_module, previous.model)
       restore(:native_context_window, previous.window)
+      restore(:native_compaction_operation_writer, previous.writer)
+      restore(:native_compaction_task_starter, previous.starter)
       File.rm_rf(root)
     end)
 
@@ -401,6 +407,8 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       assert report.trigger == "manual"
       assert is_integer(report.before_tokens)
       assert length(info.compactions) == 1
+      assert info.context_used == 0
+      assert info.context_state == :compacted
       # This conversation is tiny, so eliding finished the job and nothing was archived.
       assert report.archived_messages == 0
     end
@@ -434,7 +442,8 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       end
     end
 
-    test "the thrash guard stops the second compaction and names itself", context do
+    test "the automatic thrash latch does not overrule an explicit operator compaction",
+         context do
       session = open(context, big_script())
       turn(session, "t1")
       drain()
@@ -442,13 +451,73 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       {:ok, _first} = Session.compact(session.handle, nil)
       drain()
 
-      assert {:error, :compaction_thrashing} = Session.compact(session.handle, nil)
-      event = await_provider_event("status")
-
-      assert event.payload["status"] == "compaction_thrashing"
-      assert event.payload["message"] =~ "two compactions within three turns"
+      # `/compact` is an operator action, so a recent automatic/manual fold is context for
+      # the person rather than authority to refuse them. The permanent latch applies only
+      # to the threshold-driven path.
+      assert {:ok, second} = Session.compact(session.handle, "operator requested")
+      assert second.trigger == "manual"
+      event = await_provider_event("compaction")
+      assert event.payload["trigger"] == "manual"
 
       {:ok, info} = Session.info(session.handle)
+      refute info.compaction_thrashing
+    end
+
+    test "a cancelled operation leaves one fold and automatic status describes the prevented second",
+         context do
+      parent = self()
+
+      blocker = fn _request ->
+        send(parent, :cancelled_compaction_model_called)
+        receive do: (:never -> [{:text, "unused summary"}])
+      end
+
+      script =
+        big_script() ++
+          [
+            [{:text, "summary"}, {:finish, :stop}],
+            blocker,
+            [{:text, "more"}, {:usage, %{input_tokens: 100, output_tokens: 1}}],
+            [{:text, "after latch"}, {:finish, :stop}]
+          ]
+
+      session =
+        open(context, script, %{
+          provider_options: %{keep_recent_tokens: 200, unknown_compact_tokens: 1}
+        })
+
+      turn(session, "t1")
+      drain()
+      assert {:ok, _first} = Session.compact(session.handle, nil)
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "cancelled", nil)
+      assert_receive :cancelled_compaction_model_called
+      assert {:ok, %{status: :cancelled}} = Session.compact_cancel(session.handle, "cancelled")
+      send(session.agent, :never)
+      assert eventually(fn -> Process.info(session.agent, :status) == {:status, :waiting} end)
+      assert {:ok, %{status: :cancelled}} = Session.compact_status(session.handle, "cancelled")
+      assert {:ok, after_cancel} = Session.info(session.handle)
+      assert length(after_cancel.compactions) == 1
+
+      # Automatic eligibility is based on the preceding provider-metered request. The
+      # first post-fold turn establishes that measurement; the next turn asks for the
+      # prevented second fold. The cancelled operation consumed neither a fold nor its
+      # following scripted turn response.
+      turn(session, "t2")
+      drain()
+      events = turn(session, "t3")
+
+      status =
+        Enum.find(events, fn event ->
+          event.type == :provider_event and event.payload["kind"] == "status"
+        end)
+
+      assert status, "expected automatic latch status, got #{inspect(events)}"
+      assert status.payload["status"] == "compaction_thrashing"
+      assert status.payload["message"] =~ "a second compaction was requested"
+      refute status.payload["message"] =~ "two compactions"
+
+      {:ok, info} = Session.info(session.handle)
+      assert length(info.compactions) == 1
       assert info.compaction_thrashing
     end
 
@@ -498,20 +567,658 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       assert hd(info.compactions).trigger == "automatic"
     end
 
-    test "no compaction when the window is unknown, however large the usage", context do
+    test "unknown capacity uses an absolute measured-request safety budget", context do
       session =
-        open(context, [
-          [{:text, "one"}, {:usage, %{input_tokens: 9_000_000, output_tokens: 1}}],
-          [{:text, "two"}, {:usage, %{input_tokens: 1, output_tokens: 1}}]
-        ])
+        open(
+          context,
+          [
+            [{:text, "one"}, {:usage, %{input_tokens: 101, output_tokens: 1}}],
+            [{:text, "two"}, {:usage, %{input_tokens: 1, output_tokens: 1}}]
+          ],
+          %{provider_options: %{keep_recent_tokens: 200, unknown_compact_tokens: 100}}
+        )
 
       turn(session, "t1")
       drain()
       turn(session, "t2")
 
       {:ok, info} = Session.info(session.handle)
-      assert info.compactions == []
+      assert [compaction] = info.compactions
+      assert compaction.trigger == "automatic"
       assert info.context_window == nil
+    end
+
+    test "unknown capacity does not invent a budget unless explicitly configured", context do
+      session =
+        open(context, [
+          [{:text, "one"}, {:usage, %{input_tokens: 9_000_000, total_tokens: 99_000_000}}],
+          [{:text, "two"}, {:usage, %{input_tokens: 1, total_tokens: 99_000_001}}]
+        ])
+
+      turn(session, "t1")
+      drain()
+      turn(session, "t2")
+
+      assert {:ok, info} = Session.info(session.handle)
+      assert info.context_window == nil
+      assert info.context_used == 1
+      assert info.compactions == []
+    end
+
+    test "provider reported zero is measured rather than unmeasured", context do
+      session = open(context, [[{:text, "zero"}, {:usage, %{input_tokens: 0, output_tokens: 0}}]])
+      turn(session, "t1")
+      assert {:ok, info} = Session.info(session.handle)
+      assert info.context_used == 0
+      assert info.context_state == :measured
+    end
+
+    test "a caller id reconciles one asynchronous compaction and conflicting reuse refuses",
+         context do
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "op-1", nil)
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "op-1", nil)
+
+      assert {:error, :compaction_id_conflict} =
+               Session.compact_start(session.handle, "op-1", "other")
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{status: :completed}},
+                 Session.compact_status(session.handle, "op-1")
+               )
+             end)
+
+      assert {:ok, %{status: :completed, result: report}} =
+               Session.compact_status(session.handle, "op-1")
+
+      assert report.trigger == "manual"
+      assert {:ok, info} = Session.info(session.handle)
+      assert length(info.compactions) == 1
+    end
+
+    test "a blocked operation keeps status responsive and serializes turns and configuration",
+         context do
+      parent = self()
+
+      blocker = fn _request ->
+        send(parent, :compaction_model_called)
+        receive do: (:release_compaction -> [{:text, "summary"}])
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "blocked", nil)
+      assert_receive :compaction_model_called
+      assert {:ok, %{status: :running}} = Session.compact_status(session.handle, "blocked")
+
+      assert {:error, :compaction_in_progress} =
+               Session.send(session.handle, TurnRequest.new!(%{prompt: "race"}), "t2")
+
+      assert {:error, :compaction_in_progress} =
+               Session.configure(session.handle, %{model: session.model_spec})
+
+      send(session.agent, :release_compaction)
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{status: :completed}},
+                 Session.compact_status(session.handle, "blocked")
+               )
+             end)
+    end
+
+    test "cancellation wins over a blocked worker and leaves no fold", context do
+      blocker = fn _request ->
+        receive do
+          :never -> [{:text, "summary"}]
+        end
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "cancelled", nil)
+      assert {:ok, %{status: :cancelled}} = Session.compact_cancel(session.handle, "cancelled")
+      Process.sleep(20)
+      assert Process.alive?(session.handle)
+      assert {:ok, %{status: :cancelled}} = Session.compact_status(session.handle, "cancelled")
+      assert {:ok, info} = Session.info(session.handle)
+      assert info.compactions == []
+    end
+
+    test "checkpoint failure settles failed without exposing a successful fold", context do
+      session = open(context, [[{:text, "ok"}, {:usage, %{input_tokens: 5}}]])
+      turn(session, "t1")
+      drain()
+      assert {:ok, info} = Session.info(session.handle)
+
+      {:ok, checkpoint_path, _durable?} =
+        Ouroboros.Provider.Native.Checkpoint.locate(info.provider_session_id)
+
+      File.rm!(checkpoint_path)
+      File.mkdir!(checkpoint_path)
+
+      assert {:ok, %{status: :running}} =
+               Session.compact_start(session.handle, "bad-checkpoint", nil)
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{status: :failed}},
+                 Session.compact_status(session.handle, "bad-checkpoint")
+               )
+             end)
+
+      assert {:ok, after_info} = Session.info(session.handle)
+      assert after_info.compactions == []
+
+      refute_receive {:native_test_event,
+                      %{type: :provider_event, payload: %{"kind" => "compaction"}}}
+    end
+
+    test "durable running intent becomes interrupted and remains so on another load", context do
+      operation = %{
+        id: "restart-op",
+        fingerprint: "focus-hash",
+        source_digest: "source-hash",
+        focus: nil,
+        status: :running,
+        requested_at: DateTime.utc_now()
+      }
+
+      assert {:ok, _} = CompactionOperation.put(context.data_dir, %{}, operation)
+      assert %{"restart-op" => interrupted} = CompactionOperation.load(context.data_dir)
+      assert interrupted.status == :interrupted
+      assert %{"restart-op" => persisted} = CompactionOperation.load(context.data_dir)
+      assert persisted.status == :interrupted
+      assert persisted.finished_at == interrupted.finished_at
+    end
+
+    test "operation retention refuses capacity rather than forgetting replay identity", context do
+      retained =
+        Enum.reduce(1..32, %{}, fn index, operations ->
+          id = "capacity-op-#{index}"
+
+          operation = %{
+            id: id,
+            fingerprint: id,
+            status: :completed,
+            requested_at: DateTime.utc_now()
+          }
+
+          {:ok, next} = CompactionOperation.put(context.data_dir, operations, operation)
+          next
+        end)
+
+      extra = %{
+        id: "capacity-op-33",
+        fingerprint: "new",
+        status: :running,
+        requested_at: DateTime.utc_now()
+      }
+
+      assert {:error, :compaction_operation_capacity} =
+               CompactionOperation.put(context.data_dir, retained, extra)
+
+      assert map_size(CompactionOperation.load(context.data_dir)) == 32
+    end
+
+    test "operation intent persistence failure calls no summarizer", context do
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+      assert {:ok, info} = Session.info(session.handle)
+
+      operation_path =
+        Path.join([context.data_dir, info.provider_session_id, "compaction-operations.term"])
+
+      File.mkdir!(operation_path)
+      calls_before = NativeModelScript.call_count(session.agent)
+
+      assert {:error, {:compaction_operation_write_failed, _reason}} =
+               Session.compact_start(session.handle, "unrecordable", nil)
+
+      assert NativeModelScript.call_count(session.agent) == calls_before
+
+      assert {:error, :unknown_compaction} =
+               Session.compact_status(session.handle, "unrecordable")
+    end
+
+    test "summarizer failure settles failed and exact retry does not call it again", context do
+      # Build the raising enumerable in the linked fixture Agent, but raise only when the
+      # compaction worker consumes it. Raising directly in this callback would test the
+      # fixture owner's link, not runtime worker settlement.
+      crashing = fn _request ->
+        Stream.map([:boom], fn _ -> raise "summary exploded" end)
+      end
+
+      session = open(context, big_script() ++ [crashing])
+      turn(session, "t1")
+      drain()
+
+      assert {:ok, %{status: :running}} =
+               Session.compact_start(session.handle, "failed-op", nil)
+
+      assert eventually(fn ->
+               case Session.compact_status(session.handle, "failed-op") do
+                 {:ok, %{status: status}} when status != :running -> true
+                 _ -> false
+               end
+             end)
+
+      assert {:ok, %{status: :failed}} = Session.compact_status(session.handle, "failed-op")
+
+      calls = NativeModelScript.call_count(session.agent)
+      assert {:ok, %{status: :failed}} = Session.compact_start(session.handle, "failed-op", nil)
+      assert NativeModelScript.call_count(session.agent) == calls
+    end
+
+    test "task start settlement write failure is ambiguous without inference", context do
+      Application.put_env(:ouroboros, :native_compaction_task_starter, fn _ ->
+        {:error, :injected_start_failure}
+      end)
+
+      Application.put_env(:ouroboros, :native_compaction_operation_writer, fn directory,
+                                                                              operations,
+                                                                              operation ->
+        if operation.status == :failed,
+          do: {:error, {:compaction_operation_write_failed, :injected_settlement_failure}},
+          else: CompactionOperation.put(directory, operations, operation)
+      end)
+
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+      calls = NativeModelScript.call_count(session.agent)
+
+      assert {:error, {:compaction_task_start_failed, :injected_start_failure}} =
+               Session.compact_start(session.handle, "start-write-failed", nil)
+
+      assert {:ok, %{status: :ambiguous}} =
+               Session.compact_status(session.handle, "start-write-failed")
+
+      assert NativeModelScript.call_count(session.agent) == calls
+    end
+
+    test "task start failure settles durable intent immediately and retry reconciles", context do
+      Application.put_env(:ouroboros, :native_compaction_task_starter, fn _fun ->
+        {:error, :injected_start_failure}
+      end)
+
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+      calls = NativeModelScript.call_count(session.agent)
+
+      assert {:error, {:compaction_task_start_failed, :injected_start_failure}} =
+               Session.compact_start(session.handle, "start-failed", nil)
+
+      assert {:ok, %{status: :failed}} = Session.compact_status(session.handle, "start-failed")
+
+      assert {:ok, %{status: :failed}} =
+               Session.compact_start(session.handle, "start-failed", nil)
+
+      assert NativeModelScript.call_count(session.agent) == calls
+    end
+
+    test "terminal result write failure is ambiguous and exact retry never folds twice",
+         context do
+      writer = fn directory, operations, operation ->
+        if operation.status == :completed,
+          do: {:error, {:compaction_operation_write_failed, :injected_result_failure}},
+          else: CompactionOperation.put(directory, operations, operation)
+      end
+
+      Application.put_env(:ouroboros, :native_compaction_operation_writer, writer)
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "ambiguous", nil)
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{status: :ambiguous}},
+                 Session.compact_status(session.handle, "ambiguous")
+               )
+             end)
+
+      assert {:ok, info} = Session.info(session.handle)
+      assert length(info.compactions) == 1
+      calls = NativeModelScript.call_count(session.agent)
+
+      assert {:ok, %{status: :ambiguous}} =
+               Session.compact_start(session.handle, "ambiguous", nil)
+
+      assert NativeModelScript.call_count(session.agent) == calls
+
+      assert %{"ambiguous" => recovered} =
+               CompactionOperation.load(Path.join(context.data_dir, info.provider_session_id))
+
+      assert recovered.status == :ambiguous
+    end
+
+    test "close cancels a running operation durably and late completion cannot mutate it",
+         context do
+      parent = self()
+
+      blocker = fn _ ->
+        send(parent, :close_worker_started)
+
+        receive do
+          :release -> [{:text, "late"}]
+        end
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "close-op", nil)
+      assert_receive :close_worker_started
+      assert :ok = Session.close(session.handle)
+      send(session.agent, :release)
+      Process.sleep(20)
+
+      assert %{"close-op" => %{status: :cancelled}} =
+               CompactionOperation.load(
+                 Path.join(
+                   context.data_dir,
+                   Session.info(session.handle) |> elem(1) |> Map.fetch!(:provider_session_id)
+                 )
+               )
+    end
+
+    test "kill cancels a running operation durably", context do
+      blocker = fn _ ->
+        receive do
+          :never -> [{:text, "late"}]
+        end
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+      assert {:ok, info} = Session.info(session.handle)
+      assert {:ok, %{status: :running}} = Session.compact_start(session.handle, "kill-op", nil)
+      assert :ok = Ouroboros.Session.kill(session.handle)
+
+      assert %{"kill-op" => %{status: :cancelled}} =
+               CompactionOperation.load(Path.join(context.data_dir, info.provider_session_id))
+    end
+
+    test "close continues after cancellation settlement write failure and reopen is interrupted",
+         context do
+      Application.put_env(:ouroboros, :native_compaction_operation_writer, fn directory,
+                                                                              operations,
+                                                                              operation ->
+        if operation.status == :cancelled,
+          do: {:error, {:compaction_operation_write_failed, :injected_cancel_failure}},
+          else: CompactionOperation.put(directory, operations, operation)
+      end)
+
+      blocker = fn _ ->
+        receive do
+          :never -> [{:text, "late"}]
+        end
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+      assert {:ok, before_close} = Session.info(session.handle)
+
+      assert {:ok, %{status: :running}} =
+               Session.compact_start(session.handle, "close-write-failed", nil)
+
+      assert :ok = Session.close(session.handle)
+
+      assert %{"close-write-failed" => %{status: :interrupted}} =
+               CompactionOperation.load(
+                 Path.join(context.data_dir, before_close.provider_session_id)
+               )
+    end
+
+    test "unknown-capacity budget is live configurable and reported with null capacity",
+         context do
+      Application.delete_env(:ouroboros, :native_context_window)
+      session = open(context, [[{:text, "ok"}, {:usage, %{input_tokens: 0}}]])
+      assert :ok = Ouroboros.Session.configure(session.handle, %{unknown_compact_tokens: 12_345})
+      assert {:ok, info} = Session.info(session.handle)
+      assert info.context_window == nil
+      assert info.unknown_compact_tokens == 12_345
+      assert :ok = Ouroboros.Session.configure(session.handle, %{unknown_compact_tokens: nil})
+      assert {:ok, disabled} = Session.info(session.handle)
+      assert disabled.unknown_compact_tokens == nil
+    end
+
+    test "public compaction operation ids are bounded by bytes with typed errors" do
+      oversized = String.duplicate("å", 65)
+
+      for result <- [
+            InteractiveSession.compact_start("missing", oversized, nil),
+            InteractiveSession.compact_status("missing", oversized),
+            InteractiveSession.compact_cancel("missing", oversized)
+          ] do
+        assert {:error, {:invalid_compaction_id, details}} = result
+        assert details.max_bytes == 128
+      end
+    end
+
+    test "completed operation survives a real native session stop and reopen", context do
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+      assert {:ok, info} = Session.info(session.handle)
+
+      assert {:ok, %{status: :running}} =
+               Session.compact_start(session.handle, "completed-reopen", nil)
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{status: :completed}},
+                 Session.compact_status(session.handle, "completed-reopen")
+               )
+             end)
+
+      calls = NativeModelScript.call_count(session.agent)
+      reopened = reopen(context, session, info.provider_session_id)
+
+      assert {:ok, %{status: :completed}} =
+               Session.compact_start(reopened.handle, "completed-reopen", nil)
+
+      assert {:error, :compaction_id_conflict} =
+               Session.compact_start(reopened.handle, "completed-reopen", "different")
+
+      assert NativeModelScript.call_count(session.agent) == calls
+      assert {:ok, reopened_info} = Ouroboros.Session.context_info(reopened.handle)
+      assert reopened_info.messages > 0
+
+      assert {:ok, %{status: :completed, result: result}} =
+               Session.compact_status(reopened.handle, "completed-reopen")
+
+      assert result.after_tokens > 0
+    end
+
+    test "work-item identity and evidence survive compaction and real session reopen", context do
+      item = %{
+        "id" => "P0-persist",
+        "step" => "Retain campaign state",
+        "status" => "in_progress",
+        "deliverable" => "validation",
+        "work_state" => "reviewing",
+        "criteria" => ["reopen preserves exact item"],
+        "evidence" => ["receipt:before-compaction"],
+        "child_settlement" => "completed"
+      }
+
+      script = [
+        [
+          {:tool_call,
+           %{id: "plan-persist", name: "plan", input: %{"steps" => [item], "explanation" => "P0"}}}
+        ],
+        [
+          {:tool_call,
+           %{
+             id: "plan-accept",
+             name: "plan",
+             input: %{"steps" => [item], "accept" => ["P0-persist"], "explanation" => "P0"}
+           }}
+        ],
+        [{:text, String.duplicate("old context. ", 8_000)}, {:finish, :stop}]
+      ]
+
+      session = open(context, script)
+      turn(session, "plan-turn")
+      assert {:ok, before} = Session.info(session.handle)
+      [accepted] = before.current_plan["plan"]
+      assert accepted["id"] == "P0-persist"
+      assert accepted["work_state"] == "accepted"
+      assert accepted["evidence"] == ["receipt:before-compaction"]
+      assert accepted["acceptance"]["basis"] == "model_judgment"
+      assert accepted["acceptance"]["deterministic"] == false
+
+      assert {:ok, _report} = Session.compact(session.handle, "retain the campaign record")
+      assert {:ok, compacted} = Session.info(session.handle)
+      assert compacted.current_plan == before.current_plan
+
+      reopened = reopen(context, session, before.provider_session_id)
+      assert {:ok, after_reopen} = Ouroboros.Session.context_info(reopened.handle)
+      assert after_reopen.current_plan == before.current_plan
+    end
+
+    test "running operation becomes interrupted through a real native session reopen", context do
+      blocker = fn _ ->
+        receive do
+          :never -> [{:text, "late"}]
+        end
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+      assert {:ok, info} = Session.info(session.handle)
+
+      assert {:ok, %{status: :running}} =
+               Session.compact_start(session.handle, "running-reopen", nil)
+
+      Process.exit(session.handle, :kill)
+      assert eventually(fn -> not Process.alive?(session.handle) end)
+      reopened = reopen(context, session, info.provider_session_id)
+
+      assert {:ok, %{status: :interrupted}} =
+               Session.compact_start(reopened.handle, "running-reopen", nil)
+
+      assert {:error, :compaction_id_conflict} =
+               Session.compact_start(reopened.handle, "running-reopen", "different")
+
+      assert NativeModelScript.call_count(session.agent) == 2
+    end
+
+    test "owner kill terminates the actual blocked compaction worker", context do
+      test_pid = self()
+
+      blocker = fn _ ->
+        send(test_pid, :ownership_worker_blocked)
+
+        receive do
+          :never -> [{:text, "late"}]
+        end
+      end
+
+      session = open(context, big_script() ++ [blocker])
+      turn(session, "t1")
+      drain()
+
+      assert {:ok, %{status: :running}} =
+               Session.compact_start(session.handle, "owned-worker", nil)
+
+      assert_receive :ownership_worker_blocked
+      worker = :sys.get_state(session.handle).compaction_operation.pid
+      refute worker == session.agent
+      assert Process.alive?(worker)
+      Process.exit(session.handle, :kill)
+      assert eventually(fn -> not Process.alive?(session.handle) end)
+      assert eventually(fn -> not Process.alive?(worker) end)
+
+      refute_receive {:native_test_event,
+                      %{type: :provider_event, payload: %{"kind" => "compaction"}}}
+    end
+
+    test "committing operation becomes ambiguous through a real native session reopen", context do
+      session = open(context, big_script())
+      turn(session, "t1")
+      drain()
+      assert {:ok, info} = Session.info(session.handle)
+      directory = Path.join(context.data_dir, info.provider_session_id)
+
+      fingerprint =
+        :crypto.hash(:sha256, :erlang.term_to_binary(nil)) |> Base.encode16(case: :lower)
+
+      operation = %{
+        id: "committing-reopen",
+        fingerprint: fingerprint,
+        focus: nil,
+        source_digest: "source",
+        status: :committing,
+        requested_at: DateTime.utc_now()
+      }
+
+      assert {:ok, _} = CompactionOperation.put(directory, %{}, operation)
+      Process.exit(session.handle, :kill)
+      assert eventually(fn -> not Process.alive?(session.handle) end)
+      reopened = reopen(context, session, info.provider_session_id)
+
+      assert {:ok, %{status: :ambiguous}} =
+               Session.compact_start(reopened.handle, "committing-reopen", nil)
+
+      assert {:error, :compaction_id_conflict} =
+               Session.compact_start(reopened.handle, "committing-reopen", "different")
+
+      assert NativeModelScript.call_count(session.agent) == 2
+    end
+
+    test "corrupt operation storage refuses a real session reopen without changing bytes",
+         context do
+      session = open(context, big_script())
+      assert {:ok, info} = Session.info(session.handle)
+      Process.exit(session.handle, :kill)
+      assert eventually(fn -> not Process.alive?(session.handle) end)
+      path = CompactionOperation.path(Path.join(context.data_dir, info.provider_session_id))
+      File.write!(path, "not an erlang term")
+      before = File.read!(path)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Ouroboros.Session.open(
+                 "corrupt-reopen",
+                 resume_request(context, session, info.provider_session_id)
+               )
+
+      assert message =~ "invalid compaction operation store"
+
+      assert File.read!(path) == before
+    end
+
+    test "unreadable operation storage refuses reopen and preserves the path", context do
+      session = open(context, big_script())
+      assert {:ok, info} = Session.info(session.handle)
+      Process.exit(session.handle, :kill)
+      assert eventually(fn -> not Process.alive?(session.handle) end)
+      path = CompactionOperation.path(Path.join(context.data_dir, info.provider_session_id))
+      File.mkdir!(path)
+
+      assert {:error, {%ArgumentError{message: message}, _}} =
+               Ouroboros.Session.open(
+                 "unreadable-reopen",
+                 resume_request(context, session, info.provider_session_id)
+               )
+
+      assert message =~ "unreadable compaction operation store"
+      assert File.dir?(path)
     end
   end
 
@@ -566,10 +1273,44 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
     %{handle: handle, agent: agent, model_spec: model_spec}
   end
 
+  defp reopen(context, session, provider_session_id) do
+    logical_id = "reopen-#{System.unique_integer([:positive])}"
+
+    {:ok, runtime_id} =
+      Ouroboros.Session.open(logical_id, resume_request(context, session, provider_session_id))
+
+    {:ok, info} = Ouroboros.Session.info(runtime_id)
+    %{handle: info.pid, agent: session.agent, model_spec: session.model_spec}
+  end
+
+  defp resume_request(context, session, provider_session_id) do
+    SessionRequest.new!(%{
+      provider: :native,
+      cwd: context.workspace,
+      model: session.model_spec,
+      provider_session_id: provider_session_id,
+      approval_mode: :auto_approve,
+      provider_options: %{keep_recent_tokens: 200}
+    })
+  end
+
   defp turn(session, turn_id) do
     :ok = Session.send(session.handle, TurnRequest.new!(%{prompt: "go"}), turn_id)
     await_terminal()
   end
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 
   defp await_terminal(acc \\ []) do
     receive do

@@ -32,6 +32,51 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     assert Wasm.helper_path() == override
   end
 
+  test "campaign artifact paths select owned guest and example outputs" do
+    with_env("OUROBOROS_WASM_GUEST", "tmp/campaign/echo.wasm", fn ->
+      assert Ouroboros.Wasm.LiveFixture.guest_path("/original/echo.wasm") ==
+               Path.expand("tmp/campaign/echo.wasm")
+    end)
+
+    with_env("OUROBOROS_WASM_EXAMPLES_ROOT", "tmp/campaign/examples", fn ->
+      assert Ouroboros.Wasm.LiveFixture.examples_root("/original/examples") ==
+               Path.expand("tmp/campaign/examples")
+    end)
+  end
+
+  test "absent or empty campaign artifact paths retain fixed defaults" do
+    for value <- [nil, ""] do
+      with_env("OUROBOROS_WASM_GUEST", value, fn ->
+        assert Ouroboros.Wasm.LiveFixture.guest_path("/original/echo.wasm") ==
+                 "/original/echo.wasm"
+      end)
+
+      with_env("OUROBOROS_WASM_EXAMPLES_ROOT", value, fn ->
+        assert Ouroboros.Wasm.LiveFixture.examples_root("/original/examples") ==
+                 "/original/examples"
+      end)
+    end
+  end
+
+  test "empty canonical skew root consumes a record from the non-empty legacy root" do
+    root = Path.join(System.tmp_dir!(), "ouro-skew-root-#{System.unique_integer([:positive])}")
+    record = Path.join(root, "version-skew.json")
+    File.mkdir_p!(root)
+    File.write!(record, ~s({"selected":"legacy-record"}))
+    on_exit(fn -> File.rm_rf(root) end)
+
+    with_env("OUROBOROS_WASM_SKEW_DIR", "", fn ->
+      with_env("OURO_WASM_SKEW_DIR", root, fn ->
+        selected = Ouroboros.Wasm.LiveFixture.skew_root("/unrelated/default")
+
+        assert selected == root
+
+        assert selected |> Path.join("version-skew.json") |> File.read!() |> JSON.decode!() ==
+                 %{"selected" => "legacy-record"}
+      end)
+    end)
+  end
+
   describe "config/1 — every setting is a bound, so a typo narrows or falls back" do
     test "a malformed value falls back to the shipped default rather than widening it" do
       defaults = Wasm.all()
@@ -391,6 +436,19 @@ defmodule Ouroboros.Wasm.ResolutionTest do
       # Read on the way to every load, so a misconfigured node must say so once rather than
       # once per component.
       assert length(String.split(log, "refused whole list")) == 2
+    end
+  end
+
+  defp with_env(variable, value, fun) do
+    previous = System.get_env(variable)
+
+    try do
+      if is_nil(value), do: System.delete_env(variable), else: System.put_env(variable, value)
+      fun.()
+    after
+      if is_nil(previous),
+        do: System.delete_env(variable),
+        else: System.put_env(variable, previous)
     end
   end
 

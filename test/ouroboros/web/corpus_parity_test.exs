@@ -640,11 +640,8 @@ defmodule Ouroboros.Web.CorpusParityTest do
     end
 
     # Mirrors `a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it`.
-    # The escalation asks the same question as an ordinary command approval, which is what
-    # keeps a client that never learned the kind useful. Its `suggested_rule` is the
-    # engine's own pattern — the grammar `permissions.add` validates against and the only
-    # thing a remember row can save — and not the shape-of-a-rule map the native loop used
-    # to send, which no client could render and no rule could be built from.
+    # Explicit retry uses its own permission subject. A remembered Bash rule must not
+    # authorize replay of a command whose first-attempt effects are unknowable.
     test "a_sandbox_escalation_reads_as_a_command_and_offers_the_rule_that_would_end_it" do
       request = approval("event_approval_requested_sandbox_escalation")
       detail = Approval.detail(request)
@@ -656,7 +653,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert detail.reason ==
                "the command wrote outside the workspace and the sandbox stopped it"
 
-      assert detail.suggested_rule == "Bash(cargo build *)"
+      assert detail.suggested_rule == "SandboxEscalation()"
 
       assert Approval.subject(request) ==
                "cargo build --release — the command wrote outside the workspace and the sandbox " <>

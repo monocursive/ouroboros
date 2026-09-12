@@ -333,6 +333,8 @@ pub struct ApprovalDetail {
     pub command: Option<String>,
     pub cwd: Option<String>,
     pub reason: Option<String>,
+    /// Whole-command replay warning supplied by an explicit sandbox retry request.
+    pub at_least_once_risk: Option<String>,
     /// The C1 pattern `Ouroboros.Control.Permissions.suggest/1` computed for this request.
     pub suggested_rule: Option<String>,
     /// Paths the call named (ACP `toolCall.locations`).
@@ -540,6 +542,7 @@ impl ApprovalRequest {
                 .and_then(|call| json_nonempty_str(call, "cwd"))
                 .or_else(|| json_nonempty_str(payload, "cwd")),
             reason: json_nonempty_str(payload, "reason"),
+            at_least_once_risk: json_nonempty_str(payload, "at_least_once_risk"),
             suggested_rule: json_nonempty_str(payload, "suggested_rule"),
             locations: call.map(approval_locations).unwrap_or_default(),
             options: approval_options(payload),
@@ -1906,6 +1909,28 @@ mod tests {
         };
 
         assert_eq!(request.subject(), "git commit -am wip — writes to .git");
+    }
+
+    #[test]
+    fn an_explicit_retry_keeps_its_at_least_once_warning() {
+        let mut watch = watch();
+        let event = Event::decode(&json!({
+            "sequence": 1,
+            "type": "approval_requested",
+            "request_id": "retry-approval",
+            "payload": {
+                "kind": "sandbox_escalation",
+                "tool_call": {"name": "bash", "command": "git commit"},
+                "at_least_once_risk": "effects completed before failure may duplicate"
+            }
+        }))
+        .expect("event");
+        watch.absorb(vec![event]);
+        let request = watch.next_approval().expect("retry approval");
+        assert_eq!(
+            request.detail().at_least_once_risk.as_deref(),
+            Some("effects completed before failure may duplicate")
+        );
     }
 
     #[test]

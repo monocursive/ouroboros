@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox-host-test dev-host-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -26,6 +26,8 @@ help:
 	@echo "make stop             everything down: daemon, and any stray daemons"
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
+	@echo "make sandbox-host-test  macOS Seatbelt kernel gate (non-nested host context)"
+	@echo "make dev-host-test      launcher PID-safety gate (host process controls)"
 	@echo "make test             formatting, script checks, mix test, the boot gate, cargo test/fmt/clippy"
 	@echo "make boot-gate        pre-reduction, pre-J2 and pre-J3 data booted against this tree, 10x per mode"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
@@ -78,6 +80,12 @@ reset:
 
 logs:
 	@sh scripts/dev.sh logs
+
+sandbox-host-test:
+	@sh scripts/test-sandbox-host.sh
+
+dev-host-test:
+	@sh scripts/test-dev-host.sh
 
 # The WebAssembly containment helper, and the only helper this repository builds. It
 # enforces the same on every platform — the boundary is wasmtime's linker, not a kernel
@@ -200,6 +208,8 @@ test:
 	@echo "==> test: formatting and scripts, then mix, the boot gate, and Rust with both feature sets"
 	$(MIX) format --check-formatted
 	sh scripts/test-release-packaging.sh
+	sh scripts/test-isolated-test.sh
+	sh scripts/test-self-development-artifacts.sh
 	sh scripts/test-dev.sh
 	SHELL="$(SHELL)" $(MIX) test
 	$(MAKE) boot-gate

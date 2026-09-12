@@ -90,13 +90,18 @@ defmodule Ouroboros.Provider.Native.Tools.AskUser do
       "" ->
         %{
           output:
-            "The operator acknowledged the question without giving an answer. " <>
+            "The operator did not answer the question; a bare acknowledgement is not an answer. " <>
               "Proceed with your best judgement and say which way you went.",
-          is_error: false
+          is_error: false,
+          answered: false
         }
 
       text ->
-        %{output: "The operator answered: #{clip(text, @max_question_bytes)}", is_error: false}
+        %{
+          output: "The operator answered: #{clip(text, @max_question_bytes)}",
+          is_error: false,
+          answered: true
+        }
     end
     |> Map.put(:question, payload)
   end
@@ -113,6 +118,7 @@ defmodule Ouroboros.Provider.Native.Tools.AskUser do
         "The operator declined to answer." <>
           suffix <> " Proceed with your best judgement and say which way you went.",
       is_error: false,
+      answered: false,
       question: payload
     }
   end
@@ -125,6 +131,7 @@ defmodule Ouroboros.Provider.Native.Tools.AskUser do
         "Nobody answered the question within #{timeout_ms} ms. " <>
           "Proceed with your best judgement and say which way you went.",
       is_error: false,
+      answered: false,
       question: payload
     }
   end

@@ -110,6 +110,13 @@ defmodule Ouroboros.Provider.Native.Exec do
 
   alias Ouroboros.Provider.Native.ProcessSignal
 
+  @doc false
+  def register_cancel_owner(owner, os_pid) when is_pid(owner) and is_integer(os_pid),
+    do: Ouroboros.Provider.Native.Exec.Registry.register(owner, os_pid)
+
+  @doc "Terminates the exact process group currently owned by an execution task."
+  def cancel(owner) when is_pid(owner), do: Ouroboros.Provider.Native.Exec.Registry.cancel(owner)
+
   defp spawn_and_collect(wrapper, args, separate_stderr?, opts) do
     timeout = timeout_ms(opts)
     max_bytes = max_bytes(opts)
@@ -135,6 +142,7 @@ defmodule Ouroboros.Provider.Native.Exec do
 
     case :exec.run([wrapper | args], options, @startup_timeout_ms) do
       {:ok, exec_pid, os_pid} ->
+        :ok = register_cancel_owner(self(), os_pid)
         state = empty_output()
         deadline = System.monotonic_time(:millisecond) + timeout
 
@@ -151,6 +159,8 @@ defmodule Ouroboros.Provider.Native.Exec do
           error in Ouroboros.Audit.Unavailable ->
             ProcessSignal.signal(os_pid, :sigkill)
             reraise error, __STACKTRACE__
+        after
+          Ouroboros.Provider.Native.Exec.Registry.unregister(self(), os_pid)
         end
 
       {:error, reason} ->
@@ -239,7 +249,11 @@ defmodule Ouroboros.Provider.Native.Exec do
 
   defp without_release_environment(environment) do
     runtime_paths =
-      [Map.get(environment, "BINDIR"), release_bin(Map.get(environment, "ROOTDIR"))]
+      if release_environment?(environment) do
+        [Map.get(environment, "BINDIR"), release_bin(Map.get(environment, "ROOTDIR"))]
+      else
+        []
+      end
       |> Enum.reject(&is_nil/1)
       |> MapSet.new()
 
@@ -248,6 +262,15 @@ defmodule Ouroboros.Provider.Native.Exec do
       name in @release_runtime_env or String.starts_with?(name, "RELEASE_")
     end)
     |> without_runtime_paths(runtime_paths)
+  end
+
+  # ROOTDIR and BINDIR are set by an ordinary Erlang VM too. They identify a release only
+  # when the release boot wrapper also supplied its RELEASE_* context; otherwise removing
+  # them from PATH can remove the sole `erl` launcher from an operator command.
+  defp release_environment?(environment) do
+    Enum.any?(environment, fn {name, value} ->
+      String.starts_with?(name, "RELEASE_") and is_binary(value) and value != ""
+    end)
   end
 
   defp execution_environment(environment) do

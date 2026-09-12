@@ -22,7 +22,7 @@ defmodule Ouroboros.Wasm.DeployTest do
 
   @moduletag :capture_log
 
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
+  @guest Ouroboros.Wasm.LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
   @signer "wasm-deploy-test-key"
 
   @needs_live (cond do

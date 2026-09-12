@@ -16,7 +16,7 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
   # were about the right thing. Where either half has not been built the tests are skipped
   # with the reason and the `make` target printed, rather than passing silently: a green run
   # on a machine that never built them should say what it did not check.
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
+  @guest Ouroboros.Wasm.LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
 
   # `Ouroboros.Wasm.LiveFixture` decides, so that CI — which builds both halves and sets
   # `OUROBOROS_REQUIRE_WASM=1` — fails on a missing build instead of skipping green.

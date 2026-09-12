@@ -48,6 +48,7 @@ defmodule Ouroboros.Gateway.Listener do
   alias Ouroboros.DataDir
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Conn
+  alias Ouroboros.Maintenance.SelfReport
   alias Ouroboros.RuntimeOwner
 
   @publication_name "gateway.json"
@@ -90,6 +91,7 @@ defmodule Ouroboros.Gateway.Listener do
       {:ok, listen_socket} ->
         {:ok, port} = :inet.port(listen_socket)
         {path, publication_stat} = publish!(config, port)
+        publish_maintenance_report!(config, port)
 
         state = %{
           config: config,
@@ -307,6 +309,41 @@ defmodule Ouroboros.Gateway.Listener do
       end
 
     {path, publication_stat}
+  end
+
+  defp publish_maintenance_report!(config, port) do
+    values =
+      Map.new(["OURO_TRANSACTION_ID", "OURO_GENERATION_DIGEST", "OURO_BUILD_ID"], fn key ->
+        {key, System.get_env(key)}
+      end)
+
+    case Enum.reject(Map.values(values), &is_nil/1) do
+      [] ->
+        :ok
+
+      present when length(present) == 3 ->
+        owner = RuntimeOwner.claim()
+
+        attrs = %{
+          transaction_id: values["OURO_TRANSACTION_ID"],
+          pid: owner.pid,
+          birth: owner.birth,
+          port: port,
+          generation_digest: values["OURO_GENERATION_DIGEST"],
+          build_id: values["OURO_BUILD_ID"]
+        }
+
+        with {:ok, _} <- SelfReport.write_epoch(config.data_dir),
+             {:ok, _} <- SelfReport.write(config.data_dir, attrs) do
+          :ok
+        else
+          {:error, reason} ->
+            raise "maintenance self-report publication failed: #{inspect(reason)}"
+        end
+
+      _ ->
+        raise "maintenance self-report environment is incomplete"
+    end
   end
 
   defp remove_publication_if_owner(path, expected) do

@@ -311,7 +311,15 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
     end
 
     test "no data directory and no seam is a corpus that is skipped, not an error" do
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
       Application.delete_env(:ouroboros, :policy_evidence_root)
+      Application.delete_env(:ouroboros, :data_dir)
+
+      on_exit(fn ->
+        if is_nil(previous_data_dir),
+          do: Application.delete_env(:ouroboros, :data_dir),
+          else: Application.put_env(:ouroboros, :data_dir, previous_data_dir)
+      end)
 
       assert PolicyEvidence.path() == nil
       assert PolicyEvidence.stream() |> Enum.to_list() == []

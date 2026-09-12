@@ -360,6 +360,27 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
       assert unchanged.archives == []
     end
 
+    test "a caller-identified compaction cannot bypass a denying PreCompact hook", context do
+      hook =
+        script(
+          context.root,
+          "veto-operation.sh",
+          "cat > /dev/null\necho 'operation-veto' >&2\nexit 2\n"
+        )
+
+      user_hooks(context.root, ~s([[hooks]]\nevent = "PreCompact"\ncommand = "#{hook}"\n))
+
+      %{handle: handle} = open(context, @simple)
+      await_event(:provider_event)
+      assert :ok = Session.send(handle, TurnRequest.new!("hi"), "turn-1")
+      await_event(:turn_completed)
+
+      assert {:error, {:pre_compact_denied, "operation-veto"}} =
+               Session.compact_start(handle, "hook-op", nil)
+
+      assert {:error, :unknown_compaction} = Session.compact_status(handle, "hook-op")
+    end
+
     test "a PreCompact hook that says nothing lets the compaction through", context do
       hook = script(context.root, "quiet.sh", "cat > /dev/null\n")
       user_hooks(context.root, ~s([[hooks]]\nevent = "PreCompact"\ncommand = "#{hook}"\n))

@@ -1016,7 +1016,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
   # ================================================================ [checks]
 
   describe "[checks]" do
-    test "a failing check's tail is injected for the next model step", context do
+    test "a failing check's tail is retained for the next turn", context do
       trust(context.workspace)
 
       project_toml(context.workspace, """
@@ -1032,10 +1032,10 @@ defmodule Ouroboros.Provider.Native.HooksTest do
         [{:text, "done"}, {:finish, :stop}]
       ]
 
-      {loop, _agent} = start_loop(context, script)
+      {loop, agent} = start_loop(context, script)
       parent = self()
       spawn_link(fn -> send(parent, {:finished, Loop.run_turn(loop, "go")}) end)
-      collect()
+      events = collect()
 
       assert_receive {:finished, {:ok, state}}, 30_000
       last = List.last(state.messages)
@@ -1044,6 +1044,17 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert last.content =~ "Project checks failed"
       assert last.content =~ "typecheck"
       assert last.content =~ "undefined function"
+      assert List.last(events).type == :turn_completed
+
+      requests = agent |> NativeModelScript.requests() |> Enum.reverse()
+      assert length(requests) == 2
+
+      refute Enum.any?(requests, fn request ->
+               Enum.any?(
+                 request.messages,
+                 &(is_binary(&1.content) and &1.content =~ "undefined function")
+               )
+             end)
     end
 
     test "a passing check injects nothing", context do

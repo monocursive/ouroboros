@@ -59,7 +59,7 @@ defmodule Ouroboros.Wasm.RolloutTest do
   # One node is enough for everything except "one artifact deploys on both nodes", which
   # is `rollout_two_node_test.exs`'s job. What is proved here is the decision table: what
   # is refused before the checkpoint, what quarantines, what rolls back, and what runs.
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
+  @guest Ouroboros.Wasm.LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
   @signer "wasm-rollout-test-key"
 
   @needs_live (cond do

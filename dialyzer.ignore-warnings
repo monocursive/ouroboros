@@ -58,12 +58,26 @@ lib/ouroboros/cluster.ex:789:7: The variable __invalid@1 can never match since p
 #     claimant may be running. Dialyzer proving it currently unreachable is not a reason
 #     to delete it.
 #
-#   * `effect_ledger.ex:677` — `new_entry/3` compares against `:failed` and `:ambiguous`,
+#   * `effect_ledger.ex:703` — `new_entry/3` compares against `:failed` and `:ambiguous`,
 #     which its callers never pass. The comparison is against a shared constant used
 #     elsewhere with those values, so the list is right and this call site simply does not
 #     reach them.
-lib/ouroboros/agent/effect_ledger.ex:677: The test 'denied' | 'ok' | 'started' =:= 'ambiguous' can never evaluate to 'true'
-lib/ouroboros/agent/effect_ledger.ex:677: The test 'denied' | 'ok' | 'started' =:= 'failed' can never evaluate to 'true'
+#
+# `interactive/store.ex:375` keeps the invalid callback response branch because storage
+# implementations are a failure boundary; widening one must stop the store explicitly
+# rather than turn a malformed response into a `CaseClauseError`.
+#
+# `provider/native/loop.ex:3982` is the last-resort rendering for a model adapter failure.
+# Present adapters expose only the three tagged failures above it, but a future adapter
+# widening should still produce a bounded diagnostic rather than crash while reporting it.
+#
+# `provider/native/session.ex:2904` retains the conversation-derived operation identity for
+# a future caller that has no higher-level identity. Current call sites all provide one.
+lib/ouroboros/agent/effect_ledger.ex:703: The test 'denied' | 'ok' | 'started' =:= 'ambiguous' can never evaluate to 'true'
+lib/ouroboros/agent/effect_ledger.ex:703: The test 'denied' | 'ok' | 'started' =:= 'failed' can never evaluate to 'true'
+lib/ouroboros/interactive/store.ex:375:7: The variable _other@1 can never match since previous clauses completely covered the type 'ok' | {'error',_}
+lib/ouroboros/provider/native/loop.ex:3982:8: The variable _reason@1 can never match since previous clauses completely covered the type {'model_request_failed',binary()} | {'stream_exited',binary()} | {'stream_failed',binary()}
+lib/ouroboros/provider/native/session.ex:2904: Guard test _5::'close' | {'compaction',number()} | {'maintenance_fence',_} | {'rewind',binary() | non_neg_integer()} | {'subagent_settle',_} | {'turn',_} =:= 'nil' can never succeed
 lib/ouroboros/provider/native/loop.ex:2996:8: The variable __tools@1 can never match since previous clauses completely covered the type [#{'description':=binary(), 'name':=binary(), 'parameters':=map()}]
 lib/ouroboros/provider/native/model.ex:214:8: The variable __provider@1 can never match since previous clauses completely covered the type binary()
 lib/ouroboros/provider/native/model/req_llm.ex:192:8: The variable __env@1 can never match since previous clauses completely covered the type binary()

@@ -1,11 +1,21 @@
 defmodule Ouroboros.Control.PermissionsPatternTest do
   use ExUnit.Case, async: true
 
+  alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.Permissions.{Matcher, Pattern, Request, Rule, Shell}
 
   # ── The rule language ──────────────────────────────────────────────────────────────
 
   describe "the pattern language" do
+    test "the additive escalation subject bumps only the public vocabulary" do
+      assert Permissions.vocabulary_version() == 2
+    end
+
+    test "sandbox escalation is a distinct argument-free authority" do
+      assert %Pattern{kind: :sandbox_escalation} = Pattern.parse!("SandboxEscalation()")
+      assert {:error, _} = Pattern.parse("SandboxEscalation(git status)")
+    end
+
     test "parses every form the language contains" do
       assert %Pattern{kind: :bash, spec: %{match: :word_prefix, prefix: "ls"}} =
                Pattern.parse!("Bash(ls *)")

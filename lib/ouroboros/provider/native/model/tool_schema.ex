@@ -86,13 +86,24 @@ defmodule Ouroboros.Provider.Native.Model.ToolSchema do
   end
 
   defp req_tool(spec, parameters, strict?) do
-    ReqLLM.Tool.new!(
-      name: spec.name,
-      description: spec.description,
-      parameter_schema: parameters,
-      strict: strict?,
-      callback: @unused_callback
-    )
+    tool =
+      ReqLLM.Tool.new!(
+        name: spec.name,
+        description: spec.description,
+        parameter_schema: parameters,
+        strict: strict?,
+        callback: @unused_callback
+      )
+
+    # ReqLLM normalizes an open object by inserting an empty `properties` map. Preserve
+    # omission when that is what the remote schema declared; adding the key is harmless
+    # JSON Schema-wise but changes the frozen transport projection and is not one of this
+    # runtime's authorized tool-schema additions.
+    if Map.has_key?(stringify_keys(parameters), "properties") do
+      tool
+    else
+      %{tool | parameter_schema: Map.delete(tool.parameter_schema, :properties)}
+    end
   end
 
   defp required_hint(%{description: description, parameters: parameters}) do

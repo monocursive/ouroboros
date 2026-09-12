@@ -6,6 +6,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
   @moduletag timeout: 120_000
 
   alias Ouroboros.Session.ApprovalResponse
+  alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Test.NativeModelScript
@@ -82,6 +83,23 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
   defp find(events, type), do: Enum.find(events, &(&1.type == type))
   defp all(events, type), do: Enum.filter(events, &(&1.type == type))
+
+  defp budget_message?(%{role: :user, content: content}) when is_binary(content),
+    do: String.starts_with?(content, "Turn budget:")
+
+  defp budget_message?(_message), do: false
+
+  # The transient budget message is the last message of a request that carries one.
+  defp budget(request) do
+    case List.last(request.messages) do
+      %{role: :user, content: content} = message when is_binary(content) ->
+        assert budget_message?(message)
+        content
+
+      other ->
+        flunk("expected a turn-budget user message last, got #{inspect(other)}")
+    end
+  end
 
   defp paired_tool_calls?(messages) do
     pending =
@@ -200,7 +218,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       names = Enum.map(request.tools, & &1.name)
 
-      assert Enum.take(names, 14) == [
+      assert Enum.take(names, 15) == [
                "read",
                "write",
                "edit",
@@ -213,11 +231,58 @@ defmodule Ouroboros.Provider.Native.LoopTest do
                "ask_user",
                "agent",
                "agent_result",
+               "safe_status",
                "skill",
                "plan"
              ]
 
       assert [%{role: :user, content: "do the thing"}] = request.messages
+    end
+
+    test "safe_status is bound to the captured coordinator and never a logical-id replacement",
+         context do
+      owner =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", from, :safe_status} ->
+              GenServer.reply(from, {:ok, %{"identity" => %{"session_id" => "captured"}}})
+          end
+        end)
+
+      script = [
+        [{:tool_call, %{id: "status", name: "safe_status", input: %{}}}],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, agent} =
+        start_loop(context, script,
+          session_context: %{owner: owner, logical_id: "logical-replacement-target"}
+        )
+
+      run(loop)
+      collect()
+
+      [_, request] = NativeModelScript.requests(agent)
+      [%{role: :tool, content: content}] = Enum.filter(request.messages, &(&1.role == :tool))
+      assert content =~ "captured"
+      refute content =~ "logical-replacement-target"
+
+      dead = spawn(fn -> :ok end)
+      monitor = Process.monitor(dead)
+      assert_receive {:DOWN, ^monitor, :process, ^dead, _reason}
+
+      {loop, agent} =
+        start_loop(context, script,
+          session_context: %{owner: dead, logical_id: "logical-replacement-target"}
+        )
+
+      run(loop)
+      collect()
+
+      [_, request] = NativeModelScript.requests(agent)
+      [%{role: :tool, content: content}] = Enum.filter(request.messages, &(&1.role == :tool))
+      assert content =~ "session_call_failed"
+      refute content =~ "logical-replacement-target"
     end
 
     test "a `plan` call becomes a plan_updated event", context do
@@ -239,6 +304,36 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       plan = find(events, :plan_updated)
       assert plan.payload["plan"] == [%{"step" => "read", "status" => "completed"}]
+    end
+
+    test "an additive work item remains unaccepted until the parent names it", context do
+      item = %{
+        "id" => "P0-contract",
+        "step" => "Review the contract",
+        "status" => "in_progress",
+        "deliverable" => "analysis",
+        "work_state" => "reviewing",
+        "criteria" => ["review is retained"],
+        "evidence" => ["review://p0"]
+      }
+
+      script = [
+        [{:tool_call, %{id: "p1", name: "plan", input: %{"steps" => [item]}}}],
+        [
+          {:tool_call,
+           %{id: "p2", name: "plan", input: %{"steps" => [item], "accept" => ["P0-contract"]}}}
+        ],
+        [{:text, "accepted"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      plans = collect() |> Enum.filter(&(&1.type == :plan_updated))
+
+      assert [proposed, accepted] = plans
+      assert hd(proposed.payload["plan"])["work_state"] == "reviewing"
+      assert hd(accepted.payload["plan"])["work_state"] == "accepted"
+      assert hd(accepted.payload["plan"])["acceptance"]["actor"]
     end
   end
 
@@ -324,7 +419,44 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert failed.payload["error"] =~ "doom loop"
       assert failed.payload["error"] =~ "read"
       # Two ran, the third was refused before executing.
-      assert length(all(events, :tool_result)) == 2
+      assert length(all(events, :tool_result)) == 3
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
+    end
+
+    test "doom-loop refusal pairs every call in the same model response", context do
+      repeat = fn id -> %{id: id, name: "read", input: %{"path" => "lib/a.ex"}} end
+
+      script = [
+        [{:tool_call, repeat.("one")}],
+        [{:tool_call, repeat.("two")}],
+        [{:tool_call, repeat.("three")}, {:tool_call, repeat.("four")}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+      assert find(events, :turn_failed).payload["reason"] == "doom_loop"
+      assert length(all(events, :tool_result)) == 4
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
+    end
+
+    test "identical bounded agent_result polls are not a doom loop", context do
+      repeat =
+        {:tool_call,
+         %{id: "poll", name: "agent_result", input: %{"task_id" => "missing", "wait_ms" => 1}}}
+
+      script = List.duplicate([repeat], 3) ++ [[{:text, "done"}, {:finish, :stop}]]
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      refute find(events, :turn_failed)
+      assert find(events, :turn_completed)
+      assert length(all(events, :tool_result)) == 3
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
     end
 
     test "fails the turn by name at max_iterations", context do
@@ -390,15 +522,43 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       assert find(events, :turn_completed)
       [first, second, third] = NativeModelScript.requests(agent)
-      assert first.system =~ "3 model round-trip(s) remain"
-      assert second.system =~ "2 model round-trip(s) remain"
-      assert third.system =~ "1 model round-trip(s) remain"
-      assert third.system =~ "reserved final response round"
-      assert third.system =~ "No tools are available"
-      assert third.system =~ "state anything unverified explicitly"
+
+      # The budget rides in a transient user message at the end of the request, never
+      # in the system prompt: the prefix is the cache, and a countdown in it would miss
+      # the cache on every one of these calls.
+      assert first.system == second.system
+      assert second.system == third.system
+      refute first.system =~ "round-trip(s) remain"
+
+      assert budget(first) =~ "Turn budget: 3 model round-trip(s) remain"
+      assert budget(second) =~ "Turn budget: 2 model round-trip(s) remain"
+      assert budget(third) =~ "Turn budget: 1 model round-trip(s) remain"
+      assert budget(third) =~ "reserved final response round"
+      assert budget(third) =~ "No tools are available"
+      assert budget(third) =~ "state anything unverified explicitly"
       assert first.tools != []
       assert second.tools != []
       assert third.tools == []
+
+      # And it is not kept: the conversation the turn leaves behind has no countdowns.
+      assert_receive {:finished, {:ok, state}}, 1_000
+      refute Enum.any?(state.messages, &budget_message?/1)
+    end
+
+    test "a turn far from its budget carries no turn-budget message", context do
+      script = [
+        [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, agent} = start_loop(context, script, max_iterations: 40)
+      run(loop)
+      collect()
+
+      for request <- NativeModelScript.requests(agent) do
+        refute Enum.any?(request.messages, &budget_message?/1)
+        refute request.system =~ "round-trip(s) remain"
+      end
     end
 
     test "allows substantial interactive turns by default while retaining the hard cap" do
@@ -420,6 +580,55 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       failed = find(events, :turn_failed)
       assert failed.payload["reason"] == "model_error"
       assert failed.payload["error"] =~ "no_credentials"
+    end
+
+    test "a ReqLLM API error reaches turn_failed without transport secrets", context do
+      defmodule SensitiveAPIErrorModel do
+        @behaviour Ouroboros.Provider.Native.Model
+        @impl true
+        def stream(_request, _opts) do
+          {:error,
+           Elixir.ReqLLM.Error.API.Request.exception(
+             reason: :timeout,
+             status: 503,
+             headers: [
+               {"set-cookie", "SYNTH_LOOP_COOKIE_CANARY_59ea"},
+               {"authorization", "Bearer SYNTH_LOOP_AUTH_CANARY_ab81"}
+             ],
+             request_body: "SYNTH_LOOP_REQUEST_CANARY_46da",
+             response_body: %{"secret" => "SYNTH_LOOP_RESPONSE_CANARY_f24c"},
+             provider_code: "upstream_timeout",
+             retryable: true
+           )}
+        end
+
+        @impl true
+        def format_error(error),
+          do: Ouroboros.Provider.Native.Model.ReqLLM.format_error(error)
+      end
+
+      {loop, _agent} = start_loop(context, [])
+      run(%{loop | model_module: SensitiveAPIErrorModel})
+      events = collect()
+
+      failed = find(events, :turn_failed)
+      assert failed.payload["reason"] == "model_error"
+      assert failed.payload["error"] =~ "category=api"
+      assert failed.payload["error"] =~ "status=503"
+      assert failed.payload["error"] =~ "provider_code=upstream_timeout"
+      assert failed.payload["error"] =~ "retryable=true"
+      assert byte_size(failed.payload["error"]) <= 1_024
+
+      public = Loop.to_event(failed, :native, "native-synthetic")
+      encoded = inspect(public.payload, printable_limit: :infinity)
+      refute encoded =~ "SYNTH_LOOP_COOKIE_CANARY_59ea"
+      refute encoded =~ "SYNTH_LOOP_AUTH_CANARY_ab81"
+      refute encoded =~ "SYNTH_LOOP_REQUEST_CANARY_46da"
+      refute encoded =~ "SYNTH_LOOP_RESPONSE_CANARY_f24c"
+      refute encoded =~ "set-cookie"
+      refute encoded =~ "authorization"
+      refute encoded =~ "request_body"
+      refute encoded =~ "response_body"
     end
 
     test "an unknown tool answers in-band with the tools that do exist", context do
@@ -475,6 +684,32 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       events = collect()
       assert File.read!(Path.join(context.workspace, "lib/new.ex")) == "hello\n"
       assert find(events, :turn_completed)
+    end
+
+    test "approved session response fails closed when its permission record is unavailable",
+         context do
+      previous = Application.get_env(:ouroboros, :permissions_ledger)
+      missing = String.to_atom("missing_permissions_ledger_#{System.unique_integer([:positive])}")
+      Application.put_env(:ouroboros, :permissions_ledger, missing)
+      on_exit(fn -> restore_env(:permissions_ledger, previous) end)
+
+      {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
+      pid = run(loop)
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :approve, scope: :session}}
+      )
+
+      events = collect()
+      [result] = all(events, :tool_result)
+      assert result.payload["is_error"]
+      assert result.payload["output"] =~ "could not be durably recorded"
+      refute File.exists?(Path.join(context.workspace, "lib/new.ex"))
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
+      assert MapSet.size(state.session_grants) == 0
     end
 
     test "a denial becomes an error tool result and the file is not written", context do
@@ -720,8 +955,17 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       refute File.exists?(path)
     end
 
-    test "an interrupt while an approval is pending stops the turn", context do
-      {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
+    test "an interrupt while an approval is pending pairs it and skipped sibling calls",
+         context do
+      script = [
+        [
+          {:tool_call,
+           %{id: "c1", name: "write", input: %{"path" => "lib/new.ex", "content" => "hello\n"}}},
+          {:tool_call, %{id: "c2", name: "read", input: %{"path" => "lib/a.ex"}}}
+        ]
+      ]
+
+      {loop, _agent} = start_loop(context, script, approval_mode: :prompt)
       pid = run(loop)
 
       assert_receive {:event, %{type: :approval_requested}}, 30_000
@@ -729,9 +973,25 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       events = collect()
       assert List.last(types(events)) == :turn_interrupted
+      assert length(all(events, :tool_call)) == 2
+      assert length(all(events, :tool_result)) == 2
+      assert Enum.any?(all(events, :tool_result), &(&1.payload["output"] =~ "interrupted"))
+      assert Enum.any?(all(events, :tool_result), &(&1.payload["output"] =~ "Not run"))
       refute File.exists?(Path.join(context.workspace, "lib/new.ex"))
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert paired_tool_calls?(state.messages)
+      assert {:ok, effects} = EffectLedger.list(effect: :tool_call, limit: 100)
+      interrupted_call = Enum.find(all(events, :tool_call), &(&1.payload["call_id"] == "c1"))
+      interrupted_effect_id = interrupted_call.payload["ledger_ref"]["id"]
+
+      assert Enum.any?(effects, fn entry ->
+               entry.status == :denied and entry.id == interrupted_effect_id
+             end)
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore_env(key, value), do: Application.put_env(:ouroboros, key, value)
 
   describe "conversation checkpoints" do
     test "a failed checkpoint fails the turn instead of acknowledging completion", context do
@@ -752,6 +1012,31 @@ defmodule Ouroboros.Provider.Native.LoopTest do
   end
 
   describe "payload discipline" do
+    test "synthetic non-UTF-8 recorded tool output remains truthful and turn continues",
+         context do
+      synthetic = <<0x61, 0x94, 0x62>>
+      expected = "[binary tool output: 3 bytes, base64]\n" <> Base.encode64(synthetic)
+
+      script = [
+        [{:tool_call, %{id: "c1", name: "synthetic", input: %{}}}],
+        [{:text, "continued"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} =
+        start_loop(context, script,
+          tool_source: {:recorded, %{"c1" => %{output: synthetic, is_error: false}}}
+        )
+
+      run(loop)
+      events = collect()
+
+      assert find(events, :tool_result).payload["output"] == expected
+      assert find(events, :turn_completed)
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert Enum.any?(state.messages, &(&1[:role] == :tool and &1[:content] == expected))
+      assert Enum.all?(events, &(JSON.encode!(&1.payload) |> String.valid?()))
+    end
+
     test "no environment secret reaches an event payload", context do
       System.put_env("OUROBOROS_NATIVE_TEST_API_KEY", "sk-super-secret-value")
       on_exit(fn -> System.delete_env("OUROBOROS_NATIVE_TEST_API_KEY") end)

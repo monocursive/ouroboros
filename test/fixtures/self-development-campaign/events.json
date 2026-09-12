@@ -1,0 +1,11 @@
+{
+  "invocation_id": "fixture-invocation",
+  "events": [
+    {"id":"start","kind":"boundary","status":"passed","boundary":"submitted","metrics":{}},
+    {"id":"parent-request","kind":"request","status":"passed","metrics":{"tool_calls":4,"input_tokens":100,"output_tokens":20}},
+    {"id":"child-request","kind":"request","status":"failed","parent_id":"parent-request","metrics":{"tool_calls":5,"input_tokens":40,"cache_read_tokens":5}},
+    {"id":"supervisor-action","kind":"action","status":"refused","parent_id":"parent-request","action":"decline","metrics":{"tool_calls":1,"operator_wait_ms":7}},
+    {"id":"child-request","kind":"request","status":"failed","parent_id":"parent-request","metrics":{"tool_calls":5,"input_tokens":40,"cache_read_tokens":5}},
+    {"id":"terminal","kind":"boundary","status":"passed","boundary":"completed","metrics":{}}
+  ]
+}

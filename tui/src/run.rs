@@ -27,6 +27,9 @@
 //! session that ends before its turn does is `lost` for the same reason: the turn's
 //! outcome was not observed, and a headless caller that read `completed` there would be
 //! reading a guess.
+//! A dropped socket is re-handshaken by the transport. This driver then subscribes again
+//! from its contiguous cursor and folds only events belonging to the already accepted
+//! turn; it never resends the prompt or turns connection loss into an interrupt.
 //!
 //! ## Approvals
 //!
@@ -51,10 +54,12 @@ use crate::model::{
     self, ApprovalDecision, ApprovalScope, Event, EventType, Plane, StartRequest, StartedRef,
 };
 use crate::proto::{ErrorCode, Hello, Notification};
-use crate::transport::{Client, ClientError};
+use crate::transport::{Client, ClientError, ConnectionState};
 
 /// The reason `deny` is the headless default, said in the place the runtime records it.
 pub const HEADLESS_DENY_REASON: &str = "ouro run: headless, no approver";
+pub const HEADLESS_QUESTION_REASON: &str =
+    "ouro run: headless; no answer was supplied for this question";
 
 /// B2. The same, for the plan-exit question. It is `keep_planning` rather than a refusal
 /// of the work: the plan was produced and reported, and the session is left planning.
@@ -91,6 +96,10 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 /// draining an approval answer still on the wire. Neither may extend the run by the
 /// transport's whole default.
 const INTERRUPT_CEILING: Duration = Duration::from_secs(5);
+
+/// Re-subscription itself uses the transport request ceiling. Repeated re-handshakes are
+/// bounded here so a flapping endpoint cannot keep a headless invocation alive forever.
+const MAX_STREAM_RECONNECTS: u32 = 3;
 
 /// Per-message ceiling on collapsed deltas, matching the transcript's own draft bound.
 const MESSAGE_BYTES: usize = 128 * 1024;
@@ -290,6 +299,8 @@ pub struct Report {
     pub files_changed: Vec<String>,
     pub approvals_requested: u64,
     pub approvals_answered: u64,
+    /// Questions this headless invocation declined because it had no supplied answer.
+    pub questions_unanswered: Vec<Value>,
     /// B2. The plan a planning run produced, as the plan-exit question carried it.
     ///
     /// `None` for every run that was not planning, and for a planning run whose turn
@@ -319,6 +330,7 @@ impl Report {
             files_changed: Vec::new(),
             approvals_requested: 0,
             approvals_answered: 0,
+            questions_unanswered: Vec::new(),
             plan: None,
             duration: Duration::ZERO,
             error: None,
@@ -366,6 +378,12 @@ impl Report {
                 "answered": self.approvals_answered,
             }),
         );
+        if !self.questions_unanswered.is_empty() {
+            object.insert(
+                "questions_unanswered".into(),
+                Value::Array(self.questions_unanswered.clone()),
+            );
+        }
         object.insert(
             "duration_ms".into(),
             Value::Number(u64_number(
@@ -527,6 +545,7 @@ impl Sinks<'_> {
 pub async fn drive(
     client: &Client,
     notifications: &mut mpsc::Receiver<Notification>,
+    lifecycle: &mut tokio::sync::watch::Receiver<ConnectionState>,
     hello: &Hello,
     plan: Plan,
     options: &Options,
@@ -544,7 +563,7 @@ pub async fn drive(
         Plan::Resume { session_id, prompt } => run.resume(hello, session_id, prompt, sinks).await?,
     }
 
-    run.stream(notifications, sinks).await;
+    run.stream(notifications, lifecycle, sinks).await;
     run.settle_approvals(sinks).await;
 
     Ok(run.finish(sinks))
@@ -561,6 +580,9 @@ struct Run<'a> {
     node: Option<String>,
     /// The id the provider's own events carry for this turn, once the send named it.
     harness_turn: Option<String>,
+    /// Set only after this invocation's send is accepted. An id-less compatibility event
+    /// may count after this boundary, never while retained history is subscribing.
+    turn_accepted: bool,
     /// The contiguous high-water mark. Everything at or below it has been printed.
     cursor: u64,
     /// Events above `cursor + 1`, held in order until the gap under them is replayed.
@@ -582,6 +604,8 @@ struct Run<'a> {
     requested: Option<Status>,
     /// Set once a terminal event decided the run.
     settled: Option<Status>,
+    stream_reconnects: u32,
+    reconnecting: bool,
 }
 
 impl<'a> Run<'a> {
@@ -593,6 +617,7 @@ impl<'a> Run<'a> {
             report: Report::new(String::new(), String::new()),
             node: None,
             harness_turn: None,
+            turn_accepted: false,
             cursor: 0,
             pending: BTreeMap::new(),
             rounds: 0,
@@ -604,6 +629,8 @@ impl<'a> Run<'a> {
             unreconciled: None,
             requested: None,
             settled: None,
+            stream_reconnects: 0,
+            reconnecting: false,
         }
     }
 
@@ -910,6 +937,7 @@ impl<'a> Run<'a> {
         };
 
         let Some(failure) = failure else {
+            self.turn_accepted = true;
             if let Ok(value) = &sent {
                 self.adopt_harness_turn(value.clone(), sinks);
             }
@@ -942,6 +970,7 @@ impl<'a> Run<'a> {
 
         match retry {
             None => {
+                self.turn_accepted = true;
                 if let Ok(value) = &sent {
                     self.adopt_harness_turn(value.clone(), sinks);
                 }
@@ -1022,6 +1051,7 @@ impl<'a> Run<'a> {
     async fn stream(
         &mut self,
         notifications: &mut mpsc::Receiver<Notification>,
+        lifecycle: &mut tokio::sync::watch::Receiver<ConnectionState>,
         sinks: &mut Sinks<'_>,
     ) {
         if self.settled.is_some() {
@@ -1034,6 +1064,8 @@ impl<'a> Run<'a> {
         // interrupted event or at this bound, whichever comes first.
         let mut grace: Option<tokio::time::Instant> = None;
         let mut seen = 0u32;
+        let mut lifecycle_generation = lifecycle.borrow().generation;
+        let mut lifecycle_open = true;
 
         loop {
             if self.settled.is_some() {
@@ -1082,6 +1114,36 @@ impl<'a> Run<'a> {
                     }
                 }
 
+                changed = lifecycle.changed(), if lifecycle_open => {
+                    if changed.is_err() {
+                        // Actor teardown also closes the ordinary notification stream; stop
+                        // polling this fused source and let queued terminal events drain.
+                        lifecycle_open = false;
+                        continue;
+                    }
+                    let state = *lifecycle.borrow_and_update();
+                    if !state.connected {
+                        self.reconnecting = true;
+                        sinks.warn("runtime connection lost; waiting for bounded recovery without interrupting the accepted turn");
+                    } else if state.generation > lifecycle_generation {
+                        lifecycle_generation = state.generation;
+                        self.reconnecting = false;
+                        self.stream_reconnects += 1;
+                        if self.stream_reconnects > MAX_STREAM_RECONNECTS {
+                            self.report.error.get_or_insert_with(|| "the runtime connection repeatedly closed; the accepted turn's outcome remains unresolved".into());
+                            self.settle(Status::Lost);
+                            return;
+                        }
+                        sinks.warn(&format!("runtime connection restored; reconciling {} from sequence {}", self.report.turn_id, self.cursor));
+                        let reconciled = tokio::time::timeout_at(deadline, self.subscribe(self.cursor, sinks)).await;
+                        if let Err(error) = reconciled.unwrap_or_else(|_| Err(Refusal("the run deadline expired while re-subscribing".into()))) {
+                            self.report.error.get_or_insert_with(|| format!("the connection returned but reconciling the accepted turn failed: {error}"));
+                            self.settle(Status::Lost);
+                            return;
+                        }
+                    }
+                }
+
                 notification = notifications.recv() => {
                     let Some(notification) = notification else {
                         // The transport stopped. Whatever the turn is doing, this process
@@ -1098,6 +1160,14 @@ impl<'a> Run<'a> {
                 }
 
                 _ = tokio::time::sleep_until(ends_at) => {
+                    if self.reconnecting && grace.is_none() {
+                        self.report.error.get_or_insert_with(|| {
+                            "the connection did not recover before the run deadline; the accepted turn's outcome remains unresolved".to_string()
+                        });
+                        self.settle(Status::Lost);
+                        return;
+                    }
+
                     if grace.is_some() {
                         sinks.warn("the interrupt produced no event in time");
                         self.settle(Status::Lost);
@@ -1410,7 +1480,12 @@ impl<'a> Run<'a> {
             EventType::Usage => fold_usage(&mut self.report.usage, &event.payload),
             EventType::ToolCall if self.ours(event) => self.changed.note_call(&event.payload),
             EventType::ToolResult if self.ours(event) => self.changed.note_result(&event.payload),
-            EventType::FileChange => self.changed.note_change(&event.payload),
+            EventType::FileChange
+                if event.turn_id.as_ref().is_some_and(|_| self.ours(event))
+                    || (event.turn_id.is_none() && self.turn_accepted) =>
+            {
+                self.changed.note_change(&event.payload)
+            }
             EventType::ApprovalResolved => self.retire(event),
             EventType::ApprovalRequested => {
                 // Two ways an approval on this stream is not this run's to answer, and
@@ -1481,19 +1556,24 @@ impl<'a> Run<'a> {
     /// gateway keys the durable turn on, and the `harness_turn_id` the provider's own
     /// events carry (see [`Self::adopt_harness_turn`]).
     ///
-    /// An event with no `turn_id` is accepted — several session-level events carry none.
+    /// A turn-scoped event with no `turn_id` is accepted only after this invocation's send
+    /// was accepted — several old servers omitted the id, but retained pre-send history is
+    /// not thereby this run's work. Session-scoped events are handled without `ours()`.
     /// So is an event whose id this run cannot place *because the reply named no harness
     /// turn*: a session takes one turn at a time, and a headless run's is the one it just
     /// sent. That tolerance is the fallback, not the rule; a runtime that answers with a
     /// `harness_turn_id` gets the exact match instead.
     fn ours(&self, event: &Event) -> bool {
         let Some(turn) = event.turn_id.as_deref() else {
-            return true;
+            return self.turn_accepted;
         };
 
         match self.harness_turn.as_deref() {
             Some(harness) => turn == harness || turn == self.report.turn_id,
-            None => true,
+            // Before the send reply names the provider's turn, the caller-minted id is
+            // already known. Historical subscription events belong to neither merely
+            // because provider identity has not arrived yet.
+            None => turn == self.report.turn_id,
         }
     }
 
@@ -1539,6 +1619,39 @@ impl<'a> Run<'a> {
 
         if event.payload.get("kind").and_then(Value::as_str) == Some("plan_exit") {
             self.answer_plan_exit(&request_id, &event.payload, sinks);
+            return;
+        }
+
+        // Approving effects is not answering a question. Decline explicitly and remain
+        // attached: AskUser hands that fact back to the still-running model, whose real
+        // terminal event remains this command's outcome.
+        if event.payload.get("kind").and_then(Value::as_str) == Some("question") {
+            if self.report.questions_unanswered.len() < 8 {
+                self.report.questions_unanswered.push(json!({
+                    "request_id": request_id,
+                    "header": event.payload.get("header").and_then(Value::as_str).unwrap_or(""),
+                    "question": event.payload.get("question").and_then(Value::as_str).unwrap_or(""),
+                    "options": event.payload.get("options").cloned().unwrap_or_else(|| json!([])),
+                    "reason": HEADLESS_QUESTION_REASON,
+                }));
+            }
+            sinks.warn(&format!(
+                "question {request_id} declined (headless: no answer was supplied)"
+            ));
+            let mut answer = model::respond_approval_params_with_reason(
+                &self.report.session_id,
+                &request_id,
+                ApprovalDecision::Deny,
+                ApprovalScope::Once,
+                Some(HEADLESS_QUESTION_REASON),
+            );
+            answer["response"]["actor"] = Value::String("headless".to_string());
+            let params = self.routed(answer);
+            let client = self.client.clone();
+            self.approvals.spawn(async move {
+                client.call("interactive.respond_approval", params).await?;
+                Ok(())
+            });
             return;
         }
 

@@ -255,7 +255,9 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
        })}
     else
       focus = Keyword.get(opts, :focus)
-      summary = run_summariser(Keyword.get(opts, :summarize), older, focus)
+
+      {summary, summary_error} =
+        run_summariser(Keyword.get(opts, :summarize), older, focus)
 
       {:ok,
        finish(%{
@@ -264,6 +266,7 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
          elided: elided_count,
          summarised: true,
          summary: summary,
+         summary_error: summary_error,
          before_tokens: before_tokens
        })}
     end
@@ -273,16 +276,19 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
     case summarize.(%{messages: older, focus: focus, instruction: summary_instruction(focus)}) do
       {:ok, summary} when is_binary(summary) ->
         case String.trim(summary) do
-          "" -> structural_summary(older, focus)
-          text -> text
+          "" -> {structural_summary(older, focus), :empty_summary}
+          text -> {text, nil}
         end
 
-      _failed ->
-        structural_summary(older, focus)
+      {:error, reason} ->
+        {structural_summary(older, focus), reason}
+
+      other ->
+        {structural_summary(older, focus), {:invalid_summary_result, other}}
     end
   end
 
-  defp run_summariser(_absent, older, focus), do: structural_summary(older, focus)
+  defp run_summariser(_absent, older, focus), do: {structural_summary(older, focus), nil}
 
   # The summary is a user message, not a system one. The system prompt is the cached
   # prefix; putting a per-compaction summary in it would invalidate the cache on every

@@ -69,8 +69,8 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   The meter fields to merge into a `usage` payload.
 
   `context_window` keeps that exact name because the TUI footer decodes it
-  (`tui/src/model.rs`); a rename here is a silently dark meter there. Both keys are
-  omitted when the window is unknown rather than being emitted as zero.
+  (`tui/src/model.rs`); a rename here is a silently dark meter there. The provider-counted
+  `context_used` remains available when capacity is unknown; only the denominator is omitted.
   """
   @spec meter(map(), window()) :: map()
   def meter(payload, nil), do: Map.put(payload, "context_used", used(payload))
@@ -129,6 +129,19 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   @doc "The default number of newest tokens compaction keeps verbatim."
   @spec default_keep_recent_tokens() :: pos_integer()
   def default_keep_recent_tokens, do: @default_keep_recent_tokens
+
+  @doc "Explicit operator safety budget for measured requests while capacity is unknown."
+  def unknown_compact_tokens(options) when is_map(options) do
+    case field(options, :unknown_compact_tokens) do
+      value when is_integer(value) and value > 0 -> min(value, 500_000)
+      _ -> nil
+    end
+  end
+
+  def unknown_compact_tokens(options) when is_list(options),
+    do: unknown_compact_tokens(Map.new(options))
+
+  def unknown_compact_tokens(_), do: nil
 
   @doc """
   A rough token count for a message list.

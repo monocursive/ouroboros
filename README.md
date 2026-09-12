@@ -97,6 +97,7 @@ holds full authority over every other one.
 
 ```sh
 make dev       # run the terminal client from this checkout
+make daemon-restart  # recompile/restart it; development sessions are retained
 make web       # open the development web interface
 make test      # run the full local test and formatting suite
 ```

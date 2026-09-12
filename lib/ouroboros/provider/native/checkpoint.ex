@@ -53,9 +53,12 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
   require Logger
 
+  alias Ouroboros.Audit.Content
+  alias Ouroboros.Maintenance.Epoch
+  alias Ouroboros.Provider.Native.Journal
   alias Ouroboros.Provider.Native.Paths
 
-  @version 2
+  @version 3
   @default_limit 400
 
   @manifest_version 1
@@ -70,7 +73,8 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   @type conversation :: %{
           messages: [map()],
           offset: non_neg_integer(),
-          rewind_floor: non_neg_integer()
+          rewind_floor: non_neg_integer(),
+          plan: map() | nil
         }
 
   @doc "Where one session's checkpoint lives, and whether that location survives a reboot."
@@ -85,6 +89,14 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   @doc """
   Writes the conversation, atomically and privately, and answers with its digest.
 
+  Passing `epoch_server: server` enables the P4 durable-write protocol and requires a
+  stable `operation_identity`. The identity may be any deterministic term. It is hashed
+  with the destination path into a bounded write id; callers must reuse it only for the
+  same logical publication. The SHA-256 reservation digest covers the exact bytes passed
+  to `File.write/3`, including any operational-content envelope. A retry of an existing
+  reservation only observes the final file: exact bytes are committed, confirmed absence
+  is aborted, and every other outcome is refused without replaying the rename.
+
   A temporary file in the same directory is renamed over the target, so a reader never
   sees a partial write and a crashed write leaves the previous checkpoint intact.
 
@@ -97,35 +109,248 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   def write(path, messages, opts \\ []) do
     limit = Keyword.get(opts, :event_limit, @default_limit)
     trimmed = trim(messages, limit)
-    encoded = trimmed |> Enum.map(&encode/1) |> canonical()
-    digest = digest(encoded)
-
+    encoded = trimmed |> Enum.map(&encode/1) |> Journal.jsonable() |> canonical()
     # What the trim costs the *next* session, written down. `messages` starts at absolute
     # message `offset` in this session's conversation, so the list on disk starts at
     # `offset` plus whatever the trim just dropped — and that is the number a rewind needs
     # to turn the manifest's absolute counts into positions in the list it will hold.
     offset = count(opts, :offset) + (length(messages) - length(trimmed))
+    digest = digest(encoded)
 
     payload = %{
       "version" => @version,
+      "value_encoding" => "ouroboros-tagged-v1",
       "digest" => digest,
       "offset" => offset,
       "rewind_floor" => max(count(opts, :rewind_floor), offset),
-      "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "messages" => encoded
+      # Epoch retries must reproduce byte-for-byte payloads. The wall clock is operational
+      # metadata, not conversation authority, so supervised durable writes use a fixed
+      # spelling unless their caller explicitly supplies a stable value.
+      "updated_at" => updated_at(opts),
+      "messages" => encoded,
+      "plan" => Keyword.get(opts, :plan),
+      "plan_digest" => digest(Keyword.get(opts, :plan))
     }
 
-    with {:ok, json} <- encode_json(payload),
-         temporary =
-           path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false),
-         :ok <- File.write(temporary, Ouroboros.Audit.Content.encode(json), [:binary, :sync]),
-         :ok <- File.chmod(temporary, 0o600),
-         :ok <- File.rename(temporary, path) do
-      {:ok, digest}
-    else
-      {:error, reason} -> {:error, {:checkpoint_write_failed, reason}}
+    with {:ok, json} <- encode_json(payload) do
+      published_bytes = Content.encode(json)
+
+      case Keyword.get(opts, :epoch_server) do
+        nil -> legacy_write(path, published_bytes, digest)
+        server -> epoch_write(path, published_bytes, digest, server, opts)
+      end
     end
   end
+
+  defp updated_at(opts) do
+    case Keyword.fetch(opts, :updated_at) do
+      {:ok, value} when is_binary(value) ->
+        value
+
+      {:ok, _invalid} ->
+        "1970-01-01T00:00:00Z"
+
+      :error ->
+        if Keyword.get(opts, :epoch_server),
+          do: "1970-01-01T00:00:00Z",
+          else: DateTime.utc_now() |> DateTime.to_iso8601()
+    end
+  end
+
+  defp legacy_write(path, published_bytes, conversation_digest) do
+    temporary = temporary_path(path)
+
+    result =
+      with :ok <- File.write(temporary, published_bytes, [:binary, :sync]),
+           :ok <- File.chmod(temporary, 0o600),
+           :ok <- File.rename(temporary, path) do
+        {:ok, conversation_digest}
+      else
+        {:error, reason} -> {:error, {:checkpoint_write_failed, reason}}
+      end
+
+    if match?({:error, _}, result), do: File.rm(temporary)
+    result
+  end
+
+  defp epoch_write(path, published_bytes, conversation_digest, server, opts) do
+    case Keyword.fetch(opts, :operation_identity) do
+      {:ok, identity} when not is_nil(identity) ->
+        write_id = epoch_write_id(path, identity)
+        payload_digest = sha256(published_bytes)
+
+        :global.trans({__MODULE__, write_id}, fn ->
+          reserve_publish_commit(
+            path,
+            published_bytes,
+            conversation_digest,
+            server,
+            write_id,
+            payload_digest
+          )
+        end)
+
+      _ ->
+        {:error, :checkpoint_operation_identity_required}
+    end
+  end
+
+  defp reserve_publish_commit(path, bytes, conversation_digest, server, write_id, digest) do
+    with {:ok, existing} <- epoch_reservation(server, write_id) do
+      case existing do
+        nil ->
+          with {:ok, reservation} <- epoch_reserve(server, write_id, digest) do
+            publish_reserved(path, bytes, conversation_digest, server, reservation)
+          end
+
+        {:committed, reservation} ->
+          reconcile_committed(path, conversation_digest, reservation)
+
+        reservation ->
+          reconcile_reserved(path, conversation_digest, server, reservation)
+      end
+    end
+  end
+
+  defp reconcile_committed(path, conversation_digest, reservation) do
+    case observe_payload_digest(path, reservation.payload_digest) do
+      :exact -> {:ok, conversation_digest}
+      :absent -> {:error, :checkpoint_committed_payload_absent}
+      :different -> {:error, :checkpoint_payload_outcome_unknown}
+      {:error, reason} -> {:error, {:checkpoint_payload_observation_failed, reason}}
+    end
+  end
+
+  defp publish_reserved(path, bytes, conversation_digest, server, reservation) do
+    temporary = temporary_path(path)
+
+    publication =
+      with :ok <- File.write(temporary, bytes, [:binary, :sync]),
+           :ok <- File.chmod(temporary, 0o600),
+           :ok <- File.rename(temporary, path) do
+        :ok
+      end
+
+    if publication != :ok, do: File.rm(temporary)
+
+    case publication do
+      :ok -> commit_reserved(server, reservation, {:ok, conversation_digest})
+      {:error, reason} -> reconcile_failed_publication(path, bytes, server, reservation, reason)
+    end
+  end
+
+  # Reconciliation is deliberately observation-only. In particular, an old pending
+  # reservation never causes another rename, even when its requested bytes are available.
+  defp reconcile_reserved(path, conversation_digest, server, reservation) do
+    case observe_payload_digest(path, reservation.payload_digest) do
+      :exact -> commit_reserved(server, reservation, {:ok, conversation_digest})
+      :absent -> abort_reserved(server, reservation, :checkpoint_payload_absent)
+      :different -> {:error, :checkpoint_payload_outcome_unknown}
+      {:error, reason} -> {:error, {:checkpoint_payload_observation_failed, reason}}
+    end
+  end
+
+  defp reconcile_failed_publication(path, bytes, server, reservation, publish_reason) do
+    case observe_payload(path, bytes) do
+      :exact ->
+        commit_reserved(server, reservation, {:error, {:checkpoint_write_failed, publish_reason}})
+
+      :absent ->
+        abort_reserved(server, reservation, {:checkpoint_write_failed, publish_reason})
+
+      :different ->
+        {:error, :checkpoint_payload_outcome_unknown}
+
+      {:error, reason} ->
+        {:error, {:checkpoint_payload_observation_failed, reason}}
+    end
+  end
+
+  defp commit_reserved(server, reservation, success) do
+    case epoch_call(fn -> Epoch.commit(reservation, server) end) do
+      {:ok, :ok} -> success
+      {:ok, {:error, reason}} -> {:error, {:maintenance_epoch_commit_failed, reason}}
+      {:ok, other} -> {:error, {:invalid_epoch_response, other}}
+      {:uncertain, reason} -> {:error, {:maintenance_epoch_commit_outcome_unknown, reason}}
+    end
+  end
+
+  defp abort_reserved(server, reservation, result) do
+    case epoch_call(fn -> Epoch.abort(reservation, :payload_absence_confirmed, server) end) do
+      {:ok, :ok} -> {:error, result}
+      {:ok, {:error, reason}} -> {:error, {:maintenance_epoch_abort_failed, reason}}
+      {:ok, other} -> {:error, {:invalid_epoch_response, other}}
+      {:uncertain, reason} -> {:error, {:maintenance_epoch_abort_outcome_unknown, reason}}
+    end
+  end
+
+  defp epoch_reserve(server, write_id, digest) do
+    case epoch_call(fn -> Epoch.reserve(write_id, digest, server) end) do
+      {:ok, {:ok, reservation}} -> {:ok, reservation}
+      {:ok, {:error, reason}} -> {:error, {:maintenance_epoch, reason}}
+      {:ok, other} -> {:error, {:invalid_epoch_response, other}}
+      {:uncertain, reason} -> {:error, {:maintenance_epoch_reserve_outcome_unknown, reason}}
+    end
+  end
+
+  defp epoch_reservation(server, write_id) do
+    case epoch_call(fn -> Epoch.observe(server) end) do
+      {:ok, observation} when is_map(observation) ->
+        matches =
+          for status <- [:pending, :committed, :aborted],
+              reservation <- Map.get(observation, status, []),
+              reservation.write_id == write_id,
+              do: {status, Map.delete(reservation, :status)}
+
+        case matches do
+          [] -> {:ok, nil}
+          [{:pending, reservation}] -> {:ok, reservation}
+          [{:committed, reservation}] -> {:ok, {:committed, reservation}}
+          [{status, _reservation}] -> {:error, {:checkpoint_operation_already_settled, status}}
+          _ -> {:error, :invalid_epoch_observation}
+        end
+
+      {:ok, _other} ->
+        {:error, :invalid_epoch_observation}
+
+      {:uncertain, reason} ->
+        {:error, {:maintenance_epoch_observation_unavailable, reason}}
+    end
+  end
+
+  defp observe_payload(path, expected) do
+    case File.read(path) do
+      {:ok, ^expected} -> :exact
+      {:ok, _other} -> :different
+      {:error, :enoent} -> :absent
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp observe_payload_digest(path, expected_digest) do
+    case File.read(path) do
+      {:ok, bytes} -> if sha256(bytes) == expected_digest, do: :exact, else: :different
+      {:error, :enoent} -> :absent
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp epoch_call(fun) do
+    {:ok, fun.()}
+  catch
+    :exit, reason -> {:uncertain, reason}
+  end
+
+  defp epoch_write_id(path, operation_identity) do
+    identity = :erlang.term_to_binary({path, operation_identity}, [:deterministic])
+    "native-checkpoint/v1/" <> sha256(identity)
+  end
+
+  defp temporary_path(path),
+    do: path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+  defp sha256(bytes),
+    do: bytes |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
 
   @doc """
   The digest `write/3` would compute for a message list, without writing anything.
@@ -168,17 +393,58 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   """
   @spec load(String.t()) :: {:ok, conversation()} | {:error, term()}
   def load(path) do
+    with {:ok, snapshot} <- snapshot(path), do: {:ok, Map.delete(snapshot, :digest)}
+  end
+
+  @doc "Loads one checkpoint with the verified digest that covers its retained messages."
+  def snapshot(path) do
     with {:ok, json} <- read_file(path),
          {:ok, payload} <- decode_json(json),
          :ok <- verify_version(payload),
          {:ok, encoded} <- fetch_messages(payload),
-         :ok <- verify_digest(payload, encoded) do
-      messages = Enum.map(encoded, &decode/1)
+         :ok <- verify_digest(payload, encoded),
+         :ok <- verify_plan(payload) do
+      messages = encoded |> decode_values(payload) |> Enum.map(&decode/1)
       {offset, floor} = position(payload, path, length(messages))
 
-      {:ok, %{messages: messages, offset: offset, rewind_floor: floor}}
+      {:ok,
+       %{
+         messages: messages,
+         offset: offset,
+         rewind_floor: floor,
+         plan: authenticated_plan(payload),
+         digest: Map.fetch!(payload, "digest")
+       }}
     end
   end
+
+  @doc "Seeds a fresh native identity from a digest-bound source without modifying it."
+  def import(source_id, target_id, expected_digest) do
+    with :ok <- Paths.validate_session_id(source_id),
+         :ok <- Paths.validate_session_id(target_id),
+         :ok <- distinct_ids(source_id, target_id),
+         {:ok, source, _} <- locate(source_id),
+         {:ok, snapshot} <- snapshot(source),
+         :ok <- expected_digest(snapshot, expected_digest),
+         {:ok, target, _} <- locate(target_id),
+         {:ok, digest} <-
+           write(target, snapshot.messages,
+             event_limit: max(length(snapshot.messages), 1),
+             offset: snapshot.offset,
+             rewind_floor: snapshot.rewind_floor,
+             plan: snapshot.plan
+           ) do
+      {:ok, %{digest: digest, retained: length(snapshot.messages), offset: snapshot.offset}}
+    else
+      {:error, :no_checkpoint} -> {:error, :native_checkpoint_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp distinct_ids(id, id), do: {:error, :same_import_identity}
+  defp distinct_ids(_source, _target), do: :ok
+  defp expected_digest(%{digest: digest}, digest), do: :ok
+  defp expected_digest(_snapshot, _digest), do: {:error, :checkpoint_digest_changed}
 
   @doc "The number of messages a checkpoint keeps, honouring a session's `event_limit`."
   @spec limit(map() | keyword()) :: pos_integer()
@@ -228,12 +494,17 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     _error -> {:error, :checkpoint_corrupt}
   end
 
-  defp verify_version(%{"version" => version}) when version in [1, @version], do: :ok
+  defp verify_version(%{"version" => version}) when version in [1, 2, @version], do: :ok
   defp verify_version(%{"version" => other}), do: {:error, {:checkpoint_version, other}}
   defp verify_version(_payload), do: {:error, :checkpoint_corrupt}
 
   defp fetch_messages(%{"messages" => messages}) when is_list(messages), do: {:ok, messages}
   defp fetch_messages(_payload), do: {:error, :checkpoint_corrupt}
+
+  defp decode_values(encoded, %{"value_encoding" => "ouroboros-tagged-v1"}),
+    do: Journal.unjsonable(encoded)
+
+  defp decode_values(encoded, _legacy_payload), do: encoded
 
   # `"offset"` present — even as 0 — is a file this runtime wrote. Absent is a file
   # written before the field existed: the sibling manifest still counted messages from
@@ -281,6 +552,21 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   end
 
   defp verify_digest(_payload, _encoded), do: {:error, :checkpoint_corrupt}
+
+  defp verify_plan(%{"version" => 3, "plan_digest" => expected} = payload) do
+    if expected == digest(Map.get(payload, "plan")),
+      do: :ok,
+      else: {:error, :checkpoint_plan_digest_mismatch}
+  end
+
+  defp verify_plan(%{"version" => version}) when version in [1, 2], do: :ok
+  defp verify_plan(_payload), do: {:error, :checkpoint_corrupt}
+
+  # Legacy checkpoints authenticate only messages. Their plan field may be retained for
+  # display by old readers, but import/reopen must never promote it into v3 authenticated
+  # campaign state merely by computing a new checksum over attacker-chosen bytes.
+  defp authenticated_plan(%{"version" => 3} = payload), do: Map.get(payload, "plan")
+  defp authenticated_plan(_legacy), do: nil
 
   # Hash the canonical JSON of the message list, not the whole payload: the payload
   # carries a timestamp, and a digest over it would change without the conversation

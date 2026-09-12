@@ -1872,16 +1872,31 @@ defmodule Ouroboros.ClusterTest do
       assert :erpc.call(builder, Cluster, :role, []) == :builder
       assert is_pid(:erpc.call(builder, Process, :whereis, [Ouroboros.Supervisor]))
       assert is_pid(:erpc.call(builder, Process, :whereis, [Ouroboros.Cluster]))
+      assert is_pid(:erpc.call(builder, Process, :whereis, [Ouroboros.Storage.ETS]))
+
+      assert is_pid(
+               :erpc.call(builder, Process, :whereis, [Ouroboros.Provider.Native.Exec.Registry])
+             )
+
+      assert is_pid(:erpc.call(builder, Process, :whereis, [Ouroboros.Wasm.Supervisor]))
 
       # None of the planes a core node owns exist here. A compromised builder has a
       # compiler on it, not a fleet's sessions, journals, or effect authority.
       for name <- [
             Ouroboros.Mesh.Supervisor,
             Ouroboros.Agent.EffectLedger,
+            Ouroboros.Audit.Store,
             Ouroboros.Mesh.Directory,
             Ouroboros.Interactive.Store,
             Ouroboros.Control.Grants,
-            Ouroboros.Upgrade.Rollout.Registry
+            Ouroboros.Control.Permissions,
+            Ouroboros.Provider.Native.Registry,
+            Ouroboros.SessionTaskSupervisor,
+            Ouroboros.SessionTransportSupervisor,
+            Ouroboros.Interactive.TaskSupervisor,
+            Ouroboros.Upgrade.Rollout.Registry,
+            Ouroboros.Gateway,
+            Ouroboros.Provider.Native.Mcp.Supervisor
           ] do
         assert :erpc.call(builder, Process, :whereis, [name]) == nil,
                "#{inspect(name)} must not run on a :builder node"

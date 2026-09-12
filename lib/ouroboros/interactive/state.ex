@@ -22,12 +22,19 @@ defmodule Ouroboros.Interactive.State do
   # `handed_off_from` are relationships between two sessions, not something the provider
   # is ever told; putting either in `options` would send it to `State.request/1` and on to
   # a harness that never asked.
-  @struct_options [:forked_from, :handed_off_from]
+  @struct_options [:forked_from, :handed_off_from, :imported_from]
 
   # What `configure/2` may write into a session's durable options. Deliberately a literal
   # rather than a read of `Ouroboros.Provider`: this is the storage rule, and it holds
   # even if a capability check somewhere else is ever wrong.
-  @configurable_options [:approval_mode, :sandbox_mode, :model, :reasoning_effort, :plan]
+  @configurable_options [
+    :approval_mode,
+    :sandbox_mode,
+    :model,
+    :reasoning_effort,
+    :plan,
+    :unknown_compact_tokens
+  ]
 
   # A session title is drawn into one picker row on every list, so it is bounded where it
   # is written rather than by every client that draws it. An auto-title is shorter still:
@@ -62,6 +69,10 @@ defmodule Ouroboros.Interactive.State do
                 # because they are different claims: a fork carries the parent's
                 # conversation, a handoff carries a curated packet *about* it.
                 :handed_off_from,
+                # Durable public reservation written before native handoff work begins.
+                :handoff_intent,
+                # A recovery fact, not ancestry: context came from this native checkpoint.
+                :imported_from,
                 runtime_cursor: 0,
                 format_version: 2,
                 title_source: nil,
@@ -85,7 +96,8 @@ defmodule Ouroboros.Interactive.State do
               ]
 
   @type status ::
-          :starting
+          :preparing
+          | :starting
           | :idle
           | :running
           | :awaiting_approval
@@ -145,6 +157,7 @@ defmodule Ouroboros.Interactive.State do
           title_source: title_source(),
           forked_from: String.t() | nil,
           handed_off_from: String.t() | nil,
+          handoff_intent: map() | nil,
           forks: non_neg_integer(),
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
@@ -196,7 +209,8 @@ defmodule Ouroboros.Interactive.State do
     :provider_options,
     :approval_mode,
     :sandbox_mode,
-    :runtime_exposure
+    :runtime_exposure,
+    :unknown_compact_tokens
   ]
 
   # Values for these adapter options are reproducible execution policy, not
@@ -262,6 +276,7 @@ defmodule Ouroboros.Interactive.State do
            # from is not something a fork can be talked out of afterwards.
            forked_from: Keyword.get(opts, :forked_from),
            handed_off_from: Keyword.get(opts, :handed_off_from),
+           imported_from: Keyword.get(opts, :imported_from),
            options:
              base.options
              |> Map.merge(Map.new(Keyword.take(opts, @session_options)))
@@ -471,9 +486,25 @@ defmodule Ouroboros.Interactive.State do
       cwd: state.workspace,
       metadata: metadata
     })
+    |> move_unknown_compact_tokens()
     |> clear_applied_fork(state.provider_session_id)
     |> put_provider_session_id(state.provider_session_id)
     |> reject_nil_values()
+  end
+
+  defp move_unknown_compact_tokens(request) do
+    case Map.pop(request, :unknown_compact_tokens) do
+      {nil, request} ->
+        request
+
+      {budget, request} ->
+        Map.update(
+          request,
+          :provider_options,
+          %{unknown_compact_tokens: budget},
+          &Map.put(&1 || %{}, :unknown_compact_tokens, budget)
+        )
+    end
   end
 
   # Fork flags describe a one-time start. Once the child has its own conversation
@@ -809,6 +840,7 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:title_source, title_source(state))
     |> Map.put(:forked_from, forked_from(state))
     |> Map.put(:handed_off_from, handed_off_from(state))
+    |> Map.put(:imported_from, Map.get(state, :imported_from))
     |> Map.put(:forks, forks(state))
   end
 
@@ -943,6 +975,7 @@ defmodule Ouroboros.Interactive.State do
 
   @doc false
   @spec valid?(term()) :: boolean()
+  def valid?(%__MODULE__{status: :preparing} = state), do: storable?(state)
   def valid?(state), do: loadable?(state) and requestable?(state)
 
   @doc """
@@ -964,6 +997,9 @@ defmodule Ouroboros.Interactive.State do
     system_prompt = Map.get(options, :system_prompt)
 
     cond do
+      state.status == :preparing ->
+        :handoff_preparing
+
       state.provider != :native ->
         {:legacy_transport_unavailable, state.provider}
 
@@ -1019,7 +1055,8 @@ defmodule Ouroboros.Interactive.State do
   @doc "Returns whether a session may be written to durable storage."
   @spec storable?(term()) :: boolean()
   def storable?(%__MODULE__{} = state),
-    do: loadable?(state) and (terminal?(state) or requestable?(state))
+    do:
+      loadable?(state) and (terminal?(state) or state.status == :preparing or requestable?(state))
 
   def storable?(_state), do: false
 
@@ -1040,7 +1077,7 @@ defmodule Ouroboros.Interactive.State do
       is_binary(state.workspace) and state.workspace != "" and
       state.workspace_mode in [:shared_read, :exclusive] and
       state.status in (@terminal_statuses ++
-                         [:starting, :idle, :running, :awaiting_approval, :closing]) and
+                         [:preparing, :starting, :idle, :running, :awaiting_approval, :closing]) and
       is_binary(state.created_at) and is_binary(state.updated_at) and
       optional_id?(state.workspace_lease_id) and optional_id?(state.runtime_id) and
       optional_id?(state.runtime_generation) and state.format_version == 2 and
@@ -1049,6 +1086,8 @@ defmodule Ouroboros.Interactive.State do
       state.runtime_cursor <= state.cursor and
       optional_id?(state.provider_session_id) and valid_title?(state) and
       optional_id?(forked_from(state)) and optional_id?(handed_off_from(state)) and
+      serializable?(Map.get(state, :handoff_intent)) and
+      valid_import?(Map.get(state, :imported_from)) and
       is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
@@ -1084,6 +1123,18 @@ defmodule Ouroboros.Interactive.State do
   defp validate_forked_from(parent) do
     if valid_id?(parent), do: :ok, else: {:error, {:invalid_parent_session, parent}}
   end
+
+  defp valid_import?(nil), do: true
+
+  defp valid_import?(value) when is_map(value) do
+    is_binary(Map.get(value, :source_provider_session_id)) and
+      is_binary(Map.get(value, :source_digest)) and
+      is_binary(Map.get(value, :fingerprint)) and
+      is_integer(Map.get(value, :retained_messages)) and
+      is_integer(Map.get(value, :omitted_prefix))
+  end
+
+  defp valid_import?(_), do: false
 
   defp valid_worktree?(state) do
     is_boolean(Map.get(state, :worktree_requested, false)) and
@@ -1122,6 +1173,7 @@ defmodule Ouroboros.Interactive.State do
           :approval_mode,
           :sandbox_mode,
           :runtime_exposure,
+          :unknown_compact_tokens,
           # Accepted as keys here so `base/2` can refuse them by name rather than as an
           # unknown option: all three are credentials-adjacent and none belongs in a
           # durable checkpoint, and a caller told "unknown option" would look for a typo.

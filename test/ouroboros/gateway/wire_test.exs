@@ -3,6 +3,7 @@ defmodule Ouroboros.Gateway.WireTest do
 
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
+  alias Ouroboros.Interactive.State, as: InteractiveState
 
   defmodule Sample do
     @moduledoc false
@@ -137,6 +138,32 @@ defmodule Ouroboros.Gateway.WireTest do
 
       assert length(encoded) < 60_000
       assert List.last(encoded) == %{"_truncated" => true}
+    end
+
+    test "a long interactive transcript cannot consume its continuation cursor" do
+      state = %InteractiveState{
+        id: "long-session",
+        node: node(),
+        provider: :native,
+        workspace: "/workspace",
+        workspace_mode: :exclusive,
+        status: :running,
+        created_at: @timestamp,
+        updated_at: @timestamp,
+        cursor: 60_000,
+        event_floor: 10_000,
+        events: Enum.map(1..60_000, &%{sequence: &1, payload: %{text: "event"}}),
+        options: %{}
+      }
+
+      encoded = roundtrip(state)
+
+      assert encoded["_truncated"] == true
+      assert encoded["id"] == "long-session"
+      assert encoded["provider"] == "native"
+      assert encoded["status"] == "running"
+      assert encoded["cursor"] == 60_000
+      assert encoded["event_floor"] == 10_000
     end
 
     test "the budget is per encode, so one big payload does not shrink the next" do

@@ -5076,13 +5076,19 @@ mod tests {
             while !stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_millis(250)))
-                            .unwrap();
-                        let mut request = [0_u8; 3];
-                        if stream.read_exact(&mut request).is_ok() && request == [0, 1, 110] {
-                            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
-                        }
+                        // Port-availability and ownership checks can overlap. A bare TCP
+                        // reachability probe sends no NAMES request; handling it inline
+                        // would hold the only accept loop for the read timeout and make a
+                        // simultaneous real protocol probe observe a reset or timeout.
+                        thread::spawn(move || {
+                            stream
+                                .set_read_timeout(Some(Duration::from_millis(250)))
+                                .unwrap();
+                            let mut request = [0_u8; 3];
+                            if stream.read_exact(&mut request).is_ok() && request == [0, 1, 110] {
+                                stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
+                            }
+                        });
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -5824,10 +5830,15 @@ mod tests {
         let historical_metadata = fs::symlink_metadata(&historical_program).unwrap();
         fs::remove_file(&historical_program).unwrap();
 
+        let listener_stopped = data.join("fake-epmd-stopped");
         let current_program = data.join("current-release-epmd");
         write_private_new(
             &current_program,
-            format!("#!/bin/sh\nkill -TERM {pid}\n").as_bytes(),
+            format!(
+                "#!/bin/sh\nkill -TERM {pid}\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+                listener_stopped.display()
+            )
+            .as_bytes(),
             "test EPMD control",
         )
         .unwrap();
@@ -5836,11 +5847,26 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let server = fake_epmd(profile.epmd_port, stop.clone());
         let stop_after_pid = stop.clone();
+        let stopped_after_pid = listener_stopped.clone();
+        let stopped_port = profile.epmd_port;
         let listener_watcher = thread::spawn(move || {
             while runtime::pid_alive(pid) {
                 thread::sleep(Duration::from_millis(5));
             }
             stop_after_pid.store(true, Ordering::Relaxed);
+            loop {
+                match TcpListener::bind((Ipv4Addr::LOCALHOST, stopped_port)) {
+                    Ok(listener) => {
+                        drop(listener);
+                        fs::write(&stopped_after_pid, b"stopped").unwrap();
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("checking fake EPMD shutdown failed: {error}"),
+                }
+            }
         });
 
         let owner = EpmdOwner {
@@ -5909,10 +5935,15 @@ mod tests {
         drop(lock);
         assert!(epmd_lock_held(&lock_path, lock_metadata.dev(), lock_metadata.ino()).unwrap());
 
+        let listener_stopped = data.join("fake-epmd-stopped");
         let current_program = data.join("current-release-epmd");
         write_private_new(
             &current_program,
-            format!("#!/bin/sh\nkill -TERM {pid}\n").as_bytes(),
+            format!(
+                "#!/bin/sh\nkill -TERM {pid}\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+                listener_stopped.display()
+            )
+            .as_bytes(),
             "test EPMD control",
         )
         .unwrap();
@@ -5923,11 +5954,26 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let server = fake_epmd(profile.epmd_port, stop.clone());
         let stop_after_pid = stop.clone();
+        let stopped_after_pid = listener_stopped.clone();
+        let stopped_port = profile.epmd_port;
         let listener_watcher = thread::spawn(move || {
             while runtime::pid_alive(pid) {
                 thread::sleep(Duration::from_millis(5));
             }
             stop_after_pid.store(true, Ordering::Relaxed);
+            loop {
+                match TcpListener::bind((Ipv4Addr::LOCALHOST, stopped_port)) {
+                    Ok(listener) => {
+                        drop(listener);
+                        fs::write(&stopped_after_pid, b"stopped").unwrap();
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("checking fake EPMD shutdown failed: {error}"),
+                }
+            }
         });
 
         let owner = EpmdOwner {

@@ -50,12 +50,9 @@ defmodule Ouroboros.Wasm.SkewTest do
   # gates, twice over.
   @moduletag timeout: 180_000
 
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
+  @guest Ouroboros.Wasm.LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
   @signer "wasm-skew-test-key"
-  @skew_dir (case System.get_env("OURO_WASM_SKEW_DIR") do
-               dir when is_binary(dir) and dir != "" -> dir
-               _unset -> Path.expand("../../_build/wasm-skew", __DIR__)
-             end)
+  @skew_dir Ouroboros.Wasm.LiveFixture.skew_root(Path.expand("../../_build/wasm-skew", __DIR__))
 
   @records ["triple-skew.json", "version-skew.json"]
 

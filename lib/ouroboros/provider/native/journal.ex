@@ -75,10 +75,12 @@ defmodule Ouroboros.Provider.Native.Journal do
   require Logger
 
   alias Ouroboros.Provider.Native.Checkpoint
+  alias Ouroboros.Maintenance.Epoch
 
   @filename "journal.ndjson"
   @gap_suffix ".gap"
   @journal_version 1
+  @value_encoding "ouroboros-tagged-v1"
 
   # The same published seed as `ledger.export`'s chain: the point of a chain is that a
   # reader can recompute it from what it was handed, so the start is a constant rather
@@ -97,6 +99,9 @@ defmodule Ouroboros.Provider.Native.Journal do
     :path,
     :session_dir,
     :audit_stream,
+    :epoch_server,
+    :epoch_commit,
+    :authority_error,
     seq: 0,
     prev: @seed,
     bytes: 0,
@@ -144,14 +149,19 @@ defmodule Ouroboros.Provider.Native.Journal do
   end
 
   def open(session_dir, opts) when is_binary(session_dir) do
-    %__MODULE__{
-      path: path(session_dir),
-      session_dir: session_dir,
-      audit_stream:
-        if(Ouroboros.Audit.enabled?(), do: Ouroboros.Audit.Store.stream_id(session_dir)),
-      budget_bytes: budget_bytes(opts)
-    }
-    |> sync()
+    journal =
+      %__MODULE__{
+        path: path(session_dir),
+        session_dir: session_dir,
+        audit_stream:
+          if(Ouroboros.Audit.enabled?(), do: Ouroboros.Audit.Store.stream_id(session_dir)),
+        epoch_server: Keyword.get(opts, :epoch_server),
+        epoch_commit: Keyword.get(opts, :epoch_commit, &Epoch.commit/2),
+        budget_bytes: budget_bytes(opts)
+      }
+      |> sync()
+
+    reconcile_pending_on_open(journal)
   end
 
   @doc """
@@ -261,9 +271,9 @@ defmodule Ouroboros.Provider.Native.Journal do
 
   defp write_record(journal, kind, fields) do
     record = build(journal, kind, fields)
-    line = canonical_json(record) <> "\n"
+    line = canonical_wire(record) <> "\n"
 
-    case append_line(journal.path, line) do
+    case append_record(journal, line, kind) do
       :ok ->
         {:ok,
          %{
@@ -278,6 +288,168 @@ defmodule Ouroboros.Provider.Native.Journal do
     end
   end
 
+  defp append_record(%{epoch_server: nil} = journal, line, _kind),
+    do: append_line(journal.path, line)
+
+  defp append_record(journal, line, kind) do
+    path_prefix = epoch_path_prefix(journal.path)
+
+    write_id =
+      path_prefix <>
+        Integer.to_string(journal.seq + 1) <>
+        "/" <>
+        sha256(
+          :erlang.term_to_binary({journal.path, journal.seq + 1, journal.prev, kind}, [
+            :deterministic
+          ])
+        )
+
+    payload_digest = sha256(line)
+
+    with observation when is_map(observation) <-
+           epoch_call(fn -> Epoch.observe(journal.epoch_server) end),
+         {:ok, existing} <- journal_reservation(observation, write_id) do
+      case existing do
+        nil ->
+          with {:ok, reservation} <-
+                 epoch_call(fn ->
+                   Epoch.reserve(write_id, payload_digest, journal.epoch_server)
+                 end) do
+            case append_line(journal.path, line) do
+              :ok -> epoch_commit(journal, reservation)
+              {:error, reason} -> reconcile_journal(journal, reservation, reason)
+            end
+          end
+
+        reservation ->
+          reconcile_journal(journal, reservation, :recovered_pending)
+      end
+    else
+      {:error, reason} -> {:error, {:maintenance_epoch, reason}}
+      _ -> {:error, :invalid_epoch_observation}
+    end
+  end
+
+  defp reconcile_pending_on_open(%{epoch_server: nil} = journal), do: journal
+
+  defp reconcile_pending_on_open(journal) do
+    with observation when is_map(observation) <-
+           epoch_call(fn -> Epoch.observe(journal.epoch_server) end) do
+      pending =
+        Enum.filter(
+          observation.pending,
+          &String.starts_with?(&1.write_id, epoch_path_prefix(journal.path))
+        )
+        |> Enum.map(&Map.delete(&1, :status))
+
+      Enum.reduce_while(pending, journal, fn reservation, current ->
+        case reconcile_pending_on_open(current, reservation) do
+          :ok -> {:cont, current}
+          {:error, reason} -> {:halt, authority_failed(current, reason)}
+        end
+      end)
+    else
+      {:error, reason} -> authority_failed(journal, {:maintenance_epoch_unavailable, reason})
+      _ -> authority_failed(journal, :invalid_epoch_observation)
+    end
+  end
+
+  defp reconcile_pending_on_open(journal, reservation) do
+    intended_seq = reservation.write_id |> String.split("/") |> Enum.at(-2)
+
+    case {Integer.parse(intended_seq || ""), last_line_digest(journal.path)} do
+      {{_seq, ""}, {:ok, digest}} when digest == reservation.payload_digest ->
+        epoch_commit(journal, reservation)
+
+      {{seq, ""}, _observation} when journal.seq < seq ->
+        epoch_abort(journal.epoch_server, reservation)
+
+      {_seq, {:error, :enoent}} ->
+        epoch_abort(journal.epoch_server, reservation)
+
+      _ ->
+        {:error, :journal_publication_outcome_unknown}
+    end
+  end
+
+  defp authority_failed(journal, reason),
+    do: %{journal | authority_error: reason, degraded?: true, synced?: false}
+
+  defp epoch_path_prefix(path),
+    do: "native-journal/v1/" <> binary_part(sha256(path), 0, 16) <> "/"
+
+  @doc false
+  def epoch_write_prefix(path), do: epoch_path_prefix(path)
+
+  defp journal_reservation(observation, write_id) do
+    matches =
+      for status <- [:pending, :committed, :aborted],
+          item <- Map.get(observation, status, []),
+          item.write_id == write_id,
+          do: {status, Map.delete(item, :status)}
+
+    case matches do
+      [] -> {:ok, nil}
+      [{:pending, item}] -> {:ok, item}
+      [{status, _}] -> {:error, {:journal_operation_already_settled, status}}
+      _ -> {:error, :invalid_epoch_observation}
+    end
+  end
+
+  defp reconcile_journal(journal, reservation, publish_reason) do
+    case last_line_digest(journal.path) do
+      {:ok, digest} when digest == reservation.payload_digest ->
+        epoch_commit(journal, reservation)
+
+      {:ok, _different} ->
+        {:error, {:journal_publication_outcome_unknown, publish_reason}}
+
+      {:error, :enoent} ->
+        case epoch_abort(journal.epoch_server, reservation) do
+          :ok -> {:error, publish_reason}
+          {:error, _} = error -> error
+        end
+
+      {:error, reason} ->
+        {:error, {:journal_publication_observation_failed, reason}}
+    end
+  end
+
+  defp last_line_digest(path) do
+    case File.read(path) do
+      {:ok, bytes} ->
+        case bytes |> :binary.split("\n", [:global]) |> Enum.reject(&(&1 == "")) |> List.last() do
+          nil -> {:error, :enoent}
+          line -> {:ok, sha256(line <> "\n")}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp epoch_commit(journal, reservation) do
+    case epoch_call(fn -> journal.epoch_commit.(reservation, journal.epoch_server) end) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:maintenance_epoch_commit_failed, reason}}
+    end
+  end
+
+  defp epoch_abort(server, reservation) do
+    case epoch_call(fn -> Epoch.abort(reservation, :payload_absence_confirmed, server) end) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:maintenance_epoch_abort_failed, reason}}
+    end
+  end
+
+  defp epoch_call(fun) do
+    fun.()
+  catch
+    :exit, reason -> {:error, {:authority_unavailable, reason}}
+  end
+
+  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
   defp build(journal, kind, fields) do
     seq = journal.seq + 1
 
@@ -287,7 +459,8 @@ defmodule Ouroboros.Provider.Native.Journal do
       "seq" => seq,
       "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
       "turn_id" => turn_id(fields),
-      "kind" => kind
+      "kind" => kind,
+      "value_encoding" => @value_encoding
     })
     |> seal(journal.prev)
   end
@@ -295,9 +468,11 @@ defmodule Ouroboros.Provider.Native.Journal do
   # `hash` covers the record and the chain, and covers neither of itself: `prev` is
   # hashed as the prefix rather than as a field, exactly as `Encode.chain/1` does it.
   defp seal(body, prev) do
+    body = jsonable(body)
+
     hash =
       :sha256
-      |> :crypto.hash([prev, canonical_json(body)])
+      |> :crypto.hash([prev, canonical_wire(body)])
       |> Base.encode16(case: :lower)
 
     body |> Map.put("prev", prev) |> Map.put("hash", hash)
@@ -309,7 +484,7 @@ defmodule Ouroboros.Provider.Native.Journal do
 
   defp spill(fields, journal) do
     fields
-    |> Map.new(fn {key, value} -> {to_string(key), jsonable(value)} end)
+    |> Map.new(fn {key, value} -> {to_string(key), value} end)
     |> Map.drop(["seq", "at", "kind", "prev", "hash"])
     |> Map.new(fn {key, value} -> {key, spill_field(key, value, journal)} end)
   end
@@ -436,10 +611,10 @@ defmodule Ouroboros.Provider.Native.Journal do
       {lines, {prev, seq}} =
         Enum.map_reduce(kept, {head["hash"], dropped_through}, fn record, {prev, _seq} ->
           rechained = record |> Map.drop(["prev", "hash"]) |> seal(prev)
-          {canonical_json(rechained) <> "\n", {rechained["hash"], seq_of(rechained)}}
+          {canonical_wire(rechained) <> "\n", {rechained["hash"], seq_of(rechained)}}
         end)
 
-      contents = [canonical_json(head) <> "\n" | lines]
+      contents = [canonical_wire(head) <> "\n" | lines]
 
       case rewrite(journal.path, contents) do
         :ok ->
@@ -461,11 +636,11 @@ defmodule Ouroboros.Provider.Native.Journal do
   # a turn's worth of bytes in place.
   defp split_turns(records, budget) do
     groups = Enum.chunk_by(records, &Map.get(&1, "turn_id"))
-    total = Enum.reduce(records, 0, &(byte_size(canonical_json(&1)) + 1 + &2))
+    total = Enum.reduce(records, 0, &(byte_size(canonical_wire(&1)) + 1 + &2))
 
     {dropped, kept, _bytes} =
       Enum.reduce(groups, {[], [], total}, fn group, {dropped, kept, bytes} ->
-        group_bytes = Enum.reduce(group, 0, &(byte_size(canonical_json(&1)) + 1 + &2))
+        group_bytes = Enum.reduce(group, 0, &(byte_size(canonical_wire(&1)) + 1 + &2))
 
         # `kept == []` keeps the drop contiguous at the head; the last group is never
         # offered, which is what "never the newest" means here.
@@ -605,7 +780,7 @@ defmodule Ouroboros.Provider.Native.Journal do
     body = Map.drop(record, ["prev", "hash"])
 
     expected =
-      :sha256 |> :crypto.hash([prev, canonical_json(body)]) |> Base.encode16(case: :lower)
+      :sha256 |> :crypto.hash([prev, canonical_wire(body)]) |> Base.encode16(case: :lower)
 
     # A truncation record restarts the chain from the seed, which is the whole point of
     # writing one: the prefix is gone and the file says so in a shape a verifier checks
@@ -719,7 +894,9 @@ defmodule Ouroboros.Provider.Native.Journal do
   reader verifies is a chain over an accident.
   """
   @spec canonical_json(term()) :: binary()
-  def canonical_json(value), do: value |> canonical() |> IO.iodata_to_binary()
+  def canonical_json(value), do: value |> jsonable() |> canonical_wire()
+
+  defp canonical_wire(value), do: value |> canonical() |> IO.iodata_to_binary()
 
   defp canonical(map) when is_map(map) and not is_struct(map) do
     inner =
@@ -752,7 +929,9 @@ defmodule Ouroboros.Provider.Native.Journal do
   """
   @spec jsonable(term()) :: term()
   def jsonable(value) when is_binary(value) do
-    if String.valid?(value), do: value, else: %{"base64" => Base.encode64(value)}
+    if String.valid?(value),
+      do: value,
+      else: %{"$ouroboros_binary" => Base.encode64(value), "bytes" => byte_size(value)}
   end
 
   def jsonable(value) when is_number(value) or is_boolean(value) or is_nil(value), do: value
@@ -763,10 +942,82 @@ defmodule Ouroboros.Provider.Native.Journal do
   def jsonable(%{__struct__: _module} = value),
     do: value |> Map.from_struct() |> jsonable()
 
-  def jsonable(value) when is_map(value),
-    do: Map.new(value, fn {key, inner} -> {to_string(key), jsonable(inner)} end)
+  def jsonable(value) when is_map(value) do
+    if reserved_tag_shape?(value) do
+      %{
+        "$ouroboros_literal_map" =>
+          value
+          |> Enum.map(fn {key, inner} -> [jsonable(key), jsonable(inner)] end)
+          |> Enum.sort_by(&canonical_json/1)
+      }
+    else
+      jsonable_map(value)
+    end
+  end
 
   def jsonable(value), do: inspect(value)
+
+  defp jsonable_map(value) do
+    entries = Enum.map(value, fn {key, inner} -> {jsonable_key(key), jsonable(inner)} end)
+
+    if Enum.all?(entries, fn {key, _inner} -> is_binary(key) and String.valid?(key) end) and
+         entries |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> length() == length(entries) do
+      Map.new(entries)
+    else
+      %{
+        "$ouroboros_map" =>
+          value
+          |> Enum.map(fn {key, inner} -> [jsonable(key), jsonable(inner)] end)
+          |> Enum.sort_by(&canonical_json/1)
+      }
+    end
+  end
+
+  @doc "Restores binary/map tags emitted by `jsonable/1`; ordinary JSON values are unchanged."
+  def unjsonable(%{"$ouroboros_binary" => encoded, "bytes" => size} = value)
+      when map_size(value) == 2 and is_binary(encoded) and is_integer(size) and size >= 0 do
+    case Base.decode64(encoded) do
+      {:ok, bytes} when byte_size(bytes) == size -> bytes
+      _ -> value
+    end
+  end
+
+  def unjsonable(%{"$ouroboros_literal_map" => entries} = value) when map_size(value) == 1 do
+    if is_list(entries) and Enum.all?(entries, &match?([_, _], &1)) do
+      Map.new(entries, fn [key, inner] -> {unjsonable(key), unjsonable(inner)} end)
+    else
+      value
+    end
+  end
+
+  def unjsonable(%{"$ouroboros_map" => entries} = value) when map_size(value) == 1 do
+    if is_list(entries) and Enum.all?(entries, &match?([_, _], &1)) do
+      Map.new(entries, fn [key, inner] -> {unjsonable(key), unjsonable(inner)} end)
+    else
+      value
+    end
+  end
+
+  def unjsonable(value) when is_map(value),
+    do: Map.new(value, fn {key, inner} -> {key, unjsonable(inner)} end)
+
+  def unjsonable(value) when is_list(value), do: Enum.map(value, &unjsonable/1)
+  def unjsonable(value), do: value
+
+  @doc false
+  def decode_record_value(%{"value_encoding" => @value_encoding}, value), do: unjsonable(value)
+  def decode_record_value(_legacy_record, value), do: value
+
+  defp jsonable_key(key) when is_binary(key), do: key
+  defp jsonable_key(key) when is_atom(key) or is_number(key), do: to_string(key)
+  defp jsonable_key(_key), do: nil
+
+  defp reserved_tag_shape?(%{"$ouroboros_binary" => _, "bytes" => _} = value),
+    do: map_size(value) == 2
+
+  defp reserved_tag_shape?(%{"$ouroboros_map" => _} = value), do: map_size(value) == 1
+  defp reserved_tag_shape?(%{"$ouroboros_literal_map" => _} = value), do: map_size(value) == 1
+  defp reserved_tag_shape?(_value), do: false
 
   defp decode(json) do
     {:ok, JSON.decode!(json)}

@@ -393,10 +393,14 @@ defmodule Ouroboros.Provider.Native.ContextTest do
       session = open(context, [done()])
       {:ok, info} = Session.info(session.handle)
 
+      assert info.context_used == nil
+      assert info.context_state == :unmeasured
+
       for key <- [
             :prefix_fingerprint,
             :context_window,
             :context_used,
+            :context_state,
             :compact_at,
             :keep_recent_tokens,
             :tools,

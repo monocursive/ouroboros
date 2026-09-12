@@ -402,9 +402,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
        "the plan-exit question, with the three answers in the runtime's own words", :interactive,
        134, :approval_requested, plan_exit_payload(), request_id: "req-plan-exit-000000000001"},
       {"event_approval_requested_sandbox_escalation",
-       "a re-run outside the sandbox, carrying the C1 pattern its remember row would " <>
-         "save — the shape every `suggested_rule` has, on the path where it matters most",
-       :interactive, 135, :approval_requested,
+       "an explicit retained-command retry in the fenced escalation profile, with a " <>
+         "separate permission subject and the whole-command at-least-once warning", :interactive,
+       135, :approval_requested,
        %{
          "kind" => "sandbox_escalation",
          "tool_call" => %{
@@ -414,7 +414,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          },
          "paths" => ["/srv/repo/target"],
          "reason" => "the command wrote outside the workspace and the sandbox stopped it",
-         "suggested_rule" => "Bash(cargo build *)"
+         "suggested_rule" => "SandboxEscalation()",
+         "retry_attempt_id" => "nretry_000000000000000000000001",
+         "sandbox_mode" => "workspace_write",
+         "effective_sandbox_mode" => "workspace_write_escalated",
+         "writable_roots" => ["/srv/repo"],
+         "protected_segments" => [".ouroboros"],
+         "network" => "unchanged; external network remains denied",
+         "at_least_once_risk" =>
+           "The whole retained command will run again; effects completed before the first failure may duplicate."
        }, request_id: "req-escalation-00000000001"},
       {"event_approval_requested_subagent",
        "a child agent's own permission, relayed whole with one key naming the asker and " <>

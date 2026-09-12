@@ -161,12 +161,19 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         type: :pos_integer,
         default: 12,
         doc: "How many model round-trips the child may take. Maximum 30."
+      ],
+      work_item_ids: [
+        type: {:list, :string},
+        default: [],
+        doc:
+          "Existing parent work-item IDs delegated to this child. Their criteria and deliverable are bound before execution."
       ]
     ]
 
   alias Ouroboros.Cluster
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Subagent
+  alias Ouroboros.Provider.Native.WorkItem
 
   @max_depth 2
   @max_concurrent 10
@@ -220,7 +227,8 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
          {:ok, tools} <- tools(input, parent),
          background? = truthy(Map.get(input, "background")),
          :ok <- background_ok(background?, tools, parent),
-         {:ok, placement} <- placement(input, parent) do
+         {:ok, placement} <- placement(input, parent),
+         {:ok, bindings} <- work_item_bindings(input, parent) do
       child_id = Paths.new_session_id()
       subscriber = subscriber(parent, background?)
 
@@ -267,7 +275,9 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         background: background?,
         depth: parent.depth + 1,
         tools: tools,
-        deadline_ms: deadline_ms(input, parent)
+        deadline_ms: requested_deadline_ms(input, parent),
+        effective_deadline_ms: effective_deadline_ms(input, parent, background?),
+        bindings: bindings
       })
     end
   end
@@ -337,6 +347,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "depth" => spec.depth,
       "max_turns" => Map.get(spec.request_attrs.provider_options, "max_iterations"),
       "deadline_ms" => spec.deadline_ms,
+      "effective_deadline_ms" => Map.get(spec, :effective_deadline_ms, spec.deadline_ms),
       "node" => Atom.to_string(child_node),
       "remote" => child_node != node()
     }
@@ -897,7 +908,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     end
   end
 
-  defp deadline_ms(input, parent) do
+  defp requested_deadline_ms(input, parent) do
     ceiling =
       positive_option(option(parent.options, "subagent_max_deadline_ms"), @max_deadline_ms)
       |> min(@absolute_deadline_ms)
@@ -908,6 +919,24 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     positive_option(Map.get(input, "deadline_ms"), default)
     |> max(@min_deadline_ms)
     |> min(ceiling)
+  end
+
+  defp effective_deadline_ms(input, parent, true), do: requested_deadline_ms(input, parent)
+
+  defp effective_deadline_ms(input, parent, false) do
+    requested = requested_deadline_ms(input, parent)
+
+    case Map.get(parent, :tool_timeout_ms) do
+      tool_timeout when is_integer(tool_timeout) and tool_timeout > 5_000 ->
+        min(requested, tool_timeout - 5_000)
+
+      tool_timeout when is_integer(tool_timeout) and tool_timeout > 0 ->
+        # A deliberately tiny test/operator ceiling still keeps half its time for cleanup.
+        min(requested, max(div(tool_timeout, 2), 1))
+
+      _unset ->
+        requested
+    end
   end
 
   defp positive_option(value, _default) when is_integer(value) and value > 0, do: value
@@ -937,6 +966,39 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     case input |> Map.get("description") |> text() do
       "" -> "subagent"
       text -> clip(text, @max_description_bytes)
+    end
+  end
+
+  defp work_item_bindings(input, parent) do
+    ids = Map.get(input, "work_item_ids", [])
+    items = get_in(parent, [:current_plan, "plan"]) || []
+
+    cond do
+      not is_list(ids) or length(ids) > 16 or Enum.any?(ids, &(not is_binary(&1))) ->
+        {:error, "Refused: work_item_ids must be at most 16 string IDs."}
+
+      length(ids) != length(Enum.uniq(ids)) ->
+        {:error, "Refused: work_item_ids contains a duplicate."}
+
+      true ->
+        Enum.reduce_while(ids, {:ok, []}, fn id, {:ok, acc} ->
+          case Enum.find(items, &(&1["id"] == id and &1["work_state"] != "accepted")) do
+            nil ->
+              {:halt, {:error, "Refused: work item #{id} is absent or already accepted."}}
+
+            item ->
+              binding = %{
+                "item_id" => id,
+                "digest" => WorkItem.authority_digest(item, parent.provider_session_id)
+              }
+
+              {:cont, {:ok, [binding | acc]}}
+          end
+        end)
+        |> then(fn
+          {:ok, bindings} -> {:ok, Enum.reverse(bindings)}
+          error -> error
+        end)
     end
   end
 

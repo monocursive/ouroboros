@@ -21,6 +21,45 @@ defmodule Ouroboros.Gateway.Methods.Placement do
         &InteractiveSession.start_for_gateway_on(&1, opts)
       )
 
+  def import_native(owner, opts, import), do: import_native(owner, opts, import, Cluster)
+
+  @doc false
+  def import_native(owner, opts, import, placement) when is_function(import, 0) do
+    case destination_workspace(owner, opts) do
+      :ok ->
+        with :ok <- placement.ensure_placeable(owner),
+             :ok <- fence_possible_owner(:interactive, owner, placement) do
+          import.()
+          |> remember_imported_owner(owner, placement)
+          |> Safe.reply()
+        else
+          {:error, reason} ->
+            Safe.unavailable_not_dispatched(
+              "machine #{owner} native import was not dispatched: #{placement_reason(reason)}"
+            )
+        end
+
+      {:error, reason} ->
+        Safe.invalid_params(destination_workspace_message(owner, reason))
+    end
+  end
+
+  defp remember_imported_owner({:ok, %{id: _id}} = result, owner, placement) do
+    _ = placement.record_session_snapshot(:interactive, [{owner, [%{created: true}]}])
+    result
+  end
+
+  defp remember_imported_owner(
+         {:error, {:import_settlement_failed, _}} = result,
+         owner,
+         placement
+       ) do
+    _ = placement.record_session_snapshot(:interactive, [{owner, [%{created: true}]}])
+    result
+  end
+
+  defp remember_imported_owner(result, _owner, _placement), do: result
+
   defp start(owner, opts, plane, label, start) do
     case destination_workspace(owner, opts) do
       :ok ->
@@ -101,10 +140,12 @@ defmodule Ouroboros.Gateway.Methods.Placement do
   # created nothing, because the id already belongs to different immutable intent.
   # Owner-evidence failure cannot rewrite a created session into `not_dispatched`; the
   # monitor marks its evidence unreliable so subsequent lists fail closed instead.
-  defp fence_possible_owner(_plane, owner) when owner == node(), do: :ok
+  defp fence_possible_owner(plane, owner), do: fence_possible_owner(plane, owner, Cluster)
 
-  defp fence_possible_owner(plane, owner) do
-    Cluster.record_session_snapshot(plane, [{owner, [%{possible_start: true}]}])
+  defp fence_possible_owner(_plane, owner, _placement) when owner == node(), do: :ok
+
+  defp fence_possible_owner(plane, owner, placement) do
+    placement.record_session_snapshot(plane, [{owner, [%{possible_start: true}]}])
   end
 
   defp remember_started_owner({:ok, %{node: owner}} = result, plane, owner) do

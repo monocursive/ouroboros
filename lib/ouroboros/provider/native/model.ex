@@ -75,6 +75,9 @@ defmodule Ouroboros.Provider.Native.Model do
   """
   @callback stream(request(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
 
+  @doc "Formats a provider failure for public runtime surfaces without transport internals."
+  @callback format_error(term()) :: String.t()
+
   @doc """
   The wire request this module would send, as plain data, for provenance only.
 
@@ -102,7 +105,7 @@ defmodule Ouroboros.Provider.Native.Model do
               }
             ]
 
-  @optional_callbacks available?: 0, credential_report: 0, project: 1
+  @optional_callbacks available?: 0, credential_report: 0, project: 1, format_error: 1
 
   @default_module Ouroboros.Provider.Native.Model.ReqLLM
   @model_env "OUROBOROS_NATIVE_MODEL"
@@ -118,6 +121,30 @@ defmodule Ouroboros.Provider.Native.Model do
   @doc "Streams one model response through the configured module."
   @spec stream(module(), request(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(module, request, opts \\ []), do: module.stream(request, opts)
+
+  @doc "Formats a model failure at the model boundary, before any public event retains it."
+  @spec format_error(module(), term()) :: String.t()
+  def format_error(module, reason) do
+    if function_exported?(module, :format_error, 1) do
+      module.format_error(reason)
+    else
+      generic_error(reason)
+    end
+  rescue
+    _error -> "category=unknown retryable=false diagnostic=model request failed"
+  end
+
+  defp generic_error(reason) when is_binary(reason), do: clip(reason)
+  defp generic_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp generic_error(%{__exception__: true} = error),
+    do: error |> Exception.message() |> clip()
+
+  defp generic_error(_reason),
+    do: "category=unknown retryable=false diagnostic=model request failed"
+
+  defp clip(text) when byte_size(text) <= 1_024, do: text
+  defp clip(text), do: binary_part(text, 0, 1_021) <> "..."
 
   @doc """
   The projection a digest is taken over, from the module that would send the request.
@@ -192,7 +219,7 @@ defmodule Ouroboros.Provider.Native.Model do
   def credential_report do
     module = module()
 
-    if function_exported?(module, :credential_report, 0),
+    if Code.ensure_loaded?(module) and function_exported?(module, :credential_report, 0),
       do: module.credential_report(),
       else: []
   end

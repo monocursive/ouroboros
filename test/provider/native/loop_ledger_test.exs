@@ -192,6 +192,61 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
       assert NativeModelScript.requests(agent) == [],
              "the model was called although the call could not be recorded"
     end
+
+    test "a separately approved retry does not execute when its own effect cannot open",
+         context do
+      File.mkdir_p!(Path.join(context.workspace, ".git"))
+      marker = Path.join(context.workspace, ".git/retry-open-marker")
+      command = "dir=$(printf '\\056git'); echo ran >> \"$PWD/$dir/retry-open-marker\""
+
+      {loop, _agent} =
+        start_loop(
+          context,
+          [
+            [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => command}}}],
+            fn request ->
+              result = List.last(request.messages)
+
+              [_, retry_id] =
+                Regex.run(~r/retry_attempt_id: (nretry_[A-Za-z0-9_-]+)/, result.content)
+
+              [
+                {:tool_call,
+                 %{
+                   id: "c1-retry",
+                   name: "bash",
+                   input: %{"command" => command, "retry_attempt_id" => retry_id}
+                 }}
+              ]
+            end,
+            [{:text, "stopped"}, {:finish, :stop}]
+          ],
+          approval_mode: :auto_approve,
+          approval_timeout_ms: :infinity
+        )
+
+      pid = run(loop)
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+
+      # The first write after the swap records the human escalation decision. The second is
+      # the separately identified retry effect's `record_started`; allowing exactly one
+      # therefore proves approval durability succeeds while execution admission fails.
+      events =
+        with_refusing_ledger(1, fn ->
+          send(
+            pid,
+            {:native_approval, ask.request_id,
+             %ApprovalResponse{decision: :approve, scope: :once}}
+          )
+
+          collect()
+        end)
+
+      result = events |> Enum.filter(&(&1.type == :tool_result)) |> List.last()
+      assert result.payload["output"] =~ "could not be durably opened"
+      assert result.payload["output"] =~ "Nothing was re-run"
+      refute File.exists?(marker), "the retry ran although its effect could not be opened"
+    end
   end
 
   describe "the outcome that lands is the outcome that happened" do
@@ -550,14 +605,19 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
     @describetag @needs_sandbox
 
     test "an approved escalation writes the row", context do
-      assert %{"decision" => "approve", "tool" => "bash", "document" => document} =
+      assert %{
+               "decision" => "approve",
+               "tool" => "sandbox_escalation",
+               "document" => document
+             } =
                escalation_answer(context, :approve)
 
-      assert document =~ "escalated.txt"
+      assert document =~ "sandbox_escalation"
     end
 
     test "a declined escalation writes the row", context do
-      assert %{"decision" => "deny", "tool" => "bash"} = escalation_answer(context, :deny)
+      assert %{"decision" => "deny", "tool" => "sandbox_escalation"} =
+               escalation_answer(context, :deny)
     end
   end
 
@@ -572,21 +632,28 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
     Application.put_env(:ouroboros, :policy_evidence_root, root)
     on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
 
+    command = "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+
     {loop, _agent} =
       start_loop(
         context,
         [
-          [
-            {:tool_call,
-             %{
-               id: "c1",
-               name: "bash",
-               input: %{
-                 "command" =>
-                   "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
-               }
-             }}
-          ],
+          [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => command}}}],
+          fn request ->
+            result = List.last(request.messages)
+
+            [_, retry_id] =
+              Regex.run(~r/retry_attempt_id: (nretry_[A-Za-z0-9_-]+)/, result.content)
+
+            [
+              {:tool_call,
+               %{
+                 id: "c1-retry",
+                 name: "bash",
+                 input: %{"command" => command, "retry_attempt_id" => retry_id}
+               }}
+            ]
+          end,
           [{:text, "done"}, {:finish, :stop}]
         ],
         approval_mode: :auto_approve,
@@ -604,7 +671,9 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
 
     collect()
 
-    assert [{:ok, row}] = Enum.to_list(PolicyEvidence.stream())
+    rows = Enum.map(PolicyEvidence.stream(), fn {:ok, row} -> row end)
+    assert [row] = rows
+    assert row["tool"] == "sandbox_escalation"
     row
   end
 

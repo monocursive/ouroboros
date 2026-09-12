@@ -11,6 +11,7 @@ defmodule Ouroboros.InteractiveTurnCorrelationTest do
     root = Path.join(System.tmp_dir!(), "turn-correlation-#{System.unique_integer([:positive])}")
     id = "turn-correlation-#{System.unique_integer([:positive])}"
     File.mkdir_p!(root)
+    fence = start_supervised!({Ouroboros.Maintenance.Fence, name: nil, data_dir: nil})
     previous_dir = Application.get_env(:ouroboros, :native_data_dir)
     previous_config = NativeConfig.snapshot()
     Application.put_env(:ouroboros, :native_data_dir, Path.join(root, "native"))
@@ -68,8 +69,18 @@ defmodule Ouroboros.InteractiveTurnCorrelationTest do
     :ok = Store.create(session)
     Registry.unregister(Ouroboros.Interactive.Registry, id)
 
+    {:ok, lease} =
+      Ouroboros.Maintenance.Fence.acquire_admission(
+        "correlation-recovery:" <> id,
+        id,
+        :current,
+        fence
+      )
+
     {:ok, _coordinator} =
-      DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, id})
+      DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, {id, lease}})
+
+    :ok = Ouroboros.Maintenance.Fence.release(lease, fence)
 
     running =
       eventually(fn ->

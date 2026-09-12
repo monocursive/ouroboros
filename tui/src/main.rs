@@ -35,7 +35,8 @@ use serde_json::{json, Value};
 
 use ouro::cli::{
     AcpArgs, Cli, Command, FleetCommand, FleetMembersCommand, FleetTagCommand, ForkArgs,
-    LedgerArgs, McpCommand, ReplayArgs, RunArgs, SessionsCommand, WasmCommand,
+    LedgerArgs, McpCommand, NativeImportArgs, NativePreviewArgs, ReplayArgs, RunArgs,
+    SessionsCommand, WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::mcp_cli;
@@ -185,6 +186,11 @@ async fn run(cli: Cli) -> Result<()> {
             addr,
             token_file,
         }) => agents_page(&paths, json, addr, token_file).await,
+        Some(Command::SafeStatus {
+            id,
+            addr,
+            token_file,
+        }) => safe_status(&paths, id, addr, token_file).await,
         Some(Command::Daemon) => daemon(&paths, cli.dev).await,
         Some(Command::Attach {
             addr,
@@ -198,6 +204,8 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Policy(args)) => policy(&paths, args).await,
         Some(Command::Audit(args)) => audit(&paths, args).await,
         Some(Command::Replay(args)) => replay(&paths, args).await,
+        Some(Command::PreviewNative(args)) => preview_native(&paths, args).await,
+        Some(Command::ImportNative(args)) => import_native(&paths, args).await,
         Some(Command::Fork(args)) => fork(&paths, args).await,
         Some(Command::Wasm { command }) => wasm(&paths, command).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
@@ -843,6 +851,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     let boot = Arc::new(std::sync::Mutex::new(BootProgress::new()));
     let progress = Progress::Screen(boot.clone());
 
+    let attached_to_local_publication = args.addr.is_none() && args.token_file.is_none();
     let (address, token, mut daemon) = if args.addr.is_some() || args.token_file.is_some() {
         let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
         (address, token, Ownership::Attached)
@@ -859,10 +868,18 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     report_boot(&boot, args.verbose);
 
     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-    // Reconnect stays off deliberately. A silent re-handshake would drop this run's
-    // subscription and leave it waiting out its whole `--timeout` on a stream that is
-    // never coming back; a closed connection is instead an observable `lost`.
-    let attached = match attach_with(address, token, false, None, hook).await {
+    let refresh: Option<Arc<dyn EndpointSource>> = if attached_to_local_publication {
+        Some(Arc::new(runtime::PublishedEndpoint::new(
+            paths.data_dir.clone(),
+            paths.token_file(),
+        )))
+    } else {
+        None
+    };
+    // `run` owns reconciliation itself: the transport re-handshakes, then an internal
+    // notification makes `Run` subscribe from its durable cursor. The accepted prompt is
+    // never submitted again and connection loss is never translated into interruption.
+    let attached = match attach_with(address, token, true, refresh, hook).await {
         Ok(attached) => attached,
         Err(error) => {
             return Err(daemon
@@ -875,6 +892,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         client,
         hello,
         mut notifications,
+        mut lifecycle,
     } = attached;
 
     // F2. The one step that needs a connection before it can decide anything, and still
@@ -935,6 +953,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         ouro::run::drive(
             &client,
             &mut notifications,
+            &mut lifecycle,
             &hello,
             plan,
             &options,
@@ -1044,6 +1063,7 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
         client,
         hello,
         notifications,
+        ..
     } = attached;
 
     let outcome = ouro::acp_serve::serve(
@@ -2193,6 +2213,33 @@ async fn agents_page(
     Ok(())
 }
 
+/// One closed JSON status receipt from the authenticated, owner-routed gateway method.
+async fn safe_status(
+    paths: &Paths,
+    id: String,
+    addr: Option<String>,
+    token_file: Option<PathBuf>,
+) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, addr, token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let Connected { client, hello, .. } = attach_with(address, token, false, None, hook).await?;
+
+    if !hello.serves("interactive.safe_status") {
+        client.stop().await;
+        return Err(anyhow!(
+            "this gateway does not serve interactive.safe_status"
+        ));
+    }
+
+    let status = client
+        .call("interactive.safe_status", json!({"id": id}))
+        .await
+        .context("calling interactive.safe_status")?;
+    client.stop().await;
+    println!("{}", serde_json::to_string(&status)?);
+    Ok(())
+}
+
 /// `ouro attach`: connect to something this client did not start.
 async fn attach_remote(
     paths: &Paths,
@@ -2392,6 +2439,74 @@ async fn replay(paths: &Paths, args: ReplayArgs) -> Result<()> {
     let mut err = std::io::stderr().lock();
 
     ouro::replay_cli::run(&connected.client, &options, &mut out, &mut err).await
+}
+
+async fn preview_native(paths: &Paths, args: NativePreviewArgs) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, None, hook).await?;
+    ouro::replay_cli::require_method(&connected.hello, ouro::replay_cli::PREVIEW_NATIVE_METHOD)?;
+    let options = ouro::replay_cli::NativePreviewOptions {
+        provider_session_id: args.provider_session_id,
+        node: args.node,
+        machine: args.machine,
+        json: args.json,
+    };
+    let mut out = std::io::stdout().lock();
+    ouro::replay_cli::preview_native(&connected.client, &options, &mut out).await
+}
+
+async fn import_native(paths: &Paths, args: NativeImportArgs) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, None, hook).await?;
+    ouro::replay_cli::require_method(&connected.hello, ouro::replay_cli::IMPORT_NATIVE_METHOD)?;
+    if !connected.hello.operates() {
+        bail!("importing a native session mutates the runtime and needs OUROBOROS_GATEWAY_SCOPE=operate; this listener answered at scope `{}`", connected.hello.scope);
+    }
+
+    let machine = args.machine.unwrap_or_default();
+    let request = StartRequest {
+        id: new_client_session_id()?,
+        plane: Plane::Interactive,
+        model: args.model,
+        workspace: start_workspace(
+            &machine,
+            args.workspace
+                .as_deref()
+                .map(|path| workspace_argument(path.to_path_buf()))
+                .transpose()?
+                .as_deref(),
+        )?,
+        machine,
+        approval_mode: args
+            .approval_mode
+            .map(|name| {
+                ApprovalMode::parse(&name)
+                    .ok_or_else(|| anyhow!("{}", StartError::UnknownApprovalMode(name).message()))
+            })
+            .transpose()?,
+        sandbox_mode: args
+            .sandbox_mode
+            .map(|name| {
+                SandboxMode::parse(&name)
+                    .ok_or_else(|| anyhow!("{}", StartError::UnknownSandboxMode(name).message()))
+            })
+            .transpose()?,
+        reasoning_effort: None,
+        worktree: args.worktree,
+        plan: args.plan,
+    };
+    let options = ouro::replay_cli::NativeImportOptions {
+        provider_session_id: args.provider_session_id,
+        expected_digest: args.expected_digest,
+        acknowledge_partial_tail: args.acknowledge_partial_tail,
+        start: request,
+        json: args.json,
+    };
+    let mut out = std::io::stdout().lock();
+    let mut notes = std::io::stderr().lock();
+    ouro::replay_cli::import_native(&connected.client, &options, &mut out, &mut notes).await
 }
 
 /// `ouro fork`: branch a recorded session, with the child id minted before the call.
@@ -2789,6 +2904,7 @@ async fn run_ui(
         client,
         hello,
         notifications,
+        ..
     } = attached;
 
     let logs = daemon.owned().map(Daemon::logs);

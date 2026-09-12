@@ -26,7 +26,9 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
   """
 
   @max_files 200
-  @max_plan_items 100
+  @max_plan_items 40
+  @max_plan_text_bytes 500
+  @max_evidence_refs 16
 
   @typedoc "One file the parent session touched."
   @type file_entry :: %{path: String.t(), sha256: String.t() | nil, note: String.t() | nil}
@@ -46,7 +48,9 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
   """
   @spec packet(keyword()) :: String.t()
   def packet(opts) do
-    files = opts |> Keyword.get(:files, []) |> hash_files()
+    paths = Keyword.get(opts, :files, [])
+    files = hash_files(paths)
+    counts = file_counts(paths)
     workspace = Keyword.get(opts, :workspace)
 
     """
@@ -62,7 +66,7 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
 
     ### Files the previous session touched
 
-    #{files_section(files, workspace)}
+    #{files_section(files, workspace)}#{omission_section(counts.omitted)}
 
     ### Open plan
 
@@ -92,6 +96,20 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
   end
 
   def hash_files(_paths), do: []
+
+  @doc "Counts eligible unique file paths before and after the packet cap."
+  @spec file_counts([String.t()]) :: %{
+          total: non_neg_integer(),
+          retained: non_neg_integer(),
+          omitted: non_neg_integer()
+        }
+  def file_counts(paths) when is_list(paths) do
+    total = paths |> Enum.filter(&is_binary/1) |> Enum.uniq() |> length()
+    retained = min(total, @max_files)
+    %{total: total, retained: retained, omitted: total - retained}
+  end
+
+  def file_counts(_paths), do: %{total: 0, retained: 0, omitted: 0}
 
   # ---------------------------------------------------------------- private
 
@@ -128,6 +146,15 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
     end)
   end
 
+  defp omission_section(0), do: ""
+
+  defp omission_section(1),
+    do: "\n\n(1 touched file omitted by the 200-file handoff cap; inspect the parent session.)"
+
+  defp omission_section(count),
+    do:
+      "\n\n(#{count} touched files omitted by the 200-file handoff cap; inspect the parent session.)"
+
   defp describe(%{sha256: nil, note: note}), do: note || "unknown"
   defp describe(%{sha256: hash}), do: "sha256 " <> binary_part(hash, 0, 16)
 
@@ -136,18 +163,17 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
   defp plan_section(plan) when is_map(plan) do
     items =
       plan
-      |> Map.get("items", Map.get(plan, :items, []))
+      |> Map.get("plan", Map.get(plan, :plan, Map.get(plan, "items", Map.get(plan, :items, []))))
       |> List.wrap()
       |> Enum.take(@max_plan_items)
 
     if items == [] do
       "(no plan items were recorded)"
     else
-      Enum.map_join(items, "\n", fn item ->
-        status = value(item, "status") || "pending"
-        text = value(item, "text") || value(item, "title") || inspect(item)
-        "- [#{status}] #{text}"
-      end)
+      digest = plan_digest(items)
+
+      "authoritative-plan-digest: sha256:#{digest}\n" <>
+        Enum.map_join(items, "\n", &render_plan_item/1)
     end
   end
 
@@ -166,14 +192,91 @@ defmodule Ouroboros.Provider.Native.Context.Handoff do
   defp value(item, key) when is_map(item) do
     Map.get(item, key) ||
       case key do
+        "id" -> Map.get(item, :id)
         "status" -> Map.get(item, :status)
+        "step" -> Map.get(item, :step)
         "text" -> Map.get(item, :text)
         "title" -> Map.get(item, :title)
+        "work_state" -> Map.get(item, :work_state)
+        "evidence" -> Map.get(item, :evidence)
         _other -> nil
       end
   end
 
   defp value(_item, _key), do: nil
+
+  defp render_plan_item(item) do
+    status = bounded(value(item, "status") || "pending", 32)
+
+    text =
+      bounded(value(item, "step") || value(item, "text") || value(item, "title") || "(unnamed)")
+
+    id = value(item, "id")
+    work_state = value(item, "work_state")
+
+    metadata =
+      []
+      |> maybe_metadata("id", id)
+      |> maybe_metadata("work_state", work_state)
+      |> Enum.join(" ")
+
+    evidence =
+      item
+      |> value("evidence")
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.take(@max_evidence_refs)
+      |> Enum.map_join(", ", &bounded(&1, @max_plan_text_bytes))
+
+    suffix =
+      [
+        if(metadata == "", do: nil, else: " {#{metadata}}"),
+        if(evidence == "", do: nil, else: " evidence=[#{evidence}]")
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join()
+
+    "- [#{status}] #{text}#{suffix}"
+  end
+
+  defp maybe_metadata(parts, _name, nil), do: parts
+
+  defp maybe_metadata(parts, name, value) when is_binary(value),
+    do: parts ++ ["#{name}=#{bounded(value, 128)}"]
+
+  defp maybe_metadata(parts, _name, _value), do: parts
+
+  defp bounded(value, max \\ @max_plan_text_bytes)
+
+  defp bounded(value, max) when is_binary(value) do
+    value = if String.valid?(value), do: value, else: String.replace_invalid(value)
+    bytes = min(byte_size(value), max)
+    prefix = binary_part(value, 0, bytes)
+    if String.valid?(prefix), do: prefix, else: bounded(value, bytes - 1)
+  end
+
+  defp bounded(_value, _max), do: "(invalid)"
+
+  defp plan_digest(items) do
+    items
+    |> canonical()
+    |> JSON.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp canonical(value) when is_map(value) do
+    value
+    |> Enum.map(fn {key, nested} -> {to_string(key), canonical(nested)} end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Map.new()
+  end
+
+  defp canonical(value) when is_list(value), do: Enum.map(value, &canonical/1)
+  defp canonical(value) when is_atom(value), do: Atom.to_string(value)
+  defp canonical(value) when is_binary(value), do: bounded(value)
+  defp canonical(value) when is_number(value) or is_boolean(value) or is_nil(value), do: value
+  defp canonical(_value), do: "(invalid)"
 
   defp relative(path, workspace) when is_binary(workspace) do
     if String.starts_with?(path, workspace <> "/"),

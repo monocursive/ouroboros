@@ -79,6 +79,100 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     error -> {:error, {:model_client_error, Exception.message(error)}}
   end
 
+  @doc false
+  @impl true
+  @spec format_error(term()) :: String.t()
+  def format_error(reason) do
+    reason
+    |> unwrap_error()
+    |> error_summary()
+  rescue
+    _error -> "category=unknown retryable=false diagnostic=model request failed"
+  end
+
+  defp unwrap_error(%{errors: [error | _]}), do: unwrap_error(error)
+  defp unwrap_error(reason), do: reason
+
+  defp error_summary(%ReqLLM.Error.API.Request{} = error) do
+    case ReqLLM.Streaming.Failure.classify(error) do
+      {:api, status, provider_code, retryable} ->
+        fields(
+          :api,
+          status,
+          provider_code,
+          retryable,
+          api_diagnostic(error, status, provider_code)
+        )
+
+      {:transport, transport_reason, retryable} ->
+        fields(:transport, nil, nil, retryable, transport_diagnostic(transport_reason))
+
+      :cancelled ->
+        fields(:cancelled, nil, nil, false, "model request cancelled")
+
+      :unknown ->
+        fields(:unknown, nil, error.provider_code, false, "API request failed")
+    end
+  end
+
+  defp error_summary(reason) do
+    case ReqLLM.Streaming.Failure.classify(reason) do
+      {:api, status, provider_code, retryable} ->
+        fields(:api, status, provider_code, retryable, "API request failed (#{status})")
+
+      {:transport, transport_reason, retryable} ->
+        fields(:transport, nil, nil, retryable, transport_diagnostic(transport_reason))
+
+      :cancelled ->
+        fields(:cancelled, nil, nil, false, "model request cancelled")
+
+      :unknown ->
+        fields(:unknown, nil, nil, false, "model request failed")
+    end
+  end
+
+  defp api_diagnostic(%{reason: reason}, status, _code)
+       when reason in [:timeout, :closed, :econnrefused],
+       do: "API request failed (#{status}): #{reason}"
+
+  defp api_diagnostic(_error, status, code) do
+    if policy_code?(code),
+      do: "API request failed (#{status}): request rejected by provider policy",
+      else: "API request failed (#{status})"
+  end
+
+  defp transport_diagnostic(reason)
+       when reason in [:timeout, :closed, :econnrefused, :pool_not_available],
+       do: "transport failed: #{reason}"
+
+  defp transport_diagnostic(_reason), do: "transport failed"
+
+  defp policy_code?(code) when is_binary(code),
+    do: String.match?(code, ~r/(policy|safety|content_filter|blocked)/i)
+
+  defp policy_code?(_code), do: false
+
+  defp fields(category, status, provider_code, retryable, diagnostic) do
+    [
+      "category=#{category}",
+      if(is_integer(status), do: "status=#{status}"),
+      safe_provider_code(provider_code),
+      "retryable=#{retryable}",
+      "diagnostic=#{diagnostic}"
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+  end
+
+  defp safe_provider_code(code) when is_atom(code), do: safe_provider_code(Atom.to_string(code))
+
+  defp safe_provider_code(code) when is_binary(code) do
+    value = code |> String.replace(~r/[^a-zA-Z0-9_.:-]/, "_") |> String.slice(0, 128)
+    if value == "", do: nil, else: "provider_code=#{value}"
+  end
+
+  defp safe_provider_code(_code), do: nil
+
   defp audit_transport(options, nil) do
     if Ouroboros.Audit.required?(),
       do: raise(Ouroboros.Audit.Unavailable, reason: :missing_model_audit_context)

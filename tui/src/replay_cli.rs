@@ -47,9 +47,10 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Map, Value};
 
 use crate::model::{
-    self, sorted_json, Event, Journal, JournalRecord, Plane, ReplayVerdict, StartedRef,
+    self, sorted_json, Event, Journal, JournalRecord, Plane, ReplayVerdict, StartRequest,
+    StartedRef,
 };
-use crate::proto::ErrorCode;
+use crate::proto::{ErrorCode, Hello};
 use crate::transport::{Client, ClientError};
 use crate::ui::export;
 use crate::ui::transcript::Watch;
@@ -69,6 +70,203 @@ pub const VERIFY_METHOD: &str = "interactive.replay_verify";
 
 /// The branch verb, which already ships. `--at`/`--model` are the new params.
 pub const FORK_METHOD: &str = "interactive.fork";
+pub const PREVIEW_NATIVE_METHOD: &str = "interactive.preview_native";
+pub const IMPORT_NATIVE_METHOD: &str = "interactive.import_native";
+
+/// Optional protocol verbs are gated only by the handshake method list.
+pub fn require_method(hello: &Hello, method: &str) -> Result<()> {
+    if hello.serves(method) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "this gateway does not serve {method}; the runtime is older than this client"
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NativePreviewOptions {
+    pub provider_session_id: String,
+    pub node: Option<String>,
+    pub machine: Option<String>,
+    pub json: bool,
+}
+
+impl NativePreviewOptions {
+    pub fn params(&self) -> Value {
+        let mut params = Map::new();
+        params.insert(
+            "provider_session_id".into(),
+            json!(self.provider_session_id),
+        );
+        optional_string(&mut params, "node", self.node.as_deref());
+        optional_string(&mut params, "machine", self.machine.as_deref());
+        Value::Object(params)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeImportOptions {
+    pub provider_session_id: String,
+    pub expected_digest: String,
+    pub acknowledge_partial_tail: bool,
+    pub start: StartRequest,
+    pub json: bool,
+}
+
+impl NativeImportOptions {
+    pub fn params(&self) -> Result<Value> {
+        let mut params = self
+            .start
+            .params()
+            .map_err(|error| anyhow!(error.message()))?
+            .as_object()
+            .cloned()
+            .expect("StartRequest params are an object");
+        params.insert(
+            "provider_session_id".into(),
+            json!(self.provider_session_id),
+        );
+        params.insert("expected_digest".into(), json!(self.expected_digest));
+        if self.acknowledge_partial_tail {
+            params.insert("acknowledge_partial_tail".into(), json!(true));
+        }
+        Ok(Value::Object(params))
+    }
+}
+
+fn optional_string(params: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        params.insert(key.into(), json!(value));
+    }
+}
+
+pub async fn preview_native<O: Write>(
+    client: &Client,
+    options: &NativePreviewOptions,
+    out: &mut O,
+) -> Result<()> {
+    let answer = client
+        .call(PREVIEW_NATIVE_METHOD, options.params())
+        .await
+        .map_err(|error| refusal(PREVIEW_NATIVE_METHOD, &error))?;
+    if options.json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&answer)?)?;
+    } else {
+        render_native_preview(&answer, out)?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn render_native_preview<O: Write>(answer: &Value, out: &mut O) -> Result<()> {
+    let field = |name: &str| {
+        answer
+            .get(name)
+            .ok_or_else(|| anyhow!("{PREVIEW_NATIVE_METHOD} answer is missing `{name}`"))
+    };
+    writeln!(
+        out,
+        "native provider session {}",
+        value_text(field("provider_session_id")?)
+    )?;
+    writeln!(out, "  digest             {}", value_text(field("digest")?))?;
+    writeln!(
+        out,
+        "  retained messages  {}",
+        value_text(field("retained_messages")?)
+    )?;
+    writeln!(
+        out,
+        "  offset              {}",
+        value_text(field("offset")?)
+    )?;
+    writeln!(
+        out,
+        "  rewind floor        {}",
+        value_text(field("rewind_floor")?)
+    )?;
+    writeln!(
+        out,
+        "  owned by            {}",
+        value_text(field("owned_by")?)
+    )?;
+    Ok(())
+}
+
+pub async fn import_native<O: Write, N: Write>(
+    client: &Client,
+    options: &NativeImportOptions,
+    out: &mut O,
+    notes: &mut N,
+) -> Result<()> {
+    let params = options.params()?;
+    let answer = match client.call(IMPORT_NATIVE_METHOD, params.clone()).await {
+        Ok(answer) => answer,
+        Err(first) if model::start_outcome_unknown(&first) => {
+            writeln!(
+                    notes,
+                    "ouro import-native: {IMPORT_NATIVE_METHOD} outcome was unknown; retrying once with the same logical id {}",
+                    options.start.id
+                )?;
+            match client.call(IMPORT_NATIVE_METHOD, params).await {
+                Ok(answer) => answer,
+                Err(retry) => {
+                    return Err(anyhow!(
+                        "{}",
+                        model::ambiguous_mutation(
+                            IMPORT_NATIVE_METHOD,
+                            &options.start.id,
+                            &rendered(&first),
+                            &rendered(&retry),
+                            model::start_outcome_unknown(&retry),
+                        )
+                    ));
+                }
+            }
+        }
+        Err(error) => return Err(refusal(IMPORT_NATIVE_METHOD, &error)),
+    };
+    for name in ["id", "provider_session_id", "source_provider_session_id"] {
+        if answer.get(name).and_then(Value::as_str).is_none() {
+            return Err(anyhow!(
+                "{IMPORT_NATIVE_METHOD} answer is missing string `{name}`"
+            ));
+        }
+    }
+    let ready = answer
+        .get("ready")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("{IMPORT_NATIVE_METHOD} answer is missing boolean `ready`"))?;
+    if options.json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&answer)?)?;
+    } else {
+        writeln!(out, "imported native provider session")?;
+        writeln!(out, "  session   {}", value_text(&answer["id"]))?;
+        writeln!(
+            out,
+            "  provider  {}",
+            value_text(&answer["provider_session_id"])
+        )?;
+        writeln!(out, "  ready     {ready}")?;
+        if !ready {
+            writeln!(
+                out,
+                "  admission {}",
+                value_text(answer.get("error").unwrap_or(&Value::Null))
+            )?;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn value_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
 
 /// The gateway bounds both windows at 500. Asking for its ceiling costs the fewest
 /// round-trips on a long session.

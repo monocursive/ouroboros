@@ -152,9 +152,21 @@ defmodule Ouroboros.Provider.Native.ModelToolSchemaTest do
   test "the plan schema names and validates every nested field" do
     plan = Tools.specs(["plan"], nil) |> hd()
     item = plan.parameters["properties"]["steps"]["items"]
+    properties = item["properties"]
 
     assert item["required"] == ["step", "status"]
-    assert Map.keys(item["properties"]) |> Enum.sort() == ["status", "step"]
+
+    assert Map.keys(properties) |> Enum.sort() ==
+             ~w(acceptance blocker child_settlement criteria deliverable evidence id owner_task_id status step work_state)
+
+    assert properties["step"]["type"] == "string"
+    assert properties["status"]["enum"] == ["pending", "in_progress", "completed"]
+
+    for key <-
+          ~w(acceptance blocker child_settlement criteria deliverable evidence id owner_task_id work_state) do
+      assert is_map(properties[key]), "missing typed plan property #{key}"
+    end
+
     assert item["additionalProperties"] == false
   end
 

@@ -18,6 +18,16 @@ defmodule Ouroboros.InteractiveSessionTest do
     def put_checkpoint(_key, _value, _opts), do: :ok
   end
 
+  defmodule SlowStorageFixture do
+    @moduledoc false
+    def get_checkpoint(_key, _opts), do: {:ok, %{}}
+
+    def put_checkpoint(_key, _value, opts) do
+      Process.sleep(Keyword.fetch!(opts, :delay))
+      :ok
+    end
+  end
+
   defmodule RefuseFailedTurnStorage do
     @moduledoc false
 
@@ -388,6 +398,68 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert {:error, {:session_id_conflict, ^id}} =
              InteractiveSession.start_for_gateway(Keyword.put(opts, :sandbox_mode, :read_only))
+  end
+
+  test "gateway retry never reports a terminal created session as ready", %{id: id} do
+    opts = [id: id, provider: @provider, workspace: File.cwd!()]
+    assert {:ok, state} = State.new(id, opts)
+
+    for status <- [:closed, :cancelled] do
+      terminal = %{state | id: "#{id}-#{status}", status: status}
+      assert :ok = Store.create(terminal)
+
+      assert {:created, %Ref{id: terminal_id}, {:session_terminal, ^status}} =
+               InteractiveSession.start_for_gateway(Keyword.put(opts, :id, terminal.id))
+
+      assert terminal_id == terminal.id
+    end
+  end
+
+  test "a durable maintenance fence refuses before Store creation", %{id: id} do
+    root = Path.join(System.tmp_dir!(), "interactive-fence-#{System.unique_integer([:positive])}")
+
+    {:ok, fence} =
+      Ouroboros.Maintenance.Fence.start_link(
+        name: :interactive_test_fence,
+        data_dir: root,
+        barrier: fn _generation, _opts ->
+          {:ok,
+           %{
+             snapshot: %{
+               generation: 1,
+               token: String.duplicate("a", 64),
+               digest: String.duplicate("b", 64),
+               root_digest: String.duplicate("c", 64),
+               total: 0
+             },
+             write_epoch: 0
+           }}
+        end
+      )
+
+    assert {:ok, marker} = Ouroboros.Maintenance.Fence.enter("tx", 0, :interactive_test_fence)
+    previous = Application.get_env(:ouroboros, :maintenance_fence_server)
+    Application.put_env(:ouroboros, :maintenance_fence_server, :interactive_test_fence)
+
+    on_exit(fn ->
+      if Process.alive?(fence), do: GenServer.stop(fence)
+
+      if previous,
+        do: Application.put_env(:ouroboros, :maintenance_fence_server, previous),
+        else: Application.delete_env(:ouroboros, :maintenance_fence_server)
+
+      File.rm_rf(root)
+    end)
+
+    assert {:error, :maintenance_fenced} =
+             InteractiveSession.start_for_gateway(
+               id: id,
+               provider: @provider,
+               workspace: File.cwd!()
+             )
+
+    assert :not_found = Store.get(id)
+    assert marker["state"] == "fenced"
   end
 
   test "a turn that forges the runtime envelope is refused before dispatch", %{id: id} do
@@ -1268,6 +1340,25 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     assert {:ok, %{^second_id => ^second}} =
              Ouroboros.Storage.ETS.get_checkpoint({key, :session, 2, second_id}, table: table)
+  end
+
+  test "store put backpressures beyond the default call timeout without killing caller", %{id: id} do
+    name = String.to_atom("slow_interactive_store_#{System.unique_integer([:positive])}")
+    {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+
+    start_supervised!(
+      {Store,
+       name: name, storage: {SlowStorageFixture, delay: 5_100}, key: {:slow_interactive_store, id}}
+    )
+
+    assert :ok = Store.put(session, name)
+  end
+
+  test "store put reports an unavailable owner and never invents persistence", %{id: id} do
+    {:ok, session} = State.new(id, provider: @provider, workspace: File.cwd!())
+    missing = String.to_atom("missing_interactive_store_#{System.unique_integer([:positive])}")
+    assert {:error, :interactive_store_unavailable} = Store.put(session, missing)
+    assert Process.alive?(self())
   end
 
   test "routes an interactive session through a real OS peer", %{id: id} do

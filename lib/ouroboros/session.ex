@@ -48,6 +48,10 @@ defmodule Ouroboros.Session do
   end
 
   def configure(runtime_id, changes), do: Native.configure(runtime_id, changes)
+  @doc false
+  def configure_with_timing(runtime_id, changes),
+    do: Native.configure_with_timing(runtime_id, changes)
+
   def interrupt(runtime_id, turn_id \\ :active), do: Native.interrupt(runtime_id, turn_id)
   def close(runtime_id), do: Native.close(runtime_id)
   def kill(runtime_id), do: Native.kill(runtime_id)
@@ -59,6 +63,9 @@ defmodule Ouroboros.Session do
   def plan_mode(runtime_id, enabled), do: Native.plan_mode(runtime_id, enabled)
   def plan_state(runtime_id), do: Native.plan_state(runtime_id)
   def compact(runtime_id, focus \\ nil), do: Native.compact(runtime_id, focus)
+  def compact_start(runtime_id, id, focus \\ nil), do: Native.compact_start(runtime_id, id, focus)
+  def compact_status(runtime_id, id), do: Native.compact_status(runtime_id, id)
+  def compact_cancel(runtime_id, id), do: Native.compact_cancel(runtime_id, id)
   def handoff(runtime_id, prompt \\ nil, opts \\ []), do: Native.handoff(runtime_id, prompt, opts)
   def journal(runtime_id, opts \\ []), do: Native.journal(runtime_id, opts)
   def rewind(runtime_id, to_turn, what \\ :both), do: Native.rewind(runtime_id, to_turn, what)
@@ -66,7 +73,8 @@ defmodule Ouroboros.Session do
 
   defp validate_native_request(request, child?) do
     allowed =
-      Ouroboros.Provider.Native.spec().provider_options ++ [:compact_at, :keep_recent_tokens]
+      Ouroboros.Provider.Native.spec().provider_options ++
+        [:compact_at, :keep_recent_tokens, :unknown_compact_tokens]
 
     allowed =
       if child?,

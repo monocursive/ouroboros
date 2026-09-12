@@ -407,6 +407,7 @@ defmodule Ouroboros.Provider.Native.Replay do
       add_dirs: scope.roots -- [scope.root],
       sandbox_mode: scope.sandbox_mode,
       approval_mode: atom(Map.get(turn.started, "approval_mode"), :prompt),
+      subagent_depth: Keyword.get(context.opts, :subagent_depth, 0),
       tools:
         Tools.specs(
           Keyword.get(context.opts, :allowed_tools),

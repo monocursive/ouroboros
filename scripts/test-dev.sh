@@ -5,13 +5,7 @@ set -eu
 
 SOURCE_REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ouro-dev-test.XXXXXX")"
-SLEEP_PID=""
-
 cleanup() {
-    if [ -n "$SLEEP_PID" ]; then
-        kill "$SLEEP_PID" 2>/dev/null || true
-        wait "$SLEEP_PID" 2>/dev/null || true
-    fi
     rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT HUP INT TERM
@@ -27,22 +21,10 @@ cp "$SOURCE_REPO/scripts/dev.sh" "$CHECKOUT/scripts/dev.sh"
 printf '#!/bin/sh\nexit 1\n' >"$CHECKOUT/tui/target/debug/ouro"
 chmod 755 "$CHECKOUT/tui/target/debug/ouro"
 
-# A safe client-stop failure must never fall back to signalling the published PID.
-LIVE_DIR="$TEST_ROOT/live"
-mkdir -p "$LIVE_DIR"
-chmod 700 "$LIVE_DIR"
-sleep 60 &
-SLEEP_PID=$!
-printf '{"pid":%s,"port":1}\n' "$SLEEP_PID" >"$LIVE_DIR/gateway.json"
-
-if OUROBOROS_DATA_DIR="$LIVE_DIR" sh "$CHECKOUT/scripts/dev.sh" daemon-stop \
-    >"$TEST_ROOT/daemon-stop.out" 2>&1; then
-    fail "daemon-stop unexpectedly succeeded when the safe client refused"
-fi
-kill -0 "$SLEEP_PID" 2>/dev/null || fail "daemon-stop signalled a PID after safe stop failed"
-kill "$SLEEP_PID"
-wait "$SLEEP_PID" 2>/dev/null || true
-SLEEP_PID=""
+# The safe-stop branch needs `kill -0` against an unrelated live process. Seatbelt denies
+# that probe inside an Ouroboros shell, making the publication look stale before the client
+# is called. `scripts/test-dev-host.sh` owns that kernel/process claim; the reset decisions
+# below remain deterministic under either context.
 
 # A name containing "ouro" and path aliases are not evidence that a directory is data.
 VICTIM="$TEST_ROOT/ouroboros-victim"
@@ -99,4 +81,4 @@ printf 'discard\n' >"$DEFAULT_DIR/delete-me"
 )
 [ ! -e "$DEFAULT_DIR/delete-me" ] || fail "default dev directory was not reset"
 
-printf 'test-dev: reset identity and fail-closed stop checks passed\n'
+printf 'test-dev: reset identity checks passed (safe-stop PID claim: make dev-host-test)\n'

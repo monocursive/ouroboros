@@ -12,6 +12,17 @@ defmodule Ouroboros.Provider.Native.ProcessSignal do
 
   def signal(process, signal), do: :exec.kill(process, signal)
 
+  def alive?(os_pid) when is_integer(os_pid) do
+    executable = System.find_executable("kill") || "/bin/kill"
+
+    match?(
+      {_output, 0},
+      System.cmd(executable, ["-0", "--", "-#{os_pid}"], stderr_to_stdout: true)
+    )
+  rescue
+    _ -> false
+  end
+
   defp signal_process_group(os_pid, signal) do
     executable = System.find_executable("kill") || "/bin/kill"
 

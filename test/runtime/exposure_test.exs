@@ -9,7 +9,18 @@ defmodule Ouroboros.Runtime.ExposureTest do
     assert Manifesto.body() =~ "You cannot sign, deploy, or grant"
     assert Manifesto.body() =~ "user's objective\nafter this envelope is authoritative"
     assert Manifesto.body() =~ "Only when the user explicitly asks"
-    assert Manifesto.body() =~ "Ouroboros.Capability.*"
+
+    for required <- ["Cargo.toml", "Cargo.lock", "src/lib.rs", "manifest.json", "ouroboros-guest"] do
+      assert Manifesto.body() =~ required
+    end
+
+    assert Manifesto.body() =~ "name and description"
+    assert Manifesto.body() =~ "wasm/<name>"
+
+    for retired <- ["source.ex", "test.exs", "Jido", "Ouroboros.Capability.*"] do
+      refute Manifesto.body() =~ retired
+    end
+
     refute Manifesto.body() =~ "sandbox: read_only"
     assert byte_size(Manifesto.body()) < 1_500
     assert byte_size(Manifesto.digest()) == 64

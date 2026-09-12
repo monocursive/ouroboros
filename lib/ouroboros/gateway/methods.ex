@@ -487,7 +487,15 @@ defmodule Ouroboros.Gateway.Methods do
           "method" => method,
           "actor_id" => Ouroboros.Audit.Identity.actor(),
           "target" =>
-            Map.take(params, ["id", "session_id", "stream_id", "request_id", "machine"]),
+            Map.take(params, [
+              "id",
+              "session_id",
+              "stream_id",
+              "request_id",
+              "provider_session_id",
+              "machine",
+              "node"
+            ]),
           "decision" => Map.take(params, ["decision", "scope", "approved", "response"])
         })
 
@@ -1628,6 +1636,63 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
+  def handle_interactive_preview_native(params) do
+    safe(fn ->
+      with {:ok, id} <- fetch_string(params, "provider_session_id"),
+           {:ok, opts} <- options(params, %{"node" => :node}, ["provider_session_id"]) do
+        {owner, []} = Keyword.pop(opts, :node, node())
+
+        with :ok <- Ouroboros.Audit.admit_remote(owner) do
+          result =
+            if owner == node(),
+              do: InteractiveSession.preview_native(id),
+              else: :erpc.call(owner, InteractiveSession, :preview_native, [id])
+
+          reply(wire_reply(result))
+        end
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  @doc false
+  def handle_interactive_import_native(params) do
+    safe(fn ->
+      with {:ok, source} <- fetch_string(params, "provider_session_id"),
+           {:ok, digest} <- fetch_string(params, "expected_digest"),
+           {:ok, opts} <-
+             options(
+               params,
+               Map.merge(@start_options, %{"acknowledge_partial_tail" => :boolean}),
+               ["provider_session_id", "expected_digest"]
+             ) do
+        {owner, opts} = Keyword.pop(opts, :node, node())
+
+        with :ok <- Ouroboros.Audit.admit_remote(owner) do
+          placed = fn ->
+            if owner == node(),
+              do: InteractiveSession.import_native(source, digest, audit_actor_options(opts)),
+              else:
+                :erpc.call(owner, InteractiveSession, :import_native, [
+                  source,
+                  digest,
+                  audit_actor_options(opts)
+                ])
+          end
+
+          Placement.import_native(owner, opts, placed) |> wire_reply()
+        end
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  defp wire_reply({:ok, value}), do: {:ok, Ouroboros.Gateway.Wire.to_json(value)}
+  defp wire_reply(other), do: other
+
+  @doc false
   def handle_interactive_send_message(params) do
     with_turn(params, :interactive, &InteractiveSession.send_message/3)
   end
@@ -1753,12 +1818,32 @@ defmodule Ouroboros.Gateway.Methods do
   def handle_interactive_compact(params) do
     safe(fn ->
       with {:ok, session} <- session_target(:interactive, params),
-           {:ok, focus} <- fetch_optional_string(params, "focus") do
-        reply(InteractiveSession.compact(session, focus))
+           {:ok, focus} <- fetch_optional_string(params, "focus"),
+           {:ok, id} <- fetch_optional_string(params, "compaction_id"),
+           {:ok, action} <- compact_action(params) do
+        result =
+          case {id, action} do
+            {nil, nil} -> InteractiveSession.compact(session, focus)
+            {id, nil} -> InteractiveSession.compact_start(session, id, focus)
+            {id, "start"} -> InteractiveSession.compact_start(session, id, focus)
+            {id, "status"} -> InteractiveSession.compact_status(session, id)
+            {id, "cancel"} -> InteractiveSession.compact_cancel(session, id)
+            _ -> {:error, :compaction_id_required}
+          end
+
+        reply(result)
       else
         {:invalid, message} -> invalid_params(message)
       end
     end)
+  end
+
+  defp compact_action(params) do
+    case Map.get(params, "action") do
+      nil -> {:ok, nil}
+      action when action in ["start", "status", "cancel"] -> {:ok, action}
+      _ -> {:invalid, "params.action must be start, status, or cancel"}
+    end
   end
 
   # A handoff starts a session, so it answers in `interactive.start`'s shape and carries
@@ -1769,12 +1854,23 @@ defmodule Ouroboros.Gateway.Methods do
     safe(fn ->
       with {:ok, session} <- session_target(:interactive, params),
            {:ok, prompt} <- fetch_optional_string(params, "prompt"),
-           {:ok, handoff_id} <- fetch_optional_string(params, "handoff_id") do
+           {:ok, handoff_id} <- fetch_optional_string(params, "handoff_id"),
+           :ok <- validate_handoff_id(handoff_id) do
         fork_reply(InteractiveSession.handoff(session, prompt, handoff_id))
       else
         {:invalid, message} -> invalid_params(message)
       end
     end)
+  end
+
+  defp validate_handoff_id(nil), do: :ok
+
+  defp validate_handoff_id(id) do
+    cond do
+      String.trim(id) == "" -> {:invalid, "params.handoff_id must not be blank"}
+      byte_size(id) > 128 -> {:invalid, "params.handoff_id must be at most 128 UTF-8 bytes"}
+      true -> :ok
+    end
   end
 
   # Read scope, and it answers for every transport. `source` is the field that keeps it
@@ -1784,6 +1880,13 @@ defmodule Ouroboros.Gateway.Methods do
   def handle_interactive_context(params) do
     with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.context(session)) end)
+    end)
+  end
+
+  @doc false
+  def handle_interactive_safe_status(params) do
+    with_session(params, :interactive, fn session ->
+      safe(fn -> reply(InteractiveSession.safe_status(session)) end)
     end)
   end
 
@@ -2026,6 +2129,8 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime_exposure" => :runtime_exposure,
     "worktree" => :worktree,
     "plan" => :plan,
+    "unknown_compact_tokens" => :unknown_compact_tokens,
+    "acknowledge_partial_tail" => :acknowledge_partial_tail,
     "machine" => :node,
     "node" => :node
   }
@@ -2083,6 +2188,9 @@ defmodule Ouroboros.Gateway.Methods do
       do: {:ok, value},
       else: {:invalid, "params.#{key} must be a positive integer"}
   end
+
+  defp option_value(_key, {:nilable, _kind}, nil), do: {:ok, nil}
+  defp option_value(key, {:nilable, kind}, value), do: option_value(key, kind, value)
 
   defp option_value(key, :non_negative_integer, value) do
     if is_integer(value) and value >= 0,

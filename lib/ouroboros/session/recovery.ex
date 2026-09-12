@@ -51,7 +51,7 @@ defmodule Ouroboros.Session.Recovery do
       |> Enum.filter(&recoverable?/1)
       |> Enum.each(fn task ->
         if safe_whereis(state.task, task.id) == nil do
-          _ = safe_start_child(supervisor, state.task, task.id)
+          _ = safe_start_child(supervisor, state.task, recovery_child(state.task, task.id))
         end
       end)
     else
@@ -77,13 +77,43 @@ defmodule Ouroboros.Session.Recovery do
     :exit, _reason -> :unavailable
   end
 
-  defp safe_start_child(supervisor, task, id) do
+  defp safe_start_child(supervisor, Ouroboros.Interactive.Task = task, {id, lease}) do
+    result = safe_start_child(supervisor, task, {id, lease}, :admitted)
+    _ = Ouroboros.Maintenance.Fence.release(lease)
+    result
+  end
+
+  defp safe_start_child(_supervisor, _task, :maintenance_refused),
+    do: {:error, :maintenance_refused}
+
+  defp safe_start_child(supervisor, task, id), do: safe_start_child(supervisor, task, id, :plain)
+
+  defp safe_start_child(supervisor, task, id, _mode) do
     DynamicSupervisor.start_child(supervisor, {task, id})
   rescue
     _error -> {:error, :supervisor_unavailable}
   catch
     :exit, _reason -> {:error, :supervisor_unavailable}
   end
+
+  defp recovery_child(Ouroboros.Interactive.Task, id) do
+    case Process.whereis(Ouroboros.Maintenance.Fence) do
+      nil ->
+        id
+
+      _pid ->
+        operation_id =
+          "coordinator-recovery:" <>
+            (:crypto.hash(:sha256, id) |> Base.encode16(case: :lower))
+
+        case Ouroboros.Maintenance.Fence.acquire_admission(operation_id, id) do
+          {:ok, lease} -> {id, lease}
+          {:error, _reason} -> :maintenance_refused
+        end
+    end
+  end
+
+  defp recovery_child(_task, id), do: id
 
   defp schedule_recovery(interval), do: Process.send_after(self(), :recover, interval)
 

@@ -701,7 +701,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
     end
   end
 
-  describe "the version-3 checkpoint (R1, S2)" do
+  describe "the version-4 checkpoint (R1, S2, native import)" do
     test "a version-1 checkpoint is upgraded on read rather than refused" do
       table = unique_name("v1_storage")
       storage = {Ouroboros.Storage.ETS, table: table}
@@ -752,14 +752,12 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                  name
                )
 
-      assert {:ok, %{version: 3}} =
+      assert {:ok, %{version: 4}} =
                Ouroboros.Storage.ETS.get_checkpoint(EffectLedger.checkpoint_key(), table: table)
     end
 
     test "a version-2 checkpoint is upgraded on read too" do
-      # S2 bumped 2 to 3 for `:policy_promotion`, and the `Entry` struct did not change then
-      # either — so a checkpoint written before this node had ever promoted a tool is read as
-      # it stands rather than refused.
+      # S2 bumped 2 to 3 and native import bumped 3 to 4; neither changed Entry.
       table = unique_name("v2_storage")
       storage = {Ouroboros.Storage.ETS, table: table}
 
@@ -795,19 +793,19 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
     end
 
     test "a checkpoint from a version this build does not know is still refused" do
-      table = unique_name("v4_storage")
+      table = unique_name("v5_storage")
       storage = {Ouroboros.Storage.ETS, table: table}
 
       assert :ok =
                Ouroboros.Storage.ETS.put_checkpoint(
                  EffectLedger.checkpoint_key(),
-                 %{version: 4, entries: [], next_sequence: 1},
+                 %{version: 5, entries: [], next_sequence: 1},
                  table: table
                )
 
-      name = unique_name("v4_ledger")
+      name = unique_name("v5_ledger")
 
-      assert {:error, {{:unsupported_effect_ledger_checkpoint, 4}, _child_spec}} =
+      assert {:error, {{:unsupported_effect_ledger_checkpoint, 5}, _child_spec}} =
                start_supervised({EffectLedger, name: name, storage: storage}, id: name)
     end
   end

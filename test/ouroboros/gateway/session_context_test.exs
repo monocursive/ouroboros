@@ -34,7 +34,26 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
     previous_native_dir = Application.get_env(:ouroboros, :native_data_dir)
     previous_native_model = Application.get_env(:ouroboros, :native_model_module)
+    previous_epoch = Application.get_env(:ouroboros, :native_epoch_server)
+    previous_fence = Application.get_env(:ouroboros, :maintenance_fence_server)
+    previous_handoff_create = Application.get_env(:ouroboros, :interactive_handoff_store_create)
+
+    previous_handoff_prepare =
+      Application.get_env(:ouroboros, :interactive_handoff_store_prepare)
+
+    previous_child_start = Application.get_env(:ouroboros, :interactive_child_start)
+
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
+
+    epoch =
+      start_supervised!({Ouroboros.Maintenance.Epoch, name: nil, data_dir: data_dir})
+
+    start_supervised!(
+      {Ouroboros.Maintenance.Fence, name: :session_context_test_fence, data_dir: data_dir}
+    )
+
+    Application.put_env(:ouroboros, :native_epoch_server, epoch)
+    Application.put_env(:ouroboros, :maintenance_fence_server, :session_context_test_fence)
 
     Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
@@ -44,6 +63,11 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       Ouroboros.Test.NativeConfig.configure(previous_provider_config)
       restore_ouroboros(:native_data_dir, previous_native_dir)
       restore_ouroboros(:native_model_module, previous_native_model)
+      restore_ouroboros(:native_epoch_server, previous_epoch)
+      restore_ouroboros(:maintenance_fence_server, previous_fence)
+      restore_ouroboros(:interactive_handoff_store_create, previous_handoff_create)
+      restore_ouroboros(:interactive_handoff_store_prepare, previous_handoff_prepare)
+      restore_ouroboros(:interactive_child_start, previous_child_start)
       File.rm_rf(journal_dir)
       File.rm_rf(root)
     end)
@@ -62,16 +86,18 @@ defmodule Ouroboros.Gateway.SessionContextTest do
         assert Methods.permits?(:operate, table[method])
       end
 
-      assert table["interactive.context"].scope == :read
-      assert "interactive.context" in Methods.names()
-      assert Methods.permits?(:read, table["interactive.context"])
+      for method <- ["interactive.context", "interactive.safe_status"] do
+        assert table[method].scope == :read
+        assert method in Methods.names()
+        assert Methods.permits?(:read, table[method])
+      end
     end
 
     test "a handoff admits an unknown outcome on a ceiling, exactly as a start does" do
       assert Methods.table()["interactive.handoff"].outcome == :unknown
-      # A compaction cannot be half-done from the caller's side: it either rewrote the
-      # conversation and reported, or it refused. No outcome admission.
-      refute Map.has_key?(Methods.table()["interactive.compact"], :outcome)
+      # The synchronous compatibility form can outlive the gateway handler, while the
+      # caller-owned operation form makes that unknown result explicitly reconcilable.
+      assert Methods.table()["interactive.compact"].outcome == :unknown
     end
 
     test "the compaction ceiling is above the default, because a summary is a model call" do
@@ -80,6 +106,42 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   end
 
   describe "parameter contracts" do
+    test "safe status is owner-routed, closed, bounded, and contains no prompt or credential value",
+         context do
+      id = unique_id("safe-status")
+      _session = start_native(id, context, [%{text: "ok"}])
+
+      assert {:ok, status} = Methods.invoke("interactive.safe_status", %{"id" => id})
+      assert status["scope"] == "session"
+      assert status["owner"] == id
+      assert status["provenance"] == "interactive_owner"
+      assert status["freshness"] == "fresh"
+      assert status["identity"]["logical_id"] == id
+      assert is_binary(status["identity"]["runtime_id"])
+      assert is_binary(status["identity"]["native_id"])
+      assert status["identity"]["pid"] == nil
+      assert status["identity"]["port"] == nil
+      assert status["identity"]["birth"] == nil
+
+      assert status["listener"] == %{
+               "publication" => "unavailable",
+               "freshness" => "fresh",
+               "port" => nil,
+               "birth" => nil
+             }
+
+      assert byte_size(JSON.encode!(status)) <= 16_384
+      refute JSON.encode!(status) =~ "ok"
+
+      assert {:error, -32_602, message} =
+               Methods.invoke("interactive.safe_status", %{"id" => id, "owner" => "other"})
+
+      assert message =~ "owner"
+
+      assert {:error, -32_007, _} =
+               Methods.invoke("interactive.safe_status", %{"id" => unique_id("foreign")})
+    end
+
     test "each verb refuses a field outside its own set rather than ignoring it" do
       assert {:error, -32_602, message} =
                Methods.invoke("interactive.compact", %{"id" => "s", "provider" => "codex"})
@@ -110,7 +172,12 @@ defmodule Ouroboros.Gateway.SessionContextTest do
     end
 
     test "a session id that names nothing is not found, on all three" do
-      for method <- ["interactive.compact", "interactive.handoff", "interactive.context"] do
+      for method <- [
+            "interactive.compact",
+            "interactive.handoff",
+            "interactive.context",
+            "interactive.safe_status"
+          ] do
         assert {:error, -32_007, message} = Methods.invoke(method, %{"id" => "no-such-session"})
         assert message =~ "no such record"
       end
@@ -212,6 +279,109 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       retire_session(id)
     end
 
+    test "compact operation ids have a gateway-visible byte bound", context do
+      id = unique_id("native-compact-id-bound")
+      _session = start_native(id, context, compaction_script())
+      oversized = String.duplicate("å", 65)
+
+      assert {:error, -32006, "the runtime refused the call", details} =
+               Methods.invoke("interactive.compact", %{
+                 "id" => id,
+                 "compaction_id" => oversized,
+                 "action" => "status"
+               })
+
+      assert inspect(details) =~ "invalid_compaction_id"
+      assert inspect(details) =~ "128"
+      retire_session(id)
+    end
+
+    test "compact wire validation closes ids actions and required action identity", context do
+      id = unique_id("native-compact-wire")
+      _session = start_native(id, context, compaction_script())
+      exact = String.duplicate("x", 128)
+      oversized = exact <> "x"
+
+      assert {:error, -32006, _, _} =
+               Methods.invoke("interactive.compact", %{
+                 "id" => id,
+                 "compaction_id" => oversized,
+                 "action" => "start"
+               })
+
+      assert {:error, -32602, _} =
+               Methods.invoke("interactive.compact", %{
+                 "id" => id,
+                 "compaction_id" => "",
+                 "action" => "status"
+               })
+
+      assert {:error, -32602, _} =
+               Methods.invoke("interactive.compact", %{
+                 "id" => id,
+                 "compaction_id" => exact,
+                 "action" => "bogus"
+               })
+
+      assert {:error, -32006, _, _} =
+               Methods.invoke("interactive.compact", %{"id" => id, "action" => "status"})
+
+      assert {:error, -32006, _, _} =
+               Methods.invoke("interactive.compact", %{"id" => id, "action" => "cancel"})
+
+      retire_session(id)
+    end
+
+    test "unknown history budget is live configurable and retains unknown capacity", context do
+      Application.delete_env(:ouroboros, :native_context_window)
+      id = unique_id("native-unknown-budget")
+      _session = start_native(id, context, compaction_script())
+
+      assert {:ok, _} =
+               Methods.invoke("interactive.configure", %{
+                 "id" => id,
+                 "unknown_compact_tokens" => 12_345
+               })
+
+      assert {:ok, reported} = Methods.invoke("interactive.context", %{"id" => id})
+      assert reported.context_window == nil
+      assert reported.unknown_compact_tokens == 12_345
+      assert {:ok, persisted} = Store.get(id)
+      assert persisted.options.unknown_compact_tokens == 12_345
+
+      coordinator = Task.whereis(id)
+
+      assert :ok =
+               DynamicSupervisor.terminate_child(
+                 Ouroboros.Interactive.TaskSupervisor,
+                 coordinator
+               )
+
+      wait_until(fn -> Task.whereis(id) == nil end)
+      assert {:ok, reopened} = InteractiveSession.context(id)
+      assert reopened.context_window == nil
+      assert reopened.unknown_compact_tokens == 12_345
+
+      assert {:ok, _} =
+               Methods.invoke("interactive.configure", %{
+                 "id" => id,
+                 "unknown_compact_tokens" => nil
+               })
+
+      assert {:ok, disabled} = Methods.invoke("interactive.context", %{"id" => id})
+      assert disabled.unknown_compact_tokens == nil
+      retire_session(id)
+    end
+
+    test "unknown history budget is accepted on interactive start", context do
+      id = unique_id("native-start-budget")
+      session = start_native(id, context, compaction_script(), unknown_compact_tokens: 9_999)
+      assert {:ok, reported} = InteractiveSession.context(session)
+      assert reported.context_window == nil
+      assert reported.unknown_compact_tokens == 9_999
+      retire_session(id)
+    end
+
     test "context reports the native facts and says the source is native", context do
       id = unique_id("native-context")
       session = start_native(id, context, compaction_script())
@@ -231,11 +401,14 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert is_list(reported.instruction_files_dropped)
       assert is_integer(reported.messages)
       assert reported.handed_off_to == nil
+      assert reported.context_state == :measured
 
       # And after a compaction, the archive the fold retained is addressable by id.
       assert {:ok, _report} = Methods.invoke("interactive.compact", %{"id" => id})
       assert {:ok, compacted} = Methods.invoke("interactive.context", %{"id" => id})
       assert length(compacted.compactions) == 1
+      assert compacted.context_used == 0
+      assert compacted.context_state == :compacted
 
       retire_session(id)
     end
@@ -278,6 +451,21 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert result["outcome"] == "created"
       assert result["node"] == node()
 
+      # Handoff is performed between turns, so its native provider event must explicitly
+      # wake the public coordinator rather than waiting for another model turn to flush it.
+      handoff_event =
+        wait_until(fn ->
+          with {:ok, events} <- InteractiveSession.replay(session, cursor: 0, limit: 200) do
+            Enum.find(events, fn event ->
+              event.type == :provider_event and event.payload["kind"] == "handoff"
+            end)
+          end
+        end)
+
+      assert handoff_event.payload["files"] == 1
+      assert handoff_event.payload["files_in_packet"] == 1
+      assert handoff_event.payload["files_omitted"] == 0
+
       # The durable half of the relationship is on the child; the parent's own record of
       # it is the native session's `handed_off_to`, which `context` surfaces.
       assert {:ok, child} = Methods.invoke("interactive.info", %{"id" => child_id})
@@ -299,6 +487,391 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       refute parent.provider_session_id == child.provider_session_id
 
       retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "public reservation persistence failure precedes native inference", context do
+      id = unique_id("native-handoff-reservation-failure")
+      child_id = unique_id("native-handoff-reservation-failure-child")
+      {model_spec, agent} = NativeModelScript.start(compaction_script())
+
+      assert {:ok, session} =
+               InteractiveSession.start(
+                 id: id,
+                 provider: :native,
+                 workspace: context.workspace,
+                 model: model_spec,
+                 workspace_mode: :shared_read,
+                 approval_mode: :auto_approve
+               )
+
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+      calls = NativeModelScript.call_count(agent)
+
+      Application.put_env(:ouroboros, :interactive_handoff_store_create, fn _ ->
+        {:error, :injected}
+      end)
+
+      assert {:error, {:handoff_refused, {:handoff_checkpoint_failed, :injected}}} =
+               InteractiveSession.handoff(session, "continue", child_id)
+
+      assert NativeModelScript.call_count(agent) == calls
+      assert :not_found = Store.get(child_id)
+      retire_session(id)
+    end
+
+    test "a preparing coordinator that starts during native work observes durable promotion",
+         context do
+      id = unique_id("native-handoff-live-promotion")
+      child_id = unique_id("native-handoff-live-promotion-child")
+      test_pid = self()
+
+      handoff_response = fn request ->
+        if length(request.messages) > 2 do
+          send(test_pid, {:handoff_model_entered, self()})
+
+          receive do
+            :finish_handoff_model -> :ok
+          after
+            5_000 -> raise "handoff model fixture was not released"
+          end
+        end
+
+        [{:text, "done"}, {:finish, :stop}]
+      end
+
+      {model_spec, _agent} =
+        NativeModelScript.start([[{:text, "parent"}, {:finish, :stop}], handoff_response])
+
+      assert {:ok, session} =
+               InteractiveSession.start(
+                 id: id,
+                 provider: :native,
+                 workspace: context.workspace,
+                 model: model_spec,
+                 workspace_mode: :shared_read,
+                 approval_mode: :auto_approve
+               )
+
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+
+      task =
+        Elixir.Task.async(fn -> InteractiveSession.handoff(session, "continue", child_id) end)
+
+      assert_receive {:handoff_model_entered, model_task}, 2_000
+
+      wait_until(fn -> match?({:ok, %{status: :preparing}}, Store.get(child_id)) end)
+
+      fence =
+        Application.get_env(:ouroboros, :maintenance_fence_server, Ouroboros.Maintenance.Fence)
+
+      operation_id =
+        "handoff-test:" <>
+          (:crypto.hash(:sha256, child_id) |> Base.encode16(case: :lower))
+
+      assert {:ok, lease} =
+               Ouroboros.Maintenance.Fence.acquire_admission(
+                 operation_id,
+                 child_id,
+                 :current,
+                 fence
+               )
+
+      assert {:ok, _pid} =
+               DynamicSupervisor.start_child(
+                 Ouroboros.Interactive.TaskSupervisor,
+                 {Task, {child_id, lease}}
+               )
+
+      assert :ok = Ouroboros.Maintenance.Fence.release(lease, fence)
+
+      send(model_task, :finish_handoff_model)
+
+      assert {:ok, result} = Elixir.Task.await(task, 5_000)
+      assert result.id == child_id
+      assert {:ok, %{status: status, provider_session_id: provider_id}} = Store.get(child_id)
+      assert status in [:starting, :idle]
+      assert is_binary(provider_id)
+
+      assert {:ok, child} =
+               InteractiveSession.info(%Ouroboros.Interactive.Ref{id: child_id, node: node()})
+
+      assert child.provider_session_id == provider_id
+      refute child.status == :preparing
+
+      retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "native success followed by public attachment failure reconciles the same child",
+         context do
+      id = unique_id("native-handoff-attachment-failure")
+      child_id = unique_id("native-handoff-attachment-failure-child")
+      {model_spec, agent} = NativeModelScript.start(compaction_script())
+
+      assert {:ok, session} =
+               InteractiveSession.start(
+                 id: id,
+                 provider: :native,
+                 workspace: context.workspace,
+                 model: model_spec,
+                 workspace_mode: :shared_read,
+                 approval_mode: :auto_approve
+               )
+
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+      parent_calls = NativeModelScript.call_count(agent)
+      {:ok, failures} = Agent.start_link(fn -> 1 end)
+
+      Application.put_env(:ouroboros, :interactive_handoff_store_prepare, fn child,
+                                                                             intent,
+                                                                             provider_id ->
+        if Agent.get_and_update(failures, fn left -> {left, max(left - 1, 0)} end) > 0,
+          do: {:error, :injected},
+          else: Store.prepare_handoff(child, intent, provider_id)
+      end)
+
+      assert {:error, :injected} = InteractiveSession.handoff(session, "continue", child_id)
+      assert {:ok, %{status: :preparing, provider_session_id: nil}} = Store.get(child_id)
+      calls_after_native = NativeModelScript.call_count(agent)
+      assert calls_after_native == parent_calls + 1
+
+      assert {:ok, result} = InteractiveSession.handoff(session, "continue", child_id)
+      assert result.id == child_id
+      assert {:ok, %{provider_session_id: provider_id}} = Store.get(child_id)
+      assert is_binary(provider_id)
+      assert NativeModelScript.call_count(agent) == calls_after_native
+      retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "child admission failure is gateway-visible and exact retry does no model work",
+         context do
+      id = unique_id("native-handoff-start-failure")
+      child_id = unique_id("native-handoff-start-failure-child")
+      {model_spec, agent} = NativeModelScript.start(compaction_script())
+
+      assert {:ok, session} =
+               InteractiveSession.start(
+                 id: id,
+                 provider: :native,
+                 workspace: context.workspace,
+                 model: model_spec,
+                 approval_mode: :auto_approve
+               )
+
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+
+      params = %{"id" => id, "prompt" => "continue", "handoff_id" => child_id}
+      {:ok, starts} = Agent.start_link(fn -> 0 end)
+
+      Application.put_env(:ouroboros, :interactive_child_start, fn opts ->
+        count = Agent.get_and_update(starts, fn count -> {count, count + 1} end)
+
+        if count == 0 do
+          {:ok, child} = Store.get(child_id)
+          :ok = Store.put(%{child | status: :failed, error: :injected_admission})
+          {:created, %Ouroboros.Interactive.Ref{id: child_id, node: node()}, :injected_admission}
+        else
+          InteractiveSession.start_for_gateway(opts)
+        end
+      end)
+
+      assert {:ok, first} = Methods.invoke("interactive.handoff", params)
+      assert first["id"] == child_id
+      assert first["outcome"] == "created"
+      assert first["ready"] == false
+      assert inspect(first["error"]) =~ "injected_admission"
+      calls = NativeModelScript.call_count(agent)
+
+      assert {:ok, retried} = Methods.invoke("interactive.handoff", params)
+      assert retried["id"] == child_id
+      assert retried["ready"] == false
+      assert inspect(retried["error"]) =~ "injected_admission"
+      assert NativeModelScript.call_count(agent) == calls
+      retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "normal child provider admission failure remains visible on exact retry", context do
+      id = unique_id("native-handoff-provider-failure")
+      child_id = unique_id("native-handoff-provider-failure-child")
+      {model_spec, agent} = NativeModelScript.start(compaction_script())
+
+      assert {:ok, session} =
+               InteractiveSession.start(
+                 id: id,
+                 provider: :native,
+                 workspace: context.workspace,
+                 model: model_spec,
+                 workspace_mode: :shared_read,
+                 approval_mode: :auto_approve
+               )
+
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+      {:ok, parent} = Store.get(id)
+      prompt = "continue"
+
+      intent = %{
+        parent: id,
+        prompt_digest:
+          Base.url_encode64(:crypto.hash(:sha256, :erlang.term_to_binary(prompt)), padding: false),
+        status: :prepared
+      }
+
+      {:ok, child} =
+        State.new(child_id,
+          id: child_id,
+          provider: parent.provider,
+          workspace: parent.workspace,
+          workspace_mode: :shared_read,
+          model: parent.options.model,
+          provider_session_id: "native-checkpoint-that-does-not-exist",
+          provider_options: %{fork_session: true},
+          handed_off_from: id
+        )
+
+      assert :ok = Store.create(%{child | status: :starting, handoff_intent: intent})
+      calls = NativeModelScript.call_count(agent)
+      params = %{"id" => id, "prompt" => prompt, "handoff_id" => child_id}
+
+      assert {:ok, first} = Methods.invoke("interactive.handoff", params)
+      assert first["ready"] == false
+      assert inspect(first["error"]) =~ "session_start_failed"
+      assert {:ok, retried} = Methods.invoke("interactive.handoff", params)
+      assert retried["ready"] == false
+      assert inspect(retried["error"]) =~ "session_start_failed"
+      assert NativeModelScript.call_count(agent) == calls
+      retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "a public preparing reservation adopts one native child after response loss", context do
+      id = unique_id("native-handoff-partial")
+      child_id = unique_id("native-handoff-partial-child")
+      session = start_native(id, context, compaction_script(), workspace_mode: :shared_read)
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+      prompt = "recover this handoff"
+      assert {:ok, parent} = Store.get(id)
+
+      intent = %{
+        parent: id,
+        prompt_digest:
+          Base.url_encode64(:crypto.hash(:sha256, :erlang.term_to_binary(prompt)), padding: false)
+      }
+
+      opts = [
+        id: child_id,
+        provider: parent.provider,
+        workspace: parent.workspace,
+        workspace_mode: parent.workspace_mode,
+        handed_off_from: id,
+        model: parent.options.model
+      ]
+
+      assert {:ok, reserved} = State.new(child_id, opts)
+      assert :ok = Store.create(%{reserved | status: :preparing, handoff_intent: intent})
+      assert {:ok, result} = InteractiveSession.handoff(session, prompt, child_id)
+      assert result.id == child_id
+      assert {:ok, adopted} = Store.get(child_id)
+      assert is_binary(adopted.provider_session_id)
+
+      assert {:ok, retried} = InteractiveSession.handoff(session, prompt, child_id)
+      assert retried.id == child_id
+
+      assert {:error, {:handoff_id_conflict, _}} =
+               InteractiveSession.handoff(session, "changed", child_id)
+
+      retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "a preparing handoff survives actual parent coordinator stop and normal reopen",
+         context do
+      id = unique_id("native-handoff-coordinator-reopen")
+      child_id = unique_id("native-handoff-coordinator-child")
+      session = start_native(id, context, compaction_script(), workspace_mode: :shared_read)
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+      prompt = "resume after coordinator stop"
+      assert {:ok, parent} = Store.get(id)
+
+      intent = %{
+        parent: id,
+        prompt_digest:
+          Base.url_encode64(:crypto.hash(:sha256, :erlang.term_to_binary(prompt)), padding: false)
+      }
+
+      assert {:ok, reserved} =
+               State.new(child_id,
+                 id: child_id,
+                 provider: parent.provider,
+                 workspace: parent.workspace,
+                 workspace_mode: parent.workspace_mode,
+                 handed_off_from: id,
+                 model: parent.options.model
+               )
+
+      assert :ok = Store.create(%{reserved | status: :preparing, handoff_intent: intent})
+      coordinator = Task.whereis(id)
+      assert is_pid(coordinator)
+
+      assert :ok =
+               DynamicSupervisor.terminate_child(
+                 Ouroboros.Interactive.TaskSupervisor,
+                 coordinator
+               )
+
+      wait_until(fn -> Task.whereis(id) == nil end)
+
+      assert {:ok, result} =
+               InteractiveSession.handoff(
+                 %Ouroboros.Interactive.Ref{id: id, node: node()},
+                 prompt,
+                 child_id
+               )
+
+      assert result.id == child_id
+      assert is_pid(Task.whereis(id))
+      assert {:ok, %{provider_session_id: provider_id}} = Store.get(child_id)
+      assert is_binary(provider_id)
+      retire_session(child_id)
+      retire_session(id)
+    end
+
+    test "handoff wire ids accept 128 bytes and refuse blank or 129 bytes", context do
+      id = unique_id("native-handoff-id-bound")
+      session = start_native(id, context, compaction_script(), workspace_mode: :shared_read)
+      assert {:ok, _turn} = InteractiveSession.send_message(session, "do the work", id: "t1")
+      await_turn(session)
+      id128 = String.duplicate("å", 64)
+
+      assert {:ok, result} =
+               Methods.invoke("interactive.handoff", %{
+                 "id" => id,
+                 "prompt" => "continue",
+                 "handoff_id" => id128
+               })
+
+      assert result["id"] == id128
+
+      assert {:error, -32602, _} =
+               Methods.invoke("interactive.handoff", %{"id" => id, "handoff_id" => " "})
+
+      assert {:error, -32602, message} =
+               Methods.invoke("interactive.handoff", %{
+                 "id" => id,
+                 "handoff_id" => id128 <> "x"
+               })
+
+      assert message =~ "128 UTF-8 bytes"
+      retire_session(id128)
       retire_session(id)
     end
 

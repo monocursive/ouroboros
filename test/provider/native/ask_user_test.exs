@@ -124,6 +124,22 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
     assert result.payload["output"] =~ "The operator answered: SQLite"
   end
 
+  test "a legacy bare approval is explicitly unanswered, never counted as an answer", context do
+    {loop, _agent} = start_loop(context, @script)
+    pid = run(loop)
+    request = await_request(:approval_requested)
+
+    send(
+      pid,
+      {:native_approval, request.request_id, ApprovalResponse.new!(%{decision: :approve})}
+    )
+
+    [result] = collect() |> Enum.filter(&(&1.type == :tool_result))
+    refute result.payload["answered"]
+    assert result.payload["output"] =~ "bare acknowledgement is not an answer"
+    refute result.payload["output"] =~ "The operator answered:"
+  end
+
   test "a client that only knows approvals can answer with the reason field", context do
     {loop, _agent} = start_loop(context, @script)
     pid = run(loop)
@@ -153,6 +169,7 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
     [result] = collect() |> Enum.filter(&(&1.type == :tool_result))
 
     refute result.payload["is_error"]
+    refute result.payload["answered"]
     assert result.payload["output"] =~ "declined to answer"
     assert result.payload["output"] =~ "you decide"
   end
@@ -198,6 +215,22 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
   end
 
   describe "the payload itself" do
+    test "only nonempty text is marked as an answer" do
+      {:ok, payload} = AskUser.question(%{"question" => "Which one?"})
+
+      answered =
+        AskUser.answer(
+          payload,
+          ApprovalResponse.new!(%{decision: :approve, provider_options: %{"answer" => "A"}})
+        )
+
+      assert answered.answered
+
+      bare = AskUser.answer(payload, ApprovalResponse.new!(%{decision: :approve}))
+      refute bare.answered
+      assert bare.output =~ "bare acknowledgement is not an answer"
+    end
+
     test "is bounded: the question, the header, and the number of options" do
       {:ok, payload} =
         AskUser.question(%{

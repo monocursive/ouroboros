@@ -823,6 +823,23 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       refute Sandbox.escalatable?(violation, policy, "touch x")
     end
 
+    test "actual read-only and network-denial tool results disclose no retry token", context do
+      read_only = run(Bash, %{"command" => "echo nope > denied.txt"}, context.read_only_context)
+      assert read_only.is_error
+      assert read_only.output =~ "Unverified denial-like output"
+      assert read_only.output =~ "sandbox_mode: read_only"
+      refute Map.has_key?(read_only, :attempt_id)
+      refute Map.get(read_only, :unverified_denial)
+
+      if @backend == :sandbox_exec do
+        network = run(Bash, %{"command" => "nc -vz 192.0.2.1 9 2>&1"}, context.context)
+        assert network.is_error
+        assert network.output =~ "denies external network access"
+        refute Map.has_key?(network, :attempt_id)
+        refute Map.get(network, :unverified_denial)
+      end
+    end
+
     test "never offers one that names a protected root or an .ouroboros directory" do
       policy = fixed_policy(:workspace_write)
       violation = Sandbox.violation(policy, "/bin/sh: x: Operation not permitted\n", 1)
@@ -1660,9 +1677,15 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       # `MIX_ENV=dev` is pinned because the test runner's own environment leaks into the
       # sandboxed command: a shell (or CI) that exported MIX_ENV=test would steer this
-      # compile into _build/test and fail the _build/dev assertion below.
+      # compile into _build/test and fail the _build/dev assertion below. Its build path is
+      # deliberately removed too: the outer campaign owns one outside this fixture workspace,
+      # while this real nested compile must write only its own `_build/dev` tree.
       result =
-        run(Bash, %{"command" => "MIX_ENV=dev mix compile --warnings-as-errors"}, context)
+        run(
+          Bash,
+          %{"command" => "env -u MIX_BUILD_PATH MIX_ENV=dev mix compile --warnings-as-errors"},
+          context
+        )
 
       refute result.is_error, result.output
       refute result.output =~ "failed to acquire filesystem lock using TCP"

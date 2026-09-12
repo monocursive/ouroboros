@@ -84,45 +84,56 @@ pub fn render(text: &str, width: usize, streaming: bool) -> Rendered {
 
 /// Renders a whole agent message, stopping after `max_lines` rows.
 pub fn render_limited(text: &str, width: usize, max_lines: usize, streaming: bool) -> Rendered {
-    let width = width.max(8);
-    let segments = code::split_fences(text);
-    let last = segments.len().saturating_sub(1);
+    render_limited_with_work(text, width, max_lines, streaming).0
+}
 
+fn render_limited_with_work(
+    text: &str,
+    width: usize,
+    max_lines: usize,
+    streaming: bool,
+) -> (Rendered, usize) {
+    let width = width.max(8);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut complete = true;
+    let mut first = true;
 
     // A segment needs room for its own frame plus the caller's truncation notice; starting
     // one with less would overshoot the cap by more than it saves.
-    for (index, segment) in segments.iter().enumerate() {
+    let visited = code::visit_fences(text, |segment, last| {
         if max_lines.saturating_sub(lines.len()) < 4 {
             complete = false;
-            break;
+            return false;
         }
 
-        if index > 0 {
+        if !first {
             separate(&mut lines);
         }
 
         let remaining = max_lines.saturating_sub(lines.len());
 
-        match segment {
+        let segment_complete = match &segment {
             code::Segment::Prose(prose) => {
                 // Only the message's last segment can still be growing.
-                let live = streaming && index == last;
+                let live = streaming && last;
                 let rendered = prose_rows(prose, width, remaining, live);
-                complete &= rendered.complete;
+                let segment_complete = rendered.complete;
                 lines.extend(rendered.lines);
+                segment_complete
             }
             code::Segment::Code(block) => {
                 // While the agent is still writing this block its frame has no floor yet,
                 // so the caret can sit on the newest code row instead of a bottom border.
-                let open_tail = streaming && index == last && !block.closed;
-                code::render_block(&mut lines, block, width, remaining, open_tail);
+                let open_tail = streaming && last && !block.closed;
+                code::render_block(&mut lines, block, width, remaining, open_tail)
             }
-        }
-    }
+        };
+        complete &= segment_complete;
+        first = false;
+        segment_complete
+    });
 
-    Rendered { lines, complete }
+    (Rendered { lines, complete }, visited)
 }
 
 /// The plain text of rendered rows, one row per line.
@@ -907,7 +918,9 @@ impl Renderer {
         };
 
         let mut framed = Vec::new();
-        code::render_block(&mut framed, &block, width, budget, false);
+        if !code::render_block(&mut framed, &block, width, budget, false) {
+            self.complete = false;
+        }
 
         for row in framed {
             let mut line = quote.clone();
@@ -1529,31 +1542,34 @@ Done.";
     fn the_cost_of_a_message_follows_the_rows_drawn_rather_than_the_bytes_arrived() {
         let small = big_message();
         let large = small.repeat(8);
+        let (small_rendered, small_visited) = render_limited_with_work(&small, 100, 256, false);
+        let (large_rendered, large_visited) = render_limited_with_work(&large, 100, 256, false);
 
-        let time = |text: &str| {
-            let started = std::time::Instant::now();
-            let rendered = render_limited(text, 100, 256, false);
-            assert_eq!(rendered.lines.len(), 256);
-            started.elapsed()
-        };
-
-        let _ = time(&small);
-        let _ = time(&large);
-
-        // The fastest of several interleaved samples is the render's own cost; a single
-        // sample is that plus whatever the scheduler did to the thread in between, and on
-        // a shared runner that once read as the budget failing to bound the work.
-        let fastest = |text: &str| (0..5).map(|_| time(text)).min().unwrap();
-        let (mut small_time, mut large_time) = (fastest(&small), fastest(&large));
-        small_time = small_time.min(fastest(&small));
-        large_time = large_time.min(fastest(&large));
-
-        // Eight times the input for the same 256 rows. Linear-in-input work would show up
-        // as roughly eight times the time; the budget check means it does not.
+        assert_eq!(small_rendered, large_rendered);
+        assert_eq!(small_rendered.lines.len(), 256);
+        assert!(!small_rendered.complete);
+        assert_eq!(large_visited, small_visited);
         assert!(
-            large_time < small_time * 4 + std::time::Duration::from_millis(8),
-            "budget did not bound the work: {large_time:?} for 8x versus {small_time:?}"
+            small_visited < small.len(),
+            "row cap still scanned the whole source"
         );
+
+        let huge_unreachable_fence =
+            format!("{}\n```text\n{}\n```\n", small, "suffix\n".repeat(200_000));
+        let (fenced_rendered, fenced_visited) =
+            render_limited_with_work(&huge_unreachable_fence, 100, 256, false);
+        assert_eq!(fenced_rendered, small_rendered);
+        assert_eq!(fenced_visited, small_visited);
+    }
+
+    #[test]
+    fn a_row_capped_code_block_marks_the_message_incomplete() {
+        let text = format!("```text\n{}\n```\n", "line\n".repeat(64));
+        let rendered = render_limited(&text, 80, 8, false);
+
+        assert_eq!(rendered.lines.len(), 8);
+        assert!(!rendered.complete);
+        assert!(plain(&rendered).contains("rest of this block in event details"));
     }
 
     #[test]

@@ -15,11 +15,12 @@ defmodule Ouroboros.Agent.EffectLedger do
   and a content-free fingerprint.
 
   The store is node-local. Production config uses
-  `Ouroboros.Storage.DurableFile`; development and tests use ETS. A checkpoint found
-  with unfinished attempts is rewritten at boot with those attempts marked
-  `:ambiguous`: the old runtime acknowledged their start, but did not durably record an
-  outcome. A later settlement may still replace `:ambiguous`, which keeps isolated
-  process restarts honest without inventing a failure.
+  `Ouroboros.Storage.DurableFile`; development and tests use ETS. Durable writes are
+  covered by `Ouroboros.Maintenance.Epoch`: the exact checkpoint payload is reserved
+  before publication and the reservation is committed afterwards. Recovery only
+  observes the checkpoint and pending reservations; it commits an exact present payload
+  or aborts after the authoritative checkpoint proves it absent, and never rewrites it.
+  The legacy ETS test path still marks unfinished attempts `:ambiguous` at owner restart.
 
   Retention bounds terminal history while retaining every `:started` entry. Queries are
   independently bounded so a caller cannot copy the entire ledger out of its owner by
@@ -98,18 +99,14 @@ defmodule Ouroboros.Agent.EffectLedger do
   require Logger
 
   alias Ouroboros.Control.Grants
+  alias Ouroboros.Maintenance.Epoch
 
   @store_key {:ouroboros, :agent_effect_ledger, 1}
-  @checkpoint_version 3
-  # A version-1 or version-2 checkpoint is read as-is: the `Entry` struct did not change when
-  # `:inference` was added, and it did not change when `:policy_promotion` was, so there is
-  # nothing to widen. What each bump buys is the other direction — an *older* build reading a
-  # checkpoint that contains entries of a kind it has never heard of would fail
-  # `valid_entry?/1` on `effect in effects()` and discard the whole file as
-  # `:invalid_effect_ledger_checkpoint`, losing every entry rather than refusing cleanly.
-  # With the version stamped, that build says `:unsupported_effect_ledger_checkpoint` and
-  # stops, which is the difference between "I cannot read this" and "this is garbage".
-  @upgradable_versions [1, 2]
+  @checkpoint_version 4
+  # Each added ledger-only effect kind bumps the durable vocabulary. Older versions are
+  # structurally compatible and widen on the next write; an older build must refuse a v4
+  # checkpoint rather than discard a history containing `:native_import`.
+  @upgradable_versions [1, 2, 3]
   @default_retention_limit 1_000
   @default_query_limit 100
   @max_query_limit 500
@@ -136,6 +133,13 @@ defmodule Ouroboros.Agent.EffectLedger do
     # in; the command text is exactly the content this ledger exists to keep out, and a
     # `cd` a reader cannot see is worth less than a command they could replay.
     operator_shell: [:session_id, :command_digest, :cwd, :node, :rule_id],
+    native_import: [
+      :session_id,
+      :source_provider_session_id,
+      :source_digest,
+      :import_fingerprint,
+      :node
+    ],
     # I1. One tool call the native agent was admitted to make, checkpointed before the
     # tool runs. `subject` is what the call is *about* — the paths it names, a digest of
     # the command line, the hosts it would reach, the MCP server and tool behind an
@@ -195,6 +199,13 @@ defmodule Ouroboros.Agent.EffectLedger do
     deploy: [:artifact_id, :module, :epoch, :nodes, :state],
     permission: [:decision, :scope, :actor, :rule_id],
     operator_shell: [:exit_status, :duration_ms, :output_bytes, :spilled, :timed_out],
+    native_import: [
+      :session_id,
+      :provider_session_id,
+      :source_provider_session_id,
+      :ready,
+      :admission_error
+    ],
     tool_call: [:status, :duration_ms, :output_bytes],
     approval: [:decision, :scope, :actor, :rule_id, :origin],
     # R1. `journal_seq` points at the `model_result` record in the session's turn journal
@@ -272,6 +283,7 @@ defmodule Ouroboros.Agent.EffectLedger do
   @ledger_only_effects [
     :permission,
     :operator_shell,
+    :native_import,
     :tool_call,
     :approval,
     :inference,
@@ -469,9 +481,12 @@ defmodule Ouroboros.Agent.EffectLedger do
   def init(opts) do
     with {:ok, storage} <- storage_config(opts),
          {:ok, adapter, adapter_opts} <- normalize_storage(storage),
+         {:ok, epoch_server} <- epoch_server(opts, adapter),
          {:ok, retention_limit} <- retention_limit(opts),
          {:ok, checkpoint} <- load(adapter, adapter_opts),
-         {:ok, checkpoint} <- reconcile_unfinished(checkpoint, adapter, adapter_opts) do
+         {:ok, checkpoint} <- reconcile_epoch(checkpoint, adapter, adapter_opts, epoch_server),
+         {:ok, checkpoint} <-
+           maybe_reconcile_unfinished(checkpoint, adapter, adapter_opts, epoch_server) do
       {:ok,
        %{
          adapter: adapter,
@@ -480,6 +495,7 @@ defmodule Ouroboros.Agent.EffectLedger do
          next_sequence: checkpoint.next_sequence,
          retention_limit: retention_limit,
          durability: durability_level(adapter),
+         epoch_server: epoch_server,
          runners: %{},
          runner_monitors: %{}
        }}
@@ -605,7 +621,7 @@ defmodule Ouroboros.Agent.EffectLedger do
             # durably recorded did not happen. Keeping it in memory only would have this
             # process answer `:ambiguous` for an entry that is still `:started` on disk,
             # and hand out sequence numbers no checkpoint ever claimed.
-            case checkpoint_state(updated) do
+            case checkpoint_state(updated, write_id(:result, effect_id, state.next_sequence)) do
               :ok ->
                 {:noreply, updated}
 
@@ -634,7 +650,12 @@ defmodule Ouroboros.Agent.EffectLedger do
         entries = trim([entry | state.entries], state.retention_limit)
         updated = %{state | entries: entries, next_sequence: state.next_sequence + 1}
 
-        persist(updated, {:ok, entry, :created}, :effect_ledger_checkpoint_failed)
+        persist(
+          updated,
+          {:ok, entry, :created},
+          :effect_ledger_checkpoint_failed,
+          write_id(record_phase(status), attrs.id, state.next_sequence)
+        )
 
       %Entry{} = existing ->
         if same_attempt?(existing, attrs, status) do
@@ -655,7 +676,12 @@ defmodule Ouroboros.Agent.EffectLedger do
           entries = replace(state.entries, settled) |> trim(state.retention_limit)
           updated = %{state | entries: entries, next_sequence: state.next_sequence + 1}
 
-          case persist(updated, {:ok, settled, :updated}, :effect_ledger_checkpoint_failed) do
+          case persist(
+                 updated,
+                 {:ok, settled, :updated},
+                 :effect_ledger_checkpoint_failed,
+                 write_id(:result, effect_id, state.next_sequence)
+               ) do
             {:ok, reply, persisted} -> {:ok, reply, forget_runner(persisted, effect_id)}
             {:error, reason} -> {:error, reason}
           end
@@ -1008,23 +1034,63 @@ defmodule Ouroboros.Agent.EffectLedger do
     else
       reconciled = %{checkpoint | entries: entries, next_sequence: next_sequence}
 
-      case checkpoint(adapter, adapter_opts, reconciled) do
+      case checkpoint(adapter, adapter_opts, reconciled, nil, nil) do
         :ok -> {:ok, reconciled}
         {:error, reason} -> {:error, {:effect_ledger_reconciliation_failed, reason}}
       end
     end
   end
 
-  defp persist(state, reply, error_tag) do
-    case checkpoint_state(state) do
+  defp maybe_reconcile_unfinished(checkpoint, adapter, adapter_opts, nil),
+    do: reconcile_unfinished(checkpoint, adapter, adapter_opts)
+
+  defp maybe_reconcile_unfinished(checkpoint, adapter, adapter_opts, epoch_server) do
+    timestamp = now()
+
+    {entries, next_sequence} =
+      checkpoint.entries
+      |> Enum.reverse()
+      |> Enum.map_reduce(checkpoint.next_sequence, fn
+        %Entry{status: :started} = entry, sequence ->
+          reconciled = %Entry{
+            entry
+            | sequence: sequence,
+              status: :ambiguous,
+              error: sanitize_error(:runtime_restarted_before_settlement),
+              settled_at: timestamp
+          }
+
+          {reconciled, sequence + 1}
+
+        entry, sequence ->
+          {entry, sequence}
+      end)
+
+    entries = entries |> Enum.reverse() |> Enum.sort_by(& &1.sequence, :desc)
+
+    if entries == checkpoint.entries do
+      {:ok, checkpoint}
+    else
+      reconciled = %{checkpoint | entries: entries, next_sequence: next_sequence}
+      id = write_id(:recovery_result, "unfinished", payload_digest(reconciled))
+
+      case checkpoint(adapter, adapter_opts, reconciled, epoch_server, id) do
+        :ok -> {:ok, reconciled}
+        {:error, reason} -> {:error, {:effect_ledger_reconciliation_failed, reason}}
+      end
+    end
+  end
+
+  defp persist(state, reply, error_tag, write_id) do
+    case checkpoint_state(state, write_id) do
       :ok -> {:ok, reply, state}
       {:error, reason} -> {:error, {error_tag, reason}}
     end
   end
 
-  defp checkpoint_state(state) do
+  defp checkpoint_state(state, write_id) do
     checkpoint = %{entries: state.entries, next_sequence: state.next_sequence}
-    checkpoint(state.adapter, state.opts, checkpoint)
+    checkpoint(state.adapter, state.opts, checkpoint, state.epoch_server, write_id)
   end
 
   defp forget_runner(state, effect_id) do
@@ -1038,11 +1104,11 @@ defmodule Ouroboros.Agent.EffectLedger do
     end
   end
 
-  defp checkpoint(adapter, opts, checkpoint) do
+  defp checkpoint(adapter, opts, checkpoint, nil, _write_id) do
     result =
       adapter_call(adapter, :put_checkpoint, [
         @store_key,
-        Map.put(checkpoint, :version, @checkpoint_version),
+        checkpoint_payload(checkpoint),
         opts
       ])
 
@@ -1050,6 +1116,137 @@ defmodule Ouroboros.Agent.EffectLedger do
       {:error, {:commit_outcome_unknown, _reason} = ambiguity} -> exit(ambiguity)
       other -> other
     end
+  end
+
+  defp checkpoint(adapter, opts, checkpoint, epoch_server, write_id) do
+    payload = checkpoint_payload(checkpoint)
+    digest = payload_digest(payload)
+
+    with {:ok, reservation} <- reserve_epoch(epoch_server, write_id, digest) do
+      case adapter_call(adapter, :put_checkpoint, [@store_key, payload, opts]) do
+        :ok ->
+          commit_epoch(epoch_server, reservation)
+
+        {:error, reason} ->
+          reconcile_publish(adapter, opts, payload, epoch_server, reservation, reason)
+
+        other ->
+          exit({:effect_ledger_epoch_uncertain, {:invalid_storage_response, other}})
+      end
+    end
+  end
+
+  defp checkpoint_payload(checkpoint), do: Map.put(checkpoint, :version, @checkpoint_version)
+
+  defp payload_digest(payload) do
+    payload
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp record_phase(:started), do: :admission
+  defp record_phase(_terminal), do: :result
+
+  defp write_id(phase, effect_id, sequence) do
+    identity = :erlang.term_to_binary({phase, effect_id, sequence}, [:deterministic])
+    hash = :crypto.hash(:sha256, identity) |> Base.encode16(case: :lower)
+    "effect-ledger/v1/#{phase}/#{hash}"
+  end
+
+  defp reserve_epoch(epoch_server, write_id, digest) do
+    case epoch_call(fn -> Epoch.reserve(write_id, digest, epoch_server) end) do
+      {:ok, {:ok, reservation}} -> {:ok, reservation}
+      {:ok, {:error, reason}} -> {:error, {:maintenance_epoch, reason}}
+      {:ok, other} -> exit({:effect_ledger_epoch_uncertain, {:invalid_epoch_response, other}})
+      {:uncertain, reason} -> exit({:effect_ledger_epoch_uncertain, {:reserve, reason}})
+    end
+  end
+
+  defp commit_epoch(epoch_server, reservation) do
+    case epoch_call(fn -> Epoch.commit(reservation, epoch_server) end) do
+      {:ok, :ok} -> :ok
+      {:ok, response} -> exit({:effect_ledger_epoch_uncertain, {:commit, response}})
+      {:uncertain, reason} -> exit({:effect_ledger_epoch_uncertain, {:commit, reason}})
+    end
+  end
+
+  defp reconcile_publish(adapter, opts, payload, epoch_server, reservation, publish_reason) do
+    case read_payload(adapter, opts) do
+      {:ok, ^payload} ->
+        commit_epoch(epoch_server, reservation)
+
+      {:ok, _authoritative_other} ->
+        abort_epoch(epoch_server, reservation, publish_reason)
+
+      :not_found ->
+        abort_epoch(epoch_server, reservation, publish_reason)
+
+      other ->
+        exit({:effect_ledger_epoch_uncertain, {:payload_observation, other}})
+    end
+  end
+
+  defp abort_epoch(epoch_server, reservation, publish_reason) do
+    case epoch_call(fn -> Epoch.abort(reservation, :payload_absence_confirmed, epoch_server) end) do
+      {:ok, :ok} -> {:error, publish_reason}
+      {:ok, response} -> exit({:effect_ledger_epoch_uncertain, {:abort, response}})
+      {:uncertain, reason} -> exit({:effect_ledger_epoch_uncertain, {:abort, reason}})
+    end
+  end
+
+  defp reconcile_epoch(checkpoint, _adapter, _opts, nil), do: {:ok, checkpoint}
+
+  defp reconcile_epoch(checkpoint, adapter, opts, epoch_server) do
+    payload = checkpoint_payload(checkpoint)
+
+    case epoch_call(fn -> Epoch.observe(epoch_server) end) do
+      {:ok, %{pending: pending}} when is_list(pending) ->
+        Enum.reduce_while(pending, {:ok, checkpoint}, fn reservation, acc ->
+          if String.starts_with?(reservation.write_id, "effect-ledger/v1/") do
+            result =
+              if reservation.payload_digest == payload_digest(payload) do
+                commit_epoch(epoch_server, Map.delete(reservation, :status))
+              else
+                case read_payload(adapter, opts) do
+                  {:ok, ^payload} ->
+                    abort_epoch(
+                      epoch_server,
+                      Map.delete(reservation, :status),
+                      :reconciled_absent_payload
+                    )
+
+                  other ->
+                    exit({:effect_ledger_epoch_uncertain, {:payload_observation, other}})
+                end
+              end
+
+            case result do
+              :ok -> {:cont, acc}
+              {:error, :reconciled_absent_payload} -> {:cont, acc}
+              other -> {:halt, {:error, {:effect_ledger_epoch_reconcile_failed, other}}}
+            end
+          else
+            {:cont, acc}
+          end
+        end)
+
+      {:ok, other} ->
+        {:error, {:invalid_epoch_observation, other}}
+
+      {:uncertain, reason} ->
+        {:error, {:maintenance_epoch_unavailable, reason}}
+    end
+  end
+
+  defp read_payload(adapter, opts) do
+    adapter_call(adapter, checkpoint_reader(adapter), [@store_key, opts])
+  end
+
+  defp epoch_call(fun) do
+    {:ok, fun.()}
+  catch
+    :exit, reason -> {:uncertain, reason}
   end
 
   # An undecodable checkpoint is quarantined rather than fatal; see the moduledoc. Only the
@@ -1168,6 +1365,36 @@ defmodule Ouroboros.Agent.EffectLedger do
     {:ok, adapter, adapter_opts}
   rescue
     error -> {:error, {:invalid_effect_ledger_storage, Exception.message(error)}}
+  end
+
+  defp epoch_server(opts, adapter) do
+    configured = Keyword.get(opts, :epoch_server, :auto)
+
+    production_durable? =
+      adapter == Ouroboros.Storage.DurableFile and
+        match?(
+          path when is_binary(path) and path != "",
+          Application.get_env(:ouroboros, :data_dir)
+        )
+
+    case {production_durable?, configured} do
+      {true, :auto} ->
+        if Process.whereis(Epoch),
+          do: {:ok, Epoch},
+          else: {:error, :maintenance_epoch_required}
+
+      {true, nil} ->
+        {:error, :maintenance_epoch_required}
+
+      {false, :auto} ->
+        {:ok, nil}
+
+      {false, nil} ->
+        {:ok, nil}
+
+      {_durable, server} ->
+        {:ok, server}
+    end
   end
 
   defp retention_limit(opts) do

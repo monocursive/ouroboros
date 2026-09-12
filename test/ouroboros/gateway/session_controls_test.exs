@@ -78,6 +78,29 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       retire_session(id)
     end
 
+    test "a running turn reports next-turn timing through the wire", %{id: id} do
+      ref = start_session(id, approval_mode: :prompt)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "hold this turn", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_model_started, _run,
+                      %Ouroboros.Test.ModelRequest{approval_mode: :prompt}, adapter},
+                     2_000
+
+      assert {:ok, result} =
+               Methods.invoke("interactive.configure", %{
+                 "id" => id,
+                 "approval_mode" => "auto_approve"
+               })
+
+      assert result.applies == :next_turn
+      assert result.changed == [:approval_mode]
+
+      ControlledModel.finish(adapter)
+      retire_session(id)
+    end
+
     test "a field outside the configurable set is a parameter error naming the set" do
       assert {:error, -32_602, message} =
                Methods.invoke("interactive.configure", %{

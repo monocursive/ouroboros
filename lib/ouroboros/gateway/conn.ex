@@ -293,8 +293,14 @@ defmodule Ouroboros.Gateway.Conn do
 
   def handle_info({:tcp_closed, socket}, %{socket: socket} = state), do: {:stop, :normal, state}
 
-  def handle_info({:tcp_error, socket, _reason}, %{socket: socket} = state),
-    do: {:stop, :normal, state}
+  def handle_info({:tcp_error, socket, reason}, %{socket: socket} = state) do
+    Logger.warning("gateway socket receive failed: #{inspect(reason)}",
+      gateway_peer: describe_peer(state.peer),
+      gateway_outbound: state.outbound
+    )
+
+    {:stop, :normal, state}
+  end
 
   def handle_info(:hello_timeout, %{authenticated?: false} = state) do
     {:stop, :normal, state}
@@ -318,7 +324,14 @@ defmodule Ouroboros.Gateway.Conn do
     |> maybe_stop()
   end
 
-  def handle_info({:write_failed, _reason}, state), do: {:stop, :normal, state}
+  def handle_info({:write_failed, reason}, state) do
+    Logger.warning("gateway socket write failed: #{inspect(reason)}",
+      gateway_peer: describe_peer(state.peer),
+      gateway_outbound: state.outbound
+    )
+
+    {:stop, :normal, state}
+  end
 
   def handle_info({:request_timeout, ref}, state) when is_reference(ref) do
     case Map.pop(state.in_flight, ref) do

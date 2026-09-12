@@ -135,6 +135,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       handle: handle,
       session_id: runtime.runtime_id,
       parent_agent: parent_agent,
+      parent_spec: parent_spec,
       child_agent: child_agent,
       child_spec: child_spec
     }
@@ -290,6 +291,63 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert session_id != settled.payload["provider_session_id"]
     end
 
+    test "a completed delegated child leaves a durable receipt that survives parent reopen",
+         context do
+      item = %{
+        "id" => "P0-runtime",
+        "step" => "Review parser",
+        "status" => "in_progress",
+        "deliverable" => "analysis",
+        "work_state" => "reviewing",
+        "criteria" => ["review retained"],
+        "evidence" => ["review.md"]
+      }
+
+      parent_script = [
+        [{:tool_call, %{id: "p", name: "plan", input: %{"steps" => [item]}}}],
+        [
+          agent_call(%{
+            "prompt" => "review parser",
+            "work_item_ids" => ["P0-runtime"]
+          })
+        ],
+        finish()
+      ]
+
+      %{handle: handle, parent_spec: parent_spec} =
+        open(context, parent_script, [finish("reviewed")])
+
+      send_turn(handle)
+      _events = collect_until(:turn_completed)
+
+      assert {:ok, %{current_plan: plan}} = Session.plan_state(handle)
+      [owned] = plan["plan"]
+      assert is_binary(owned["owner_task_id"])
+      assert plan["authority"]["P0-runtime"]["state"] == "settled"
+      assert plan["authority"]["P0-runtime"]["receipt"]["settlement"] == "completed"
+
+      {:ok, info} = Session.info(handle)
+      assert :ok = Session.close(handle)
+
+      request =
+        SessionRequest.new!(%{
+          provider: :native,
+          cwd: context.workspace,
+          model: parent_spec,
+          provider_session_id: info.provider_session_id
+        })
+
+      assert {:ok, reopened} =
+               Session.open(request, %{
+                 session_id: "reopened-binding",
+                 provider: :native,
+                 owner: self()
+               })
+
+      on_exit(fn -> if Process.alive?(reopened), do: Session.close(reopened) end)
+      assert {:ok, %{current_plan: ^plan}} = Session.plan_state(reopened)
+    end
+
     test "the child's usage folds into the parent's own usage and turn totals", context do
       %{handle: handle} =
         open(
@@ -328,6 +386,48 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert info.context_used == 10
     end
 
+    test "a foreground digest keeps a long report pageable until explicit release", context do
+      report = String.duplicate("x", 13_000) <> "END"
+
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "report", "description" => "foreground-long"})], finish()],
+          [[{:text, report}, {:finish, :stop}]]
+        )
+
+      send_turn(handle)
+      events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
+      task_id = spawned.payload["task_id"]
+      result = tool_result(events, "agent")
+
+      assert result.payload["output"] =~ "cursor 0"
+      handles = collector(handle)
+
+      assert {:ok, %{is_error: false, output: page}} =
+               AgentResult.run(%{task_id: task_id, cursor: 0, max_bytes: 12_288}, %{
+                 subagents: handles
+               })
+
+      assert page =~ "continue with cursor"
+
+      assert {:ok, %{is_error: false, output: final}} =
+               AgentResult.run(
+                 %{task_id: task_id, cursor: 12_288, max_bytes: 1_000, release: true},
+                 %{
+                   subagents: handles
+                 }
+               )
+
+      assert final =~ "complete"
+
+      assert {:ok, %{is_error: true, output: gone}} =
+               AgentResult.run(%{task_id: task_id}, %{subagents: handles})
+
+      assert gone =~ "No subagent"
+    end
+
     test "a child's summary and the events about it are bounded", context do
       %{handle: handle} =
         open(
@@ -345,6 +445,233 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       result = tool_result(events, "agent")
       assert byte_size(result.payload["output"]) <= 16 * 1024 + 8
     end
+
+    test "a child can return a typed parent-resolvable blocker without self-acceptance",
+         context do
+      blocked = %{
+        "plan" => [
+          %{
+            "id" => "child-blocked",
+            "step" => "Implement the broad change",
+            "status" => "pending",
+            "deliverable" => "implementation",
+            "work_state" => "blocked",
+            "criteria" => ["focused regression passes"],
+            "evidence" => [],
+            "child_settlement" => "unsettled",
+            "blocker" => %{
+              "type" => "scope_too_broad",
+              "resolvable_by_parent" => true,
+              "detail" => "split ownership before editing"
+            }
+          }
+        ],
+        "explanation" => "Returning early"
+      }
+
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "implement broad change"})], finish()],
+          [
+            [
+              {:tool_call, %{id: "p1", name: "plan", input: %{"steps" => blocked["plan"]}}}
+            ],
+            finish("Blocked before spending the remaining budget.")
+          ]
+        )
+
+      send_turn(handle)
+      events = collect_until(:turn_completed)
+      [settled] = subagent_events(events, "settled")
+
+      assert settled.payload["status"] == "completed"
+
+      assert settled.payload["deliverable"] == %{
+               "state" => "blocked",
+               "accepted" => false,
+               "item_id" => "child-blocked",
+               "deliverable" => "implementation",
+               "blocker" => blocked["plan"] |> hd() |> Map.fetch!("blocker"),
+               "child_settlement" => "completed"
+             }
+
+      assert settled.payload["tool_calls"] == 1
+    end
+
+    test "a large terminal report is reconstructed exactly through bounded UTF-8 pages",
+         context do
+      tail = "TAIL-CAVEAT-λ"
+      report = String.duplicate("é", 8_000) <> tail
+
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "report", "background" => true})], finish()],
+          [[{:text, report}, {:finish, :stop}]]
+        )
+
+      send_turn(handle)
+      events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
+      assert await_subagent("settled").payload["result_bytes"] == byte_size(report)
+      handles = collector(handle)
+
+      assert {:ok, %{is_error: true, output: invalid}} =
+               AgentResult.run(
+                 %{task_id: spawned.payload["task_id"], cursor: 1, max_bytes: 100},
+                 %{subagents: handles}
+               )
+
+      assert invalid =~ "Invalid result cursor"
+
+      {pages, final_cursor} =
+        Enum.reduce_while(1..10, {[], 0}, fn _, {pages, cursor} ->
+          assert {:ok, %{output: output, is_error: false}} =
+                   AgentResult.run(
+                     %{task_id: spawned.payload["task_id"], cursor: cursor, max_bytes: 4097},
+                     %{subagents: handles}
+                   )
+
+          [header, text] = String.split(output, "\n\n", parts: 2)
+          next = Regex.run(~r/continue with cursor (\d+)/, header)
+
+          if next do
+            cursor = next |> Enum.at(1) |> String.to_integer()
+            {:cont, {[text | pages], cursor}}
+          else
+            {:halt, {[text | pages], byte_size(report)}}
+          end
+        end)
+
+      assert final_cursor == byte_size(report)
+      assert pages |> Enum.reverse() |> Enum.join() == report
+      assert List.first(pages) |> String.ends_with?(tail)
+
+      assert {:ok, %{is_error: false, output: repeated}} =
+               AgentResult.run(
+                 %{task_id: spawned.payload["task_id"], cursor: 0, max_bytes: 4097},
+                 %{subagents: handles}
+               )
+
+      [repeated_header, repeated_text] = String.split(repeated, "\n\n", parts: 2)
+      assert repeated_header =~ "report page 0..4096"
+      assert repeated_text == report |> binary_part(0, 4096)
+
+      assert {:ok, %{is_error: false, output: repeated_final}} =
+               AgentResult.run(
+                 %{task_id: spawned.payload["task_id"], cursor: final_cursor, max_bytes: 100},
+                 %{subagents: handles}
+               )
+
+      assert repeated_final =~ "report page #{final_cursor}..#{final_cursor}"
+      assert repeated_final =~ "complete"
+
+      assert {:ok, %{is_error: false}} =
+               AgentResult.run(
+                 %{
+                   task_id: spawned.payload["task_id"],
+                   cursor: final_cursor,
+                   max_bytes: 100,
+                   release: true
+                 },
+                 %{subagents: handles}
+               )
+
+      assert {:ok, %{is_error: true, output: released}} =
+               AgentResult.run(%{task_id: spawned.payload["task_id"]}, %{subagents: handles})
+
+      assert released =~ "No subagent"
+    end
+
+    test "retention truncates a report above one MiB and reports original and retained sizes",
+         context do
+      report = String.duplicate("é", 512 * 1024 + 50) <> "UNRETAINED"
+
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "report", "background" => true})], finish()],
+          [[{:text, report}, {:finish, :stop}]]
+        )
+
+      send_turn(handle)
+      events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
+      settled = await_subagent("settled").payload
+      task_id = spawned.payload["task_id"]
+      handles = collector(handle)
+
+      assert settled["summary_bytes"] <= 12 * 1024
+      assert settled["result_bytes"] == 1024 * 1024
+      assert settled["result_original_bytes"] == byte_size(report)
+      assert settled["result_truncated"] == true
+
+      assert {:ok, %{is_error: false, output: final}} =
+               AgentResult.run(
+                 %{task_id: task_id, cursor: 1024 * 1024 - 4, max_bytes: 12 * 1024},
+                 %{subagents: handles}
+               )
+
+      assert final =~ "of 1048576 bytes"
+      assert final =~ "original_bytes=#{byte_size(report)}"
+      assert final =~ "retained_truncated=true"
+      refute final =~ "UNRETAINED"
+    end
+
+    test "invalid UTF-8 output is replaced before retained paging", context do
+      report = <<"valid", 255, "tail">>
+
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "report", "background" => true})], finish()],
+          [[{:text, report}, {:finish, :stop}]]
+        )
+
+      send_turn(handle)
+      events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
+      _settled = await_subagent("settled")
+
+      assert {:ok, %{is_error: false, output: output}} =
+               AgentResult.run(
+                 %{task_id: spawned.payload["task_id"], cursor: 0},
+                 %{subagents: collector(handle)}
+               )
+
+      assert String.valid?(output)
+      assert output =~ "valid�tail"
+      assert output =~ "retained_truncated=true"
+    end
+  end
+
+  test "agent_result rejects malformed paging inputs at the validated tool boundary" do
+    context = %{
+      subagents: %{
+        lookup: fn task_id -> send(self(), {:unexpected_lookup, task_id}) end,
+        release: fn task_id -> send(self(), {:unexpected_release, task_id}) end
+      }
+    }
+
+    cases = [
+      %{"task_id" => "sub-x", "cursor" => -1},
+      %{"task_id" => "sub-x", "cursor" => "0"},
+      %{"task_id" => "sub-x", "cursor" => 0, "max_bytes" => 0},
+      %{"task_id" => "sub-x", "cursor" => 0, "max_bytes" => -1},
+      %{"task_id" => "sub-x", "cursor" => 0, "max_bytes" => "12"},
+      %{"task_id" => "sub-x", "wait_ms" => -1},
+      %{"task_id" => "sub-x", "release" => "true"}
+    ]
+
+    Enum.each(cases, fn input ->
+      result = Tools.execute(AgentResult, input, context, 5_000)
+      assert result.is_error
+      assert result.output != ""
+    end)
+
+    refute_received {:unexpected_lookup, _}
+    refute_received {:unexpected_release, _}
   end
 
   # ---------------------------------------------------------------- the bounds
@@ -492,6 +819,42 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       send(child, :stop)
     end
 
+    test "settlement while idle is injected into the next model turn", context do
+      %{handle: handle, parent_agent: parent_agent} =
+        open(context, [[{:text, "saw settlement"}, {:finish, :stop}]], [[{:finish, :stop}]])
+
+      child = spawn(fn -> receive do: (_message -> :ok) end)
+      assert :ok = GenServer.call(handle, {:subagent_track, "context-child", child, %{}})
+
+      summary = %{
+        task_id: "context-child",
+        description: "finished",
+        provider_session_id: "native-context-child",
+        status: :completed,
+        turns: 1,
+        tool_calls: 0,
+        files_changed_count: 0,
+        files_changed: [],
+        usage: %{input: 1, output: 1, cost: nil},
+        approvals_denied: 0,
+        text: "done",
+        error: nil,
+        worktree: nil
+      }
+
+      send(handle, {:subagent, "context-child", {:settled, summary}})
+      await_subagent("settled")
+      send_turn(handle)
+      collect_until(:turn_completed)
+
+      [request] = NativeModelScript.requests(parent_agent)
+      user = List.last(request.messages)
+      assert inspect(user) =~ "Ouroboros child settlement"
+      assert inspect(user) =~ "task_id=context-child"
+      assert inspect(user) =~ "settlement does not imply acceptance"
+      send(child, :stop)
+    end
+
     test "provisioning takes only bounded-policy options from the actual parent" do
       parent = bare_parent("provision-policy")
 
@@ -571,7 +934,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
                :sync,
                :background,
                :deadline_ms,
-               :max_turns
+               :max_turns,
+               :work_item_ids
              ]
 
       prompting = %{
@@ -584,6 +948,50 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert prompting_spec.request_attrs.approval_mode == :prompt
       assert prompting_spec.request_attrs.sandbox_mode == :workspace_write
       refute prompting_spec.request_attrs.plan
+    end
+
+    test "delegation binds only an existing exact parent work item before spawn" do
+      item = %{
+        "id" => "P0-owned",
+        "step" => "Implement parser",
+        "status" => "in_progress",
+        "deliverable" => "implementation",
+        "work_state" => "investigating",
+        "criteria" => ["focused tests pass"],
+        "evidence" => []
+      }
+
+      parent = Map.put(bare_parent("binding"), :current_plan, %{"plan" => [item]})
+
+      assert {:ok, spec} =
+               AgentTool.plan(
+                 %{"prompt" => "implement it", "work_item_ids" => ["P0-owned"]},
+                 parent
+               )
+
+      assert [%{"item_id" => "P0-owned", "digest" => digest}] = spec.bindings
+
+      assert digest ==
+               Ouroboros.Provider.Native.WorkItem.authority_digest(item, "native-binding")
+
+      assert {:error, absent} =
+               AgentTool.plan(
+                 %{"prompt" => "implement it", "work_item_ids" => ["other"]},
+                 parent
+               )
+
+      assert absent =~ "absent"
+
+      assert {:error, duplicate} =
+               AgentTool.plan(
+                 %{
+                   "prompt" => "implement it",
+                   "work_item_ids" => ["P0-owned", "P0-owned"]
+                 },
+                 parent
+               )
+
+      assert duplicate =~ "duplicate"
     end
 
     test "max_turns is capped and reaches the child as its own iteration bound" do
@@ -636,6 +1044,35 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     parent = %{parent | options: %{"subagent_max_deadline_ms" => 250}}
     assert {:ok, spec} = AgentTool.plan(%{"prompt" => "build", "deadline_ms" => 1_000}, parent)
     assert spec.deadline_ms == 250
+  end
+
+  test "a foreground child reports its requested and effective wall deadlines truthfully" do
+    parent = Map.put(bare_parent("effective-deadline"), :tool_timeout_ms, 120_000)
+
+    assert {:ok, spec} =
+             AgentTool.plan(%{"prompt" => "review", "deadline_ms" => 600_000}, parent)
+
+    assert spec.deadline_ms == 600_000
+    assert spec.effective_deadline_ms == 115_000
+    payload = AgentTool.spawned_payload(spec, %{provider_session_id: "native-child"})
+    assert payload["deadline_ms"] == 600_000
+    assert payload["effective_deadline_ms"] == 115_000
+
+    assert {:ok, background} =
+             AgentTool.plan(
+               %{"prompt" => "review", "deadline_ms" => 600_000, "background" => true},
+               parent
+             )
+
+    assert background.effective_deadline_ms == 600_000
+
+    tiny = Map.put(parent, :tool_timeout_ms, 1_000)
+
+    assert {:ok, tiny_spec} =
+             AgentTool.plan(%{"prompt" => "review", "deadline_ms" => 600_000}, tiny)
+
+    assert tiny_spec.effective_deadline_ms == 500
+    assert tiny_spec.effective_deadline_ms < tiny.tool_timeout_ms
   end
 
   test "500 tool calls coalesce and the last progress carries the latest activity", context do
@@ -883,19 +1320,18 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   describe "the deadline" do
     @tag audit_outcome: true
     test "fires, stops the child, and reports timed_out with what it had", context do
-      %{handle: handle} =
+      %{handle: handle, child_agent: child_agent} =
         open(
           context,
           [[agent_call(%{"prompt" => "take too long", "description" => "slow"})], finish()],
-          [
-            [{:tool_call, %{id: "b1", name: "bash", input: %{"command" => "sleep 20"}}}],
-            [{:text, "late"}, {:finish, :stop}]
-          ],
+          [[{:text, "late"}, {:finish, :stop}]],
           %{provider_options: %{"subagent_deadline_ms" => 1_500}}
         )
 
+      :sys.suspend(child_agent)
       send_turn(handle)
       events = collect_until(:turn_completed, [], 60_000)
+      :sys.resume(child_agent)
 
       [settled] = subagent_events(events, "settled")
       assert settled.payload["status"] == "timed_out"
@@ -987,6 +1423,39 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   # ---------------------------------------------------------------- background
 
   describe "a background child" do
+    test "cursor collection honors wait_ms before reporting that no stable page exists",
+         context do
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "wait", "background" => true})], finish()],
+          [
+            [{:tool_call, %{id: "slow", name: "bash", input: %{"command" => "sleep 1"}}}],
+            finish()
+          ],
+          %{sandbox_mode: :unrestricted}
+        )
+
+      send_turn(handle)
+      spawned = await_subagent("spawned")
+      handles = collector(handle)
+      started = System.monotonic_time(:millisecond)
+
+      assert {:ok, %{is_error: false, output: output, lifecycle: lifecycle}} =
+               AgentResult.run(
+                 %{task_id: spawned.payload["task_id"], cursor: 0, wait_ms: 200},
+                 %{subagents: handles}
+               )
+
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert elapsed >= 150
+      assert output =~ "no stable report page"
+      assert lifecycle.next_action == "await_settlement_event"
+      assert lifecycle.wait_ms == 200
+      assert lifecycle.report_available == false
+      assert await_subagent("settled", 5_000).payload["status"] == "completed"
+    end
+
     @tag audit_outcome: true
     test "returns a task_id, settles on the session's own stream, and is collectable",
          context do
@@ -1039,11 +1508,66 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert output =~ "it defines x/0"
       assert output =~ "completed"
 
-      # Collected means released: a second collection says so rather than answering twice.
-      assert {:ok, %{is_error: true, output: again}} =
+      # Reading is retryable until the caller explicitly releases the terminal child.
+      assert {:ok, %{is_error: false, output: again}} =
                AgentResult.run(%{task_id: task_id, wait_ms: 0}, %{subagents: handles})
 
-      assert again =~ "No subagent"
+      assert again == output
+
+      assert {:ok, %{is_error: false}} =
+               AgentResult.run(
+                 %{task_id: task_id, wait_ms: 0, release: true},
+                 %{subagents: handles}
+               )
+
+      assert {:ok, %{is_error: true, output: released}} =
+               AgentResult.run(%{task_id: task_id, wait_ms: 0}, %{subagents: handles})
+
+      assert released =~ "No subagent"
+    end
+
+    test "a legacy background digest remains pageable until explicit release", context do
+      report = String.duplicate("y", 13_000) <> "BACKGROUND-END"
+
+      %{handle: handle} =
+        open(
+          context,
+          [[agent_call(%{"prompt" => "long", "background" => true})], finish()],
+          [[{:text, report}, {:finish, :stop}]]
+        )
+
+      send_turn(handle)
+      events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
+      task_id = spawned.payload["task_id"]
+      _settled = await_subagent("settled")
+      handles = collector(handle)
+
+      assert {:ok, %{is_error: false, output: digest}} =
+               AgentResult.run(%{task_id: task_id, wait_ms: 0}, %{subagents: handles})
+
+      assert digest =~ "retrieve the retained report exactly with cursor 0"
+
+      assert {:ok, %{is_error: false, output: page}} =
+               AgentResult.run(%{task_id: task_id, cursor: 0, max_bytes: 12_288}, %{
+                 subagents: handles
+               })
+
+      assert page =~ "continue with cursor"
+
+      assert {:ok, %{is_error: false, output: final}} =
+               AgentResult.run(
+                 %{
+                   task_id: task_id,
+                   cursor: 12_288,
+                   max_bytes: 1_000,
+                   release: true
+                 },
+                 %{subagents: handles}
+               )
+
+      assert final =~ "BACKGROUND-END"
+      assert final =~ "complete"
     end
 
     test "asks between turns and the approved child write reaches the effect ledger", context do
@@ -1305,6 +1829,13 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     test "with a data directory configured a child still writes inside its worktree",
          context do
       File.mkdir_p!(Path.join(context.data_dir, "worktrees"))
+
+      epoch =
+        start_supervised!({Ouroboros.Maintenance.Epoch, name: nil, data_dir: context.data_dir})
+
+      previous_epoch = Application.get_env(:ouroboros, :native_epoch_server)
+      Application.put_env(:ouroboros, :native_epoch_server, epoch)
+      on_exit(fn -> restore(:native_epoch_server, previous_epoch) end)
       Application.put_env(:ouroboros, :data_dir, context.data_dir)
       Application.put_env(:ouroboros, :workspace_allowed_roots, [context.data_dir])
 

@@ -158,17 +158,26 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       |> Enum.find(&(&1.payload["kind"] == "sandbox_escalation"))
 
   defp escape_script(_context, id \\ "c1") do
+    command = "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+    explicit_retry_script(command, id)
+  end
+
+  defp explicit_retry_script(command, id) do
     [
-      [
-        {:tool_call,
-         %{
-           id: id,
-           name: "bash",
-           input: %{
-             "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
-           }
-         }}
-      ],
+      [{:tool_call, %{id: id, name: "bash", input: %{"command" => command}}}],
+      fn request ->
+        result = List.last(request.messages)
+        [_, retry_id] = Regex.run(~r/retry_attempt_id: (nretry_[A-Za-z0-9_-]+)/, result.content)
+
+        [
+          {:tool_call,
+           %{
+             id: id <> "-retry",
+             name: "bash",
+             input: %{"command" => command, "retry_attempt_id" => retry_id}
+           }}
+        ]
+      end,
       [{:text, "done"}, {:finish, :stop}]
     ]
   end
@@ -198,8 +207,28 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       # token that was never a rule. It now carries what `permissions.add` would take.
       rule = ask.payload["suggested_rule"]
 
-      assert is_binary(rule)
-      assert {:ok, _pattern} = Ouroboros.Control.Permissions.Pattern.parse(rule)
+      assert rule == "SandboxEscalation()"
+
+      assert %Ouroboros.Control.Permissions.Pattern{kind: :sandbox_escalation} =
+               Ouroboros.Control.Permissions.Pattern.parse!(rule)
+
+      escalation_request =
+        Ouroboros.Control.Permissions.Request.new(%{
+          tool: "sandbox_escalation",
+          context: %{sandbox_escalation: true}
+        })
+
+      assert Ouroboros.Control.Permissions.Matcher.matches?(
+               Ouroboros.Control.Permissions.Pattern.parse!(rule),
+               escalation_request,
+               :all
+             )
+
+      refute Ouroboros.Control.Permissions.Matcher.matches?(
+               Ouroboros.Control.Permissions.Pattern.parse!("Bash(dir=$(printf *)"),
+               escalation_request,
+               :all
+             )
 
       assert is_binary(ask.request_id)
 
@@ -226,20 +255,21 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       assert File.read!(context.outside) == "escaped\n"
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       refute result.payload["is_error"]
 
-      # The model is shown the re-run, and told plainly that a first attempt happened —
-      # a command that partly succeeded before the denial has now run twice.
-      assert result.payload["output"] =~ "The OS sandbox stopped the first attempt"
-      assert result.payload["output"] =~ "has now happened twice"
+      # The model is shown the separately authorized re-run and told plainly that a first
+      # attempt happened, without upgrading child-controlled output into proven OS provenance.
+      assert result.payload["output"] =~ "could not prove OS provenance"
+      refute result.payload["output"] =~ "The OS sandbox stopped the first attempt"
+      assert result.payload["output"] =~ "may have happened again"
       assert result.payload["output"] =~ "Runtime data, config, `.ouroboros`"
 
       # And the transcript keeps the half the tool result no longer carries.
       event = escalation_event(events)
       assert event.payload["decision"] == "approved"
       assert event.payload["granted_by"] == "human"
-      assert event.payload["call_id"] == "c1"
+      assert event.payload["call_id"] == "c1-retry"
       assert event.payload["constraint"] == "filesystem"
       assert event.payload["evidence"] =~ @denial
       assert event.payload["stopped_by"] == Sandbox.label(Sandbox.detect())
@@ -263,7 +293,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       refute File.exists?(context.outside)
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ @denial
       assert result.payload["output"] =~ "declined: not that one"
@@ -271,6 +301,10 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       assert escalation_event(events).payload["decision"] == "declined"
       assert escalation_event(events).payload["granted_by"] == "human"
+      retry_ref = List.last(all(events, :tool_call)).payload["ledger_ref"]
+      assert {:ok, retry_entry} = Ouroboros.Agent.EffectLedger.get(retry_ref["id"])
+      assert retry_entry.status == :denied
+      assert retry_entry.authority.reason == "sandbox_escalation_human"
     end
 
     test "an unanswered escalation is a declined one at the deadline", context do
@@ -283,11 +317,15 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       refute File.exists?(context.outside)
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ "Nobody answered"
       assert result.payload["output"] =~ "300 ms"
       assert escalation_event(events).payload["granted_by"] == "timeout"
+      retry_ref = List.last(all(events, :tool_call)).payload["ledger_ref"]
+      assert {:ok, retry_entry} = Ouroboros.Agent.EffectLedger.get(retry_ref["id"])
+      assert retry_entry.status == :denied
+      assert retry_entry.authority.reason == "sandbox_escalation_timeout"
     end
 
     test "an interrupt while the escalation is outstanding declines it and stops the turn",
@@ -304,36 +342,20 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       refute File.exists?(context.outside)
       assert find(events, :turn_interrupted)
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ "interrupted while the fenced escalation request"
       assert escalation_event(events).payload["granted_by"] == "interrupted"
+      retry_ref = List.last(all(events, :tool_call)).payload["ledger_ref"]
+      assert {:ok, retry_entry} = Ouroboros.Agent.EffectLedger.get(retry_ref["id"])
+      assert retry_entry.status == :denied
+      assert retry_entry.authority.reason == "sandbox_escalation_interrupted"
     end
 
-    test "a session-scope approval is not asked a second time in the same session", context do
-      script = [
-        [
-          {:tool_call,
-           %{
-             id: "c1",
-             name: "bash",
-             input: %{
-               "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
-             }
-           }}
-        ],
-        [
-          {:tool_call,
-           %{
-             id: "c2",
-             name: "bash",
-             input: %{
-               "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
-             }
-           }}
-        ],
-        [{:text, "done"}, {:finish, :stop}]
-      ]
+    test "a session-scope approval does not grant a later escalation", context do
+      command = "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+
+      script = explicit_retry_script(command, "c1")
 
       {loop, _agent} = start_loop(context, script)
       pid = run(loop)
@@ -346,19 +368,9 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       )
 
       events = collect()
-
-      # The first ask was taken out of the mailbox by `assert_receive` above, so anything
-      # left here would be a *second* one — and the point of `scope: :session` is that
-      # there is not one.
-      assert all(events, :approval_requested) == []
-      assert [first, second] = all(events, :provider_event) |> Enum.filter(&sandbox_kind?/1)
-      assert first.payload["granted_by"] == "human"
-      assert second.payload["granted_by"] == "session_grant"
-
-      for result <- all(events, :tool_result) do
-        refute result.payload["is_error"]
-        assert result.payload["output"] =~ "The OS sandbox stopped the first attempt"
-      end
+      assert escalation_event(events).payload["granted_by"] == "human"
+      # A separate future retained attempt must ask again; no session grant is installed.
+      refute Enum.any?(events, &(&1.payload["granted_by"] == "session_grant"))
     end
   end
 
@@ -396,21 +408,11 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       # Neither the command nor the shell's EPERM text names the protected root. The
       # kernel profile, not textual inspection, must be the boundary on the approved run.
-      script = [
-        [
-          {:tool_call,
-           %{
-             id: "c1",
-             name: "bash",
-             input: %{
-               "command" =>
-                 "sh -c 'echo escaped > runtime-link/ledger.db' 2>&1 || " <>
-                   "echo 'Operation not permitted' >&2; exit 1"
-             }
-           }}
-        ],
-        [{:text, "done"}, {:finish, :stop}]
-      ]
+      command =
+        "sh -c 'echo escaped > runtime-link/ledger.db' 2>&1 || " <>
+          "echo 'Operation not permitted' >&2; exit 1"
+
+      script = explicit_retry_script(command, "c1")
 
       {loop, _agent} = start_loop(context, script)
       run(loop)
@@ -421,7 +423,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert escalation_event(events).payload["decision"] == "approved"
       assert escalation_event(events).payload["granted_by"] == "rule"
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ "fenced workspace profile"
       assert result.payload["output"] =~ @denial
@@ -439,7 +441,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert all(events, :approval_requested) == []
       refute File.exists?(context.outside)
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ "refuses the fenced escalation re-run"
       assert result.payload["output"] =~ "no-escapes"
@@ -482,14 +484,28 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ @denial
-      # The pre-escalation advice, unchanged: ask a human, do not expect a way out.
-      assert result.payload["output"] =~ "ask_user"
+      # Protected roots mint no retry token and therefore no approval path.
+      refute result.payload["output"] =~ "retry_attempt_id"
       refute result.payload["output"] =~ "re-runs the command once inside a fenced profile"
     end
 
     test "plan mode never reaches an escalation: the write is refused before bash runs",
          context do
-      {loop, _agent} = start_loop(context, escape_script(context), approval_mode: :plan)
+      script = [
+        [
+          {:tool_call,
+           %{
+             id: "c1",
+             name: "bash",
+             input: %{
+               "command" => "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+             }
+           }}
+        ],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script, approval_mode: :plan)
       run(loop)
 
       events = collect()
@@ -561,10 +577,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       command =
         "git add -A && git -c user.email=a@b -c user.name=a commit -qm second --allow-empty"
 
-      script = [
-        [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => command}}}],
-        [{:text, "committed"}, {:finish, :stop}]
-      ]
+      script = explicit_retry_script(command, "c1")
 
       {loop, _agent} = start_loop(%{context | scope: scope}, script)
       pid = run(loop)
@@ -579,7 +592,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       events = collect()
 
-      [result] = all(events, :tool_result)
+      [_first, result] = all(events, :tool_result)
       refute result.payload["is_error"]
 
       {log, 0} = git.(["log", "--oneline"])
@@ -684,7 +697,4 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       20_000 -> flunk("no #{type} within 20s")
     end
   end
-
-  defp sandbox_kind?(%{payload: %{"kind" => "sandbox_escalation"}}), do: true
-  defp sandbox_kind?(_event), do: false
 end

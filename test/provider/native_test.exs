@@ -73,7 +73,8 @@ defmodule Ouroboros.Provider.NativeTest do
                  :provider_session_id,
                  :allowed_tools,
                  :disallowed_tools,
-                 :add_dirs
+                 :add_dirs,
+                 :unknown_compact_tokens
                ])
     end
 
@@ -110,7 +111,8 @@ defmodule Ouroboros.Provider.NativeTest do
                :model,
                :reasoning_effort,
                :approval_mode,
-               :sandbox_mode
+               :sandbox_mode,
+               :unknown_compact_tokens
              ]
     end
 
@@ -150,6 +152,7 @@ defmodule Ouroboros.Provider.NativeTest do
       capabilities = Provider.session_capabilities()
 
       assert capabilities.approvals != false
+      assert {:module, adapter} = Code.ensure_loaded(adapter)
       assert function_exported?(adapter, :respond_approval, 3)
       assert capabilities.steer != false
       assert function_exported?(adapter, :steer, 3)
@@ -203,8 +206,19 @@ defmodule Ouroboros.Provider.NativeTest do
 
   describe "status/1" do
     test "reports credential presence by environment variable name, never by value" do
+      previous_model_module = Application.get_env(:ouroboros, :native_model_module)
+      previous_probe = System.get_env("OUROBOROS_NATIVE_STATUS_PROBE")
       System.put_env("OUROBOROS_NATIVE_STATUS_PROBE", "sk-must-not-appear")
-      on_exit(fn -> System.delete_env("OUROBOROS_NATIVE_STATUS_PROBE") end)
+
+      on_exit(fn ->
+        if is_nil(previous_probe),
+          do: System.delete_env("OUROBOROS_NATIVE_STATUS_PROBE"),
+          else: System.put_env("OUROBOROS_NATIVE_STATUS_PROBE", previous_probe)
+
+        if is_nil(previous_model_module),
+          do: Application.delete_env(:ouroboros, :native_model_module),
+          else: Application.put_env(:ouroboros, :native_model_module, previous_model_module)
+      end)
 
       # Probe the real client, not the scripted one: the claim under test is about what
       # `Model.ReqLLM.credential_report/0` puts on the wire.

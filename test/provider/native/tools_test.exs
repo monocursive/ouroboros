@@ -54,6 +54,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                "ask_user",
                "agent",
                "agent_result",
+               "safe_status",
                "skill",
                "plan"
              ]
@@ -132,6 +133,7 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                "ask_user",
                "agent",
                "agent_result",
+               "safe_status",
                "skill",
                "plan"
              ]
@@ -721,6 +723,52 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert Bitwise.band(mode, 0o777) == 0o600
     end
 
+    test "Read retrieves only this session's exact private Bash spill", %{
+      context: context,
+      root: root
+    } do
+      output = Path.join(context.session_dir, "output")
+      File.mkdir_p!(output)
+      owned = Path.join(output, "bash-abcdefghijkl.txt")
+      File.write!(owned, "owned middle\n")
+      File.chmod!(owned, 0o600)
+
+      result =
+        run(Ouroboros.Provider.Native.Tools.Read, %{"path" => owned}, context)
+
+      refute result.is_error
+      assert result.output =~ "owned middle"
+
+      foreign_dir = Path.join(root, "foreign-session/output")
+      File.mkdir_p!(foreign_dir)
+      foreign = Path.join(foreign_dir, "bash-abcdefghijkl.txt")
+      File.write!(foreign, "foreign")
+      File.chmod!(foreign, 0o600)
+
+      assert %{is_error: true} =
+               run(Ouroboros.Provider.Native.Tools.Read, %{"path" => foreign}, context)
+
+      planted = Path.join(output, "bash-mnopqrstuvwx.txt")
+      File.ln_s!(Path.join(root, "outside/secret.txt"), planted)
+
+      assert %{is_error: true} =
+               run(Ouroboros.Provider.Native.Tools.Read, %{"path" => planted}, context)
+
+      loose = Path.join(output, "bash-zyxwvutsrqpo.txt")
+      File.write!(loose, "loose")
+      File.chmod!(loose, 0o644)
+
+      assert %{is_error: true} =
+               run(Ouroboros.Provider.Native.Tools.Read, %{"path" => loose}, context)
+
+      wrong_name = Path.join(output, "report.txt")
+      File.write!(wrong_name, "wrong")
+      File.chmod!(wrong_name, 0o600)
+
+      assert %{is_error: true} =
+               run(Ouroboros.Provider.Native.Tools.Read, %{"path" => wrong_name}, context)
+    end
+
     # C5: read_only runs inside the OS sandbox where the node has one, and keeps the old
     # refusal where it does not. Both halves are asserted, on whichever node this runs.
     # The escapes themselves live in `Ouroboros.Provider.Native.SandboxTest`.
@@ -751,6 +799,32 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
       refute result.is_error
       assert result.output =~ "ok"
+    end
+  end
+
+  describe "safe status" do
+    test "renders only status returned by the owner-bound closure", %{context: context} do
+      status = %{"version" => 1, "owner" => "logical-1", "credentials" => []}
+      context = Map.put(context, :safe_status, fn -> {:ok, status} end)
+
+      assert %{output: output, is_error: false} =
+               run(Ouroboros.Provider.Native.Tools.SafeStatus, %{}, context)
+
+      assert JSON.decode!(output) == status
+    end
+
+    test "refuses detached contexts and owner failures", %{context: context} do
+      assert %{is_error: true, output: absent} =
+               run(Ouroboros.Provider.Native.Tools.SafeStatus, %{}, context)
+
+      assert absent =~ "no owning interactive session"
+
+      context = Map.put(context, :safe_status, fn -> {:error, :ownership_refused} end)
+
+      assert %{is_error: true, output: refused} =
+               run(Ouroboros.Provider.Native.Tools.SafeStatus, %{}, context)
+
+      assert refused =~ "ownership_refused"
     end
   end
 

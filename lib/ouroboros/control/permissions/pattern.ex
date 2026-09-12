@@ -2,15 +2,18 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   @moduledoc """
   The rule language `Ouroboros.Control.Permissions` is written in, and nothing else.
 
-  A pattern is one string. Parsing it is pure, total, and independent of the filesystem,
-  the clock, and any running process, so the corpus in `test/control/permissions_test.exs`
-  is the whole specification of what a rule means.
+  A pattern is one string. **Rule vocabulary version 2** adds the argument-free
+  `SandboxEscalation()` subject; version 1 rules retain their original meaning. Parsing is
+  pure, total, and independent of the filesystem, the clock, and any running process, so
+  the corpus in `test/control/permissions_test.exs` is the whole specification of what a
+  rule means.
 
       Bash(<prefix> *)          a command line whose first tokens are <prefix>
       Bash(<exact command>)     that command line and no other
       Read(<glob>)              a path read
       Edit(<glob>)              a path edited
       Write(<glob>)             a path written
+      SandboxEscalation()       one explicit retained Bash retry in the fenced profile
       WebFetch(domain:<host>)   a network fetch of <host> or any subdomain
       mcp__<server>__<tool>     one MCP tool
       mcp__<server>__*          every tool on one MCP server
@@ -56,10 +59,17 @@ defmodule Ouroboros.Control.Permissions.Pattern do
     :tool,
     :tool_param,
     :capability,
-    :forge
+    :forge,
+    :sandbox_escalation
   ]
 
-  @wrapped %{"Bash" => :bash, "Read" => :read, "Edit" => :edit, "Write" => :write}
+  @wrapped %{
+    "Bash" => :bash,
+    "Read" => :read,
+    "Edit" => :edit,
+    "Write" => :write,
+    "SandboxEscalation" => :sandbox_escalation
+  }
 
   @max_pattern_bytes 512
 
@@ -71,7 +81,7 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   @capability_name ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
 
   # The tools whose `Tool(<name>)` form may not carry an allow. See `decisions/1`.
-  @per_target_tools ["capability", "forge"]
+  @per_target_tools ["capability", "forge", "sandbox_escalation"]
 
   @enforce_keys [:raw, :kind, :spec, :fragile?]
   defstruct @enforce_keys
@@ -87,6 +97,7 @@ defmodule Ouroboros.Control.Permissions.Pattern do
           | :tool_param
           | :capability
           | :forge
+          | :sandbox_escalation
   @type t :: %__MODULE__{
           raw: String.t(),
           kind: kind(),
@@ -199,6 +210,12 @@ defmodule Ouroboros.Control.Permissions.Pattern do
          }}
     end
   end
+
+  defp parse_named("SandboxEscalation", "", raw),
+    do: {:ok, %__MODULE__{raw: raw, kind: :sandbox_escalation, spec: %{}, fragile?: false}}
+
+  defp parse_named("SandboxEscalation", inner, _raw),
+    do: {:error, {:unexpected_argument, "SandboxEscalation", inner}}
 
   defp parse_named(name, inner, raw) when is_map_key(@wrapped, name) do
     kind = Map.fetch!(@wrapped, name)
