@@ -33,16 +33,25 @@ four completed support certifications. macOS Intel remains in that scope with no
 dedicated evidence; it is not silently dropped. The goal of a useful preview across
 these targets is **not complete** merely because installation front doors work.
 
-### Candidate notes (2026-09-12, after Linux first use and local integration)
+### Candidate notes (2026-09-13, after implementation wrap-up)
 
-Version **0.1.0**, integrated source baseline
-**`7cc878278860ac95cfc7fbe7953971325eb2a77f`**, which adopts the Linux candidate's
-packaging-check discoverability enhancement unchanged. This release-record update
-is documentation-only. The exact revision of a checkout containing it is obtained
-with `git rev-parse HEAD`; do not substitute the baseline for a later documentation
-commit in a source manifest. No retained binary was rebuilt for this update or the
-baseline. This is a local candidate record, not an announcement that its commits,
-source archive or binaries have been published.
+Version **0.1.0**, implementation checkpoint **`7e0e7f5c`** on
+`codex/self-improvements`, superseding source baseline `7cc878278860ac95cfc7fbe7953971325eb2a77f`.
+This integrates admission/recovery and pending-delivery fixes, private test authorities,
+EPMD readiness corrections, and durable lifetime write identities with stricter retry
+checks. The intentional Fable prompt/cache work is retained. See the
+[implementation and validation record](experiments/self-development-wrap-up-2026-09-12.md).
+The exact revision of a checkout containing this documentation is obtained with
+`git rev-parse HEAD`; record that complete commit in a source manifest. No retained
+preview binary was rebuilt for this source update. This remains a local candidate
+record; its commits, source archive and binaries have not been published.
+
+**Data-format boundary:** starting this code migrates an existing maintenance epoch to
+schema 2. Older builds refuse that format, so retain an independent pre-upgrade data
+copy before testing an existing installation. The epoch keeps bounded resident history
+and archives finalized identities on disk; it never forgets old write IDs to make room.
+Disk usage grows with lifetime writes, and startup checks the reachable archive. Fresh
+installation and upgrade journeys for this revision still require candidate validation.
 
 Build from a fresh checkout at the recorded candidate revision using the
 [source recipe below](#obtain-and-build) and its checked-in dependency locks.
