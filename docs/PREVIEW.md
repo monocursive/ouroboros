@@ -16,9 +16,9 @@ binary download. Do not use old `dist/` files as current release artifacts.
 
 | Target | Current evidence, not a compatibility promise |
 |---|---|
-| macOS Apple Silicon | Historical full embedded-runtime runs; current local source regression evidence. Fresh candidate installation and real-model first-use qualification still required. |
-| Linux x86-64 GNU | Ubuntu 24.04 CI is configured; a runner label is not a current candidate build/install result. Native-host namespace and ABI qualification still required. |
-| Linux AArch64 GNU | Historical helper/container evidence, not full `ouro` installation acceptance. Not yet qualified as a preview target. |
+| macOS Apple Silicon | Isolated embedded installation, standard ChatGPT browser sign-in, native Astra/xhigh documentation edit, explicitly approved sandboxed recipe check and retained resume demonstrated. Clean committed-source build also passed; these are separate artifact records, not general macOS compatibility qualification. |
+| Linux x86-64 GNU | Ubuntu 24.04 CI is configured. Current ARM-hosted AMD64 emulation failed during OTP startup before product compilation. Needs a working native x86-64 host or full-system guest; no current candidate installation qualification. |
+| Linux AArch64 GNU | Full source build and runtime-only install/onboarding/clean stop passed in an ordinary Ubuntu 24.04 ARM64 container on OrbStack. Unauthenticated web returned 401. Namespace enforcement and real-model first use on Linux remain unqualified; container success is not native-host support. |
 | macOS Intel | No current dedicated build/install evidence. Not yet qualified as a preview target. |
 
 macOS and Linux are the implemented OS families. No minimum macOS version, glibc
@@ -27,6 +27,29 @@ musl and other targets are not established support. Accessing the local web UI
 from a browser does not establish runtime support for that browser's device.
 Before a public candidate claims any target, its release record must contain the
 per-target checks below. Missing checks must not be labeled passed.
+
+### Evidence checkpoint (2026-09-12)
+
+Local integrated source checkpoint `588dca58` was reconstructed from Git and built
+on macOS arm64. The earlier macOS first-use binary was built from an explicit
+448-file working-tree snapshot, not that commit: only README wording differs among
+those selected inputs. Its two live task turns verified before restart; after
+restart replay reports a `resumed_conversation` boundary. A successful new model
+resume is not deterministic verification beyond that boundary.
+
+The Linux ARM64 build used 869 selected working-tree inputs at `d0122723`, digest
+`9e89a8766f2520fa00d72c79bbcdad19c3c9cde0f5de6b0d76ae38068532994f`.
+Of those inputs, 868 matched `588dca58`; only this guide changed. This comparison
+does not prove new-input completeness or relabel the build as that commit. The
+produced binary SHA-256 is
+`4841e6fbed1e1feda4abf625b4dc1d0cfc08d315793d40ad8de7637a80d91986`.
+The ordinary container's namespace probe was refused without security changes.
+AMD64 OTP interpreter-bootstrap investigation also stopped before product inputs;
+no product-source fix is established by these environment failures.
+
+Current validation retains an intermittent audit-test extra-session event: a
+same-seed diagnostic rerun passed, but no causal fix has been established. Test
+passes and these narrow installation records are not whole-program acceptance.
 
 ## Obtain and build
 
