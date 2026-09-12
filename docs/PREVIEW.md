@@ -18,7 +18,7 @@ binary download. Do not use old `dist/` files as current release artifacts.
 |---|---|
 | macOS Apple Silicon | Isolated embedded installation, standard ChatGPT browser sign-in, native Astra/xhigh documentation edit, explicitly approved sandboxed recipe check and retained resume demonstrated. Clean committed-source build also passed; these are separate artifact records, not general macOS compatibility qualification. |
 | Linux x86-64 GNU | Frozen `82a4c2dd` selected-source build passed in a full-system Ubuntu 24.04.5 x86-64 guest with normal-JIT OTP 29. Clean-PATH install, real PTY onboarding, unauthenticated web 401 and stop passed; actual guest exit recorded. Stock bubblewrap probe failed; useful model task, product containment and recovery journey remain unqualified. |
-| Linux AArch64 GNU | Older selected-source build passed in an Ubuntu 24.04 ARM64 OrbStack container. The same binary also passed runtime-only install, real PTY onboarding, web 401 and stop in an independent Ubuntu 24.04.5 ARM64 HVF guest; actual guest exit recorded. Both environments refused the namespace probe; useful model task, product containment and recovery journey remain unqualified. |
+| Linux AArch64 GNU | Older selected-source build and container/HVF install, PTY, web 401 and stop passed. Those environments refused the namespace probe. A later Ubuntu 24.04.5 ARM64 HVF guest proved an opt-in distro AppArmor profile correction, actual packaged shell execution with negative controls, and rollback; actual guest exit recorded. Full model-backed task/auth/recovery/browser qualification remains open. |
 | macOS Intel | No current dedicated build/install evidence. Not yet qualified as a preview target. |
 
 macOS and Linux are the implemented OS families. No minimum macOS version, glibc
@@ -86,26 +86,34 @@ separate clean OS image. Neither selected-source set proves full candidate input
 completeness. Earlier user-space AMD64 OTP failures remain separate failed attempts,
 not the outcome of the successful full-system build.
 
-**The Linux qualification blocker remains:** each full-system guest ran one stock
+**Historical Linux refusal:** each initial full-system guest ran one stock
 `bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/true` probe and got
 `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. No bypass or retry
-followed. The exact denying policy was not isolated; the x86 diagnostic additionally
-could not find `sysctl` on its restricted PATH. This is a failed environment check,
-not proof of an Ouroboros source defect or of actual product sandbox behavior.
-Helper presence/doctor is not component execution, and web 401 is not authenticated
-browser acceptance. Neither Linux architecture has a recorded useful model-backed
-setup/task/check/resume/replay/restart journey. These are missing requirements, not
-waivers that make the cross-platform goal complete.
+followed in those runs. The exact denying policy was not isolated then; the x86
+diagnostic additionally could not find `sysctl` on its restricted PATH.
 
-The next concrete step is bounded diagnosis of the stock Linux refusal, followed
-by a minimal supported correction and verification of the actual contained product
-path. This remediation is pending, not an accepted end-state or a request to disable
-host security. It needs an owned Linux host or disposable full-system environment
-with enough dedicated space, without recreating the discarded bulk build caches.
-A successful probe alone will not finish qualification: each Linux architecture
-still needs the complete model-backed journey below, ordinary account access, and
-attributable source/build evidence. macOS Intel still needs build/install and
-journey evidence. Wider distribution/version ranges are not implied by one host.
+**Subsequent bounded correction:** a new Ubuntu 24.04.5 ARM64 HVF guest matched the
+refusal to AppArmor's `unprivileged_userns` transition and `setpcap`/`net_admin`
+denials. Administrator-authorized activation of the exact Ubuntu experimental
+`bwrap-userns-restrict` profile restored the stock probe and actual packaged
+`Tools.Bash` execution using the older ARM64 binary above, without a source change
+or rebuild. Read-only/outside/pre-existing protected-file writes, network isolation
+with a positive control, zero child CapPrm/CapEff/CapBnd sets and `NoNewPrivs: 1`,
+nested-child and unrelated-unprivileged-userns denials were checked. Global AppArmor userns
+restriction stayed `1`; removing only the profile restored the original refusal.
+The guest exited normally. This is a deployment-policy correction, not proof of an
+implementation defect or general production support: the distro profile is opt-in,
+experimental/unsupported and disabled by default. See the
+[preflight, administrator setup, verification and rollback recipe](LINUX_BUBBLEWRAP.md).
+
+The next platform step is an attributable x86-64 preflight/profile evaluation and
+actual contained shell controls on an owned, administrator-approved environment;
+the ARM64 result does not qualify x86. Each Linux architecture still needs ordinary
+account access and the complete model-backed task/check/recovery/authenticated-
+browser journey below with attributable source/build evidence. Helper presence is
+not component execution and web 401 is not authenticated-browser acceptance.
+macOS Intel still needs build/install and journey evidence. These remain missing
+requirements, not waivers; wider distribution/version ranges are not implied.
 
 Current source also includes the standalone fixture SDK-path correction and audit
 fixture recovery quiescence. A controlled orphan demonstrated one interference path
@@ -138,8 +146,11 @@ Prerequisites:
 - Network access for dependency bootstrap. Use the checked-in Mix and Cargo locks;
   do not update dependencies as part of reproducing a candidate.
 - Linux shell containment needs **usable** bubblewrap mount/network namespaces,
-  not merely an installed `bwrap` command. Host policy can refuse them. Do not turn
-  off machine-wide security to make a preview check green. macOS uses Seatbelt
+  not merely an installed `bwrap` command. Before a long build or first use, run the
+  [quick Linux preflight](LINUX_BUBBLEWRAP.md#1-check-before-building-or-starting-a-runtime).
+  That guide covers the demonstrated Ubuntu policy cause and opt-in administrator
+  setup/verification/rollback, not an automatic policy change. Do not turn off
+  machine-wide security to make a preview check green. macOS uses Seatbelt
   (`sandbox-exec`). If the backend cannot enforce a requested posture, stop and
   report the refusal; do not silently select full access.
 
