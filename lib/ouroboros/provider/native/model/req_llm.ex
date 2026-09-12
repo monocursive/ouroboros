@@ -327,7 +327,9 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     if Code.ensure_loaded?(ReqLLM.Providers) do
       rows =
         ReqLLM.Providers.list()
-        |> Enum.reject(&(&1 in [:anthropic, :xai]))
+        # These lanes report their actual managed credential below. In particular,
+        # a generic OPENAI_CODEX_API_KEY row can sort before and mask the OAuth row.
+        |> Enum.reject(&(&1 in [:openai_codex, :anthropic, :xai]))
         |> Enum.map(fn provider ->
           env = ReqLLM.Keys.env_var_name(provider)
           %{provider: provider, env: env, present: present?(env), source: source(env)}
