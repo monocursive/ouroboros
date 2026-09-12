@@ -3569,7 +3569,8 @@ mod tests {
                 .expect("a bound loopback address")
                 .port();
             held.push(listener);
-            if port != 4369
+            if port != 65_358
+                && port != 4369
                 && !(fleet::DEFAULT_DIST_PORT_MIN..=fleet::DEFAULT_DIST_PORT_MAX).contains(&port)
                 && !(fleet::DEFAULT_EPMD_BASE..fleet::DEFAULT_EPMD_BASE + fleet::DEFAULT_EPMD_SPAN)
                     .contains(&port)

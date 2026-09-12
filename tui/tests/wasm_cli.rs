@@ -1990,9 +1990,14 @@ struct Recorder {
 #[cfg(unix)]
 impl Recorder {
     fn listening(order: &Path) -> Recorder {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to record on");
-        let port = listener.local_addr().expect("a bound address").port();
+        let (listener, port) = loop {
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to record on");
+            let port = listener.local_addr().expect("a bound address").port();
+            if port != 65_358 {
+                break (listener, port);
+            }
+        };
         let order = order.to_path_buf();
 
         let thread = std::thread::spawn(move || {

@@ -4622,7 +4622,7 @@ mod tests {
     fn tags_round_trip_and_validate_before_persisting() {
         let dir = scratch("tags");
         fs::create_dir(dir.join("fleet")).unwrap();
-        let profile = sample_profile("studio");
+        let profile = loopback_test_profile("studio");
         write_profile(&dir, &profile).unwrap();
         assert_eq!(
             tags(&dir, None, Some(("xcode", true))).unwrap(),
@@ -5090,8 +5090,8 @@ mod tests {
     fn a_machine_declared_gone_is_named_by_status_and_doctor_and_can_be_restored() {
         let dir = scratch("tombstone-visible");
         fs::create_dir(dir.join("fleet")).unwrap();
-        let mut profile = sample_profile("studio");
-        let vps = member("vps", "vps.tailnet.ts.net");
+        let mut profile = loopback_test_profile("studio");
+        let vps = member("vps", "127.0.0.1");
         profile.members.push(vps.clone());
         write_profile(&dir, &profile).unwrap();
 
@@ -5114,16 +5114,13 @@ mod tests {
             "summary": {"expected": 1, "connected": 1, "offline": 0, "incompatible": 0},
             "machines": [{
                 "machine": "studio",
-                "node": "ouro-studio@studio.tailnet.ts.net",
+                "node": profile.node,
                 "state": "local",
                 "role": "core"
             }]
         });
         let rendered = render_live_status(&dir, &live).expect("a live projection");
-        assert!(
-            rendered.contains("ouro-vps@vps.tailnet.ts.net"),
-            "{rendered}"
-        );
+        assert!(rendered.contains(&vps.node), "{rendered}");
         assert!(rendered.contains("sessions restore"), "{rendered}");
 
         // `members add` refuses to quietly undo the operator's statement.
@@ -5157,6 +5154,23 @@ mod tests {
             epmd_port: 14_111,
             dist_port_min: 44_111,
             dist_port_max: 44_111,
+        }
+    }
+
+    // Doctor performs real local listener checks even when other fixture material is
+    // missing. Give those tests numeric loopback hosts and allocated test ports.
+    fn loopback_test_profile(machine: &str) -> Profile {
+        let ports = ephemeral_ports();
+        let local = member(machine, "127.0.0.1");
+        Profile {
+            host: local.host.clone(),
+            node: local.node.clone(),
+            members: vec![local],
+            gateway_port: ports.gateway.unwrap(),
+            epmd_port: ports.epmd.unwrap(),
+            dist_port_min: ports.dist.unwrap(),
+            dist_port_max: ports.dist.unwrap(),
+            ..sample_profile(machine)
         }
     }
 
@@ -5950,7 +5964,7 @@ mod tests {
     #[test]
     fn aborting_a_boot_watch_kills_the_spawned_child_and_never_an_incumbent() {
         let data = scratch("epmd-abort-boot");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
             .into_iter()
             .find(|path| path.is_file())
