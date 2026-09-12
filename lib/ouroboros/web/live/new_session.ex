@@ -624,7 +624,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   """
   @spec requires_chatgpt?(t(), model_field()) :: boolean()
   def requires_chatgpt?(%__MODULE__{} = form, field) do
-    case model_intent(form, field).send do
+    case effective_model(form, field) do
       model when is_binary(model) -> String.starts_with?(model, "openai_codex:")
       nil -> false
     end
@@ -692,17 +692,18 @@ defmodule Ouroboros.Web.Live.NewSession do
     }
 
   defp effective_model(%__MODULE__{} = form, field) do
-    model_intent(form, field).send || selected_default_model(field, form.model_choice)
+    # Every omitted model takes the runtime default, including a blank Custom input.
+    model_intent(form, field).send || selected_default_model(field)
   end
 
-  defp selected_default_model({:rows, rows, _total}, :runtime_default) do
+  defp selected_default_model({:rows, rows, _total}) do
     case Enum.find(rows, &(&1.choice == :runtime_default)) do
       %{model: model} -> trimmed(model)
       _unknown -> nil
     end
   end
 
-  defp selected_default_model(_field, _choice), do: nil
+  defp selected_default_model(_field), do: nil
 
   @doc "The `<option>` value one choice travels to the browser as."
   @spec choice_value(model_choice()) :: String.t()

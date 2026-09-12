@@ -9,6 +9,8 @@ defmodule Ouroboros.Web.CredentialStateTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: dir} do
+    # ExUnit creates this test-owned directory with its default umask.
+    File.chmod!(dir, 0o700)
     Ouroboros.DataDir.ensure_private!(dir)
     Ouroboros.Test.FirstUseIsolation.setup(dir)
     Application.put_env(:ouroboros, :account_adapter, OpenAIAuth)

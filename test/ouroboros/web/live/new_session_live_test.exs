@@ -803,6 +803,47 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       refute NewSession.requires_chatgpt?(plain, {:text, nil})
       refute NewSession.requires_chatgpt?(NewSession.new(), {:text, nil})
     end
+
+    test "the recommended model is gated without becoming an explicit override" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native,
+              default: "openai_codex:gpt-6-astra",
+              total: 1,
+              models: [model("openai_codex:gpt-6-astra")]
+            )
+          ])
+        )
+
+      form = NewSession.new()
+      assert NewSession.requires_chatgpt?(form, field)
+      assert NewSession.model_intent(form, field).send == nil
+      refute Map.has_key?(NewSession.start_params(form, field), "model")
+
+      for text <- ["", "  \t  "] do
+        blank_custom = %NewSession{form | model_choice: :custom, model_text: text}
+        assert NewSession.requires_chatgpt?(blank_custom, field)
+        assert NewSession.model_intent(blank_custom, field).send == nil
+        refute Map.has_key?(NewSession.start_params(blank_custom, field), "model")
+      end
+
+      api_model = %NewSession{form | model_choice: :custom, model_text: "openai:gpt-5"}
+      refute NewSession.requires_chatgpt?(api_model, field)
+    end
+
+    test "a recommended API model or unknown default does not require ChatGPT" do
+      for default <- ["openai:gpt-5", nil] do
+        field =
+          NewSession.model_field(
+            catalogue([provider_row(:native, default: default, models: [], total: 0)])
+          )
+
+        refute NewSession.requires_chatgpt?(NewSession.new(), field)
+      end
+
+      refute NewSession.requires_chatgpt?(NewSession.new(), :unsupported)
+    end
   end
 
   describe "the Anthropic API-key card" do
@@ -1154,19 +1195,178 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   describe "ChatGPT gating" do
     setup :endpoint
 
-    test "an openai_codex model raises the card and disables Start with the reason",
-         %{conn: conn} do
+    test "the recommended ChatGPT model immediately shows the connection requirement",
+         %{conn: conn, dir: dir} do
       {:ok, view, html} = live(conn, "/new")
-
-      # Before: no card, and the button is the ordinary one.
-      refute html =~ "Connect ChatGPT first"
-
-      html = choose_codex(view)
 
       assert html =~ "ChatGPT"
       assert html =~ "Required"
       assert html =~ "Connect ChatGPT first"
+      assert has_element?(view, ~s(button[phx-click="connect-chatgpt"]))
+
+      _ = change(view, %{"workspace" => dir})
       assert has_element?(view, "button[type=submit][disabled]")
+      refute Map.has_key?(start_params(view), "model")
+    end
+
+    test "an explicitly selected ChatGPT model also requires connection", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/new")
+      html = choose_codex(view)
+
+      assert html =~ "Connect ChatGPT first"
+      assert has_element?(view, "button[type=submit][disabled]")
+    end
+
+    test "a connected recommended model enables Start without claiming verified access",
+         %{conn: conn, dir: dir} do
+      Ouroboros.Test.OpenAIAccountAdapter.fail(
+        {:ok,
+         %{
+           "account" => %{"type" => "chatgpt"},
+           "credentialState" => "present",
+           "requiresOpenaiAuth" => false,
+           "login" => idle()
+         }}
+      )
+
+      {:ok, view, _html} = live(conn, "/new")
+      html = change(view, %{"workspace" => dir})
+
+      assert html =~ "Local account"
+      assert html =~ "Provider acceptance and model access are not verified."
+      refute html =~ "Connect ChatGPT first"
+      refute has_element?(view, "button[type=submit][disabled]")
+      refute Map.has_key?(start_params(view), "model")
+    end
+
+    test "a direct submit cannot start a recommended model with absent or unavailable credentials",
+         %{conn: conn, dir: dir} do
+      for account <- [
+            %{"credentialState" => "absent", "requiresOpenaiAuth" => true},
+            %{
+              "credentialState" => "unavailable",
+              "account" => %{"type" => "chatgpt"},
+              "requiresOpenaiAuth" => false
+            }
+          ] do
+        Ouroboros.Test.OpenAIAccountAdapter.fail({:ok, account})
+        {:ok, view, _html} = live(conn, "/new")
+        id = form(view).id
+
+        html =
+          render_submit(view, "start", %{
+            "workspace" => dir,
+            "model_choice" => "runtime_default",
+            "initial_message" => "This must not reach the model."
+          })
+
+        assert html =~ "Connect ChatGPT before starting this session."
+        assert :sys.get_state(view.pid).socket.assigns.started_id == nil
+        assert Ouroboros.Interactive.Task.whereis(id) == nil
+        assert Ouroboros.Interactive.Store.get(id) == :not_found
+        GenServer.stop(view.pid)
+      end
+    end
+
+    test "blank custom model submits cannot bypass the recommended model connection",
+         %{conn: conn, dir: dir} do
+      for text <- ["", "  \t  "] do
+        {:ok, view, _html} = live(conn, "/new")
+        id = form(view).id
+
+        html =
+          render_submit(view, "start", %{
+            "workspace" => dir,
+            "model_choice" => "custom",
+            "model_text" => text,
+            "initial_message" => "This must not reach the model."
+          })
+
+        assert html =~ "Connect ChatGPT before starting this session."
+        assert has_element?(view, ~s(button[phx-click="connect-chatgpt"]))
+        assert has_element?(view, "button[type=submit][disabled]")
+        refute Map.has_key?(start_params(view), "model")
+        assert :sys.get_state(view.pid).socket.assigns.started_id == nil
+        assert Ouroboros.Interactive.Task.whereis(id) == nil
+        assert Ouroboros.Interactive.Store.get(id) == :not_found
+        GenServer.stop(view.pid)
+      end
+    end
+
+    test "pinned start and first-message retries can repair only their account connection",
+         %{conn: conn, dir: dir} do
+      connected = %{
+        "account" => %{"type" => "chatgpt"},
+        "credentialState" => "present",
+        "requiresOpenaiAuth" => false,
+        "login" => idle()
+      }
+
+      for pinned_key <- [:pending_start, :started_id] do
+        Ouroboros.Test.OpenAIAccountAdapter.fail({:ok, connected})
+        {:ok, view, _html} = live(conn, "/new")
+        _ = change(view, %{"workspace" => dir, "initial_message" => "Keep this task."})
+
+        # Seed the two outcomes the page retains after an uncertain start or a refused
+        # first message. No session or model call is needed to exercise their retry gate.
+        value = if pinned_key == :pending_start, do: start_params(view), else: form(view).id
+
+        :sys.replace_state(view.pid, fn state ->
+          %{state | socket: Phoenix.Component.assign(state.socket, pinned_key, value)}
+        end)
+
+        pinned = pinned_request(view)
+
+        Ouroboros.Test.OpenAIAccountAdapter.fail({:ok, %{"credentialState" => "unavailable"}})
+
+        # A previously queued account observation may arrive after the request is pinned.
+        send(view.pid, :poll_account)
+        html = render_submit(view, "start", %{"initial_message" => "Replace the task."})
+        assert html =~ "Connect ChatGPT before starting this session."
+        assert pinned_request(view) == pinned
+        assert has_element?(view, ~s(fieldset[disabled][aria-label="Task setup"]))
+
+        for action <- ["connect-chatgpt", "refresh-chatgpt"] do
+          assert has_element?(view, ~s(button[phx-click="#{action}"]))
+          refute has_element?(view, ~s(button[phx-click="#{action}"][disabled]))
+          refute has_element?(view, ~s(fieldset[disabled] button[phx-click="#{action}"]))
+        end
+
+        _ =
+          render_change(view, "change", %{
+            "machine" => "other-computer",
+            "workspace" => "/other/project",
+            "model_choice" => "custom",
+            "model_text" => "openai:other",
+            "initial_message" => "Replace the task."
+          })
+
+        _ = render_click(view, "refresh-computer", %{})
+        _ = render_click(view, "pick-sandbox", %{"mode" => "unrestricted"})
+        assert pinned_request(view) == pinned
+
+        Ouroboros.Test.OpenAIAccountAdapter.succeed()
+        html = view |> element(~s(button[phx-click="connect-chatgpt"])) |> render_click()
+        assert html =~ "ABCD-1234"
+        refute has_element?(view, ~s(fieldset[disabled] button[phx-click="cancel-chatgpt"]))
+
+        html = view |> element(~s(button[phx-click="cancel-chatgpt"])) |> render_click()
+        refute html =~ "ABCD-1234"
+        assert html =~ "Required"
+        assert pinned_request(view) == pinned
+
+        Ouroboros.Test.OpenAIAccountAdapter.fail({:ok, connected})
+        html = view |> element(~s(button[phx-click="refresh-chatgpt"])) |> render_click()
+        assert html =~ "Local account"
+        refute html =~ "Connect ChatGPT before starting this session."
+        assert NewSession.usable?(:sys.get_state(view.pid).socket.assigns.account)
+        assert has_element?(view, ~s(button[type="submit"]), "Check & retry task")
+        refute has_element?(view, ~s(button[type="submit"][disabled]))
+        assert pinned_request(view) == pinned
+        assert Ouroboros.Interactive.Task.whereis(form(view).id) == nil
+        assert Ouroboros.Interactive.Store.get(form(view).id) == :not_found
+        GenServer.stop(view.pid)
+      end
     end
 
     test "Connect starts a device-code login and shows the code and the https link",
@@ -1194,14 +1394,16 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ "Required"
     end
 
-    test "a model with no subscription prefix raises no card at all", %{conn: conn} do
+    test "a model with no subscription prefix raises no card at all", %{conn: conn, dir: dir} do
       {:ok, view, _html} = live(conn, "/new")
 
-      _ = change(view, %{"model_choice" => "custom"})
+      _ = change(view, %{"model_choice" => "custom", "workspace" => dir})
       html = change(view, %{"model_text" => "openai:gpt-5"})
 
       refute html =~ "Connect ChatGPT first"
       assert html =~ "Using openai:gpt-5"
+      refute has_element?(view, ~s(button[phx-click="connect-chatgpt"]))
+      refute has_element?(view, "button[type=submit][disabled]")
     end
   end
 
@@ -1656,6 +1858,15 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # holds the choice and the request is derived from it, so the assertion has to be made
   # against the socket rather than against a re-derivation of it in the test.
   defp form(view), do: :sys.get_state(view.pid).socket.assigns.form
+
+  defp pinned_request(view) do
+    view.pid
+    |> :sys.get_state()
+    |> Map.fetch!(:socket)
+    |> Map.fetch!(:assigns)
+    |> Map.take([:form, :pending_start, :started_id, :started_node, :initial_message])
+  end
+
   defp catalogue_of(view), do: :sys.get_state(view.pid).socket.assigns.catalogue
 
   defp field(view), do: NewSession.model_field(catalogue_of(view))

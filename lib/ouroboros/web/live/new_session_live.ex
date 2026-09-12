@@ -230,10 +230,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # rendered controls and the request can therefore never disagree.
   @impl true
   def handle_event(event, _params, %{assigns: %{pending_start: pending}} = socket)
-      when event != "start" and not is_nil(pending), do: {:noreply, socket}
+      when event not in ["start", "connect-chatgpt", "cancel-chatgpt", "refresh-chatgpt"] and
+             not is_nil(pending),
+      do: {:noreply, socket}
 
   def handle_event(event, _params, %{assigns: %{started_id: id}} = socket)
-      when event != "start" and not is_nil(id), do: {:noreply, socket}
+      when event not in ["start", "connect-chatgpt", "cancel-chatgpt", "refresh-chatgpt"] and
+             not is_nil(id),
+      do: {:noreply, socket}
 
   def handle_event("change", %{"machine" => machine} = params, socket)
       when machine != socket.assigns.form.machine do
@@ -307,6 +311,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   def handle_event("cancel-chatgpt", _params, socket),
     do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, &call/3)}
+
+  def handle_event("refresh-chatgpt", _params, socket),
+    do: {:noreply, socket |> read_account() |> maybe_poll_account() |> assign(:refusal, nil)}
 
   def handle_event("open-anthropic-key", _params, socket) do
     cond do
@@ -553,6 +560,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp start(socket, params) do
+    with_chatgpt_ready(socket, &do_start(&1, params))
+  end
+
+  defp do_start(socket, params) do
     socket = assign(socket, :starting?, true)
 
     case call(socket, "interactive.start", params) do
@@ -594,6 +605,24 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp send_initial(socket, id) do
+    with_chatgpt_ready(socket, &do_send_initial(&1, id))
+  end
+
+  # The disabled button is a hint, not the submit boundary. Check the same local
+  # readiness before starting or retrying either request, including idempotent retries.
+  defp with_chatgpt_ready(socket, proceed) do
+    if NewSession.requires_chatgpt?(socket.assigns.form, field(socket)) and
+         not NewSession.usable?(socket.assigns.account) do
+      assign(socket, :refusal, %{
+        message: "Connect ChatGPT before starting this session.",
+        detail: "Check the ChatGPT connection on the selected computer, then try again."
+      })
+    else
+      proceed.(socket)
+    end
+  end
+
+  defp do_send_initial(socket, id) do
     message = String.trim(socket.assigns.initial_message)
 
     if message == "" do
@@ -864,11 +893,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             <p class="ouro-new-hint">This becomes the first message in the session.</p>
           </section>
 
-          <section :if={@gated? or is_map(@api_key_card)} aria-label="AI connection">
+          <section :if={is_map(@api_key_card)} aria-label="AI connection">
             <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
-            <.account_card :if={@gated?} card={@account_card} scope={@scope} />
             <.api_key_card
-              :if={is_map(@api_key_card)}
               card={@api_key_card}
               can_set={@can_set_api_key?}
             />
@@ -902,6 +929,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             <.sandbox_field sandbox={@form.sandbox} />
           </details>
         </fieldset>
+
+        <section :if={@gated?} aria-label="AI connection">
+          <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
+          <.account_card card={@account_card} scope={@scope} refresh?={@locked?} />
+        </section>
 
         <p :if={@locked?} class="ouro-new-hint" role="status">
           Your task may already exist. Check and retry the same task before changing its computer or project.
@@ -1391,6 +1423,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   attr :card, :map, required: true
   attr :scope, :atom, required: true
+  attr :refresh?, :boolean, default: false
 
   def account_card(assigns) do
     assigns = assign(assigns, :can_login?, Call.available?(assigns.scope, "account.login.start"))
@@ -1431,6 +1464,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       <p :if={@card.error} class="ouro-refusal">{@card.error}</p>
 
       <div class="ouro-new-row">
+        <button
+          :if={@refresh?}
+          type="button"
+          class="ouro-new-secondary"
+          phx-click="refresh-chatgpt"
+        >
+          Check connection
+        </button>
         <button
           :if={@card.state in [:required, :checking, :unavailable]}
           type="button"

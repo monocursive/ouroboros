@@ -9,6 +9,8 @@ defmodule Ouroboros.Web.FirstUseTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: dir} do
+    # ExUnit creates this test-owned directory with its default umask.
+    File.chmod!(dir, 0o700)
     Ouroboros.DataDir.ensure_private!(dir)
     Ouroboros.Test.FirstUseIsolation.setup(dir)
     File.write!(Path.join(dir, "gateway.token"), @token)
