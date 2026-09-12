@@ -2929,13 +2929,7 @@ defmodule Ouroboros.Provider.Native.Session do
   # would be a second digest over the same list.
   defp checkpoint(state, operation_identity) do
     operation_identity =
-      {:session, state.provider_session_id, state.generation,
-       operation_identity ||
-         {:conversation,
-          Checkpoint.digest_of(state.messages,
-            event_limit: state.checkpoint_limit,
-            offset: state.message_offset
-          ), state.message_offset, state.rewind_floor, state.plan}}
+      {:session, state.provider_session_id, state.generation, operation_identity}
 
     case Checkpoint.write(state.checkpoint_path, state.messages,
            event_limit: state.checkpoint_limit,

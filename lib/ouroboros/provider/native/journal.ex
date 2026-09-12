@@ -339,7 +339,6 @@ defmodule Ouroboros.Provider.Native.Journal do
       end
     else
       {:error, reason} -> {:error, {:maintenance_epoch, reason}}
-      _ -> {:error, :invalid_epoch_observation}
     end
   end
 

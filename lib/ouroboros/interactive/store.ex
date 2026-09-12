@@ -436,9 +436,6 @@ defmodule Ouroboros.Interactive.Store do
 
       {:error, reason} ->
         reconcile_failed_publish(reservation, desired, reply, reason, state)
-
-      other ->
-        stop_unknown({:invalid_storage_response, other}, state)
     end
   end
 
