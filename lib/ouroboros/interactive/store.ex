@@ -13,6 +13,9 @@ defmodule Ouroboros.Interactive.Store do
           id: String.t(),
           node: node(),
           status: State.status(),
+          runtime_id: String.t() | nil,
+          runtime_generation: String.t() | nil,
+          runtime_cursor: non_neg_integer(),
           terminal?: boolean(),
           removed_provider?: boolean(),
           updated_at: String.t()
@@ -56,7 +59,7 @@ defmodule Ouroboros.Interactive.Store do
   @doc """
   Returns the projection recovery needs, computed inside the store process.
 
-  Each entry is `%{id:, node:, status:, terminal?:, removed_provider?:, updated_at:}`.
+  Each entry contains routing, runtime identity, terminal/provider flags and updated_at.
   Recovery runs on a
   one-second tick, and deep-copying every retained event list and turn map on every
   tick is the cost this exists to avoid.
@@ -227,11 +230,24 @@ defmodule Ouroboros.Interactive.Store do
         {:reply, :not_found, state}
 
       {:ok, session} ->
-        if State.terminal?(session) do
-          desired = Map.delete(state.sessions, id)
-          drop_sessions(:delete, payload_digest(desired), [id], :ok, state)
-        else
-          {:reply, {:error, {:session_not_terminal, session.status}}, state}
+        delivery = delivery_state(session)
+
+        cond do
+          not State.terminal?(session) ->
+            {:reply, {:error, {:session_not_terminal, session.status}}, state}
+
+          delivery == :pending ->
+            {:reply, {:error, :session_delivery_pending}, state}
+
+          delivery == :unknown ->
+            {:reply, {:error, :session_delivery_unknown}, state}
+
+          delivery == :uncheckpointed ->
+            {:reply, {:error, :session_delivery_uncheckpointed}, state}
+
+          true ->
+            desired = Map.delete(state.sessions, id)
+            drop_sessions(:delete, payload_digest(desired), [id], :ok, state)
         end
     end
   end
@@ -509,6 +525,9 @@ defmodule Ouroboros.Interactive.Store do
       id: session.id,
       node: session.node,
       status: session.status,
+      runtime_id: session.runtime_id,
+      runtime_generation: session.runtime_generation,
+      runtime_cursor: session.runtime_cursor,
       terminal?: State.terminal?(session),
       # A record whose provider this build no longer serves is not recovered: there is
       # nothing to resume, and starting a coordinator for it every restart would leave one
@@ -520,8 +539,17 @@ defmodule Ouroboros.Interactive.Store do
   end
 
   defp prunable?(%State{} = session, horizon) do
-    State.terminal?(session) and older_than?(session.updated_at, horizon)
+    State.terminal?(session) and older_than?(session.updated_at, horizon) and
+      delivery_state(session) == :settled
   end
+
+  defp delivery_state(session),
+    do:
+      Ouroboros.Session.Delivery.state(
+        session.runtime_id,
+        session.runtime_generation,
+        session.runtime_cursor
+      )
 
   # An unparsable timestamp is not evidence of age. Retain it rather than delete
   # durable state on a guess.

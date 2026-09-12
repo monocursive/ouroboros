@@ -71,13 +71,34 @@ defmodule Ouroboros.StoreRetentionTest do
       assert entry.id == id
       assert entry.node == node()
       assert entry.status == :starting
+      assert entry.runtime_id == nil
+      assert entry.runtime_generation == nil
       refute entry.terminal?
       # A native record is recoverable; `removed_provider?` is the lifecycle fact that
       # keeps `Session.Recovery` from restarting a record naming a provider this build lost.
       refute entry.removed_provider?
 
       assert Map.keys(entry) |> Enum.sort() ==
-               [:id, :node, :removed_provider?, :status, :terminal?, :updated_at]
+               [
+                 :id,
+                 :node,
+                 :removed_provider?,
+                 :runtime_cursor,
+                 :runtime_generation,
+                 :runtime_id,
+                 :status,
+                 :terminal?,
+                 :updated_at
+               ]
+
+      assert :ok =
+               InteractiveStore.put(
+                 %{session(id) | runtime_id: "runtime", runtime_generation: "generation"},
+                 store
+               )
+
+      assert [%{runtime_id: "runtime", runtime_generation: "generation"}] =
+               InteractiveStore.list_recoverable(store)
     end
   end
 

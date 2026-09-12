@@ -1533,6 +1533,32 @@ defmodule Ouroboros.InteractiveSessionTest do
     end
 
     assert {:ok, session} = Store.get(id)
+    # This helper forcibly retires a fixture rather than completing protocol delivery.
+    # Reap its exact native owner before deleting the pending-delivery checkpoint.
+    if session.runtime_id do
+      case stop_supervised({:stub_session, session.runtime_id}) do
+        :ok ->
+          :ok
+
+        {:error, :not_found} ->
+          case Session.info(session.runtime_id) do
+            {:ok, info} ->
+              DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
+
+            _ ->
+              :ok
+          end
+      end
+
+      assert_eventually(fn ->
+        Ouroboros.Session.Delivery.state(
+          session.runtime_id,
+          session.runtime_generation,
+          session.runtime_cursor
+        ) == :settled
+      end)
+    end
+
     assert :ok = Store.put(%{session | status: :cancelled})
     Store.delete(id)
   end

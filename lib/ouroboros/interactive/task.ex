@@ -39,7 +39,9 @@ defmodule Ouroboros.Interactive.Task do
     %{
       id: {__MODULE__, id},
       start: {__MODULE__, :start_link, [{id, admission}]},
-      restart: :transient
+      # An operation lease is released by its caller, not reusable restart authority.
+      # The supervised recovery sweep reacquires admission for this logical session.
+      restart: :temporary
     }
   end
 

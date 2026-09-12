@@ -225,17 +225,28 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     end
 
     test "a fork of an unnamed historical session is refused with a reason", %{id: id} do
-      start_session(id, sandbox_mode: :read_only)
+      # This is a retained session that ended before native execution named it.
+      # Editing a live coordinator alone lets its next reconciliation restore the
+      # provider ID, changing which fork contract the fixture exercises.
+      assert {:ok, historical} =
+               State.new(id,
+                 provider: @provider,
+                 workspace: File.cwd!(),
+                 sandbox_mode: :read_only
+               )
 
-      :sys.replace_state(Task.whereis(id), fn runtime ->
-        %{runtime | session: %{runtime.session | provider_session_id: nil}}
-      end)
+      historical = %{historical | status: :closed}
+      assert :ok = Store.create(historical)
+      fork_id = unique_id("gateway-unnamed-fork")
 
-      assert {:error, -32_006, message, data} = Methods.invoke("interactive.fork", %{"id" => id})
+      assert {:error, -32_006, message, data} =
+               Methods.invoke("interactive.fork", %{"id" => id, "fork_id" => fork_id})
 
       assert message =~ "refused the call"
       assert ["unforkable_session", details] = data
       assert details["reason"] == "no_provider_session_id"
+      assert :not_found = Store.get(fork_id)
+      assert {:ok, ^historical} = Store.get(id)
 
       retire_session(id)
     end

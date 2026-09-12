@@ -515,7 +515,12 @@ defmodule Ouroboros.Provider.Native.Session do
           register(provider_session_id)
 
           {:ok, _} =
-            Registry.register(Ouroboros.SessionRegistry, {:runtime, context.runtime_id}, nil)
+            Registry.register(Ouroboros.SessionRegistry, {:runtime, context.runtime_id}, %{
+              generation: state.generation,
+              terminal?: false,
+              pending?: false,
+              output_cursor: 0
+            })
 
           state =
             journal(
@@ -743,6 +748,14 @@ defmodule Ouroboros.Provider.Native.Session do
          ) do
       :ok ->
         state = flush_producer(state)
+
+        Ouroboros.Session.Delivery.publish(
+          state.runtime_id,
+          state.generation,
+          state.status in [:closed, :cancelled, :failed],
+          not Output.empty?(state.output),
+          Output.high_water(state.output)
+        )
 
         if state.status in [:closed, :cancelled, :failed] and Output.empty?(state.output),
           do: {:stop, :normal, :ok, state},
@@ -2158,6 +2171,19 @@ defmodule Ouroboros.Provider.Native.Session do
   defp track_approval(state, _event), do: state
 
   defp emit(state, event) do
+    # Publish before append notifies the coordinator: its terminal checkpoint may be
+    # pruned concurrently. close/kill still carry :closing in state at this boundary.
+    if event.type in [:session_closed, :session_cancelled, :session_failed] or
+         state.status in [:closed, :cancelled, :failed] do
+      Ouroboros.Session.Delivery.publish(
+        state.runtime_id,
+        state.generation,
+        true,
+        true,
+        Output.high_water(state.output) + 1
+      )
+    end
+
     Output.append!(state.output, normalized_event(state, event))
     :ok
   end

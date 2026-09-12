@@ -164,6 +164,22 @@ broadcasts only after successful persistence. Repeated drains do not fold a batc
 stale attachments and generations cannot acknowledge another owner's output. A retained
 range gap is explicit. There is no active 25 ms event-polling loop.
 
+An admitted coordinator is not automatically restarted with its released operation lease.
+The supervised recovery sweep acquires fresh session-bound admission before rebuilding it,
+including a terminal coordinator whose native runtime still retains unacknowledged output.
+This does not restart the native generation or bypass a closed maintenance fence.
+Terminal retention and deletion keep the checkpoint while its native generation has pending
+terminal delivery, so short retention cannot discard it while admission is closed. The
+native owner publishes this bounded delivery projection in the Registry before notifying
+the coordinator and updates it on acknowledgement; the durable store never synchronously
+calls an execution process. A mismatched generation or a nonterminal runtime does not pin
+an unrelated terminal checkpoint. Unknown delivery observations retain the record but do
+not trigger repeated recovery. Admission acquisition and release failures stay within an
+individual recovery attempt rather than crashing the shared sweep.
+Recovery also compares the native output cursor with the durable checkpoint: newer terminal
+output is retained as `session_delivery_uncheckpointed` for explicit reconciliation, never
+acknowledged or repeatedly restarted as though it were already persisted.
+
 The output queue is bounded at 4,096 events and 32 MiB; one event is bounded at 8 MiB.
 A separate 256-event / 8 MiB reserve keeps lifecycle and denial/cancellation output
 responsive while the loop's single synchronous producer call is backpressured. Node
