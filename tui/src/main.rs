@@ -1999,6 +1999,9 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
 /// Boot lines go to stderr rather than through [`Progress::Plain`], because stdout here is
 /// one URL and `ouro web --print` exists to be read by something that is not a person.
 async fn web(paths: &Paths, dev: bool, print: bool) -> Result<()> {
+    // Invocation-local, before adopting/starting any daemon. Its cwd is not the project.
+    let workspace =
+        std::env::current_dir().context("cannot determine the browser project folder")?;
     paths.ensure_private_data_dir()?;
 
     let boot = Arc::new(std::sync::Mutex::new(BootProgress::new()));
@@ -2021,6 +2024,7 @@ async fn web(paths: &Paths, dev: bool, print: bool) -> Result<()> {
     ouro::web_cli::open(
         &paths.data_dir,
         &paths.token_file(),
+        &workspace,
         print,
         &ouro::web_cli::SystemOpener,
         &mut std::io::stdout().lock(),

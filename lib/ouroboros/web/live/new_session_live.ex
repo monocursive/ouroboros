@@ -92,13 +92,16 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:starting?, false)
       |> assign(:refusal, nil)
       |> assign(:initial_message, starter(params["starter"]))
-      |> assign(:default_workspace, File.cwd!())
       |> assign(:started_id, nil)
 
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
     # knows of no models.
-    {:ok, if(connected?(socket), do: socket |> load_machines() |> load(), else: socket)}
+    {:ok,
+     if(connected?(socket),
+       do: socket |> load_machines() |> apply_launch(params) |> load(),
+       else: apply_launch(socket, params)
+     )}
   end
 
   defp initial_form(prefs, params) do
@@ -117,6 +120,25 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       _ ->
         form
+    end
+  end
+
+  defp apply_launch(socket, params) do
+    if Map.has_key?(params, "workspace") do
+      # `ouro web` names the caller's local project even when the last browser
+      # session was elsewhere. Do not import a remote machine's model settings.
+      form = socket.assigns.form
+      form = if form.machine == "", do: form, else: %{NewSession.new() | sandbox: form.sandbox}
+
+      workspace =
+        case {params["machine"], Ouroboros.Web.Launch.workspace(params["workspace"])} do
+          {machine, {:ok, path}} when machine in [nil, ""] -> path
+          _ -> ""
+        end
+
+      assign(socket, :form, %{form | machine: "", workspace: workspace})
+    else
+      socket
     end
   end
 
@@ -423,11 +445,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
 
     cond do
-      form.machine != "" and blank?(form.workspace) ->
+      Ouroboros.Web.Launch.workspace(form.workspace) == :error ->
         {:noreply,
          assign(socket, :refusal, %{
            message: "Choose a project folder on this computer first.",
-           detail: "Browse shows folders on the selected computer."
+           detail: "Enter an absolute folder path, or use Browse on the selected computer."
          })}
 
       not socket.assigns.loaded? ->
@@ -697,7 +719,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # A model chosen before the catalogue arrived is not necessarily a row in it, so the
   # choice is re-checked against the field the change produced rather than carried.
   defp reconcile(form, socket) do
-    field = NewSession.model_field(socket.assigns.catalogue)
+    field = NewSession.model_field(socket.assigns.catalogue, form)
 
     form =
       if NewSession.offers?(field, form.model_choice),
@@ -709,7 +731,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       else: %{form | effort: nil}
   end
 
-  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue)
+  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue, socket.assigns.form)
 
   defp model_choice(%{"model_choice" => value}, _form), do: NewSession.choice(value)
   defp model_choice(_params, form), do: form.model_choice
@@ -725,7 +747,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   @impl true
   def render(assigns) do
-    field = NewSession.model_field(assigns.catalogue)
+    field = NewSession.model_field(assigns.catalogue, assigns.form)
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
     api_key = NewSession.api_key_card(assigns.form, field, assigns.providers)
@@ -818,7 +840,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           </section>
           <.workspace_field
             workspace={@form.workspace}
-            default_workspace={if @form.machine == "", do: @default_workspace}
             machine_label={@machine_label}
             can_browse={@can_browse?}
             open={@browse_open?}
@@ -854,6 +875,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           </section>
 
           <details
+            id="new-session-advanced"
             class="ouro-new-advanced"
             data-ouro-disclosure="setup:false"
           >
@@ -898,7 +920,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             disabled={
               not @can_start? or @starting? or
                 (not @locked? and
-                   ((@form.machine != "" and @form.workspace == "") or
+                   (Ouroboros.Web.Launch.workspace(@form.workspace) == :error or
                       not @chatgpt_ready? or @api_key_required?))
             }
           >
@@ -1055,7 +1077,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     </select>
 
     <p :if={@form.model_search != ""} class="ouro-new-hint">
-      {@matched} {if @matched == 1, do: "model", else: "models"} match
+      {@matched} {if @matched == 1, do: "model", else: "models"} shown (including the current selection).
+    </p>
+
+    <p class="ouro-new-hint">
+      Search covers this bounded snapshot plus configured and current choices, not account entitlements.
+      Missing a model? Choose Custom and enter its exact provider:model ID. Unknown metadata
+      does not mean unsupported; access is checked when a turn runs.
     </p>
 
     <input
@@ -1064,7 +1092,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       class="ouro-new-input"
       name="model_text"
       value={@form.model_text}
-      placeholder="Model id"
+      placeholder="provider:model (exact ID)"
       aria-label="custom model id"
       autocomplete="off"
     />
@@ -1102,7 +1130,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   attr :workspace, :string, required: true
-  attr :default_workspace, :string, default: nil
   attr :machine_label, :string, default: "this computer"
   attr :can_browse, :boolean, required: true
   attr :open, :boolean, required: true
@@ -1114,7 +1141,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     <section class="ouro-new-field" aria-labelledby="workspace-label">
       <div class="ouro-new-label-row">
         <label class="ouro-new-label" id="workspace-label" for="workspace">Project folder</label>
-        <span class="ouro-new-aside">Optional</span>
+        <span class="ouro-new-aside">Required</span>
       </div>
 
       <div class="ouro-new-row">
@@ -1126,6 +1153,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           value={@workspace}
           placeholder="Choose a project folder"
           autocomplete="off"
+          required
         />
         <button
           type="button"
@@ -1138,10 +1166,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         </button>
       </div>
       <p class="ouro-new-hint">
-        {if String.trim(@workspace) == "", do: "Default project on ", else: "Project on "}{@machine_label}:
-        <span class="ouro-mono">{if String.trim(@workspace) == "",
-          do: @default_workspace || "Choose a folder with Browse",
-          else: String.trim(@workspace)}</span>
+        Project on {@machine_label}:
+        <span class="ouro-mono">{if @workspace == "",
+          do: "Choose a folder with Browse or enter its absolute path",
+          else: @workspace}</span>
       </p>
 
       <.browse_panel :if={@open} listing={@listing} refusal={@refusal} />

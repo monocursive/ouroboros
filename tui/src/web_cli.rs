@@ -80,18 +80,20 @@ impl Opener for SystemOpener {
 pub async fn open<O: Write, E: Write>(
     data_dir: &Path,
     default_token_file: &Path,
+    workspace: &Path,
     print_only: bool,
     opener: &dyn Opener,
     out: &mut O,
     err: &mut E,
 ) -> Result<()> {
+    let workspace = workspace_text(workspace)?;
     let publication = wait_for_publication(data_dir, PUBLICATION_WAIT).await?;
     let token_path = token_file(&publication, default_token_file);
     let token =
         runtime::read_token(&token_path).with_context(|| unreadable_token_refusal(&token_path))?;
 
     present(
-        &auth_url(publication.port, token.expose()),
+        &project_auth_url(publication.port, token.expose(), workspace),
         print_only,
         opener,
         out,
@@ -177,6 +179,29 @@ pub fn token_file(publication: &WebPublication, default: &Path) -> PathBuf {
 /// name and not by this link.
 pub fn auth_url(port: u16, token: &str) -> String {
     format!("http://127.0.0.1:{port}/auth?token={}", encode_query(token))
+}
+
+fn workspace_text(workspace: &Path) -> Result<&str> {
+    let text = workspace
+        .to_str()
+        .context("browser project path must be UTF-8")?;
+    anyhow::ensure!(
+        workspace.is_absolute()
+            && !text.is_empty()
+            && text.len() <= 4096
+            && !text.contains(['\0', '\r', '\n']),
+        "browser project must be an absolute path of at most 4096 bytes without NUL or line breaks"
+    );
+    Ok(text)
+}
+
+/// The fixed auth exchange carries only the caller's project, never a redirect URL.
+pub fn project_auth_url(port: u16, token: &str, workspace: &str) -> String {
+    format!(
+        "{}&workspace={}",
+        auth_url(port, token),
+        encode_query(workspace)
+    )
 }
 
 /// What `ouro web` says when the runtime is up and no browser surface came with it.
@@ -327,6 +352,22 @@ mod tests {
             scope: "operate".into(),
             token_file: token_file.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn project_context_is_explicit_and_encoded_independently_of_daemon_cwd() {
+        let project = "/repo + & % # é ";
+        assert_eq!(workspace_text(Path::new(project)).unwrap(), project);
+        assert_eq!(
+            project_auth_url(4321, "synthetic", project),
+            "http://127.0.0.1:4321/auth?token=synthetic&workspace=%2Frepo%20%2B%20%26%20%25%20%23%20%C3%A9%20"
+        );
+        for invalid in ["", ".", "relative", "/nul\0", "/line\n"] {
+            assert!(workspace_text(Path::new(invalid)).is_err());
+        }
+        assert!(workspace_text(Path::new(&"/".repeat(4097))).is_err());
+        use std::os::unix::ffi::OsStrExt;
+        assert!(workspace_text(Path::new(std::ffi::OsStr::from_bytes(b"/\xff"))).is_err());
     }
 
     #[test]

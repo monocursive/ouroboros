@@ -275,6 +275,39 @@ defmodule Ouroboros.Web.Live.NewSession do
     if is_map(catalogue), do: native_field(catalogue, @provider), else: {:text, nil}
   end
 
+  @doc "Keep a saved/current exact choice accessible even outside the snapshot's bounded rows."
+  @spec model_field(term(), t()) :: model_field()
+  def model_field(catalogue, %__MODULE__{} = form) do
+    field = model_field(catalogue)
+
+    id =
+      case form.model_choice do
+        {:catalog, id} -> id
+        :custom -> trimmed(form.model_text)
+        _ -> nil
+      end
+
+    case field do
+      {:rows, [default | rows], total} when is_binary(id) and id != "" ->
+        if offers?(field, {:catalog, id}) do
+          field
+        else
+          current = %{
+            choice: {:catalog, id},
+            model: id,
+            label: short_model_id(id),
+            detail: "#{id} · Current choice; catalogue metadata unavailable; access not verified",
+            reasoning_efforts: Ouroboros.ReasoningEffort.accepted_names()
+          }
+
+          {:rows, [default, current | rows], total}
+        end
+
+      _ ->
+        field
+    end
+  end
+
   defp native_field(catalogue, provider) do
     case Enum.find(List.wrap(catalogue[:providers]), &(to_string(&1[:provider]) == provider)) do
       nil ->
@@ -363,7 +396,7 @@ defmodule Ouroboros.Web.Live.NewSession do
       choice: :custom,
       model: nil,
       label: "Custom model…",
-      detail: "For advanced provider configurations",
+      detail: "Enter an exact provider:model ID, including models absent from this snapshot",
       reasoning_efforts: nil
     }
   end
@@ -440,9 +473,21 @@ defmodule Ouroboros.Web.Live.NewSession do
   # The readable name is the option label. Detail keeps the exact id available to an
   # advanced reader without forcing everybody else to parse a provider namespace first.
   defp model_detail(model, id) do
-    case window(model[:context_window]) do
-      nil -> id
-      window -> "#{id} · #{window}"
+    detail =
+      case window(model[:context_window]) do
+        nil -> id
+        window -> "#{id} · #{window}"
+      end
+
+    cond do
+      model[:metadata] == :unavailable ->
+        "#{detail} · Configured; catalogue metadata unavailable; access not verified"
+
+      model[:configured] == true ->
+        "#{detail} · Configured"
+
+      true ->
+        detail
     end
   end
 
@@ -817,7 +862,7 @@ defmodule Ouroboros.Web.Live.NewSession do
 
     * `id` — always. Caller-owned idempotency, minted with the form (see `new/0`).
     * `model` — whatever `model_intent/2` says it is sending, absent when that is nothing.
-    * `workspace` — the trimmed path, absent when the field is empty.
+    * `workspace` — the exact path, absent when the field is empty. Spaces are path bytes.
     * `sandbox_mode` — the operator's card, absent when no card was chosen.
     * `reasoning_effort` — the operator's level, absent when the picker was left alone.
 
@@ -829,7 +874,7 @@ defmodule Ouroboros.Web.Live.NewSession do
     %{"id" => form.id || mint_id()}
     |> put_stated("machine", trimmed(form.machine))
     |> put_stated("model", model_intent(form, field).send)
-    |> put_stated("workspace", trimmed(form.workspace))
+    |> put_stated("workspace", if(form.workspace != "", do: form.workspace))
     |> put_stated("sandbox_mode", stated(form.sandbox, @sandbox_modes))
     |> put_stated("reasoning_effort", stated(form.effort, efforts(form, field)))
   end

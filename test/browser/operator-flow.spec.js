@@ -85,6 +85,8 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
 
   await liveConnected(page);
   const start = page.getByRole("button", { name: "Start session" });
+  // A browser-only visit must choose a project, never inherit the daemon cwd.
+  await page.locator("#workspace").fill(require("node:path").resolve(__dirname, "../../_build/playwright-workspace"));
   await expect(start).toBeEnabled();
   await start.click();
   await expect(page).toHaveURL(/\/s\/interactive\//);

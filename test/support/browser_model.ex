@@ -12,6 +12,13 @@ defmodule Ouroboros.Test.BrowserModel do
     after_tool? = List.last(request.messages).role == :tool
 
     cond do
+      String.contains?(prompt, "first-use request proof") ->
+        {:ok,
+         [
+           {:text, "Requested model=#{request.model}; reasoning=#{request.reasoning_effort}"},
+           {:finish, :stop}
+         ]}
+
       after_tool? ->
         {:ok, [{:text, "Browser approval completed."}, {:finish, :stop}]}
 
@@ -69,5 +76,17 @@ defmodule Ouroboros.Test.BrowserModel do
       end,
       fn _ -> :ok end
     )
+  end
+end
+
+defmodule Ouroboros.Test.BrowserAccount do
+  @moduledoc false
+  def read do
+    {:ok,
+     %{
+       "account" => %{"type" => "chatgpt"},
+       "requiresOpenaiAuth" => false,
+       "login" => %{"status" => "idle"}
+     }}
   end
 end

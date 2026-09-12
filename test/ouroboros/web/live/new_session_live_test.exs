@@ -471,7 +471,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
         NewSession.new()
         | model_choice: :custom,
           model_text: " openai_codex:x ",
-          workspace: "  /srv/work  ",
+          workspace: "/srv/work  ",
           sandbox: "workspace_write",
           effort: "high"
       }
@@ -482,7 +482,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                ["id", "model", "reasoning_effort", "sandbox_mode", "workspace"]
 
       assert params["model"] == "openai_codex:x"
-      assert params["workspace"] == "/srv/work"
+      assert params["workspace"] == "/srv/work  "
       assert params["sandbox_mode"] == "workspace_write"
       assert params["reasoning_effort"] == "high"
     end
@@ -982,7 +982,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
       html = change(view, %{"model_search" => "no-model-is-called-this"})
 
-      assert html =~ "0 models match"
+      assert html =~ "0 models shown"
       assert html =~ "Recommended"
       assert html =~ "Custom model…"
       # The catalogue itself did not move; only what is drawn from it did.
@@ -1562,30 +1562,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   defp endpoint_with(_context, scope, seed) do
     dir = Path.join(System.tmp_dir!(), "ouroboros-web-new-#{System.unique_integer([:positive])}")
     Ouroboros.DataDir.ensure_private!(dir)
-    previous_anthropic_key_file = Application.get_env(:ouroboros, :anthropic_api_key_file)
-    previous_xai_key_file = Application.get_env(:ouroboros, :xai_api_key_file)
-    Application.put_env(:ouroboros, :anthropic_api_key_file, Path.join(dir, "anthropic.key"))
-    Application.put_env(:ouroboros, :xai_api_key_file, Path.join(dir, "xai.key"))
+    Ouroboros.Test.FirstUseIsolation.setup(dir, Ouroboros.Provider.Native.Model.ReqLLM)
     token_path = Path.join(dir, "gateway.token")
     File.write!(token_path, @token)
     File.chmod!(token_path, 0o600)
 
-    on_exit(fn ->
-      if previous_anthropic_key_file,
-        do:
-          Application.put_env(
-            :ouroboros,
-            :anthropic_api_key_file,
-            previous_anthropic_key_file
-          ),
-        else: Application.delete_env(:ouroboros, :anthropic_api_key_file)
-
-      if previous_xai_key_file,
-        do: Application.put_env(:ouroboros, :xai_api_key_file, previous_xai_key_file),
-        else: Application.delete_env(:ouroboros, :xai_api_key_file)
-
-      File.rm_rf(dir)
-    end)
+    on_exit(fn -> File.rm_rf(dir) end)
 
     seed.(dir)
 
@@ -1648,6 +1630,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   end
 
   defp choose_anthropic(view) do
+    _ = change(view, %{"workspace" => System.tmp_dir!()})
     {:rows, rows, _total} = field(view)
 
     choice =
@@ -1660,7 +1643,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   end
 
   defp choose_xai(view) do
-    _ = change(view, %{"model_choice" => "custom"})
+    _ = change(view, %{"model_choice" => "custom", "workspace" => System.tmp_dir!()})
     change(view, %{"model_text" => "xai:grok-4.6"})
   end
 

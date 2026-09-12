@@ -191,6 +191,10 @@ defmodule Ouroboros.Web.Prefs do
   defp validate("sandbox_mode", value), do: one_of(value, @sandbox_modes)
   defp validate("reasoning_effort", value), do: one_of(value, @efforts)
 
+  defp validate("workspace", value) when is_binary(value) do
+    if String.trim(value) != "" and byte_size(value) <= @max_value_bytes, do: value
+  end
+
   defp validate(_key, value) when is_binary(value) do
     case String.trim(value) do
       "" -> nil
