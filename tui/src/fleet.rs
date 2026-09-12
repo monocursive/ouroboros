@@ -396,7 +396,8 @@ pub(crate) fn ephemeral_ports() -> Ports {
             .port();
         // Keeping every allocation bound until all three are chosen makes them distinct.
         held.push(listener);
-        if port != legacy_epmd_port()
+        if port != 65_358
+            && port != legacy_epmd_port()
             && !(DEFAULT_DIST_PORT_MIN..=DEFAULT_DIST_PORT_MAX).contains(&port)
             && !(DEFAULT_EPMD_BASE..DEFAULT_EPMD_BASE + DEFAULT_EPMD_SPAN).contains(&port)
             && !(DEFAULT_GATEWAY_BASE..DEFAULT_GATEWAY_BASE + DEFAULT_GATEWAY_SPAN).contains(&port)
@@ -1944,12 +1945,13 @@ fn stop_owned_empty_epmd(
 
     let deadline = Instant::now() + EPMD_STOP_DEADLINE;
     loop {
-        let recorded_closed = epmd_probe(owner.address, owner.port) != EpmdProbe::Compatible;
+        let recorded_closed =
+            owned_epmd_probe_before(owner.address, owner.port, deadline)? == EpmdProbe::Absent;
         let loopback_closed = owner.address.is_loopback()
-            || epmd_probe(Ipv4Addr::LOCALHOST, owner.port) != EpmdProbe::Compatible;
+            || epmd_probe_before(Ipv4Addr::LOCALHOST, owner.port, deadline) == EpmdProbe::Absent;
         let listener_closed = recorded_closed && loopback_closed;
         let lock_released = !epmd_owner_lock_held(data_dir, owner)?;
-        if listener_closed && lock_released {
+        if listener_closed && lock_released && Instant::now() < deadline {
             break;
         }
         if Instant::now() >= deadline {
@@ -1958,7 +1960,9 @@ fn stop_owned_empty_epmd(
                 owner.pid
             );
         }
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(
+            Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
     remove_epmd_owner_artifacts(data_dir)
 }
@@ -3086,6 +3090,9 @@ enum EpmdProbe {
     Absent,
     Compatible,
     Incompatible,
+    // The connection or NAMES exchange could not establish the listener's identity.
+    // Only a positively owned child still inside its startup deadline may retry it.
+    Unresponsive,
 }
 
 /// Starts the packaged EPMD as an explicitly owned foreground child when this profile's
@@ -3247,10 +3254,13 @@ fn start_owned_epmd(
                 profile.epmd_port
             );
         }
-        match owned_epmd_ready(address, profile.epmd_port) {
+        match owned_epmd_ready(address, profile.epmd_port, deadline) {
             Ok(true) => break,
             Ok(false) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(25));
+                thread::sleep(
+                    Duration::from_millis(25)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
             Ok(false) => {
                 drop(lock.take());
@@ -3708,29 +3718,44 @@ fn ensure_epmd_port_available(host: &str, port: u16) -> Result<EpmdPortState> {
     ensure_epmd_address_port_available(address, port)
 }
 
-// Preflight may reserve sockets before a process starts. Readiness must only probe:
-// binding here races our own child, either stealing its port or misreporting its
-// newly bound socket as somebody else's conflict. Both listeners and the interface
-// fence still have to pass before the launcher records ownership.
-fn owned_epmd_ready(address: Ipv4Addr, port: u16) -> Result<bool> {
-    let advertised = epmd_probe(address, port);
+// Unlike preflight, readiness never reserves the required listener addresses: that
+// would race our own child. Both protocol listeners and the separate interface fence
+// still have to pass within the startup deadline before the launcher records ownership.
+fn owned_epmd_ready(address: Ipv4Addr, port: u16, deadline: Instant) -> Result<bool> {
+    let advertised = epmd_probe_before(address, port, deadline);
     let loopback = if address.is_loopback() {
         advertised
     } else {
-        epmd_probe(Ipv4Addr::LOCALHOST, port)
+        epmd_probe_before(Ipv4Addr::LOCALHOST, port, deadline)
     };
+    let ready = owned_epmd_probes_ready(advertised, loopback, port, || {
+        ensure_epmd_not_exposed_on_other_interfaces(address, port)
+    })?;
+    Ok(ready && Instant::now() < deadline)
+}
+
+fn owned_epmd_probes_ready(
+    advertised: EpmdProbe,
+    loopback: EpmdProbe,
+    port: u16,
+    validate_scope: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
     if advertised == EpmdProbe::Incompatible || loopback == EpmdProbe::Incompatible {
         bail!("packaged EPMD port {port} accepts TCP but does not speak the documented NAMES protocol");
     }
     if advertised == EpmdProbe::Compatible && loopback == EpmdProbe::Compatible {
-        ensure_epmd_not_exposed_on_other_interfaces(address, port)?;
+        validate_scope()?;
         return Ok(true);
     }
     Ok(false)
 }
 
 fn ensure_owned_epmd_listener_state(owner: &EpmdOwner) -> Result<OwnedEpmdListenerState> {
-    let recorded = epmd_probe(owner.address, owner.port);
+    let recorded = owned_epmd_probe_before(
+        owner.address,
+        owner.port,
+        Instant::now() + Duration::from_millis(750),
+    )?;
     let loopback = if owner.address.is_loopback() {
         recorded
     } else {
@@ -3740,6 +3765,12 @@ fn ensure_owned_epmd_listener_state(owner: &EpmdOwner) -> Result<OwnedEpmdListen
     if recorded == EpmdProbe::Incompatible || loopback == EpmdProbe::Incompatible {
         bail!(
             "owned fleet EPMD port {} accepts TCP through a listener that does not speak the documented NAMES protocol. Nothing will be killed until the listener identity is repaired",
+            owner.port
+        );
+    }
+    if recorded == EpmdProbe::Unresponsive || loopback == EpmdProbe::Unresponsive {
+        bail!(
+            "owned fleet EPMD port {} NAMES response could not be validated. Nothing will be killed until the listener identity is established",
             owner.port
         );
     }
@@ -3761,8 +3792,9 @@ fn ensure_owned_epmd_listener_state(owner: &EpmdOwner) -> Result<OwnedEpmdListen
             owner.address,
             owner.port
         ),
-        // Incompatible states are rejected above.
-        (EpmdProbe::Incompatible, _) | (_, EpmdProbe::Incompatible) => unreachable!(),
+        // Unvalidated states are rejected above.
+        (EpmdProbe::Incompatible | EpmdProbe::Unresponsive, _)
+        | (_, EpmdProbe::Incompatible | EpmdProbe::Unresponsive) => unreachable!(),
     }
 }
 
@@ -3783,6 +3815,11 @@ fn ensure_epmd_address_port_available(address: Ipv4Addr, port: u16) -> Result<Ep
     if probes.contains(&EpmdProbe::Incompatible) {
         bail!(
             "fleet EPMD port {port} accepts TCP but does not speak the documented EPMD NAMES protocol. Stop that non-EPMD or incompatible listener, then retry"
+        );
+    }
+    if probes.contains(&EpmdProbe::Unresponsive) {
+        bail!(
+            "fleet EPMD port {port} NAMES response could not be validated. The listener cannot be reused or treated as an available port; inspect its owner, then retry"
         );
     }
     if probes.contains(&EpmdProbe::Compatible) {
@@ -3856,19 +3893,73 @@ fn names_healthy(address: Ipv4Addr, port: u16) -> bool {
 }
 
 fn epmd_probe(address: Ipv4Addr, port: u16) -> EpmdProbe {
-    let socket = (address, port).into();
-    let Ok(mut stream) = TcpStream::connect_timeout(&socket, Duration::from_millis(250)) else {
-        return EpmdProbe::Absent;
+    epmd_probe_before(address, port, Instant::now() + Duration::from_millis(750))
+}
+
+// After validating an ownership marker and its exact lock, a vanished local address
+// is positive evidence that its local listener is unavailable. Do not probe that
+// historical address through a new route, or infer its disappearance from a timeout.
+fn owned_epmd_probe_before(address: Ipv4Addr, port: u16, deadline: Instant) -> Result<EpmdProbe> {
+    if !address.is_loopback() && !local_ipv4_interfaces()?.contains(&address) {
+        return Ok(EpmdProbe::Absent);
+    }
+    Ok(epmd_probe_before(address, port, deadline))
+}
+
+fn epmd_connect_error(error: &io::Error) -> EpmdProbe {
+    if error.kind() == io::ErrorKind::ConnectionRefused {
+        EpmdProbe::Absent
+    } else {
+        EpmdProbe::Unresponsive
+    }
+}
+
+fn epmd_probe_timeout(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(remaining.min(Duration::from_millis(250)))
+}
+
+fn epmd_probe_before(address: Ipv4Addr, port: u16, deadline: Instant) -> EpmdProbe {
+    let Some(timeout) = epmd_probe_timeout(deadline) else {
+        return EpmdProbe::Unresponsive;
     };
-    let timeout = Some(Duration::from_millis(250));
-    if stream.set_read_timeout(timeout).is_err()
-        || stream.set_write_timeout(timeout).is_err()
-        || stream.write_all(&[0, 1, 110]).is_err()
-    {
-        return EpmdProbe::Incompatible;
+    let socket = (address, port).into();
+    let mut stream = match TcpStream::connect_timeout(&socket, timeout) {
+        Ok(stream) => stream,
+        Err(error) => return epmd_connect_error(&error),
+    };
+    let mut request = &[0, 1, 110][..];
+    while !request.is_empty() {
+        let Some(timeout) = epmd_probe_timeout(deadline) else {
+            return EpmdProbe::Unresponsive;
+        };
+        if stream.set_write_timeout(Some(timeout)).is_err() {
+            return EpmdProbe::Unresponsive;
+        }
+        match stream.write(request) {
+            Ok(0) => return EpmdProbe::Unresponsive,
+            Ok(written) => request = &request[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return EpmdProbe::Unresponsive,
+        }
     }
     let mut response = [0_u8; 4];
-    if stream.read_exact(&mut response).is_ok() && u32::from_be_bytes(response) == u32::from(port) {
+    let mut received = 0;
+    while received < response.len() {
+        let Some(timeout) = epmd_probe_timeout(deadline) else {
+            return EpmdProbe::Unresponsive;
+        };
+        if stream.set_read_timeout(Some(timeout)).is_err() {
+            return EpmdProbe::Unresponsive;
+        }
+        match stream.read(&mut response[received..]) {
+            Ok(0) => return EpmdProbe::Unresponsive,
+            Ok(count) => received += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return EpmdProbe::Unresponsive,
+        }
+    }
+    if u32::from_be_bytes(response) == u32::from(port) {
         EpmdProbe::Compatible
     } else {
         EpmdProbe::Incompatible
@@ -5070,6 +5161,7 @@ mod tests {
     }
 
     fn fake_epmd(port: u16, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+        assert_ne!(port, 65_358, "never use the protected runtime endpoint");
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
         listener.set_nonblocking(true).unwrap();
         thread::spawn(move || {
@@ -5081,8 +5173,12 @@ mod tests {
                         // would hold the only accept loop for the read timeout and make a
                         // simultaneous real protocol probe observe a reset or timeout.
                         thread::spawn(move || {
+                            stream.set_nonblocking(false).unwrap();
                             stream
                                 .set_read_timeout(Some(Duration::from_millis(250)))
+                                .unwrap();
+                            stream
+                                .set_write_timeout(Some(Duration::from_millis(250)))
                                 .unwrap();
                             let mut request = [0_u8; 3];
                             if stream.read_exact(&mut request).is_ok() && request == [0, 1, 110] {
@@ -5099,13 +5195,81 @@ mod tests {
         })
     }
 
+    // Keep the allocated listener owned until the fixture is dropped. No client probes
+    // a released ephemeral port, including the operator's protected runtime endpoint.
+    fn epmd_probe_test_listener(address: Ipv4Addr) -> TcpListener {
+        loop {
+            let listener = TcpListener::bind((address, 0)).unwrap();
+            if listener.local_addr().unwrap().port() != 65_358 {
+                return listener;
+            }
+        }
+    }
+
+    struct EpmdProtocolFixture {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        server: Option<thread::JoinHandle<()>>,
+    }
+
+    impl EpmdProtocolFixture {
+        fn new(mut respond: impl FnMut(&mut TcpStream, u16) + Send + 'static) -> Self {
+            let listener = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = stop.clone();
+            let server = thread::spawn(move || {
+                while !server_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            // Accepted sockets inherit O_NONBLOCK on some platforms.
+                            // The fixture's bounded read/write timeouts need blocking I/O.
+                            stream.set_nonblocking(false).unwrap();
+                            stream
+                                .set_read_timeout(Some(Duration::from_millis(250)))
+                                .unwrap();
+                            stream
+                                .set_write_timeout(Some(Duration::from_millis(250)))
+                                .unwrap();
+                            let mut request = [0_u8; 3];
+                            stream.read_exact(&mut request).unwrap();
+                            assert_eq!(request, [0, 1, 110]);
+                            respond(&mut stream, port);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("EPMD protocol fixture accept failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                port,
+                stop,
+                server: Some(server),
+            }
+        }
+    }
+
+    impl Drop for EpmdProtocolFixture {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            let result = self.server.take().unwrap().join();
+            if !thread::panicking() {
+                result.unwrap();
+            }
+        }
+    }
+
     fn assign_free_loopback_epmd_port(data_dir: &Path) -> Profile {
         let mut profile = load(data_dir).unwrap().unwrap();
         loop {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             let port = listener.local_addr().unwrap().port();
             drop(listener);
-            if port != legacy_epmd_port()
+            if port != 65_358
+                && port != legacy_epmd_port()
                 && port != profile.gateway_port
                 && !(profile.dist_port_min..=profile.dist_port_max).contains(&port)
             {
@@ -5442,22 +5606,170 @@ mod tests {
     }
 
     #[test]
-    fn owned_epmd_readiness_waits_for_a_protocol_listener_and_rejects_other_services() {
-        let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port).unwrap());
-        let stop = Arc::new(AtomicBool::new(false));
-        let server = fake_epmd(port, stop.clone());
-        assert!(owned_epmd_ready(Ipv4Addr::LOCALHOST, port).unwrap());
-        stop.store(true, Ordering::Relaxed);
-        server.join().unwrap();
+    fn owned_epmd_readiness_requires_both_protocols_and_rejects_any_wrong_header() {
+        let states = [
+            EpmdProbe::Absent,
+            EpmdProbe::Compatible,
+            EpmdProbe::Incompatible,
+            EpmdProbe::Unresponsive,
+        ];
+        for advertised in states {
+            for loopback in states {
+                let mut scope_checked = false;
+                let result = owned_epmd_probes_ready(advertised, loopback, 14_111, || {
+                    scope_checked = true;
+                    Ok(())
+                });
+                let both_compatible =
+                    advertised == EpmdProbe::Compatible && loopback == EpmdProbe::Compatible;
+                assert_eq!(scope_checked, both_compatible);
+                if [advertised, loopback].contains(&EpmdProbe::Incompatible) {
+                    assert!(result.is_err(), "{advertised:?}, {loopback:?}");
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        both_compatible,
+                        "{advertised:?}, {loopback:?}"
+                    );
+                }
+            }
+        }
+        let error =
+            owned_epmd_probes_ready(EpmdProbe::Compatible, EpmdProbe::Compatible, 14_111, || {
+                bail!("fixture interface exposure")
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "fixture interface exposure");
+    }
 
-        let other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let error = owned_epmd_ready(Ipv4Addr::LOCALHOST, other.local_addr().unwrap().port())
+    #[test]
+    fn owned_epmd_readiness_waits_for_a_protocol_listener_and_rejects_other_services() {
+        let epmd = EpmdProtocolFixture::new(|stream, port| {
+            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
+        });
+        assert!(owned_epmd_ready(
+            Ipv4Addr::LOCALHOST,
+            epmd.port,
+            Instant::now() + EPMD_START_DEADLINE
+        )
+        .unwrap());
+
+        let other = EpmdProtocolFixture::new(|stream, _| {
+            stream.write_all(b"HTTP").unwrap();
+        });
+        let error = owned_epmd_ready(
+            Ipv4Addr::LOCALHOST,
+            other.port,
+            Instant::now() + EPMD_START_DEADLINE,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("does not speak"), "{error}");
+    }
+
+    #[test]
+    fn owned_epmd_readiness_retries_incomplete_names_only_before_its_deadline() {
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let mut first = true;
+        let epmd = EpmdProtocolFixture::new(move |stream, port| {
+            if first {
+                first = false;
+                // Withhold the first response until the probe times out and closes its
+                // own socket. The next connection then gets a complete NAMES header.
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                assert_eq!(stream.read(&mut [0_u8; 1]).unwrap(), 0);
+                closed_tx.send(()).unwrap();
+            } else {
+                stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
+            }
+        });
+        let deadline = Instant::now() + EPMD_START_DEADLINE;
+        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, epmd.port, deadline).unwrap());
+        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(owned_epmd_ready(Ipv4Addr::LOCALHOST, epmd.port, deadline).unwrap());
+
+        let silent = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
+        let port = silent.local_addr().unwrap().port();
+        let deadline = Instant::now() + Duration::from_millis(40);
+        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port, deadline).unwrap());
+
+        let expired = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
+        let port = expired.local_addr().unwrap().port();
+        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port, Instant::now()).unwrap());
+        expired.set_nonblocking(true).unwrap();
+        assert_eq!(
+            expired.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn epmd_probe_only_treats_connection_refusal_as_absence() {
+        assert_eq!(
+            epmd_connect_error(&io::Error::from(io::ErrorKind::ConnectionRefused)),
+            EpmdProbe::Absent
+        );
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::AddrNotAvailable,
+            io::ErrorKind::NetworkUnreachable,
+            io::ErrorKind::HostUnreachable,
+        ] {
+            assert_eq!(
+                epmd_connect_error(&io::Error::from(kind)),
+                EpmdProbe::Unresponsive,
+                "{kind:?} must not prove listener absence"
+            );
+        }
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            assert_eq!(
+                epmd_connect_error(&io::Error::from_raw_os_error(errno)),
+                EpmdProbe::Unresponsive,
+                "resource exhaustion must not prove listener absence"
+            );
+        }
+    }
+
+    #[test]
+    fn epmd_probe_distinguishes_short_names_from_a_complete_wrong_header() {
+        let epmd = EpmdProtocolFixture::new(|stream, port| {
+            stream
+                .write_all(&u32::from(port).to_be_bytes()[..3])
+                .unwrap();
+        });
+        assert_eq!(
+            epmd_probe(Ipv4Addr::LOCALHOST, epmd.port),
+            EpmdProbe::Unresponsive
+        );
+        let error = ensure_epmd_port_available("127.0.0.1", epmd.port)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("does not speak"), "{error}");
+        assert!(error.contains("could not be validated"), "{error}");
+
+        // This classifier does not read ownership artifacts or act on the PID. Even an
+        // already-owned listener must remain unclassified until NAMES is validated.
+        let owner = EpmdOwner {
+            schema: EPMD_OWNER_SCHEMA,
+            fleet_id: String::new(),
+            host: "127.0.0.1".into(),
+            address: Ipv4Addr::LOCALHOST,
+            port: epmd.port,
+            pid: 0,
+            executable: PathBuf::new(),
+            executable_dev: 0,
+            executable_ino: 0,
+            lock_dev: 0,
+            lock_ino: 0,
+        };
+        let error = ensure_owned_epmd_listener_state(&owner)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not be validated"), "{error}");
     }
 
     #[test]
@@ -5465,32 +5777,20 @@ mod tests {
         assert!(local_ipv4_interfaces()
             .unwrap()
             .contains(&Ipv4Addr::LOCALHOST));
-        let epmd = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = epmd.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let (mut connection, _) = epmd.accept().unwrap();
-            let mut request = [0_u8; 3];
-            connection.read_exact(&mut request).unwrap();
-            assert_eq!(request, [0, 1, 110]);
-            connection
-                .write_all(&u32::from(port).to_be_bytes())
-                .unwrap();
+        let epmd = EpmdProtocolFixture::new(|stream, port| {
+            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
         });
         assert_eq!(
-            ensure_epmd_port_available("127.0.0.1", port).unwrap(),
+            ensure_epmd_port_available("127.0.0.1", epmd.port).unwrap(),
             EpmdPortState::CompatibleRunning
         );
-        server.join().unwrap();
 
-        let arbitrary = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let arbitrary = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
         let arbitrary_port = arbitrary.local_addr().unwrap().port();
         let error = ensure_epmd_port_available("127.0.0.1", arbitrary_port)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("non-EPMD or incompatible listener"),
-            "{error}"
-        );
+        assert!(error.contains("could not be validated"), "{error}");
         drop(arbitrary);
     }
 
@@ -5567,13 +5867,15 @@ mod tests {
 
     #[test]
     fn owned_epmd_watch_reaps_a_crash_and_reports_health_loss() {
+        let listener = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
+        let port = listener.local_addr().unwrap().port();
         let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
             .into_iter()
             .find(|path| path.is_file())
             .expect("a Unix sleep executable");
         let epmd = Command::new(sleep).arg("30").spawn().unwrap();
         let epmd_pid = epmd.id() as i32;
-        let failure = EpmdRuntimeWatch::new(Some(epmd), Ipv4Addr::LOCALHOST, 65_300).supervise();
+        let failure = EpmdRuntimeWatch::new(Some(epmd), Ipv4Addr::LOCALHOST, port).supervise();
 
         runtime::send_signal(epmd_pid, libc::SIGKILL).unwrap();
         let reason = failure.blocking_recv().unwrap();
@@ -5587,7 +5889,7 @@ mod tests {
     #[test]
     fn failed_startup_validation_reaps_its_own_epmd_and_never_an_incumbent() {
         let data = scratch("epmd-reap-failed-start");
-        create(&data, None, "owner", "127.0.0.1", Ports::DEFAULT).unwrap();
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         let profile = assign_free_loopback_epmd_port(&data);
 
         // The exact shape start_owned_epmd leaves behind: a foreground child holding the
@@ -5709,11 +6011,10 @@ mod tests {
 
     #[test]
     fn reused_epmd_watch_reports_loss_without_signalling_any_process() {
-        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let stop = Arc::new(AtomicBool::new(false));
-        let server = fake_epmd(port, stop.clone());
+        let server = EpmdProtocolFixture::new(|stream, port| {
+            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
+        });
+        let port = server.port;
         let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
             .into_iter()
             .find(|path| path.is_file())
@@ -5723,8 +6024,7 @@ mod tests {
         let failure = EpmdRuntimeWatch::new(None, Ipv4Addr::LOCALHOST, port).supervise();
 
         assert!(epmd_responds(Ipv4Addr::LOCALHOST, port));
-        stop.store(true, Ordering::Relaxed);
-        server.join().unwrap();
+        drop(server);
         let reason = failure.blocking_recv().unwrap();
         assert!(reason.contains("consecutive NAMES probes"), "{reason}");
         assert!(
