@@ -97,9 +97,10 @@ ChatGPT sign-in; authenticate it through the supported UI rather than copying
 private auth files.
 
 For the browser front door, run `ouro web` with the same environment/data directory.
-It serves locally by default. `ouro web --print` prints a credential-bearing URL:
-keep it private. Remote web exposure/TLS and fleet setup are separate operator
-work, not part of first use.
+It serves locally by default. Both `ouro web` and `ouro web --print` print a
+credential-bearing URL; keep terminal output private. `--print` skips opening the
+browser. Remote web exposure/TLS and fleet setup are separate operator work, not
+part of first use.
 
 ## One useful first journey
 
