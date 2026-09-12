@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "updated_at": "2026-09-11T11:00:00Z",
+  "messages": [],
+  "plan": {
+    "plan": [
+      {
+        "id": "gate-a",
+        "step": "Gate gate-a",
+        "status": "completed",
+        "deliverable": "validation",
+        "work_state": "accepted",
+        "criteria": [
+          "review evidence"
+        ],
+        "evidence": [
+          "evidence/gate-a.json"
+        ],
+        "child_settlement": "completed",
+        "acceptance": {
+          "actor": "parent",
+          "decision_source": "parent_model",
+          "basis": "model_judgment",
+          "evidence_validation": "unchecked_references",
+          "deterministic": false
+        }
+      },
+      {
+        "id": "gate-b",
+        "step": "Gate gate-b",
+        "status": "completed",
+        "deliverable": "validation",
+        "work_state": "change_proposed",
+        "criteria": [
+          "review evidence"
+        ],
+        "evidence": [],
+        "child_settlement": "completed"
+      }
+    ],
+    "explanation": "fixture"
+  },
+  "plan_digest": "eda292ebcd901f3d4d53a5d5e625a7806652e2b51df9a03ddd288a50edd0590a",
+  "offset": 0,
+  "rewind_floor": 0
+}

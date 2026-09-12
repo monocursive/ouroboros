@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "updated_at": "2026-09-11T10:00:00Z",
+  "messages": [],
+  "plan": {
+    "plan": [
+      {
+        "id": "gate-a",
+        "step": "Gate gate-a",
+        "status": "completed",
+        "deliverable": "validation",
+        "work_state": "change_proposed",
+        "criteria": [
+          "review evidence"
+        ],
+        "evidence": [],
+        "child_settlement": "completed"
+      }
+    ],
+    "explanation": "fixture"
+  },
+  "plan_digest": "9cf0a22755474b4af462ff8bbdedc8bb0c72ef7aad8afe92b9919a0c76ced215",
+  "offset": 0,
+  "rewind_floor": 0
+}

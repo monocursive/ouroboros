@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -14,7 +15,6 @@ CLI = os.path.join(ROOT, "scripts", "self-development-status.py")
 STATUS = module_path = os.path.join(ROOT, "scripts", "self-development-status.py")
 CAMPAIGN = os.path.join(ROOT, "scripts", "self-development-campaign.py")
 FIXTURES = os.path.join(ROOT, "test", "fixtures", "self-development-status")
-P2_FIXTURES = os.path.join(ROOT, "tmp", "roadmap-implementation-20260911", "p2-review-probes", "live")
 AS_OF = "1789143700"
 
 
@@ -54,11 +54,61 @@ def bind_checkpoint(value):
 
 
 class StatusTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Disposable synthetic input, never a retained experiment receipt or key.
+        # Run one harmless command so identities/artifacts match this machine, then
+        # deliberately mark its condition projection as legacy for the historical test.
+        cls.p2_temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.p2_temp.cleanup)
+        cls.p2_fixtures = os.path.realpath(cls.p2_temp.name)
+        workspace = os.path.join(cls.p2_fixtures, "work")
+        os.mkdir(workspace)
+        subprocess.run(["git", "init", "-q", workspace], check=True)
+        with open(os.path.join(workspace, "source.txt"), "w") as handle:
+            handle.write("synthetic status test input\n")
+        subprocess.run(["git", "-C", workspace, "add", "source.txt"], check=True)
+        subprocess.run(["git", "-C", workspace, "-c", "user.name=Fixture",
+                        "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
+        python = os.path.realpath(sys.executable)
+        manifest = {
+            "schema_version": 2, "mode": "validation", "workspace": workspace,
+            "source": {"revision": "pending", "tree_digest": "sha256:" + "0" * 64},
+            "receipt_policy": {"mode": "local_integrity", "signer_id": "synthetic-test",
+                               "nonce": "synthetic-status-fixture", "max_age_seconds": 3600},
+            "execution": {
+                "environment": {}, "environment_policy": "trusted_controller_allowlist_v1",
+                "start_mode": "existing", "outer_sandbox": "forbidden",
+                "containment": {"required": "cooperative_pgid"},
+                "requested_deadline_ms": 5000, "effective_deadline_ms": 5000,
+                "allowed_executables": [{"path": python, "sha256": P2.file_digest(python),
+                                         "env_allowlist": []}],
+                "commands": [{"id": "probe", "argv": [python, "-c", "print('synthetic fixture')"],
+                              "cwd": workspace, "coverage_units": ["probe"],
+                              "artifact_mode": "stdout", "artifact_path": os.path.join(workspace, "artifact.txt")}],
+            },
+            "coverage": {"required_units": ["probe"], "exclusions": []},
+        }
+        manifest["source"] = P2.measure_source(manifest)
+        key = os.urandom(32)
+        receipt = P2.execute_manifest(manifest, key)
+        if receipt["constituents"][0]["status"] != "passed":
+            raise AssertionError("synthetic fixture command did not pass")
+        receipt["issued_at"] = int(AS_OF)
+        receipt["effective_conditions"].pop("conditions_version", None)
+        P2.sign_receipt(receipt, key)
+        write_json(os.path.join(cls.p2_fixtures, "smoke-manifest.json"), manifest)
+        write_json(os.path.join(cls.p2_fixtures, "smoke-receipt.json"), receipt)
+        key_path = os.path.join(cls.p2_fixtures, "key")
+        with open(key_path, "wb") as handle:
+            handle.write(key)
+        os.chmod(key_path, 0o600)
+
     def checkpoints(self):
         return ["--checkpoint", os.path.join(FIXTURES, "checkpoint-old.json"), "--checkpoint", os.path.join(FIXTURES, "checkpoint-current.json"), "--as-of", AS_OF]
 
     def p2_args(self):
-        return ["--receipt", os.path.join(P2_FIXTURES, "smoke-receipt.json"), "--manifest", os.path.join(P2_FIXTURES, "smoke-manifest.json"), "--key", os.path.join(P2_FIXTURES, "key")]
+        return ["--receipt", os.path.join(self.p2_fixtures, "smoke-receipt.json"), "--manifest", os.path.join(self.p2_fixtures, "smoke-manifest.json"), "--key", os.path.join(self.p2_fixtures, "key")]
 
     def mutate_checkpoint(self, mutation, raw=None, filename="checkpoint.json", post_bind_mutation=lambda value: None):
         temporary = tempfile.TemporaryDirectory()
@@ -79,9 +129,9 @@ class StatusTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         base = os.path.realpath(temporary.name)
-        receipt = read_json(os.path.join(P2_FIXTURES, "smoke-receipt.json"))
-        manifest = read_json(os.path.join(P2_FIXTURES, "smoke-manifest.json"))
-        with open(os.path.join(P2_FIXTURES, "key"), "rb") as handle:
+        receipt = read_json(os.path.join(self.p2_fixtures, "smoke-receipt.json"))
+        manifest = read_json(os.path.join(self.p2_fixtures, "smoke-manifest.json"))
+        with open(os.path.join(self.p2_fixtures, "key"), "rb") as handle:
             key = handle.read()
         manifest_mutation(manifest)
         receipt["manifest_digest"] = P2.digest(manifest)
@@ -363,7 +413,7 @@ class StatusTest(unittest.TestCase):
         process = run(*self.checkpoints(), *self.p2_args())
         self.assertEqual(process.returncode, 0, process.stderr)
         receipt = json.loads(process.stdout)["validation"]["receipts"][0]
-        # The retained fixture predates the current execution-condition projection.
+        # The synthetic fixture deliberately omits the current condition version.
         # It is still validated/authenticated, but must not be upgraded to a pass.
         self.assertEqual(receipt["status"], "unknown")
         self.assertEqual(receipt["classification"], "inconclusive")
