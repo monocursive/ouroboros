@@ -66,6 +66,7 @@ defmodule Ouroboros.InteractiveTerminalAckTest do
   setup do
     root = Path.join(System.tmp_dir!(), "terminal-ack-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
+    Ouroboros.Test.DurableFence.ensure_started!(root)
     original_dir = Application.get_env(:ouroboros, :native_data_dir)
     original_model = Application.get_env(:ouroboros, :native_model_module)
     Application.put_env(:ouroboros, :native_data_dir, Path.join(root, "native"))
@@ -107,8 +108,7 @@ defmodule Ouroboros.InteractiveTerminalAckTest do
     Registry.unregister(Ouroboros.Interactive.Registry, ctx.id)
     monitor = Process.monitor(info.pid)
 
-    {:ok, _coordinator} =
-      DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, ctx.id})
+    {:ok, _coordinator} = start_admitted(ctx.id)
 
     assert_receive {:DOWN, ^monitor, :process, _, :normal}, 2_000
     assert {:ok, ^session} = Store.get(ctx.id)
@@ -143,8 +143,7 @@ defmodule Ouroboros.InteractiveTerminalAckTest do
     :ok = Store.create(session)
     on_exit(fn -> cleanup(ctx.id, retained) end)
 
-    {:ok, coordinator} =
-      DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, ctx.id})
+    {:ok, coordinator} = start_admitted(ctx.id)
 
     assert_receive {:terminal_ack_refused, 7}, 1_000
     assert Process.alive?(coordinator)
@@ -180,8 +179,7 @@ defmodule Ouroboros.InteractiveTerminalAckTest do
     :ok = Store.create(session)
     on_exit(fn -> cleanup(ctx.id, replacement) end)
 
-    {:ok, coordinator} =
-      DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, ctx.id})
+    {:ok, coordinator} = start_admitted(ctx.id)
 
     monitor = Process.monitor(coordinator)
     assert_receive {:DOWN, ^monitor, :process, ^coordinator, :normal}, 2_000
@@ -189,6 +187,16 @@ defmodule Ouroboros.InteractiveTerminalAckTest do
     refute_receive {:terminal_ack_refused, _}, 50
     assert Process.alive?(replacement)
     assert {:ok, ^session} = Store.get(ctx.id)
+  end
+
+  defp start_admitted(id) do
+    {:ok, admission} = Ouroboros.Maintenance.Fence.acquire("terminal-fixture:" <> id, id)
+
+    try do
+      DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, {id, admission}})
+    after
+      :ok = Ouroboros.Maintenance.Fence.release(admission)
+    end
   end
 
   defp cleanup(id, runtime) do

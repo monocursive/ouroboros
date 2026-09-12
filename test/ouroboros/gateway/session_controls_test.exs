@@ -307,6 +307,17 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
 
   describe "runtime.models" do
     test "the catalogue is a read method and answers with bounded per-provider rows" do
+      model_env = Ouroboros.Provider.Native.Model.model_env()
+      previous_model = System.get_env(model_env)
+      configured = "openai_codex:fixture-unknown-catalogue"
+      System.put_env(model_env, configured)
+
+      on_exit(fn ->
+        if previous_model,
+          do: System.put_env(model_env, previous_model),
+          else: System.delete_env(model_env)
+      end)
+
       assert Methods.table()["runtime.models"].scope == :read
       assert "runtime.models" in Methods.names()
       assert Methods.permits?(:read, Methods.table()["runtime.models"])
@@ -323,8 +334,30 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       assert length(row.models) <= catalogue.limit
       assert length(row.models) > 0
 
-      model = hd(row.models)
-      assert is_integer(model.context_window)
+      assert [%{id: ^configured, configured: true, metadata: :unavailable} = unknown | _] =
+               row.models
+
+      assert Enum.count(row.models, &(&1.id == configured)) == 1
+      assert unknown.context_window == nil
+      assert unknown.max_output_tokens == nil
+      assert unknown.pricing == nil
+      assert unknown.release_date == nil
+
+      # The configured model is pinned first even when the snapshot does not know it.
+      # Known catalogue metadata remains numeric; unknown intent must not invent a window.
+      for model <- row.models do
+        if Map.get(model, :metadata) == :unavailable do
+          assert model.configured
+          assert model.context_window == nil
+        else
+          assert is_nil(model.context_window) or
+                   (is_integer(model.context_window) and model.context_window > 0)
+        end
+      end
+
+      known = Enum.find(row.models, &String.starts_with?(&1.id, "anthropic:"))
+      assert known
+      assert is_integer(known.context_window) and known.context_window > 0
     end
 
     test "a session's own model is on interactive.info, so a client can divide by the window",

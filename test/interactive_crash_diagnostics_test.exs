@@ -20,6 +20,7 @@ defmodule Ouroboros.Interactive.CrashDiagnosticsTest do
     id = "diagnostic-session-#{System.unique_integer([:positive, :monotonic])}"
     workspace = Path.join(System.tmp_dir!(), id)
     File.mkdir_p!(workspace)
+    Ouroboros.Test.DurableFence.ensure_started!(workspace)
     {:ok, session} = State.new(id, provider: :native, workspace: workspace)
 
     session = %{
@@ -57,7 +58,14 @@ defmodule Ouroboros.Interactive.CrashDiagnosticsTest do
 
     log =
       capture_log(fn ->
-        {:ok, pid} = InteractiveTask.start_link(id)
+        {:ok, admission} = Ouroboros.Maintenance.Fence.acquire("crash-fixture:" <> id, id)
+
+        {:ok, pid} =
+          try do
+            InteractiveTask.start_link({id, admission})
+          after
+            :ok = Ouroboros.Maintenance.Fence.release(admission)
+          end
 
         :sys.replace_state(pid, fn runtime ->
           runtime
