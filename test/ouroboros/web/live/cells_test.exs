@@ -415,11 +415,15 @@ defmodule Ouroboros.Web.Live.CellsTest do
       refute paint(%Cell.Status{label: "Approved", tone: :success}) =~ "attention-green"
     end
 
-    test "provider failures lead with recovery copy and hide raw diagnostics in disclosure" do
-      raw = "** (ServerError) server_is_overloaded\\n    stack frame"
+    test "classified provider failures lead with recovery copy and safe technical fields" do
+      raw =
+        "model call failed: category=api status=503 provider_code=server_is_overloaded retryable=true diagnostic=private ignored text"
+
       html = paint(%Cell.Status{label: "Turn failed", detail: raw, tone: :error})
 
-      assert html =~ "The AI service is temporarily busy. Try the message again."
+      assert html =~ "The AI service failed to handle the request."
+      assert html =~ "marked retryable"
+      refute html =~ "private ignored text"
       assert html =~ "Technical details"
       assert html =~ "server_is_overloaded"
       assert html =~ "<details"
@@ -428,8 +432,71 @@ defmodule Ouroboros.Web.Live.CellsTest do
     test "unknown failures never lead with a stack trace" do
       html = paint(%Cell.Status{label: "Turn failed", detail: "opaque crash", tone: :error})
 
-      assert html =~ "The agent stopped unexpectedly."
+      assert html =~ "no safe failure classification is available"
       assert html =~ "Technical details"
+    end
+
+    test "hostile diagnostics remain private, including old arbitrary errors" do
+      for raw <- [
+            "credential sk-SECRET https://private/?sig=SECRET",
+            String.duplicate("éSECRET", 10_000),
+            <<255>>,
+            "category=unknown retryable=false diagnostic=SECRET <script>hidden reasoning</script>"
+          ] do
+        html = paint(%Cell.Status{label: "Agent error", detail: raw, tone: :error})
+        assert String.valid?(html)
+        assert byte_size(html) < 2000
+        refute html =~ "SECRET"
+        refute html =~ "hidden reasoning"
+        refute html =~ "<script>"
+      end
+    end
+
+    test "actual event projection retains classification and explicit recovery choice" do
+      for {status, code, retryable, copy} <- [
+            {401, "invalid_api_key", false, "rejected authentication"},
+            {403, "redacted", false, "refused access"},
+            {429, "rate_limit_exceeded", true, "limited the request"},
+            {429, "insufficient_quota", false, "insufficient quota"},
+            {400, "content_policy_violation", false, "under its policy"},
+            {404, "model_not_found", false, "exact model ID"},
+            {400, "context_length_exceeded", false, "context limit"}
+          ] do
+        error =
+          "model call failed: category=api status=#{status} provider_code=#{code} retryable=#{retryable} diagnostic=SECRET"
+
+        event = %Event{
+          id: "error",
+          session_id: "synthetic",
+          timestamp: "2026-09-12T00:00:00Z",
+          sequence: 1,
+          type: :turn_failed,
+          payload: %{"error" => error, "reason" => "model_error"},
+          provider: :native
+        }
+
+        html = [%Entry.Event{event: event}] |> Transcript.project() |> Enum.map_join(&paint/1)
+        assert html =~ copy
+        assert html =~ "status=#{status}"
+        assert html =~ "marked retryable" == retryable
+        refute html =~ "SECRET"
+      end
+    end
+
+    test "transport, cancellation and unknown stream errors keep safe distinctions" do
+      for {detail, copy} <- [
+            {"stream_failed category=transport retryable=true diagnostic=transport failed: timeout",
+             "Communication with the AI service failed"},
+            {"category=cancelled retryable=false diagnostic=model request cancelled",
+             "request was cancelled"},
+            {"stream_exited category=unknown retryable=false diagnostic=model request failed",
+             "cause could not be determined"}
+          ] do
+        html = paint(%Cell.Status{label: "Agent error", detail: detail, tone: :error})
+        assert html =~ copy
+        refute html =~ "provider_code=redacted"
+        if detail =~ "timeout", do: assert(html =~ "transport failed: timeout")
+      end
     end
 
     test "an approval request from the corpus renders its words" do

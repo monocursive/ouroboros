@@ -1,6 +1,13 @@
 # Finder metadata is machine-local, never repository input.
 .DS_Store
 
+# Release binaries are published as GitHub assets, not source files.
+/dist/
+
+# Python interpreter caches are local build artifacts.
+__pycache__/
+*.py[cod]
+
 # The directory Mix will write compiled artifacts to.
 /_build/
 

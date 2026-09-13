@@ -28,6 +28,8 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
 
     previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+    previous_epoch = Application.get_env(:ouroboros, :native_epoch_server)
+    previous_fence = Application.get_env(:ouroboros, :maintenance_fence_server)
     journal_dir = unique_journal_dir()
 
     root = Path.join(System.tmp_dir!(), "workspace-exec-#{System.unique_integer([:positive])}")
@@ -38,12 +40,24 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
     File.mkdir_p!(data_dir)
     Application.put_env(:ouroboros, :data_dir, data_dir)
 
+    epoch =
+      start_supervised!({Ouroboros.Maintenance.Epoch, name: nil, data_dir: data_dir})
+
+    start_supervised!(
+      {Ouroboros.Maintenance.Fence, name: :workspace_exec_test_fence, data_dir: data_dir}
+    )
+
+    Application.put_env(:ouroboros, :native_epoch_server, epoch)
+    Application.put_env(:ouroboros, :maintenance_fence_server, :workspace_exec_test_fence)
+
     Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
 
     on_exit(fn ->
       cleanup_sessions()
       Ouroboros.Test.NativeConfig.configure(previous_provider_config)
       restore(:ouroboros, :data_dir, previous_data_dir)
+      restore(:ouroboros, :native_epoch_server, previous_epoch)
+      restore(:ouroboros, :maintenance_fence_server, previous_fence)
       File.rm_rf(journal_dir)
       File.rm_rf(root)
     end)

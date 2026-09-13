@@ -31,7 +31,7 @@ defmodule Ouroboros.Wasm.SdkAcceptanceTest do
 
   # The SDK's worked components, as `make wasm-examples` builds them. Each is its own cargo
   # workspace, so each has a build directory of its own.
-  @examples Path.expand("../../tui/wasm/guest/examples", __DIR__)
+  @examples LiveFixture.examples_root(Path.expand("../../tui/wasm/guest/examples", __DIR__))
 
   @deny_writes Path.join(@examples, "deny-writes/target/wasm32-wasip2/release/deny_writes.wasm")
   @counter Path.join(@examples, "counter/target/wasm32-wasip2/release/counter.wasm")
@@ -319,7 +319,9 @@ defmodule Ouroboros.Wasm.SdkAcceptanceTest do
       {_output, 0} = System.cmd(exe, ["init", "--quiet", root], stderr_to_stdout: true)
     end
 
-    File.cp!(component, Path.join([root, "hooks", "guest.wasm"]))
+    destination = Path.join([root, "hooks", "guest.wasm"])
+    File.rm(destination)
+    File.cp!(component, destination)
     File.write!(Path.join(root, "ouroboros.toml"), toml)
 
     %{root: root, pool: start_pool()}

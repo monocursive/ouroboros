@@ -47,9 +47,10 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
   alias Ouroboros.Wasm.PolicyPromotionTest.DeadLedger
   alias Ouroboros.Wasm.{Artifact, LiveFixture, PolicyEngine, Pool, Rollout, SandboxFixture, Store}
 
-  @component Path.expand(
-               "../../tui/wasm/guest/examples/no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm",
-               __DIR__
+  @examples LiveFixture.examples_root(Path.expand("../../tui/wasm/guest/examples", __DIR__))
+  @component Path.join(
+               @examples,
+               "no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm"
              )
   @signer "wasm-policy-promotion-key"
 

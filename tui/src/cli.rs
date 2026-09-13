@@ -163,6 +163,21 @@ pub enum Command {
         token_file: Option<PathBuf>,
     },
 
+    /// Print privacy-safe status for one owning session and exit.
+    SafeStatus {
+        /// Session id. The gateway routes it to its owning coordinator.
+        #[arg(value_name = "SESSION_ID")]
+        id: String,
+
+        /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+        #[arg(long, value_name = "HOST:PORT")]
+        addr: Option<String>,
+
+        /// File holding the gateway token. Omitted, the local token file is used.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
+    },
+
     /// The MCP servers this runtime runs for the native agent, and the files that declare
     /// them (D4).
     ///
@@ -256,6 +271,12 @@ pub enum Command {
     ///
     /// Re-calling the model is a *fork*, not a replay. See `ouro fork`.
     Replay(ReplayArgs),
+
+    /// Inspect a native provider session before importing it into Ouroboros.
+    PreviewNative(NativePreviewArgs),
+
+    /// Import a native provider session after confirming its preview digest.
+    ImportNative(NativeImportArgs),
 
     /// Branch a recorded session into a new one, optionally at a turn and on another model.
     ///
@@ -628,6 +649,61 @@ pub struct ReplayArgs {
     pub addr: Option<String>,
 
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// `ouro preview-native`'s flags.
+#[derive(Debug, Args)]
+pub struct NativePreviewArgs {
+    /// The provider-owned session identifier to inspect.
+    #[arg(value_name = "PROVIDER_SESSION_ID")]
+    pub provider_session_id: String,
+    /// Route the read to this owning node.
+    #[arg(long, value_name = "NODE", conflicts_with = "machine")]
+    pub node: Option<String>,
+    /// Read the provider session from this fleet machine.
+    #[arg(long, value_name = "NAME")]
+    pub machine: Option<String>,
+    /// Print the exact result object.
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// `ouro import-native`'s flags. Start options intentionally match `ouro new`.
+#[derive(Debug, Args)]
+pub struct NativeImportArgs {
+    #[arg(value_name = "PROVIDER_SESSION_ID")]
+    pub provider_session_id: String,
+    /// Digest printed by `ouro preview-native`.
+    #[arg(long, value_name = "SHA256")]
+    pub expected_digest: String,
+    /// Accept a preview which reports an incomplete trailing record.
+    #[arg(long)]
+    pub acknowledge_partial_tail: bool,
+    #[arg(long, value_name = "SPEC")]
+    pub model: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+    #[arg(long, value_name = "MODE")]
+    pub approval_mode: Option<String>,
+    #[arg(long, value_name = "MODE")]
+    pub sandbox_mode: Option<String>,
+    #[arg(long, value_name = "NAME")]
+    pub machine: Option<String>,
+    #[arg(long)]
+    pub worktree: bool,
+    #[arg(long)]
+    pub plan: bool,
+    /// Print the exact result object.
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
 }
@@ -1356,9 +1432,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Answer every approval request `approve` with scope `once`. Without it a headless
-    /// run answers `deny`/`once` with a reason saying there was no approver — it never
-    /// waits for one.
+    /// Answer effect approval requests `approve` with scope `once`. Questions are declined
+    /// because this flag supplies authority, not an answer. Without it a headless run
+    /// answers `deny`/`once` with a reason saying there was no approver — it never waits.
     #[arg(long)]
     pub approve_all: bool,
 
@@ -1537,11 +1613,39 @@ pub enum SessionsCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied()))
             .expect("a parseable command line")
+    }
+
+    #[test]
+    fn safe_status_takes_only_session_and_file_based_connection_options() {
+        let Some(Command::SafeStatus {
+            id,
+            addr,
+            token_file,
+        }) = parse(&[
+            "safe-status",
+            "session-1",
+            "--addr",
+            "127.0.0.1:4560",
+            "--token-file",
+            "/tmp/token",
+        ])
+        .command
+        else {
+            panic!("safe-status must parse");
+        };
+
+        assert_eq!(id, "session-1");
+        assert_eq!(addr.as_deref(), Some("127.0.0.1:4560"));
+        assert_eq!(token_file.as_deref(), Some(Path::new("/tmp/token")));
+        assert!(Cli::try_parse_from(["ouro", "safe-status", "s", "--owner", "other"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "safe-status", "s", "--token", "secret"]).is_err());
     }
 
     /// B2. `--plan` is a plain boolean on both surfaces, with no flag it fights.

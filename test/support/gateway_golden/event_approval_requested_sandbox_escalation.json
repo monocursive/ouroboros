@@ -7,17 +7,28 @@
       "harness_session_id": "harness-0000000000000000001",
       "id": "evt-0000000000000000000000135",
       "payload": {
+        "at_least_once_risk": "The whole retained command will run again; effects completed before the first failure may duplicate.",
+        "effective_sandbox_mode": "workspace_write_escalated",
         "kind": "sandbox_escalation",
+        "network": "unchanged; external network remains denied",
         "paths": [
           "/srv/repo/target"
         ],
+        "protected_segments": [
+          ".ouroboros"
+        ],
         "reason": "the command wrote outside the workspace and the sandbox stopped it",
-        "suggested_rule": "Bash(cargo build *)",
+        "retry_attempt_id": "nretry_000000000000000000000001",
+        "sandbox_mode": "workspace_write",
+        "suggested_rule": "SandboxEscalation()",
         "tool_call": {
           "command": "cargo build --release",
           "cwd": "/srv/repo",
           "name": "bash"
-        }
+        },
+        "writable_roots": [
+          "/srv/repo"
+        ]
       },
       "provider": "native",
       "provider_session_id": "provider-0000000000000001",

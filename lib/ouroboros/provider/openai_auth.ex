@@ -104,13 +104,39 @@ defmodule Ouroboros.Provider.OpenAIAuth do
     end
   end
 
-  @doc "Whether a usable OAuth credential is present, without returning it."
+  @doc "Legacy boolean: credential material was found, not verified provider access."
   def credential_present? do
     case read_credentials(credential_path()) do
       {:ok, credential} -> present?(credential["access"]) or present?(credential["refresh"])
       _absent -> false
     end
   end
+
+  @doc "Non-secret source observation. Unavailable/invalid is not evidence of absence."
+  def credential_status do
+    credential_path() |> read_credentials() |> credential_state()
+  rescue
+    _ -> :unavailable
+  end
+
+  defp credential_state({:ok, credential}) do
+    cond do
+      present?(credential["access"]) or present?(credential["refresh"]) ->
+        :present
+
+      Enum.any?(
+        ["access", "refresh"],
+        &(not is_nil(credential[&1]) and not is_binary(credential[&1]))
+      ) ->
+        :invalid
+
+      true ->
+        :absent
+    end
+  end
+
+  defp credential_state({:error, state}) when state in [:absent, :invalid, :unavailable],
+    do: state
 
   @impl true
   def init(opts) do
@@ -426,8 +452,10 @@ defmodule Ouroboros.Provider.OpenAIAuth do
   defp token_credential(_body), do: {:error, :invalid_token_response}
 
   defp account_projection(state) do
+    observation = read_credentials(state.credential_path)
+
     credential =
-      case read_credentials(state.credential_path) do
+      case observation do
         {:ok, value} -> value
         _absent -> nil
       end
@@ -449,6 +477,7 @@ defmodule Ouroboros.Provider.OpenAIAuth do
 
     %{
       "account" => account,
+      "credentialState" => Atom.to_string(credential_state(observation)),
       "requiresOpenaiAuth" => is_nil(credential),
       "login" => state.login
     }
@@ -669,17 +698,37 @@ defmodule Ouroboros.Provider.OpenAIAuth do
   end
 
   defp read_credentials(path) do
-    with {:ok, json} <- File.read(path),
-         {:ok, payload} when is_map(payload) <- JSON.decode(json),
-         credential when is_map(credential) <- payload[@provider_key] do
-      {:ok, credential}
+    # Observational only: never refresh or write. Bound parsing of a corrupt store.
+    with {:ok, %{type: :regular, size: size}} when size <= 65_536 <- File.stat(path),
+         {:ok, json} <- File.open(path, [:read, :binary], &IO.binread(&1, 65_537)) do
+      decode_credentials(json)
     else
-      {:error, :enoent} -> {:error, :not_found}
-      _missing_or_invalid -> {:error, :not_found}
+      {:error, :enoent} -> {:error, :absent}
+      {:ok, %{type: :regular}} -> {:error, :invalid}
+      _ -> {:error, :unavailable}
     end
   rescue
-    _error -> {:error, :not_found}
+    _ -> {:error, :unavailable}
   end
+
+  defp decode_credentials(json) when is_binary(json) and byte_size(json) <= 65_536 do
+    case JSON.decode(json) do
+      {:ok, payload} when is_map(payload) ->
+        case Map.fetch(payload, @provider_key) do
+          {:ok, credential} when is_map(credential) -> {:ok, credential}
+          :error -> {:error, :absent}
+          _ -> {:error, :invalid}
+        end
+
+      _ ->
+        {:error, :invalid}
+    end
+  rescue
+    _ -> {:error, :invalid}
+  end
+
+  defp decode_credentials({:error, _}), do: {:error, :unavailable}
+  defp decode_credentials(_), do: {:error, :invalid}
 
   defp atomic_write(path, contents) do
     temporary = path <> ".tmp-" <> random_token(9)

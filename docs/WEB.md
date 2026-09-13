@@ -228,6 +228,26 @@ through the existing spawn-lock machinery exactly as `ouro attach` does), prints
 wraps it in dev. The desktop's HTTPS-only `open_url` guard does not apply — this URL is
 constructed locally from the publication, not received from a stream.
 
+**As built, first-use project context (September 2026):** `ouro web` captures the
+invocation's current directory before starting or adopting a daemon and adds it as an
+independently encoded `workspace` parameter to the token exchange. After successful GET
+authentication, `/auth` redirects to the fixed local `/new?workspace=…` route without the
+token; POST authentication and GET without project context retain `/`. This is a form
+seed, not an arbitrary redirect or a daemon-global preference change. It selects the
+invoking computer's project even when an existing daemon has another cwd. Saved local
+model/thinking choices survive; saved remote-machine model choices do not carry over.
+Explicit form edits then win. Without a handoff, saved choices remain available; without
+a saved project, the browser requires an explicit absolute project path. Invalid supplied
+context clears the project rather than falling back to saved state or an extracted release
+directory. Significant spaces remain path bytes; existence and workspace admission are
+checked at start.
+
+The model picker includes the configured model before the snapshot cap and keeps the
+current/saved exact ID accessible during search. A model absent from the snapshot has
+unknown metadata and unverified access, not invented pricing or an unsupported verdict.
+Custom accepts an exact `provider:model` ID; the selected ID and thinking level are sent
+without model substitution. This is request selection, not proof of vendor entitlement.
+
 **As built** (`tui/src/web_cli.rs`), with five notes where the paragraph above was
 imprecise or silent:
 

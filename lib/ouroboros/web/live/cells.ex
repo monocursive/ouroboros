@@ -379,10 +379,11 @@ defmodule Ouroboros.Web.Live.Cells do
 
   defp status(assigns) do
     raw = assigns.cell.detail
+    {error_detail, safe_technical} = error_presentation(raw)
 
     detail =
       cond do
-        assigns.cell.tone == :error -> friendly_error(raw)
+        assigns.cell.tone == :error -> error_detail
         assigns.cell.label == "Approval needed" -> "Waiting for your decision."
         is_binary(raw) and (String.starts_with?(raw, "{") or String.starts_with?(raw, "[")) -> ""
         true -> raw
@@ -390,7 +391,7 @@ defmodule Ouroboros.Web.Live.Cells do
 
     assigns =
       assigns
-      |> assign(:raw_detail, raw)
+      |> assign(:raw_detail, if(assigns.cell.tone == :error, do: safe_technical, else: raw))
       |> assign(:detail, detail)
       |> assign(
         :technical?,
@@ -409,22 +410,109 @@ defmodule Ouroboros.Web.Live.Cells do
     """
   end
 
-  defp friendly_error(detail) when is_binary(detail) do
-    down = String.downcase(detail)
+  # Parse only the bounded model-boundary vocabulary, never diagnose from a word in
+  # an exception/body. Technical disclosure is not permission to publish raw secrets.
+  defp error_presentation(detail) when is_binary(detail) and byte_size(detail) <= 1_024 do
+    pattern =
+      ~r/\A(?:model call failed: )?(?:(stream_failed|stream_exited) )?category=(api|transport|cancelled|unknown|credentials)(?: status=([1-5][0-9]{2}))?(?: provider_code=([a-z_]{1,64}))? retryable=(true|false) diagnostic=([^\r\n]*)\z/u
 
-    cond do
-      String.contains?(down, ["server_is_overloaded", "currently overloaded", "overloaded"]) ->
-        "The AI service is temporarily busy. Try the message again."
+    with true <- String.valid?(detail),
+         [_, phase, category, status, code, retryable, diagnostic] <- Regex.run(pattern, detail) do
+      code =
+        if code == "" or
+             code in ~w(upstream_timeout server_is_overloaded overloaded rate_limit_exceeded
+                      insufficient_quota invalid_api_key invalid_request_error model_not_found
+                      context_length_exceeded content_policy_violation content_filter
+                      policy_violation safety_violation request_blocked redacted),
+           do: code,
+           else: "redacted"
 
-      String.contains?(down, ["authentication", "unauthorized", "credential", "api key"]) ->
-        "The AI provider needs to be connected again."
+      message =
+        cond do
+          category == "credentials" ->
+            "No model credential was reported. Check the provider connection in Settings."
 
-      true ->
-        "The agent stopped unexpectedly."
+          category == "cancelled" ->
+            "The model request was cancelled. You can send another message when ready."
+
+          status == "401" ->
+            "The AI service rejected authentication. Check the selected provider connection in Settings."
+
+          code in ~w(content_policy_violation content_filter policy_violation safety_violation request_blocked) ->
+            "The AI service rejected the request under its policy. Review the request before sending again."
+
+          status == "403" ->
+            "The AI service refused access. Check the selected model and account permissions; this does not establish a missing credential."
+
+          code == "insufficient_quota" ->
+            "The AI service reported insufficient quota. Check the provider's usage or billing limits."
+
+          status == "429" ->
+            "The AI service limited the request. Check the provider's usage limits."
+
+          code == "context_length_exceeded" ->
+            "The request exceeded the model's context limit. Reduce the conversation or choose another model."
+
+          status == "404" or code == "model_not_found" ->
+            "The AI service could not find the requested resource. Check the exact model ID and its availability to your account."
+
+          status in ~w(400 422) ->
+            "The AI service rejected the request. Check the model and request settings before sending again."
+
+          category == "transport" ->
+            "Communication with the AI service failed. Check the connection."
+
+          status in ~w(500 502 503 504) ->
+            "The AI service failed to handle the request."
+
+          phase != "" ->
+            "The model stream stopped before completion. Its cause could not be determined."
+
+          true ->
+            "The model request failed. Its cause could not be determined. Check the provider and model settings."
+        end
+
+      recovery =
+        if retryable == "true",
+          do: " The failure was marked retryable; you can try the message again.",
+          else: ""
+
+      technical =
+        Enum.join(
+          Enum.reject(
+            [
+              phase,
+              "category=#{category}",
+              if(status != "", do: "status=#{status}"),
+              if(code != "", do: "provider_code=#{code}"),
+              "retryable=#{retryable}",
+              if(
+                diagnostic in [
+                  "transport failed: timeout",
+                  "transport failed: closed",
+                  "transport failed: econnrefused",
+                  "transport failed: pool_not_available"
+                ],
+                do: diagnostic
+              )
+            ],
+            &(&1 in [nil, ""])
+          ),
+          " "
+        )
+
+      {message <> recovery, technical}
+    else
+      _ -> unknown_error()
     end
   end
 
-  defp friendly_error(_detail), do: "The agent stopped unexpectedly."
+  defp error_presentation(_), do: unknown_error()
+
+  defp unknown_error,
+    do:
+      {"The agent stopped; no safe failure classification is available. Check the provider and model settings before sending another message.",
+       "Unclassified failure. Raw diagnostic omitted for privacy."}
 
   defp chat_note(assigns) do
     diagnostic? =

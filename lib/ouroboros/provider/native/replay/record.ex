@@ -26,7 +26,7 @@ defmodule Ouroboros.Provider.Native.Replay.Record do
         {:error, {:blob_unavailable, marker, :no_session_dir}}
 
       value ->
-        {:ok, value}
+        {:ok, Journal.decode_record_value(record, value)}
     end
   end
 

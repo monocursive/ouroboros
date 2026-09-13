@@ -8,7 +8,8 @@
 > `interactive.request_approval` / `grok.account.*` call describes a plane that is gone.
 > The map is left as the record it is.
 
-Repo `/Users/monocursive/code/ouroboros`, branch `review-fixes`. All citations are `file:line`.
+Repository: Ouroboros checkout, branch `review-fixes`. All citations are `file:line`,
+relative to the checkout root; the original machine-local prefix is omitted.
 Scope: what a user can actually *drive* today, and through which gateway call.
 
 ---

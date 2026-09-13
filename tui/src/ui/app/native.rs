@@ -198,7 +198,10 @@ impl App {
         );
     }
 
-    /// The child is opened the moment the runtime names it. `outcome: "unknown"` is *not*
+    /// The child is opened the moment the runtime names it. The caller-owned ID is also
+    /// the recovery handle: retrying `/handoff` with the same prompt reconciles a durable
+    /// preparing/prepared child after response loss or coordinator restart, while changed
+    /// prompt text is refused as an ID conflict. `outcome: "unknown"` is *not*
     /// a failure — the ceiling fired and the child may well exist — so the id is opened
     /// either way and the transcript says which of the two happened.
     pub(super) fn handed_off(&mut self, parent: &str, child: &str, value: &Value) {

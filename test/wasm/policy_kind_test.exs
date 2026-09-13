@@ -20,10 +20,11 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
 
   @moduletag :capture_log
 
-  @capability_guest Path.expand("../support/wasm/echo.wasm", __DIR__)
-  @policy_guest Path.expand(
-                  "../../tui/wasm/guest/examples/no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm",
-                  __DIR__
+  @capability_guest LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
+  @examples LiveFixture.examples_root(Path.expand("../../tui/wasm/guest/examples", __DIR__))
+  @policy_guest Path.join(
+                  @examples,
+                  "no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm"
                 )
 
   # Any bytes with a component preamble: everything in the first three blocks is about the

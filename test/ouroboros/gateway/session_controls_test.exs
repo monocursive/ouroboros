@@ -78,6 +78,29 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       retire_session(id)
     end
 
+    test "a running turn reports next-turn timing through the wire", %{id: id} do
+      ref = start_session(id, approval_mode: :prompt)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "hold this turn", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_model_started, _run,
+                      %Ouroboros.Test.ModelRequest{approval_mode: :prompt}, adapter},
+                     2_000
+
+      assert {:ok, result} =
+               Methods.invoke("interactive.configure", %{
+                 "id" => id,
+                 "approval_mode" => "auto_approve"
+               })
+
+      assert result.applies == :next_turn
+      assert result.changed == [:approval_mode]
+
+      ControlledModel.finish(adapter)
+      retire_session(id)
+    end
+
     test "a field outside the configurable set is a parameter error naming the set" do
       assert {:error, -32_602, message} =
                Methods.invoke("interactive.configure", %{
@@ -202,17 +225,28 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     end
 
     test "a fork of an unnamed historical session is refused with a reason", %{id: id} do
-      start_session(id, sandbox_mode: :read_only)
+      # This is a retained session that ended before native execution named it.
+      # Editing a live coordinator alone lets its next reconciliation restore the
+      # provider ID, changing which fork contract the fixture exercises.
+      assert {:ok, historical} =
+               State.new(id,
+                 provider: @provider,
+                 workspace: File.cwd!(),
+                 sandbox_mode: :read_only
+               )
 
-      :sys.replace_state(Task.whereis(id), fn runtime ->
-        %{runtime | session: %{runtime.session | provider_session_id: nil}}
-      end)
+      historical = %{historical | status: :closed}
+      assert :ok = Store.create(historical)
+      fork_id = unique_id("gateway-unnamed-fork")
 
-      assert {:error, -32_006, message, data} = Methods.invoke("interactive.fork", %{"id" => id})
+      assert {:error, -32_006, message, data} =
+               Methods.invoke("interactive.fork", %{"id" => id, "fork_id" => fork_id})
 
       assert message =~ "refused the call"
       assert ["unforkable_session", details] = data
       assert details["reason"] == "no_provider_session_id"
+      assert :not_found = Store.get(fork_id)
+      assert {:ok, ^historical} = Store.get(id)
 
       retire_session(id)
     end
@@ -284,6 +318,17 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
 
   describe "runtime.models" do
     test "the catalogue is a read method and answers with bounded per-provider rows" do
+      model_env = Ouroboros.Provider.Native.Model.model_env()
+      previous_model = System.get_env(model_env)
+      configured = "openai_codex:fixture-unknown-catalogue"
+      System.put_env(model_env, configured)
+
+      on_exit(fn ->
+        if previous_model,
+          do: System.put_env(model_env, previous_model),
+          else: System.delete_env(model_env)
+      end)
+
       assert Methods.table()["runtime.models"].scope == :read
       assert "runtime.models" in Methods.names()
       assert Methods.permits?(:read, Methods.table()["runtime.models"])
@@ -300,8 +345,30 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       assert length(row.models) <= catalogue.limit
       assert length(row.models) > 0
 
-      model = hd(row.models)
-      assert is_integer(model.context_window)
+      assert [%{id: ^configured, configured: true, metadata: :unavailable} = unknown | _] =
+               row.models
+
+      assert Enum.count(row.models, &(&1.id == configured)) == 1
+      assert unknown.context_window == nil
+      assert unknown.max_output_tokens == nil
+      assert unknown.pricing == nil
+      assert unknown.release_date == nil
+
+      # The configured model is pinned first even when the snapshot does not know it.
+      # Known catalogue metadata remains numeric; unknown intent must not invent a window.
+      for model <- row.models do
+        if Map.get(model, :metadata) == :unavailable do
+          assert model.configured
+          assert model.context_window == nil
+        else
+          assert is_nil(model.context_window) or
+                   (is_integer(model.context_window) and model.context_window > 0)
+        end
+      end
+
+      known = Enum.find(row.models, &String.starts_with?(&1.id, "anthropic:"))
+      assert known
+      assert is_integer(known.context_window) and known.context_window > 0
     end
 
     test "a session's own model is on interactive.info, so a client can divide by the window",

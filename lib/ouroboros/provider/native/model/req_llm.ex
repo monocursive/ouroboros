@@ -79,6 +79,114 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     error -> {:error, {:model_client_error, Exception.message(error)}}
   end
 
+  @doc false
+  @impl true
+  @spec format_error(term()) :: String.t()
+  def format_error(reason) do
+    reason
+    |> unwrap_error()
+    |> error_summary()
+  rescue
+    _error -> "category=unknown retryable=false diagnostic=model request failed"
+  end
+
+  defp unwrap_error(%{errors: [error | _]}), do: unwrap_error(error)
+
+  defp unwrap_error(%ReqLLM.Error.API.Stream{cause: cause}) when not is_nil(cause),
+    do: unwrap_error(cause)
+
+  defp unwrap_error(reason), do: reason
+
+  defp error_summary(%ReqLLM.Error.API.Request{} = error) do
+    case ReqLLM.Streaming.Failure.classify(error) do
+      {:api, status, provider_code, retryable} ->
+        fields(
+          :api,
+          status,
+          provider_code,
+          retryable,
+          api_diagnostic(error, status, provider_code)
+        )
+
+      {:transport, transport_reason, retryable} ->
+        fields(:transport, nil, nil, retryable, transport_diagnostic(transport_reason))
+
+      :cancelled ->
+        fields(:cancelled, nil, nil, false, "model request cancelled")
+
+      :unknown ->
+        fields(:unknown, nil, error.provider_code, false, "API request failed")
+    end
+  end
+
+  defp error_summary(reason) do
+    case ReqLLM.Streaming.Failure.classify(reason) do
+      {:api, status, provider_code, retryable} ->
+        fields(:api, status, provider_code, retryable, "API request failed (#{status})")
+
+      {:transport, transport_reason, retryable} ->
+        fields(:transport, nil, nil, retryable, transport_diagnostic(transport_reason))
+
+      :cancelled ->
+        fields(:cancelled, nil, nil, false, "model request cancelled")
+
+      :unknown ->
+        fields(:unknown, nil, nil, false, "model request failed")
+    end
+  end
+
+  defp api_diagnostic(%{reason: reason}, status, _code)
+       when reason in [:timeout, :closed, :econnrefused],
+       do: "API request failed (#{status}): #{reason}"
+
+  defp api_diagnostic(_error, status, code) do
+    if policy_code?(code),
+      do: "API request failed (#{status}): request rejected by provider policy",
+      else: "API request failed (#{status})"
+  end
+
+  defp transport_diagnostic(reason)
+       when reason in [:timeout, :closed, :econnrefused, :pool_not_available],
+       do: "transport failed: #{reason}"
+
+  defp transport_diagnostic(_reason), do: "transport failed"
+
+  defp policy_code?(code) when is_binary(code),
+    do:
+      code in ~w(content_policy_violation content_filter policy_violation safety_violation request_blocked)
+
+  defp policy_code?(_code), do: false
+
+  defp fields(category, status, provider_code, retryable, diagnostic) do
+    [
+      "category=#{category}",
+      if(is_integer(status), do: "status=#{status}"),
+      safe_provider_code(provider_code),
+      "retryable=#{retryable}",
+      "diagnostic=#{diagnostic}"
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
+  end
+
+  defp safe_provider_code(nil), do: nil
+  defp safe_provider_code(code) when is_atom(code), do: safe_provider_code(Atom.to_string(code))
+
+  defp safe_provider_code(code) when is_binary(code) do
+    # A syntactically tidy string can still be a token or a signed URL fragment.
+    # Preserve known operational codes, not arbitrary provider-controlled content.
+    if code in ~w(upstream_timeout server_is_overloaded overloaded rate_limit_exceeded
+                  insufficient_quota invalid_api_key invalid_request_error model_not_found
+                  context_length_exceeded content_policy_violation content_filter
+                  policy_violation safety_violation request_blocked) do
+      "provider_code=#{code}"
+    else
+      "provider_code=redacted"
+    end
+  end
+
+  defp safe_provider_code(_code), do: nil
+
   defp audit_transport(options, nil) do
     if Ouroboros.Audit.required?(),
       do: raise(Ouroboros.Audit.Unavailable, reason: :missing_model_audit_context)
@@ -233,18 +341,22 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     if Code.ensure_loaded?(ReqLLM.Providers) do
       rows =
         ReqLLM.Providers.list()
-        |> Enum.reject(&(&1 in [:anthropic, :xai]))
+        # These lanes report their actual managed credential below. In particular,
+        # a generic OPENAI_CODEX_API_KEY row can sort before and mask the OAuth row.
+        |> Enum.reject(&(&1 in [:openai_codex, :anthropic, :xai]))
         |> Enum.map(fn provider ->
           env = ReqLLM.Keys.env_var_name(provider)
           %{provider: provider, env: env, present: present?(env), source: source(env)}
         end)
 
-      oauth_present? = Ouroboros.Provider.OpenAIAuth.credential_present?()
+      oauth_state = Ouroboros.Provider.OpenAIAuth.credential_status()
+      oauth_present? = oauth_state == :present
 
       oauth = %{
         provider: :openai_codex,
         env: "OUROBOROS_OAUTH_FILE",
         present: oauth_present?,
+        credential_state: oauth_state,
         source: if(oauth_present?, do: :stored)
       }
 

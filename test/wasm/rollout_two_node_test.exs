@@ -20,7 +20,7 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   # BEAM artifact is loadable on exactly one OTP/Elixir/architecture triple (docs/WASM.md
   # §3.3). This is the test that says it, against the real helper and a real
   # `wasm32-wasip2` component rather than a scripted reply.
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
+  @guest Ouroboros.Wasm.LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
   @signer "wasm-two-node-key"
   @config ~s({"greeting":"hello"})
 

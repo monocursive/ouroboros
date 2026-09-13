@@ -37,9 +37,12 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
   alias Ouroboros.Wasm.PolicyEngine
   alias Ouroboros.Wasm.Rollout
 
-  @component Path.expand(
-               "../../tui/wasm/guest/examples/no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm",
-               __DIR__
+  @examples Ouroboros.Wasm.LiveFixture.examples_root(
+              Path.expand("../../tui/wasm/guest/examples", __DIR__)
+            )
+  @component Path.join(
+               @examples,
+               "no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm"
              )
   @signer "wasm-policy-two-node-key"
   # The name the register calls it. Fixed rather than unique: every run gets fresh peer VMs

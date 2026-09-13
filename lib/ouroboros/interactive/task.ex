@@ -12,7 +12,9 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Poll.Timer
   alias Ouroboros.Provider
   alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Model
   alias Ouroboros.ReasoningEffort
+  alias Ouroboros.Runtime.SafeStatus
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Worktree
@@ -33,6 +35,16 @@ defmodule Ouroboros.Interactive.Task do
   # becomes a coding task's durable objective, and the coding plane has its own bound;
   # this one is smaller because it is a sentence, not a document.
 
+  def child_spec({id, admission}) do
+    %{
+      id: {__MODULE__, id},
+      start: {__MODULE__, :start_link, [{id, admission}]},
+      # An operation lease is released by its caller, not reusable restart authority.
+      # The supervised recovery sweep reacquires admission for this logical session.
+      restart: :temporary
+    }
+  end
+
   def child_spec(id) do
     %{
       id: {__MODULE__, id},
@@ -41,7 +53,11 @@ defmodule Ouroboros.Interactive.Task do
     }
   end
 
-  def start_link(id) when is_binary(id), do: GenServer.start_link(__MODULE__, id, name: via(id))
+  def start_link({id, admission}) when is_binary(id),
+    do: GenServer.start_link(__MODULE__, {id, admission}, name: via(id))
+
+  def start_link(id) when is_binary(id),
+    do: GenServer.start_link(__MODULE__, {id, nil}, name: via(id))
 
   def via(id), do: {:via, Registry, {Ouroboros.Interactive.Registry, id}}
 
@@ -57,15 +73,35 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   @impl true
-  def init(id) do
+  def init({id, admission}) do
+    with :ok <- validate_maintenance_admission(id, admission) do
+      init_admitted(id, admission)
+      |> retain_maintenance_admission(admission)
+    else
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp retain_maintenance_admission({:ok, runtime}, admission),
+    do: {:ok, Map.put(runtime, :maintenance_admission, admission)}
+
+  defp retain_maintenance_admission({:ok, runtime, continuation}, admission),
+    do: {:ok, Map.put(runtime, :maintenance_admission, admission), continuation}
+
+  defp retain_maintenance_admission(other, _admission), do: other
+
+  defp init_admitted(id, admission) do
     case Store.get(id) do
+      {:ok, %State{node: owner, status: :preparing} = session} when owner == node() ->
+        {:ok, runtime(session)}
+
       {:ok, %State{node: owner} = session} when owner == node() ->
         if State.terminal?(session) do
           {:ok, runtime(session), {:continue, :attach}}
         else
           case State.removed_provider(session) do
             nil ->
-              case admit_workspace(session) do
+              case admit_workspace(session, admission) do
                 # A checkpoint this build cannot turn into a runtime request — a trace from
                 # a newer prompt format, a prompt that is no longer a binary — fails as
                 # itself, before any provider session, and releases what it holds.
@@ -92,6 +128,22 @@ defmodule Ouroboros.Interactive.Task do
 
       {:error, reason} ->
         {:stop, {:storage_error, reason}}
+    end
+  end
+
+  defp validate_maintenance_admission(id, admission) do
+    server =
+      Application.get_env(:ouroboros, :maintenance_fence_server, Ouroboros.Maintenance.Fence)
+
+    case Process.whereis(server) do
+      nil ->
+        :ok
+
+      _pid when is_map(admission) ->
+        Ouroboros.Maintenance.Fence.validate_admission(admission, id, server)
+
+      _pid ->
+        {:error, :maintenance_admission_required}
     end
   end
 
@@ -163,6 +215,13 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   def handle_call(:ready, from, runtime) do
+    # A handoff reservation may have been started by the recovery sweep while the parent
+    # was still building its native packet. Its coordinator then holds the durable
+    # `:preparing` snapshot in memory when the store atomically promotes the reservation
+    # to `:starting`. Re-read that one transition before deciding readiness; otherwise an
+    # already-running coordinator can wait forever while list/store truth has advanced.
+    runtime = refresh_promoted_handoff(runtime)
+
     cond do
       ready?(runtime.session) ->
         {:reply, {:ok, State.public(runtime.session)}, runtime}
@@ -217,9 +276,18 @@ defmodule Ouroboros.Interactive.Task do
       do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:send_turn, mode, id, input, opts}, _from, runtime) do
-    case Turns.dispatch_turn(runtime, mode, id, input, opts) do
-      {:ok, turn, runtime} -> {:reply, {:ok, State.public_turn(turn)}, runtime}
-      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    case acquire_turn_admission(runtime.session.id, id) do
+      {:ok, lease} ->
+        result = Turns.dispatch_turn(runtime, mode, id, input, opts)
+        release_turn_admission(lease)
+
+        case result do
+          {:ok, turn, runtime} -> {:reply, {:ok, State.public_turn(turn)}, runtime}
+          {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, runtime}
     end
   end
 
@@ -420,12 +488,31 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, compact(runtime, focus), runtime}
   end
 
+  def handle_call({:compact_start, id, focus}, _from, runtime) do
+    {:reply, compact_operation(runtime, :start, id, focus), runtime}
+  end
+
+  def handle_call({:compact_status, id}, _from, runtime) do
+    {:reply, compact_operation(runtime, :status, id, nil), runtime}
+  end
+
+  def handle_call({:compact_cancel, id}, _from, runtime) do
+    {:reply, compact_operation(runtime, :cancel, id, nil), runtime}
+  end
+
   # Read-only, and it answers for every transport — with different amounts of truth. The
   # native session knows its own prefix, window, compactions and instruction files; every
   # other transport knows only what its `usage` events reported, and that is what it says
   # rather than a shape padded out with nulls that look like measurements.
   def handle_call(:context, _from, runtime) do
     {:reply, {:ok, session_context(runtime.session)}, runtime}
+  end
+
+  # P3. This coordinator is the authority for this one session. The gateway caller names
+  # only the routed session; it cannot submit status facts, provenance, owner, or scope.
+  def handle_call(:safe_status, _from, runtime) do
+    now = System.monotonic_time(:millisecond)
+    {:reply, SafeStatus.session(safe_status_facts(runtime, now), now), runtime}
   end
 
   # B7. Two calls, not one, and the split is the whole design: a command may run for ten
@@ -787,6 +874,9 @@ defmodule Ouroboros.Interactive.Task do
   def handle_info(_message, runtime), do: {:noreply, runtime}
 
   @impl true
+  def format_status(status), do: Ouroboros.Interactive.CrashDiagnostics.format_status(status)
+
+  @impl true
   def terminate(_reason, runtime) do
     Ouroboros.Provider.Native.SubagentBridge.close(self())
     _ = release_workspace(runtime)
@@ -823,6 +913,31 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp no_retry, do: %{signature: nil, count: 0, delay: 0}
+
+  defp refresh_promoted_handoff(%{session: %State{status: :preparing, id: id}} = runtime) do
+    case Store.get(id) do
+      {:ok, %State{status: status} = promoted} when status != :preparing ->
+        case admit_workspace(promoted, Map.get(runtime, :maintenance_admission)) do
+          {:ok, promoted_runtime} ->
+            runtime
+            |> Map.put(:session, promoted_runtime.session)
+            |> Map.put(:workspace_lease, promoted_runtime.workspace_lease)
+            |> Map.put(:workspace_capability, promoted_runtime.workspace_capability)
+            |> attach_or_start()
+
+          {:error, _reason} ->
+            case Store.get(id) do
+              {:ok, %State{} = settled} -> %{runtime | session: settled}
+              _unavailable -> %{runtime | session: promoted}
+            end
+        end
+
+      _unchanged ->
+        runtime
+    end
+  end
+
+  defp refresh_promoted_handoff(runtime), do: runtime
 
   defp attach_or_start(%{session: %State{runtime_id: id}} = runtime) when is_binary(id) do
     case safe_session_call(fn -> Session.info(id) end) do
@@ -1795,9 +1910,10 @@ defmodule Ouroboros.Interactive.Task do
       {plan, rest} = Map.pop(changes, :plan)
 
       with :ok <- one_configuration_surface(plan, rest),
-           {:ok, rest, applies} <- configuration_changes(rest, plan),
-           :ok <- apply_plan(runtime, plan),
-           :ok <- apply_rest(runtime, rest) do
+           {:ok, rest, _validated_applies} <- configuration_changes(rest, plan),
+           {:ok, plan_applies} <- apply_plan(runtime, plan),
+           {:ok, rest_applies} <- apply_rest(runtime, rest) do
+        applies = if :next_turn in [plan_applies, rest_applies], do: :next_turn, else: :now
         record_configuration(runtime, plan_changes(rest, plan), applies)
       else
         {:error, reason} -> {:error, reason, runtime}
@@ -1833,14 +1949,14 @@ defmodule Ouroboros.Interactive.Task do
 
   defp configuration_changes(rest, _planning?), do: Provider.session_configuration(rest)
 
-  defp apply_rest(_runtime, rest) when rest == %{}, do: :ok
+  defp apply_rest(_runtime, rest) when rest == %{}, do: {:ok, :now}
   defp apply_rest(runtime, rest), do: apply_configuration(runtime, rest)
 
   defp plan_changes(rest, plan) do
     if is_nil(plan), do: rest, else: Map.put(rest, :plan, plan)
   end
 
-  defp apply_plan(_runtime, nil), do: :ok
+  defp apply_plan(_runtime, nil), do: {:ok, :now}
 
   # B2. The native session reaches its plan posture through a live process call, so a
   # change takes hold now and survives a resume. A start may also ask with
@@ -1848,8 +1964,9 @@ defmodule Ouroboros.Interactive.Task do
   defp apply_plan(%{session: session}, planning?) when is_boolean(planning?) do
     with {:ok, pid} <- native_transport(session, :plan) do
       case safe_session_call(fn -> Session.plan_mode(pid, planning?) end) do
-        :ok -> :ok
-        {:ok, _state} -> :ok
+        :ok -> {:ok, :now}
+        {:ok, applies} when applies in [:now, :next_turn] -> {:ok, applies}
+        {:ok, _state} -> {:ok, :now}
         {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
         other -> {:error, {:configure_refused, durable(other)}}
       end
@@ -1857,8 +1974,9 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp apply_configuration(runtime, changes) do
-    case with_runtime(runtime, &Session.configure(&1, changes)) do
-      :ok -> :ok
+    case with_runtime(runtime, &Session.configure_with_timing(&1, changes)) do
+      :ok -> {:ok, :now}
+      {:ok, applies} when applies in [:now, :next_turn] -> {:ok, applies}
       {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
       other -> {:error, {:configure_refused, durable(other)}}
     end
@@ -2009,6 +2127,25 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  defp compact_operation(%{session: session}, action, id, focus) do
+    with {:ok, pid} <- native_transport(session, :compact) do
+      result =
+        safe_session_call(fn ->
+          case action do
+            :start -> Session.compact_start(pid, id, focus)
+            :status -> Session.compact_status(pid, id)
+            :cancel -> Session.compact_cancel(pid, id)
+          end
+        end)
+
+      case result do
+        {:ok, operation} -> {:ok, durable(operation)}
+        {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
+        other -> {:error, {:compaction_refused, durable(other)}}
+      end
+    end
+  end
+
   # Never a guess. A native session answers with the facts it holds; a session with no
   # live transport answers with the two numbers its `usage` events carried and says so in
   # `source`, so a footer can tell "nothing reported a window" from "the window is zero".
@@ -2034,6 +2171,85 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  defp safe_status_facts(runtime, now) do
+    session = runtime.session
+    native = if session.provider == :native, do: native_safe_status(session), else: %{}
+    birth = Map.get(native, :birth)
+    port = Map.get(native, :port)
+
+    %{
+      owner: session.id,
+      observed_at_ms: now,
+      identity: %{
+        logical_id: session.id,
+        native_id: session.provider_session_id,
+        runtime_id: session.runtime_id,
+        generation: session.runtime_generation,
+        pid: Map.get(native, :pid),
+        port: port,
+        birth: birth
+      },
+      listener: %{
+        publication: :unavailable,
+        observed_at_ms: now,
+        port: port,
+        birth: birth
+      },
+      activity: %{
+        owner_active: session.status in [:running, :awaiting_approval],
+        turn_id: active_turn_id(session)
+      },
+      posture: %{
+        sandbox: Map.get(session.options, :sandbox_mode),
+        approval: Map.get(session.options, :approval_mode)
+      },
+      deadlines: %{requested_ms: nil, effective_ms: nil},
+      credentials: scoped_credentials(session)
+    }
+  end
+
+  defp native_safe_status(session) do
+    case safe_session_call(fn -> Session.info(session.runtime_id) end) do
+      {:ok, %SessionInfo{} = info} when info.generation == session.runtime_generation ->
+        # `RuntimeInfo.pid` is a BEAM pid, not an OS-process identity. P3 publishes neither
+        # that term nor a guessed OS pid; listener identity requires a separately bound receipt.
+        %{pid: nil, port: nil, birth: nil}
+
+      _ ->
+        %{pid: nil, port: nil, birth: nil}
+    end
+  end
+
+  defp active_turn_id(session) do
+    session.turns
+    |> Map.values()
+    |> Enum.filter(&(Map.get(&1, :status) in [:dispatching, :queued, :running, :finishing]))
+    |> Enum.max_by(&Map.get(&1, :created_at, ""), fn -> nil end)
+    |> case do
+      nil -> nil
+      turn -> Map.get(turn, :id)
+    end
+  end
+
+  defp scoped_credentials(session) do
+    selected = session.options |> Map.get(:model) |> credential_provider()
+
+    Model.credential_report()
+    |> Enum.filter(&(to_string(Map.get(&1, :provider)) == selected))
+    |> Enum.map(&Map.take(&1, [:provider, :present, :source, :credential_state]))
+  rescue
+    _ -> []
+  end
+
+  defp credential_provider(model) when is_binary(model) do
+    case String.split(model, ":", parts: 2) do
+      [provider, _] -> provider
+      _ -> nil
+    end
+  end
+
+  defp credential_provider(_), do: nil
+
   defp native_context(pid) do
     case safe_session_call(fn -> Session.context_info(pid) end) do
       {:ok, info} when is_map(info) ->
@@ -2044,8 +2260,10 @@ defmodule Ouroboros.Interactive.Task do
           # the thing that counted them, and the fold is a projection of its events.
           context_window: Map.get(info, :context_window),
           context_used: Map.get(info, :context_used),
+          context_state: Map.get(info, :context_state),
           compact_at: Map.get(info, :compact_at),
           keep_recent_tokens: Map.get(info, :keep_recent_tokens),
+          unknown_compact_tokens: Map.get(info, :unknown_compact_tokens),
           messages: Map.get(info, :messages),
           compaction_thrashing: Map.get(info, :compaction_thrashing),
           compactions: durable(List.wrap(Map.get(info, :compactions))),
@@ -2088,19 +2306,16 @@ defmodule Ouroboros.Interactive.Task do
 
     with {:ok, id} <- validate_fork_id(id),
          {:ok, prompt} <- validate_handoff_prompt(prompt) do
-      case existing_handoff_options(session, id) do
+      case existing_handoff_options(session, id, prompt) do
         {:ok, opts} ->
           {:ok, opts}
 
+        {:preparing, child} ->
+          prepare_reserved_handoff(session, child, prompt)
+
         :not_found ->
-          with {:ok, pid} <- native_transport(session, :handoff),
-               {:ok, result} <-
-                 safe_session_call(fn ->
-                   Session.handoff(pid, prompt, open_child: false)
-                 end),
-               opts = handoff_start_options(session, id, result.provider_session_id),
-               {:ok, opts} <- reserve_handoff(session, opts) do
-            {:ok, opts}
+          with {:ok, child} <- reserve_handoff(session, id, prompt) do
+            prepare_reserved_handoff(session, child, prompt)
           else
             {:error, reason} -> {:error, handoff_error(reason)}
             other -> {:error, {:handoff_refused, durable(other)}}
@@ -2114,23 +2329,91 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp reserve_handoff(parent, opts) do
-    id = Keyword.fetch!(opts, :id)
+  defp reserve_handoff(parent, id, prompt) do
+    intent = %{parent: parent.id, prompt_digest: handoff_prompt_digest(prompt)}
+    opts = handoff_start_options(parent, id, nil)
 
-    with {:ok, child} <- State.new(id, opts) do
-      case Store.create(child) do
-        :ok -> {:ok, opts}
-        {:error, :already_exists} -> existing_handoff_options(parent, id)
-        {:error, reason} -> {:error, {:handoff_checkpoint_failed, reason}}
+    with {:ok, child} <- State.new(id, opts),
+         child = %{child | status: :preparing, handoff_intent: intent} do
+      case handoff_store_create(child) do
+        :ok ->
+          {:ok, child}
+
+        {:error, :already_exists} ->
+          case existing_handoff_options(parent, id, prompt) do
+            {:preparing, existing} -> {:ok, existing}
+            other -> other
+          end
+
+        {:error, reason} ->
+          {:error, {:handoff_checkpoint_failed, reason}}
       end
     end
   end
 
-  defp existing_handoff_options(parent, id) do
+  defp handoff_store_create(child) do
+    create = Application.get_env(:ouroboros, :interactive_handoff_store_create, &Store.create/1)
+    create.(child)
+  end
+
+  defp handoff_store_prepare(id, expected, provider_session_id) do
+    prepare =
+      Application.get_env(
+        :ouroboros,
+        :interactive_handoff_store_prepare,
+        &Store.prepare_handoff/3
+      )
+
+    prepare.(id, expected, provider_session_id)
+  end
+
+  defp prepare_reserved_handoff(parent, child, prompt) do
+    expected = %{parent: parent.id, prompt_digest: handoff_prompt_digest(prompt)}
+
+    if child.handoff_intent == expected do
+      with {:ok, pid} <- native_transport(parent, :handoff),
+           {:ok, result} <-
+             safe_session_call(fn ->
+               Session.handoff(pid, prompt, open_child: false, id: child.id)
+             end),
+           :ok <- handoff_store_prepare(child.id, expected, result.provider_session_id),
+           {:ok, prepared} <- Store.get(child.id) do
+        # Handoff emits a provider event between turns. There may be no later loop output
+        # to wake this coordinator, so explicitly project its retained disclosure now.
+        send(self(), :reconcile_output)
+        {:ok, stored_handoff_start_options(prepared)}
+      else
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, {:handoff_id_conflict, %{id: child.id}}}
+    end
+  end
+
+  defp handoff_prompt_digest(prompt),
+    do: Base.url_encode64(:crypto.hash(:sha256, :erlang.term_to_binary(prompt)), padding: false)
+
+  defp intent_matches?(%{parent: parent, prompt_digest: digest}, %{
+         parent: parent,
+         prompt_digest: digest
+       }),
+       do: true
+
+  defp intent_matches?(_, _), do: false
+
+  defp existing_handoff_options(parent, id, prompt) do
     case Store.get(id) do
       {:ok, %State{} = child} ->
-        if State.handed_off_from(child) == parent.id do
-          {:ok, stored_handoff_start_options(child)}
+        expected_intent = %{
+          parent: parent.id,
+          prompt_digest: handoff_prompt_digest(prompt)
+        }
+
+        if State.handed_off_from(child) == parent.id and
+             intent_matches?(child.handoff_intent, expected_intent) do
+          if child.status == :preparing,
+            do: {:preparing, child},
+            else: {:ok, stored_handoff_start_options(child)}
         else
           {:error,
            {:handoff_id_conflict,
@@ -2162,11 +2445,11 @@ defmodule Ouroboros.Interactive.Task do
        when tag in [
               :unsupported_on_transport,
               :native_transport_unavailable,
-              :invalid_fork_id,
               :handoff_id_conflict
             ],
        do: reason
 
+  defp handoff_error({:invalid_fork_id, details}), do: {:invalid_handoff_id, details}
   defp handoff_error(:invalid_fork_id), do: :invalid_handoff_id
   defp handoff_error({:invalid_handoff_prompt, _detail} = reason), do: reason
   defp handoff_error(reason), do: {:handoff_refused, durable(reason)}
@@ -2212,7 +2495,11 @@ defmodule Ouroboros.Interactive.Task do
   defp validate_fork_id(nil), do: {:ok, Ouroboros.ID.generate!()}
 
   defp validate_fork_id(id) when is_binary(id) do
-    if String.trim(id) != "", do: {:ok, id}, else: {:error, :invalid_fork_id}
+    cond do
+      String.trim(id) == "" -> {:error, :invalid_fork_id}
+      byte_size(id) > 128 -> {:error, {:invalid_fork_id, %{max_bytes: 128}}}
+      true -> {:ok, id}
+    end
   end
 
   defp validate_fork_id(_id), do: {:error, :invalid_fork_id}
@@ -2681,17 +2968,17 @@ defmodule Ouroboros.Interactive.Task do
   # the runtime, and every path check inside the provider, applies to the worktree rather
   # than to the repository it came from. Provisioning is idempotent, so the admission
   # that follows a restart finds the worktree already recorded and re-leases it.
-  defp admit_workspace(session) do
+  defp admit_workspace(session, maintenance_admission) do
     case Worktree.provision(session, "interactive-" <> session.id, []) do
-      {:ok, provisioned} -> admit_leased_workspace(provisioned)
+      {:ok, provisioned} -> admit_leased_workspace(provisioned, maintenance_admission)
       {:error, reason} -> checkpoint_admission_failure(session, {:worktree_failed, reason})
     end
   end
 
-  defp admit_leased_workspace(session) do
+  defp admit_leased_workspace(session, maintenance_admission) do
     cond do
       is_pid(Process.whereis(WorkspaceManager)) ->
-        acquire_leased_workspace(session)
+        acquire_leased_workspace(session, maintenance_admission)
 
       workspace_admission_configured?() ->
         # Same F7 posture as the coding plane: configured roots without a running
@@ -2703,8 +2990,8 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp acquire_leased_workspace(session) do
-    case acquire_workspace(session, @workspace_reacquire_attempts) do
+  defp acquire_leased_workspace(session, maintenance_admission) do
+    case acquire_workspace(session, @workspace_reacquire_attempts, maintenance_admission) do
       {:ok, lease, capability} ->
         leased =
           session
@@ -2735,7 +3022,55 @@ defmodule Ouroboros.Interactive.Task do
 
   defp workspace_admission_configured?, do: Ouroboros.Workspace.Admission.configured?()
 
-  defp acquire_workspace(session, attempts) do
+  defp acquire_turn_admission(session_id, turn_id) do
+    server =
+      Application.get_env(:ouroboros, :maintenance_fence_server, Ouroboros.Maintenance.Fence)
+
+    case Process.whereis(server) do
+      nil ->
+        {:ok, nil}
+
+      _pid ->
+        operation_id =
+          "turn:" <>
+            (:crypto.hash(:sha256, :erlang.term_to_binary({session_id, turn_id}))
+             |> Base.encode16(case: :lower))
+
+        with {:ok, lease} <-
+               Ouroboros.Maintenance.Fence.acquire_admission(
+                 operation_id,
+                 session_id,
+                 :current,
+                 server
+               ) do
+          case Ouroboros.Maintenance.Fence.queue_turn(lease, turn_id, server) do
+            :ok ->
+              {:ok, {server, lease}}
+
+            {:error, reason} ->
+              _ = Ouroboros.Maintenance.Fence.release(lease, server)
+              {:error, reason}
+          end
+        end
+    end
+  end
+
+  defp release_turn_admission(nil), do: :ok
+
+  defp release_turn_admission({server, lease}) do
+    _ = Ouroboros.Maintenance.Fence.release(lease, server)
+    :ok
+  end
+
+  defp acquire_workspace(session, attempts, maintenance_admission) do
+    server =
+      Application.get_env(:ouroboros, :maintenance_fence_server, Ouroboros.Maintenance.Fence)
+
+    maintenance =
+      if maintenance_admission,
+        do: {server, maintenance_admission, session.id},
+        else: nil
+
     Ouroboros.Workspace.Admission.acquire(
       session.workspace,
       "interactive:" <> session.id,
@@ -2743,7 +3078,8 @@ defmodule Ouroboros.Interactive.Task do
       session.workspace_mode,
       WorkspaceManager,
       attempts,
-      @workspace_reacquire_delay_ms
+      @workspace_reacquire_delay_ms,
+      maintenance
     )
   end
 

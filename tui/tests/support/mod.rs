@@ -146,12 +146,15 @@ impl Peer {
 }
 
 pub async fn listener() -> (TcpListener, SocketAddr) {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("an ephemeral port");
-    let address = listener.local_addr().expect("a bound address");
-
-    (listener, address)
+    loop {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("an ephemeral port");
+        let address = listener.local_addr().expect("a bound address");
+        if address.port() != 65_358 {
+            return (listener, address);
+        }
+    }
 }
 
 pub fn config(address: SocketAddr) -> TransportConfig {

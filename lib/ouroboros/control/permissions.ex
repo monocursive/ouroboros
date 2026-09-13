@@ -74,6 +74,10 @@ defmodule Ouroboros.Control.Permissions do
 
   @store_key {:ouroboros, :control_permissions, 1}
   @checkpoint_version 1
+  # Version 2 adds the argument-free `SandboxEscalation()` subject. This is the rule
+  # vocabulary version, deliberately separate from the durable checkpoint envelope above:
+  # old stored Bash rules retain byte-for-byte meaning and match no escalation request.
+  @vocabulary_version 2
   @default_rule_limit 500
   @stored_scopes [:user, :workspace, :session]
   @call_timeout 5_000
@@ -320,6 +324,10 @@ defmodule Ouroboros.Control.Permissions do
 
   def forget_session(_session_id, _server), do: {:error, :invalid_session}
 
+  @doc "The separately versioned public rule vocabulary. Version 2 adds `SandboxEscalation()`."
+  @spec vocabulary_version() :: pos_integer()
+  def vocabulary_version, do: @vocabulary_version
+
   @doc "Bounded sizing, durability, and the protected-path list."
   @spec status(server()) :: map()
   def status(server \\ __MODULE__) do
@@ -350,6 +358,9 @@ defmodule Ouroboros.Control.Permissions do
     forge = forge_name(request)
 
     cond do
+      request.tool == "sandbox_escalation" and request.context[:sandbox_escalation] == true ->
+        "SandboxEscalation()"
+
       is_binary(capability) ->
         "Capability(#{capability})"
 

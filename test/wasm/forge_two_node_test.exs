@@ -221,7 +221,13 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
       |> Enum.map(&elem(&1, 0))
       |> Enum.sort()
 
-    assert ids == [Cluster, Ouroboros.Storage.ETS, Wasm.Supervisor]
+    assert ids == [
+             Cluster,
+             Ouroboros.Provider.Native.Exec.Registry,
+             Ouroboros.Storage.ETS,
+             Wasm.Supervisor
+           ]
+
     assert call(builder.node, Process, :whereis, [Registry]) == nil
   end
 

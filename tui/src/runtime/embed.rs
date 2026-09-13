@@ -1,6 +1,6 @@
 //! The embedded release: verify, extract once, and keep the cache small.
 //!
-//! ## The digest is checked before anything is written
+//! ## The digest is checked before anything is unpacked
 //!
 //! The bytes are the binary's own, so this is an integrity check rather than a trust
 //! decision — a truncated download or a corrupted page should fail as a refusal to
@@ -9,19 +9,22 @@
 //!
 //! ## Extraction is atomic, and losing the race is not an error
 //!
-//! Every extraction unpacks into a `.tmp-<pid>-<n>` sibling and renames it into place.
-//! Two first runs at once therefore produce one directory: whoever renames second finds
-//! the destination occupied, deletes its own temporary copy, and uses what is already
-//! there. A half-written release is never reachable under its real name.
+//! Cold runs coordinate repair and publication with a bounded private extraction lock.
+//! Each extraction unpacks into a `.tmp-<pid>-<n>` sibling and renames it into place.
+//! If publication nevertheless loses a rename race, the caller deletes its own temporary
+//! copy and validates the completed winner before using it. A half-written release is
+//! never reachable under its real name.
 //!
 //! ## Reuse is a lookup, and the cache repairs itself
 //!
-//! A directory whose name carries the recorded digest is reused without hashing the
-//! payload again, but it must be release-shaped — `bin/` and `releases/` present. A name
-//! that exists without the shape is a truncated or pre-planted cache entry; it is removed
-//! and the verified extraction runs instead, so a corrupted cache costs one re-unpack and
-//! never a start failure. The releases directory itself is kept private to its owner,
-//! matching every other directory this crate creates.
+//! A directory whose name carries the full recorded digest is reused without hashing the
+//! payload again, but it must be release-shaped — `bin/` and `releases/` present — and
+//! carry the completion marker for that exact digest and version. The marker is written
+//! inside the temporary directory and published atomically with the release. An incomplete
+//! or mismatched entry is checked again under the extraction lock, removed and extracted
+//! again. This is an extraction identity
+//! check, not detection of later payload tampering. The releases directory itself is
+//! kept private to its owner, matching every other directory this crate creates.
 //!
 //! ## A start is a use, and collection counts uses
 //!
@@ -33,11 +36,12 @@
 //! out of a release nobody has replaced twice is not something a later start collects.
 
 use std::fs;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
@@ -49,6 +53,8 @@ mod baked {
 }
 
 static TEMPORARY: AtomicU32 = AtomicU32::new(0);
+const COMPLETION_MARKER: &str = ".ouroboros-release-complete";
+const EXTRACTION_LOCK: &str = ".extract.lock";
 
 /// How many extracted releases survive a collection. Two, so that the release a running
 /// daemon was started from outlives the one that replaced it.
@@ -84,11 +90,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// What a release is filed under: its version plus enough digest to keep two builds of
-/// the same version apart, which the upgrade lanes make an ordinary occurrence.
+/// What a release is filed under: its version and complete artifact digest. Builds of
+/// the same version must remain distinct even when their digest prefixes collide.
 pub fn directory_name(version: &str, sha256: &str) -> String {
-    let short: String = sha256.chars().take(8).collect();
-    format!("{version}+{short}")
+    format!("{version}+{sha256}")
 }
 
 /// Extracts the embedded release, verifying it first.
@@ -103,23 +108,48 @@ pub fn extract(
     version: &str,
     releases_dir: &Path,
 ) -> Result<PathBuf> {
-    // The digest the build recorded is what the directory is named after, so an existing
-    // one can be recognised without hashing the payload again. That is a lookup, not a
-    // trust decision: nothing below is *written* on the strength of the name, and the
-    // check that gates every write still runs on the bytes.
+    // Warm reuse checks the published extraction identity without faulting the embedded
+    // payload into memory. It does not revalidate every cached payload file.
     let expected = expected_sha256.to_ascii_lowercase();
     let destination = releases_dir.join(directory_name(version, &expected));
 
-    if destination.is_dir() {
-        if release_shaped(&destination) {
-            touch(&destination);
-            return Ok(destination);
-        }
+    if cache_matches(&destination, version, &expected) {
+        touch(&destination);
+        return Ok(destination);
+    }
 
-        // A digest-named directory without a release in it cannot have come from this
-        // module finishing: it is a truncated extraction or something pre-planted under
-        // the name. Drop it and take the verified path below.
-        let _ = fs::remove_dir_all(&destination);
+    extract_uncached(bytes, &expected, version, releases_dir)
+}
+
+fn extract_uncached(
+    bytes: &[u8],
+    expected: &str,
+    version: &str,
+    releases_dir: &Path,
+) -> Result<PathBuf> {
+    prepare_releases_dir(releases_dir)?;
+    let _lock = lock_extraction(releases_dir, Duration::from_secs(30))?;
+    let destination = releases_dir.join(directory_name(version, expected));
+
+    // Another extractor may have repaired this entry after our initial observation.
+    // Recheck while holding the same lock used through invalidation and publication;
+    // a delayed observer must never delete a newly completed extraction.
+    if cache_matches(&destination, version, expected) {
+        touch(&destination);
+        return Ok(destination);
+    }
+
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                fs::remove_dir_all(&destination)
+            } else {
+                fs::remove_file(&destination)
+            }
+            .with_context(|| format!("removing incomplete cache {}", destination.display()))?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspecting the release cache entry"),
     }
 
     let actual = sha256_hex(bytes);
@@ -127,11 +157,9 @@ pub fn extract(
     if actual != expected {
         bail!(
             "the embedded release does not match the digest recorded at build time \
-             (expected {expected_sha256}, got {actual}); refusing to extract it"
+             (expected {expected}, got {actual}); refusing to extract it"
         );
     }
-
-    prepare_releases_dir(releases_dir)?;
 
     let temporary = releases_dir.join(format!(
         ".tmp-{}-{}",
@@ -144,22 +172,64 @@ pub fn extract(
     let _ = fs::remove_dir_all(&temporary);
     fs::create_dir_all(&temporary)?;
 
-    let unpacked = unpack(bytes, &temporary).and_then(|()| make_executable(&temporary));
+    let unpacked = unpack(bytes, &temporary)
+        .and_then(|()| make_executable(&temporary))
+        .and_then(|()| write_completion(&temporary, version, expected));
 
     if let Err(error) = unpacked {
         let _ = fs::remove_dir_all(&temporary);
         return Err(error);
     }
 
-    match fs::rename(&temporary, &destination) {
-        Ok(()) => Ok(destination),
-        Err(error) => {
-            let _ = fs::remove_dir_all(&temporary);
+    publish_completed(&temporary, &destination, version, expected)?;
+    Ok(destination)
+}
 
-            if destination.is_dir() {
-                // Another process finished first. Its copy is byte-identical by
-                // construction: the digest is part of the name.
-                return Ok(destination);
+fn lock_extraction(releases_dir: &Path, timeout: Duration) -> Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(releases_dir.join(EXTRACTION_LOCK))
+        .context("opening the release extraction lock")?;
+    // Keep this inode permanently: unlinking it would let a waiter and a new caller
+    // lock different files. Closing this owned descriptor releases the advisory lock.
+    let started = Instant::now();
+    loop {
+        // SAFETY: flock acts on this live owned descriptor and has no pointer arguments.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::WouldBlock && error.kind() != io::ErrorKind::Interrupted {
+            return Err(error).context("locking release extraction");
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            bail!("timed out waiting for release extraction to finish; retry when the other launch completes");
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
+fn publish_completed(
+    temporary: &Path,
+    destination: &Path,
+    version: &str,
+    digest: &str,
+) -> Result<()> {
+    match fs::rename(temporary, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_dir_all(temporary);
+
+            if cache_matches(destination, version, digest) {
+                // Only a completed extraction of the exact same artifact is a winner.
+                touch(destination);
+                return Ok(());
             }
 
             Err(error).with_context(|| format!("publishing {}", destination.display()))
@@ -179,7 +249,59 @@ fn unpack(bytes: &[u8], destination: &Path) -> Result<()> {
 }
 
 fn release_shaped(release: &Path) -> bool {
-    release.join("bin").is_dir() && release.join("releases").is_dir()
+    [
+        release.to_path_buf(),
+        release.join("bin"),
+        release.join("releases"),
+    ]
+    .iter()
+    .all(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+}
+
+fn completion_identity(version: &str, digest: &str) -> String {
+    format!("ouroboros-release-cache-v1\n{digest}\n{version}")
+}
+
+fn cache_matches(release: &Path, version: &str, digest: &str) -> bool {
+    if !release_shaped(release) {
+        return false;
+    }
+
+    let marker = release.join(COMPLETION_MARKER);
+    let expected = completion_identity(version, digest);
+    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return false;
+    }
+    let Ok(file) = fs::File::open(marker) else {
+        return false;
+    };
+    let mut actual = Vec::new();
+    file.take(expected.len() as u64 + 1)
+        .read_to_end(&mut actual)
+        .is_ok()
+        && actual == expected.as_bytes()
+}
+
+fn write_completion(release: &Path, version: &str, digest: &str) -> Result<()> {
+    if !release_shaped(release) {
+        bail!("the embedded archive has no complete release shape; refusing to publish it");
+    }
+
+    // Reserve this filename to the extractor. In particular, never follow a marker
+    // symlink supplied by an archive. The directory rename publishes marker and payload
+    // together only after extraction and executable repair have finished.
+    let mut marker = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(release.join(COMPLETION_MARKER))
+        .context("creating the release completion marker")?;
+    marker.write_all(completion_identity(version, digest).as_bytes())?;
+    marker
+        .sync_all()
+        .context("syncing the release completion marker")
 }
 
 fn prepare_releases_dir(releases_dir: &Path) -> Result<()> {
@@ -346,16 +468,13 @@ mod tests {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         let mut builder = tar::Builder::new(encoder);
 
+        let launcher_bytes = b"#!/bin/sh\necho started\n";
         let mut launcher = tar::Header::new_gnu();
-        launcher.set_size(24);
+        launcher.set_size(launcher_bytes.len() as u64);
         launcher.set_mode(0o644);
         launcher.set_cksum();
         builder
-            .append_data(
-                &mut launcher,
-                "bin/ouroboros",
-                &b"#!/bin/sh\necho started\n"[..],
-            )
+            .append_data(&mut launcher, "bin/ouroboros", &launcher_bytes[..])
             .expect("appending the launcher");
 
         let mut version = tar::Header::new_gnu();
@@ -429,8 +548,9 @@ mod tests {
 
         assert_eq!(
             release.file_name().unwrap().to_string_lossy(),
-            format!("9.9.9+{}", &digest[..8])
+            format!("9.9.9+{digest}")
         );
+        assert!(cache_matches(&release, "9.9.9", &digest));
 
         let launcher = release.join("bin").join("ouroboros");
         assert!(launcher.is_file());
@@ -492,6 +612,97 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn a_shared_digest_prefix_cannot_reuse_another_artifact() {
+        let dir = scratch("digest-prefix");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+        let release = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+        let mut other = digest.clone();
+        other.pop();
+        other.push(if digest.ends_with('0') { '1' } else { '0' });
+        assert_eq!(&digest[..8], &other[..8]);
+        assert_ne!(
+            directory_name("9.9.9", &digest),
+            directory_name("9.9.9", &other)
+        );
+
+        let error = extract(&[], &other, "9.9.9", &dir)
+            .expect_err("a different full digest must verify its own artifact");
+        assert!(error.to_string().contains("does not match the digest"));
+        assert!(cache_matches(&release, "9.9.9", &digest));
+        assert!(!dir.join(directory_name("9.9.9", &other)).exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_or_mismatched_completion_markers_force_verified_extraction() {
+        for damage in ["missing", "digest", "version", "trailing", "symlink"] {
+            let dir = scratch(damage);
+            let bytes = fixture_tarball();
+            let digest = sha256_hex(&bytes);
+            let release = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+            let marker = release.join(COMPLETION_MARKER);
+            match damage {
+                "missing" => fs::remove_file(&marker).unwrap(),
+                "digest" => {
+                    fs::write(&marker, completion_identity("9.9.9", &"0".repeat(64))).unwrap()
+                }
+                "version" => fs::write(&marker, completion_identity("8.8.8", &digest)).unwrap(),
+                "trailing" => fs::write(
+                    &marker,
+                    format!("{}x", completion_identity("9.9.9", &digest)),
+                )
+                .unwrap(),
+                "symlink" => {
+                    let outside = dir.join("marker-target");
+                    fs::rename(&marker, &outside).unwrap();
+                    std::os::unix::fs::symlink(&outside, &marker).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            fs::write(release.join("stale-cache"), b"must be replaced").unwrap();
+
+            let repaired = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+            assert_eq!(repaired, release);
+            assert!(cache_matches(&repaired, "9.9.9", &digest), "{damage}");
+            assert!(!repaired.join("stale-cache").exists(), "{damage}");
+            assert_eq!(
+                fs::read(repaired.join("bin/ouroboros")).unwrap(),
+                b"#!/bin/sh\necho started\n"
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_completion_marker_cannot_hide_a_missing_release_directory() {
+        let dir = scratch("incomplete-marked");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+        let release = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+        fs::remove_dir_all(release.join("bin")).unwrap();
+
+        let repaired = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+        assert!(cache_matches(&repaired, "9.9.9", &digest));
+        assert!(repaired.join("bin/ouroboros").is_file());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unmarked_cache_still_requires_matching_embedded_bytes() {
+        let dir = scratch("unmarked-mismatch");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+        let release = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+        fs::remove_file(release.join(COMPLETION_MARKER)).unwrap();
+
+        let error = extract(&[], &digest, "9.9.9", &dir).expect_err("unverified cache reuse");
+        assert!(error.to_string().contains("does not match the digest"));
+        assert!(!release.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// A directory that carries a digest name without being a release is repaired by
     /// extraction rather than returned to the spawner.
     #[test]
@@ -508,6 +719,99 @@ mod tests {
         assert_eq!(release, planted);
         assert!(release.join("releases").join("start_erl.data").is_file());
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_or_symlink_cache_entry_is_replaced_without_following_it() {
+        for entry in ["file", "dangling-symlink", "directory-symlink"] {
+            let dir = scratch(entry);
+            let bytes = fixture_tarball();
+            let digest = sha256_hex(&bytes);
+            let destination = dir.join(directory_name("9.9.9", &digest));
+            let outside = dir.join("outside");
+            match entry {
+                "file" => fs::write(&destination, b"not a release").unwrap(),
+                "dangling-symlink" => {
+                    std::os::unix::fs::symlink(&outside, &destination).unwrap();
+                }
+                "directory-symlink" => {
+                    fs::create_dir(&outside).unwrap();
+                    fs::write(outside.join("sentinel"), b"keep").unwrap();
+                    std::os::unix::fs::symlink(&outside, &destination).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let repaired = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+            assert_eq!(repaired, destination);
+            assert!(cache_matches(&repaired, "9.9.9", &digest));
+            if entry == "directory-symlink" {
+                assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"keep");
+            } else {
+                assert!(!outside.exists());
+            }
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn a_delayed_invalid_observer_reuses_a_concurrently_completed_repair() {
+        let dir = scratch("delayed-repair");
+        let bytes = fixture_tarball();
+        let digest = sha256_hex(&bytes);
+        let destination = dir.join(directory_name("9.9.9", &digest));
+        fs::create_dir_all(destination.join("bin")).unwrap();
+        fs::create_dir_all(destination.join("releases")).unwrap();
+        let (observed, observation) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let delayed_destination = destination.clone();
+            let delayed_digest = digest.clone();
+            let delayed_dir = dir.clone();
+            let delayed = scope.spawn(move || {
+                assert!(!cache_matches(
+                    &delayed_destination,
+                    "9.9.9",
+                    &delayed_digest
+                ));
+                observed.send(()).unwrap();
+                resumed.recv().unwrap();
+                // Continue exactly where an initial failed warm lookup enters repair.
+                // Empty bytes also prove that the new winner is reused, not extracted.
+                extract_uncached(&[], &delayed_digest, "9.9.9", &delayed_dir)
+            });
+
+            observation.recv().unwrap();
+            let winner = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+            fs::write(winner.join("already-starting"), b"keep").unwrap();
+            resume.send(()).unwrap();
+            assert_eq!(delayed.join().unwrap().unwrap(), winner);
+            assert_eq!(fs::read(winner.join("already-starting")).unwrap(), b"keep");
+            assert!(cache_matches(&winner, "9.9.9", &digest));
+        });
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_busy_extraction_lock_refuses_and_preserves_its_coordination_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = scratch("busy-lock");
+        let held = lock_extraction(&dir, Duration::ZERO).unwrap();
+        let inode = fs::metadata(dir.join(EXTRACTION_LOCK)).unwrap().ino();
+        let error = lock_extraction(&dir, Duration::ZERO).expect_err("a bounded lock refusal");
+        assert!(error
+            .to_string()
+            .contains("timed out waiting for release extraction"));
+        drop(held);
+        let reacquired = lock_extraction(&dir, Duration::ZERO).unwrap();
+        assert_eq!(
+            fs::metadata(dir.join(EXTRACTION_LOCK)).unwrap().ino(),
+            inode
+        );
+        drop(reacquired);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -581,9 +885,10 @@ mod tests {
             .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
             .unwrap_or_default();
 
-        assert!(
-            leftovers.is_empty(),
-            "a refused extraction must leave nothing behind, found {leftovers:?}"
+        assert_eq!(
+            leftovers,
+            vec![dir.join(EXTRACTION_LOCK)],
+            "a refused extraction leaves only the permanent coordination lock"
         );
 
         fs::remove_dir_all(&dir).ok();
@@ -645,20 +950,65 @@ mod tests {
         });
 
         assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(cache_matches(&results[0], "9.9.9", &digest));
 
         let entries: Vec<String> = fs::read_dir(&dir)
             .unwrap()
             .flatten()
+            .filter(|entry| entry.file_name() != EXTRACTION_LOCK)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
 
         assert_eq!(
             entries,
-            vec![format!("9.9.9+{}", &digest[..8])],
+            vec![format!("9.9.9+{digest}")],
             "the losers of the race must delete their temporary copies"
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rename_race_accepts_only_a_matching_completed_winner() {
+        for winner in [
+            "matching",
+            "missing",
+            "wrong-digest",
+            "wrong-version",
+            "malformed",
+        ] {
+            let dir = scratch(winner);
+            let bytes = fixture_tarball();
+            let digest = sha256_hex(&bytes);
+            let destination = extract(&bytes, &digest, "9.9.9", &dir).unwrap();
+            let temporary = extract(&bytes, &digest, "9.9.9", &dir.join("staging")).unwrap();
+            let marker = destination.join(COMPLETION_MARKER);
+            match winner {
+                "matching" => {}
+                "missing" => fs::remove_file(&marker).unwrap(),
+                "wrong-digest" => {
+                    fs::write(&marker, completion_identity("9.9.9", &"0".repeat(64))).unwrap()
+                }
+                "wrong-version" => {
+                    fs::write(&marker, completion_identity("8.8.8", &digest)).unwrap()
+                }
+                "malformed" => fs::remove_dir_all(destination.join("bin")).unwrap(),
+                _ => unreachable!(),
+            }
+
+            // The nonempty destination forces rename to lose, deterministically.
+            let result = publish_completed(&temporary, &destination, "9.9.9", &digest);
+            assert_eq!(result.is_ok(), winner == "matching", "{winner}: {result:?}");
+            assert!(
+                !temporary.exists(),
+                "the loser removes only its own extraction"
+            );
+            assert!(
+                destination.is_dir(),
+                "the race winner is preserved for reconciliation"
+            );
+            fs::remove_dir_all(&dir).ok();
+        }
     }
 
     #[test]
@@ -700,8 +1050,6 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
-
-    use std::time::Duration;
 
     /// `utimes` through libc, because the standard library has no way to backdate a
     /// directory and the collection order is what this test is about.

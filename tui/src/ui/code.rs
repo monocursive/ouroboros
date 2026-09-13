@@ -37,6 +37,18 @@ pub enum Segment<'a> {
 /// Splits message text into prose and fenced-code segments, in order.
 pub fn split_fences(text: &str) -> Vec<Segment<'_>> {
     let mut segments = Vec::new();
+    let _ = visit_fences(text, |segment, _last| {
+        segments.push(segment);
+        true
+    });
+    segments
+}
+
+/// Visits fenced-code and prose segments in order, stopping without scanning the suffix
+/// when the visitor returns false. The boolean says that this segment reaches the current
+/// end of the message, which lets streaming renderers identify the live tail without first
+/// collecting every segment.
+pub fn visit_fences<'a>(text: &'a str, mut visit: impl FnMut(Segment<'a>, bool) -> bool) -> usize {
     let mut prose_start = 0;
     let mut cursor = 0;
 
@@ -46,37 +58,48 @@ pub fn split_fences(text: &str) -> Vec<Segment<'_>> {
             continue;
         }
 
+        // Offer the preceding prose before searching an arbitrarily distant closer. A
+        // row-capped renderer that has filled its budget can then stop without scanning a
+        // code block in the unreachable suffix.
+        if !text[prose_start..open_at].is_empty()
+            && !visit(Segment::Prose(&text[prose_start..open_at]), false)
+        {
+            return open_at;
+        }
+
         match find_closing_fence(text, content_start) {
             Some((close_at, resume)) => {
-                push_prose(&mut segments, &text[prose_start..open_at]);
-                segments.push(Segment::Code(CodeBlock {
-                    lang: info,
-                    code: &text[content_start..close_at],
-                    closed: true,
-                }));
+                if !visit(
+                    Segment::Code(CodeBlock {
+                        lang: info,
+                        code: &text[content_start..close_at],
+                        closed: true,
+                    }),
+                    false,
+                ) {
+                    return resume;
+                }
                 cursor = resume;
                 prose_start = cursor;
             }
             None => {
-                push_prose(&mut segments, &text[prose_start..open_at]);
-                segments.push(Segment::Code(CodeBlock {
-                    lang: info,
-                    code: &text[content_start..],
-                    closed: false,
-                }));
-                return segments;
+                visit(
+                    Segment::Code(CodeBlock {
+                        lang: info,
+                        code: &text[content_start..],
+                        closed: false,
+                    }),
+                    true,
+                );
+                return text.len();
             }
         }
     }
 
-    push_prose(&mut segments, &text[prose_start..]);
-    segments
-}
-
-fn push_prose<'a>(segments: &mut Vec<Segment<'a>>, text: &'a str) {
-    if !text.is_empty() {
-        segments.push(Segment::Prose(text));
+    if !text[prose_start..].is_empty() {
+        visit(Segment::Prose(&text[prose_start..]), true);
     }
+    text.len()
 }
 
 /// Whether everything between the previous newline and `at` is indentation.
@@ -1329,7 +1352,7 @@ pub fn render_block(
     width: usize,
     budget: usize,
     open_tail: bool,
-) {
+) -> bool {
     let language = detect(block.lang);
     let label = match block.lang {
         Some(_) => language.label(),
@@ -1385,6 +1408,8 @@ pub fn render_block(
             border,
         )));
     }
+
+    complete
 }
 
 /// One framed row: left rule, content padded to the pane's width, right rule.

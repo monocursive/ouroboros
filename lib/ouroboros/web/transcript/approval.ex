@@ -261,6 +261,7 @@ defmodule Ouroboros.Web.Transcript.Approval.Detail do
     locations: [],
     options: [],
     edits: [],
+    proposed_change: [],
     diff_excerpted: false
   ]
 
@@ -276,6 +277,7 @@ defmodule Ouroboros.Web.Transcript.Approval.Detail do
           diff: Presentation.Diff.t() | nil,
           diff_excerpted: boolean(),
           edits: [Approval.Edit.t()],
+          proposed_change: [map()],
           plan: Approval.PlanExit.t() | nil,
           subagent: Approval.Subagent.t() | nil
         }
@@ -419,6 +421,7 @@ defmodule Ouroboros.Web.Transcript.Approval do
       diff: diff,
       diff_excerpted: diff_excerpted,
       edits: if(call, do: edits(call), else: []),
+      proposed_change: proposed_change(payload, call),
       plan: plan_exit(payload),
       subagent: subagent(payload)
     }
@@ -677,6 +680,57 @@ defmodule Ouroboros.Web.Transcript.Approval do
   end
 
   defp diff_from_candidate(_candidate), do: nil
+
+  # Native input is not a unified diff: V4A includes move/delete directives, and an
+  # exact-string edit has no line numbers. Quote the known fields without parsing,
+  # trimming or inventing an applied result. Unknown fields are never rendered.
+  defp proposed_change(payload, call) do
+    fields =
+      case call && text(call, "name") do
+        "apply_patch" ->
+          [{"patch", "Patch (V4A)"}]
+
+        "write" ->
+          [{"path", "Path"}, {"content", "Replacement content"}]
+
+        "edit" ->
+          [
+            {"path", "Path"},
+            {"old_string", "Text to replace"},
+            {"new_string", "Replacement text"},
+            {"replace_all", "Replace every occurrence"}
+          ]
+
+        _ ->
+          []
+      end
+
+    preview = Map.get(payload, "proposed_change")
+
+    Enum.flat_map(fields, fn {key, label} ->
+      case fetch(preview, key) do
+        {:ok, value} when is_binary(value) ->
+          [change_field(label, value, false)]
+
+        {:ok, value} when is_boolean(value) ->
+          [change_field(label, to_string(value), false)]
+
+        {:ok, %{"_excerpt" => value}} when is_binary(value) ->
+          [change_field(label, value, true)]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  defp change_field(label, text, excerpted) do
+    %{
+      label: label,
+      text: Presentation.bounded_copy(text, 32 * 1024, ""),
+      excerpted: excerpted or byte_size(text) > 32 * 1024
+    }
+  end
 
   @doc """
   Reads one `plan_exit` question, or `nil` for every other approval.

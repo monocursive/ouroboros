@@ -130,6 +130,9 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @registry Ouroboros.Provider.Native.Registry
   @return_timeout_ms 615_000
   @max_summary_bytes 16 * 1024
+  # Retain a bounded report for explicit page retrieval. The ordinary tool result remains
+  # small; raising this does not raise the native tool-output or gateway bounds.
+  @max_result_bytes 1024 * 1024
   @max_text_bytes 12 * 1024
   @max_files 50
   @max_progress 2000
@@ -311,9 +314,28 @@ defmodule Ouroboros.Provider.Native.Subagent do
   defp launch_timeout(%{provision: provision}) when is_map(provision), do: @open_timeout + 140_000
   defp launch_timeout(_), do: @open_timeout + 5_000
 
+  @doc """
+  How much of a child's final message the parent's summary carries, in bytes.
+
+  Public because the child's system prompt states the number: a child told the bound it
+  is actually held to writes a report that fits, and a prompt that hard-coded the figure
+  would drift from the clip the moment either changed.
+  """
+  @spec max_text_bytes() :: pos_integer()
+  def max_text_bytes, do: @max_text_bytes
+
   @doc "This child's summary now, whether or not it has settled."
   @spec summary(pid()) :: {:ok, map()} | {:error, term()}
   def summary(pid), do: safe_call(pid, :summary, 5_000)
+
+  @doc "Reads one bounded UTF-8 page of this owned child's retained final report."
+  @spec result_page(pid(), non_neg_integer(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  def result_page(pid, cursor, max_bytes)
+      when is_integer(cursor) and cursor >= 0 and is_integer(max_bytes) and max_bytes > 0,
+      do: safe_call(pid, {:result_page, cursor, max_bytes}, 5_000)
+
+  def result_page(_pid, cursor, max_bytes),
+    do: {:error, {:invalid_result_page, cursor, max_bytes}}
 
   @doc """
   Waits up to `timeout_ms` for this child to settle and returns its summary.
@@ -355,6 +377,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
     unless match?({:ok, %{status: :returning}}, result), do: stop_process(pid)
     result
   end
+
+  @doc "Transfers a settled foreground report to its owning session for explicit collection."
+  @spec retain(pid(), pid()) :: :ok | {:error, term()}
+  def retain(pid, owner) when is_pid(pid) and is_pid(owner),
+    do: safe_call(pid, {:retain, owner}, 5_000)
 
   @doc false
   def returning_payload(summary) do
@@ -463,7 +490,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
        background?: Map.get(spec, :background, false),
        depth: Map.get(spec, :depth, 1),
        tools: Map.get(spec, :tools, []),
+       bindings: Map.get(spec, :bindings, []),
        deadline_ms: Map.get(spec, :deadline_ms, 300_000),
+       effective_deadline_ms:
+         Map.get(spec, :effective_deadline_ms, Map.get(spec, :deadline_ms, 300_000)),
        subscriber: subscriber,
        subscriber_monitor: monitor,
        handle: nil,
@@ -480,6 +510,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
        tool_calls: 0,
        files: [],
        files_count: 0,
+       plan: nil,
        approvals_denied: 0,
        open_approvals: MapSet.new(),
        progress_sent: 0,
@@ -495,6 +526,9 @@ defmodule Ouroboros.Provider.Native.Subagent do
        # render in a footer as a free child.
        usage: %{input: 0, output: 0, cost: nil},
        text: "",
+       result_text: "",
+       result_truncated: false,
+       result_original_bytes: 0,
        deadline_timer: nil,
        waiters: []
      }}
@@ -529,6 +563,32 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   def handle_call(:summary, _from, state), do: {:reply, {:ok, summary_of(state)}, state}
+
+  def handle_call({:retain, owner}, _from, %{status: status} = state)
+      when status in [:completed, :failed, :stopped, :timed_out] do
+    Process.demonitor(state.subscriber_monitor, [:flush])
+
+    {:reply, :ok,
+     %{
+       state
+       | subscriber: owner,
+         subscriber_monitor: Process.monitor(owner),
+         background?: true,
+         orphaned?: false
+     }}
+  end
+
+  def handle_call({:retain, _owner}, _from, state),
+    do: {:reply, {:error, :result_not_terminal}, state}
+
+  def handle_call({:result_page, cursor, max_bytes}, _from, state) do
+    reply =
+      if state.status in [:starting, :running, :returning],
+        do: {:error, {:result_not_terminal, state.status}},
+        else: result_page_of(state, cursor, max_bytes)
+
+    {:reply, reply, state}
+  end
 
   def handle_call({:await, _timeout}, _from, %{status: status} = state)
       when status in [:completed, :failed, :stopped, :timed_out],
@@ -767,7 +827,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
           turn_id: turn_id,
           status: :running,
           deadline_timer:
-            Process.send_after(self(), {:subagent_deadline, state.task_id}, state.deadline_ms)
+            Process.send_after(
+              self(),
+              {:subagent_deadline, state.task_id},
+              state.effective_deadline_ms
+            )
       }
 
       case Session.submit(runtime_id, turn_id, :message, TurnRequest.new!(state.prompt)) do
@@ -863,9 +927,23 @@ defmodule Ouroboros.Provider.Native.Subagent do
     %{state | files: Enum.take(merged, @max_files), files_count: length(merged)}
   end
 
+  defp absorb(state, %{type: :plan_updated, payload: %{"plan" => items} = plan})
+       when is_list(items),
+       do: %{state | plan: plan}
+
   defp absorb(state, %{type: :output_text_final, payload: %{"text" => text}})
-       when is_binary(text),
-       do: %{state | text: text}
+       when is_binary(text) do
+    {retained, truncated?} = bounded_utf8(text, @max_result_bytes)
+    {digest, _digest_truncated?} = bounded_utf8(retained, @max_text_bytes)
+
+    %{
+      state
+      | text: digest,
+        result_text: retained,
+        result_truncated: truncated?,
+        result_original_bytes: byte_size(text)
+    }
+  end
 
   defp absorb(state, %{type: :turn_completed, payload: payload}),
     do: settle(%{state | turns: max(state.turns, iterations(payload))}, :completed, nil)
@@ -952,6 +1030,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
       "phase" => "progress",
       "elapsed_ms" => elapsed(state),
       "deadline_ms" => state.deadline_ms,
+      "effective_deadline_ms" => state.effective_deadline_ms,
       "last_tool" => state.last_tool,
       "last_activity" => state.last_activity,
       "task_id" => state.task_id,
@@ -1123,6 +1202,9 @@ defmodule Ouroboros.Provider.Native.Subagent do
       status: state.status,
       elapsed_ms: elapsed(state),
       deadline_ms: state.deadline_ms,
+      effective_deadline_ms: state.effective_deadline_ms,
+      lifecycle: lifecycle(state),
+      deliverable: deliverable(state),
       last_tool: state.last_tool,
       last_activity: state.last_activity,
       error: state.error,
@@ -1136,7 +1218,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
         output: state.usage.output,
         cost: state.usage.cost && Float.round(state.usage.cost / 1, 6)
       },
-      text: clip(state.text, @max_text_bytes),
+      text: state.text,
+      result_bytes: byte_size(state.result_text),
+      result_original_bytes: state.result_original_bytes,
+      result_truncated: state.result_truncated,
       worktree: state.worktree,
       workspace: state.workspace,
       # Where the work happened. `node` is this process's own node — the child's — and
@@ -1159,6 +1244,125 @@ defmodule Ouroboros.Provider.Native.Subagent do
     )
   end
 
+  defp lifecycle(%{status: status} = state) do
+    terminal = status in [:completed, :failed, :timed_out, :stopped, :cancelled]
+
+    %{
+      terminal: terminal,
+      report_available: terminal and byte_size(state.result_text) > 0,
+      next_action: if(terminal, do: "read_or_release", else: "await"),
+      effective_deadline_ms: state.effective_deadline_ms
+    }
+  end
+
+  defp deliverable(%{plan: %{"plan" => items}, status: status})
+       when status in [:completed, :failed, :timed_out, :stopped] do
+    case Enum.find(items, &(&1["work_state"] == "blocked" and is_map(&1["blocker"]))) do
+      nil ->
+        settled_deliverable(status, items)
+
+      item ->
+        %{
+          state: "blocked",
+          accepted: false,
+          item_id: item["id"],
+          deliverable: item["deliverable"],
+          blocker: item["blocker"],
+          child_settlement: Atom.to_string(status)
+        }
+    end
+  end
+
+  defp deliverable(%{status: :completed, files_count: count}) when count > 0,
+    do: %{state: "change_proposed", accepted: false, child_settlement: "completed"}
+
+  defp deliverable(%{status: :completed}),
+    do: %{state: "analysis_proposed", accepted: false, child_settlement: "completed"}
+
+  defp deliverable(%{status: status}),
+    do: %{
+      state: "blocked",
+      accepted: false,
+      blocker: %{type: Atom.to_string(status), resolvable_by_parent: false},
+      child_settlement: Atom.to_string(status)
+    }
+
+  defp settled_deliverable(:completed, items) do
+    state =
+      if Enum.any?(items, &(&1["deliverable"] == "implementation" and &1["evidence"] != [])),
+        do: "change_proposed",
+        else: "analysis_proposed"
+
+    %{
+      state: state,
+      accepted: false,
+      child_settlement: "completed",
+      item_ids: Enum.map(items, & &1["id"])
+    }
+  end
+
+  defp settled_deliverable(status, _items),
+    do: %{
+      state: "blocked",
+      accepted: false,
+      blocker: %{type: Atom.to_string(status), resolvable_by_parent: false},
+      child_settlement: Atom.to_string(status)
+    }
+
+  defp result_page_of(state, cursor, max_bytes) do
+    total = byte_size(state.result_text)
+
+    if cursor > total or not utf8_boundary?(state.result_text, cursor) do
+      {:error, {:invalid_result_cursor, cursor, total}}
+    else
+      next = utf8_page_end(state.result_text, cursor, min(max_bytes, @max_text_bytes))
+      chunk = binary_part(state.result_text, cursor, next - cursor)
+
+      {:ok,
+       %{
+         task_id: state.task_id,
+         provider_session_id: state.provider_session_id,
+         status: state.status,
+         cursor: cursor,
+         next_cursor: if(next < total, do: next),
+         complete: next == total,
+         total_bytes: total,
+         original_bytes: state.result_original_bytes,
+         retained_truncated: state.result_truncated,
+         text: chunk
+       }}
+    end
+  end
+
+  defp utf8_page_end(text, cursor, limit) do
+    available = min(byte_size(text) - cursor, limit)
+    utf8_prefix_end(text, cursor, available)
+  end
+
+  defp utf8_prefix_end(_text, cursor, 0), do: cursor
+
+  defp utf8_prefix_end(text, cursor, bytes) do
+    candidate = binary_part(text, cursor, bytes)
+
+    if String.valid?(candidate) do
+      cursor + bytes
+    else
+      utf8_prefix_end(text, cursor, bytes - 1)
+    end
+  end
+
+  defp utf8_boundary?(text, cursor), do: text |> binary_part(0, cursor) |> String.valid?()
+
+  defp bounded_utf8(text, limit) do
+    valid = if String.valid?(text), do: text, else: String.replace_invalid(text)
+
+    if byte_size(valid) <= limit do
+      {valid, valid != text}
+    else
+      {binary_part(valid, 0, utf8_prefix_end(valid, 0, limit)), true}
+    end
+  end
+
   @doc "The digest a `provider_event` carries when a child settles."
   @spec settled_payload(map()) :: map()
   def settled_payload(summary) do
@@ -1172,6 +1376,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
       "description" => summary.description,
       "provider_session_id" => summary.provider_session_id,
       "status" => Atom.to_string(summary.status),
+      "lifecycle" => Map.get(summary, :lifecycle),
+      "deliverable" => Map.get(summary, :deliverable),
       "turns" => summary.turns,
       "tool_calls" => summary.tool_calls,
       "files_changed" => summary.files_changed_count,
@@ -1179,7 +1385,15 @@ defmodule Ouroboros.Provider.Native.Subagent do
       "input_tokens" => summary.usage.input,
       "output_tokens" => summary.usage.output,
       "approvals_denied" => summary.approvals_denied,
-      "summary_bytes" => byte_size(summary.text),
+      "summary_bytes" => min(byte_size(summary.text), @max_text_bytes),
+      "result_bytes" => Map.get(summary, :result_bytes, byte_size(summary.text)),
+      "result_original_bytes" =>
+        Map.get(
+          summary,
+          :result_original_bytes,
+          Map.get(summary, :result_bytes, byte_size(summary.text))
+        ),
+      "result_truncated" => Map.get(summary, :result_truncated, false),
       # Defaulted rather than fetched: a summary minted by a parent that could not reach its
       # child at all still has to answer "where", and `node()` is the honest answer for one
       # this runtime never heard from.

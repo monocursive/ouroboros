@@ -47,16 +47,24 @@ defmodule Ouroboros.Session.Recovery do
          supervisor when is_pid(supervisor) <-
            Process.whereis(state.supervisor),
          tasks when is_list(tasks) <- safe_list_recoverable(state.store) do
-      tasks
-      |> Enum.filter(&recoverable?/1)
-      |> Enum.each(fn task ->
-        if safe_whereis(state.task, task.id) == nil do
-          _ = safe_start_child(supervisor, state.task, task.id)
+      Enum.each(tasks, fn task ->
+        if safe_whereis(state.task, task.id) == nil and recoverable?(task) do
+          _ = recover_child(supervisor, state.task, task.id)
         end
       end)
     else
       _unavailable -> :ok
     end
+  end
+
+  # Admission can disappear independently of the coordinator supervisor. Isolate
+  # the entire attempt, including acquisition and cleanup, from the shared sweep.
+  defp recover_child(supervisor, task, id) do
+    safe_start_child(supervisor, task, recovery_child(task, id))
+  rescue
+    _error -> {:error, :recovery_unavailable}
+  catch
+    :exit, _reason -> {:error, :recovery_unavailable}
   end
 
   # The projection carries only routing and lifecycle fields. Listing full task
@@ -77,7 +85,20 @@ defmodule Ouroboros.Session.Recovery do
     :exit, _reason -> :unavailable
   end
 
-  defp safe_start_child(supervisor, task, id) do
+  defp safe_start_child(supervisor, Ouroboros.Interactive.Task = task, {id, lease, server}) do
+    try do
+      safe_start_child(supervisor, task, {id, lease}, :admitted)
+    after
+      safe_release(lease, server)
+    end
+  end
+
+  defp safe_start_child(_supervisor, _task, :maintenance_refused),
+    do: {:error, :maintenance_refused}
+
+  defp safe_start_child(supervisor, task, id), do: safe_start_child(supervisor, task, id, :plain)
+
+  defp safe_start_child(supervisor, task, id, _mode) do
     DynamicSupervisor.start_child(supervisor, {task, id})
   rescue
     _error -> {:error, :supervisor_unavailable}
@@ -85,13 +106,57 @@ defmodule Ouroboros.Session.Recovery do
     :exit, _reason -> {:error, :supervisor_unavailable}
   end
 
+  defp safe_release(lease, server) do
+    Ouroboros.Maintenance.Fence.release(lease, server)
+  rescue
+    _error -> :unavailable
+  catch
+    :exit, _reason -> :unavailable
+  end
+
+  defp recovery_child(Ouroboros.Interactive.Task, id) do
+    server =
+      Application.get_env(:ouroboros, :maintenance_fence_server, Ouroboros.Maintenance.Fence)
+
+    case Process.whereis(server) do
+      nil ->
+        id
+
+      _pid ->
+        operation_id =
+          "coordinator-recovery:" <>
+            (:crypto.hash(:sha256, id) |> Base.encode16(case: :lower))
+
+        case Ouroboros.Maintenance.Fence.acquire_admission(operation_id, id, :current, server) do
+          {:ok, lease} -> {id, lease, server}
+          {:error, _reason} -> :maintenance_refused
+        end
+    end
+  end
+
+  defp recovery_child(_task, id), do: id
+
   defp schedule_recovery(interval), do: Process.send_after(self(), :recover, interval)
 
   defp recoverable?(task) do
-    task.node == node() and not task.terminal? and
-      not Map.get(task, :removed_provider?, false) and
-      old_enough_to_recover?(task.updated_at)
+    task.node == node() and not Map.get(task, :removed_provider?, false) and
+      if(task.terminal?,
+        do: retained_terminal?(task),
+        else: old_enough_to_recover?(task.updated_at)
+      )
   end
+
+  # A terminal coordinator may die between checkpoint and acknowledgement. Recover
+  # only for outstanding terminal delivery from the persisted generation.
+  defp retained_terminal?(%{
+         runtime_id: id,
+         runtime_generation: generation,
+         runtime_cursor: cursor
+       }) do
+    Ouroboros.Session.Delivery.state(id, generation, cursor) == :pending
+  end
+
+  defp retained_terminal?(_task), do: false
 
   defp old_enough_to_recover?(updated_at) do
     with {:ok, timestamp, _offset} <- DateTime.from_iso8601(updated_at) do

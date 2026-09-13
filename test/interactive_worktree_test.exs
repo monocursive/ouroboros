@@ -47,6 +47,8 @@ defmodule Ouroboros.InteractiveWorktreeTest do
       previous = %{
         roots: Application.get_env(:ouroboros, :workspace_allowed_roots),
         data_dir: Application.get_env(:ouroboros, :data_dir),
+        native_epoch_server: Application.get_env(:ouroboros, :native_epoch_server),
+        maintenance_fence_server: Application.get_env(:ouroboros, :maintenance_fence_server),
         providers: nil,
         provider_config: Ouroboros.Test.NativeConfig.snapshot()
       }
@@ -55,6 +57,21 @@ defmodule Ouroboros.InteractiveWorktreeTest do
 
       Application.put_env(:ouroboros, :workspace_allowed_roots, [base])
       Application.put_env(:ouroboros, :data_dir, base)
+
+      epoch =
+        start_supervised!({Ouroboros.Maintenance.Epoch, name: nil, data_dir: base})
+
+      start_supervised!(
+        {Ouroboros.Maintenance.Fence, name: :interactive_worktree_test_fence, data_dir: base}
+      )
+
+      Application.put_env(:ouroboros, :native_epoch_server, epoch)
+
+      Application.put_env(
+        :ouroboros,
+        :maintenance_fence_server,
+        :interactive_worktree_test_fence
+      )
 
       :ok
 
@@ -68,6 +85,8 @@ defmodule Ouroboros.InteractiveWorktreeTest do
         cleanup_sessions()
         restore(:ouroboros, :workspace_allowed_roots, previous.roots)
         restore(:ouroboros, :data_dir, previous.data_dir)
+        restore(:ouroboros, :native_epoch_server, previous.native_epoch_server)
+        restore(:ouroboros, :maintenance_fence_server, previous.maintenance_fence_server)
         :ok
         Ouroboros.Test.NativeConfig.configure(previous.provider_config)
         File.rm_rf(base)

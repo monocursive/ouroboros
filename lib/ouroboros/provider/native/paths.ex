@@ -79,6 +79,25 @@ defmodule Ouroboros.Provider.Native.Paths do
 
   def resolve(path, _scope), do: {:error, {:invalid_path, inspect(path)}}
 
+  @doc "Resolves an existing durable session directory without creating any path."
+  def existing_session_dir(provider_session_id) do
+    with :ok <- validate_session_id(provider_session_id),
+         {root, true} <- root_dir(),
+         {:ok, canonical_root} <- WorkspacePath.canonicalize(root),
+         path = Path.join(canonical_root, provider_session_id),
+         {:ok, canonical_path} <- WorkspacePath.canonicalize(path),
+         :ok <- contained_session_dir(canonical_root, canonical_path) do
+      {:ok, canonical_path}
+    else
+      {_root, false} -> {:error, :native_checkpoint_not_durable}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp contained_session_dir(root, path) do
+    if Path.dirname(path) == root, do: :ok, else: {:error, :session_path_escape}
+  end
+
   @doc "A human-readable refusal, safe to hand back to the model as a tool result."
   @spec describe_error(term()) :: String.t()
   def describe_error({:path_escapes_workspace, path, roots}),

@@ -34,9 +34,9 @@
 //! unauthenticated refusal of credentials the source has already replaced — that is the
 //! rotation race, not a decision about the token this client would present next.
 //! [`ReconnectHook`] is where the interactive UI re-subscribes every watched session
-//! after a successful re-handshake. Headless commands (`ouro run`, `ouro stop`,
-//! `mcp-serve`) pass [`NoReconnectHook`]: a lost socket is the answer, not a fault to
-//! repair.
+//! after a successful re-handshake. A successful re-handshake also emits the internal
+//! `transport.reconnected` notification, allowing a headless stream to re-subscribe from
+//! its own durable cursor without resending the accepted operation.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -53,7 +53,7 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use zeroize::Zeroizing;
 
 use crate::proto::{self, Hello, HelloParams, Incoming, Notification, Request, RpcError};
@@ -508,6 +508,14 @@ pub struct Connected {
     pub client: Client,
     pub hello: Hello,
     pub notifications: mpsc::Receiver<Notification>,
+    pub lifecycle: watch::Receiver<ConnectionState>,
+}
+
+/// Reliable, coalesced connection state, independent of the lossy event queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionState {
+    pub connected: bool,
+    pub generation: u32,
 }
 
 /// Connects, completes the handshake, and starts the connection actor.
@@ -527,6 +535,10 @@ pub async fn connect(
 
     let (commands, inbox) = mpsc::channel(COMMAND_CAPACITY);
     let (notifications, stream) = mpsc::channel(config.notification_capacity);
+    let (lifecycle, lifecycle_stream) = watch::channel(ConnectionState {
+        connected: true,
+        generation: 0,
+    });
     let shared = Arc::new(Shared::default());
 
     let client = Client {
@@ -544,6 +556,7 @@ pub async fn connect(
         ids,
         inbox,
         notifications,
+        lifecycle,
         shared,
         handle: client.commands.downgrade(),
         request_timeout: client.request_timeout,
@@ -556,6 +569,7 @@ pub async fn connect(
         client,
         hello,
         notifications: stream,
+        lifecycle: lifecycle_stream,
     })
 }
 
@@ -649,6 +663,7 @@ struct Actor {
     ids: Arc<AtomicU64>,
     inbox: mpsc::Receiver<Command>,
     notifications: mpsc::Sender<Notification>,
+    lifecycle: watch::Sender<ConnectionState>,
     shared: Arc<Shared>,
     /// Weak on purpose: the actor holding a live sender to its own inbox would keep the
     /// connection alive after every caller has dropped its handle.
@@ -667,10 +682,12 @@ impl Actor {
                 }
                 Outcome::Lost(reason) => {
                     self.fail_pending(reason);
+                    self.notify_lifecycle(false);
 
                     match self.reconnect().await {
                         Ok((next, hello)) => {
                             wire = next;
+                            self.notify_lifecycle(true);
                             self.run_hook(hello);
                         }
                         Err(fatal) => {
@@ -835,6 +852,19 @@ impl Actor {
         let hook = self.hook.clone();
 
         tokio::spawn(async move { hook.after_reconnect(client, hello).await });
+    }
+
+    fn notify_lifecycle(&self, connected: bool) {
+        let previous = *self.lifecycle.borrow();
+        let generation = if connected {
+            previous.generation.saturating_add(1)
+        } else {
+            previous.generation
+        };
+        self.lifecycle.send_replace(ConnectionState {
+            connected,
+            generation,
+        });
     }
 
     fn fail_pending(&mut self, reason: ClientError) {

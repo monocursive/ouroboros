@@ -34,8 +34,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   alternative is discovering the ceiling after a tool call that cannot be answered. If
   the model still emits tool calls, the turn fails by name and those unpaired calls are
   stripped from the checkpointed transcript so a resume remains well-formed. During the
-  final ten calls the system prompt exposes the remaining budget, becoming urgent for
-  the final three and naming the last round as tool-free. `tool_timeout_ms` caps one tool.
+  final ten calls a transient user message at the end of the request exposes the
+  remaining budget, becoming urgent for the final three and naming the last round as
+  tool-free. It is appended to the request and never to `messages`: the system prompt is
+  the cached prefix, and a number that changes every call would miss the cache on every
+  call — ten of a default subagent's twelve. `tool_timeout_ms` caps one tool.
   The doom-loop guard stops a turn on the third identical `(name, input)` call — OpenCode's
   rule, and the cheapest defence against a model that has found a loop it likes. Each
   bound fails the turn by name rather than running out quietly.
@@ -176,6 +179,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   # read the denial and what led to it; not the whole spill file, which the tool result
   # already names a path for.
   @max_escalation_output_bytes 4 * 1024
+  @bash_retry_ttl_ms 300_000
 
   defstruct [
     :emit,
@@ -252,6 +256,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     subagent_depth: 0,
     subagent_parent: nil,
     subagent_task_id: nil,
+    current_plan: nil,
     messages: [],
     # How many messages this session had before `messages` begins. A resumed session holds
     # only the tail its checkpoint kept, and the turn manifest counts from the start of the
@@ -271,6 +276,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     turn_files: %{},
     turn_paths: [],
     turn_commands: [],
+    # At most one failed sandboxed bash attempt from this turn. Its random id is disclosed
+    # only in that tool result and is consumed before any retry approval is requested.
+    retained_bash_attempt: nil,
+    bash_retry_ttl_ms: @bash_retry_ttl_ms,
     usage: %{input: 0, output: 0, cost: 0.0},
     max_iterations: @default_max_iterations,
     tool_timeout_ms: @default_tool_timeout_ms,
@@ -299,6 +308,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         turn_files: %{},
         turn_paths: [],
         turn_commands: [],
+        retained_bash_attempt: nil,
         # The other writer — the session, between turns — may have advanced the file since
         # this handle was built. One bounded tail read per turn brings it current, and
         # clears the degraded flag, which is what makes `journal_degraded` once *per turn*
@@ -475,8 +485,8 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     request = %{
       model: state.model_spec,
-      system: iteration_system(state.system, iteration, state.max_iterations),
-      messages: state.messages,
+      system: state.system,
+      messages: state.messages ++ turn_budget_messages(iteration, state.max_iterations),
       tools: iteration_tools(state, iteration),
       provider_session_id: state.provider_session_id,
       turn_id: state.turn_id,
@@ -485,7 +495,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     }
 
     # Digested over the module's own projection of the wire request, not over
-    # `state.messages`: that is what makes it cover the iteration-mutated system suffix
+    # `state.messages`: that is what makes it cover the transient turn-budget message
     # and the reserved final round's empty tool list, and what makes two conversations
     # that project to the same request digest to the same value.
     prompt_sha256 = Journal.digest(Model.project(state.model_module, request))
@@ -534,7 +544,8 @@ defmodule Ouroboros.Provider.Native.Loop do
               %{}
             )
 
-            {:error, state, reason}
+            {:error, state,
+             {:model_request_failed, Model.format_error(state.model_module, reason)}}
         end
 
       # The same hard gate the tool loop makes, for the same reason: a model call nobody
@@ -545,7 +556,12 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  defp iteration_system(system, iteration, max_iterations) when is_binary(system) do
+  # A user-role message rather than a system suffix, for the same reason a compaction
+  # summary is one (`Context.Compaction`): the prefix must not carry a value that changes
+  # per call. It goes after the tool results the same way a lazily loaded rule or a
+  # steer does, and it is not kept — the next call computes its own, and a transcript
+  # that recorded ten countdowns would be ten messages nobody re-reads.
+  defp turn_budget_messages(iteration, max_iterations) do
     remaining = max_iterations - iteration + 1
 
     if remaining <= @iteration_warning_at do
@@ -563,16 +579,18 @@ defmodule Ouroboros.Provider.Native.Loop do
             " Prioritize the work required to validate the result and finish the turn."
         end
 
-      system <>
-        "\n\n## Turn budget\n" <>
-        "#{remaining} model round-trip(s) remain in this turn, including this one." <>
-        urgency
+      [
+        %{
+          role: :user,
+          content:
+            "Turn budget: #{remaining} model round-trip(s) remain in this turn, " <>
+              "including this one." <> urgency
+        }
+      ]
     else
-      system
+      []
     end
   end
-
-  defp iteration_system(system, _iteration, _max_iterations), do: system
 
   defp iteration_tools(_state, iteration) when iteration < 1, do: []
 
@@ -660,7 +678,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         })
 
       settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
-      {:error, state, {:stream_failed, Exception.message(error)}}
+      {:error, state, {:stream_failed, Model.ReqLLM.format_error(error)}}
   catch
     :exit, reason ->
       _ =
@@ -671,7 +689,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         })
 
       settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
-      {:error, state, {:stream_exited, inspect(reason)}}
+      {:error, state, {:stream_exited, Model.ReqLLM.format_error(reason)}}
   end
 
   # The meter rides on `usage` because that is the event a client already subscribes to
@@ -765,21 +783,33 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   def run_tool(%__MODULE__{}, _call), do: {:error, :unsupported_bridge_tool}
 
-  defp run_tools(state, calls) do
-    Enum.reduce_while(calls, {:continue, state}, fn call, {:continue, state} ->
-      case run_call(state, call) do
-        {:continue, state} ->
-          # Interrupt is honoured *after* the tool that was already running, never in
-          # the middle of it: a half-applied edit is worse than one extra tool call.
-          state = drain_control(state)
+  defp run_tools(state, []), do: {:continue, state}
 
-          if state.interrupted?,
-            do: {:halt, {:interrupted, state}},
-            else: {:cont, {:continue, state}}
+  defp run_tools(state, [call | remaining]) do
+    case run_call(state, call) do
+      {:continue, state} ->
+        state = drain_control(state)
 
-        other ->
-          {:halt, other}
-      end
+        if state.interrupted?,
+          do: {:interrupted, pair_skipped_calls(state, remaining, "interrupted")},
+          else: run_tools(state, remaining)
+
+      {:interrupted, state} ->
+        {:interrupted, pair_skipped_calls(state, remaining, "interrupted")}
+
+      {:failed, state, message, reason} ->
+        {:failed, pair_skipped_calls(state, remaining, reason), message, reason}
+    end
+  end
+
+  defp pair_skipped_calls(state, calls, reason) do
+    Enum.reduce(calls, state, fn call, state ->
+      emit_tool_call(state, call, nil)
+
+      tool_result(state, call, %{
+        output: "Not run: this model response stopped after #{reason}.",
+        is_error: true
+      })
     end)
   end
 
@@ -787,7 +817,17 @@ defmodule Ouroboros.Provider.Native.Loop do
     signature = signature(call)
     seen = if state.last_signature == signature, do: state.signature_repeats, else: 0
 
-    if seen + 1 >= @doom_loop_repeats do
+    if seen + 1 >= @doom_loop_repeats and doom_guarded?(call) do
+      emit_tool_call(state, call, nil)
+
+      state =
+        tool_result(state, call, %{
+          output:
+            "Refused: doom loop guard stopped this repeated tool call before execution. " <>
+              "Change the arguments or explain a different next step.",
+          is_error: true
+        })
+
       {:failed, state,
        "doom loop: `#{call.name}` was called #{seen + 1} consecutive times with identical arguments. " <>
          "Stopping the turn rather than repeating it.", "doom_loop"}
@@ -796,6 +836,12 @@ defmodule Ouroboros.Provider.Native.Loop do
       dispatch(state, call)
     end
   end
+
+  # Polling a child with the same bounded wait is progress observation, not repeating an
+  # effect. The child state and elapsed deadline change outside these arguments. The tool's
+  # own timeout remains the bound; stopping it on the third poll stranded completed reviews.
+  defp doom_guarded?(%{name: "agent_result"}), do: false
+  defp doom_guarded?(_call), do: true
 
   # R1's tool seam, and deliberately the *first* thing dispatch asks — ahead of the tool
   # lookup, the depth cap, argument validation and classification. Everything past this
@@ -859,10 +905,16 @@ defmodule Ouroboros.Provider.Native.Loop do
               # Classified once, here, and handed to the gate.
               classified = Tools.classify(call.name, call.input, state.scope)
 
-              effect_id = tool_effect_id(state, call)
-              emit_tool_call(state, call, effect_id)
+              case explicit_bash_retry(state, call, module, classified) do
+                {:retry, result} ->
+                  result
 
-              gated(state, ToolAttempt.new(call, module, classified, effect_id))
+                :ordinary ->
+                  state = %{state | retained_bash_attempt: nil}
+                  effect_id = tool_effect_id(state, call)
+                  emit_tool_call(state, call, effect_id)
+                  gated(state, ToolAttempt.new(call, module, classified, effect_id))
+              end
 
             {:error, message} ->
               # Invalid calls have no effect to admit or record. They remain paired tool
@@ -926,7 +978,11 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       {:interrupted, state, classified} ->
         refuse_tool_effect(state, call, classified, effect_id, interrupted_authority())
-        {:interrupted, state}
+
+        {:interrupted,
+         tool_result(state, call, %{output: "interrupted before execution", is_error: true},
+           ledger_ref: effect_id
+         )}
     end
   end
 
@@ -1002,6 +1058,8 @@ defmodule Ouroboros.Provider.Native.Loop do
         # else may), the tool reads it and nothing else, and it is deliberately not a
         # parameter — see `Tools.Forge`'s moduledoc.
         principal: principal(state),
+        provider_session_id: state.provider_session_id,
+        safe_status: safe_status_fetcher(state),
         # S1/Q-A. The `:tool_call` ledger entry this call *is*, named plainly and not only
         # inside `audit` above: that entry is written on every admitted call whether or not
         # this node's audit stream is on, so the chain from a `:forge` entry back to the
@@ -1017,7 +1075,9 @@ defmodule Ouroboros.Provider.Native.Loop do
         # so it is handed two closures over the session rather than a pid to call: the tool
         # never learns which process tracks what, and a run with no session gets `nil` and
         # says so instead of failing obscurely.
-        subagents: subagent_handles(state)
+        subagents: subagent_handles(state),
+        subagent_depth: state.subagent_depth,
+        current_plan: state.current_plan
       }
 
     # Checkpoint before write, always: the snapshot is the thing a rewind depends on.
@@ -1025,27 +1085,62 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     started = System.monotonic_time(:millisecond)
 
-    result =
-      Tools.execute(module, call.input, context, execute_timeout(state, classified, call.input))
+    execution =
+      Task.async(fn ->
+        Tools.execute(module, call.input, context, execute_timeout(state, classified, call.input))
+      end)
+
+    result = await_tool(execution)
 
     elapsed = System.monotonic_time(:millisecond) - started
 
-    state =
-      audit_journal(state, "tool_response", %{
-        "call_id" => call.id,
-        "tool" => call.name,
-        "ledger_effect_id" => effect_id,
-        "attempt_id" => effect_id <> ":1",
-        "result" => result,
-        "duration_ms" => elapsed,
-        "is_error" => result.is_error
-      })
+    case result do
+      :interrupted ->
+        interrupted_result = %{output: "interrupted", is_error: true}
+        state = tool_result(state, call, interrupted_result, ledger_ref: effect_id)
 
-    if state.interrupted? do
-      settle_tool_effect(state, effect_id, %{output: "interrupted", is_error: true}, elapsed)
-      {:interrupted, state}
-    else
-      finish_execute(state, attempt, result, elapsed, context)
+        state =
+          audit_journal(state, "tool_response", %{
+            "call_id" => call.id,
+            "tool" => call.name,
+            "ledger_effect_id" => effect_id,
+            "attempt_id" => effect_id <> ":1",
+            "result" => %{output: "interrupted", is_error: true},
+            "duration_ms" => elapsed,
+            "is_error" => true
+          })
+
+        settle_tool_effect(state, effect_id, %{output: "interrupted", is_error: true}, elapsed)
+        {:interrupted, state}
+
+      result ->
+        state =
+          audit_journal(state, "tool_response", %{
+            "call_id" => call.id,
+            "tool" => call.name,
+            "ledger_effect_id" => effect_id,
+            "attempt_id" => effect_id <> ":1",
+            "result" => result,
+            "duration_ms" => elapsed,
+            "is_error" => result.is_error
+          })
+
+        finish_execute(state, attempt, result, elapsed, context)
+    end
+  end
+
+  defp await_tool(execution) do
+    ref = execution.ref
+
+    receive do
+      {^ref, result} ->
+        _ = Task.shutdown(execution, 0)
+        result
+
+      :native_interrupt ->
+        _ = Ouroboros.Provider.Native.Exec.cancel(execution.pid)
+        _ = Task.shutdown(execution, 1_000)
+        :interrupted
     end
   end
 
@@ -1063,7 +1158,7 @@ defmodule Ouroboros.Provider.Native.Loop do
          context
        ) do
     {state, result, elapsed} =
-      escalate(state, %{
+      retain_failed_bash(state, %{
         call: call,
         module: module,
         classified: classified,
@@ -1281,10 +1376,12 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp emit_plan(state, plan) do
     emit(state, :plan_updated, plan)
-    state
+    %{state | current_plan: plan}
   end
 
   defp tool_result(state, call, result, opts \\ []) do
+    output = safe_tool_output(result.output)
+    result = Map.put(result, :output, output)
     emit(state, :tool_result, tool_result_event(call, result))
 
     message = %{
@@ -1313,6 +1410,21 @@ defmodule Ouroboros.Provider.Native.Loop do
     %{state | messages: state.messages ++ [message]}
   end
 
+  # Tool processes are byte streams. Model messages, provider events and JSON checkpoints
+  # are UTF-8 text. Preserve arbitrary bytes truthfully and deterministically rather than
+  # crashing JSON encoding or silently replacing bytes.
+  defp safe_tool_output(output) when is_binary(output) do
+    if String.valid?(output) do
+      output
+    else
+      encoded = Base.encode64(output)
+
+      "[binary tool output: #{byte_size(output)} bytes, base64]\n" <> encoded
+    end
+  end
+
+  defp safe_tool_output(output), do: output |> to_string() |> safe_tool_output()
+
   defp tool_result_event(call, result) do
     %{
       "name" => call.name,
@@ -1320,7 +1432,12 @@ defmodule Ouroboros.Provider.Native.Loop do
       "output" => result.output,
       "is_error" => result.is_error
     }
+    |> maybe_put("attempt_id", Map.get(result, :attempt_id))
+    |> maybe_put("retry", Map.get(result, :retry))
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp unknown_tool(name, state) do
     available = state |> tool_specs() |> Enum.map_join(", ", & &1.name)
@@ -1581,6 +1698,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         "paths" => classified.paths,
         "reason" => reason_text(reason)
       }
+      |> Ouroboros.Provider.Native.FileApproval.attach(call)
 
     # Only where the engine had a pattern to offer. An absent key is a card with no
     # remember row; a key carrying anything `permissions.add` will not take is a row that
@@ -1634,7 +1752,6 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
-        state = if persist?, do: grant(state, classified, response.scope), else: state
         actor = answer_actor(response)
 
         entry_id =
@@ -1647,16 +1764,40 @@ defmodule Ouroboros.Provider.Native.Loop do
             permission_request(state, classified)
           )
 
-        state =
-          journal_approval(state, request_id, call.id, question, %{
-            "decision" => "approve",
-            "scope" => response.scope,
-            "actor" => to_string(actor),
-            "permission_entry_id" => entry_id
-          })
+        if entry_id do
+          state = if persist?, do: grant(state, classified, response.scope), else: state
 
-        {:allow, state, call, classified, context,
-         authority(:allow, to_string(actor), response.scope, actor, nil, entry_id, request_id)}
+          state =
+            journal_approval(state, request_id, call.id, question, %{
+              "decision" => "approve",
+              "scope" => response.scope,
+              "actor" => to_string(actor),
+              "permission_entry_id" => entry_id
+            })
+
+          {:allow, state, call, classified, context,
+           authority(:allow, to_string(actor), response.scope, actor, nil, entry_id, request_id)}
+        else
+          state =
+            journal_approval(state, request_id, call.id, question, %{
+              "decision" => "permission_record_unavailable",
+              "scope" => response.scope,
+              "actor" => to_string(actor)
+            })
+
+          {:deny, state,
+           "Refused: the operator approval could not be durably recorded, so this call did not run.",
+           classified,
+           authority(
+             :deny,
+             "permission_record_unavailable",
+             :once,
+             :runtime,
+             nil,
+             nil,
+             request_id
+           )}
+        end
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
         actor = answer_actor(response)
@@ -1875,9 +2016,159 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  # ------------------------------------------------------- sandbox escalation
+  # ------------------------------------------------------- explicit sandbox retry
 
-  # C5+. What happens after `Ouroboros.Provider.Native.Sandbox` stopped a command.
+  defp explicit_bash_retry(state, call, module, classified) do
+    retry_id = Map.get(call.input, "retry_attempt_id", "")
+
+    if module == Ouroboros.Provider.Native.Tools.Bash and retry_id != "" do
+      effect_id = tool_effect_id(state, call)
+      emit_tool_call(state, call, effect_id)
+      {:retry, retry_retained_bash(state, call, classified, retry_id, effect_id)}
+    else
+      :ordinary
+    end
+  end
+
+  defp retry_retained_bash(state, call, classified, retry_id, effect_id) do
+    retained = state.retained_bash_attempt
+
+    if retained_match?(state, retained, call, classified, retry_id) do
+      # Exact presentation consumes before either authority is requested. A forged id does
+      # not destroy the legitimate capability, but denial/timeout/interrupt cannot reuse it.
+      state = %{state | retained_bash_attempt: nil}
+
+      case gate(state, call, classified) do
+        {:allow, state, ^call, ^classified, hook_context, ordinary_authority} ->
+          pending =
+            retained
+            |> Map.put(:call, call)
+            |> Map.put(:classified, classified)
+            |> Map.put(:context, %{retained.context | scope: state.scope})
+            |> Map.put(:retry_effect_id, effect_id)
+            |> Map.put(:ordinary_authority, ordinary_authority)
+            |> Map.put(:hook_context, hook_context)
+
+          {state, result, elapsed} = consider_escalation(state, pending)
+
+          {:continue,
+           tool_result(state, call, result, ledger_ref: effect_id, duration_ms: elapsed)}
+
+        {:allow, state, _rewritten_call, _rewritten_classified, _context, _authority} ->
+          refuse_retry(state, call, classified, effect_id, "a hook changed the retained request")
+
+        {:deny, state, message, classified, authority} ->
+          refuse_tool_effect(state, call, classified, effect_id, authority)
+
+          {:continue,
+           tool_result(state, call, %{output: message, is_error: true}, ledger_ref: effect_id)}
+
+        {:interrupted, state, classified} ->
+          refuse_tool_effect(state, call, classified, effect_id, interrupted_authority())
+          {:interrupted, state}
+      end
+    else
+      refuse_retry(state, call, classified, effect_id, "the retained envelope did not match")
+    end
+  end
+
+  defp refuse_retry(state, call, classified, effect_id, detail) do
+    authority = authority(:deny, "invalid_retry", :once, :runtime, {:invalid_retry, detail}, nil)
+    refuse_tool_effect(state, call, classified, effect_id, authority)
+
+    {:continue,
+     tool_result(
+       state,
+       call,
+       %{
+         output:
+           "Refused: retry_attempt_id is unknown, expired, used, foreign, or does not exactly match the retained command, cwd, sandbox mode, roots, paths, and authority (#{detail}). Nothing was run. Omit retry_attempt_id on a new command; never guess or reuse one.",
+         is_error: true,
+         retry: %{
+           "availability" => "unavailable",
+           "next_action" => "omit_on_new_call",
+           "exact_retry_only" => true,
+           "command_ran" => false
+         }
+       },
+       ledger_ref: effect_id
+     )}
+  end
+
+  defp retained_match?(state, retained, call, classified, retry_id) when is_map(retained) do
+    retained.attempt_id == retry_id and retained.turn_id == state.turn_id and
+      retained.session_id == state.session_id and
+      retained.provider_session_id == state.provider_session_id and
+      retained.principal == principal(state) and retained.command == classified.command and
+      retained.cwd == state.scope.root and retained.sandbox_mode == state.scope.sandbox_mode and
+      retained.roots == Enum.sort(state.scope.roots) and retained.tool == classified.tool and
+      retained.paths == Enum.sort(classified.paths) and retained.input == retry_input(call.input) and
+      System.monotonic_time(:millisecond) <= retained.expires_at and
+      state.approval_mode != :plan and state.scope.sandbox_mode == :workspace_write
+  end
+
+  defp retained_match?(_state, _retained, _call, _classified, _retry_id), do: false
+
+  defp retry_input(input), do: Map.put(input, "retry_attempt_id", "")
+
+  defp retain_failed_bash(state, pending) do
+    denial = Map.get(pending.result, :unverified_denial)
+
+    if pending.module == Ouroboros.Provider.Native.Tools.Bash and pending.result.is_error and
+         is_map(denial) and state.approval_mode != :plan and
+         state.scope.sandbox_mode == :workspace_write do
+      attempt_id = "nretry_" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+
+      retained = %{
+        attempt_id: attempt_id,
+        turn_id: state.turn_id,
+        session_id: state.session_id,
+        provider_session_id: state.provider_session_id,
+        principal: principal(state),
+        original_call_id: pending.call.id,
+        original_effect_id: pending.context.ledger_effect_id,
+        tool: pending.classified.tool,
+        command: pending.classified.command,
+        cwd: state.scope.root,
+        sandbox_mode: state.scope.sandbox_mode,
+        roots: Enum.sort(state.scope.roots),
+        paths: Enum.sort(pending.classified.paths),
+        input: retry_input(pending.call.input),
+        module: pending.module,
+        context: pending.context,
+        result: pending.result,
+        elapsed: pending.elapsed,
+        offer: denial,
+        issued_at: System.monotonic_time(:millisecond),
+        expires_at: System.monotonic_time(:millisecond) + state.bash_retry_ttl_ms,
+        retry_effect_id: nil,
+        ordinary_authority: nil,
+        hook_context: []
+      }
+
+      output =
+        pending.result.output <>
+          "\nNo replay occurred. To request one separately authorized fenced retry, call bash again with the identical arguments plus retry_attempt_id: #{attempt_id}. The whole command may repeat effects completed before failure."
+
+      result =
+        pending.result
+        |> Map.put(:output, output)
+        |> Map.put(:attempt_id, attempt_id)
+        |> Map.put(:retry, %{
+          "availability" => "available",
+          "attempt_id" => attempt_id,
+          "next_action" => "exact_retry_only",
+          "exact_retry_only" => true,
+          "command_ran" => false
+        })
+
+      {%{state | retained_bash_attempt: retained}, result, pending.elapsed}
+    else
+      {state, pending.result, pending.elapsed}
+    end
+  end
+
+  # The explicit retry has already matched retained runtime state before this point.
   #
   # Before this, a denial was a dead end: `bash` failed, the guidance told the model to
   # ask a human with `ask_user`, and the human's best option was to do the work
@@ -1892,19 +2183,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   #     a **`workspace_write`** session whose evidence and command line name no protected
   #     root. Network is a node setting, `read_only` is a label that must hold, and the
   #     runtime's own data directory is nobody's to escalate into.
-  #   * The engine answers first, on the **same `Bash(…)` subject the command already
-  #     has** — same tool, same command, same paths, with `context.sandbox_escalation`
-  #     set. That is the simplest honest mapping onto C1's existing vocabulary and it has
-  #     a sharp edge worth naming: a rule that allows *running* this command therefore
-  #     also allows *escalating* it, because the engine is being asked about the same
-  #     subject. If that is too coarse it wants a dimension in
-  #     `Ouroboros.Control.Permissions`, not a second vocabulary invented here.
+  #   * The original Bash request is gated again, including current rules and hooks. Then
+  #     the engine answers a distinct `SandboxEscalation()` subject. Bash authority cannot
+  #     imply escalation authority in either direction.
   #   * `approval_mode` does **not** answer it. `auto_approve` means "do not ask me about
   #     tool calls"; it has never meant "leave the OS sandbox", and reading it that way
   #     would turn a convenience into a hole. Only an engine rule or a human grants this.
-  #   * A human `approve` at `scope: session` is remembered under a key of its own —
-  #     `{:sandbox_escalation, command}` — so approving a *bash call* for the session
-  #     never leaks into approving an *escape* for it.
+  #   * A human answer is recorded against the escalation request, not the Bash request.
   #   * Approval re-runs the identical command once under Sandbox's internal escalated
   #     profile. It permits `.git` beneath the declared writable roots, but preserves the
   #     protected data/config roots, `.ouroboros`, and network policy. This is deliberately
@@ -1915,13 +2200,6 @@ defmodule Ouroboros.Provider.Native.Loop do
   #
   # Plan mode never reaches here — `Permissions.evaluate/1` refuses `:execute` while
   # planning, before a tool runs — and that is checked rather than assumed.
-  defp escalate(state, pending) do
-    case Map.get(pending.result, :escalation) do
-      offer when is_map(offer) -> consider_escalation(state, Map.put(pending, :offer, offer))
-      _none -> {state, pending.result, pending.elapsed}
-    end
-  end
-
   defp consider_escalation(%{approval_mode: :plan} = state, pending),
     do: declined(state, pending, :plan_mode, nil)
 
@@ -1929,8 +2207,24 @@ defmodule Ouroboros.Provider.Native.Loop do
     case Permissions.evaluate(escalation_request(state, pending.classified)) do
       {:allow, rule} ->
         ref = escalation_ref(rule)
-        _ = record(state, :approve, :once, :rule, ref)
-        rerun(state, pending, "rule", nil)
+
+        permission_id =
+          record(
+            state,
+            :approve,
+            :once,
+            :rule,
+            ref,
+            escalation_request(state, pending.classified)
+          )
+
+        rerun(
+          state,
+          pending,
+          "rule",
+          nil,
+          authority(:allow, "sandbox_escalation", :once, :rule, ref, permission_id)
+        )
 
       {:deny, rule} ->
         ref = escalation_ref(rule)
@@ -1938,11 +2232,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         declined(state, pending, :rule, rule)
 
       {:ask, _reason} ->
-        if MapSet.member?(state.session_grants, escalation_key(pending.classified)) do
-          rerun(state, pending, "session_grant", nil)
-        else
-          ask_escalation(state, pending)
-        end
+        ask_escalation(state, pending)
     end
   end
 
@@ -1964,14 +2254,22 @@ defmodule Ouroboros.Provider.Native.Loop do
         }
         |> reject_nils(),
       "paths" => classified.paths,
-      "reason" => pending.offer.reason
+      "reason" => pending.offer.reason,
+      "retry_attempt_id" => pending.attempt_id,
+      "sandbox_mode" => Atom.to_string(state.scope.sandbox_mode),
+      "effective_sandbox_mode" => "workspace_write_escalated",
+      "writable_roots" => state.scope.roots,
+      "protected_segments" => [".ouroboros"],
+      "network" => "unchanged; external network remains denied",
+      "at_least_once_risk" =>
+        "The whole retained command will run again; effects completed before the first failure may duplicate."
     }
 
     # The engine's pattern, or no key at all — the same rule `ask/5` follows. This is the
     # card where remembering matters most, and it is the one that used to carry a map no
     # client could draw and `permissions.add` would not take.
     payload =
-      case Permissions.suggested_rule(permission_request(state, classified)) do
+      case Permissions.suggested_rule(escalation_request(state, classified)) do
         rule when is_binary(rule) -> Map.put(payload, "suggested_rule", rule)
         nil -> payload
       end
@@ -1993,20 +2291,33 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
-        state = grant_escalation(state, pending.classified, response.scope)
         actor = answer_actor(response)
 
-        _ =
+        permission_id =
           record(
             state,
             :approve,
             response.scope,
             actor,
             escalation_ref(nil),
-            permission_request(state, pending.classified)
+            escalation_request(state, pending.classified)
           )
 
-        rerun(state, pending, to_string(actor), request_id)
+        rerun(
+          state,
+          pending,
+          to_string(actor),
+          request_id,
+          authority(
+            :allow,
+            "sandbox_escalation",
+            response.scope,
+            actor,
+            escalation_ref(nil),
+            permission_id,
+            request_id
+          )
+        )
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
         actor = answer_actor(response)
@@ -2018,7 +2329,7 @@ defmodule Ouroboros.Provider.Native.Loop do
             response.scope,
             actor,
             escalation_ref(nil),
-            permission_request(state, pending.classified)
+            escalation_request(state, pending.classified)
           )
 
         declined(state, pending, actor, response.reason, request_id)
@@ -2046,7 +2357,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # The same command, once, in the fenced escalation profile. Nothing about the session
   # changes: the next `bash` call uses the ordinary workspace-write profile again.
-  defp rerun(state, pending, granted_by, request_id) do
+  defp rerun(state, pending, granted_by, request_id, escalation_authority) do
     context = %{pending.context | scope: Sandbox.escalated_scope(state.scope)}
 
     context =
@@ -2055,17 +2366,40 @@ defmodule Ouroboros.Provider.Native.Loop do
           put_in(
             context,
             [:audit, :fields, "attempt_id"],
-            pending.call.id <> ":escalation:" <> to_string(request_id)
+            pending.attempt_id <> ":retry"
           ),
         else: context
 
     Ouroboros.Audit.ensure_actor(state.session_request)
 
+    case open_tool_effect(
+           state,
+           pending.call,
+           pending.classified,
+           pending.retry_effect_id,
+           escalation_authority
+         ) do
+      :ok ->
+        do_rerun(state, pending, granted_by, request_id, context)
+
+      {:error, reason} ->
+        result = %{
+          output:
+            "Refused: the separately approved retry could not be durably opened in the effect ledger (#{inspect(reason)}). Nothing was re-run.",
+          is_error: true
+        }
+
+        {state, result, pending.elapsed}
+    end
+  end
+
+  defp do_rerun(state, pending, granted_by, request_id, context) do
     state =
       audit_journal(state, "tool_dispatch", %{
         "call_id" => pending.call.id,
         "tool" => pending.call.name,
-        "attempt_id" => pending.call.id <> ":escalation:" <> to_string(request_id),
+        "attempt_id" => pending.attempt_id <> ":retry",
+        "retained_attempt_id" => pending.attempt_id,
         "arguments" => pending.call.input,
         "approval_request_id" => request_id,
         "authority" => granted_by,
@@ -2093,24 +2427,47 @@ defmodule Ouroboros.Provider.Native.Loop do
       audit_journal(state, "tool_response", %{
         "call_id" => pending.call.id,
         "tool" => pending.call.name,
-        "attempt_id" => pending.call.id <> ":escalation:" <> to_string(request_id),
+        "attempt_id" => pending.attempt_id <> ":retry",
+        "retained_attempt_id" => pending.attempt_id,
         "result" => result,
         "duration_ms" => elapsed,
         "is_error" => result.is_error
       })
 
+    settle_tool_effect(state, pending.retry_effect_id, result, elapsed)
+
     output =
-      "The OS sandbox stopped the first attempt at this command (#{pending.offer.evidence}). " <>
-        "The escalation to re-run it in the fenced workspace profile was granted, and " <>
-        "this is that re-run. Runtime data, config, `.ouroboros`, and network protections " <>
-        "remained enforced. Anything the first attempt completed before the denial " <>
-        "has now happened twice — check for that before you trust this output.\n\n" <>
+      "The first attempt produced denial-like output that could not prove OS provenance " <>
+        "(#{pending.offer.evidence}). The separately authorized escalation re-ran the exact " <>
+        "retained command in the fenced workspace profile, and this is that re-run. Runtime " <>
+        "data, config, `.ouroboros`, and network protections remained enforced. Anything the " <>
+        "first attempt completed before its failure may have happened again — check for " <>
+        "duplication before you trust this output.\n\n" <>
         Map.get(result, :output, "")
 
     {state, result |> Map.put(:output, output) |> Map.put(:escalation, nil), elapsed}
   end
 
   defp declined(state, pending, source, detail, request_id \\ nil) do
+    authority =
+      authority(
+        :deny,
+        "sandbox_escalation_#{source}",
+        :once,
+        if(source in [:timeout, :interrupted, :plan_mode], do: :runtime, else: source),
+        escalation_ref(nil),
+        nil,
+        request_id
+      )
+
+    refuse_tool_effect(
+      state,
+      pending.call,
+      pending.classified,
+      pending.retry_effect_id,
+      authority
+    )
+
     emit_escalation(state, pending, "declined", to_string(source), request_id)
 
     result =
@@ -2185,7 +2542,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp escalation_request(state, classified) do
     request = permission_request(state, classified)
-    %{request | context: Map.put(request.context, :sandbox_escalation, true)}
+
+    %{
+      request
+      | tool: "sandbox_escalation",
+        command: nil,
+        context: Map.put(request.context, :sandbox_escalation, true)
+    }
   end
 
   # A rule reference that says which decision this was, so a `:permission` entry for an
@@ -2195,13 +2558,6 @@ defmodule Ouroboros.Provider.Native.Loop do
   # Deliberately not `grant_key/1`. Approving a `bash` call for the session must not also
   # approve escaping the sandbox for it; these are two different questions and they get
   # two different keys in the one set the session already carries across turns.
-  defp escalation_key(classified), do: {:sandbox_escalation, classified.command}
-
-  defp grant_escalation(state, classified, :session),
-    do: %{state | session_grants: MapSet.put(state.session_grants, escalation_key(classified))}
-
-  defp grant_escalation(state, _classified, _once), do: state
-
   defp clip(text, limit) when is_binary(text) and byte_size(text) > limit,
     do: binary_part(text, 0, limit) <> "\n… #{byte_size(text) - limit} bytes elided …"
 
@@ -2371,15 +2727,18 @@ defmodule Ouroboros.Provider.Native.Loop do
        approval_mode: state.approval_mode,
        tool_names: state |> tool_specs() |> Enum.map(& &1.name),
        options: provider_options(state),
+       tool_timeout_ms: state.tool_timeout_ms,
        subscriber: self(),
        background_subscriber: state.session_pid,
        running: counts.running,
-       tracked: counts.tracked
+       tracked: counts.tracked,
+       current_plan: state.current_plan
      }}
   end
 
   defp spawn_subagent(state, call, spec, started, hook_context, effect_id) do
     started_at = System.monotonic_time(:millisecond)
+    state = bind_subagent_work(state, spec)
 
     emit(state, :provider_event, subagent_event(AgentTool.spawned_payload(spec, started)))
     _ = track_subagent(state, spec, started)
@@ -2395,7 +2754,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         hook_context,
         effect_id,
         started_at,
-        deadline(min(spec.deadline_ms + 5_000, state.tool_timeout_ms)),
+        deadline(Map.get(spec, :effective_deadline_ms, spec.deadline_ms) + 5_000),
         %{}
       )
     end
@@ -2605,17 +2964,32 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at) do
     emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
+    _ = settle_tracked_subagent(state, spec.task_id, summary)
+    state = settle_local_work(state, spec.task_id, summary)
     state = fold_subagent_usage(state, spec, summary)
 
-    # A foreground child is released the moment its summary is in hand: nothing can
-    # collect it afterwards, and leaving it tracked would spend one of the parent's four
-    # slots on a child that has already answered.
-    _ = Subagent.stop(started.pid, :stopped)
-    _ = release_subagent(state, spec.task_id)
+    # A foreground child remains retained when the digest cannot carry its complete report.
+    # The caller must page and explicitly release it; otherwise a clipped foreground result
+    # would instruct recovery through a task id this branch had already discarded.
+    retained? = summary.result_bytes > 12 * 1024
+
+    if retained? do
+      _ = Subagent.retain(started.pid, state.session_pid)
+    else
+      _ = Subagent.stop(started.pid, :stopped)
+      _ = release_subagent(state, spec.task_id)
+    end
 
     result =
       Tools.normalize_result_of(%{
-        output: Subagent.render(summary) <> provisioning_result(started),
+        output:
+          Subagent.render(summary) <>
+            if(retained?,
+              do:
+                "\nThe report is larger than this digest; retrieve it with agent_result task_id #{spec.task_id} and cursor 0, then release after complete consumption.",
+              else: ""
+            ) <>
+            provisioning_result(started),
         is_error: summary.status in [:failed, :timed_out]
       })
 
@@ -2753,6 +3127,17 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp subagent_handles(_state), do: nil
 
+  defp safe_status_fetcher(%{
+         session_context: %{owner: owner, logical_id: logical_id}
+       })
+       when is_pid(owner) and is_binary(logical_id) do
+    owner_node = node(owner)
+
+    fn -> Ouroboros.InteractiveSession.safe_status_from_owner(owner, owner_node) end
+  end
+
+  defp safe_status_fetcher(_state), do: nil
+
   defp track_subagent(%{session_pid: pid}, spec, started) when is_pid(pid),
     do:
       session_call(
@@ -2762,7 +3147,8 @@ defmodule Ouroboros.Provider.Native.Loop do
            description: spec.description,
            background: spec.background,
            provider_session_id: started.provider_session_id,
-           node: Map.get(started, :node) || spec.node
+           node: Map.get(started, :node) || spec.node,
+           bindings: Map.get(spec, :bindings, [])
          }}
       )
 
@@ -2781,6 +3167,76 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp subagent_counts(_state), do: %{running: 0, tracked: 0}
+
+  defp bind_subagent_work(state, %{task_id: task_id, bindings: bindings}) when bindings != [] do
+    authority = Map.get(state.current_plan || %{}, "authority", %{})
+
+    additions =
+      Map.new(bindings, fn binding ->
+        {binding["item_id"], Map.merge(binding, %{"task_id" => task_id, "state" => "running"})}
+      end)
+
+    item_ids = Enum.map(bindings, & &1["item_id"])
+
+    items =
+      Enum.map(Map.get(state.current_plan || %{}, "plan", []), fn item ->
+        if item["id"] in item_ids, do: Map.put(item, "owner_task_id", task_id), else: item
+      end)
+
+    plan =
+      (state.current_plan || %{})
+      |> Map.put("plan", items)
+      |> Map.put("authority", Map.merge(authority, additions))
+
+    %{state | current_plan: plan}
+  end
+
+  defp bind_subagent_work(state, _spec), do: state
+
+  defp settle_tracked_subagent(%{session_pid: pid}, task_id, summary) when is_pid(pid),
+    do: session_call(pid, {:subagent_settle, task_id, summary})
+
+  defp settle_tracked_subagent(_state, _task_id, _summary), do: :ok
+
+  defp settle_local_work(state, task_id, summary) do
+    authority = Map.get(state.current_plan || %{}, "authority", %{})
+
+    authority =
+      Map.new(authority, fn {item_id, binding} ->
+        if binding["task_id"] == task_id do
+          settlement = local_settlement(summary.status)
+
+          receipt = %{
+            "task_id" => task_id,
+            "parent_session" => state.provider_session_id,
+            "item_id" => item_id,
+            "binding_digest" => binding["digest"],
+            "settlement" => settlement,
+            "outcome_digest" => local_outcome_digest(summary)
+          }
+
+          {item_id, Map.merge(binding, %{"state" => "settled", "receipt" => receipt})}
+        else
+          {item_id, binding}
+        end
+      end)
+
+    %{state | current_plan: (state.current_plan || %{}) |> Map.put("authority", authority)}
+  end
+
+  defp local_settlement(:completed), do: "completed"
+  defp local_settlement(:failed), do: "failed"
+  defp local_settlement(:timed_out), do: "lost"
+  defp local_settlement(:stopped), do: "cancelled"
+  defp local_settlement(_), do: "lost"
+
+  defp local_outcome_digest(summary) do
+    summary
+    |> Map.take([:status, :error, :files_changed, :files_changed_count, :result_bytes])
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
 
   defp session_call(pid, message) do
     GenServer.call(pid, message, 5_000)
@@ -3471,6 +3927,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       messages: state.messages,
       reads: state.reads,
       session_grants: state.session_grants,
+      plan: state.current_plan,
       rules_loaded: state.rules_loaded
     })
     |> case do
@@ -3530,10 +3987,9 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp remaining(:infinity), do: :infinity
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
-  defp describe({:stream_failed, message}), do: message
-  defp describe({:stream_exited, reason}), do: reason
-  defp describe(reason) when is_binary(reason), do: reason
-  defp describe(reason), do: inspect(reason)
+  defp describe({:model_request_failed, message}) when is_binary(message), do: message
+  defp describe({:stream_failed, message}), do: "stream_failed " <> message
+  defp describe({:stream_exited, reason}), do: "stream_exited " <> reason
 
   @doc """
   Builds an owned runtime event, redacted before it enters retained output.

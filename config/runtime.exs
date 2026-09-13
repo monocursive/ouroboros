@@ -387,6 +387,18 @@ gateway_data_dir =
 if gateway_data_dir do
   Ouroboros.DataDir.ensure_private!(gateway_data_dir)
   config :ouroboros, :data_dir, gateway_data_dir
+
+  # `ouro --dev` always supplies its private development data directory. Keep the
+  # coordinator in the same per-record store as a release so a documented
+  # `make daemon-restart` can reconstruct sessions instead of retaining only their
+  # native conversation checkpoints. Tests keep the ETS default unless they evaluate
+  # this file explicitly as `:dev`; their data-directory override is isolation, not a
+  # request to share state between test VMs.
+  if config_env() == :dev do
+    config :ouroboros,
+      interactive_storage:
+        {Ouroboros.Storage.DurableFile, path: Path.join(gateway_data_dir, "interactive")}
+  end
 end
 
 # S4. `OUROBOROS_POSTURE=self`, the one switch that lets a model session change the runtime

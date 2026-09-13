@@ -124,7 +124,8 @@ fn codex_sandbox_escalation() -> serde_json::Value {
         },
         "reason": "the sandbox refused a write outside the workspace",
         "kind": "sandbox_escalation",
-        "suggested_rule": "Bash(cargo test *)"
+        "suggested_rule": "SandboxEscalation()",
+        "at_least_once_risk": "The whole retained command will run again; effects completed before the first failure may duplicate."
     })
 }
 
@@ -401,7 +402,7 @@ fn the_fifth_answer_names_the_exact_pattern_and_scope_it_would_write() {
     let screen = render(&mut app, 120, 30);
 
     assert!(
-        screen.contains("approve, and don't ask again for Bash(cargo test *)"),
+        screen.contains("approve, and don't ask again for SandboxEscalation()"),
         "{}",
         screen.text()
     );
@@ -490,7 +491,7 @@ fn choosing_the_fifth_answer_sends_the_approval_first_and_the_rule_second() {
 
     let rule = &calls[rule];
     assert_eq!(rule.params["scope"], "workspace");
-    assert_eq!(rule.params["pattern"], "Bash(cargo test *)");
+    assert_eq!(rule.params["pattern"], "SandboxEscalation()");
     assert_eq!(rule.params["decision"], "allow");
     assert_eq!(rule.params["workspace"], "/tmp/w");
     assert_eq!(
@@ -501,7 +502,7 @@ fn choosing_the_fifth_answer_sends_the_approval_first_and_the_rule_second() {
     );
     assert!(matches!(
         rule.tag,
-        Tag::PermissionRule { ref pattern } if pattern == "Bash(cargo test *)"
+        Tag::PermissionRule { ref pattern } if pattern == "SandboxEscalation()"
     ));
 }
 
@@ -1000,8 +1001,8 @@ fn auto_approve_answers_a_sandbox_escalation_without_writing_its_rule() {
 }
 
 /// The escalation modal a person *does* see states every field the payload carries — the
-/// command that was stopped, where it ran, and the reason the sandbox gave — beside the
-/// fifth answer that would stop it being asked again.
+/// command that was stopped, where it ran, the reason the sandbox gave, and the
+/// at-least-once replay risk — beside the fifth answer that would stop it being asked again.
 #[test]
 fn the_escalation_modal_states_the_command_the_cwd_the_reason_and_the_rule() {
     let mut app = opened(full_hello());
@@ -1018,8 +1019,13 @@ fn the_escalation_modal_states_the_command_the_cwd_the_reason_and_the_rule() {
         screen.text()
     );
     assert!(
-        screen.contains("approve, and don't ask again for Bash(cargo test *)"),
-        "the fifth answer is present where a rule can actually be saved:\n{}",
+        screen.contains("replay risk: The whole retained command will run again"),
+        "the at-least-once warning is visible before approval:\n{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("approve, and don't ask again for SandboxEscalation()"),
+        "the fifth answer saves only the separate escalation authority:\n{}",
         screen.text()
     );
 }

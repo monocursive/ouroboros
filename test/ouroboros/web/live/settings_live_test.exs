@@ -29,6 +29,7 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
       Path.join(System.tmp_dir!(), "ouroboros-web-settings-#{System.unique_integer([:positive])}")
 
     Ouroboros.DataDir.ensure_private!(dir)
+    Ouroboros.Test.FirstUseIsolation.setup(dir, Ouroboros.Provider.Native.Model.ReqLLM)
     token_path = Path.join(dir, "gateway.token")
     File.write!(token_path, @token)
     File.chmod!(token_path, 0o600)

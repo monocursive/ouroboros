@@ -267,6 +267,22 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
         <Cells.parsed_diff parsed={@parsed} pending={true} />
       </div>
 
+      <div :if={@detail.proposed_change != []} class="ouro-approval-change">
+        <h3>Proposed file change</h3>
+        <p class="ouro-quiet">
+          Requested input, not an applied diff. Sensitive values may be redacted;
+          normal file checks still run after approval.
+        </p>
+        <div :for={field <- @detail.proposed_change}>
+          <strong>{field.label}</strong>
+          <p :if={field.excerpted} class="ouro-quiet">
+            Only an excerpt is shown. Approval applies to the entire requested input,
+            including the part not shown; deny if you cannot review it.
+          </p>
+          <pre class="ouro-approval-command ouro-mono">{field.text}</pre>
+        </div>
+      </div>
+
       <.plan_steps :if={@detail.plan} plan={@detail.plan} />
 
       <p :if={@detail.plan && @detail.plan.unmapped != []} class="ouro-quiet">

@@ -19,11 +19,12 @@ defmodule Ouroboros.Runtime.Manifesto do
 
   Only when the user explicitly asks to create or change an Ouroboros runtime
   capability, author a proposal under .ouroboros/capabilities/<Name>/. A proposal
-  contains manifest.json (module and description; optional eval and start),
-  source.ex, and at least one passing test.exs. The source defines exactly one
-  Ouroboros.Mesh.Agent module under Ouroboros.Capability.*; helper modules must already
-  exist on target nodes. It starts through Mesh.start_agent/2 with an id and
-  answers ouroboros.agent.message through handle_message/3.
+  contains Cargo.toml, a pinned Cargo.lock, src/lib.rs, and manifest.json
+  (name and description; optional eval and start). Use the ouroboros-guest SDK
+  and the forge skill's project and lock format. The manifest name must match
+  the Cargo package name. Include evaluation probes for signing and start.config
+  to start the deployed WebAssembly component as wasm/<name>. It receives JSON
+  messages and returns JSON replies.
 
   You can author files only when the shown sandbox permits it. You cannot sign, deploy, or grant
   a capability, nor admit or load one; the operator previews and admits it. Do

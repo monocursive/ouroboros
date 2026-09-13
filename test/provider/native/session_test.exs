@@ -107,6 +107,115 @@ defmodule Ouroboros.Provider.Native.SessionTest do
       assert Process.alive?(handle)
     end
 
+    test "maintenance fence atomically snapshots idle roots and blocks mutation", context do
+      %{handle: handle} = open(context, @simple_script)
+      token = make_ref()
+
+      assert {:ok, row} =
+               Ouroboros.Provider.Native.Session.prepare_fence(handle, 7, token)
+
+      assert row.active_count == 0
+      assert row.queued_count == 0
+      assert row.unresolved_count == 0
+      assert is_binary(row.checkpoint.sha256)
+      assert is_binary(row.journal.head)
+      assert {:error, :maintenance_fenced} = Session.close(handle)
+
+      assert {:ok, revalidated} =
+               Ouroboros.Provider.Native.Session.revalidate_fence(
+                 handle,
+                 7,
+                 token,
+                 row.root_digest
+               )
+
+      assert revalidated.root_digest == row.root_digest
+      assert :ok = Ouroboros.Provider.Native.Session.release_fence(handle, 7, token)
+      assert :ok = Session.close(handle)
+    end
+
+    test "maintenance fence blocks every durable mutation entry and rejects stale release",
+         context do
+      %{handle: handle} = open(context, @simple_script)
+      token = make_ref()
+      assert {:ok, row} = Ouroboros.Provider.Native.Session.prepare_fence(handle, 8, token)
+
+      request = TurnRequest.new!("blocked")
+
+      mutations = [
+        {:submit, "t1", :message, request},
+        {:steer, request, "steer-1"},
+        {:configure, %{plan: true}},
+        {:checkpoint, "t1", %{messages: []}},
+        {:handoff, nil, false, "h1"},
+        {:compact, nil},
+        {:compact_start, "c1", nil},
+        {:compact_cancel, "c1"},
+        {:rewind, "t1", :conversation},
+        {:subagent_track, "a1", self(), %{}},
+        {:subagent_settle, "a1", %{}},
+        {:subagent_release, "a1"},
+        {:bridge_tool, %{}, fn _ -> :ok end},
+        {:respond_approval, "r1", ApprovalResponse.new!(:deny)}
+      ]
+
+      assert Enum.all?(mutations, fn message ->
+               GenServer.call(handle, message) == {:error, :maintenance_fenced}
+             end)
+
+      assert {:error, :maintenance_fenced} = GenServer.call(handle, :close)
+      assert {:error, :maintenance_fenced} = GenServer.call(handle, :kill)
+
+      assert {:error, :stale_native_fence} =
+               Ouroboros.Provider.Native.Session.release_fence(handle, 8, make_ref())
+
+      assert {:ok, %{root_digest: root}} =
+               Ouroboros.Provider.Native.Session.revalidate_fence(
+                 handle,
+                 8,
+                 token,
+                 row.root_digest
+               )
+
+      assert root == row.root_digest
+      assert :ok = Ouroboros.Provider.Native.Session.release_fence(handle, 8, token)
+    end
+
+    test "epoch authority death leaves a frozen session closed", context do
+      epoch_dir = Path.join(context.root, "epoch")
+      epoch = start_supervised!({Ouroboros.Maintenance.Epoch, name: nil, data_dir: epoch_dir})
+      previous = Application.get_env(:ouroboros, :native_epoch_server)
+      Application.put_env(:ouroboros, :native_epoch_server, epoch)
+      on_exit(fn -> restore(:native_epoch_server, previous) end)
+
+      %{handle: handle} = open(context, @simple_script)
+      token = make_ref()
+      assert {:ok, row} = Ouroboros.Provider.Native.Session.prepare_fence(handle, 9, token)
+      GenServer.stop(epoch)
+      Process.sleep(20)
+
+      assert {:error, :maintenance_epoch_unavailable} =
+               Ouroboros.Provider.Native.Session.revalidate_fence(
+                 handle,
+                 9,
+                 token,
+                 row.root_digest
+               )
+
+      assert {:error, :maintenance_epoch_unavailable} =
+               Ouroboros.Provider.Native.Session.submit(
+                 handle,
+                 "t1",
+                 :message,
+                 TurnRequest.new!("x")
+               )
+
+      # Exact release can clear only the in-process barrier; loss of Epoch authority still
+      # keeps every durable mutation closed.
+      assert :ok = Ouroboros.Provider.Native.Session.release_fence(handle, 9, token)
+      assert {:error, :maintenance_epoch_unavailable} = Session.close(handle)
+    end
+
     test "refuses a provider_session_id that could become a path", context do
       {model_spec, _agent} = NativeModelScript.start([])
 

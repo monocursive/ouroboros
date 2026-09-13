@@ -3,6 +3,11 @@ defmodule Ouroboros.Gateway.GoldenTest do
 
   alias Mix.Tasks.Ouroboros.Gateway.Golden
   alias Ouroboros.Gateway.Wire
+  @compatibility_additive_methods ["interactive.safe_status"]
+  @compatibility_hello Path.expand(
+                         "../../support/gateway_compatibility/hello_before_safe_status.json",
+                         __DIR__
+                       )
 
   # These files are a contract with a second implementation that cannot run this suite. So
   # what is asserted here is not that they parse — it is that they are still what this
@@ -23,7 +28,7 @@ defmodule Ouroboros.Gateway.GoldenTest do
     end
   end
 
-  test "regenerating writes the same bytes, so a no-op change is a no-op diff" do
+  test "regenerating preserves every current golden fixture byte" do
     for {name, frame} <- Golden.fixtures() do
       assert File.read!(Golden.path(name)) == IO.iodata_to_binary(Golden.encode(frame)),
              "#{name}.json is not byte-stable; run mix ouroboros.gateway.golden"
@@ -111,8 +116,22 @@ defmodule Ouroboros.Gateway.GoldenTest do
     assert "interactive.event_detail" in methods
   end
 
-  test "the hello fixture lists exactly the methods this build serves" do
-    assert fixture("hello_result")["result"]["methods"] == Ouroboros.Gateway.Methods.names()
+  test "the hello compatibility fixture and current method contract differ only additively" do
+    # Historical bytes live outside the regenerated directory: preserving an older
+    # client's contract must not leave current discovery stale or break regeneration.
+    historical = File.read!(@compatibility_hello)
+    baseline = JSON.decode!(historical)["result"]["methods"]
+    current = Ouroboros.Gateway.Methods.names()
+
+    assert baseline == current -- @compatibility_additive_methods
+    assert current -- baseline == @compatibility_additive_methods
+
+    assert historical ==
+             "hello_result"
+             |> fixture()
+             |> drop_additive_hello_methods()
+             |> Golden.encode()
+             |> IO.iodata_to_binary()
   end
 
   test "the status fixture keeps pids per-leaf rather than opaquing the tree" do
@@ -131,4 +150,8 @@ defmodule Ouroboros.Gateway.GoldenTest do
   end
 
   defp fixture(name), do: name |> Golden.path() |> File.read!() |> JSON.decode!()
+
+  defp drop_additive_hello_methods(%{"result" => %{"methods" => methods} = result} = frame) do
+    %{frame | "result" => %{result | "methods" => methods -- @compatibility_additive_methods}}
+  end
 end

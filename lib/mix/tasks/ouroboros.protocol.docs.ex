@@ -725,6 +725,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   defp type(:string), do: "nonempty string"
   defp type(:boolean), do: "boolean"
   defp type(:positive_integer), do: "positive integer"
+  defp type({:nilable, kind}), do: type(kind) <> " or null"
   defp type(:non_negative_integer), do: "non-negative integer"
   defp type(:object), do: "JSON object"
   defp type(:json), do: "any JSON value"

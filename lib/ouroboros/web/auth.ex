@@ -168,7 +168,13 @@ defmodule Ouroboros.Web.Auth do
         |> put_session(@session_key, new_session_id())
         |> put_session("ouroboros_identity", subject)
         |> put_resp_header("cache-control", "no-store")
-        |> put_resp_header("location", "/")
+        |> put_resp_header(
+          "location",
+          if(conn.method == "GET",
+            do: Ouroboros.Web.Launch.destination(conn.query_params),
+            else: "/"
+          )
+        )
         |> send_resp(:found, "")
         |> halt()
 

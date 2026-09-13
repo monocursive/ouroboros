@@ -22,7 +22,7 @@ defmodule Ouroboros.Wasm.HooksAcceptanceTest do
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.SandboxFixture
 
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
+  @guest LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
 
   # Asked when this run asks, and answered differently in CI: there a missing build is a
   # failure rather than a skip, because a suite that skips green is a suite nobody notices

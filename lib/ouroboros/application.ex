@@ -123,9 +123,16 @@ defmodule Ouroboros.Application do
   # builder with no pool answered every forwarded forge `{:imports_unreadable,
   # {:pool_unavailable, …}}` — found the first time a forward crossed a real node boundary
   # (W22, §13 W-F31). The pool is lazy and owns nothing durable, so the posture is unchanged:
-  # no stores, registries, workspaces or recovery loops exist on that host to be reached.
+  # no durable stores, session registries, workspaces or recovery loops exist on that host
+  # to be reached. `Storage.ETS` below is the role-neutral ephemeral compatibility table;
+  # it owns no durable work. `Exec.Registry` tracks only bounded helper OS processes.
   defp children(:builder),
-    do: [Ouroboros.Storage.ETS, Ouroboros.Cluster, Ouroboros.Wasm.Supervisor]
+    do: [
+      Ouroboros.Storage.ETS,
+      Ouroboros.Cluster,
+      Ouroboros.Provider.Native.Exec.Registry,
+      Ouroboros.Wasm.Supervisor
+    ]
 
   # A `:signer` node is the same posture plus the one process its role names. The service
   # owns a key, a policy, and a durable decision journal; it refuses to boot without all
@@ -142,6 +149,7 @@ defmodule Ouroboros.Application do
   defp children(:core) do
     children =
       runtime_boundary_children([]) ++
+        maintenance_epoch_children() ++
         [
           # The effect ledger leads every process that can originate an effect. If its
           # durable authority restarts, rest_for_one stops mesh handler tasks and agent
@@ -164,7 +172,15 @@ defmodule Ouroboros.Application do
           },
           Ouroboros.Mesh.Directory,
           Ouroboros.Upgrade.Rollout.Registry,
-          Ouroboros.Interactive.Store,
+          Ouroboros.Interactive.Store
+          # P4. The target-owned maintenance fence starts only after the session store it
+          # inventories and before every workspace, permission, and session consumer. Its
+          # retained marker is loaded synchronously; a corrupt or unreadable marker fails
+          # this rest-for-one authority chain closed. A fence crash restarts every consumer
+          # below it so no process can retain admission from a replaced generation.
+        ] ++
+        maintenance_fence_children() ++
+        [
           Ouroboros.Control.Grants,
           # S2. What a signed policy component has earned the right to resolve, beside the
           # authority that says what an agent may do to the cluster and above every session
@@ -196,6 +212,7 @@ defmodule Ouroboros.Application do
                    keys: :unique, name: Ouroboros.SessionRegistry},
                   {Ouroboros.Application.RegistryOwner,
                    keys: :unique, name: Ouroboros.Provider.Native.Registry},
+                  Ouroboros.Provider.Native.Exec.Registry,
                   {Task.Supervisor, name: Ouroboros.SessionTaskSupervisor},
                   {DynamicSupervisor,
                    strategy: :one_for_one, name: Ouroboros.SessionTransportSupervisor}
@@ -438,6 +455,25 @@ defmodule Ouroboros.Application do
         # Only the owner of a durable directory is dropped. The children behind it own no
         # durable state of their own and still belong in an in-memory tree.
         after_owner
+    end
+  end
+
+  # P4's write epoch is a durable authority and therefore exists only on a core node with
+  # a durable data directory. Where it exists it immediately precedes the effect ledger;
+  # this application's rest-for-one root takes every covered writer down if Epoch dies.
+  @doc false
+  def maintenance_epoch_children do
+    case Application.get_env(:ouroboros, :data_dir) do
+      data_dir when is_binary(data_dir) and data_dir != "" -> [Ouroboros.Maintenance.Epoch]
+      _unset -> []
+    end
+  end
+
+  @doc false
+  def maintenance_fence_children do
+    case Application.get_env(:ouroboros, :data_dir) do
+      data_dir when is_binary(data_dir) and data_dir != "" -> [Ouroboros.Maintenance.Fence]
+      _unset -> []
     end
   end
 

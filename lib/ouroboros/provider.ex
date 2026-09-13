@@ -29,8 +29,14 @@ defmodule Ouroboros.Provider do
   # Conversation operations supplement the transport declarations in the public map.
   @derived_capability_keys [:fork, :compact, :replay]
 
-  # These four settings can change while an existing session remains open.
-  @configuration_fields [:approval_mode, :sandbox_mode, :model, :reasoning_effort]
+  # Settings that can change while an existing session remains open.
+  @configuration_fields [
+    :approval_mode,
+    :sandbox_mode,
+    :model,
+    :reasoning_effort,
+    :unknown_compact_tokens
+  ]
 
   # The session contract reads each of these as "the caller said nothing" and never checks it
   # against a provider's allowlist. `:default` is therefore always legal to send.
@@ -134,8 +140,9 @@ defmodule Ouroboros.Provider do
   plus the narrower "and can still be changed once the session is open" list the transport
   declares.
 
-  A change always applies `:now`: the native transport carries it to a live session
-  process rather than to the next re-execution of a CLI.
+  Validation does not decide timing. The native session answers `:now` while idle and
+  `:next_turn` while a turn is running; an in-flight tool keeps the authority snapshot it
+  started with.
   """
   @spec session_configuration(map()) :: {:ok, map(), :now} | {:error, term()}
   def session_configuration(changes) when is_map(changes) do

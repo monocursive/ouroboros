@@ -53,12 +53,16 @@ defmodule Ouroboros.Provider.OpenAIAuthTest do
 
     path = Path.join(root, "oauth.json")
     File.mkdir_p!(root)
+    Ouroboros.Test.FirstUseIsolation.setup(root)
+    previous = Application.fetch_env(:ouroboros, :openai_auth_test_pid)
     Application.put_env(:ouroboros, :openai_auth_test_pid, self())
-    System.delete_env("OPENAI_API_KEY")
 
     on_exit(fn ->
-      Application.delete_env(:ouroboros, :openai_auth_test_pid)
-      System.delete_env("OPENAI_API_KEY")
+      case previous do
+        {:ok, value} -> Application.put_env(:ouroboros, :openai_auth_test_pid, value)
+        :error -> Application.delete_env(:ouroboros, :openai_auth_test_pid)
+      end
+
       File.rm_rf(root)
     end)
 

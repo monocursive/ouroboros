@@ -5,6 +5,8 @@ An ouroboros capability component: a WebAssembly component in the world
 
 ## Build
 
+Run these commands from `test/support/wasm_forge` in the checkout:
+
 ```sh
 rustup target add wasm32-wasip2   # once per toolchain
 cargo build --release --target wasm32-wasip2
@@ -15,7 +17,7 @@ The component is `target/wasm32-wasip2/release/forge_fixture.wasm`.
 `ouroboros-guest` is not published to crates.io yet, so `Cargo.toml` reaches it by **path**:
 
 ```toml
-ouroboros-guest = { path = "../../tui/wasm/guest" }
+ouroboros-guest = { path = "../../../tui/wasm/guest" }
 ```
 
 That path has to point at an ouroboros checkout on this machine, and this project stops

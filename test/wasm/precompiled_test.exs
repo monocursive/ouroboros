@@ -33,10 +33,13 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
   @moduletag :capture_log
 
-  @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
-  @policy_guest Path.expand(
-                  "../../tui/wasm/guest/examples/no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm",
-                  __DIR__
+  @guest Ouroboros.Wasm.LiveFixture.guest_path(Path.expand("../support/wasm/echo.wasm", __DIR__))
+  @examples Ouroboros.Wasm.LiveFixture.examples_root(
+              Path.expand("../../tui/wasm/guest/examples", __DIR__)
+            )
+  @policy_guest Path.join(
+                  @examples,
+                  "no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm"
                 )
   @signer "wasm-precompiled-test-key"
 

@@ -3,6 +3,7 @@ defmodule Ouroboros.Provider.Native.JournalTest do
 
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Journal
+  alias Ouroboros.Maintenance.Epoch
 
   setup do
     dir = Path.join(System.tmp_dir!(), "native-journal-#{System.unique_integer([:positive])}")
@@ -58,6 +59,166 @@ defmodule Ouroboros.Provider.Native.JournalTest do
 
     assert record["hash"] == expected
   end
+
+  test "epoch reserves exact appended line and commits ordinary journal write", %{
+    dir: dir,
+    path: path
+  } do
+    epoch_dir = Path.join(dir, "epoch")
+    epoch = start_supervised!({Epoch, name: nil, data_dir: epoch_dir})
+
+    journal =
+      Journal.open(dir, epoch_server: epoch) |> Journal.append("prompt", %{"content" => "hi"})
+
+    refute journal.degraded?
+    [entry] = Epoch.observe(epoch).committed
+    assert entry.payload_digest == sha256(File.read!(path))
+    assert String.starts_with?(entry.write_id, "native-journal/v1/")
+    assert byte_size(entry.write_id) <= 128
+  end
+
+  test "open commits an exact pending append without repeating it", %{dir: dir, path: path} do
+    epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(dir, "epoch")})
+    record = build_record(1, Journal.seed(), "prompt", %{"content" => "recovered"})
+    line = Journal.canonical_json(record) <> "\n"
+
+    identity = :erlang.term_to_binary({path, 1, Journal.seed(), "prompt"}, [:deterministic])
+    write_id = Journal.epoch_write_prefix(path) <> "1/" <> sha256(identity)
+    assert {:ok, _} = Epoch.reserve(write_id, sha256(line), epoch)
+    File.write!(path, line)
+    inode = File.stat!(path).inode
+
+    reopened = Journal.open(dir, epoch_server: epoch)
+    assert reopened.seq == 1
+    refute reopened.degraded?
+    assert Epoch.observe(epoch).pending == []
+    assert File.stat!(path).inode == inode
+    assert File.read!(path) == line
+  end
+
+  test "an archived commit refuses a stale journal handle without appending twice", ctx do
+    epoch =
+      start_supervised!({Epoch, name: nil, data_dir: Path.join(ctx.dir, "epoch"), max_entries: 1})
+
+    stale = Journal.open(ctx.dir, epoch_server: epoch)
+    first = Journal.append(stale, "prompt", %{"content" => "once"})
+    refute first.degraded?
+    bytes = File.read!(ctx.path)
+    assert {:ok, filler} = Epoch.reserve("filler", sha256("filler"), epoch)
+    assert :ok = Epoch.commit(filler, epoch)
+    assert %{archived_entries: 1} = Epoch.observe(epoch)
+
+    retry = Journal.append(stale, "prompt", %{"content" => "once"})
+    assert retry.degraded?
+    assert File.read!(ctx.path) == bytes
+    assert length(lines(ctx.path)) == 1
+  end
+
+  test "a conflicting pending retry cannot advance the chain before reopen", %{
+    dir: dir,
+    path: path
+  } do
+    epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(dir, "epoch")})
+    stale = Journal.open(dir, epoch_server: epoch)
+    record = build_record(1, Journal.seed(), "prompt", %{"content" => "published"})
+    line = Journal.canonical_json(record) <> "\n"
+    identity = :erlang.term_to_binary({path, 1, Journal.seed(), "prompt"}, [:deterministic])
+    write_id = Journal.epoch_write_prefix(path) <> "1/" <> sha256(identity)
+    assert {:ok, reservation} = Epoch.reserve(write_id, sha256(line), epoch)
+    File.write!(path, line)
+
+    retry = Journal.append(stale, "prompt", %{"content" => "different"})
+    assert retry.authority_error == {:maintenance_epoch, :write_id_conflict}
+    assert retry.degraded?
+    assert {retry.seq, retry.prev, retry.bytes} == {stale.seq, stale.prev, stale.bytes}
+    assert File.read!(path) == line
+    assert Epoch.lookup(write_id, epoch) == {:ok, Map.put(reservation, :status, :pending)}
+
+    # The failed attempt staged a gap. Neither it nor a changed kind may bypass the
+    # pending reservation by taking a different write ID on the stale handle.
+    blocked = retry |> Journal.sync() |> Journal.append("turn_settled", %{"status" => "complete"})
+    assert blocked.authority_error == retry.authority_error
+    assert {blocked.seq, blocked.prev, blocked.bytes} == {stale.seq, stale.prev, stale.bytes}
+    assert File.read!(path) == line
+
+    reopened = Journal.open(dir, epoch_server: epoch)
+    refute reopened.degraded?
+    assert reopened.authority_error == nil
+    assert {reopened.seq, reopened.prev, reopened.bytes} == {1, record["hash"], byte_size(line)}
+    assert Epoch.lookup(write_id, epoch) == {:ok, Map.put(reservation, :status, :committed)}
+
+    next = Journal.append(reopened, "turn_settled", %{"status" => "complete"})
+    refute next.degraded?
+
+    assert {:ok, %{records: [published, gap, settled], head: head, verified_through: 3}} =
+             Journal.verify(path)
+
+    assert published == record
+    assert gap["kind"] == "gap"
+    assert settled["kind"] == "turn_settled"
+    assert next.prev == head
+  end
+
+  test "open aborts a pending append after confirmed absence", %{dir: dir, path: path} do
+    epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(dir, "epoch")})
+    write_id = Journal.epoch_write_prefix(path) <> "1/absent"
+    assert {:ok, _} = Epoch.reserve(write_id, String.duplicate("a", 64), epoch)
+
+    reopened = Journal.open(dir, epoch_server: epoch)
+    refute reopened.degraded?
+    assert [%{write_id: ^write_id}] = Epoch.observe(epoch).aborted
+    refute File.exists?(path)
+  end
+
+  test "commit uncertainty retains pending evidence and reopen settles without append", %{
+    dir: dir,
+    path: path
+  } do
+    epoch = start_supervised!({Epoch, name: nil, data_dir: Path.join(dir, "epoch")})
+
+    uncertain = fn _reservation, _server -> exit(:injected_commit_loss) end
+
+    failed =
+      Journal.open(dir, epoch_server: epoch, epoch_commit: uncertain)
+      |> Journal.append("prompt", %{"content" => "once"})
+
+    assert failed.degraded?
+    assert [pending] = Epoch.observe(epoch).pending
+    bytes = File.read!(path)
+    inode = File.stat!(path).inode
+
+    blocked = Journal.append(failed, "turn_settled", %{"status" => "complete"})
+    assert blocked.degraded?
+    assert blocked.authority_error == failed.authority_error
+    assert {blocked.seq, blocked.prev, blocked.bytes} == {failed.seq, failed.prev, failed.bytes}
+    assert File.read!(path) == bytes
+    assert Epoch.observe(epoch).pending == [pending]
+
+    reopened = Journal.open(dir, epoch_server: epoch)
+    refute reopened.degraded?
+    assert Epoch.observe(epoch).pending == []
+    assert File.read!(path) == bytes
+    assert File.stat!(path).inode == inode
+    assert length(lines(path)) == 1
+  end
+
+  defp build_record(seq, prev, kind, fields) do
+    body =
+      Map.merge(fields, %{
+        "seq" => seq,
+        "at" => "2026-09-11T00:00:00Z",
+        "turn_id" => nil,
+        "kind" => kind
+      })
+
+    hash =
+      :crypto.hash(:sha256, [prev, Journal.canonical_json(body)])
+      |> Base.encode16(case: :lower)
+
+    body |> Map.put("prev", prev) |> Map.put("hash", hash)
+  end
+
+  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   test "a tampered record is named by its sequence", %{dir: dir, path: path} do
     dir
@@ -367,6 +528,8 @@ defmodule Ouroboros.Provider.Native.JournalTest do
   end
 
   test "terms the journal does not own are coerced rather than raising", %{dir: dir, path: path} do
+    synthetic = <<0x66, 0x94, 0x67>>
+
     dir
     |> Journal.open()
     |> Journal.append("model_result", %{
@@ -378,7 +541,7 @@ defmodule Ouroboros.Provider.Native.JournalTest do
         {:finish, :stop}
       ],
       "pid" => self(),
-      "binary" => <<0xFF, 0xFE>>
+      "binary" => synthetic
     })
 
     assert [record] = records(path)
@@ -391,8 +554,60 @@ defmodule Ouroboros.Provider.Native.JournalTest do
            ]
 
     assert is_binary(record["pid"])
-    assert record["binary"] == %{"base64" => Base.encode64(<<0xFF, 0xFE>>)}
+
+    assert record["binary"] == %{
+             "$ouroboros_binary" => Base.encode64(synthetic),
+             "bytes" => byte_size(synthetic)
+           }
+
+    assert Journal.unjsonable(record["binary"]) == synthetic
+
+    assert {:ok, ^synthetic} =
+             Ouroboros.Provider.Native.Replay.Record.field(record, "binary", dir)
+
     assert {:ok, %{verified_through: 1}} = Journal.verify(path)
+
+    reopened = Journal.open(dir)
+    assert reopened.seq == 1
+    refute reopened.degraded?
+    assert {:ok, %{verified_through: 1}} = Journal.verify(path)
+  end
+
+  test "canonical encoding handles invalid binary keys and values deterministically" do
+    synthetic_key = <<0x94>>
+    synthetic_value = <<0xFF, 0x61>>
+    term = %{synthetic_key => [synthetic_value]}
+
+    encoded = Journal.canonical_json(term)
+    assert String.valid?(encoded)
+    assert encoded == Journal.canonical_json(term)
+    assert Journal.unjsonable(JSON.decode!(encoded)) == term
+  end
+
+  test "literal tag-shaped JSON maps remain maps through journal and replay", %{
+    dir: dir,
+    path: path
+  } do
+    binary_lookalike = %{"$ouroboros_binary" => "YWJj", "bytes" => 3}
+    map_lookalike = %{"$ouroboros_map" => [["key", "value"]]}
+    nested = %{"binary" => binary_lookalike, "map" => map_lookalike}
+
+    dir |> Journal.open() |> Journal.append("tool_result", %{"content" => nested})
+    [record] = records(path)
+
+    assert {:ok, ^nested} =
+             Ouroboros.Provider.Native.Replay.Record.field(record, "content", dir)
+
+    assert {:ok, %{verified_through: 1}} = Journal.verify(path)
+    assert Journal.open(dir).seq == 1
+  end
+
+  test "legacy journal without encoding marker does not decode a tag-shaped map", %{dir: dir} do
+    literal = %{"$ouroboros_binary" => "YWJj", "bytes" => 3}
+    record = %{"kind" => "tool_result", "content" => literal}
+
+    assert {:ok, ^literal} =
+             Ouroboros.Provider.Native.Replay.Record.field(record, "content", dir)
   end
 end
 

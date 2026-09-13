@@ -57,12 +57,23 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
     previous =
       Map.new(
-        [:native_data_dir, :native_model_module, :data_dir, :workspace_allowed_roots],
+        [
+          :native_data_dir,
+          :native_model_module,
+          :native_epoch_server,
+          :data_dir,
+          :workspace_allowed_roots
+        ],
         &{&1, Application.get_env(:ouroboros, &1)}
       )
 
     Application.put_env(:ouroboros, :native_data_dir, origin_data)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
+
+    origin_epoch =
+      start_supervised!({Ouroboros.Maintenance.Epoch, name: nil, data_dir: origin_data})
+
+    Application.put_env(:ouroboros, :native_epoch_server, origin_epoch)
 
     # Both nodes share this host's filesystem, so the peer's root is named here (with the
     # same run-keyed scheme as `tmp_dir!/1`) and registered for removal before the peer
@@ -72,13 +83,18 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     File.rm_rf!(peer_root)
     on_exit(fn -> File.rm_rf(peer_root) end)
 
-    peer = start_app_peer!()
-
-    # The peer's own directories, created *by the peer*, under app env only the peer has.
     peer_data = Path.join(peer_root, "data")
     peer_workspace = Path.join(peer_root, "workspace")
-    :ok = peer_call(peer, File, :mkdir_p!, [peer_data])
-    :ok = peer_call(peer, File, :mkdir_p!, [Path.join(peer_workspace, "lib")])
+    File.mkdir_p!(peer_data)
+    File.chmod!(peer_data, 0o700)
+    File.mkdir_p!(Path.join(peer_workspace, "lib"))
+
+    # Durable configuration must exist before the peer application chooses its supervised
+    # children. Installing `:data_dir` after boot leaves the peer correctly refusing native
+    # sessions because no maintenance epoch authority was started.
+    peer = start_app_peer!(peer_data)
+
+    # The peer's own directories and files live under app env only the peer has.
 
     :ok =
       peer_call(peer, File, :write!, [
@@ -88,7 +104,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
     put_peer_env!(peer, :native_data_dir, peer_data)
     put_peer_env!(peer, :native_model_module, NativeModelScript)
-    put_peer_env!(peer, :data_dir, peer_data)
+    assert is_pid(peer_call(peer, Process, :whereis, [Ouroboros.Maintenance.Epoch]))
     [node_name, host] = String.split(Atom.to_string(peer), "@")
     machine = String.replace_prefix(node_name, "ouro-", "")
     fleet_id = "00112233445566778899aabb"
@@ -327,6 +343,15 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
       assert result.output =~ "git cherry-pick"
       assert result.output =~ settled.payload["returned_ref"]
+      assert {:ok, ^child} = GenServer.call(handle, {:subagent_lookup, task_id})
+
+      assert {:ok, released} =
+               Ouroboros.Provider.Native.Tools.AgentResult.run(
+                 %{task_id: task_id, wait_ms: 0, release: true},
+                 context
+               )
+
+      assert released.output =~ "git cherry-pick"
       assert :error = GenServer.call(handle, {:subagent_lookup, task_id})
       assert File.read!(Path.join(root, "changed.txt")) == "uncommitted on the parent"
     end
@@ -925,13 +950,17 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   # The same shape `test/cluster_test.exs` uses: a peer booted on this VM's code path,
   # running the whole application, with the storages a second node must not share.
-  defp start_app_peer! do
+  defp start_app_peer!(data_dir) do
     name = String.to_atom("ouro-subagent-peer-#{unique()}")
 
     {:ok, peer, peer_node} =
       :peer.start(%{name: name, args: code_path_args(), wait_boot: 30_000})
 
     on_exit(fn -> stop_peer(peer) end)
+
+    :ok = :erpc.call(peer_node, Application, :put_env, [:ouroboros, :data_dir, data_dir])
+    {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
+    :ok = :erpc.call(peer_node, Mix, :env, [:test])
 
     {:ok, _applications} =
       :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros], 60_000)

@@ -661,15 +661,13 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       </div>
 
       <p :if={@card.state == :connected} class="ouro-settings-connection-copy">
-        Connected{if @card.identity, do: " as #{@card.identity}"}. Tokens remain with the
+        Local account{if @card.identity, do: " — #{@card.identity}"}. Tokens remain with the
         first-party runtime.
       </p>
       <p :if={@card.state == :checking} class="ouro-settings-connection-copy">
         Reading account readiness…
       </p>
-      <p :if={@card.state == :required} class="ouro-settings-connection-copy">
-        Not connected. This is optional unless you select one of these subscription models.
-      </p>
+      <p class="ouro-settings-connection-copy">{@card.credential_note}</p>
 
       <div :if={@card.state == :waiting} class="ouro-account-wait">
         <p>Open the verification link, confirm the code, then return here.</p>
@@ -690,7 +688,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       <p :if={@card.error} class="ouro-refusal">{@card.error}</p>
       <div class="ouro-settings-card-actions">
         <button
-          :if={@card.state in [:required, :checking]}
+          :if={@card.state in [:required, :checking, :unavailable]}
           type="button"
           class="ouro-new-secondary"
           phx-click={@connect}
@@ -774,7 +772,8 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     }
   end
 
-  defp account_state(:connected), do: "Connected"
+  defp account_state(:connected), do: "Local account"
+  defp account_state(:unavailable), do: "Status unavailable"
   defp account_state(:waiting), do: "Waiting"
   defp account_state(:required), do: "Not connected"
   defp account_state(:checking), do: "Checking"

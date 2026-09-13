@@ -92,13 +92,16 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:starting?, false)
       |> assign(:refusal, nil)
       |> assign(:initial_message, starter(params["starter"]))
-      |> assign(:default_workspace, File.cwd!())
       |> assign(:started_id, nil)
 
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
     # knows of no models.
-    {:ok, if(connected?(socket), do: socket |> load_machines() |> load(), else: socket)}
+    {:ok,
+     if(connected?(socket),
+       do: socket |> load_machines() |> apply_launch(params) |> load(),
+       else: apply_launch(socket, params)
+     )}
   end
 
   defp initial_form(prefs, params) do
@@ -117,6 +120,25 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       _ ->
         form
+    end
+  end
+
+  defp apply_launch(socket, params) do
+    if Map.has_key?(params, "workspace") do
+      # `ouro web` names the caller's local project even when the last browser
+      # session was elsewhere. Do not import a remote machine's model settings.
+      form = socket.assigns.form
+      form = if form.machine == "", do: form, else: %{NewSession.new() | sandbox: form.sandbox}
+
+      workspace =
+        case {params["machine"], Ouroboros.Web.Launch.workspace(params["workspace"])} do
+          {machine, {:ok, path}} when machine in [nil, ""] -> path
+          _ -> ""
+        end
+
+      assign(socket, :form, %{form | machine: "", workspace: workspace})
+    else
+      socket
     end
   end
 
@@ -208,10 +230,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # rendered controls and the request can therefore never disagree.
   @impl true
   def handle_event(event, _params, %{assigns: %{pending_start: pending}} = socket)
-      when event != "start" and not is_nil(pending), do: {:noreply, socket}
+      when event not in ["start", "connect-chatgpt", "cancel-chatgpt", "refresh-chatgpt"] and
+             not is_nil(pending),
+      do: {:noreply, socket}
 
   def handle_event(event, _params, %{assigns: %{started_id: id}} = socket)
-      when event != "start" and not is_nil(id), do: {:noreply, socket}
+      when event not in ["start", "connect-chatgpt", "cancel-chatgpt", "refresh-chatgpt"] and
+             not is_nil(id),
+      do: {:noreply, socket}
 
   def handle_event("change", %{"machine" => machine} = params, socket)
       when machine != socket.assigns.form.machine do
@@ -285,6 +311,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   def handle_event("cancel-chatgpt", _params, socket),
     do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, &call/3)}
+
+  def handle_event("refresh-chatgpt", _params, socket),
+    do: {:noreply, socket |> read_account() |> maybe_poll_account() |> assign(:refusal, nil)}
 
   def handle_event("open-anthropic-key", _params, socket) do
     cond do
@@ -423,11 +452,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
 
     cond do
-      form.machine != "" and blank?(form.workspace) ->
+      Ouroboros.Web.Launch.workspace(form.workspace) == :error ->
         {:noreply,
          assign(socket, :refusal, %{
            message: "Choose a project folder on this computer first.",
-           detail: "Browse shows folders on the selected computer."
+           detail: "Enter an absolute folder path, or use Browse on the selected computer."
          })}
 
       not socket.assigns.loaded? ->
@@ -531,6 +560,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp start(socket, params) do
+    with_chatgpt_ready(socket, &do_start(&1, params))
+  end
+
+  defp do_start(socket, params) do
     socket = assign(socket, :starting?, true)
 
     case call(socket, "interactive.start", params) do
@@ -572,6 +605,24 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp send_initial(socket, id) do
+    with_chatgpt_ready(socket, &do_send_initial(&1, id))
+  end
+
+  # The disabled button is a hint, not the submit boundary. Check the same local
+  # readiness before starting or retrying either request, including idempotent retries.
+  defp with_chatgpt_ready(socket, proceed) do
+    if NewSession.requires_chatgpt?(socket.assigns.form, field(socket)) and
+         not NewSession.usable?(socket.assigns.account) do
+      assign(socket, :refusal, %{
+        message: "Connect ChatGPT before starting this session.",
+        detail: "Check the ChatGPT connection on the selected computer, then try again."
+      })
+    else
+      proceed.(socket)
+    end
+  end
+
+  defp do_send_initial(socket, id) do
     message = String.trim(socket.assigns.initial_message)
 
     if message == "" do
@@ -697,7 +748,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # A model chosen before the catalogue arrived is not necessarily a row in it, so the
   # choice is re-checked against the field the change produced rather than carried.
   defp reconcile(form, socket) do
-    field = NewSession.model_field(socket.assigns.catalogue)
+    field = NewSession.model_field(socket.assigns.catalogue, form)
 
     form =
       if NewSession.offers?(field, form.model_choice),
@@ -709,7 +760,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       else: %{form | effort: nil}
   end
 
-  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue)
+  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue, socket.assigns.form)
 
   defp model_choice(%{"model_choice" => value}, _form), do: NewSession.choice(value)
   defp model_choice(_params, form), do: form.model_choice
@@ -725,7 +776,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   @impl true
   def render(assigns) do
-    field = NewSession.model_field(assigns.catalogue)
+    field = NewSession.model_field(assigns.catalogue, assigns.form)
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
     api_key = NewSession.api_key_card(assigns.form, field, assigns.providers)
@@ -818,7 +869,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           </section>
           <.workspace_field
             workspace={@form.workspace}
-            default_workspace={if @form.machine == "", do: @default_workspace}
             machine_label={@machine_label}
             can_browse={@can_browse?}
             open={@browse_open?}
@@ -843,17 +893,16 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             <p class="ouro-new-hint">This becomes the first message in the session.</p>
           </section>
 
-          <section :if={@gated? or is_map(@api_key_card)} aria-label="AI connection">
+          <section :if={is_map(@api_key_card)} aria-label="AI connection">
             <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
-            <.account_card :if={@gated?} card={@account_card} scope={@scope} />
             <.api_key_card
-              :if={is_map(@api_key_card)}
               card={@api_key_card}
               can_set={@can_set_api_key?}
             />
           </section>
 
           <details
+            id="new-session-advanced"
             class="ouro-new-advanced"
             data-ouro-disclosure="setup:false"
           >
@@ -881,6 +930,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           </details>
         </fieldset>
 
+        <section :if={@gated?} aria-label="AI connection">
+          <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
+          <.account_card card={@account_card} scope={@scope} refresh?={@locked?} />
+        </section>
+
         <p :if={@locked?} class="ouro-new-hint" role="status">
           Your task may already exist. Check and retry the same task before changing its computer or project.
         </p>
@@ -898,7 +952,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             disabled={
               not @can_start? or @starting? or
                 (not @locked? and
-                   ((@form.machine != "" and @form.workspace == "") or
+                   (Ouroboros.Web.Launch.workspace(@form.workspace) == :error or
                       not @chatgpt_ready? or @api_key_required?))
             }
           >
@@ -1055,7 +1109,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     </select>
 
     <p :if={@form.model_search != ""} class="ouro-new-hint">
-      {@matched} {if @matched == 1, do: "model", else: "models"} match
+      {@matched} {if @matched == 1, do: "model", else: "models"} shown (including the current selection).
+    </p>
+
+    <p class="ouro-new-hint">
+      Search covers this bounded snapshot plus configured and current choices, not account entitlements.
+      Missing a model? Choose Custom and enter its exact provider:model ID. Unknown metadata
+      does not mean unsupported; access is checked when a turn runs.
     </p>
 
     <input
@@ -1064,7 +1124,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       class="ouro-new-input"
       name="model_text"
       value={@form.model_text}
-      placeholder="Model id"
+      placeholder="provider:model (exact ID)"
       aria-label="custom model id"
       autocomplete="off"
     />
@@ -1102,7 +1162,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   attr :workspace, :string, required: true
-  attr :default_workspace, :string, default: nil
   attr :machine_label, :string, default: "this computer"
   attr :can_browse, :boolean, required: true
   attr :open, :boolean, required: true
@@ -1114,7 +1173,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     <section class="ouro-new-field" aria-labelledby="workspace-label">
       <div class="ouro-new-label-row">
         <label class="ouro-new-label" id="workspace-label" for="workspace">Project folder</label>
-        <span class="ouro-new-aside">Optional</span>
+        <span class="ouro-new-aside">Required</span>
       </div>
 
       <div class="ouro-new-row">
@@ -1126,6 +1185,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           value={@workspace}
           placeholder="Choose a project folder"
           autocomplete="off"
+          required
         />
         <button
           type="button"
@@ -1138,10 +1198,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         </button>
       </div>
       <p class="ouro-new-hint">
-        {if String.trim(@workspace) == "", do: "Default project on ", else: "Project on "}{@machine_label}:
-        <span class="ouro-mono">{if String.trim(@workspace) == "",
-          do: @default_workspace || "Choose a folder with Browse",
-          else: String.trim(@workspace)}</span>
+        Project on {@machine_label}:
+        <span class="ouro-mono">{if @workspace == "",
+          do: "Choose a folder with Browse or enter its absolute path",
+          else: @workspace}</span>
       </p>
 
       <.browse_panel :if={@open} listing={@listing} refusal={@refusal} />
@@ -1363,6 +1423,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   attr :card, :map, required: true
   attr :scope, :atom, required: true
+  attr :refresh?, :boolean, default: false
 
   def account_card(assigns) do
     assigns = assign(assigns, :can_login?, Call.available?(assigns.scope, "account.login.start"))
@@ -1377,13 +1438,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       <p :if={@card.state == :checking} class="ouro-new-hint">reading account readiness…</p>
 
       <p :if={@card.state == :connected} class="ouro-new-hint">
-        Connected{if @card.identity, do: " as #{@card.identity}"}.
+        Local account{if @card.identity, do: " — #{@card.identity}"}.
       </p>
 
-      <p :if={@card.state == :required} class="ouro-new-hint">
-        This model runs on a ChatGPT subscription, and the runtime has no usable credential
-        for one. Tokens stay in the runtime; this page never sees them.
-      </p>
+      <p class="ouro-new-hint">{@card.credential_note}</p>
 
       <div :if={@card.state == :waiting} class="ouro-account-wait">
         <p class="ouro-new-hint">Open the link, enter the code, then come back here.</p>
@@ -1407,7 +1465,15 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       <div class="ouro-new-row">
         <button
-          :if={@card.state in [:required, :checking]}
+          :if={@refresh?}
+          type="button"
+          class="ouro-new-secondary"
+          phx-click="refresh-chatgpt"
+        >
+          Check connection
+        </button>
+        <button
+          :if={@card.state in [:required, :checking, :unavailable]}
           type="button"
           class="ouro-new-secondary"
           phx-click="connect-chatgpt"
@@ -1429,7 +1495,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp account_aside(:checking), do: "Checking"
-  defp account_aside(:connected), do: "Connected"
+  defp account_aside(:connected), do: "Local account"
+  defp account_aside(:unavailable), do: "Status unavailable"
   defp account_aside(:waiting), do: "Waiting"
   defp account_aside(:required), do: "Required"
 

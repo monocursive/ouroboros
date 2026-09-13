@@ -55,6 +55,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.Mcp, as: McpTool
   alias Ouroboros.Provider.Native.Tools.Plan
   alias Ouroboros.Provider.Native.Tools.Read
+  alias Ouroboros.Provider.Native.Tools.SafeStatus
   alias Ouroboros.Provider.Native.Tools.Schema
   alias Ouroboros.Provider.Native.Tools.Skill
   alias Ouroboros.Provider.Native.Tools.WebFetch
@@ -86,6 +87,7 @@ defmodule Ouroboros.Provider.Native.Tools do
       AskUser,
       AgentTool,
       AgentResult,
+      SafeStatus,
       Fleet,
       Skill,
       Plan
@@ -351,7 +353,7 @@ defmodule Ouroboros.Provider.Native.Tools do
       [
         validation_reason(reason),
         required_summary(required),
-        property_summary(parameters, required),
+        property_summary(name, parameters, required),
         "Retry with corrected arguments; do not repeat the unchanged call."
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
@@ -374,7 +376,14 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp required_summary([]), do: "Required arguments: none."
   defp required_summary(required), do: "Required arguments: #{Enum.join(required, ", ")}."
 
-  defp property_summary(parameters, required) do
+  # Preserve the exact frozen diagnostics for legacy Plan validation. `accept` is additive
+  # recovery metadata and an unrelated malformed legacy step must not gain a new diagnostic.
+  defp property_summary("plan", parameters, required) do
+    parameters = update_in(parameters, ["properties"], &Map.delete(&1 || %{}, "accept"))
+    property_summary(nil, parameters, required)
+  end
+
+  defp property_summary(_name, parameters, required) do
     required = MapSet.new(required)
 
     fields =
@@ -709,19 +718,24 @@ defmodule Ouroboros.Provider.Native.Tools do
   @doc false
   @spec normalize_result(term()) :: map()
   def normalize_result({:ok, %{output: output} = result}) do
-    %{
-      output: bound(to_string(output)),
-      is_error: Map.get(result, :is_error, false) == true,
-      changes: Map.get(result, :changes, []),
-      reads: Map.get(result, :reads, %{}),
-      plan: Map.get(result, :plan),
-      # C5+. `bash` is the one tool that can come back saying "the OS sandbox stopped
-      # this, and it is a denial an operator could lift". It is carried here rather than
-      # buried in the output text because the loop has to *act* on it — it owns the only
-      # approval channel — and parsing a decision back out of prose is how that kind of
-      # seam rots. Every other tool leaves it `nil`.
-      escalation: Map.get(result, :escalation)
-    }
+    normalized =
+      %{
+        output: bound(to_string(output)),
+        is_error: Map.get(result, :is_error, false) == true,
+        changes: Map.get(result, :changes, []),
+        reads: Map.get(result, :reads, %{}),
+        plan: Map.get(result, :plan),
+        # Compatibility field retained for frozen action/result observations. Escalation is
+        # never populated by opaque output now; explicit retry authority lives in loop state.
+        escalation: nil
+      }
+      |> maybe_optional(result, :lifecycle)
+      |> maybe_optional(result, :retry)
+
+    case Map.get(result, :unverified_denial) do
+      nil -> normalized
+      denial -> Map.put(normalized, :unverified_denial, denial)
+    end
   end
 
   def normalize_result({:ok, result}) when is_map(result), do: empty(inspect(result), false)
@@ -745,6 +759,13 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp describe(%{__exception__: true} = error), do: Exception.message(error)
   defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason), do: inspect(reason)
+
+  defp maybe_optional(map, result, key) do
+    case Map.fetch(result, key) do
+      {:ok, value} -> Map.put(map, key, value)
+      :error -> map
+    end
+  end
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key) || Map.get(map, Atom.to_string(key))

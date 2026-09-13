@@ -5086,7 +5086,12 @@ mod tests {
 
     #[test]
     fn an_oversized_code_block_is_capped_inside_its_frame() {
-        let block = format!("```elixir\n{}\n```", "line\n".repeat(600));
+        let block = format!(
+            "```elixir\n{}\n```",
+            (0..600)
+                .map(|line| format!("line {line}\n"))
+                .collect::<String>()
+        );
         let cells = vec![Cell::Message {
             speaker: Speaker::Agent,
             text: block,
@@ -5094,17 +5099,48 @@ mod tests {
         }];
 
         let rendered = render_cells(&cells, 60);
-        let text = plain(&rendered);
+        let rows: Vec<String> = rendered.iter().map(plain_line).collect();
+        let text = rows.join("\n");
 
         assert!(rendered.len() <= MESSAGE_LINES + 2, "{}", rendered.len());
+        let ceiling = rows
+            .iter()
+            .position(|row| row.contains("rest of this block in event details"))
+            .expect("the framed block owns its truncation notice");
+        let floor = rows
+            .iter()
+            .position(|row| row.starts_with('└'))
+            .expect("the truncated frame still closes");
+        assert_eq!(floor, ceiling + 1, "{text}");
         assert!(
-            text.contains("rest of this block in event details"),
-            "{text}"
+            rows[2..floor]
+                .iter()
+                .all(|row| row.starts_with("│ ") && row.ends_with(" │")),
+            "every visible code row and notice stays inside the frame: {text}"
         );
-        // The block's own notice replaces the message-level one; both would be noise.
-        assert!(!text.contains("full message in event details"), "{text}");
-        let floor = plain_line(rendered.last().expect("rows"));
-        assert!(floor.starts_with('└'), "the frame still closes: {floor}");
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("… full message · ctrl+o"),
+            "the affordance follows rather than replaces the frame floor: {text}"
+        );
+        assert!(text.contains("line 0"), "{text}");
+        assert!(
+            !text.contains("line 599"),
+            "compact rendering must stay bounded: {text}"
+        );
+
+        let expanded = render_cells_at(&cells, 60, 0, Verbosity::Verbose);
+        let expanded_text = plain(&expanded);
+        assert!(expanded_text.contains("line 599"), "{expanded_text}");
+        assert!(
+            !expanded_text.contains("full message")
+                && !expanded_text.contains("rest of this block in event details"),
+            "an expansion that fits needs no truncation affordance: {expanded_text}"
+        );
+        assert!(
+            plain_line(expanded.last().expect("expanded rows")).starts_with('└'),
+            "the expanded frame closes too: {expanded_text}"
+        );
     }
 
     #[test]

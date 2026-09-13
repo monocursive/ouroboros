@@ -224,6 +224,7 @@ defmodule Ouroboros.Web.Live.NewSession do
               provider: provider,
               env: env,
               present: present,
+              credential_state: credential_state(value(row, :credential_state)),
               source: source,
               workspace_env: workspace_env,
               workspace_configured?: workspace_configured
@@ -273,6 +274,39 @@ defmodule Ouroboros.Web.Live.NewSession do
   @spec model_field(term()) :: model_field()
   def model_field(catalogue) do
     if is_map(catalogue), do: native_field(catalogue, @provider), else: {:text, nil}
+  end
+
+  @doc "Keep a saved/current exact choice accessible even outside the snapshot's bounded rows."
+  @spec model_field(term(), t()) :: model_field()
+  def model_field(catalogue, %__MODULE__{} = form) do
+    field = model_field(catalogue)
+
+    id =
+      case form.model_choice do
+        {:catalog, id} -> id
+        :custom -> trimmed(form.model_text)
+        _ -> nil
+      end
+
+    case field do
+      {:rows, [default | rows], total} when is_binary(id) and id != "" ->
+        if offers?(field, {:catalog, id}) do
+          field
+        else
+          current = %{
+            choice: {:catalog, id},
+            model: id,
+            label: short_model_id(id),
+            detail: "#{id} · Current choice; catalogue metadata unavailable; access not verified",
+            reasoning_efforts: Ouroboros.ReasoningEffort.accepted_names()
+          }
+
+          {:rows, [default, current | rows], total}
+        end
+
+      _ ->
+        field
+    end
   end
 
   defp native_field(catalogue, provider) do
@@ -363,7 +397,7 @@ defmodule Ouroboros.Web.Live.NewSession do
       choice: :custom,
       model: nil,
       label: "Custom model…",
-      detail: "For advanced provider configurations",
+      detail: "Enter an exact provider:model ID, including models absent from this snapshot",
       reasoning_efforts: nil
     }
   end
@@ -440,9 +474,21 @@ defmodule Ouroboros.Web.Live.NewSession do
   # The readable name is the option label. Detail keeps the exact id available to an
   # advanced reader without forcing everybody else to parse a provider namespace first.
   defp model_detail(model, id) do
-    case window(model[:context_window]) do
-      nil -> id
-      window -> "#{id} · #{window}"
+    detail =
+      case window(model[:context_window]) do
+        nil -> id
+        window -> "#{id} · #{window}"
+      end
+
+    cond do
+      model[:metadata] == :unavailable ->
+        "#{detail} · Configured; catalogue metadata unavailable; access not verified"
+
+      model[:configured] == true ->
+        "#{detail} · Configured"
+
+      true ->
+        detail
     end
   end
 
@@ -578,7 +624,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   """
   @spec requires_chatgpt?(t(), model_field()) :: boolean()
   def requires_chatgpt?(%__MODULE__{} = form, field) do
-    case model_intent(form, field).send do
+    case effective_model(form, field) do
       model when is_binary(model) -> String.starts_with?(model, "openai_codex:")
       nil -> false
     end
@@ -646,17 +692,18 @@ defmodule Ouroboros.Web.Live.NewSession do
     }
 
   defp effective_model(%__MODULE__{} = form, field) do
-    model_intent(form, field).send || selected_default_model(field, form.model_choice)
+    # Every omitted model takes the runtime default, including a blank Custom input.
+    model_intent(form, field).send || selected_default_model(field)
   end
 
-  defp selected_default_model({:rows, rows, _total}, :runtime_default) do
+  defp selected_default_model({:rows, rows, _total}) do
     case Enum.find(rows, &(&1.choice == :runtime_default)) do
       %{model: model} -> trimmed(model)
       _unknown -> nil
     end
   end
 
-  defp selected_default_model(_field, _choice), do: nil
+  defp selected_default_model(_field), do: nil
 
   @doc "The `<option>` value one choice travels to the browser as."
   @spec choice_value(model_choice()) :: String.t()
@@ -689,12 +736,13 @@ defmodule Ouroboros.Web.Live.NewSession do
   the account surface projects an identity, a boolean, and a login status, and the token
   itself never leaves the runtime's private file.
 
-  Four states, and they are different facts rather than degrees of the same one:
+  Five display states, distinct from provider acceptance:
 
     * `:checking` — nothing has answered yet, so nothing is claimed.
-    * `:connected` — the runtime says the subscription model can run now.
-    * `:waiting` — a login is pending; the code and the verification link belong here.
-    * `:required` — resolved, and the answer was no.
+    * `:connected` — local account metadata exists; access is not verified.
+    * `:waiting` — a login is pending; the code and verification link belong here.
+    * `:required` — no credential material was reported.
+    * `:unavailable` — invalid store or failed observation, not confirmed absence.
   """
   @spec account_card(term(), term()) :: map()
   def account_card(read, login) do
@@ -705,11 +753,13 @@ defmodule Ouroboros.Web.Live.NewSession do
         not is_map(read) and not pending? -> :checking
         usable?(read) -> :connected
         pending? -> :waiting
+        value(read, :credentialState) in ["invalid", "unavailable"] -> :unavailable
         true -> :required
       end
 
     %{
       state: state,
+      credential_note: credential_note(read),
       usable?: usable?(read),
       identity: identity(read),
       code: login && login[:code],
@@ -721,9 +771,39 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   @doc "Whether the runtime says an `openai_codex:` model can run right now."
   @spec usable?(term()) :: boolean()
+  def usable?(%{"credentialState" => state}) when state in ["absent", "invalid", "unavailable"],
+    do: false
+
   def usable?(%{"account" => %{"type" => "chatgpt"}}), do: true
   def usable?(%{"requiresOpenaiAuth" => false}), do: true
   def usable?(_read), do: false
+
+  defp credential_state(state) when state in [:present, :absent, :invalid, :unavailable],
+    do: Atom.to_string(state)
+
+  defp credential_state(state) when state in ["present", "absent", "invalid", "unavailable"],
+    do: state
+
+  defp credential_state(_), do: "unavailable"
+
+  defp credential_note(read) do
+    case value(read, :credentialState) do
+      "present" ->
+        "Credential material found locally. Provider acceptance and model access are not verified."
+
+      "absent" ->
+        "No local ChatGPT credential material was found. Connect to sign in."
+
+      "invalid" ->
+        "The local credential store is malformed. Restore a valid local store, then connect again; its contents are not shown."
+
+      "unavailable" ->
+        "Credential status could not be determined. Check local store access and refresh; this does not mean credentials are missing."
+
+      _ ->
+        "Credential-source status was not reported. Provider acceptance and model access are not verified."
+    end
+  end
 
   @doc """
   Whether a URL may be offered as a link.
@@ -785,6 +865,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   defp pending_login?(%{"login" => %{"status" => "pending"}}), do: true
+  defp pending_login?(%{"followingLogin" => true}), do: true
   defp pending_login?(_read), do: false
 
   defp login_error(%{"login" => %{"error" => error}}) when is_binary(error) and error != "",
@@ -817,7 +898,7 @@ defmodule Ouroboros.Web.Live.NewSession do
 
     * `id` — always. Caller-owned idempotency, minted with the form (see `new/0`).
     * `model` — whatever `model_intent/2` says it is sending, absent when that is nothing.
-    * `workspace` — the trimmed path, absent when the field is empty.
+    * `workspace` — the exact path, absent when the field is empty. Spaces are path bytes.
     * `sandbox_mode` — the operator's card, absent when no card was chosen.
     * `reasoning_effort` — the operator's level, absent when the picker was left alone.
 
@@ -829,7 +910,7 @@ defmodule Ouroboros.Web.Live.NewSession do
     %{"id" => form.id || mint_id()}
     |> put_stated("machine", trimmed(form.machine))
     |> put_stated("model", model_intent(form, field).send)
-    |> put_stated("workspace", trimmed(form.workspace))
+    |> put_stated("workspace", if(form.workspace != "", do: form.workspace))
     |> put_stated("sandbox_mode", stated(form.sandbox, @sandbox_modes))
     |> put_stated("reasoning_effort", stated(form.effort, efforts(form, field)))
   end
@@ -928,4 +1009,6 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
+  defp value(_, _), do: nil
 end

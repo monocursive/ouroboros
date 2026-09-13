@@ -40,6 +40,14 @@ defmodule Ouroboros.Test.StubSession do
 
   @impl true
   def init(opts) do
+    Ouroboros.Session.Delivery.publish(
+      Keyword.fetch!(opts, :session_id),
+      "stub-generation",
+      Keyword.get(opts, :state, :idle) in [:closed, :cancelled, :failed],
+      Ouroboros.Test.StubHarness.output_cursor(Keyword.get(opts, :replay, {:ok, []})) > 0,
+      Ouroboros.Test.StubHarness.output_cursor(Keyword.get(opts, :replay, {:ok, []}))
+    )
+
     {:ok,
      %{
        session_id: Keyword.fetch!(opts, :session_id),
@@ -84,7 +92,17 @@ defmodule Ouroboros.Test.StubSession do
     {:reply, reply, %{state | replay_calls: state.replay_calls + 1}}
   end
 
-  def handle_call({:ack, _attachment, _cursor}, _from, state), do: {:reply, :ok, state}
+  def handle_call({:ack, _attachment, cursor}, _from, state) do
+    Ouroboros.Session.Delivery.publish(
+      state.session_id,
+      "stub-generation",
+      state.state in [:closed, :cancelled, :failed],
+      cursor < Ouroboros.Test.StubHarness.output_cursor(state.replay),
+      Ouroboros.Test.StubHarness.output_cursor(state.replay)
+    )
+
+    {:reply, :ok, state}
+  end
 
   # Known, dispatched, and never resolving: `Session.turn_result/2` reports this as a
   # timeout for as long as the caller keeps asking.

@@ -34,15 +34,12 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   refused rather than re-run under a weaker posture, because a sandbox that silently
   is not there is worse than one that is absent and says so.
 
-  ## The escalation offer
+  ## Explicit retained-attempt retry
 
-  A denial `Sandbox.escalatable?/3` says an operator could lift comes back as an
-  `escalation:` key on the result, beside the output rather than inside it. This tool
-  cannot ask anybody anything — only `Ouroboros.Provider.Native.Loop` owns an approval
-  channel — so it describes the denial and says whether it is liftable, and the loop
-  decides whether a human sees it and re-runs the command. That split is why a `bash`
-  call made outside a loop reads exactly as honestly as one made inside: the guidance
-  text never claims somebody is being asked.
+  Opaque output can only produce an `unverified_denial` diagnostic. It never asks for
+  approval and never causes a replay. The loop may retain one failed attempt and return a
+  runtime-issued id; a later, explicit call carrying `retry_attempt_id` is separately
+  authorized before the identical command is run once in the fenced profile.
 
   ## What the command can read out of the environment
 
@@ -98,6 +95,12 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
         type: :string,
         default: "",
         doc: "A short description of what the command does, shown in the transcript."
+      ],
+      retry_attempt_id: [
+        type: :string,
+        default: "",
+        doc:
+          "Only use the exact runtime-issued id from the immediately retained failed attempt. Omit this field on every new command; never guess or reuse an id. A retry must keep the command, cwd, sandbox mode, and paths identical."
       ]
     ]
 
@@ -117,6 +120,14 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
     case Map.get(options, "bash_max_timeout_ms") || Map.get(options, :bash_max_timeout_ms) do
       value when is_integer(value) and value > 0 -> min(value, 14_400_000)
       _ -> @max_timeout_ms
+    end
+  end
+
+  @doc false
+  def unverified_denial(policy, output, status, command) do
+    case Sandbox.violation(policy, output, status) do
+      nil -> nil
+      violation -> if Sandbox.escalatable?(violation, policy, command), do: violation
     end
   end
 
@@ -209,13 +220,13 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
     case Sandbox.backend_failure(plan.label, output, status) do
       nil ->
         {inline, note} = present(output, context)
-        {annotation, offer} = annotate(plan, output, status, timed_out?)
+        {annotation, denial} = annotate(plan, output, status, timed_out?)
 
         {:ok,
          %{
            output: header(status, timed_out?, timeout) <> inline <> note <> annotation,
            is_error: timed_out? or status != 0,
-           escalation: offer
+           unverified_denial: denial
          }}
 
       message ->
@@ -235,25 +246,32 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   defp annotate(_plan, _output, _status, true), do: {"", nil}
   defp annotate(%{policy: nil}, _output, _status, _live), do: {"", nil}
 
-  # Returns the text appended to the tool result and, separately, the escalation *offer*
-  # the loop acts on. They are two things and are kept apart on purpose: this tool cannot
-  # ask anybody anything — only the loop process owns an approval channel — so all it does
-  # is describe the denial accurately and say whether it is one an operator could lift.
-  # A `bash` call made outside a loop therefore reads exactly as honestly as one inside.
+  # Output is diagnostic evidence only. A child can print these same bytes, so the text may
+  # explain the policy that would have caused a genuine denial but cannot itself authorize
+  # anything. Only an escalatable shape is returned as unverified state for the loop to bind
+  # to a fresh attempt token; read-only and network denials remain diagnostics with no token.
   defp annotate(plan, output, status, _live) do
     case Sandbox.violation(plan.policy, output, status) do
       nil ->
         {"", nil}
 
       violation ->
-        offered? = Sandbox.escalatable?(violation, plan.policy, plan.command)
+        reason = Sandbox.escalation_reason(violation, plan.policy, plan.label)
 
-        {Sandbox.escalation(violation, plan.policy, plan.label, offered: offered?),
-         if(offered?, do: offer(violation, plan))}
+        diagnostic =
+          "\nUnverified denial-like output was observed. It did not trigger approval or replay. " <>
+            reason <> " " <> Sandbox.escalation(violation, plan.policy, plan.label)
+
+        retained =
+          if Sandbox.escalatable?(violation, plan.policy, plan.command),
+            do: denial(violation, plan),
+            else: nil
+
+        {diagnostic, retained}
     end
   end
 
-  defp offer(violation, plan) do
+  defp denial(violation, plan) do
     %{
       constraint: violation.constraint,
       evidence: violation.evidence,

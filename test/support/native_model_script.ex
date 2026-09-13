@@ -76,6 +76,7 @@ defmodule Ouroboros.Test.NativeModelScript do
             [head | tail] -> {head, tail}
           end
 
+        chunks = if is_function(chunks, 1), do: chunks.(request), else: chunks
         {chunks, %{state | script: rest, requests: [request | state.requests]}}
       end)
 

@@ -22,7 +22,9 @@ defmodule Ouroboros.Provider.Native.Session do
   alias Ouroboros.Provider.Native.Context
   alias Ouroboros.Provider.Native.Context.Archive
   alias Ouroboros.Provider.Native.Context.Compaction
+  alias Ouroboros.Provider.Native.Context.CompactionOperation
   alias Ouroboros.Provider.Native.Context.Handoff
+  alias Ouroboros.Provider.Native.Context.HandoffOperation
   alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Inference
@@ -73,6 +75,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
   @max_plan_message_bytes 8 * 1024
   @max_follow_up_bytes 32 * 1024
+  @max_compaction_id_bytes 128
   # The posture that has to outlive the process. Held apart from `conversation.json`
   # because it is not conversation: a resume that restored the messages and dropped the
   # read-only posture would put a planning session back to work without asking anyone.
@@ -141,6 +144,16 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   def runtime_info(handle), do: call(handle, :runtime_info)
+
+  def prepare_fence(handle, generation, token),
+    do: call(handle, {:prepare_fence, generation, token})
+
+  def revalidate_fence(handle, generation, token, expected_root),
+    do: call(handle, {:revalidate_fence, generation, token, expected_root})
+
+  def release_fence(handle, generation, token),
+    do: call(handle, {:release_fence, generation, token})
+
   def attach(handle, coordinator, cursor), do: call(handle, {:attach, coordinator, cursor})
   def submit(handle, turn_id, mode, request), do: call(handle, {:submit, turn_id, mode, request})
   def steer(handle, request_id, request), do: call(handle, {:steer, request, request_id})
@@ -149,7 +162,15 @@ defmodule Ouroboros.Provider.Native.Session do
   def respond_approval(handle, request_id, %ApprovalResponse{} = response),
     do: call(handle, {:respond_approval, request_id, response})
 
-  def configure(handle, changes), do: call(handle, {:configure, changes})
+  def configure(handle, changes) do
+    case configure_with_timing(handle, changes) do
+      {:ok, _applies} -> :ok
+      other -> other
+    end
+  end
+
+  @doc false
+  def configure_with_timing(handle, changes), do: call(handle, {:configure, changes})
   def close(handle), do: call(handle, :close, @checkpoint_timeout + 5_000)
   def kill(handle), do: call(handle, :kill)
   def turn_result(handle, turn_id), do: call(handle, {:turn_result, turn_id})
@@ -321,14 +342,16 @@ defmodule Ouroboros.Provider.Native.Session do
     requested_id = if(fork?, do: nil, else: request.provider_session_id)
     checkpoint_limit = Checkpoint.limit(options)
 
-    with {:ok, provider_session_id} <- session_id(requested_id),
+    with {:ok, epoch_server} <- epoch_server(),
+         {:ok, provider_session_id} <- session_id(requested_id),
          {:ok, seeded} <-
            seed_fork(
              request.provider_session_id,
              provider_session_id,
              fork?,
              checkpoint_limit,
-             fork_to_turn
+             fork_to_turn,
+             epoch_server
            ),
          {:ok, scope} <-
            Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
@@ -362,12 +385,16 @@ defmodule Ouroboros.Provider.Native.Session do
         started_at: DateTime.utc_now(),
         finished_at: nil,
         runtime_error: nil,
+        maintenance_fence: nil,
+        epoch_monitor: epoch_monitor(epoch_server),
+        epoch_available?: true,
         provider_session_id: provider_session_id,
         scope: scope,
         session_dir: session_dir,
         checkpoint_path: checkpoint_path,
         checkpoint_durable?: durable?,
         checkpoint_limit: checkpoint_limit,
+        epoch_server: epoch_server,
         model_module: Model.module(),
         model_spec: model_spec,
         reasoning_effort: request.reasoning_effort,
@@ -391,16 +418,43 @@ defmodule Ouroboros.Provider.Native.Session do
         options: options,
         compact_at: Window.compact_at(options),
         keep_recent_tokens: Window.keep_recent_tokens(options),
+        unknown_compact_tokens: Window.unknown_compact_tokens(options),
         # The last request's size as the provider counted it, and the turn it was
         # counted on. Both are needed by the thrash guard, which asks "how many turns
         # ago", not "how long ago".
-        context_used: 0,
+        # Unknown until a provider reports a request size. Nil is distinct from a measured
+        # zero/reset and must not be inferred from cumulative token totals.
+        context_used: nil,
+        context_state: :unmeasured,
         turns: 0,
         compactions: [],
+        compaction_operation: nil,
+        compaction_results: CompactionOperation.load(session_dir),
+        compaction_operation_writer:
+          Application.get_env(
+            :ouroboros,
+            :native_compaction_operation_writer,
+            &CompactionOperation.put/3
+          ),
+        compaction_task_starter:
+          Application.get_env(
+            :ouroboros,
+            :native_compaction_task_starter,
+            &default_compaction_task_start/1
+          ),
         thrashing?: false,
         archives: [],
         handed_off_to: nil,
-        plan: nil,
+        handoff_results: HandoffOperation.load(session_dir, epoch_server: epoch_server),
+        handoff_operation_writer:
+          Application.get_env(
+            :ouroboros,
+            :native_handoff_operation_writer,
+            fn dir, operations, operation ->
+              HandoffOperation.put(dir, operations, operation, epoch_server: epoch_server)
+            end
+          ),
+        plan: conversation.plan,
         # A lazily-loaded rule enters the conversation once per session, not once per
         # turn: the loop reports back what it injected so the next turn does not repeat it.
         rules_loaded: [],
@@ -438,6 +492,10 @@ defmodule Ouroboros.Provider.Native.Session do
         # A child can settle before the loop's tracking call reaches this process. These
         # bounded tombstones preserve that ordering fact until the corresponding track.
         settled_subagents: MapSet.new(),
+        # Actionable child settlement notices are model input, not only UI events. While a
+        # turn is live they are steered to its next tool boundary; between turns they are
+        # retained here and injected once into the next user message.
+        pending_child_context: [],
         # ---- hooks (D5's three lifecycle events) ----
         hooks: Hooks.load(scope.root),
         # `SessionStart`'s `additionalContext`, held until the first turn's prompt and
@@ -449,7 +507,7 @@ defmodule Ouroboros.Provider.Native.Session do
         # into every `Loop` this session runs; between turns this process is the writer,
         # and each of its own records syncs the handle first because the loop advanced the
         # file while it was not looking.
-        journal: Journal.open(session_dir)
+        journal: Journal.open(session_dir, epoch_server: epoch_server)
       }
 
       case build_context(state) do
@@ -457,7 +515,12 @@ defmodule Ouroboros.Provider.Native.Session do
           register(provider_session_id)
 
           {:ok, _} =
-            Registry.register(Ouroboros.SessionRegistry, {:runtime, context.runtime_id}, nil)
+            Registry.register(Ouroboros.SessionRegistry, {:runtime, context.runtime_id}, %{
+              generation: state.generation,
+              terminal?: false,
+              pending?: false,
+              output_cursor: 0
+            })
 
           state =
             journal(
@@ -541,6 +604,105 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_call(:runtime_info, _from, state),
     do: {:reply, {:ok, runtime_snapshot(state)}, state}
 
+  def handle_call({:prepare_fence, fence_generation, token}, _from, state) do
+    case {state.epoch_server, state.epoch_available?} do
+      {server, false} when not is_nil(server) ->
+        {:reply, {:error, :maintenance_epoch_unavailable}, state}
+
+      _ ->
+        case state.maintenance_fence do
+          %{generation: ^fence_generation, token: ^token, root: root} ->
+            {:reply, native_fence_row(state, root), state}
+
+          nil ->
+            with :ok <- fence_idle(state),
+                 {:ok, _digest} <- checkpoint(state, {:maintenance_fence, fence_generation}),
+                 {:ok, row, root} <- native_fence_snapshot(state, fence_generation) do
+              fence = %{generation: fence_generation, token: token, root: root}
+              {:reply, {:ok, row}, %{state | maintenance_fence: fence}}
+            else
+              {:error, reason} -> {:reply, {:error, reason}, state}
+            end
+
+          _other ->
+            {:reply, {:error, :native_session_already_fenced}, state}
+        end
+    end
+  end
+
+  def handle_call(message, _from, %{epoch_available?: false} = state)
+      when (is_tuple(message) and
+              elem(message, 0) in [
+                :submit,
+                :steer,
+                :configure,
+                :checkpoint,
+                :handoff,
+                :compact,
+                :compact_start,
+                :compact_cancel,
+                :rewind,
+                :subagent_track,
+                :subagent_settle,
+                :subagent_release,
+                :bridge_tool,
+                :respond_approval
+              ]) or message in [:close, :kill] do
+    {:reply, {:error, :maintenance_epoch_unavailable}, state}
+  end
+
+  def handle_call({:revalidate_fence, generation, token, expected_root}, _from, state) do
+    case {state.epoch_server, state.epoch_available?} do
+      {server, false} when not is_nil(server) ->
+        {:reply, {:error, :maintenance_epoch_unavailable}, state}
+
+      _ ->
+        case state.maintenance_fence do
+          %{generation: ^generation, token: ^token, root: ^expected_root} ->
+            case native_fence_snapshot(state, generation) do
+              {:ok, row, ^expected_root} -> {:reply, {:ok, row}, state}
+              {:ok, _row, _changed} -> {:reply, {:error, :native_session_root_changed}, state}
+              {:error, reason} -> {:reply, {:error, reason}, state}
+            end
+
+          _ ->
+            {:reply, {:error, :stale_native_fence}, state}
+        end
+    end
+  end
+
+  def handle_call({:release_fence, generation, token}, _from, state) do
+    case state.maintenance_fence do
+      %{generation: ^generation, token: ^token} ->
+        {:reply, :ok, %{state | maintenance_fence: nil}}
+
+      _ ->
+        {:reply, {:error, :stale_native_fence}, state}
+    end
+  end
+
+  def handle_call(message, _from, %{maintenance_fence: fence} = state)
+      when not is_nil(fence) and
+             ((is_tuple(message) and
+                 elem(message, 0) in [
+                   :submit,
+                   :steer,
+                   :configure,
+                   :checkpoint,
+                   :handoff,
+                   :compact,
+                   :compact_start,
+                   :compact_cancel,
+                   :rewind,
+                   :subagent_track,
+                   :subagent_settle,
+                   :subagent_release,
+                   :bridge_tool,
+                   :respond_approval
+                 ]) or message in [:close, :kill]) do
+    {:reply, {:error, :maintenance_fenced}, state}
+  end
+
   def handle_call({:attach, coordinator, cursor}, {caller, _}, state) do
     if caller == coordinator and authorized_coordinator?(state, coordinator) and
          is_integer(cursor) and cursor >= 0 do
@@ -587,6 +749,14 @@ defmodule Ouroboros.Provider.Native.Session do
       :ok ->
         state = flush_producer(state)
 
+        Ouroboros.Session.Delivery.publish(
+          state.runtime_id,
+          state.generation,
+          state.status in [:closed, :cancelled, :failed],
+          not Output.empty?(state.output),
+          Output.high_water(state.output)
+        )
+
         if state.status in [:closed, :cancelled, :failed] and Output.empty?(state.output),
           do: {:stop, :normal, :ok, state},
           else: {:reply, :ok, state}
@@ -598,6 +768,14 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_call({:turn_result, turn_id}, _from, state),
     do: {:reply, Output.turn_result(state.output, turn_id), state}
+
+  def handle_call(
+        {:submit, _turn_id, _mode, _request},
+        _from,
+        %{compaction_operation: operation} = state
+      )
+      when not is_nil(operation),
+      do: {:reply, {:error, :compaction_in_progress}, state}
 
   def handle_call({:submit, turn_id, mode, request}, _from, state) do
     digest = fingerprint({mode, request})
@@ -784,7 +962,13 @@ defmodule Ouroboros.Provider.Native.Session do
   # `configure` is one of the two things allowed to change the cached prefix, so it
   # rebuilds it here rather than letting the next turn discover a stale one. A change
   # that fails validation leaves both the session and its prefix untouched.
+  def handle_call({:configure, _changes}, _from, %{compaction_operation: operation} = state)
+      when not is_nil(operation),
+      do: {:reply, {:error, :compaction_in_progress}, state}
+
   def handle_call({:configure, changes}, _from, state) do
+    applies = if is_nil(state.loop), do: :now, else: :next_turn
+
     with {:ok, state} <- apply_configuration(state, changes),
          {:ok, state} <- build_context(state) do
       state =
@@ -792,7 +976,12 @@ defmodule Ouroboros.Provider.Native.Session do
         |> supersede_plan_exit_mode(changes)
         |> persist_posture()
 
-      {:reply, :ok, state}
+      state =
+        if Map.has_key?(changes, :model),
+          do: %{state | context_used: nil, context_state: :unmeasured},
+          else: state
+
+      {:reply, {:ok, applies}, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -805,8 +994,9 @@ defmodule Ouroboros.Provider.Native.Session do
      {:ok,
       %{
         plan: state.plan_mode?,
-        sandbox_mode: state.scope.sandbox_mode,
+        current_plan: state.plan,
         sandbox_after_plan: state.sandbox_before_plan,
+        sandbox_mode: state.scope.sandbox_mode,
         approval_mode: state.approval_mode,
         awaiting_plan_exit: state.plan_exit != nil
       }}, state}
@@ -822,12 +1012,133 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  def handle_call({:handoff, prompt, open_child?}, _from, state) do
-    case start_handoff(state, prompt, open_child?) do
-      {:ok, state, result} -> {:reply, {:ok, result}, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+  def handle_call({:compact_start, id, _focus}, _from, state)
+      when not is_binary(id) or id == "" or byte_size(id) > @max_compaction_id_bytes,
+      do:
+        {:reply, {:error, {:invalid_compaction_id, %{max_bytes: @max_compaction_id_bytes}}},
+         state}
+
+  def handle_call({:compact_start, id, focus}, _from, state) do
+    fingerprint =
+      :crypto.hash(:sha256, :erlang.term_to_binary(focus)) |> Base.encode16(case: :lower)
+
+    case Map.get(state.compaction_results, id) || state.compaction_operation do
+      %{id: ^id, fingerprint: ^fingerprint} = operation ->
+        {:reply, {:ok, operation}, state}
+
+      %{id: ^id} ->
+        {:reply, {:error, :compaction_id_conflict}, state}
+
+      nil when not is_nil(state.loop) ->
+        {:reply, {:error, :busy}, state}
+
+      nil ->
+        source_digest =
+          Checkpoint.digest_of(state.messages, event_limit: state.checkpoint_limit)
+
+        operation = %{
+          id: id,
+          fingerprint: fingerprint,
+          source_digest: source_digest,
+          focus: focus,
+          status: :running,
+          requested_at: DateTime.utc_now()
+        }
+
+        owner = self()
+
+        with {:ok, _hook_context} <- compaction_allowed(state, focus, :manual),
+             {:ok, results} <-
+               state.compaction_operation_writer.(
+                 state.session_dir,
+                 state.compaction_results,
+                 operation
+               ) do
+          state = %{state | compaction_results: results}
+
+          case state.compaction_task_starter.(fn ->
+                 result = fold(state, focus)
+                 send(owner, {:compaction_operation, id, result})
+               end) do
+            {:ok, pid} ->
+              monitor = Process.monitor(pid)
+              running = operation |> Map.put(:pid, pid) |> Map.put(:monitor, monitor)
+
+              {:reply, {:ok, public_compaction(running)},
+               %{state | compaction_operation: running}}
+
+            {:error, reason} ->
+              state = settle_failed_compaction(state, operation, {:task_start_failed, reason})
+              {:reply, {:error, {:compaction_task_start_failed, reason}}, state}
+          end
+        else
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      _other ->
+        {:reply, {:error, :compaction_in_progress}, state}
     end
   end
+
+  def handle_call({action, id}, _from, state)
+      when action in [:compact_status, :compact_cancel] and
+             (not is_binary(id) or id == "" or byte_size(id) > @max_compaction_id_bytes),
+      do:
+        {:reply, {:error, {:invalid_compaction_id, %{max_bytes: @max_compaction_id_bytes}}},
+         state}
+
+  def handle_call({:compact_status, id}, _from, state) do
+    operation =
+      case state.compaction_operation do
+        %{id: ^id} = current -> current
+        _ -> Map.get(state.compaction_results, id)
+      end
+
+    {:reply,
+     if(operation, do: {:ok, public_compaction(operation)}, else: {:error, :unknown_compaction}),
+     state}
+  end
+
+  def handle_call(
+        {:compact_cancel, id},
+        _from,
+        %{compaction_operation: %{id: id} = operation} = state
+      ) do
+    Process.demonitor(operation.monitor, [:flush])
+    Task.Supervisor.terminate_child(Ouroboros.SessionTaskSupervisor, operation.pid)
+
+    settled =
+      operation
+      |> public_compaction()
+      |> Map.merge(%{status: :cancelled, finished_at: DateTime.utc_now()})
+
+    {:reply, {:ok, settled}, remember_compaction(state, settled)}
+  end
+
+  def handle_call({:compact_cancel, id}, _from, state) do
+    case Map.get(state.compaction_results, id) do
+      nil -> {:reply, {:error, :unknown_compaction}, state}
+      settled -> {:reply, {:ok, settled}, state}
+    end
+  end
+
+  def handle_call(
+        {:handoff, _prompt, _open_child?},
+        _from,
+        %{compaction_operation: operation} = state
+      )
+      when not is_nil(operation),
+      do: {:reply, {:error, :compaction_in_progress}, state}
+
+  def handle_call({:handoff, prompt, open_child?, id}, _from, state) do
+    case start_handoff(state, prompt, open_child?, id) do
+      {:ok, state, result} -> {:reply, {:ok, result}, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:handoff, prompt, open_child?}, from, state),
+    do: handle_call({:handoff, prompt, open_child?, nil}, from, state)
 
   def handle_call({:bridge_tool, _call, _emit}, _from, %{loop: loop} = state)
       when not is_nil(loop), do: {:reply, {:error, :busy}, state}
@@ -897,12 +1208,16 @@ defmodule Ouroboros.Provider.Native.Session do
       end)
 
       {:reply, :ok,
-       %{
-         state
-         | queued_child_approvals: Map.delete(state.queued_child_approvals, task_id),
-           subagents: Map.put(state.subagents, task_id, entry),
-           settled_subagents: MapSet.delete(state.settled_subagents, task_id)
-       }}
+       bind_session_work(
+         %{
+           state
+           | queued_child_approvals: Map.delete(state.queued_child_approvals, task_id),
+             subagents: Map.put(state.subagents, task_id, entry),
+             settled_subagents: MapSet.delete(state.settled_subagents, task_id)
+         },
+         task_id,
+         Map.get(meta, :bindings, [])
+       )}
     end
   end
 
@@ -910,6 +1225,15 @@ defmodule Ouroboros.Provider.Native.Session do
     case Map.fetch(state.subagents, task_id) do
       {:ok, %{pid: pid}} -> {:reply, {:ok, pid}, state}
       :error -> {:reply, :error, state}
+    end
+  end
+
+  def handle_call({:subagent_settle, task_id, summary}, _from, state) do
+    state = record_subagent_settlement(state, task_id, summary)
+
+    case checkpoint(state, {:subagent_settle, task_id}) do
+      {:ok, _digest} -> {:reply, :ok, mark_subagent_settled(state, task_id)}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -932,6 +1256,7 @@ defmodule Ouroboros.Provider.Native.Session do
       do: {:reply, :ok, state}
 
   def handle_call(:close, _from, state) do
+    state = cancel_compaction_for_shutdown(state, :closed)
     state = %{state | status: :closing}
 
     state =
@@ -940,7 +1265,7 @@ defmodule Ouroboros.Provider.Native.Session do
       |> terminate_turns("closed")
       |> stop_subagents("session closed")
 
-    case checkpoint(state) do
+    case checkpoint(state, :close) do
       {:ok, _digest} ->
         _ = session_end(state, "closed")
         state = journal(state, "session_closed", %{"status" => "closed"})
@@ -957,6 +1282,7 @@ defmodule Ouroboros.Provider.Native.Session do
       do: {:reply, :ok, state}
 
   def handle_call(:kill, _from, state) do
+    state = cancel_compaction_for_shutdown(state, :killed)
     state = %{state | status: :closing}
 
     state =
@@ -1010,10 +1336,14 @@ defmodule Ouroboros.Provider.Native.Session do
       | messages: snapshot.messages,
         reads: snapshot.reads,
         session_grants: snapshot.session_grants,
+        plan: Map.get(snapshot, :plan, state.plan),
         rules_loaded: Map.get(snapshot, :rules_loaded, state.rules_loaded)
     }
 
-    case checkpoint(state) do
+    # A plan-exit follow-up starts another loop under the same public turn ID.
+    # Its new conversation is a distinct publication; retries within that loop keep
+    # the same ordinal and therefore the same durable write identity.
+    case checkpoint(state, {:turn, turn_id, state.turns}) do
       {:ok, digest} -> {:reply, {:ok, digest}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -1032,6 +1362,10 @@ defmodule Ouroboros.Provider.Native.Session do
       {:error, _reason} = error -> {:reply, error, state}
     end
   end
+
+  def handle_call({:rewind, _to_turn, _what}, _from, %{compaction_operation: operation} = state)
+      when not is_nil(operation),
+      do: {:reply, {:error, :compaction_in_progress}, state}
 
   def handle_call({:rewind, _to_turn, _what}, _from, %{loop: loop} = state)
       when not is_nil(loop),
@@ -1093,6 +1427,78 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   def handle_info(:start_next, state), do: {:noreply, state}
+
+  def handle_info(
+        {:compaction_operation, id, result},
+        %{compaction_operation: %{id: id} = operation} = state
+      ) do
+    Process.demonitor(operation.monitor, [:flush])
+
+    case result do
+      {:ok, %{summary_error: reason}} when not is_nil(reason) ->
+        {:error, reason, state} = refuse_broken_compaction(state, reason)
+        {:noreply, settle_failed_compaction(state, operation, reason)}
+
+      {:ok, outcome} ->
+        case archive(state, outcome.archived) do
+          {:ok, entry} ->
+            committing = operation |> public_compaction() |> Map.put(:status, :committing)
+
+            case state.compaction_operation_writer.(
+                   state.session_dir,
+                   state.compaction_results,
+                   committing
+                 ) do
+              {:ok, results} ->
+                state = %{state | compaction_results: results}
+
+                case apply_compaction(state, outcome, entry, :manual) do
+                  {:ok, state, report} ->
+                    settled =
+                      operation
+                      |> public_compaction()
+                      |> Map.merge(%{
+                        status: :completed,
+                        result: report,
+                        finished_at: DateTime.utc_now()
+                      })
+
+                    {:noreply, remember_compaction(state, settled)}
+
+                  {:error, reason, unchanged} ->
+                    {:noreply, settle_failed_compaction(unchanged, operation, reason)}
+                end
+
+              {:error, reason} ->
+                {:noreply, settle_ambiguous_compaction(state, operation, reason)}
+            end
+
+          {:error, reason} ->
+            {:error, reason, state} = refuse_compaction(state, reason)
+            {:noreply, settle_failed_compaction(state, operation, reason)}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state} = refuse_broken_compaction(state, reason)
+        {:noreply, settle_failed_compaction(state, operation, reason)}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{compaction_operation: %{monitor: ref} = operation} = state
+      ) do
+    settled =
+      operation
+      |> public_compaction()
+      |> Map.merge(%{
+        status: :failed,
+        error: inspect(reason, limit: 6),
+        finished_at: DateTime.utc_now()
+      })
+
+    {:noreply, remember_compaction(state, settled)}
+  end
 
   def handle_info({:native_approval_timeout, request_id}, state) do
     if Map.has_key?(state.approval_timers, request_id) do
@@ -1221,6 +1627,9 @@ defmodule Ouroboros.Provider.Native.Session do
   def handle_info({:subagent, task_id, {:settled, summary}}, state) do
     emit(state, subagent_event(Subagent.settled_payload(summary)))
     state = cancel_child_approvals(state, task_id)
+    state = record_subagent_settlement(state, task_id, summary)
+    state = deliver_subagent_settlement(state, task_id, summary)
+    _ = checkpoint(state, {:subagent_settle, task_id})
     {:noreply, mark_subagent_settled(state, task_id)}
   end
 
@@ -1284,6 +1693,16 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{owner_monitor: monitor} = state),
     do: detach_coordinator(state)
+
+  def handle_info({:DOWN, monitor, :process, _pid, reason}, %{epoch_monitor: monitor} = state) do
+    {:noreply,
+     %{
+       state
+       | epoch_available?: false,
+         runtime_error: {:maintenance_epoch_unavailable, reason},
+         epoch_monitor: nil
+     }}
+  end
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
     case Enum.find(state.background_approvals, fn {_id, entry} ->
@@ -1367,6 +1786,90 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
+  defp record_subagent_settlement(state, task_id, summary) do
+    authority = Map.get(state.plan || %{}, "authority", %{})
+
+    authority =
+      Map.new(authority, fn {item_id, binding} ->
+        if binding["task_id"] == task_id do
+          settlement = settlement_name(summary.status)
+
+          receipt = %{
+            "task_id" => task_id,
+            "parent_session" => state.provider_session_id,
+            "item_id" => item_id,
+            "binding_digest" => binding["digest"],
+            "settlement" => settlement,
+            "outcome_digest" => settlement_digest(summary)
+          }
+
+          {item_id, Map.merge(binding, %{"state" => "settled", "receipt" => receipt})}
+        else
+          {item_id, binding}
+        end
+      end)
+
+    %{state | plan: (state.plan || %{}) |> Map.put("authority", authority)}
+  end
+
+  defp deliver_subagent_settlement(state, task_id, summary) do
+    notice =
+      "[Ouroboros child settlement: task_id=#{task_id}, status=#{settlement_name(summary.status)}, " <>
+        "report_available=true. Use agent_result with cursor 0 to inspect the retained report; " <>
+        "settlement does not imply acceptance.]"
+
+    case state.loop do
+      %{pid: pid} when is_pid(pid) ->
+        Kernel.send(pid, {:native_steer, notice})
+        state
+
+      _ ->
+        if length(state.pending_child_context) < AgentTool.max_tracked() do
+          %{state | pending_child_context: [notice | state.pending_child_context]}
+        else
+          state
+        end
+    end
+  end
+
+  defp bind_session_work(state, _task_id, []), do: state
+
+  defp bind_session_work(state, task_id, bindings) do
+    authority = Map.get(state.plan || %{}, "authority", %{})
+    item_ids = Enum.map(bindings, & &1["item_id"])
+
+    items =
+      Enum.map(Map.get(state.plan || %{}, "plan", []), fn item ->
+        if item["id"] in item_ids, do: Map.put(item, "owner_task_id", task_id), else: item
+      end)
+
+    additions =
+      Map.new(bindings, fn binding ->
+        {binding["item_id"], Map.merge(binding, %{"task_id" => task_id, "state" => "running"})}
+      end)
+
+    plan =
+      (state.plan || %{})
+      |> Map.put("plan", items)
+      |> Map.put("authority", Map.merge(authority, additions))
+
+    %{state | plan: plan}
+  end
+
+  defp settlement_name(:completed), do: "completed"
+  defp settlement_name(:failed), do: "failed"
+  defp settlement_name(:timed_out), do: "lost"
+  defp settlement_name(:stopped), do: "cancelled"
+  defp settlement_name(_), do: "lost"
+
+  defp settlement_digest(summary) do
+    summary
+    |> Map.take([:status, :error, :files_changed, :files_changed_count, :result_bytes])
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
   # `Process.alive?/1` answers only about this node and **raises** for a pid of any other,
   # so a child placed on another machine cannot be asked here. It does not need to be: every
   # tracked child is monitored, a monitor fires across the distribution link — including on
@@ -1398,6 +1901,21 @@ defmodule Ouroboros.Provider.Native.Session do
     Enum.each(state.background_approvals, fn {_id, entry} ->
       if Map.has_key?(entry, :task), do: Task.shutdown(entry.task, :brutal_kill)
     end)
+
+    state =
+      Enum.reduce(state.subagents, state, fn {task_id, entry}, acc ->
+        if entry.status == :running do
+          record_subagent_settlement(acc, task_id, %{
+            status: :stopped,
+            error: "parent session closed",
+            files_changed: [],
+            files_changed_count: 0,
+            result_bytes: 0
+          })
+        else
+          acc
+        end
+      end)
 
     Enum.each(state.subagents, fn {_task_id, entry} ->
       Process.demonitor(entry.monitor, [:flush])
@@ -1455,6 +1973,7 @@ defmodule Ouroboros.Provider.Native.Session do
   # case a `SessionEnd` hook exists to notice.
   @impl GenServer
   def terminate(:normal, state) do
+    _ = terminate_compaction_worker(state)
     _ = stop_loop(state)
     _ = stop_subagents(state, "session closed")
     :ok
@@ -1463,6 +1982,7 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   def terminate(reason, state) do
+    _ = terminate_compaction_worker(state)
     _ = stop_loop(state)
     _ = stop_subagents(state, "session ended")
     _ = session_end(state, terminate_reason(reason))
@@ -1475,10 +1995,64 @@ defmodule Ouroboros.Provider.Native.Session do
   defp terminate_reason({:shutdown, _detail}), do: "shutdown"
   defp terminate_reason(_crash), do: "crashed"
 
+  defp default_compaction_task_start(fun) do
+    # The task supervisor owns crash isolation, while the session remains the worker's
+    # explicit owner. A monitor alone cannot stop a worker when the owner is killed, so the
+    # worker also watches the session and exits before entering inference if ownership ended.
+    session_owner = self()
+
+    Task.Supervisor.start_child(Ouroboros.SessionTaskSupervisor, fn ->
+      owner_ref = Process.monitor(session_owner)
+      supervisor = self()
+
+      worker =
+        Task.async(fn ->
+          result = fun.()
+          send(supervisor, {:owned_compaction_result, self(), result})
+        end)
+
+      receive do
+        {:owned_compaction_result, _pid, result} ->
+          Process.demonitor(owner_ref, [:flush])
+          Task.await(worker, 5_000)
+          result
+
+        {:DOWN, ^owner_ref, :process, ^session_owner, _reason} ->
+          Task.shutdown(worker, :brutal_kill)
+          exit(:owner_stopped)
+      end
+    end)
+  end
+
+  defp cancel_compaction_for_shutdown(%{compaction_operation: nil} = state, _reason), do: state
+
+  defp cancel_compaction_for_shutdown(%{compaction_operation: operation} = state, reason) do
+    Process.demonitor(operation.monitor, [:flush])
+    _ = Task.Supervisor.terminate_child(Ouroboros.SessionTaskSupervisor, operation.pid)
+
+    settled =
+      operation
+      |> public_compaction()
+      |> Map.merge(%{
+        status: :cancelled,
+        error: "session #{reason} while compaction was running",
+        finished_at: DateTime.utc_now()
+      })
+
+    remember_compaction(state, settled)
+  end
+
+  defp terminate_compaction_worker(%{compaction_operation: %{pid: pid}}),
+    do: Task.Supervisor.terminate_child(Ouroboros.SessionTaskSupervisor, pid)
+
+  defp terminate_compaction_worker(_state), do: :ok
+
   # ---------------------------------------------------------------- turns
 
   defp start_turn(state, request, turn_id) do
-    text = TurnRequest.text(request) <> injected(state.start_context)
+    text =
+      TurnRequest.text(request) <>
+        injected(state.start_context ++ Enum.reverse(state.pending_child_context))
 
     with {:ok, state} <- maybe_compact(state),
          {:ok, state} <- ensure_context(state),
@@ -1540,7 +2114,8 @@ defmodule Ouroboros.Provider.Native.Session do
         session_context: state.context,
         subagent_depth: state.subagent_depth,
         subagent_parent: state.subagent_parent,
-        subagent_task_id: state.subagent_task_id
+        subagent_task_id: state.subagent_task_id,
+        current_plan: state.plan
       }
 
       task =
@@ -1557,6 +2132,7 @@ defmodule Ouroboros.Provider.Native.Session do
            # Sent once. A `SessionStart` hook's context belongs to the session opening, not
            # to every prompt after it.
            start_context: [],
+           pending_child_context: [],
            turn_plan: nil,
            turn_text: nil
        }}
@@ -1598,6 +2174,19 @@ defmodule Ouroboros.Provider.Native.Session do
   defp track_approval(state, _event), do: state
 
   defp emit(state, event) do
+    # Publish before append notifies the coordinator: its terminal checkpoint may be
+    # pruned concurrently. close/kill still carry :closing in state at this boundary.
+    if event.type in [:session_closed, :session_cancelled, :session_failed] or
+         state.status in [:closed, :cancelled, :failed] do
+      Ouroboros.Session.Delivery.publish(
+        state.runtime_id,
+        state.generation,
+        true,
+        true,
+        Output.high_water(state.output) + 1
+      )
+    end
+
     Output.append!(state.output, normalized_event(state, event))
     :ok
   end
@@ -2004,6 +2593,13 @@ defmodule Ouroboros.Provider.Native.Session do
     {:ok, %{state | scope: %{state.scope | sandbox_mode: Loop.sandbox_mode(value)}}}
   end
 
+  defp configure_one(state, :unknown_compact_tokens, nil),
+    do: {:ok, %{state | unknown_compact_tokens: nil}}
+
+  defp configure_one(state, :unknown_compact_tokens, value)
+       when is_integer(value) and value > 0,
+       do: {:ok, %{state | unknown_compact_tokens: value}}
+
   # B2's key, and the reason it is `plan` rather than a fifth `approval_mode`: the pinned
   # `Ouroboros.Session.Request` validates `approval_mode` against a four-member
   # `Zoi.enum`, so a `:plan` member would be refused at every session start and every
@@ -2073,16 +2669,21 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  defp seed_fork(_source_id, _child_id, false, _limit, _to_turn), do: {:ok, nil}
+  defp seed_fork(_source_id, _child_id, false, _limit, _to_turn, _epoch_server), do: {:ok, nil}
 
-  defp seed_fork(source_id, child_id, true, limit, to_turn)
+  defp seed_fork(source_id, child_id, true, limit, to_turn, epoch_server)
        when is_binary(source_id) and is_binary(child_id) do
     with :ok <- Paths.validate_session_id(source_id),
          {:ok, source_path, _durable?} <- Checkpoint.locate(source_id),
          {:ok, conversation} <- Checkpoint.load(source_path),
          {:ok, messages} <- fork_slice(source_path, conversation, to_turn),
          {:ok, child_path, _durable?} <- Checkpoint.locate(child_id),
-         {:ok, _digest} <- Checkpoint.write(child_path, messages, event_limit: limit) do
+         {:ok, _digest} <-
+           Checkpoint.write(child_path, messages,
+             event_limit: limit,
+             epoch_server: epoch_server,
+             operation_identity: {:fork, source_id, child_id, to_turn}
+           ) do
       {:ok, %{to_turn: to_turn, message_count: length(messages)}}
     else
       {:error, :no_checkpoint} -> {:error, :fork_source_unavailable}
@@ -2095,8 +2696,41 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  defp seed_fork(_source_id, _child_id, true, _limit, _to_turn),
+  defp seed_fork(_source_id, _child_id, true, _limit, _to_turn, _epoch_server),
     do: {:error, :fork_source_required}
+
+  # The application data directory identifies the supervised durable runtime. Bare and
+  # isolated native sessions retain their historical stateless path; production refuses
+  # to publish a native-owned durable byte without the Epoch authority being alive.
+  defp epoch_server do
+    configured = Application.get_env(:ouroboros, :native_epoch_server, :auto)
+    data_dir = Application.get_env(:ouroboros, :data_dir)
+    production? = is_binary(data_dir) and data_dir != ""
+
+    case configured do
+      :auto ->
+        if Process.whereis(Ouroboros.Maintenance.Epoch),
+          do: {:ok, Ouroboros.Maintenance.Epoch},
+          else: if(production?, do: {:error, :maintenance_epoch_required}, else: {:ok, nil})
+
+      nil ->
+        if production?, do: {:error, :maintenance_epoch_required}, else: {:ok, nil}
+
+      server ->
+        if GenServer.whereis(server),
+          do: {:ok, server},
+          else: {:error, :maintenance_epoch_required}
+    end
+  end
+
+  defp epoch_monitor(nil), do: nil
+
+  defp epoch_monitor(server) do
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) -> Process.monitor(pid)
+      nil -> nil
+    end
+  end
 
   # R3. A tail fork is the whole list, exactly as it was before `to_turn` existed.
   defp fork_slice(_source_path, conversation, nil), do: {:ok, conversation.messages}
@@ -2167,7 +2801,7 @@ defmodule Ouroboros.Provider.Native.Session do
   defp restore(path) do
     case Checkpoint.load(path) do
       {:ok, conversation} -> {:ok, conversation}
-      {:error, :no_checkpoint} -> {:ok, %{messages: [], offset: 0, rewind_floor: 0}}
+      {:error, :no_checkpoint} -> {:ok, %{messages: [], offset: 0, rewind_floor: 0, plan: nil}}
       {:error, reason} -> {:error, {:checkpoint_unusable, reason}}
     end
   end
@@ -2188,7 +2822,7 @@ defmodule Ouroboros.Provider.Native.Session do
       {:ok, count} ->
         state = %{state | messages: Enum.take(state.messages, count)}
 
-        case checkpoint(state) do
+        case checkpoint(state, {:rewind, to_turn}) do
           {:ok, digest} ->
             state =
               journal(state, "rewind", %{
@@ -2293,11 +2927,17 @@ defmodule Ouroboros.Provider.Native.Session do
   # Answers with the digest the write computed, because the loop's `turn_settled` journal
   # record carries it as the journal↔conversation cross-link (R1) and recomputing it here
   # would be a second digest over the same list.
-  defp checkpoint(state) do
+  defp checkpoint(state, operation_identity) do
+    operation_identity =
+      {:session, state.provider_session_id, state.generation, operation_identity}
+
     case Checkpoint.write(state.checkpoint_path, state.messages,
            event_limit: state.checkpoint_limit,
            offset: state.message_offset,
-           rewind_floor: state.rewind_floor
+           rewind_floor: state.rewind_floor,
+           plan: state.plan,
+           epoch_server: state.epoch_server,
+           operation_identity: operation_identity
          ) do
       {:ok, digest} ->
         {:ok, digest}
@@ -2305,6 +2945,94 @@ defmodule Ouroboros.Provider.Native.Session do
       {:error, reason} ->
         Logger.warning("native session checkpoint failed: #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  defp fence_idle(state) do
+    unresolved = map_size(state.approval_timers) + map_size(state.background_approvals)
+
+    if is_nil(state.loop) and state.active_turn_id == nil and :queue.is_empty(state.queue) and
+         unresolved == 0 and is_nil(state.compaction_operation),
+       do: :ok,
+       else: {:error, :native_session_busy}
+  end
+
+  defp native_fence_snapshot(state, fence_generation) do
+    with :ok <- fence_idle(state),
+         {:ok, checkpoint} <- file_root(state.checkpoint_path),
+         {:ok, journal} <- journal_root(state.journal),
+         {:ok, handoff} <- optional_file_root(HandoffOperation.path(state.session_dir)) do
+      root =
+        :erlang.term_to_binary(
+          {state.logical_id, state.runtime_id, state.provider_session_id, state.generation,
+           checkpoint, journal, handoff},
+          [:deterministic]
+        )
+        |> text_digest()
+
+      row = %{
+        logical_id: state.logical_id,
+        runtime_id: state.runtime_id,
+        provider_session_id: state.provider_session_id,
+        process_generation: state.generation,
+        fence_generation: fence_generation,
+        lifecycle: state.status,
+        active_count: 0,
+        queued_count: 0,
+        unresolved_count: 0,
+        checkpoint: checkpoint,
+        journal: journal,
+        handoff: handoff,
+        root_digest: root
+      }
+
+      {:ok, row, root}
+    end
+  end
+
+  defp native_fence_row(state, expected_root) do
+    case native_fence_snapshot(state, state.maintenance_fence.generation) do
+      {:ok, row, ^expected_root} -> {:ok, row}
+      {:ok, _row, _root} -> {:error, :native_session_root_changed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp file_root(path) do
+    with {:ok, bytes} <- File.read(path),
+         {:ok, stat} <- File.stat(path, time: :posix) do
+      {:ok,
+       %{
+         sha256: text_digest(bytes),
+         bytes: byte_size(bytes),
+         device: stat.major_device,
+         inode: stat.inode,
+         mtime: stat.mtime
+       }}
+    else
+      {:error, reason} -> {:error, {:native_checkpoint_unavailable, reason}}
+    end
+  end
+
+  defp optional_file_root(path) do
+    case file_root(path) do
+      {:ok, root} -> {:ok, root}
+      {:error, {:native_checkpoint_unavailable, :enoent}} -> {:ok, %{absent: true}}
+      error -> error
+    end
+  end
+
+  defp journal_root(nil), do: {:ok, %{absent: true, sequence: 0, head: Journal.seed()}}
+
+  defp journal_root(journal) do
+    case Journal.verify(journal.path) do
+      {:ok, verified} ->
+        with {:ok, file} <- file_root(journal.path) do
+          {:ok, Map.merge(file, %{sequence: verified.verified_through, head: verified.head})}
+        end
+
+      {:error, reason} ->
+        {:error, {:native_journal_unavailable, reason}}
     end
   end
 
@@ -2380,6 +3108,15 @@ defmodule Ouroboros.Provider.Native.Session do
   @spec compact(pid(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def compact(handle, focus \\ nil), do: call(handle, {:compact, focus})
 
+  @doc "Starts or reconciles a caller-identified manual compaction without replaying it."
+  def compact_start(handle, id, focus \\ nil), do: call(handle, {:compact_start, id, focus})
+
+  @doc "Returns one caller-identified compaction's current or terminal result."
+  def compact_status(handle, id), do: call(handle, {:compact_status, id})
+
+  @doc "Cancels a running caller-identified compaction; terminal results remain terminal."
+  def compact_cancel(handle, id), do: call(handle, {:compact_cancel, id})
+
   @doc """
   Starts a fresh native session in this workspace, seeded with a curated packet.
 
@@ -2405,7 +3142,11 @@ defmodule Ouroboros.Provider.Native.Session do
   """
   @spec handoff(pid(), String.t() | nil, keyword()) :: {:ok, map()} | {:error, term()}
   def handoff(handle, prompt \\ nil, opts \\ []),
-    do: call(handle, {:handoff, prompt, Keyword.get(opts, :open_child, true)})
+    do:
+      call(
+        handle,
+        {:handoff, prompt, Keyword.get(opts, :open_child, true), Keyword.get(opts, :id)}
+      )
 
   # ---------------------------------------------------------------- prefix
 
@@ -2426,6 +3167,9 @@ defmodule Ouroboros.Provider.Native.Session do
       add_dirs: state.scope.roots -- [state.scope.root],
       sandbox_mode: state.scope.sandbox_mode,
       approval_mode: loop_approval_mode(state),
+      # Read twice on purpose: the tool list hides `agent` at the cap, and the prompt
+      # tells a child what it is. Neither can be inferred from the other.
+      subagent_depth: state.subagent_depth,
       tools:
         Tools.specs(state.request.allowed_tools, state.request.disallowed_tools,
           workspace: state.scope.root,
@@ -2459,14 +3203,17 @@ defmodule Ouroboros.Provider.Native.Session do
     Map.merge(base, %{
       provider_session_id: state.provider_session_id,
       context_used: state.context_used,
+      context_state: state.context_state,
       compact_at: state.compact_at,
       keep_recent_tokens: state.keep_recent_tokens,
+      unknown_compact_tokens: state.unknown_compact_tokens,
       messages: length(state.messages),
       compaction_thrashing: state.thrashing?,
       compactions: Enum.reverse(state.compactions),
       archives: Enum.reverse(state.archives),
       handed_off_to: state.handed_off_to,
       plan: state.plan_mode?,
+      current_plan: state.plan,
       awaiting_plan_exit: state.plan_exit != nil
     })
   end
@@ -2485,14 +3232,70 @@ defmodule Ouroboros.Provider.Native.Session do
 
   defp track_usage(state, %{type: :usage, payload: payload}) when is_map(payload) do
     case Window.used(payload) do
-      used when used > 0 -> %{state | context_used: used}
-      _none -> state
+      used when is_integer(used) and used >= 0 ->
+        %{state | context_used: used, context_state: :measured}
+
+      _none ->
+        state
     end
   end
 
   defp track_usage(state, _event), do: state
 
   # ---------------------------------------------------------------- compaction
+
+  defp remember_compaction(state, settled) do
+    case state.compaction_operation_writer.(state.session_dir, state.compaction_results, settled) do
+      {:ok, results} ->
+        %{state | compaction_operation: nil, compaction_results: results}
+
+      {:error, reason} ->
+        Logger.error(
+          "native compaction result could not be retained: #{inspect(reason, limit: 6)}"
+        )
+
+        ambiguous =
+          Map.merge(settled, %{
+            status: :ambiguous,
+            error:
+              "the conversation checkpoint settled but the operation result could not be retained; query context before retrying"
+          })
+
+        %{
+          state
+          | compaction_operation: nil,
+            compaction_results: Map.put(state.compaction_results, ambiguous.id, ambiguous)
+        }
+    end
+  end
+
+  defp settle_ambiguous_compaction(state, operation, reason) do
+    settled =
+      operation
+      |> public_compaction()
+      |> Map.merge(%{
+        status: :ambiguous,
+        error: inspect(reason, limit: 6),
+        finished_at: DateTime.utc_now()
+      })
+
+    remember_compaction(state, settled)
+  end
+
+  defp settle_failed_compaction(state, operation, reason) do
+    settled =
+      operation
+      |> public_compaction()
+      |> Map.merge(%{
+        status: :failed,
+        error: inspect(reason, limit: 6),
+        finished_at: DateTime.utc_now()
+      })
+
+    remember_compaction(state, settled)
+  end
+
+  defp public_compaction(operation), do: Map.drop(operation, [:pid, :monitor])
 
   # The thrash latch is deliberately permanent for the *automatic* path. "Stop rather
   # than loop" means stop: a session whose tail alone fills the window will keep meeting
@@ -2504,7 +3307,13 @@ defmodule Ouroboros.Provider.Native.Session do
   defp maybe_compact(state) do
     window = state.prompt_context && state.prompt_context.context_window
 
-    if Window.over_threshold?(state.context_used, window, state.compact_at) do
+    over_known? = Window.over_threshold?(state.context_used, window, state.compact_at)
+
+    over_unknown? =
+      is_nil(window) and is_integer(state.unknown_compact_tokens) and
+        is_integer(state.context_used) and state.context_used >= state.unknown_compact_tokens
+
+    if over_known? or over_unknown? do
       case run_compaction(state, nil, :automatic) do
         {:ok, state, _report} -> {:ok, state}
         # A refused compaction is not a refused turn. The operator has been told, in an
@@ -2523,15 +3332,15 @@ defmodule Ouroboros.Provider.Native.Session do
   # threshold or a tail that cannot fit. Say so once, as a `status` provider event, and
   # stop — Claude Code's thrashing detection with the reason made visible.
   defp run_compaction(state, focus, trigger) do
-    if thrash_guard(state) do
+    if trigger == :automatic and thrash_guard(state) do
       emit(state, %{
         type: :provider_event,
         payload: %{
           "kind" => "status",
           "status" => "compaction_thrashing",
           "message" =>
-            "two compactions within three turns; stopping rather than looping. " <>
-              "Raise `keep_recent_tokens`, lower `compact_at`, or hand off to a new " <>
+            "a second compaction was requested within three turns; stopping rather than " <>
+              "looping. Raise `keep_recent_tokens`, lower `compact_at`, or hand off to a new " <>
               "session with the packet this one can build."
         },
         turn_id: nil,
@@ -2554,17 +3363,11 @@ defmodule Ouroboros.Provider.Native.Session do
   # the event that names it. The next model request may still be refused for length, which
   # is a truthful failure rather than a silent loss.
   defp gated_compaction(state, focus, trigger) do
-    base =
-      hook_base(state)
-      |> Map.put("trigger", if(trigger == :manual, do: "manual", else: "automatic"))
-      |> Map.put("custom_instructions", focus || "")
-      |> Map.put("messages", length(state.messages))
-
-    case Hooks.pre_compact(state.hooks, base) do
+    case compaction_allowed(state, focus, trigger) do
       {:ok, _context} ->
         do_compaction(state, focus, trigger)
 
-      {:deny, reason} ->
+      {:error, {:pre_compact_denied, reason}} ->
         announce_refusal(
           state,
           "pre_compact_hook_denied",
@@ -2574,6 +3377,19 @@ defmodule Ouroboros.Provider.Native.Session do
         )
 
         {:error, {:pre_compact_denied, reason}, state}
+    end
+  end
+
+  defp compaction_allowed(state, focus, trigger) do
+    base =
+      hook_base(state)
+      |> Map.put("trigger", if(trigger == :manual, do: "manual", else: "automatic"))
+      |> Map.put("custom_instructions", focus || "")
+      |> Map.put("messages", length(state.messages))
+
+    case Hooks.pre_compact(state.hooks, base) do
+      {:ok, context} -> {:ok, context}
+      {:deny, reason} -> {:error, {:pre_compact_denied, reason}}
     end
   end
 
@@ -2660,6 +3476,7 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp apply_compaction(state, outcome, entry, trigger) do
+    original = state
     # Taken before anything moves: after `rebase/2` and the message swap there is no way
     # left to say what the conversation hashed to going in.
     pre_digest = Checkpoint.digest_of(state.messages, event_limit: state.checkpoint_limit)
@@ -2684,50 +3501,47 @@ defmodule Ouroboros.Provider.Native.Session do
         compactions: [report | state.compactions],
         archives: if(entry, do: [entry | state.archives], else: state.archives),
         prompt_context: Context.compacted(state.prompt_context, context_options(state)),
-        context_used: 0
+        context_used: 0,
+        context_state: :compacted
     }
 
     # Checkpoint before broadcast, the same order every other durable write in this
     # process follows: a client told the conversation was folded must never be able to
     # restart onto a conversation that was not.
-    digest =
-      case checkpoint(state) do
-        {:ok, digest} -> digest
-        {:error, _reason} -> nil
-      end
+    case checkpoint(state, {:compaction, state.turns + 1}) do
+      {:error, reason} ->
+        {:error, {:checkpoint_write_failed, reason}, original}
 
-    # R1. `elided_count` is how many tool results compaction rewrote in place — a count
-    # rather than the per-call list REPLAY.md §3.2 asks for, because `Compaction.compact/2`
-    # returns a count and nothing else knows which calls they were. It costs nothing that
-    # matters: the elided *bytes* survive in this journal's own `tool_result` records, keyed
-    # by `call_id`, which is the copy the in-place rewrite used to destroy. `post_digest` is
-    # the folded conversation; `pre_digest` is what it hashed to going in.
-    state =
-      journal(state, "compaction", %{
-        "turn_id" => "compact_" <> Integer.to_string(state.turns + 1),
-        "trigger" => report.trigger,
-        # The summariser's own `model_call`/`model_result` pair is written at top level
-        # under this turn id rather than inlined here, so a replay engine feeds it back
-        # through the same path as any other model call. An elide-only fold ran no
-        # summariser and says so with `null` rather than a pointer to nothing.
-        "summariser_turn_id" =>
-          if(report.summarised, do: "compact_" <> Integer.to_string(state.turns + 1)),
-        "elided_count" => outcome.elided,
-        "archived_messages" => report.archived_messages,
-        "archive_id" => report.archive_id,
-        "summarised" => report.summarised,
-        "pre_digest" => pre_digest,
-        "post_digest" => digest
-      })
+      {:ok, digest} ->
+        # R1. `elided_count` is how many tool results compaction rewrote in place, while
+        # the journal retains their original bytes keyed by call id.
+        state =
+          journal(state, "compaction", %{
+            "turn_id" => "compact_" <> Integer.to_string(state.turns + 1),
+            "trigger" => report.trigger,
+            # The summariser's own `model_call`/`model_result` pair is written at top level
+            # under this turn id rather than inlined here, so a replay engine feeds it back
+            # through the same path as any other model call. An elide-only fold ran no
+            # summariser and says so with `null` rather than a pointer to nothing.
+            "summariser_turn_id" =>
+              if(report.summarised, do: "compact_" <> Integer.to_string(state.turns + 1)),
+            "elided_count" => outcome.elided,
+            "archived_messages" => report.archived_messages,
+            "archive_id" => report.archive_id,
+            "summarised" => report.summarised,
+            "pre_digest" => pre_digest,
+            "post_digest" => digest
+          })
 
-    emit(state, %{
-      type: :provider_event,
-      payload: compaction_payload(report, outcome),
-      turn_id: nil,
-      request_id: nil
-    })
+        emit(state, %{
+          type: :provider_event,
+          payload: compaction_payload(report, outcome),
+          turn_id: nil,
+          request_id: nil
+        })
 
-    {:ok, state, report}
+        {:ok, state, report}
+    end
   end
 
   # Eliding tool results rewrites messages in place, so the conversation still lines up
@@ -2897,7 +3711,7 @@ defmodule Ouroboros.Provider.Native.Session do
           %{}
         )
 
-        {:error, reason}
+        {:error, {:model_request_failed, Model.format_error(state.model_module, reason)}}
     end
   rescue
     error in Ouroboros.Audit.Unavailable ->
@@ -2970,50 +3784,250 @@ defmodule Ouroboros.Provider.Native.Session do
   # The packet is made durable *before* the child is started. A handoff whose child
   # failed to start is then still a handoff the operator can open by id, rather than a
   # summary that existed only inside a call that returned an error.
-  defp start_handoff(state, prompt, open_child?) do
+  defp start_handoff(state, prompt, open_child?, id) do
+    with :ok <- validate_handoff_operation_id(id) do
+      do_start_handoff(state, prompt, open_child?, id)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp do_start_handoff(state, prompt, open_child?, id) do
+    fingerprint = handoff_fingerprint(prompt)
+
+    case id && Map.get(state.handoff_results, id) do
+      %{fingerprint: ^fingerprint, status: :completed, result: result} ->
+        case maybe_open_child(state, result.provider_session_id, open_child?) do
+          {:ok, runtime_id} ->
+            result = %{
+              result
+              | runtime_id: runtime_id,
+                pid: if(runtime_id, do: lookup({:runtime, runtime_id}), else: nil)
+            }
+
+            {:ok, state, result}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
+
+      %{fingerprint: ^fingerprint, status: :prepared} = operation ->
+        commit_handoff(state, operation, open_child?)
+
+      %{fingerprint: ^fingerprint, status: :committing} = operation ->
+        reconcile_committing_handoff(state, operation, open_child?)
+
+      %{fingerprint: ^fingerprint} = operation ->
+        {:error, {:handoff_incomplete, Map.drop(operation, [:fingerprint])}, state}
+
+      %{} ->
+        {:error, :handoff_id_conflict, state}
+
+      nil ->
+        perform_handoff(state, prompt, open_child?, id, fingerprint)
+    end
+  end
+
+  defp perform_handoff(state, prompt, open_child?, id, fingerprint) do
+    operation = %{
+      id: id || "legacy-" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false),
+      fingerprint: fingerprint,
+      status: :running,
+      started_at: DateTime.utc_now()
+    }
+
+    with {:ok, handoff_results} <-
+           state.handoff_operation_writer.(state.session_dir, state.handoff_results, operation) do
+      state = %{state | handoff_results: handoff_results}
+      create_handoff(state, prompt, open_child?, operation)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp create_handoff(state, prompt, open_child?, operation) do
+    file_paths = Map.keys(state.reads)
+    file_counts = Handoff.file_counts(file_paths)
+
     packet =
       Handoff.packet(
         summary: handoff_summary(state),
-        files: Map.keys(state.reads),
+        files: file_paths,
         plan: state.plan,
         prompt: prompt,
         workspace: state.scope.root,
         parent: state.provider_session_id
       )
 
-    child_id = Paths.new_session_id()
-    seeded = [%{role: :user, content: packet}]
+    prepared =
+      Map.merge(operation, %{
+        status: :prepared,
+        child_id: Paths.new_session_id(),
+        packet: packet,
+        packet_bytes: byte_size(packet),
+        files: file_counts.total,
+        files_in_packet: file_counts.retained,
+        files_omitted: file_counts.omitted
+      })
 
-    with {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(child_id),
-         {:ok, _digest} <-
-           Checkpoint.write(checkpoint_path, seeded, event_limit: state.checkpoint_limit),
-         {:ok, runtime_id} <- maybe_open_child(state, child_id, open_child?) do
+    case state.handoff_operation_writer.(state.session_dir, state.handoff_results, prepared) do
+      {:ok, handoff_results} ->
+        commit_handoff(%{state | handoff_results: handoff_results}, prepared, open_child?)
+
+      {:error, reason} ->
+        {:error, {:handoff_packet_write_failed, reason}, state}
+    end
+  end
+
+  defp reconcile_committing_handoff(state, operation, open_child?) do
+    with {:ok, checkpoint_path, _} <- Checkpoint.locate(operation.child_id),
+         {:ok, [%{content: packet}]} <- Checkpoint.read(checkpoint_path),
+         true <- packet == operation.packet do
+      finish_handoff(state, operation, open_child?)
+    else
+      _ ->
+        {:error,
+         {:handoff_incomplete,
+          %{
+            status: :ambiguous,
+            child_id: operation.child_id,
+            error: "child checkpoint outcome is ambiguous"
+          }}, state}
+    end
+  end
+
+  defp finish_handoff(state, operation, open_child?) do
+    child_id = operation.child_id
+
+    with {:ok, runtime_id} <- maybe_open_child(state, child_id, open_child?) do
       pid = if runtime_id, do: lookup({:runtime, runtime_id}), else: nil
 
       result = %{
         provider_session_id: child_id,
         runtime_id: runtime_id,
         pid: pid,
-        packet_bytes: byte_size(packet),
-        files: length(Map.keys(state.reads)),
+        packet_bytes: operation.packet_bytes,
+        files: operation.files,
+        files_in_packet: operation.files_in_packet,
+        files_omitted: operation.files_omitted,
         parent: state.provider_session_id
       }
 
-      emit(state, %{
-        type: :provider_event,
-        payload: %{
-          "kind" => "handoff",
-          "provider_session_id" => child_id,
-          "packet_bytes" => result.packet_bytes,
-          "files" => result.files
-        },
-        turn_id: nil,
-        request_id: nil
-      })
-
-      {:ok, %{state | handed_off_to: child_id}, result}
+      complete_handoff(state, operation, result)
+    else
+      {:error, reason} -> settle_handoff_failure(state, operation, reason)
     end
   end
+
+  defp complete_handoff(state, operation, result) do
+    child_id = operation.child_id
+
+    completed =
+      Map.merge(operation, %{
+        status: :completed,
+        result: result,
+        finished_at: DateTime.utc_now()
+      })
+
+    case state.handoff_operation_writer.(state.session_dir, state.handoff_results, completed) do
+      {:ok, handoff_results} ->
+        emit(state, %{
+          type: :provider_event,
+          payload: %{
+            "kind" => "handoff",
+            "provider_session_id" => child_id,
+            "packet_bytes" => result.packet_bytes,
+            "files" => result.files,
+            "files_in_packet" => result.files_in_packet,
+            "files_omitted" => result.files_omitted
+          },
+          turn_id: nil,
+          request_id: nil
+        })
+
+        {:ok, %{state | handed_off_to: child_id, handoff_results: handoff_results}, result}
+
+      {:error, reason} ->
+        {:error, {:handoff_result_write_failed, reason}, state}
+    end
+  end
+
+  defp commit_handoff(state, operation, open_child?) do
+    child_id = operation.child_id
+    seeded = [%{role: :user, content: operation.packet}]
+
+    committing = %{operation | status: :committing}
+
+    case state.handoff_operation_writer.(state.session_dir, state.handoff_results, committing) do
+      {:ok, handoff_results} ->
+        committing_state = %{state | handoff_results: handoff_results}
+
+        with {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(child_id),
+             {:ok, _digest} <-
+               write_handoff_checkpoint(
+                 checkpoint_path,
+                 seeded,
+                 state.checkpoint_limit,
+                 inherited_plan(state.plan, state.provider_session_id)
+               ) do
+          finish_handoff(committing_state, committing, open_child?)
+        else
+          {:error, reason} ->
+            {:error, {:handoff_checkpoint_outcome_unknown, reason}, committing_state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp write_handoff_checkpoint(path, messages, limit, plan) do
+    writer =
+      Application.get_env(:ouroboros, :native_handoff_checkpoint_writer, &Checkpoint.write/3)
+
+    writer.(path, messages, event_limit: limit, plan: plan)
+  end
+
+  # Structured campaign state is inherited context, not a new acceptance decision. The
+  # checkpoint v3 digest binds it exactly; `inherited_from` prevents a consumer from
+  # presenting the child as the actor that accepted retained parent work.
+  defp inherited_plan(nil, _parent), do: nil
+
+  defp inherited_plan(plan, parent) when is_map(plan) do
+    plan
+    |> Map.put("inherited_from", parent)
+    |> Map.put("inheritance", "context_only")
+  end
+
+  defp settle_handoff_failure(state, operation, reason) do
+    failed =
+      Map.merge(operation, %{status: :failed, error: reason, finished_at: DateTime.utc_now()})
+
+    case state.handoff_operation_writer.(state.session_dir, state.handoff_results, failed) do
+      {:ok, handoff_results} ->
+        {:error, reason, %{state | handoff_results: handoff_results}}
+
+      {:error, write_reason} ->
+        {:error, {:handoff_settlement_write_failed, reason, write_reason}, state}
+    end
+  end
+
+  defp handoff_fingerprint(prompt) do
+    :crypto.hash(:sha256, :erlang.term_to_binary(prompt))
+    |> Base.url_encode64(padding: false)
+  end
+
+  defp validate_handoff_operation_id(nil), do: :ok
+
+  defp validate_handoff_operation_id(id) when is_binary(id) do
+    cond do
+      String.trim(id) == "" -> {:error, :invalid_handoff_id}
+      byte_size(id) > 128 -> {:error, {:invalid_handoff_id, %{max_bytes: 128}}}
+      true -> :ok
+    end
+  end
+
+  defp validate_handoff_operation_id(_id), do: {:error, :invalid_handoff_id}
 
   # The child inherits this session's request — same workspace, same tools, same posture —
   # with its own id and no caller-supplied resume. It also inherits `context.owner`,

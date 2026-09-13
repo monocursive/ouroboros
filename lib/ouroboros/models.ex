@@ -105,6 +105,8 @@ defmodule Ouroboros.Models do
         end,
         :desc
       )
+      |> Enum.map(fn {prefix, _catalog, model} -> model(model, Atom.to_string(prefix)) end)
+      |> pin_configured(default_model(:native))
 
     %{
       provider: :native,
@@ -115,14 +117,30 @@ defmodule Ouroboros.Models do
       default: default_model(:native),
       model_option: true,
       total: length(models),
-      models:
-        models
-        |> Enum.take(@max_models)
-        |> Enum.map(fn {prefix, _catalog, model} ->
-          model(model, Atom.to_string(prefix))
-        end)
+      models: Enum.take(models, @max_models)
     }
   end
+
+  # Configured intent is selectable even when the packaged snapshot predates it or
+  # ranking would cut it off. Metadata absence is not model/account availability.
+  defp pin_configured(models, id) when is_binary(id) and id != "" do
+    configured =
+      Enum.find(models, &(&1.id == id)) ||
+        %{
+          id: id,
+          name: nil,
+          context_window: nil,
+          max_output_tokens: nil,
+          release_date: nil,
+          pricing: nil,
+          reasoning_efforts: Ouroboros.ReasoningEffort.accepted_names(),
+          metadata: :unavailable
+        }
+
+    [Map.put(configured, :configured, true) | Enum.reject(models, &(&1.id == id))]
+  end
+
+  defp pin_configured(models, _), do: models
 
   defp catalog_models(nil), do: []
 

@@ -62,6 +62,9 @@ defmodule Ouroboros.Control.Permissions.Matcher do
 
   # ── Bash ───────────────────────────────────────────────────────────────────────────
 
+  defp do_matches?(%Pattern{kind: :sandbox_escalation}, request, _quantifier),
+    do: request.tool == "sandbox_escalation" and request.context[:sandbox_escalation] == true
+
   defp do_matches?(%Pattern{kind: :bash}, %Request{command: nil}, _quantifier), do: false
 
   defp do_matches?(%Pattern{kind: :bash, spec: spec}, %Request{command: command}, quantifier) do

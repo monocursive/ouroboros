@@ -72,9 +72,11 @@ and how it finds the others.
 
 Role (`:core`, `:builder`, `:signer`) is resolved once, at application start, before any
 child is supervised — an unrecognized role raises rather than booting the privileged
-tree. `:core` starts the full runtime. `:builder` starts formation and
-`Ouroboros.Wasm.Supervisor` — the helper pool a forwarded lane-W forge needs in order to
-read imports (W22) — and nothing that holds durable work: no stores and no sessions.
+tree. `:core` starts the full runtime. `:builder` starts the role-neutral ephemeral
+`Ouroboros.Storage.ETS` compatibility table, formation, the bounded helper-process
+registry, and `Ouroboros.Wasm.Supervisor` — the helper pool a forwarded lane-W forge
+needs in order to read imports (W22) — and nothing that holds durable work: no durable
+stores, session registries, workspaces, or sessions.
 `:signer` starts the durable-directory owner when a data directory is configured, then
 one process: `Upgrade.Signing.Service`, which holds the key, applies the signing policy,
 and journals every decision, then formation. That process leads the role-specific
@@ -161,6 +163,22 @@ usage, outcomes, runtime identity, generation, and cursor together. It acknowled
 broadcasts only after successful persistence. Repeated drains do not fold a batch twice;
 stale attachments and generations cannot acknowledge another owner's output. A retained
 range gap is explicit. There is no active 25 ms event-polling loop.
+
+An admitted coordinator is not automatically restarted with its released operation lease.
+The supervised recovery sweep acquires fresh session-bound admission before rebuilding it,
+including a terminal coordinator whose native runtime still retains unacknowledged output.
+This does not restart the native generation or bypass a closed maintenance fence.
+Terminal retention and deletion keep the checkpoint while its native generation has pending
+terminal delivery, so short retention cannot discard it while admission is closed. The
+native owner publishes this bounded delivery projection in the Registry before notifying
+the coordinator and updates it on acknowledgement; the durable store never synchronously
+calls an execution process. A mismatched generation or a nonterminal runtime does not pin
+an unrelated terminal checkpoint. Unknown delivery observations retain the record but do
+not trigger repeated recovery. Admission acquisition and release failures stay within an
+individual recovery attempt rather than crashing the shared sweep.
+Recovery also compares the native output cursor with the durable checkpoint: newer terminal
+output is retained as `session_delivery_uncheckpointed` for explicit reconciliation, never
+acknowledged or repeatedly restarted as though it were already persisted.
 
 The output queue is bounded at 4,096 events and 32 MiB; one event is bounded at 8 MiB.
 A separate 256-event / 8 MiB reserve keeps lifecycle and denial/cancellation output
@@ -267,8 +285,10 @@ attach natively — all of which have landed.
     with the drop stated in the prompt.
   - `Context.Window` resolves the model's context window from `llm_db`, then node
     configuration, then **not at all**. `context_used`/`context_window` ride on every
-    `usage` event; an unknown window omits the key rather than supplying a denominator
-    nobody measured.
+    `usage` event; an unknown window omits the denominator but retains the provider-counted
+    request size. An explicit `unknown_compact_tokens` is an operator-selected history
+    budget, not an inferred model capacity; absent that option, unknown capacity never
+    triggers automatic compaction.
   - `Context.Compaction` elides older tool results before it summarises anything, and
     summarises into a fixed Goal / Constraints / Progress / Decisions / Next steps,
     keeping `keep_recent_tokens` of the tail verbatim. `Context.Archive` retains the
@@ -535,13 +555,19 @@ model may do to this machine. It is consulted at the pre-tool seam the native lo
 `Ouroboros.Provider.Native.Permissions.evaluate/1` — before any `approval_requested` event
 is emitted, and at the interactive plane's external approvals and operator shell.
 
-A rule is `{pattern, decision, scope}`. The pattern language is `Bash(<prefix> *)` with a
+A rule is `{pattern, decision, scope}`. Rule vocabulary version 2 adds
+`SandboxEscalation()` without changing the durable permission-checkpoint version or the
+meaning of any version 1 rule. The pattern language is `Bash(<prefix> *)` with a
 word boundary, path globs for `Read`/`Edit`/`Write` canonicalised through
 `Workspace.Path`, `WebFetch(domain:…)`, `mcp__<server>__<tool>`, and `Tool(<name>)`;
 `Bash(command:…)` is refused, and `Tool(<name>:<param>=<value>)` may deny or ask but never
 allow. A compound command splits per sub-command with wrappers stripped and redirect
 targets evaluated as writes, and an `allow` must cover every part while a `deny` needs
 only one — the asymmetry that keeps a chained command from smuggling a part past an allow.
+`SandboxEscalation()` is the separately versioned authority for one explicit, retained
+failed-command retry in the fenced `.git`-write profile. It is argument-free and broad by
+design, may be configured by an operator, and is never implied by `Bash(…)`; generic
+`Tool(sandbox_escalation)` cannot carry an allow.
 
 Four scopes, `:node` (operator configuration) above `:user` above `:workspace` above
 `:session`, resolved as: any `deny`, then any `ask`, then `allow`, with scope breaking

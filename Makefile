@@ -13,7 +13,8 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox-host-test dev-host-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
+.PHONY: release-packaging-test
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -26,7 +27,10 @@ help:
 	@echo "make stop             everything down: daemon, and any stray daemons"
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
+	@echo "make sandbox-host-test  macOS Seatbelt kernel gate (non-nested host context)"
+	@echo "make dev-host-test      launcher PID-safety gate (host process controls)"
 	@echo "make test             formatting, script checks, mix test, the boot gate, cargo test/fmt/clippy"
+	@echo "make release-packaging-test  check packaging recipes with producer stubs; does not build the product"
 	@echo "make boot-gate        pre-reduction, pre-J2 and pre-J3 data booted against this tree, 10x per mode"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
@@ -79,13 +83,19 @@ reset:
 logs:
 	@sh scripts/dev.sh logs
 
+sandbox-host-test:
+	@sh scripts/test-sandbox-host.sh
+
+dev-host-test:
+	@sh scripts/test-dev-host.sh
+
 # The WebAssembly containment helper, and the only helper this repository builds. It
 # enforces the same on every platform — the boundary is wasmtime's linker, not a kernel
 # feature — so there is no per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a
 # newer Rust than the rest of this workspace; see the rust-version note in tui/wasm/Cargo.toml.
 wasm:
 	@echo "==> wasm: release helper into priv/wasm/"
-	cd tui && $(CARGO) build --release -p ouro-wasm
+	cd tui && $(CARGO) build --locked --release -p ouro-wasm
 	mkdir -p priv/wasm
 	cp tui/target/release/ouro-wasm priv/wasm/ouro-wasm
 	chmod 0755 priv/wasm/ouro-wasm
@@ -193,12 +203,22 @@ wasm-skew-test:
 	@echo "==> wasm-skew-test: a precompiled artifact from another toolchain, refused by name"
 	scripts/wasm-skew-test.sh
 
+release-packaging-test:
+	sh scripts/test-release-packaging.sh
+	python3 scripts/test-release.py
+	python3 scripts/test-install.py
+
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
 # extractor nobody compiled is an extractor nobody tested.
 test:
 	@echo "==> test: formatting and scripts, then mix, the boot gate, and Rust with both feature sets"
 	$(MIX) format --check-formatted
+	sh scripts/test-release-packaging.sh
+	python3 scripts/test-release.py
+	python3 scripts/test-install.py
+	sh scripts/test-isolated-test.sh
+	sh scripts/test-self-development-artifacts.sh
 	sh scripts/test-dev.sh
 	SHELL="$(SHELL)" $(MIX) test
 	$(MAKE) boot-gate
@@ -292,6 +312,10 @@ release-tarball: wasm
 # machine, with the same target.
 ouro: release-tarball
 	@echo "==> ouro: baking that tarball into tui/target/release/ouro"
-	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
-	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features embed
+	@set -eu; set -- "$$PWD"/_build/prod/$(RELEASE)-*.tar.gz; \
+	if [ "$$#" -ne 1 ] || [ ! -f "$$1" ] || [ -L "$$1" ]; then \
+	  echo "ouro: expected one regular release tarball; use a fresh build checkout (old artifacts are not deleted)" >&2; \
+	  exit 1; \
+	fi; \
+	cd tui && OUROBOROS_RELEASE_TARBALL="$$1" $(CARGO) build --locked --release --features embed
 	@ls -l tui/target/release/ouro

@@ -103,7 +103,12 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
     data_dir = Path.join(scratch, "development")
     System.put_env(@data_dir, "  #{data_dir}\t")
 
-    assert get_in(runtime_config(:dev), [:ouroboros, :data_dir]) == data_dir
+    config = runtime_config(:dev)
+
+    assert get_in(config, [:ouroboros, :data_dir]) == data_dir
+
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")} ==
+             get_in(config, [:ouroboros, :interactive_storage])
 
     System.put_env(@data_dir, " relative/gateway ")
 

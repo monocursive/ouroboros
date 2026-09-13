@@ -85,6 +85,34 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
+    test "a change during a running turn says next turn and does not alter that turn", %{id: id} do
+      ref = start_session(id, approval_mode: :prompt)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "first posture", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{approval_mode: :prompt},
+                      adapter},
+                     2_000
+
+      assert {:ok, result} =
+               InteractiveSession.configure(ref, %{approval_mode: :auto_approve})
+
+      assert result.applies == :next_turn
+      assert :ok = HarnessAdapter.finish(adapter)
+      assert_eventually(fn -> ready_for_next_turn?(ref) end)
+
+      assert {:ok, _turn} =
+               InteractiveSession.send_message(ref, "next posture", id: unique_id("turn"))
+
+      assert_receive {:ouroboros_test_model_started, _run,
+                      %RunRequest{approval_mode: :auto_approve}, next_adapter},
+                     2_000
+
+      assert :ok = HarnessAdapter.finish(next_adapter)
+      retire_session(id)
+    end
+
     test "the effective options survive a coordinator restart", %{id: id} do
       ref = start_session(id)
       assert {:ok, _result} = InteractiveSession.configure(ref, %{sandbox_mode: :read_only})

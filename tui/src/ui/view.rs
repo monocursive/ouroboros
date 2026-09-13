@@ -2277,6 +2277,13 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         }
     }
 
+    if let Some(risk) = &detail.at_least_once_risk {
+        body.push(Line::from(vec![
+            Span::styled("· replay risk: ", Style::default().fg(theme::warn())),
+            Span::styled(risk.clone(), Style::default().fg(theme::warn())),
+        ]));
+    }
+
     // Everything above is chrome the popup must keep; whatever height is left after it and
     // the answer rows is the diff's budget.
     let fixed = body.len() + answers.len() + approval_notes(&modal).len() + 5;

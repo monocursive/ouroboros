@@ -17,21 +17,47 @@
 # of the same component must still load, because the whole point of that refusal is that it is a
 # fallback and not a dead capability.
 #
-# Usage: scripts/wasm-skew-test.sh [triple|version|all]   (default: all)
+# Usage: scripts/wasm-skew-test.sh [triple|version|all] [online]
+#        scripts/wasm-skew-test.sh version offline
+# (defaults: all online; offline is supported only for version skew)
 #
 # Output lands in `_build/wasm-skew/`, which `test/wasm/skew_test.exs` reads: a real artifact is
 # a built binary and this repository does not check those in (see `.gitignore`'s note on
 # `test/support/wasm/echo.wasm`), so the Elixir half builds or skips with this script's name in
-# the reason. `OURO_WASM_SKEW_DIR=` moves it.
+# the reason. Non-empty `OUROBOROS_WASM_SKEW_DIR` moves it; non-empty legacy
+# `OURO_WASM_SKEW_DIR` remains a compatibility fallback.
 
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-out="${OURO_WASM_SKEW_DIR:-$root/_build/wasm-skew}"
+out="${OUROBOROS_WASM_SKEW_DIR:-${OURO_WASM_SKEW_DIR:-$root/_build/wasm-skew}}"
 what="${1:-all}"
 
 IMAGE="${OURO_SKEW_TEST_IMAGE:-hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1}"
 RUST_VERSION="${OURO_SKEW_TEST_RUST:-1.95}"
+CARGO_NET="${2:-online}"
+case "$CARGO_NET" in
+  online) CARGO_NET_FLAG= ;;
+  offline)
+    CARGO_NET_FLAG=--offline
+    export CARGO_NET_OFFLINE=true RUSTUP_AUTO_INSTALL=0
+    ;;
+  *)
+    echo "wasm-skew-test: second argument is online or offline." >&2
+    exit 2
+    ;;
+esac
+case "$what" in
+  triple|version|all) ;;
+  *)
+    echo "wasm-skew-test: unknown argument \`$what\`; it is triple, version or all." >&2
+    exit 2
+    ;;
+esac
+if [ "$CARGO_NET" = offline ] && [ "$what" != version ]; then
+  echo "wasm-skew-test: offline mode supports version skew only; triple and all require online container setup." >&2
+  exit 2
+fi
 # The version the copied crate is pinned to. One patch back from the workspace's own resolution:
 # the *nearest* other wasmtime that builds under the same MSRV and the same `wasmparser` pin, so
 # what differs between the two helpers is a version string and nothing structural.
@@ -45,8 +71,8 @@ VOLUME_CARGO=ouro-forge-cargo
 VOLUME_RUSTUP=ouro-forge-rustup
 VOLUME_TUI_TARGET=ouro-forge-tui-target
 
-helper="$root/priv/wasm/ouro-wasm"
-guest="$root/test/support/wasm/echo.wasm"
+helper="${OUROBOROS_WASM_HELPER:-$root/priv/wasm/ouro-wasm}"
+guest="${OUROBOROS_WASM_GUEST:-$root/test/support/wasm/echo.wasm}"
 
 if [ ! -x "$helper" ]; then
   echo "wasm-skew-test: no helper at $helper; run \`make wasm\`." >&2
@@ -243,6 +269,7 @@ TOML
   sed -e "s/^wasmtime = { version = \"48\"/wasmtime = { version = \"=$SKEW_WASMTIME\"/" \
     "$work/wasm/Cargo.toml" > "$work/pinned.toml"
   mv "$work/pinned.toml" "$work/wasm/Cargo.toml"
+  cp "$root/test/support/wasm/wasmtime-48.0.0-Cargo.lock" "$work/Cargo.lock"
 
   if ! grep -q "^wasmtime = { version = \"=$SKEW_WASMTIME\"" "$work/wasm/Cargo.toml"; then
     echo "wasm-skew-test: the wasmtime line in tui/wasm/Cargo.toml is not the shape this pin edits." >&2
@@ -250,7 +277,7 @@ TOML
   fi
   grep -n '^wasmtime = ' "$work/wasm/Cargo.toml"
 
-  (cd "$work" && cargo "+$RUST_VERSION" build --release -j 6)
+  (cd "$work" && cargo "+$RUST_VERSION" build --locked $CARGO_NET_FLAG --release -j 6)
 
   "$work/target/release/ouro-wasm" doctor > "$out/skewed-doctor.json"
   skewed_wasmtime=$(sed -n 's/.*"wasmtime": "\([^"]*\)".*/\1/p' "$out/skewed-doctor.json")
@@ -293,10 +320,6 @@ case "$what" in
   all)
     triple_skew
     version_skew
-    ;;
-  *)
-    echo "wasm-skew-test: unknown argument \`$what\`; it is triple, version or all." >&2
-    exit 2
     ;;
 esac
 

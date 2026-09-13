@@ -15,7 +15,12 @@ defmodule Ouroboros.Provider.Native.ToolsBehaviorParityTest do
       specs = Baseline.specs()
 
       for entry <- @baseline.validation do
-        assert Tools.validate_call(entry.name, entry.input, specs) === entry.result,
+        actual =
+          entry.name
+          |> Tools.validate_call(entry.input, specs)
+          |> strip_authorized_validation_additions(entry.id)
+
+        assert actual === entry.result,
                "local JSON validation changed for #{entry.id}"
       end
     end)
@@ -39,8 +44,70 @@ defmodule Ouroboros.Provider.Native.ToolsBehaviorParityTest do
           specs
           |> ToolSchema.prepare(transport.model)
           |> Enum.map(&Map.take(&1, [:name, :description, :parameter_schema, :strict]))
+          |> Enum.reject(&(&1.name == "safe_status"))
 
-        assert actual === transport.tools, "prepared tools changed for #{transport.id}"
+        assert Enum.map(actual, & &1.name) === Enum.map(transport.tools, & &1.name)
+
+        projected =
+          Enum.zip_with(actual, transport.tools, fn current, frozen ->
+            current_properties = Map.get(current.parameter_schema, "properties", %{})
+            frozen_properties = Map.get(frozen.parameter_schema, "properties", %{})
+
+            additions =
+              current_properties
+              |> Map.keys()
+              |> MapSet.new()
+              |> MapSet.difference(MapSet.new(Map.keys(frozen_properties)))
+
+            expected_additions =
+              case current.name do
+                "bash" -> MapSet.new(["retry_attempt_id"])
+                "agent_result" -> MapSet.new(["cursor", "max_bytes", "release"])
+                "agent" -> MapSet.new(["work_item_ids"])
+                "plan" -> MapSet.new(["accept"])
+                _ -> MapSet.new()
+              end
+
+            assert additions == expected_additions,
+                   "unexpected prepared-schema delta for #{transport.id}/#{current.name}"
+
+            assert_transport_additions(current, expected_additions)
+
+            current_required = Map.get(current.parameter_schema, "required", [])
+            frozen_required = Map.get(frozen.parameter_schema, "required", [])
+
+            expected_required =
+              if current.strict,
+                do: Enum.sort(frozen_required ++ MapSet.to_list(expected_additions)),
+                else: frozen_required
+
+            assert current_required === expected_required,
+                   "prepared required fields changed for #{transport.id}/#{current.name}"
+
+            projected =
+              if Map.has_key?(current.parameter_schema, "properties") or
+                   Map.has_key?(frozen.parameter_schema, "properties") do
+                put_in(
+                  current,
+                  [:parameter_schema, "properties"],
+                  Map.drop(current_properties, MapSet.to_list(additions))
+                )
+              else
+                current
+              end
+
+            projected =
+              if current.name == "plan", do: legacy_plan_schema(projected), else: projected
+
+            if Map.has_key?(current.parameter_schema, "required") or
+                 Map.has_key?(frozen.parameter_schema, "required") do
+              put_in(projected, [:parameter_schema, "required"], frozen_required)
+            else
+              projected
+            end
+          end)
+
+        assert projected === transport.tools, "prepared tools changed for #{transport.id}"
       end
     end)
   end
@@ -70,6 +137,149 @@ defmodule Ouroboros.Provider.Native.ToolsBehaviorParityTest do
       end
     end)
   end
+
+  defp assert_transport_additions(%{name: name, strict: strict, parameter_schema: schema}, fields) do
+    expected =
+      case {name, strict} do
+        {"bash", true} ->
+          %{
+            "retry_attempt_id" =>
+              nullable(%{
+                "type" => "string",
+                "description" => retry_description()
+              })
+          }
+
+        {"bash", false} ->
+          %{"retry_attempt_id" => %{"type" => "string", "description" => retry_description()}}
+
+        {"agent_result", true} ->
+          %{
+            "cursor" =>
+              nullable(%{
+                "type" => "integer",
+                "minimum" => 0,
+                "description" =>
+                  "Byte cursor returned by a prior page. Omit for the concise summary."
+              }),
+            "max_bytes" =>
+              nullable(%{
+                "type" => "integer",
+                "minimum" => 1,
+                "description" => "Maximum UTF-8 report bytes to return for a page. Maximum 12288."
+              }),
+            "release" =>
+              nullable(%{
+                "type" => "boolean",
+                "description" =>
+                  "Explicitly release a terminal child after this successful summary or page read."
+              })
+          }
+
+        {"agent_result", false} ->
+          %{
+            "cursor" => %{
+              "type" => "integer",
+              "minimum" => 0,
+              "description" =>
+                "Byte cursor returned by a prior page. Omit for the concise summary."
+            },
+            "max_bytes" => %{
+              "type" => "integer",
+              "minimum" => 1,
+              "description" => "Maximum UTF-8 report bytes to return for a page. Maximum 12288."
+            },
+            "release" => %{
+              "type" => "boolean",
+              "description" =>
+                "Explicitly release a terminal child after this successful summary or page read."
+            }
+          }
+
+        {"agent", true} ->
+          %{
+            "work_item_ids" =>
+              nullable(%{
+                "type" => "array",
+                "items" => %{"type" => "string"},
+                "description" =>
+                  "Existing parent work-item IDs delegated to this child. Their criteria and deliverable are bound before execution."
+              })
+          }
+
+        {"agent", false} ->
+          %{
+            "work_item_ids" => %{
+              "type" => "array",
+              "items" => %{"type" => "string"},
+              "description" =>
+                "Existing parent work-item IDs delegated to this child. Their criteria and deliverable are bound before execution."
+            }
+          }
+
+        {"plan", true} ->
+          %{
+            "accept" =>
+              nullable(%{
+                "type" => "array",
+                "description" =>
+                  "Work-item IDs this owning parent accepts; acceptance requires criteria and evidence.",
+                "items" => %{"type" => "string"},
+                "maxItems" => 40
+              })
+          }
+
+        {"plan", false} ->
+          %{
+            "accept" => %{
+              "type" => "array",
+              "description" =>
+                "Work-item IDs this owning parent accepts; acceptance requires criteria and evidence.",
+              "items" => %{"type" => "string"},
+              "maxItems" => 40
+            }
+          }
+
+        _ ->
+          %{}
+      end
+
+    actual = Map.take(Map.get(schema, "properties", %{}), MapSet.to_list(fields))
+    assert actual === expected, "authorized transport fields changed for #{name}"
+  end
+
+  defp nullable(schema), do: %{"anyOf" => [schema, %{"type" => "null"}]}
+
+  defp strip_authorized_validation_additions({:error, message}, id) do
+    if String.starts_with?(id, "agent_") do
+      {:error, String.replace(message, ", work_item_ids: array (optional)", "")}
+    else
+      {:error, message}
+    end
+  end
+
+  defp strip_authorized_validation_additions(result, _id), do: result
+
+  defp legacy_plan_schema(current) do
+    drop =
+      ~w(id deliverable work_state owner_task_id criteria evidence child_settlement blocker acceptance)
+
+    current
+    |> update_in(
+      [:parameter_schema, "properties", "steps", "items", "properties"],
+      &Map.drop(&1, drop)
+    )
+    |> update_in(
+      [:parameter_schema, "properties", "steps", "items", "required"],
+      &Enum.filter(&1, fn field -> field in ["step", "status"] end)
+    )
+  end
+
+  defp retry_description,
+    do:
+      "Only use the exact runtime-issued id from the immediately retained failed attempt. " <>
+        "Omit this field on every new command; never guess or reuse an id. A retry must keep " <>
+        "the command, cwd, sandbox mode, and paths identical."
 end
 
 defmodule Ouroboros.Provider.Native.ToolsBehaviorParityLoopTest do

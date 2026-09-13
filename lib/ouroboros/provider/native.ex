@@ -57,6 +57,7 @@ defmodule Ouroboros.Provider.Native do
         :approval_mode,
         :sandbox_mode,
         :reasoning_effort,
+        :unknown_compact_tokens,
         :attachments,
         :provider_session_id,
         :allowed_tools,
@@ -116,7 +117,13 @@ defmodule Ouroboros.Provider.Native do
       session_provider_options: :adapter,
       turn_options: :adapter,
       turn_provider_options: :adapter,
-      configuration_options: [:model, :reasoning_effort, :approval_mode, :sandbox_mode]
+      configuration_options: [
+        :model,
+        :reasoning_effort,
+        :approval_mode,
+        :sandbox_mode,
+        :unknown_compact_tokens
+      ]
     )
   end
 

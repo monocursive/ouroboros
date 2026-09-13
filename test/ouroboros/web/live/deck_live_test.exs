@@ -503,7 +503,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       :ok = Ouroboros.Interactive.Store.put(%{row | status: :awaiting_approval})
       poll(view)
 
-      assert_push_event(view, "needs-you", %{sessions: [%{key: key}]})
+      assert_push_event(view, "needs-you", %{sessions: [%{key: key}]}, 500)
       assert key == "interactive:#{id}"
     end
 

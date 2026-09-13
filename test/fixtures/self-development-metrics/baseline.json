@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "scope": "sd-bounded-v1",
+    "bounds": {"mission": "fixture-review", "max_tool_calls": 20},
+    "environment": {"os": "fixture-os", "sandbox": "workspace_write", "start_mode": "application_started"},
+    "environment_evidence": {"valid": true, "source": "baseline fixture manifest"}
+  },
+  "tool_calls": {"total": 10},
+  "supervision": {"total": 8},
+  "usage": {"input_tokens": 1200, "cached_input_tokens": 500, "output_tokens": 200},
+  "wall_time_seconds": 40.0
+}

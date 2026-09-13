@@ -103,6 +103,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
     "approval_mode" => {:enum, @approval_modes},
     "sandbox_mode" => {:enum, @sandbox_modes},
     "reasoning_effort" => {:enum, @reasoning_efforts},
+    "unknown_compact_tokens" => :positive_integer,
     "runtime_exposure" => :boolean,
     "worktree" => :boolean,
     "plan" => :boolean,
@@ -114,6 +115,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
     "sandbox_mode" => {:enum, @sandbox_modes},
     "model" => :string,
     "reasoning_effort" => {:enum, @reasoning_efforts},
+    "unknown_compact_tokens" => {:nilable, :positive_integer},
     "plan" => :boolean
   }
   @start_option_notes %{
@@ -128,7 +130,9 @@ defmodule Ouroboros.Gateway.Methods.Contract do
                    {name, :optional, kind, Map.get(@start_option_notes, name)}
                  end)
   @configuration_option_notes %{
-    "plan" => "not a Harness configuration key — it takes its own live surface (B2)"
+    "plan" => "not a Harness configuration key — it takes its own live surface (B2)",
+    "unknown_compact_tokens" =>
+      "operator-selected measured-history budget for models whose capacity is unknown; null disables it and never claims a model context window"
   }
   @configuration_params (for {name, kind} <- Enum.sort(@configuration_options) do
                            {name, :optional, kind, Map.get(@configuration_option_notes, name)}
@@ -468,9 +472,18 @@ defmodule Ouroboros.Gateway.Methods.Contract do
     "interactive.compact" => %{
       scope: :operate,
       timeout: @compaction_timeout,
+      outcome: :unknown,
       params:
         {:closed,
-         [@session_id, {"focus", :optional, :string, "what the fold should keep"}, @session_node]},
+         [
+           @session_id,
+           {"focus", :optional, :string, "what the fold should keep"},
+           {"compaction_id", :optional, :string,
+            "caller-owned recovery identity; starts asynchronously and exact retries reconcile"},
+           {"action", :optional, {:enum, ["start", "status", "cancel"]},
+            "operation action; defaults to start when compaction_id is present"},
+           @session_node
+         ]},
       handler: :handle_interactive_compact
     },
     "interactive.configure" => %{
@@ -484,8 +497,18 @@ defmodule Ouroboros.Gateway.Methods.Contract do
     "interactive.context" => %{
       scope: :read,
       timeout: @default_timeout,
-      params: {:closed, [@session_id, @session_node]},
+      params:
+        {:closed, [@session_id, @session_node],
+         "for native sessions, `context_state` is `unmeasured` with `context_used: null` before provider measurement, `measured` with the provider-counted request size, or `compacted` with the zero reset sentinel after a successful fold; zero does not claim an empty real prompt. Unknown `context_window` remains null, cumulative `total_tokens` is never substituted, and automatic threshold compaction remains native-session-owned. With unknown capacity, automatic compaction is disabled unless the operator explicitly configures `unknown_compact_tokens`; that is a measured-history budget, not a claimed model window"},
       handler: :handle_interactive_context
+    },
+    "interactive.safe_status" => %{
+      scope: :read,
+      timeout: @default_timeout,
+      params:
+        {:closed, [@session_id, @session_node],
+         "bounded privacy-safe status from the owning session; callers cannot submit facts, ownership, provenance, or freshness"},
+      handler: :handle_interactive_safe_status
     },
     "interactive.delete" => %{
       scope: :operate,
@@ -533,7 +556,8 @@ defmodule Ouroboros.Gateway.Methods.Contract do
            @session_id,
            {"prompt", :optional, :string,
             "a prompt forging the `<ouroboros-runtime>` delimiters is refused, not escaped"},
-           {"handoff_id", :optional, :string, "caller-owned id for the child"},
+           {"handoff_id", :optional, :string,
+            "caller-owned child id, nonblank and at most 128 UTF-8 bytes; exact retry reconciles the durable reservation"},
            @session_node
          ]},
       handler: :handle_interactive_handoff
@@ -672,6 +696,33 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       outcome: :unknown,
       params: {:closed, @start_params},
       handler: :handle_interactive_start
+    },
+    "interactive.preview_native" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed,
+         [
+           {"provider_session_id", :required, :string,
+            "a known native checkpoint id, never a path"},
+           @session_node
+         ]},
+      handler: :handle_interactive_preview_native
+    },
+    "interactive.import_native" => %{
+      scope: :operate,
+      timeout: @start_timeout,
+      outcome: :unknown,
+      params:
+        {:closed,
+         [
+           {"provider_session_id", :required, :string, "the source id returned by preview"},
+           {"expected_digest", :required, :string, "the exact digest returned by preview"},
+           {"acknowledge_partial_tail", {:optional, false}, :boolean,
+            "required true when preview reports a nonzero offset"}
+           | @start_params
+         ]},
+      handler: :handle_interactive_import_native
     },
     "interactive.steer" => %{
       scope: :operate,

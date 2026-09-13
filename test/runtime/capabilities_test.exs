@@ -42,6 +42,16 @@ defmodule Ouroboros.Runtime.CapabilitiesTest do
     refute broken_summary.readable?
   end
 
+  test "repository capability proposals are readable by the current loader" do
+    workspace = Path.expand("../..", __DIR__)
+    assert {:ok, proposals} = Capabilities.list(workspace)
+
+    for proposal <- proposals do
+      assert proposal.readable?,
+             "#{proposal.path} is an obsolete or invalid proposal: #{inspect(proposal)}"
+    end
+  end
+
   # The `Cargo.toml` is what makes a directory a proposal. A directory without one is
   # refused rather than read as something else: there is one lane and one project shape.
   test "a proposal with no Cargo manifest is refused rather than guessed at", context do

@@ -27,12 +27,122 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
     assert restored == @conversation
   end
 
+  test "round-trips and authenticates synthetic non-UTF-8 tool bytes", %{path: path} do
+    synthetic = <<0x6F, 0x94, 0x75>>
+
+    conversation = [
+      %{role: :assistant, content: "tool", tool_calls: [%{id: "c1", name: "bash", input: %{}}]},
+      %{role: :tool, tool_call_id: "c1", name: "bash", content: synthetic, is_error: false}
+    ]
+
+    assert {:ok, digest} = Checkpoint.write(path, conversation)
+    assert {:ok, %{digest: ^digest, messages: ^conversation}} = Checkpoint.snapshot(path)
+    assert String.valid?(File.read!(path))
+  end
+
+  test "literal tag-shaped maps remain maps through current checkpoint", %{path: path} do
+    binary_lookalike = %{"$ouroboros_binary" => "YWJj", "bytes" => 3}
+    map_lookalike = %{"$ouroboros_map" => [["key", "value"]]}
+    nested = %{"literal" => binary_lookalike, "nested" => [map_lookalike]}
+
+    conversation = [
+      %{role: :tool, tool_call_id: "c1", name: "json", content: nested, is_error: false}
+    ]
+
+    assert {:ok, _} = Checkpoint.write(path, conversation)
+    assert {:ok, %{messages: ^conversation}} = Checkpoint.snapshot(path)
+  end
+
+  test "legacy checkpoint tag-shaped maps remain ordinary maps", %{path: path} do
+    literal = %{"$ouroboros_binary" => "YWJj", "bytes" => 3}
+
+    conversation = [
+      %{role: :tool, tool_call_id: "c1", name: "json", content: literal, is_error: false}
+    ]
+
+    assert {:ok, _} = Checkpoint.write(path, conversation)
+
+    payload = path |> File.read!() |> JSON.decode!()
+
+    legacy_messages = [
+      %{
+        "role" => "tool",
+        "tool_call_id" => "c1",
+        "name" => "json",
+        "content" => literal,
+        "is_error" => false
+      }
+    ]
+
+    digest = :crypto.hash(:sha256, JSON.encode!(legacy_messages)) |> Base.encode16(case: :lower)
+
+    legacy =
+      payload
+      |> Map.put("version", 2)
+      |> Map.put("messages", legacy_messages)
+      |> Map.put("digest", digest)
+      |> Map.delete("value_encoding")
+      |> Map.delete("plan_digest")
+
+    File.write!(path, JSON.encode!(legacy))
+
+    assert {:ok, %{messages: [%{content: ^literal}]}} = Checkpoint.snapshot(path)
+  end
+
+  test "round-trips and authenticates the current work-item plan", %{path: path} do
+    plan = %{"plan" => [%{"id" => "P0", "step" => "Persist", "status" => "pending"}]}
+    assert {:ok, _digest} = Checkpoint.write(path, @conversation, plan: plan)
+    assert {:ok, %{plan: ^plan}} = Checkpoint.load(path)
+
+    payload = path |> File.read!() |> JSON.decode!()
+    File.write!(path, JSON.encode!(put_in(payload, ["plan", "plan"], [])))
+    assert {:error, :checkpoint_plan_digest_mismatch} = Checkpoint.load(path)
+  end
+
+  test "legacy message-only checksums never promote a mutable plan", %{path: path} do
+    assert {:ok, _digest} = Checkpoint.write(path, @conversation, plan: %{"plan" => []})
+    current = path |> File.read!() |> JSON.decode!()
+
+    forged = %{
+      "plan" => [
+        %{
+          "id" => "forged",
+          "step" => "Claim completion",
+          "status" => "completed",
+          "acceptance" => %{"basis" => "model_judgment", "actor" => "operator"}
+        }
+      ]
+    }
+
+    for version <- [1, 2] do
+      legacy =
+        current
+        |> Map.put("version", version)
+        |> Map.put("plan", forged)
+        |> Map.delete("plan_digest")
+
+      File.write!(path, JSON.encode!(legacy))
+      assert {:ok, %{plan: nil}} = Checkpoint.snapshot(path)
+    end
+  end
+
   test "is written 0600 and atomically, leaving no temporary behind", %{path: path} do
     assert {:ok, _digest} = Checkpoint.write(path, @conversation)
     {:ok, %File.Stat{mode: mode}} = File.stat(path)
     assert Bitwise.band(mode, 0o777) == 0o600
 
     assert path |> Path.dirname() |> File.ls!() == ["conversation.json"]
+  end
+
+  test "a failed replacement removes its generated temporary file", %{path: path} do
+    File.mkdir_p!(path)
+
+    assert {:error, {:checkpoint_write_failed, _}} = Checkpoint.write(path, @conversation)
+
+    assert path
+           |> Path.dirname()
+           |> File.ls!()
+           |> Enum.reject(&(&1 == "conversation.json")) == []
   end
 
   test "a missing checkpoint is not an error", %{path: path} do

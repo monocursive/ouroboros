@@ -26,6 +26,37 @@ defmodule Ouroboros.Wasm.LiveFixture do
 
   @require "OUROBOROS_REQUIRE_WASM"
 
+  @doc "The acceptance guest selected for this test run."
+  @spec guest_path(String.t()) :: String.t()
+  def guest_path(default), do: selected_path("OUROBOROS_WASM_GUEST", default)
+
+  @doc "The worked-example root selected for this test run."
+  @spec examples_root(String.t()) :: String.t()
+  def examples_root(default), do: selected_path("OUROBOROS_WASM_EXAMPLES_ROOT", default)
+
+  @doc "The skew-record root selected for this test run, including the legacy fallback."
+  @spec skew_root(String.t()) :: String.t()
+  def skew_root(default) do
+    case nonempty_env("OUROBOROS_WASM_SKEW_DIR") || nonempty_env("OURO_WASM_SKEW_DIR") do
+      nil -> default
+      path -> Path.expand(path)
+    end
+  end
+
+  defp selected_path(variable, default) do
+    case nonempty_env(variable) do
+      path when is_binary(path) -> Path.expand(path)
+      _unset -> default
+    end
+  end
+
+  defp nonempty_env(variable) do
+    case System.get_env(variable) do
+      path when is_binary(path) and path != "" -> path
+      _unset -> nil
+    end
+  end
+
   @doc """
   The `@tag` an acceptance test should carry: `[]` to run, `[skip: reason]` to skip.
 

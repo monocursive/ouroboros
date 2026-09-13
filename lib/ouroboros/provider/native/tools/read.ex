@@ -33,7 +33,7 @@ defmodule Ouroboros.Provider.Native.Tools.Read do
 
   @impl true
   def run(params, context) do
-    with {:ok, path} <- Paths.resolve(params.path, context.scope),
+    with {:ok, path} <- resolve(params.path, context),
          {:ok, stat} <- stat(path),
          {:ok, content} <- read(path) do
       {slice, note} = slice(content, params.offset, params.limit)
@@ -48,6 +48,50 @@ defmodule Ouroboros.Provider.Native.Tools.Read do
       {:error, reason} -> {:ok, %{output: "read failed: #{describe(reason)}", is_error: true}}
     end
   end
+
+  defp resolve(path, context) do
+    case Paths.resolve(path, context.scope) do
+      {:ok, resolved} ->
+        {:ok, resolved}
+
+      {:error, scope_reason} ->
+        case owned_output(path, context[:session_dir]) do
+          {:ok, resolved} -> {:ok, resolved}
+          _ -> {:error, scope_reason}
+        end
+    end
+  end
+
+  # Bash spills are runtime-owned operational content outside some workspace roots. Admit
+  # only the exact private output directory of this session and only names this runtime
+  # mints; this is not an additional arbitrary read root.
+  defp owned_output(path, session_dir) when is_binary(path) and is_binary(session_dir) do
+    output_dir = Path.expand(Path.join(session_dir, "output"))
+    expanded = Path.expand(path)
+    name = Path.basename(expanded)
+
+    cond do
+      Path.dirname(expanded) != output_dir ->
+        {:error, {:outside_workspace, path}}
+
+      not Regex.match?(~r/\Abash-[A-Za-z0-9_-]{12}\.txt\z/, name) ->
+        {:error, {:outside_workspace, path}}
+
+      true ->
+        case File.lstat(expanded) do
+          {:ok, %File.Stat{type: :regular, mode: mode}} when Bitwise.band(mode, 0o077) == 0 ->
+            {:ok, expanded}
+
+          {:ok, %File.Stat{type: type}} ->
+            {:error, {:not_owned_output, type}}
+
+          {:error, reason} ->
+            {:error, {:unreadable, expanded, reason}}
+        end
+    end
+  end
+
+  defp owned_output(path, _session_dir), do: {:error, {:outside_workspace, path}}
 
   @doc false
   @spec fingerprint(File.Stat.t(), binary()) :: map()

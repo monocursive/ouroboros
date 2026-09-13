@@ -58,6 +58,9 @@ defmodule Ouroboros.Test.NativeSessionFixture do
   def configure(handle, changes), do: Session.configure(handle, changes)
   def interrupt(handle, turn_id \\ :active), do: Session.interrupt(handle, turn_id)
   def compact(handle, focus \\ nil), do: Session.compact(handle, focus)
+  def compact_start(handle, id, focus \\ nil), do: Session.compact_start(handle, id, focus)
+  def compact_status(handle, id), do: Session.compact_status(handle, id)
+  def compact_cancel(handle, id), do: Session.compact_cancel(handle, id)
   def plan_mode(handle, enabled), do: Session.plan_mode(handle, enabled)
   def plan_state(handle), do: Session.plan_state(handle)
 

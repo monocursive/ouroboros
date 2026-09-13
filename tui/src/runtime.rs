@@ -2893,7 +2893,7 @@ fn open_daemon_log(path: &Path, expected: Option<FileIdentity>) -> Result<File> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, TcpListener};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static SCRATCH: AtomicU32 = AtomicU32::new(0);
@@ -4585,6 +4585,16 @@ mod tests {
         command
     }
 
+    // Keep any boot/supervision probe on a listener owned for the entire test.
+    fn epmd_test_listener() -> TcpListener {
+        loop {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            if listener.local_addr().unwrap().port() != 65_358 {
+                return listener;
+            }
+        }
+    }
+
     fn tokio_sleep_child() -> (Child, i32) {
         let child = Command::new("/bin/sh")
             .args(["-c", "exec sleep 30"])
@@ -4599,6 +4609,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_a_boot_daemon_stops_the_packaged_epmd() {
+        let listener = epmd_test_listener();
         let data = scratch("drop-boot-epmd");
         let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
         let epmd_pid = epmd.id() as i32;
@@ -4613,7 +4624,7 @@ mod tests {
             epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
                 Some(epmd),
                 Ipv4Addr::LOCALHOST,
-                65_302,
+                listener.local_addr().unwrap().port(),
             )),
             data_dir: data.clone(),
         };
@@ -4636,6 +4647,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_does_not_arm_boot_epmd_so_cancellation_can_still_reap_it() {
+        let listener = epmd_test_listener();
         let data = scratch("wait-boot-epmd");
         let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
         let epmd_pid = epmd.id() as i32;
@@ -4650,7 +4662,7 @@ mod tests {
             epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
                 Some(epmd),
                 Ipv4Addr::LOCALHOST,
-                65_303,
+                listener.local_addr().unwrap().port(),
             )),
             data_dir: data.clone(),
         };
@@ -4682,6 +4694,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_wait_ready_leaves_boot_epmd_reapable() {
+        let listener = epmd_test_listener();
         let data = scratch("wait-ready-reap-epmd");
         let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
         let epmd_pid = epmd.id() as i32;
@@ -4696,7 +4709,7 @@ mod tests {
             epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
                 Some(epmd),
                 Ipv4Addr::LOCALHOST,
-                65_304,
+                listener.local_addr().unwrap().port(),
             )),
             data_dir: data.clone(),
         };
@@ -4721,6 +4734,7 @@ mod tests {
 
     #[tokio::test]
     async fn arming_makes_reap_a_no_op_so_a_validated_start_keeps_its_epmd() {
+        let listener = epmd_test_listener();
         let data = scratch("arm-then-reap-epmd");
         let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
         let epmd_pid = epmd.id() as i32;
@@ -4735,7 +4749,7 @@ mod tests {
             epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
                 Some(epmd),
                 Ipv4Addr::LOCALHOST,
-                65_305,
+                listener.local_addr().unwrap().port(),
             )),
             data_dir: data.clone(),
         };

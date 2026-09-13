@@ -8,13 +8,15 @@ defmodule Ouroboros.InteractiveSession do
   """
 
   alias Ouroboros.Session.ApprovalResponse
-  alias Ouroboros.Interactive.{Ref, State, Store, Task}
-  alias Ouroboros.Provider.Native.Replay
+  alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.Interactive.{Event, Ref, State, Store, Task}
+  alias Ouroboros.Provider.Native.{Checkpoint, Paths, Replay}
   alias Ouroboros.Workspace.Exec
 
   @type session :: Ref.t() | String.t()
 
   @turn_options [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]
+  @max_compaction_id_bytes 128
 
   # Control-plane operations (info/replay/subscribe/steer/respond_approval/interrupt/
   # close/kill) are bounded so one wedged coordinator cannot freeze every caller.
@@ -52,41 +54,40 @@ defmodule Ouroboros.InteractiveSession do
           {:ok, Ref.t()} | {:created, Ref.t(), term()} | {:error, term()}
   def start_for_gateway(opts) when is_list(opts) do
     if valid_options?(opts) do
+      {supplied_admission, opts} = Keyword.pop(opts, :maintenance_admission)
+      {operation_id, opts} = Keyword.pop(opts, :maintenance_operation_id)
       id = Keyword.get_lazy(opts, :id, &Ouroboros.ID.generate!/0)
+      operation_id = operation_id || maintenance_operation("session-start", [id])
 
-      with {:ok, session} <- State.new(id, opts),
-           {:ok, persisted} <- create_or_match(session) do
-        ref = Ref.new(id)
+      with {:ok, session} <- State.new(id, opts) do
+        with_admission(operation_id, id, supplied_admission, fn lease ->
+          with {:ok, persisted} <- create_or_match(session) do
+            ref = Ref.new(id)
 
-        case persisted.status do
-          status when status in [:failed, :lost] ->
-            {:created, ref, {:session_start_failed, persisted.error}}
+            case persisted.status do
+              status when status in [:failed, :lost] ->
+                {:created, ref, {:session_start_failed, persisted.error}}
 
-          status when status in [:closed, :cancelled] ->
-            {:ok, ref}
+              status when status in [:closed, :cancelled] ->
+                {:created, ref, {:session_terminal, status}}
 
-          _active ->
-            case ensure_coordinator(id) do
-              {:ok, pid} ->
-                # Readiness waits for provider start-up, whose latency is legitimately
-                # unbounded, so it keeps the long wait rather than the control-plane
-                # bound. The request already exists durably at this point. Preserve that
-                # fact when provider/workspace readiness fails so the gateway can open
-                # the failed session instead of making a same-id client reconcile
-                # forever. A coordinator whose readiness never settles — a store that
-                # keeps refusing checkpoints, for instance — answers this call itself
-                # at the readiness deadline with `{:session_start_unresolved, id}`,
-                # so a caller here cannot wait forever on a session that can no
-                # longer report anything.
-                case safe_call(pid, :ready, :infinity) do
-                  {:ok, _state} -> {:ok, ref}
-                  {:error, reason} -> {:created, ref, reason}
+              _active ->
+                case ensure_coordinator(id, lease) do
+                  {:ok, pid} ->
+                    # The admission lease spans Store creation, coordinator creation,
+                    # Task/workspace admission and durable readiness. It is intentionally
+                    # released only after this result is known.
+                    case safe_call(pid, :ready, :infinity) do
+                      {:ok, _state} -> {:ok, ref}
+                      {:error, reason} -> {:created, ref, reason}
+                    end
+
+                  {:error, reason} ->
+                    {:created, ref, reason}
                 end
-
-              {:error, reason} ->
-                {:created, ref, reason}
             end
-        end
+          end
+        end)
       else
         {:error, reason} -> {:error, reason}
       end
@@ -96,6 +97,351 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   def start_for_gateway(_opts), do: {:error, :invalid_options}
+
+  @doc "Previews one known durable native checkpoint without creating a session."
+  def preview_native(provider_session_id) do
+    with :ok <- Paths.validate_session_id(provider_session_id),
+         {:ok, dir} <- Paths.existing_session_dir(provider_session_id),
+         path = Path.join(dir, "conversation.json"),
+         {:ok, snapshot} <- Checkpoint.snapshot(path) do
+      owner =
+        Store.list()
+        |> Enum.find_value(fn state ->
+          imported_source =
+            get_in(state, [Access.key(:imported_from), Access.key(:source_provider_session_id)])
+
+          if state.provider_session_id == provider_session_id or
+               imported_source == provider_session_id,
+             do: state.id
+        end)
+
+      {:ok,
+       %{
+         provider_session_id: provider_session_id,
+         digest: snapshot.digest,
+         retained_messages: length(snapshot.messages),
+         offset: snapshot.offset,
+         rewind_floor: snapshot.rewind_floor,
+         owned_by: owner
+       }}
+    else
+      {:error, {:path_unavailable, _path, :enoent}} -> {:error, :native_checkpoint_not_found}
+      {:error, :no_checkpoint} -> {:error, :native_checkpoint_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Imports a digest-bound checkpoint as context under fresh logical/native identities."
+  def import_native(provider_session_id, expected_digest, opts \\ []) do
+    id = Keyword.get_lazy(opts, :id, &Ouroboros.ID.generate!/0)
+
+    with {:ok, preview} <- preview_native(provider_session_id),
+         :ok <- matching_digest(preview, expected_digest),
+         :ok <- require_tail_ack(preview, opts) do
+      with_admission(maintenance_operation("native-import", [id]), id, fn lease ->
+        do_import_native(id, provider_session_id, expected_digest, preview, opts, lease)
+      end)
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_import_native(id, provider_session_id, expected_digest, preview, opts, admission) do
+    with provenance = import_provenance(preview, id, opts),
+         {:ok, existing} <- existing_import(id, provenance),
+         target_native = (existing && existing.provider_session_id) || Paths.new_session_id(),
+         {:ok, session} <- import_session(id, target_native, preview, provenance, opts),
+         {:ok, ledger, ledger_status} <- open_import_effect(session, preview),
+         {:ok, persisted, creation} <-
+           complete_import(
+             ledger,
+             session,
+             existing,
+             provider_session_id,
+             target_native,
+             expected_digest
+           ),
+         {:ok, admission} <- admit_or_replay_import(ledger, ledger_status, persisted, admission) do
+      {:ok,
+       %{
+         id: persisted.id,
+         provider_session_id: persisted.provider_session_id,
+         source_provider_session_id: provider_session_id,
+         idempotent: creation == :existing or ledger_status == :existing,
+         ready: admission.ready,
+         error: admission.error
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp admit_or_replay_import(%{status: :ok, result: result}, :existing, _session, _admission) do
+    {:ok, %{ready: Map.get(result, :ready), error: Map.get(result, :admission_error)}}
+  end
+
+  defp admit_or_replay_import(ledger, _status, session, admission),
+    do: admit_import(ledger, session, admission)
+
+  defp existing_import(id, provenance) do
+    case Store.get(id) do
+      :not_found ->
+        {:ok, nil}
+
+      {:ok, existing} ->
+        if get_in(existing, [Access.key(:imported_from), Access.key(:fingerprint)]) ==
+             provenance.fingerprint,
+           do: {:ok, existing},
+           else: {:error, {:session_id_conflict, id}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp import_session(id, target, preview, provenance, opts) do
+    with {:ok, session} <-
+           State.new(
+             id,
+             opts
+             |> Keyword.drop([:id, :acknowledge_partial_tail])
+             |> Keyword.put(:provider_session_id, target)
+             |> Keyword.put(:imported_from, provenance)
+           ) do
+      {:ok, import_marker(%{session | provider_session_id: target}, preview, target)}
+    end
+  end
+
+  defp seed_unless_existing(%State{}, _source, _target, _digest), do: :ok
+
+  defp seed_unless_existing(nil, source, target, digest) do
+    case Checkpoint.import(source, target, digest) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp create_import_or_cleanup(_session, %State{} = existing),
+    do: {:ok, existing, :existing}
+
+  defp create_import_or_cleanup(session, nil) do
+    case Store.create_import(session) do
+      :ok ->
+        {:ok, session, :created}
+
+      {:ok, existing, status} ->
+        if existing.provider_session_id != session.provider_session_id do
+          with :ok <- cleanup_seed(session), do: {:ok, existing, status}
+        else
+          {:ok, existing, status}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp complete_import(ledger, session, existing, source, target, digest) do
+    result =
+      with :ok <- seed_unless_existing(existing, source, target, digest),
+           {:ok, persisted, creation} <- create_import_or_cleanup(session, existing) do
+        {:ok, persisted, creation}
+      end
+
+    case result do
+      {:ok, _, _} = success ->
+        success
+
+      {:error, reason} ->
+        cleanup = if is_nil(existing), do: cleanup_seed(session), else: :ok
+
+        reported_reason =
+          if cleanup == :ok, do: reason, else: {:import_cleanup_failed, reason, cleanup}
+
+        case settle_import_failure(ledger, reported_reason) do
+          :ok -> {:error, reported_reason}
+          {:error, settlement} -> {:error, {:import_failed_unsettled, reason, settlement}}
+        end
+    end
+  end
+
+  defp admit_import(ledger, session, admission) do
+    readiness =
+      with {:ok, pid} <- ensure_coordinator(session.id, admission),
+           {:ok, _} <- safe_call(pid, :ready, :infinity) do
+        :ok
+      end
+
+    case readiness do
+      :ok ->
+        with :ok <- settle_import_effect(ledger, session, true, nil),
+             do: {:ok, %{ready: true, error: nil}}
+
+      {:error, reason} ->
+        # Import commits when the fresh target and logical record are durable. Coordinator
+        # admission is a separate outcome, exactly as ordinary gateway start treats a
+        # created-but-not-ready session. The returned target remains inspectable and can be
+        # imported again after deleting the terminal logical record and repairing admission.
+        with :ok <- settle_import_effect(ledger, session, false, reason),
+             do: {:ok, %{ready: false, error: reason}}
+    end
+  end
+
+  defp cleanup_seed(session) do
+    cleanup = Application.get_env(:ouroboros, :native_import_cleanup)
+
+    with :ok <- if(is_function(cleanup, 1), do: cleanup.(session), else: :ok),
+         {:ok, path, _} <- Checkpoint.locate(session.provider_session_id) do
+      directory = Path.dirname(path)
+      errors = [remove_if_present(path)]
+
+      errors =
+        directory
+        |> Path.join("conversation.json.tmp-*")
+        |> Path.wildcard()
+        |> Enum.reduce(errors, fn temporary, acc -> [remove_if_present(temporary) | acc] end)
+
+      errors = [remove_dir_if_empty(directory) | errors] |> Enum.reject(&(&1 == :ok))
+      if errors == [], do: :ok, else: {:error, errors}
+    end
+  end
+
+  defp remove_if_present(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:remove_failed, path, reason}
+    end
+  end
+
+  defp remove_dir_if_empty(path) do
+    case File.rmdir(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:rmdir_failed, path, reason}
+    end
+  end
+
+  defp open_import_effect(session, preview) do
+    attrs = %{
+      id: "native-import:" <> session.imported_from.fingerprint,
+      effect: :native_import,
+      principal: "operator",
+      claimed_from: nil,
+      attempt: %{
+        session_id: session.id,
+        source_provider_session_id: preview.provider_session_id,
+        source_digest: preview.digest,
+        import_fingerprint: session.imported_from.fingerprint,
+        node: node()
+      },
+      authority: %{decision: :operator, source: :gateway},
+      cause: %{kind: :operator_action}
+    }
+
+    case EffectLedger.record_started(
+           attrs,
+           import_ledger()
+         ) do
+      {:ok, %{status: :failed} = entry, :existing} ->
+        {:error, {:import_previously_failed, entry.id}}
+
+      {:ok, entry, status} ->
+        {:ok, entry, status}
+
+      {:error, reason} ->
+        {:error, {:import_unrecordable, reason}}
+    end
+  end
+
+  defp settle_import_effect(entry, session, ready, admission_error) do
+    outcome = %{
+      status: :ok,
+      result: %{
+        session_id: session.id,
+        provider_session_id: session.provider_session_id,
+        source_provider_session_id: session.imported_from.source_provider_session_id,
+        ready: ready,
+        admission_error: if(admission_error, do: inspect(admission_error), else: nil)
+      }
+    }
+
+    case EffectLedger.settle(
+           entry.id,
+           outcome,
+           import_ledger()
+         ) do
+      {:ok, _, _} -> :ok
+      {:error, {:effect_already_settled, _, :ok}} -> :ok
+      {:error, reason} -> {:error, {:import_settlement_failed, reason}}
+    end
+  end
+
+  defp settle_import_failure(entry, reason) do
+    outcome = %{status: :failed, error: %{reason: inspect(reason)}}
+
+    case EffectLedger.settle(entry.id, outcome, import_ledger()) do
+      {:ok, _, _} -> :ok
+      {:error, {:effect_already_settled, _, :failed}} -> :ok
+      {:error, settlement} -> {:error, settlement}
+    end
+  end
+
+  defp import_ledger,
+    do: Application.get_env(:ouroboros, :native_import_ledger, EffectLedger)
+
+  defp matching_digest(%{digest: digest}, digest), do: :ok
+  defp matching_digest(_preview, _expected), do: {:error, :checkpoint_digest_changed}
+
+  defp require_tail_ack(%{offset: 0}, _opts), do: :ok
+
+  defp require_tail_ack(_preview, opts) do
+    if Keyword.get(opts, :acknowledge_partial_tail) == true,
+      do: :ok,
+      else: {:error, :partial_tail_acknowledgement_required}
+  end
+
+  defp import_provenance(preview, id, opts) do
+    semantic =
+      %{
+        id: id,
+        source_provider_session_id: preview.provider_session_id,
+        source_digest: preview.digest,
+        offset: preview.offset,
+        rewind_floor: preview.rewind_floor,
+        options: Keyword.drop(opts, [:acknowledge_partial_tail])
+      }
+      |> :erlang.term_to_binary([:deterministic])
+
+    %{
+      source_provider_session_id: preview.provider_session_id,
+      source_digest: preview.digest,
+      retained_messages: preview.retained_messages,
+      omitted_prefix: preview.offset,
+      rewind_floor: preview.rewind_floor,
+      fingerprint: Base.encode16(:crypto.hash(:sha256, semantic), case: :lower)
+    }
+  end
+
+  defp import_marker(session, preview, target_native) do
+    payload = %{
+      "source_provider_session_id" => preview.provider_session_id,
+      "source_digest" => preview.digest,
+      "new_provider_session_id" => target_native,
+      "retained_messages" => preview.retained_messages,
+      "omitted_prefix" => preview.offset,
+      "not_restored" => [
+        "public events",
+        "approvals and grants",
+        "effects",
+        "cursor and outcome",
+        "ancestry and timestamps"
+      ]
+    }
+
+    event = Event.from_runtime(session.id, 1, :native_checkpoint_imported, payload)
+    %{session | events: [event], cursor: 1, sequence_offset: 1}
+  end
 
   @doc "Starts an interactive session on a selected connected node."
   @spec start_on(node(), keyword()) :: {:ok, Ref.t()} | {:error, term()}
@@ -273,24 +619,39 @@ defmodule Ouroboros.InteractiveSession do
   """
   @spec fork(session(), String.t() | nil, map()) :: {:ok, map()} | {:error, term()}
   def fork(session, id \\ nil, overrides \\ %{}) do
-    with {:ok, _parent_id, owner} <- session_identity(session),
-         {:ok, opts} <- call(session, {:fork_plan, id, overrides}),
-         {:ok, child} <- start_child(owner, opts, :fork_start_failed) do
-      # The child exists and carries `forked_from`, which is the durable half of the
-      # relationship. The parent's count is a hint that follows it, and a parent that
-      # cannot record one does not undo a fork that already happened.
-      _ = call(session, :count_fork)
-      {:ok, child}
+    with {:ok, child_id} <- child_operation_id(id),
+         {:ok, parent_id, owner} <- session_identity(session) do
+      operation_id = maintenance_operation("fork", [parent_id, child_id])
+
+      with_admission(operation_id, child_id, fn lease ->
+        with {:ok, opts} <- call(session, {:fork_plan, child_id, overrides}),
+             {:ok, child} <-
+               start_child(
+                 owner,
+                 admission_options(opts, lease, operation_id),
+                 :fork_start_failed
+               ) do
+          # The child exists and carries `forked_from`, which is the durable half of the
+          # relationship. The parent's count is a hint that follows it.
+          _ = call(session, :count_fork)
+          {:ok, child}
+        end
+      end)
     end
   end
 
   # Shared by `fork/2` and `handoff/3`: both answer in `start/1`'s shape because both
   # *are* starts, and a client that can already open a created-but-not-ready session
   # should not need a third branch to open this one.
+  defp child_start(opts) do
+    start = Application.get_env(:ouroboros, :interactive_child_start, &start_for_gateway/1)
+    start.(opts)
+  end
+
   defp start_child(owner, opts, failure_tag) do
     result =
       if owner == node(),
-        do: start_for_gateway(opts),
+        do: child_start(opts),
         else: start_for_gateway_on(owner, opts)
 
     case result do
@@ -395,6 +756,40 @@ defmodule Ouroboros.InteractiveSession do
 
   def compact(_session, focus), do: {:error, {:invalid_compaction_focus, %{value: focus}}}
 
+  @doc "Starts or reconciles a caller-owned compaction operation."
+  def compact_start(session, id, focus \\ nil)
+
+  def compact_start(session, id, nil)
+      when is_binary(id) and id != "" and byte_size(id) <= @max_compaction_id_bytes,
+      do: call(session, {:compact_start, id, nil})
+
+  def compact_start(session, id, focus)
+      when is_binary(id) and id != "" and byte_size(id) <= @max_compaction_id_bytes and
+             is_binary(focus) do
+    if String.trim(focus) == "",
+      do: {:error, {:invalid_compaction_focus, %{reason: :blank}}},
+      else: call(session, {:compact_start, id, focus})
+  end
+
+  def compact_start(_session, id, _focus),
+    do: {:error, {:invalid_compaction_id, %{value: id, max_bytes: @max_compaction_id_bytes}}}
+
+  @doc "Reads a caller-owned compaction operation without blocking behind its inference."
+  def compact_status(session, id)
+      when is_binary(id) and id != "" and byte_size(id) <= @max_compaction_id_bytes,
+      do: call(session, {:compact_status, id})
+
+  def compact_status(_session, id),
+    do: {:error, {:invalid_compaction_id, %{value: id, max_bytes: @max_compaction_id_bytes}}}
+
+  @doc "Cancels a running compaction operation owned by this session."
+  def compact_cancel(session, id)
+      when is_binary(id) and id != "" and byte_size(id) <= @max_compaction_id_bytes,
+      do: call(session, {:compact_cancel, id})
+
+  def compact_cancel(_session, id),
+    do: {:error, {:invalid_compaction_id, %{value: id, max_bytes: @max_compaction_id_bytes}}}
+
   @doc """
   Returns what this session can honestly say about its own context.
 
@@ -406,6 +801,23 @@ defmodule Ouroboros.InteractiveSession do
   """
   @spec context(session()) :: {:ok, map()} | {:error, term()}
   def context(session), do: call(session, :context)
+
+  @doc "Returns a bounded privacy-safe status produced by the session's owning coordinator."
+  @spec safe_status(session()) :: {:ok, map()} | {:error, term()}
+  def safe_status(session), do: call(session, :safe_status)
+
+  @doc false
+  @spec safe_status_from_owner(pid(), node()) :: {:ok, map()} | {:error, term()}
+  def safe_status_from_owner(owner, expected_node)
+      when is_pid(owner) and is_atom(expected_node) do
+    if node(owner) == expected_node and expected_node == node() do
+      safe_call(owner, :safe_status, call_timeout())
+    else
+      {:error, :stale_session_owner}
+    end
+  end
+
+  def safe_status_from_owner(_owner, _expected_node), do: {:error, :stale_session_owner}
 
   @doc "D6. Rewind a native session to `to_turn`; `what` is `:files`, `:conversation`, or `:both`."
   def rewind(session, to_turn, what \\ :both)
@@ -486,9 +898,21 @@ defmodule Ouroboros.InteractiveSession do
   """
   @spec handoff(session(), String.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
   def handoff(session, prompt \\ nil, id \\ nil) do
-    with {:ok, _parent_id, owner} <- session_identity(session),
-         {:ok, opts} <- call(session, {:handoff_plan, prompt, id}) do
-      start_child(owner, opts, :handoff_start_failed)
+    with {:ok, child_id} <- child_operation_id(id),
+         {:ok, parent_id, owner} <- session_identity(session) do
+      operation_id = maintenance_operation("handoff", [parent_id, child_id])
+
+      with_admission(operation_id, child_id, fn lease ->
+        with {:ok, opts} <- call(session, {:handoff_plan, prompt, child_id}),
+             {:ok, child} <-
+               start_child(
+                 owner,
+                 admission_options(opts, lease, operation_id),
+                 :handoff_start_failed
+               ) do
+          {:ok, child}
+        end
+      end)
     end
   end
 
@@ -678,6 +1102,77 @@ defmodule Ouroboros.InteractiveSession do
     end
   end
 
+  defp with_admission(operation_id, session_id, fun),
+    do: with_admission(operation_id, session_id, nil, fun)
+
+  defp with_admission(operation_id, session_id, supplied, fun) do
+    server = maintenance_fence_server()
+
+    case Process.whereis(server) do
+      nil ->
+        # Library/test trees without a configured target authority retain their in-memory
+        # posture. A core runtime supervises Fence before reaching this entry point.
+        if supplied, do: {:error, :maintenance_fence_unavailable}, else: fun.(nil)
+
+      _pid ->
+        acquisition =
+          if supplied do
+            case Ouroboros.Maintenance.Fence.validate_admission(supplied, session_id, server) do
+              :ok -> {:ok, supplied, false}
+              {:error, reason} -> {:error, reason}
+            end
+          else
+            case Ouroboros.Maintenance.Fence.acquire_admission(
+                   operation_id,
+                   session_id,
+                   :current,
+                   server
+                 ) do
+              {:ok, lease} -> {:ok, lease, true}
+              {:error, reason} -> {:error, reason}
+            end
+          end
+
+        with {:ok, lease, owned?} <- acquisition do
+          try do
+            fun.(lease)
+          after
+            if owned?, do: Ouroboros.Maintenance.Fence.release(lease, server)
+          end
+        end
+    end
+  end
+
+  defp maintenance_fence_server,
+    do: Application.get_env(:ouroboros, :maintenance_fence_server, Ouroboros.Maintenance.Fence)
+
+  defp child_operation_id(nil), do: {:ok, Ouroboros.ID.generate!()}
+
+  defp child_operation_id(id) when is_binary(id) do
+    cond do
+      String.trim(id) == "" -> {:error, :invalid_fork_id}
+      byte_size(id) > 128 -> {:error, {:invalid_fork_id, %{max_bytes: 128}}}
+      true -> {:ok, id}
+    end
+  end
+
+  defp child_operation_id(_id), do: {:error, :invalid_fork_id}
+
+  defp maintenance_operation(kind, parts) do
+    digest =
+      :crypto.hash(:sha256, :erlang.term_to_binary({kind, parts})) |> Base.encode16(case: :lower)
+
+    kind <> ":" <> digest
+  end
+
+  defp admission_options(opts, nil, _operation_id), do: opts
+
+  defp admission_options(opts, lease, operation_id) do
+    opts
+    |> Keyword.put(:maintenance_admission, lease)
+    |> Keyword.put(:maintenance_operation_id, operation_id)
+  end
+
   defp create_or_match(session) do
     case Store.create(session) do
       :ok ->
@@ -708,7 +1203,8 @@ defmodule Ouroboros.InteractiveSession do
       :event_limit,
       :options,
       :forked_from,
-      :handed_off_from
+      :handed_off_from,
+      :imported_from
     ]
 
     Map.take(left, immutable) == Map.take(right, immutable) and
@@ -734,7 +1230,17 @@ defmodule Ouroboros.InteractiveSession do
     end
   end
 
-  defp ensure_coordinator(id) do
+  defp ensure_coordinator(id, admission \\ nil) do
+    if is_nil(admission) and Process.whereis(maintenance_fence_server()) do
+      with_admission(maintenance_operation("coordinator-recovery", [id]), id, fn lease ->
+        ensure_coordinator(id, lease)
+      end)
+    else
+      ensure_coordinator_admitted(id, admission)
+    end
+  end
+
+  defp ensure_coordinator_admitted(id, admission) do
     case Task.whereis(id) do
       pid when is_pid(pid) ->
         {:ok, pid}
@@ -742,7 +1248,9 @@ defmodule Ouroboros.InteractiveSession do
       nil ->
         case Store.get(id) do
           {:ok, %State{node: owner}} when owner == node() ->
-            case DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, {Task, id}) do
+            child = if admission, do: {Task, {id, admission}}, else: {Task, id}
+
+            case DynamicSupervisor.start_child(Ouroboros.Interactive.TaskSupervisor, child) do
               {:ok, pid} -> {:ok, pid}
               {:error, {:already_started, pid}} -> {:ok, pid}
               {:error, reason} -> {:error, reason}

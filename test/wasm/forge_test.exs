@@ -57,6 +57,16 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert String.match?(preview.source_sha256, ~r/\A[0-9a-f]{64}\z/)
     end
 
+    test "the fixture's direct-build SDK path resolves inside this checkout" do
+      manifest = Toml.decode!(fixture()["Cargo.toml"])
+      relative = manifest["dependencies"]["ouroboros-guest"]["path"]
+      sdk = Path.expand(relative, ForgeFixture.project_root())
+
+      assert sdk == Path.expand("../../tui/wasm/guest", __DIR__)
+      assert File.regular?(Path.join(sdk, "Cargo.toml"))
+      assert File.regular?(Path.join(sdk, "src/lib.rs"))
+    end
+
     # Red without the `map_size(files) > @max_files` arm of `bound/1`.
     test "thirty-three files are refused before anything is copied", context do
       files =
@@ -233,8 +243,8 @@ defmodule Ouroboros.Wasm.ForgeTest do
           manifest(fixture(), fn toml ->
             String.replace(
               toml,
-              ~s(ouroboros-guest = { path = "../../tui/wasm/guest" }),
-              ~s(ouroboros-guest = { path = "../../tui/wasm/guest", #{extra} })
+              ~s(ouroboros-guest = { path = "../../../tui/wasm/guest" }),
+              ~s(ouroboros-guest = { path = "../../../tui/wasm/guest", #{extra} })
             )
           end)
 
