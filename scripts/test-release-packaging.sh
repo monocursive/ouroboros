@@ -23,7 +23,7 @@ EOF
     cat >"$dir/bin/cargo" <<'EOF'
 #!/bin/sh
 set -eu
-[ "$*" = 'build --release --features embed' ]
+[ "$*" = 'build --locked --release --features embed' ]
 printf '%s\n' "$OUROBOROS_RELEASE_TARBALL" > ../selected
 touch target/release/ouro
 EOF

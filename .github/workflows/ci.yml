@@ -4,7 +4,7 @@
 
 name: CI
 
-# Long-lived branches and release tags only. PR branches already run every job through
+# Long-lived branches only; release.yml calls this workflow for tags. PR branches run through
 # the pull_request event, so an unfiltered `push` ran each PR commit twice.
 #
 # The other half of the same rule: a PR whose head *is* a long-lived branch (`dev` into
@@ -14,8 +14,8 @@ name: CI
 on:
   push:
     branches: [main, dev]
-    tags: ["v*"]
   pull_request:
+  workflow_call:
 
 # Nothing in this workflow writes to the repository; don't hold a token that could.
 permissions:
@@ -76,6 +76,8 @@ jobs:
 
       - run: mix format --check-formatted
       - run: sh scripts/test-release-packaging.sh
+      - run: python3 scripts/test-release.py
+      - run: python3 scripts/test-install.py
       - run: sh scripts/test-dev.sh
 
       # The tree is warning-free today, checked before this file was written. `--force`

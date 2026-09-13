@@ -40,17 +40,30 @@ finished commercial product.
 The runtime, the terminal client, the web interface, cluster placement, and the
 WebAssembly lane are implemented and tested locally. Some production concerns remain:
 high-availability state, partition handling, signing custody outside the cluster's
-trust domain, a VM boundary around the shell and the build, and any form of release
-distribution — `ouro` is built on the machine that runs it. Review the documented limits
+trust domain, and a VM boundary around the shell and the build. Tag-based binary
+distribution is configured; the first hosted release is still to be published.
+Review the documented limits
 in [ARCHITECTURE.md](docs/ARCHITECTURE.md), "Safety boundaries", before relying on
 Ouroboros for sensitive or unattended work.
 
 ## Quick start
 
-Building from source currently requires Elixir 1.20, Erlang/OTP 29, Rust 1.95,
-`make`, Git, and a native C/C++ toolchain. Build on the machine that will run it.
-See the [developer preview guide](docs/PREVIEW.md) for platform qualification,
-first-use checks, and known limitations; there is no binary installer or updater.
+Once the first stable release is published, install on macOS or GNU/Linux with:
+
+```sh
+curl -fsSL https://github.com/monocursive/ouroboros/releases/latest/download/install.sh | bash
+ouro
+```
+
+This installs a checksum-verified binary to `~/.local/bin`. The runtime is embedded;
+Elixir and Rust are not needed. The [installation and release guide](docs/RELEASING.md)
+covers platform requirements, upgrades, and installing any older version from
+[GitHub Releases](https://github.com/monocursive/ouroboros/releases).
+
+To build from source, install Elixir 1.20, Erlang/OTP 29, Rust 1.95, `make`, Git, and
+a native C/C++ toolchain. Build on the machine that will run it. See the
+[developer preview guide](docs/PREVIEW.md) for platform qualification, first-use checks,
+and known limitations.
 
 ```sh
 mix deps.get
@@ -78,7 +91,7 @@ Model access is a ChatGPT sign-in by default. An API key selects a direct lane i
 ## A second machine
 
 Ouroboros runs as one BEAM cluster: several machines, one trust domain, sessions and
-subagents placed across it. There is no enrollment product. Build `ouro` on each machine,
+subagents placed across it. There is no enrollment product. Install the same version of `ouro` on each machine,
 copy one cluster-identity directory between them privately, and tell the first machine
 about the second:
 
@@ -133,6 +146,7 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 
 ## Documentation
 
+- [Installation and releases](docs/RELEASING.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Terminal client](docs/TUI.md)
 - [Web interface](docs/WEB.md)

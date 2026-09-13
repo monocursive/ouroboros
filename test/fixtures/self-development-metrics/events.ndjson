@@ -1,0 +1,19 @@
+{"session_id":"repeat-1","sequence":1,"timestamp":"2026-09-10T10:00:00Z","type":"benchmark_metadata","payload":{"scope":"sd-bounded-v1","bounds":{"mission":"fixture-review","max_tool_calls":20},"environment":{"os":"fixture-os","sandbox":"workspace_write","start_mode":"application_started"},"environment_evidence":{"valid":true,"source":"fixture manifest"}}}
+{"session_id":"repeat-1","sequence":2,"timestamp":"2026-09-10T10:00:01Z","type":"tool_call","payload":{"call_id":"r1","name":"read","input":{"path":"lib/example.ex","offset":0,"limit":80}}}
+{"session_id":"repeat-1","sequence":2,"timestamp":"2026-09-10T10:00:01Z","type":"tool_call","payload":{"call_id":"r1","name":"read","input":{"path":"lib/example.ex","offset":0,"limit":80}}}
+{"session_id":"repeat-1","sequence":3,"timestamp":"2026-09-10T10:00:02Z","type":"tool_result","payload":{"call_id":"r1","status":"completed","output":"80 lines"}}
+{"session_id":"repeat-1","sequence":4,"timestamp":"2026-09-10T10:00:03Z","type":"tool_call","payload":{"call_id":"b1","name":"bash","input":{"command":"mix test --no-start test/example_test.exs"}}}
+{"session_id":"repeat-1","sequence":5,"timestamp":"2026-09-10T10:00:04Z","type":"tool_result","payload":{"call_id":"b1","status":"failed","error":"dependency unavailable in environment"}}
+{"session_id":"repeat-1","sequence":6,"timestamp":"2026-09-10T10:00:05Z","type":"tool_call","payload":{"call_id":"b2","name":"bash","input":{"command":"mix test --no-start test/example_test.exs"}}}
+{"session_id":"repeat-1","sequence":7,"timestamp":"2026-09-10T10:00:06Z","type":"tool_result","payload":{"call_id":"b2","is_error":true,"output":"dependency unavailable in environment"}}
+{"session_id":"repeat-1","sequence":8,"timestamp":"2026-09-10T10:00:07Z","type":"tool_call","payload":{"call_id":"b3","name":"bash","input":{"command":"nested-check"}}}
+{"session_id":"repeat-1","sequence":9,"timestamp":"2026-09-10T10:00:08Z","type":"tool_result","payload":{"call_id":"b3","status":"failed","output":"nested sandbox: Operation not permitted"}}
+{"session_id":"repeat-1","sequence":10,"timestamp":"2026-09-10T10:00:09Z","type":"usage","payload":{"input_tokens":600,"output_tokens":90,"context_used":700,"context_window":2000}}
+{"session_id":"repeat-1","sequence":11,"timestamp":"2026-09-10T10:00:10Z","type":"turn_completed","payload":{"input_tokens":600,"output_tokens":90,"tool_calls":4}}
+{"session_id":"repeat-1","sequence":12,"timestamp":"2026-09-10T10:00:11Z","type":"approval_requested","request_id":"q1","payload":{"kind":"question","question":"Run host gate?"}}
+{"session_id":"repeat-1","sequence":13,"timestamp":"2026-09-10T10:00:12Z","type":"approval_resolved","request_id":"q1","payload":{"decision":"declined"}}
+{"session_id":"repeat-1","sequence":14,"timestamp":"2026-09-10T10:00:13Z","type":"approval_requested","request_id":"q2","payload":{"kind":"question","question":"Choose fixture?"}}
+{"session_id":"repeat-1","sequence":15,"timestamp":"2026-09-10T10:00:14Z","type":"approval_resolved","request_id":"q2","payload":{"decision":"approved","answer":"small"}}
+{"session_id":"repeat-1","sequence":16,"timestamp":"2026-09-10T10:00:15Z","type":"compaction","payload":{"before_tokens":900}}
+{"session_id":"repeat-1","sequence":17,"timestamp":"2026-09-10T10:00:16Z","type":"handoff_completed","payload":{"child":"reviewer"}}
+{"session_id":"repeat-1","sequence":18,"timestamp":"2026-09-10T10:00:20Z","type":"finding","payload":{"id":"F-CONFOUNDED","classification":"confirmed defect","severity":"high","evidence":{"scope_valid":true,"environment_valid":false,"command":"mix test --no-start test/example_test.exs"}}}

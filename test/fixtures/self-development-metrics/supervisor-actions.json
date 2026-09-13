@@ -1,0 +1,8 @@
+{
+  "actions": [
+    {"timestamp": "2026-09-10T10:00:04Z", "type": "steering_prompt", "actor": "supervisor", "summary": "Bound the reproduction"},
+    {"timestamp": "2026-09-10T10:00:12Z", "type": "question_decline", "actor": "supervisor", "request_id": "q1"},
+    {"timestamp": "2026-09-10T10:00:14Z", "type": "question_answer", "actor": "supervisor", "request_id": "q2"},
+    {"timestamp": "2026-09-10T10:00:17Z", "type": "interrupt", "actor": "supervisor", "reason": "retry budget reached"}
+  ]
+}

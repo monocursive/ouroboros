@@ -95,7 +95,7 @@ dev-host-test:
 # newer Rust than the rest of this workspace; see the rust-version note in tui/wasm/Cargo.toml.
 wasm:
 	@echo "==> wasm: release helper into priv/wasm/"
-	cd tui && $(CARGO) build --release -p ouro-wasm
+	cd tui && $(CARGO) build --locked --release -p ouro-wasm
 	mkdir -p priv/wasm
 	cp tui/target/release/ouro-wasm priv/wasm/ouro-wasm
 	chmod 0755 priv/wasm/ouro-wasm
@@ -205,6 +205,8 @@ wasm-skew-test:
 
 release-packaging-test:
 	sh scripts/test-release-packaging.sh
+	python3 scripts/test-release.py
+	python3 scripts/test-install.py
 
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
@@ -213,6 +215,8 @@ test:
 	@echo "==> test: formatting and scripts, then mix, the boot gate, and Rust with both feature sets"
 	$(MIX) format --check-formatted
 	sh scripts/test-release-packaging.sh
+	python3 scripts/test-release.py
+	python3 scripts/test-install.py
 	sh scripts/test-isolated-test.sh
 	sh scripts/test-self-development-artifacts.sh
 	sh scripts/test-dev.sh
@@ -313,5 +317,5 @@ ouro: release-tarball
 	  echo "ouro: expected one regular release tarball; use a fresh build checkout (old artifacts are not deleted)" >&2; \
 	  exit 1; \
 	fi; \
-	cd tui && OUROBOROS_RELEASE_TARBALL="$$1" $(CARGO) build --release --features embed
+	cd tui && OUROBOROS_RELEASE_TARBALL="$$1" $(CARGO) build --locked --release --features embed
 	@ls -l tui/target/release/ouro

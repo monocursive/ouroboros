@@ -11,8 +11,9 @@ self-improvement or safe unattended operation.
 
 Build `ouro` on the OS and architecture that will run it. It embeds BEAM/ERTS and
 the WebAssembly helper; the intermediate Mix tarball alone is not the supported
-deployment unit. There is no installer, updater, package-manager release or signed
-binary download. Do not use old `dist/` files as current release artifacts.
+deployment unit. [Tag-based releases and a Bash installer](RELEASING.md) are now prepared;
+the first hosted binary release has not been published. There is no automatic runtime
+updater or package-manager release. Do not use old `dist/` files as current release artifacts.
 
 | Target | Current evidence, not a compatibility promise |
 |---|---|
