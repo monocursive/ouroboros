@@ -1378,6 +1378,7 @@ dependencies = [
  "ratatui",
  "rcgen",
  "ring",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

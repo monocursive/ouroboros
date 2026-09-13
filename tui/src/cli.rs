@@ -343,6 +343,18 @@ pub enum Command {
 
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
+
+    /// Update this standalone executable to the latest stable release. Running runtimes
+    /// keep their current version until you stop and restart them.
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Check without writing files. Exit 10 means an update is available; 0 means
+    /// current or ahead of stable, and 1 means the check failed.
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `ouro acp`'s flags, in one struct so the dispatch stays one line.

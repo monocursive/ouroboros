@@ -1,0 +1,11 @@
+{
+  "stable_tags": ["v0.1.2", "v1.2.10", "v10.0.0"],
+  "invalid_latest_tags": ["v01.2.3", "v1.2", "v1.2.3-rc.1", "v1.2.3+build", "v1.2.3/extra", "v1.2.3%0A"],
+  "targets": [
+    {"os": "macos", "uname": "Darwin", "arch": "arm64", "version": "15.0", "rosetta": false, "target": "aarch64-apple-darwin"},
+    {"os": "macos", "uname": "Darwin", "arch": "x86_64", "version": "15.0", "rosetta": false, "target": "x86_64-apple-darwin"},
+    {"os": "macos", "uname": "Darwin", "arch": "x86_64", "version": "15.0", "rosetta": true, "target": "aarch64-apple-darwin"},
+    {"os": "linux", "uname": "Linux", "arch": "x86_64", "version": "glibc 2.39", "rosetta": false, "target": "x86_64-unknown-linux-gnu"},
+    {"os": "linux", "uname": "Linux", "arch": "aarch64", "version": "glibc 2.39", "rosetta": false, "target": "aarch64-unknown-linux-gnu"}
+  ]
+}
