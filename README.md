@@ -152,6 +152,7 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 ## Documentation
 
 - [Installation and releases](docs/RELEASING.md)
+- [Changelog](CHANGELOG.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Terminal client](docs/TUI.md)
 - [Web interface](docs/WEB.md)

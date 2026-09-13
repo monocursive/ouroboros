@@ -983,6 +983,30 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   describe "the page" do
     setup :endpoint
 
+    test "the packaged Astra entry is selectable with its supported thinking levels", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/new")
+      id = "openai_codex:gpt-6-astra"
+      choice = NewSession.choice_value({:catalog, id})
+
+      assert has_element?(
+               view,
+               ~s(select[name="model_choice"] option[value="#{choice}"]),
+               "GPT-6 Astra"
+             )
+
+      change(view, %{"model_choice" => choice})
+
+      assert start_params(view)["model"] == id
+
+      for effort <- ~w(low medium high xhigh max) do
+        assert has_element?(view, ~s(select[name="effort"] option[value="#{effort}"]))
+      end
+
+      refute has_element?(view, ~s(select[name="effort"] option[value="none"]))
+    end
+
     test "keeps the primary workflow visible and advanced AI choices disclosed", %{conn: conn} do
       {:ok, view, html} = live(conn, "/new")
 

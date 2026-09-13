@@ -6,6 +6,15 @@
 - `main` is release-only. It advances when a release is cut from `dev` and is where
   `v*` tags live. Nothing merges into `main` directly.
 
+## Changelog
+
+For changes users will notice, add a short entry under `Unreleased` in
+[CHANGELOG.md](CHANGELOG.md) in the same pull request. Describe the resulting
+behavior and any upgrade action. Group entries under `Added`, `Changed`, `Fixed`,
+`Removed`, `Deprecated`, or `Security` as needed; put migration and restart
+instructions under `Upgrade notes`. Internal refactors and routine maintenance do
+not need entries unless they change behavior for users.
+
 ## Local test gate
 
 Start in a fresh checkout with the [source-build toolchains](docs/PREVIEW.md#obtain-and-build)
@@ -128,7 +137,9 @@ make golden
 ## Releases (maintainers)
 
 1. Set the same version in `mix.exs`, `tui/Cargo.toml`, and the `ouro` package entry
-   in `tui/Cargo.lock`, and land the change on `dev`.
+   in `tui/Cargo.lock`. Finalize the changelog entry with the release version and
+   date, keep an `Unreleased` section for subsequent work, and update its comparison
+   link to start at the new tag. Land the changes on `dev`.
 2. Merge `dev` into `main` once CI is green.
 3. Push an annotated `vX.Y.Z` tag on the reviewed `main` commit. The tag must match
    the version in all three files. GitHub Actions runs CI, builds and smoke-tests

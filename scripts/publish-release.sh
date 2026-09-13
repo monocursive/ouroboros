@@ -29,6 +29,7 @@ curl -fsSL https://github.com/$GH_REPO/releases/download/$TAG/install.sh | bash 
 Linux builds target Ubuntu 24.04 / glibc 2.39 or newer; macOS builds use macOS 15 runners.
 For future stable upgrades, run \`ouro update --check\` and \`ouro update\`. Finish active work, then run \`ouro stop\` and \`ouro\` to activate the installed runtime. Older binaries without \`update\` need one installer rerun first.
 See the [installation and release guide](https://github.com/$GH_REPO/blob/$TAG/docs/RELEASING.md) for prerequisites, checksums, upgrades and older versions.
+See the [changelog](https://github.com/$GH_REPO/blob/$TAG/CHANGELOG.md) for changes and upgrade notes.
 
 Source commit: $GITHUB_SHA. Each target passed packaged startup, helper, web authentication refusal and shutdown checks. These checks do not establish every model/provider journey or OS version.
 EOF

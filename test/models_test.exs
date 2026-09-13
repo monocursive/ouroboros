@@ -57,6 +57,23 @@ defmodule Ouroboros.ModelsTest do
   end
 
   describe "the catalogue" do
+    test "Astra is discoverable with metadata without being configured as the default" do
+      native = provider_row(:native)
+      id = "openai_codex:gpt-6-astra"
+
+      refute native.default == id
+      model = Enum.find(native.models, &(&1.id == id))
+
+      assert model,
+             "the packaged OpenAI catalogue must include GPT-6 Astra within the picker limit"
+
+      assert model.name == "GPT-6 Astra"
+      assert model.context_window == 1_050_000
+      assert model.max_output_tokens == 128_000
+      assert model.reasoning_efforts == ["low", "medium", "high", "xhigh", "max"]
+      assert Models.reasoning_efforts(id) == model.reasoning_efforts
+    end
+
     test "every provider this node serves gets a row, bounded and deterministic" do
       catalogue = Models.list()
 
