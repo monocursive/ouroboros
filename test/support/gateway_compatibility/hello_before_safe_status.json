@@ -54,7 +54,6 @@
       "interactive.retry_turn",
       "interactive.rewind",
       "interactive.rewind_points",
-      "interactive.safe_status",
       "interactive.send_message",
       "interactive.start",
       "interactive.steer",

@@ -198,20 +198,32 @@ fn claim_scratch(parent: &Path, protected: &[PathBuf], allowed: &[PathBuf]) -> i
         .iter()
         .map(|path| path.canonicalize())
         .collect::<io::Result<Vec<_>>>()?;
-    let allowed = allowed
+    let invalid_allowed = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an allowed SDK scratch root must be an absolute canonical path",
+        )
+    };
+    let mut canonical_allowed = Vec::new();
+    for path in allowed {
+        if !path.is_absolute() {
+            return Err(invalid_allowed());
+        }
+        let canonical = match path.canonicalize() {
+            Ok(canonical) => canonical,
+            // A fresh checkout has no ignored tmp/ directory. Its absence grants
+            // nothing and must not prevent a claim outside the protected source.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if canonical != *path {
+            return Err(invalid_allowed());
+        }
+        canonical_allowed.push(canonical);
+    }
+    let explicitly_allowed = canonical_allowed
         .iter()
-        .map(|path| {
-            let canonical = path.canonicalize()?;
-            if !path.is_absolute() || canonical != *path {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "an allowed SDK scratch root must be an absolute canonical path",
-                ));
-            }
-            Ok(canonical)
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    let explicitly_allowed = allowed.iter().any(|root| parent.starts_with(root));
+        .any(|root| parent.starts_with(root));
     if !explicitly_allowed
         && protected
             .iter()
@@ -451,6 +463,35 @@ impl Drop for SyntheticLayout {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).expect("only the owned synthetic layout is removed");
     }
+}
+
+#[test]
+fn scratch_missing_optional_output_root_does_not_block_external_scratch() {
+    let layout = SyntheticLayout::new("missing-optional-root");
+    let source = layout.0.join("repository");
+    let outside = layout.0.join("outside");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let allowed = source.canonicalize().unwrap().join("tmp");
+
+    let claim = claim_scratch(
+        &outside,
+        std::slice::from_ref(&source),
+        std::slice::from_ref(&allowed),
+    )
+    .unwrap();
+    assert_eq!(
+        claim.parent(),
+        Some(outside.canonicalize().unwrap().as_path())
+    );
+    assert!(!allowed.exists(), "an optional output root is not created");
+    assert_eq!(
+        claim_scratch(&source, std::slice::from_ref(&source), &[allowed])
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(std::fs::read_dir(&source).unwrap().next().is_none());
 }
 
 #[test]
