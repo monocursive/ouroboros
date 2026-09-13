@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ouroboros — positioning evidence</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0d0c;--surface:#111613;--ink:#f2efe8;--muted:#a0aaa3;--line:#29342d;--accent:#b5d8a5}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 system-ui,sans-serif}main{max-width:1160px;margin:auto;padding:64px 28px}header{max-width:840px}h1{font-size:clamp(36px,5vw,64px);line-height:1.06;letter-spacing:-2px;margin:16px 0 24px}h2{font-size:28px;letter-spacing:-.6px;margin:0 0 24px}h3{font-size:20px;margin:0 0 10px}p{margin:0 0 16px}a{color:var(--accent);text-underline-offset:4px}a:focus-visible{outline:2px solid var(--accent);outline-offset:5px}.eyebrow{font:12px/1.5 monospace;letter-spacing:1.2px;text-transform:uppercase;color:var(--accent)}nav{display:flex;flex-wrap:wrap;gap:24px;margin-top:28px}section{border-top:1px solid var(--line);padding-top:40px;margin-top:48px}.muted,small{color:var(--muted)}.lead{font-size:21px;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}.card,.quote{padding:24px;background:var(--surface);border:1px solid var(--line);border-radius:8px}.quote{font-size:25px;line-height:1.45;margin:24px 0}.scroll{overflow:auto}table{border-collapse:collapse;min-width:760px;width:100%;font-size:14px}th,td{text-align:left;vertical-align:top;padding:16px;border-bottom:1px solid var(--line)}th{color:var(--accent);font-weight:600}td:first-child{width:18%;font-weight:600}td:nth-child(2){width:35%}.sources{columns:2;column-gap:40px;padding-left:22px}.sources li{break-inside:avoid;margin:0 0 12px}code{font-size:.9em;overflow-wrap:anywhere}li{margin-bottom:12px}@media(max-width:780px){main{padding:36px 22px}.grid{grid-template-columns:1fr}.sources{columns:1}.quote{font-size:21px}}@media print{body{background:#fff;color:#111}a,th,.eyebrow{color:#245834}.card,.quote{background:#f7f8f7}.muted,small,.lead{color:#4a544d}.grid{grid-template-columns:1fr}.scroll{overflow:visible}table{min-width:0}.sources{columns:1}section{break-inside:avoid}}
+  </style>
+</head>
+<body><main>
+  <header>
+    <p class="eyebrow">Positioning evidence / reviewed 13 September 2026</p>
+    <h1>What makes<br>Ouroboros different?</h1>
+    <p class="lead">Lead with the runtime’s contracts: verified replay, native cluster placement, and a bounded path for evolving capabilities.</p>
+    <p class="muted">Comparison with pi, oh-my-pi (OMP), and OpenCode. This brief supports the landing-page copy; it is not a benchmark or an exhaustive survey of community extensions.</p>
+    <nav aria-label="Brief sections"><a href="#overview">Overview</a><a href="#competitors">Competitors</a><a href="#guidance">Guidance</a><a href="#sources">Sources</a></nav>
+  </header>
+  <section id="overview">
+    <h2>Overview</h2>
+    <p><strong>Positioning inference:</strong> the strongest story is the combination of runtime mechanisms. Session history, resume, branching, subagents, workspaces, permissions, plugins, and remote access all overlap with these alternatives. Claiming exclusivity for those features would be misleading.</p>
+    <div class="scroll" role="region" aria-label="Positioning comparison" tabindex="0"><table>
+      <thead><tr><th>Area</th><th>Ouroboros read</th><th>Status</th><th>Main pressure</th></tr></thead>
+      <tbody>
+        <tr><td>Recovery and replay</td><td>Durable session state plus verification through the actual agent loop using recorded model and tool results. <a href="#source-replay">Proof</a></td><td>Distinct replay mechanism; recovery overlaps</td><td>Pi saves branching sessions. OMP also records interrupted turns and restores owned child sessions. <a href="#source-pi">Pi</a> · <a href="#source-omp-session">OMP</a></td></tr>
+        <tr><td>Multiple machines</td><td>Native BEAM membership, placement by machine/toolchain tag, session ownership, and child worktree leases. <a href="#source-fleet">Proof</a></td><td>Strong positioning angle</td><td>Remote clients, SSH workflows, and local subagents already exist. No equivalent cluster placement contract was identified in the reviewed core documentation. <a href="#source-pi-extensions">Pi</a> · <a href="#source-omp-task">OMP</a> · <a href="#source-server">OpenCode</a></td></tr>
+        <tr><td>Capability authority</td><td>A signed WebAssembly lane with a closed host-import surface. <a href="#source-architecture">Proof</a></td><td>Concrete architectural distinction</td><td>OMP documents in-process extensions. OpenCode explicitly separates permission prompts from sandboxing. Pi offers sandbox extension examples. <a href="#source-omp-extensions">OMP</a> · <a href="#source-security">OpenCode</a> · <a href="#source-pi-extensions">Pi</a></td></tr>
+        <tr><td>Runtime evolution</td><td>Agent-authored capabilities, evaluated rollout, and policy promotion checked against human-decision evidence. <a href="#source-self">Proof</a></td><td>Distinct process; experimental</td><td>Pi can author extensions; OMP supports memory and reusable learning. “Can improve itself” alone is too broad. <a href="#source-pi-extensions">Pi</a> · <a href="#source-omp">OMP</a></td></tr>
+      </tbody>
+    </table></div>
+  </section>
+  <section id="competitors">
+    <h2>Competitors</h2>
+    <div class="grid">
+      <article class="card"><h3>pi</h3><p><strong>Verified:</strong> a deliberately small coding harness with extensible tools and UI, packages, SDK/RPC integration, and saved session trees with resume and branching. Subagents and sandbox workflows can be supplied through extensions. <a href="#source-pi">README</a> · <a href="#source-pi-extensions">Extensions</a></p><p class="muted"><strong>Positioning read:</strong> compelling for developers who want to assemble their own workflow. Ouroboros should explain the durable, distributed contracts it supplies in the runtime.</p></article>
+      <article class="card"><h3>oh-my-pi / OMP</h3><p><strong>Verified:</strong> LSP, debugger integration, Hashline editing, persistent Python/JavaScript kernels, memory, live collaboration, and subagents with separate workspaces. Its session log also recovers child lifecycle state. <a href="#source-omp">README</a> · <a href="#source-omp-task">Tasks</a> · <a href="#source-omp-session">Sessions</a></p><p class="muted"><strong>Positioning read:</strong> the closest overlap in agent orchestration. Feature breadth is a weak contest for Ouroboros; verified replay and cross-node ownership are sharper distinctions.</p></article>
+      <article class="card"><h3>OpenCode</h3><p><strong>Verified:</strong> primary agents and subagents, configurable permissions, plugins, and a headless HTTP server supporting multiple clients. Its API exposes session children, forks, and reverts. <a href="#source-agents">Agents</a> · <a href="#source-plugins">Plugins</a> · <a href="#source-server">Server</a></p><p class="muted"><strong>Positioning read:</strong> strong appeal for an integrated coding workflow with remote control. Explain Ouroboros’s machine placement and capability execution boundaries precisely.</p></article>
+    </div>
+  </section>
+  <section id="guidance">
+    <h2>Guidance</h2>
+    <p class="eyebrow">Landing-page direction</p>
+    <div class="quote">Keep the work alive.<br><span class="muted">Your machines. One agent runtime.</span></div>
+    <p>An experimental, distributed runtime for AI coding agents. Recover durable sessions, verify recorded runs, and place work across your own machines.</p>
+    <p><strong>Use this positioning when</strong> the work spans machines, interruption recovery matters, or users need to inspect how a run was derived and how new capabilities gain authority. Demonstrate replay verification, a child placed on a tagged node, and a refused import or failed promotion gate.</p>
+    <p><strong>Clarify before making stronger claims:</strong> do users need this runtime architecture, or primarily richer editing, debugging, and provider integrations? No comparative speed, coding-quality, reliability, or security benchmark was run.</p>
+    <ul>
+      <li><strong>Replay has named boundaries.</strong> It checks derivation from recorded inputs; it does not prove external effects were correct. Missing records, compaction, or changed workspace inputs can stop verification. <a href="#source-replay">Replay implementation</a></li>
+      <li><strong>A cluster is one trust domain.</strong> Journals remain node-local. This is not replicated high availability, transparent failover, or isolation between cluster members. <a href="#source-fleet">Fleet limits</a></li>
+      <li><strong>Signing proves provenance and integrity.</strong> Authority comes from the host-import boundary. Development can allow unsigned components; avoid implying every extension or every configuration is equally contained. <a href="#source-architecture">Architecture</a></li>
+      <li><strong>Evolution requires setup and human authority.</strong> Policy promotion is narrow, evidence-bound, and opt-in. It is not a promise of continuous autonomous improvement or better benchmark results. <a href="#source-self">Self-evolution status</a></li>
+    </ul>
+  </section>
+  <section id="sources">
+    <h2>Sources</h2>
+    <p class="muted">Used: current local Ouroboros documentation and implementation, plus official public competitor documentation. CRM, account intelligence, internal messaging, and meeting transcripts are not relevant to this product-positioning task. Competitor workflows were reviewed from documentation, not executed. Absence from this review is not proof that a community extension cannot provide an equivalent.</p>
+    <ol class="sources">
+      <li id="source-replay"><a href="https://github.com/monocursive/ouroboros/blob/bcfc3ea5a6c4e772ffa79275c5c5b176c14102df/lib/ouroboros/provider/native/replay.ex">Ouroboros: verified replay implementation and boundaries</a></li>
+      <li id="source-fleet"><a href="https://github.com/monocursive/ouroboros/blob/bcfc3ea5a6c4e772ffa79275c5c5b176c14102df/docs/FLEET.md">Ouroboros: fleet placement, ownership, and trust domain</a></li>
+      <li id="source-architecture"><a href="https://github.com/monocursive/ouroboros/blob/bcfc3ea5a6c4e772ffa79275c5c5b176c14102df/docs/ARCHITECTURE.md">Ouroboros: recovery, containment, and evolution plane</a></li>
+      <li id="source-self"><a href="https://github.com/monocursive/ouroboros/blob/bcfc3ea5a6c4e772ffa79275c5c5b176c14102df/docs/SELF.md">Ouroboros: implemented self-evolution slices and policy promotion</a></li>
+      <li id="source-pi"><a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md">pi: coding-agent README</a> — current on review date; former badlogic/pi-mono repository redirects here.</li>
+      <li id="source-pi-extensions"><a href="https://github.com/earendil-works/pi/blob/71dca871bc80b6bc97be37f0ca3189399d651fff/packages/coding-agent/docs/extensions.md">pi: extensions, authored tools, and sandbox examples</a></li>
+      <li id="source-omp"><a href="https://github.com/can1357/oh-my-pi">OMP: product README</a> — current on review date.</li>
+      <li id="source-omp-task"><a href="https://github.com/can1357/oh-my-pi/blob/165cede8400d833382177a4dfd2901271c9f0a2c/docs/tools/task.md">OMP: task execution, workspaces, and child lifecycle</a></li>
+      <li id="source-omp-session"><a href="https://github.com/can1357/oh-my-pi/blob/165cede8400d833382177a4dfd2901271c9f0a2c/docs/session.md">OMP: durable session and child-lifecycle records</a></li>
+      <li id="source-omp-extensions"><a href="https://github.com/can1357/oh-my-pi/blob/165cede8400d833382177a4dfd2901271c9f0a2c/docs/extensions.md">OMP: extension execution model</a></li>
+      <li id="source-agents"><a href="https://opencode.ai/docs/agents/">OpenCode: agents and subagents</a> — current on review date.</li>
+      <li id="source-plugins"><a href="https://opencode.ai/docs/plugins/">OpenCode: plugins</a> — current on review date.</li>
+      <li id="source-server"><a href="https://opencode.ai/docs/server/">OpenCode: HTTP server and session APIs</a> — current on review date.</li>
+      <li id="source-security"><a href="https://github.com/anomalyco/opencode/blob/95daf90670b7c039c436c85537da5fbfe2205b41/SECURITY.md">OpenCode: permission and sandbox boundary</a></li>
+    </ol>
+  </section>
+</main></body>
+</html>
