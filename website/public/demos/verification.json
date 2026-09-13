@@ -1,0 +1,17 @@
+{
+  "id": "demo-recovery",
+  "status": "idle",
+  "resumes": 1,
+  "provider_session_id": "native-FclWokkW95n1-89Q1fShxY1JvLzLP",
+  "harness_session_id": "runtime-L-GV1CWIWhNzsaeeDRUktrCj",
+  "retained_context_answer": "The tests cover mixed completed/pending tasks, an empty task list, and an all-completed task list.",
+  "fleet_summary": {
+    "compatible": 2,
+    "connected": 2,
+    "expected": 2,
+    "incompatible": 0,
+    "offline": 0
+  },
+  "source_commit": "9f78cc6a520bebfb676223b8292f105fb38f088e",
+  "same_machine_demo": true
+}

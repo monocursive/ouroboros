@@ -32,6 +32,41 @@ is the record of what was cut in September 2026 to make that true.
   human signs, merges and promotes, and one benchmark says whether the change was an
   improvement ([docs/SELF.md](docs/SELF.md)).
 
+## See it work
+
+The terminal client, connected to a real coding session:
+
+![Ouroboros TUI showing a coding conversation, session state, and two connected fleet nodes](website/public/demos/tui-session.png)
+
+[Web UI screenshot](website/public/demos/web-session.png) ·
+[Full desktop web UI](website/public/demos/web-desktop.png) ·
+[Fleet overview](website/public/demos/fleet.png)
+
+<details>
+<summary>Fleet management — a worker disconnects and rejoins (11s)</summary>
+
+![Real TUI recording of two local TLS nodes, one worker going offline, then reconnecting](website/public/demos/fleet.gif)
+
+</details>
+
+<details>
+<summary>Agent recovery — a process crashes, the conversation continues (15s)</summary>
+
+![Real TUI recording of one deliberate agent process kill, automatic recovery, and a follow-up using retained context](website/public/demos/recovery.gif)
+
+</details>
+
+<details>
+<summary>Coding session — reproduce, fix, and test (22s)</summary>
+
+![Real web UI recording of a failing JavaScript test, approved commands, a code fix, and three passing tests](website/public/demos/coding.gif)
+
+</details>
+
+Captured from the development build; pauses are shortened. The fleet uses two nodes
+on one Mac. Recovery shows one agent-process crash while idle; automatic resume is
+bounded to one attempt per coordinator incarnation. [Capture notes, limits, and MP4s](website/public/demos/README.md).
+
 ## Project status
 
 Ouroboros is under active development. It is a working research project, not a

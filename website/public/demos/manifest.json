@@ -1,0 +1,92 @@
+{
+  "fleet": {
+    "duration_seconds": 11.01,
+    "gif_frames": 88,
+    "gif_dimensions": [
+      1240,
+      880
+    ],
+    "mp4_dimensions": [
+      1240,
+      880
+    ],
+    "mp4_codec": "h264",
+    "audio": false
+  },
+  "recovery": {
+    "duration_seconds": 15.01,
+    "gif_frames": 120,
+    "gif_dimensions": [
+      1240,
+      880
+    ],
+    "mp4_dimensions": [
+      1240,
+      880
+    ],
+    "mp4_codec": "h264",
+    "audio": false
+  },
+  "coding": {
+    "duration_seconds": 22.01,
+    "gif_frames": 176,
+    "gif_dimensions": [
+      765,
+      964
+    ],
+    "mp4_dimensions": [
+      766,
+      964
+    ],
+    "mp4_codec": "h264",
+    "audio": false
+  },
+  "coding.gif": {
+    "bytes": 807067,
+    "sha256": "b7c34ecd845efed659bff128be1a40205cda9362f0bf561e5950606515856d1c"
+  },
+  "coding.mp4": {
+    "bytes": 408371,
+    "sha256": "48ec0ff10a4dd897e601b7dd0be0a9007b11393b8a2cd2e645c05cb5956a1fc1"
+  },
+  "coding.png": {
+    "bytes": 162544,
+    "sha256": "39df074b2eeb99fdc0799605615a8de9e48607e4f68c5d2090e10ba349ca5e59"
+  },
+  "fleet.gif": {
+    "bytes": 114487,
+    "sha256": "93ffbfd7b3b4cdfc237cb1dc88863939b5762fed45e0ed0d378dd1dcb65f84e0"
+  },
+  "fleet.mp4": {
+    "bytes": 95421,
+    "sha256": "c262778a74dc883efa058aca62231c0ea7a09ab29838784db806c16127f10e53"
+  },
+  "fleet.png": {
+    "bytes": 230647,
+    "sha256": "cab2ab2e79e77ea7aea900b6b15427811ae35311c9739c2bee80b263d987e387"
+  },
+  "recovery.gif": {
+    "bytes": 379302,
+    "sha256": "9da514f69a39969062d16703d5660005e2ae0e4421448cb3006072d8c3d008dc"
+  },
+  "recovery.mp4": {
+    "bytes": 300373,
+    "sha256": "2f4b82c3489619113c48bb0a7704959927d5b0434a5bed8902cf4ef15e94d056"
+  },
+  "recovery.png": {
+    "bytes": 136154,
+    "sha256": "92995f48773c37fa7cecba1d5903d16bc38f00101d2f802a64a84926b117ca79"
+  },
+  "tui-session.png": {
+    "bytes": 319339,
+    "sha256": "8744f820d54609e50fb21b86bf248038c3a2c5b10c8fb94f3dc5123d686bf178"
+  },
+  "web-desktop.png": {
+    "bytes": 237915,
+    "sha256": "766c8dc8894e309739b3a6834e0528369c9ddfb8b94da3c737bdd013d05c3e16"
+  },
+  "web-session.png": {
+    "bytes": 162544,
+    "sha256": "39df074b2eeb99fdc0799605615a8de9e48607e4f68c5d2090e10ba349ca5e59"
+  }
+}

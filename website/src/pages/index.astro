@@ -17,6 +17,11 @@ const modelProviders = [
   { provider: 'Anthropic', models: 'Claude', access: 'API key', description: 'Connect directly with your Anthropic API account.' },
   { provider: 'xAI', models: 'Grok', access: 'API key', description: 'Connect directly with your xAI API account.' },
 ];
+const demos = [
+  { id: 'fleet', title: 'Watch your fleet reconnect.', duration: '11 seconds', description: 'Two local nodes connected over TLS. A worker goes offline, then rejoins the running fleet.', width: 1240, height: 880 },
+  { id: 'recovery', title: 'Continue after a crash.', duration: '15 seconds', description: 'One deliberate agent-process crash. The session recovers and answers a follow-up using the conversation it retained.', width: 1240, height: 880 },
+  { id: 'coding', title: 'From failing test to working code.', duration: '22 seconds', description: 'A real web session: reproduce the failure, approve the test command, inspect the edit, and finish with three passing tests.', width: 766, height: 964 },
+];
 ---
 
 <!doctype html>
@@ -93,6 +98,41 @@ const modelProviders = [
           <a href={`${docs}/RELEASING.md`}>Installation guide <span aria-hidden="true">↗︎</span></a>
         </div>
         <p id="copy-status" class="sr-only" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="demos" id="demos" aria-labelledby="demos-heading">
+        <div class="container">
+          <p class="eyebrow section-eyebrow">Recorded in Ouroboros</p>
+          <div class="demos-heading">
+            <h2 id="demos-heading">See the work happen.</h2>
+            <p>Real sessions from the development build.<br />Short, silent recordings. Press play to explore.</p>
+          </div>
+          <div class="demo-grid">
+            {demos.map((demo) => (
+              <article class:list={['demo', { 'demo-coding': demo.id === 'coding' }]}>
+                <div class="demo-copy">
+                  <p class="eyebrow">{demo.duration} <span aria-hidden="true">/</span> {demo.id === 'coding' ? 'Web UI' : 'Terminal'}</p>
+                  <h3>{demo.title}</h3>
+                  <p>{demo.description}</p>
+                  <a class="text-link" href={`/demos/${demo.id}.gif`}>Open GIF <span aria-hidden="true">↗</span></a>
+                </div>
+                <video controls muted playsinline loop preload="none" poster={`/demos/${demo.id}.png`} width={demo.width} height={demo.height} aria-label={demo.title}>
+                  <source src={`/demos/${demo.id}.mp4`} type="video/mp4" />
+                  <a href={`/demos/${demo.id}.mp4`}>Download the {demo.id} recording</a>
+                </video>
+              </article>
+            ))}
+          </div>
+          <div class="demo-notes">
+            <p>Pauses are shortened. The fleet demo runs two nodes on one Mac. Recovery shows one process crash while idle; automatic resume is bounded to one attempt per coordinator incarnation.</p>
+            <div class="demo-downloads" aria-label="Screenshots and capture notes">
+              <a href="/demos/tui-session.png">TUI screenshot ↗</a>
+              <a href="/demos/web-session.png">Web UI screenshot ↗</a>
+              <a href="/demos/web-desktop.png">Full desktop screenshot ↗</a>
+              <a href="/demos/README.md">Capture notes ↗</a>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="runtime" id="runtime" aria-labelledby="runtime-heading">
