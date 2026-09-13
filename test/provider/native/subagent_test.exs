@@ -173,6 +173,41 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     end)
   end
 
+  defp await_collected_subagent(events, phase, timeout \\ 30_000) do
+    # A background child can settle before or after its parent's turn completes.
+    # collect_until/3 may already have consumed that one-shot notification.
+    case subagent_events(events, phase) do
+      [event | _] -> event
+      [] -> await_subagent(phase, timeout)
+    end
+  end
+
+  test "settlement collected before parent completion remains available" do
+    settled = %{
+      type: :provider_event,
+      payload: %{"kind" => "subagent", "phase" => "settled", "task_id" => "early-child"}
+    }
+
+    send(self(), {:native_test_event, settled})
+    send(self(), {:native_test_event, %{type: :turn_completed}})
+    events = collect_until(:turn_completed)
+
+    assert await_collected_subagent(events, "settled", 0) == settled
+  end
+
+  test "settlement arriving after parent completion is still awaited" do
+    settled = %{
+      type: :provider_event,
+      payload: %{"kind" => "subagent", "phase" => "settled", "task_id" => "late-child"}
+    }
+
+    send(self(), {:native_test_event, %{type: :turn_completed}})
+    events = collect_until(:turn_completed)
+    send(self(), {:native_test_event, settled})
+
+    assert await_collected_subagent(events, "settled", 0) == settled
+  end
+
   defp tool_result(events, name) do
     if name == "agent" and Ouroboros.Audit.enabled?(), do: assert_agent_audit()
     Enum.find(events, &(&1.type == :tool_result and &1.payload["name"] == name))
@@ -514,7 +549,10 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       send_turn(handle)
       events = collect_until(:turn_completed)
       [spawned] = subagent_events(events, "spawned")
-      assert await_subagent("settled").payload["result_bytes"] == byte_size(report)
+
+      assert await_collected_subagent(events, "settled").payload["result_bytes"] ==
+               byte_size(report)
+
       handles = collector(handle)
 
       assert {:ok, %{is_error: true, output: invalid}} =
@@ -598,7 +636,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       send_turn(handle)
       events = collect_until(:turn_completed)
       [spawned] = subagent_events(events, "spawned")
-      settled = await_subagent("settled").payload
+      settled = await_collected_subagent(events, "settled").payload
       task_id = spawned.payload["task_id"]
       handles = collector(handle)
 
@@ -632,7 +670,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       send_turn(handle)
       events = collect_until(:turn_completed)
       [spawned] = subagent_events(events, "spawned")
-      _settled = await_subagent("settled")
+      _settled = await_collected_subagent(events, "settled")
 
       assert {:ok, %{is_error: false, output: output}} =
                AgentResult.run(
@@ -1494,9 +1532,9 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert result.payload["output"] =~ task_id
       assert result.payload["output"] =~ "agent_result"
 
-      # It settles on the *session's* stream, with no turn id: the turn that spawned it
-      # has ended, and the work is still this session's.
-      settled = await_subagent("settled")
+      # It settles on the *session's* stream, with no turn id, whether the parent turn
+      # completes before or after the child. The work still belongs to this session.
+      settled = await_collected_subagent(events, "settled")
       assert settled.payload["task_id"] == task_id
       assert settled.payload["status"] == "completed"
       assert settled.turn_id == nil
@@ -1540,7 +1578,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       events = collect_until(:turn_completed)
       [spawned] = subagent_events(events, "spawned")
       task_id = spawned.payload["task_id"]
-      _settled = await_subagent("settled")
+      _settled = await_collected_subagent(events, "settled")
       handles = collector(handle)
 
       assert {:ok, %{is_error: false, output: digest}} =

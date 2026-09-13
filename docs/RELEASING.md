@@ -19,14 +19,14 @@ model accounts, or start/stop the runtime. For a different destination, append
 `-s -- --bin-dir /absolute/path` to `bash`.
 
 Install a specific version, including an older release or a release candidate (replace
-`v0.1.0` with a published tag):
+`v0.1.1` with a published tag):
 
 ```sh
-curl -fsSL https://github.com/monocursive/ouroboros/releases/download/v0.1.0/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://github.com/monocursive/ouroboros/releases/download/v0.1.1/install.sh | bash -s -- --version v0.1.1
 ```
 
 For inspection before execution, download `install.sh`, read it, then run
-`bash install.sh --version v0.1.0`. All versions and their checksums remain on the
+`bash install.sh --version v0.1.1`. All versions and their checksums remain on the
 [Releases page](https://github.com/monocursive/ouroboros/releases). The installer accepts
 `--help`, `--version`, and `--bin-dir`; it refuses an existing symlink at the destination.
 It trusts the official GitHub repository and HTTPS. SHA-256 detects corrupt or mismatched
@@ -84,7 +84,7 @@ Your configuration, credentials, sessions and extracted runtime cache remain ava
 Work integrates through `dev`; stable releases come from commits on `main`. Release
 candidates may come from commits on `dev` or `main`. Use:
 
-- `vX.Y.Z` for a stable release, for example `v0.1.0`.
+- `vX.Y.Z` for a stable release, for example `v0.1.1`.
 - `vX.Y.Z-alpha.N`, `vX.Y.Z-beta.N`, or `vX.Y.Z-rc.N` for a prerelease.
 
 No leading zeroes, moving major-version tags or build-metadata suffixes. Never move a
@@ -94,14 +94,14 @@ published tag or replace its assets. A correction gets a new version.
    `name = "ouro"` package entry in `tui/Cargo.lock`.
    The helper and guest SDK have their own package versions; do not bump them merely
    to rename an Ouroboros release.
-2. Run `python3 scripts/release.py check v0.1.0` and `make release-packaging-test`,
+2. Run `python3 scripts/release.py check v0.1.1` and `make release-packaging-test`,
    review the changes, and land the version commit through the normal branch process.
    Put compatibility changes in the release's PRs so generated notes can identify them.
 3. On the reviewed release commit, create and push an annotated tag:
 
    ```sh
-   git tag -a v0.1.0 -m "Ouroboros 0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.1.1 -m "Ouroboros 0.1.1"
+   git push origin v0.1.1
    ```
 
 4. Watch the **Release** workflow. It validates the tag/version/branch, runs the existing
@@ -128,7 +128,7 @@ The workflow itself already refuses to overwrite a published release.
 
 If a build fails, no release is published. Re-run failed jobs for a transient failure.
 If a code correction is needed, commit it and use a new tag. To rerun an existing tag
-explicitly: `gh workflow run release.yml --ref v0.1.0` (the workflow must also be known
+explicitly: `gh workflow run release.yml --ref v0.1.1` (the workflow must also be known
 on the default branch). Dispatching a branch is refused.
 
 A publication failure can leave an unpublished draft. Rerunning the publication job
@@ -142,7 +142,7 @@ Local packaging checks:
 ```sh
 make release-packaging-test
 make ouro
-python3 scripts/release-smoke.py tui/target/release/ouro 0.1.0 aarch64-apple-darwin
+python3 scripts/release-smoke.py tui/target/release/ouro 0.1.1 aarch64-apple-darwin
 ```
 
 Use the actual native target in the last command. The smoke does no model work and needs
