@@ -4,9 +4,6 @@ Ouroboros uses version tags and GitHub Releases. Each release contains four nati
 `ouro` executables with the Elixir runtime, Erlang/OTP and WebAssembly helper embedded,
 an `install.sh`, and `SHA256SUMS`. Users do not need Elixir, Rust or a compiler.
 
-The automation is prepared in this tree. The commands below become available after
-the first successful published release; adding the workflow does not publish one.
-
 ## Install
 
 Latest stable version:
@@ -99,8 +96,6 @@ published tag or replace its assets. A correction gets a new version.
    to rename an Ouroboros release.
 2. Run `python3 scripts/release.py check v0.1.0` and `make release-packaging-test`,
    review the changes, and land the version commit through the normal branch process.
-   For the first stable release, remove the preparation notes at the start of this guide
-   and in the README as part of that commit.
    Put compatibility changes in the release's PRs so generated notes can identify them.
 3. On the reviewed release commit, create and push an annotated tag:
 

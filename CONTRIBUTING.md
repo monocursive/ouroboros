@@ -127,8 +127,13 @@ make golden
 
 ## Releases (maintainers)
 
-1. Bump `version` in `mix.exs` on `dev`.
+1. Set the same version in `mix.exs`, `tui/Cargo.toml`, and the `ouro` package entry
+   in `tui/Cargo.lock`, and land the change on `dev`.
 2. Merge `dev` into `main` once CI is green.
-3. Tag `vX.Y.Z` on `main` — the tag must match the Mix version exactly. There is no
-   binary publication workflow: `make ouro` builds the client with its release embedded,
-   on the machine that will run it (`docs/proposals/core.md` §3).
+3. Push an annotated `vX.Y.Z` tag on the reviewed `main` commit. The tag must match
+   the version in all three files. GitHub Actions runs CI, builds and smoke-tests
+   native binaries for macOS and GNU/Linux on ARM64 and x86-64, then publishes the
+   complete release with the installer and checksums.
+
+See [the release guide](docs/RELEASING.md#cut-a-release) for validation commands,
+prerelease tags, release retries, and compatibility notes.

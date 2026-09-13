@@ -41,14 +41,14 @@ The runtime, the terminal client, the web interface, cluster placement, and the
 WebAssembly lane are implemented and tested locally. Some production concerns remain:
 high-availability state, partition handling, signing custody outside the cluster's
 trust domain, and a VM boundary around the shell and the build. Tag-based binary
-distribution is configured; the first hosted release is still to be published.
+distribution builds and tests each supported platform before publication.
 Review the documented limits
 in [ARCHITECTURE.md](docs/ARCHITECTURE.md), "Safety boundaries", before relying on
 Ouroboros for sensitive or unattended work.
 
 ## Quick start
 
-Once the first stable release is published, install on macOS or GNU/Linux with:
+Install the latest stable release on macOS or GNU/Linux with:
 
 ```sh
 curl -fsSL https://github.com/monocursive/ouroboros/releases/latest/download/install.sh | bash
