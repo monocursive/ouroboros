@@ -101,7 +101,8 @@ Choosing an older binary does not migrate persistent data backwards. Before upgr
 stop the runtime and back up your data/configuration (normally
 `~/.local/share/ouroboros` and `~/.config/ouroboros`, or your configured locations).
 Restore a compatible backup or use a separate `OUROBOROS_DATA_DIR` when returning to an
-older release. Check the release notes for data compatibility changes.
+older release. Check the [changelog](../CHANGELOG.md) for upgrade notes and data
+compatibility changes.
 
 To remove the default installation, stop the runtime and delete `~/.local/bin/ouro`.
 Your configuration, credentials, sessions and extracted runtime cache remain available.
@@ -121,9 +122,14 @@ published tag or replace its assets. A correction gets a new version.
    `name = "ouro"` package entry in `tui/Cargo.lock`.
    The helper and guest SDK have their own package versions; do not bump them merely
    to rename an Ouroboros release.
-2. Run `python3 scripts/release.py check v0.1.3` and `make release-packaging-test`,
-   review the changes, and land the version commit through the normal branch process.
-   Put compatibility changes in the release's PRs so generated notes can identify them.
+2. Move the relevant `Unreleased` entries in
+   [CHANGELOG.md](../CHANGELOG.md) into a section with the release version and date
+   (`YYYY-MM-DD`). Include any compatibility changes and required upgrade steps.
+   Keep an `Unreleased` section and update its comparison link to start at the new
+   tag. Run `python3 scripts/release.py check v0.1.3` and `make release-packaging-test`,
+   review the changes, and land the version and changelog through the normal branch
+   process. GitHub's generated PR list complements the curated changelog; future
+   release pages link to the changelog at their tag.
 3. On the reviewed release commit, create and push an annotated tag:
 
    ```sh
