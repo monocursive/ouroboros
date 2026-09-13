@@ -30,8 +30,6 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   setup context do
     File.chmod!(context.tmp_dir, 0o700)
-    cleanup_sessions()
-    cleanup_stores()
 
     old_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
@@ -58,8 +56,6 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
     on_exit(fn ->
       :gen_tcp.close(client)
-      cleanup_sessions()
-      cleanup_stores()
       Ouroboros.Test.NativeConfig.configure(old_config)
       File.rm_rf(journal_dir)
     end)
@@ -67,6 +63,34 @@ defmodule Ouroboros.Gateway.StreamingTest do
     assert hello(client)["result"]["scope"] == "operate"
 
     %{client: client}
+  end
+
+  test "cleanup retires only its own session and preserves unrelated records and runtimes" do
+    alias Ouroboros.Interactive.{State, Store, Task}
+
+    {foreign_ref, foreign_id} = start_session()
+    wait_until_runtime_attached(foreign_ref)
+    {:ok, foreign_session} = Store.get(foreign_id)
+    {:ok, foreign_runtime} = Session.info(foreign_session.runtime_id)
+
+    orphan_id = "foreign-record-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, base} = State.new(orphan_id, workspace: File.cwd!())
+    orphan = %{base | node: :unrelated_gateway_fixture@offline, status: :idle}
+    assert :ok = Store.create(orphan)
+
+    on_exit(fn ->
+      Store.put(%{orphan | status: :closed})
+      Store.delete(orphan_id)
+    end)
+
+    {_ref, owned_id} = start_session()
+    cleanup_session(owned_id)
+
+    assert :not_found = Store.get(owned_id)
+    assert is_nil(Task.whereis(owned_id))
+    assert {:ok, ^orphan} = Store.get(orphan_id)
+    assert Process.alive?(foreign_runtime.pid)
+    assert {:ok, %{status: :idle}} = InteractiveSession.info(foreign_id)
   end
 
   describe "subscribing" do
@@ -699,6 +723,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   defp start_session(opts, provider) do
     id = "gateway-stream-#{System.unique_integer([:positive, :monotonic])}"
+    on_exit({:session, id}, fn -> cleanup_session(id) end)
 
     assert {:ok, ref} =
              InteractiveSession.start(
@@ -836,7 +861,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
 
   defp writer_pid(client), do: :sys.get_state(conn_pid(client)).writer
 
-  defp await_terminal(id, attempts \\ 200)
+  defp await_terminal(id, attempts \\ div(@receive_timeout, 10))
   defp await_terminal(_id, 0), do: flunk("the session never reached a terminal status")
 
   defp await_terminal(id, attempts) do
@@ -850,7 +875,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  defp await_retired(id, attempts \\ 200)
+  defp await_retired(id, attempts \\ div(@receive_timeout, 10))
   defp await_retired(_id, 0), do: flunk("the coordinator never retired")
 
   defp await_retired(id, attempts) do
@@ -862,19 +887,25 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  # Store cleanup waits for the coordinator to persist its terminal state before
-  # deleting it. The explicit storage owner survives individual store restarts;
-  # each test leaves no session that a later recovery sweep could adopt.
-  defp cleanup_stores do
-    Enum.each(Ouroboros.Interactive.Store.list(), fn session ->
-      unless Ouroboros.Interactive.State.terminal?(session) do
-        _ = InteractiveSession.kill(session.id)
-        await_terminal(session.id)
-      end
+  # Own only the IDs this test started. The shared store can also contain records
+  # from other fixtures or offline nodes whose coordinators cannot settle here.
+  # Retire our coordinator before deleting its durable terminal state.
+  defp cleanup_session(id) do
+    cleanup_runtime(id)
 
-      await_retired(session.id)
-      _ = Ouroboros.Interactive.Store.delete(session.id)
-    end)
+    case Ouroboros.Interactive.Store.get(id) do
+      {:ok, session} ->
+        unless Ouroboros.Interactive.State.terminal?(session) do
+          _ = InteractiveSession.kill(id)
+          await_terminal(id)
+        end
+
+        await_retired(id)
+        assert :ok = Ouroboros.Interactive.Store.delete(id)
+
+      :not_found ->
+        :ok
+    end
   end
 
   # Polls the plane's durable record until the whole turn is there: every output the
@@ -950,8 +981,9 @@ defmodule Ouroboros.Gateway.StreamingTest do
     call(client, "hello", %{"token" => @token, "protocol" => 1, "client" => "streaming-test"})
   end
 
-  defp cleanup_sessions do
+  defp cleanup_runtime(id) do
     Session.list()
+    |> Enum.filter(&(&1.logical_id == id))
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
 

@@ -3,11 +3,20 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
 
   alias Ouroboros.Provider.Native.Model.Admission
 
-  setup do
+  @receive_timeout 5_000
+  @queue_timeout 30_000
+
+  setup context do
     name = Module.concat(__MODULE__, "Server#{System.unique_integer([:positive])}")
 
     pid =
-      start_supervised!({Admission, name: name, limit: 1, queue_limit: 1, queue_timeout_ms: 100})
+      start_supervised!(
+        {Admission,
+         name: name,
+         limit: 1,
+         queue_limit: 1,
+         queue_timeout_ms: Map.get(context, :queue_timeout_ms, @queue_timeout)}
+      )
 
     {:ok, server: name, pid: pid}
   end
@@ -16,8 +25,8 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
     assert {:ok, lease} = Admission.checkout(server)
     parent = self()
 
-    waiter =
-      spawn(fn ->
+    {waiter, monitor} =
+      spawn_monitor(fn ->
         send(parent, {:waiter, Admission.checkout(server)})
       end)
 
@@ -28,32 +37,51 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
              limit: 1,
              queued: 1,
              queue_limit: 1,
-             queue_timeout_ms: 100
+             queue_timeout_ms: @queue_timeout
            }
 
     :ok = Admission.release(lease)
-    assert_receive {:waiter, {:ok, next_lease}}, 200
-    assert Process.alive?(waiter) == false
+    assert_receive {:waiter, {:ok, next_lease}}, @receive_timeout
+    assert_receive {:DOWN, ^monitor, :process, ^waiter, :normal}, @receive_timeout
     :ok = Admission.release(next_lease)
     assert Admission.status(server).active == 0
   end
 
-  test "bounds the queue and gives timeout and saturation distinct errors", %{
+  test "bounds the queue without displacing the waiting caller", %{
     server: server,
     pid: pid
   } do
     assert {:ok, lease} = Admission.checkout(server)
     parent = self()
 
-    spawn(fn -> send(parent, {:timed_out, Admission.checkout(server)}) end)
+    spawn(fn -> send(parent, {:waiter, Admission.checkout(server)}) end)
     assert_eventually(fn -> Admission.status(server).queued == 1 end)
 
     assert {:error, {:model_capacity_exhausted, %{limit: 1, queue_limit: 1}}} =
              Admission.checkout(server)
 
-    assert_receive {:timed_out, {:error, {:model_capacity_timeout, %{limit: 1, waited_ms: 100}}}},
-                   250
+    :ok = Admission.release(lease)
+    assert_receive {:waiter, {:ok, next_lease}}, @receive_timeout
+    :ok = Admission.release(next_lease)
+    assert Admission.status(server).queued == 0
+    assert queue_empty?(pid)
+  end
 
+  @tag queue_timeout_ms: 100
+  test "an expired waiter reports timeout and releases its queue slot", %{
+    server: server,
+    pid: pid
+  } do
+    assert {:ok, lease} = Admission.checkout(server)
+    parent = self()
+    spawn(fn -> send(parent, {:timed_out, Admission.checkout(server)}) end)
+
+    # The timer stays short; only observation allows for a busy scheduler. Avoid
+    # racing queue/saturation assertions against the timer this test exercises.
+    assert_receive {:timed_out, {:error, {:model_capacity_timeout, %{limit: 1, waited_ms: 100}}}},
+                   @receive_timeout
+
+    assert Admission.status(server).active == 1
     assert Admission.status(server).queued == 0
     assert queue_empty?(pid)
 
@@ -74,12 +102,14 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
         Process.sleep(:infinity)
       end)
 
-    assert_receive :owner_ready
+    on_exit(fn -> Process.exit(owner, :kill) end)
+
+    assert_receive :owner_ready, @receive_timeout
     spawn(fn -> send(parent, {:replacement, Admission.checkout(server)}) end)
     assert_eventually(fn -> Admission.status(server).queued == 1 end)
 
     Process.exit(owner, :kill)
-    assert_receive {:replacement, {:ok, replacement}}, 200
+    assert_receive {:replacement, {:ok, replacement}}, @receive_timeout
     :ok = Admission.release(replacement)
   end
 
@@ -107,6 +137,8 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
         Process.sleep(:infinity)
       end)
 
+    on_exit(fn -> Process.exit(waiter, :kill) end)
+
     assert_eventually(fn -> Admission.status(server).queued == 1 end)
     Process.exit(waiter, :kill)
     assert_eventually(fn -> Admission.status(server).queued == 0 end)
@@ -117,7 +149,7 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
     assert_eventually(fn -> Admission.status(server).queued == 1 end)
 
     :ok = Admission.release(lease)
-    assert_receive {:replacement, {:ok, replacement}}, 200
+    assert_receive {:replacement, {:ok, replacement}}, @receive_timeout
     :ok = Admission.release(replacement)
     assert queue_empty?(pid)
   end
@@ -140,7 +172,7 @@ defmodule Ouroboros.Provider.Native.Model.AdmissionTest do
     pid |> :sys.get_state() |> Map.fetch!(:queue) |> :queue.is_empty()
   end
 
-  defp assert_eventually(fun, attempts \\ 40)
+  defp assert_eventually(fun, attempts \\ div(@receive_timeout, 5))
 
   defp assert_eventually(_fun, 0), do: flunk("condition did not become true")
 
