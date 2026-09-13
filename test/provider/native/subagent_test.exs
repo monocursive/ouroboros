@@ -1463,35 +1463,57 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   describe "a background child" do
     test "cursor collection honors wait_ms before reporting that no stable page exists",
          context do
+      parent = self()
+
+      # Keep the child unfinished until collection has returned. A shell sleep can
+      # expire while a loaded runner is still scheduling the parent's next step.
+      child_response =
+        Stream.map([:finish], fn _ ->
+          send(parent, {:child_waiting, self()})
+
+          receive do
+            :finish_child -> {:finish, :stop}
+          after
+            30_000 -> raise "test never released its waiting child"
+          end
+        end)
+
       %{handle: handle} =
         open(
           context,
           [[agent_call(%{"prompt" => "wait", "background" => true})], finish()],
-          [
-            [{:tool_call, %{id: "slow", name: "bash", input: %{"command" => "sleep 1"}}}],
-            finish()
-          ],
-          %{sandbox_mode: :unrestricted}
+          [fn _request -> child_response end]
         )
 
       send_turn(handle)
-      spawned = await_subagent("spawned")
+      # Spawn notification precedes registration. The completed parent turn proves
+      # the spawn tool has returned and its child is available to agent_result.
+      events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
       handles = collector(handle)
-      started = System.monotonic_time(:millisecond)
+      assert {:ok, _pid} = handles.lookup.(spawned.payload["task_id"])
+      assert_receive {:child_waiting, child}, 30_000
 
-      assert {:ok, %{is_error: false, output: output, lifecycle: lifecycle}} =
-               AgentResult.run(
-                 %{task_id: spawned.payload["task_id"], cursor: 0, wait_ms: 200},
-                 %{subagents: handles}
-               )
+      try do
+        started = System.monotonic_time(:millisecond)
 
-      elapsed = System.monotonic_time(:millisecond) - started
-      assert elapsed >= 150
-      assert output =~ "no stable report page"
-      assert lifecycle.next_action == "await_settlement_event"
-      assert lifecycle.wait_ms == 200
-      assert lifecycle.report_available == false
-      assert await_subagent("settled", 5_000).payload["status"] == "completed"
+        assert {:ok, %{is_error: false, output: output, lifecycle: lifecycle}} =
+                 AgentResult.run(
+                   %{task_id: spawned.payload["task_id"], cursor: 0, wait_ms: 200},
+                   %{subagents: handles}
+                 )
+
+        elapsed = System.monotonic_time(:millisecond) - started
+        assert elapsed >= 150
+        assert output =~ "no stable report page"
+        assert lifecycle.next_action == "await_settlement_event"
+        assert lifecycle.wait_ms == 200
+        assert lifecycle.report_available == false
+      after
+        send(child, :finish_child)
+      end
+
+      assert await_subagent("settled").payload["status"] == "completed"
     end
 
     @tag audit_outcome: true
