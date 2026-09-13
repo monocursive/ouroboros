@@ -10,6 +10,22 @@ requirements and upgrade instructions are in the
 
 No unreleased changes recorded yet.
 
+## [0.1.4] - 2026-09-13
+
+### Fixed
+
+- GPT-6 Astra now appears in the model picker with its context limits and supported
+  thinking levels, including when another model is configured as the default.
+- Updated the bundled model catalogue to `llm_db` 2026.9.1 and the model transport
+  to ReqLLM 1.22.0, which includes Astra Responses support.
+
+### Upgrade notes
+
+- Run `ouro update` from an official standalone installation. Finish active work,
+  then run `ouro stop` and `ouro` to load the updated catalogue and runtime.
+- Model access still depends on the connected account. This update adds Astra to
+  the catalogue without changing the configured default model.
+
 ## [0.1.3] - 2026-09-13
 
 ### Added
@@ -50,6 +66,7 @@ No unreleased changes recorded yet.
 
 Earlier `v0.1.0` and `v0.1.1` tags have no published release assets.
 
-[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.3...dev
+[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.4...dev
+[0.1.4]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.4
 [0.1.3]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.3
 [0.1.2]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.2
