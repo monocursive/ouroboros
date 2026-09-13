@@ -60,6 +60,11 @@ Elixir and Rust are not needed. The [installation and release guide](docs/RELEAS
 covers platform requirements, upgrades, and installing any older version from
 [GitHub Releases](https://github.com/monocursive/ouroboros/releases).
 
+After installing a release with self-update support, use `ouro update --check` to
+check for a newer stable version, and `ouro update` to install it. Finish active
+work and run `ouro stop`, then `ouro`, to activate the new embedded runtime.
+Older binaries without `update` need one installer rerun to acquire the command.
+
 To build from source, install Elixir 1.20, Erlang/OTP 29, Rust 1.95, `make`, Git, and
 a native C/C++ toolchain. Build on the machine that will run it. See the
 [developer preview guide](docs/PREVIEW.md) for platform qualification, first-use checks,

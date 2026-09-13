@@ -78,6 +78,7 @@ jobs:
       - run: sh scripts/test-release-packaging.sh
       - run: python3 scripts/test-release.py
       - run: python3 scripts/test-install.py
+      - run: python3 scripts/test-release-smoke.py
       - run: sh scripts/test-dev.sh
 
       # The tree is warning-free today, checked before this file was written. `--force`

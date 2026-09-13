@@ -88,6 +88,8 @@ jobs:
           rustup default "$RUST_VERSION"
           test "$(rustc -vV | sed -n 's/^host: //p')" = "$TARGET"
       - name: Build locked dependencies and embedded runtime
+        env:
+          OUROBOROS_SELF_UPDATE: "1"
         run: |
           mix deps.get --check-locked
           make ouro
@@ -97,9 +99,19 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          python3 scripts/release-smoke.py tui/target/release/ouro "$VERSION" "$TARGET"
+          python3 scripts/release-smoke.py tui/target/release/ouro "$VERSION" "$TARGET" --require-self-update
           mkdir -p _build/release-assets
           cp tui/target/release/ouro "_build/release-assets/ouro-$VERSION-$TARGET"
+      - name: Qualify updater replacement with the packaged executable
+        env:
+          OURO_UPDATE_SMOKE_BINARY: ${{ github.workspace }}/tui/target/release/ouro
+        run: cargo test --locked -p ouro --lib update::tests::packaged_candidate_replaces_standalone_installation -- --exact
+        working-directory: tui
+      - name: Qualify previous runtime helpers and durable session restart
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/update-smoke.py tui/target/release/ouro "$VERSION" "$TARGET"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.target }}

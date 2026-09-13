@@ -30,7 +30,7 @@ def scratch():
         shutil.rmtree(state)
 
 
-def smoke(binary, version, target):
+def smoke(binary, version, target, *, require_self_update=False):
     with scratch() as state:
         for name in ("home", "data", "config", "cache", "tmp", "bin"):
             (state / name).mkdir(mode=0o700)
@@ -52,6 +52,25 @@ def smoke(binary, version, target):
         output = run(str(installed), "version")
         if not output.startswith(f"ouro {version}\n") or f"  release   {version} (sha256 " not in output:
             raise ValueError("client and embedded runtime must both match the release tag")
+        # Exercise the shipped CLI's build policy without depending on a mutable
+        # public latest tag. This PATH substitution exists only in the smoke harness;
+        # the binary has no repository or verification override. All runtime probes
+        # below keep their system-only PATH.
+        check_tools = state / "update-check-tools"
+        check_tools.mkdir()
+        curl = check_tools / "curl"
+        curl.write_text("#!/bin/sh\nprintf 'https://github.com/monocursive/ouroboros/releases/tag/v0.0.0'\n")
+        curl.chmod(0o755)
+        before = {p.relative_to(state) for p in state.rglob("*")}
+        checked = subprocess.run([str(installed), "update", "--check"], cwd=state,
+                                 env=dict(env, PATH=str(check_tools)), text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        if checked.returncode not in (0, 10) or "0.0.0" not in checked.stdout:
+            raise ValueError("packaged update check failed: " + checked.stderr)
+        if require_self_update and "local build" in checked.stdout:
+            raise ValueError("official packaged binary must enable standalone self-update")
+        if before != {p.relative_to(state) for p in state.rglob("*")}:
+            raise ValueError("packaged update check wrote files")
         try:
             run(str(installed), "daemon")
             status = json.loads(run(str(installed), "wasm", "doctor", "--json"))
@@ -97,11 +116,12 @@ def smoke(binary, version, target):
             finally:
                 connection.close()
         finally:
-            # Stop only this isolated runtime using its authenticated control path.
-            if (state / "data/gateway.json").exists():
-                stopped = run(str(installed), "stop")
-                if "the runtime accepted runtime.shutdown" not in stopped or not re.search(r"the runtime stopped \(pid [0-9]+\)", stopped):
-                    raise ValueError("packaged runtime shutdown was not confirmed")
+            # A missing gateway publication does not prove its runtime stopped.
+            # Always use this isolated client's authenticated control path; an
+            # unavailable or unconfirmed shutdown retains the profile for inspection.
+            stopped = run(str(installed), "stop")
+            if "the runtime accepted runtime.shutdown" not in stopped or not re.search(r"the runtime stopped \(pid [0-9]+\)", stopped):
+                raise ValueError("packaged runtime shutdown was not confirmed")
         print(f"release smoke passed: {version} {target} (boot, helper, web refusal, stop)")
 
 
@@ -110,5 +130,8 @@ if __name__ == "__main__":
     parser.add_argument("binary", type=Path)
     parser.add_argument("version")
     parser.add_argument("target")
+    parser.add_argument("--require-self-update", action="store_true",
+                        help="require an official build with standalone self-update enabled")
     args = parser.parse_args()
-    smoke(args.binary.resolve(), args.version, args.target)
+    smoke(args.binary.resolve(), args.version, args.target,
+          require_self_update=args.require_self_update)

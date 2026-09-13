@@ -207,6 +207,7 @@ release-packaging-test:
 	sh scripts/test-release-packaging.sh
 	python3 scripts/test-release.py
 	python3 scripts/test-install.py
+	python3 scripts/test-release-smoke.py
 
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
@@ -217,6 +218,7 @@ test:
 	sh scripts/test-release-packaging.sh
 	python3 scripts/test-release.py
 	python3 scripts/test-install.py
+	python3 scripts/test-release-smoke.py
 	sh scripts/test-isolated-test.sh
 	sh scripts/test-self-development-artifacts.sh
 	sh scripts/test-dev.sh

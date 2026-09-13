@@ -64,8 +64,35 @@ are separate from this packaging gate; the [preview record](PREVIEW.md) tracks t
 
 ## Upgrade, older versions and removal
 
-Finish active work, run `ouro stop`, then rerun the installer for the latest version or
-pass an explicit `--version`. The verified replacement is renamed into place atomically;
+Official standalone releases with self-update support can upgrade themselves:
+
+```sh
+ouro update --check  # No files changed; exit 10 means an update is available.
+ouro update          # Install a newer stable release at this executable's location.
+```
+
+The updater verifies SHA-256, checks that the downloaded executable runs and reports
+the selected version, and replaces the binary atomically. It needs curl, but no
+checkout, compiler, model account, or running runtime. It never automatically
+downgrades or restarts active work. `--check` exits 0 when current/ahead and 1 on
+failure; a successful update exits 0. A local build can check but cannot replace
+itself. Run as the installation's owner without sudo. Recognized package-manager
+stores and directories writable by other users are refused; use that manager or
+install a standalone copy in a directory you own. Updates on other fleet machines
+and their runtime restarts are coordinated separately.
+
+Finish active work, run `ouro stop`, then run `ouro` again to activate the installed
+runtime. The process-identity helpers stay compatible with older running runtimes;
+updating the binary alone does not update already-loaded BEAM code.
+
+Version 0.1.2 and older binaries without `update` need one installer rerun to acquire
+the command. The installer also remains the recovery path and supports choosing an
+explicit older release with `--version`. Stop the runtime before using that path.
+Avoid running the installer and `ouro update` concurrently. Updater processes
+coordinate through a permanent `.ouro-update-*.lock` file beside the executable;
+do not remove that file while an update is running.
+
+The verified replacement is renamed into place atomically;
 a failed download or checksum leaves the installed executable unchanged. `ouro version`
 shows both the client and embedded runtime version. Run `ouro` again to start that version.
 An already running runtime continues using its old code until stopped.
@@ -119,6 +146,14 @@ only the publication job receives `contents: write`. New release actions are pin
 commit SHAs and covered by the existing Dependabot configuration. Toolchain versions
 match CI (Elixir 1.20, OTP 29, Rust 1.95); keep the two workflow version blocks in sync.
 
+The native build job sets `OUROBOROS_SELF_UPDATE=1` while building the embedded
+binary. Normal `cargo build` and `make ouro` leave self-update disabled. This marker
+is a distribution policy, not a signature. The release workflow passes
+`--require-self-update` to `scripts/release-smoke.py` to reject a packaged binary
+that omitted the marker. Each release also runs the updater's real replacement
+transaction against a copied packaged artifact and checks the older runtime
+helper/shutdown contract before publication.
+
 As a one-time repository hardening step, enable **immutable releases** in GitHub's
 release settings. Draft-first publication is compatible with that setting:
 [GitHub's immutable release guidance](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
@@ -146,6 +181,26 @@ python3 scripts/release-smoke.py tui/target/release/ouro 0.1.2 aarch64-apple-dar
 ```
 
 Use the actual native target in the last command. The smoke does no model work and needs
-no account. Failed smoke runs retain their isolated temporary directory for diagnosis;
-successful runs remove it after confirmed shutdown. Production builds use fresh hosted checkouts; untracked local `dist/` files
-and development caches are never release inputs.
+no account. Its default mode accepts local builds with self-update disabled, while
+still requiring `update --check` to work without creating files.
+`make release-packaging-test` also runs the smoke-harness policy and cleanup regressions
+with CLI doubles; these are separate from native packaged-binary qualification.
+
+To reproduce the official build policy and old-runtime compatibility checks locally:
+
+```sh
+OUROBOROS_SELF_UPDATE=1 make ouro
+python3 scripts/release-smoke.py tui/target/release/ouro 0.1.2 aarch64-apple-darwin --require-self-update
+python3 scripts/update-smoke.py tui/target/release/ouro 0.1.2 aarch64-apple-darwin
+```
+
+Use the candidate's actual version and native target. The update smoke downloads and
+checksum-verifies published 0.1.2, so that command needs network access. Both scripts
+use disposable installations and profiles. After attempting a daemon start, they
+require authenticated shutdown acceptance and confirmation that the runtime stopped
+before deleting the profile. Missing `gateway.json`, a failed stop, or an incomplete
+shutdown response cannot establish that the runtime is gone: the check fails and
+retains its directory for inspection. All other failed smoke runs also retain state.
+
+Production builds use fresh hosted checkouts; untracked local `dist/` files and
+development caches are never release inputs.

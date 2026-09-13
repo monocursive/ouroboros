@@ -10,6 +10,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OUROBOROS_RELEASE_TARBALL");
     println!("cargo:rerun-if-env-changed=OUROBOROS_RELEASE_VERSION");
     println!("cargo:rustc-check-cfg=cfg(embedded_release)");
+    println!("cargo:rustc-check-cfg=cfg(official_release)");
+    println!("cargo:rerun-if-env-changed=OUROBOROS_SELF_UPDATE");
+    match std::env::var("OUROBOROS_SELF_UPDATE").as_deref() {
+        Ok("1") => {
+            assert!(
+                std::env::var_os("CARGO_FEATURE_EMBED").is_some(),
+                "self-update requires the embed feature"
+            );
+            assert!(
+                std::env::var_os("OUROBOROS_RELEASE_TARBALL").is_some(),
+                "self-update requires an embedded release"
+            );
+            println!("cargo:rustc-cfg=official_release");
+        }
+        Err(_) | Ok("0") | Ok("") => {}
+        Ok(_) => panic!("OUROBOROS_SELF_UPDATE must be 0 or 1"),
+    }
 
     #[cfg(feature = "embed")]
     embedded::bake();
