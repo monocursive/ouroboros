@@ -1,6 +1,6 @@
 # `ouro update`
 
-Status: implemented on `codex/cli-self-update`; not yet published.
+Status: implemented; first release version is 0.1.3.
 Date: 2026-09-13.
 Baseline: `bcfc3ea5`, published version 0.1.2.
 

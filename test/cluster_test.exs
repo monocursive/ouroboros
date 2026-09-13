@@ -1101,7 +1101,7 @@ defmodule Ouroboros.ClusterTest do
       assert_eventually(
         fn ->
           match?(
-            %{expected?: true, state: :connected, role: :core},
+            %{expected?: true, state: :connected, role: :core, runtime_running?: true},
             Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
           )
         end,
@@ -1111,11 +1111,32 @@ defmodule Ouroboros.ClusterTest do
       assert {:ok, interactive} = Methods.invoke("interactive.list", %{})
       assert is_list(interactive)
 
-      # Keep distribution alive but remove the owner-local stores. This is the exact
-      # posture in which silently mapping the remote error to [] used to erase its rows
+      # Keep the runtime alive but remove its session consumers and owner-local store.
+      # Stopping the whole application lets a concurrent facts refresh mark the runtime
+      # stopped, so it no longer qualifies for the connected-core query under test.
+      # Silently mapping this remote store error to [] used to erase its rows
       # while fleet.status continued to call the node connected.
-      assert :ok = :erpc.call(core, Application, :stop, [:ouroboros])
+      for child <- [Ouroboros.Session.Supervisor, Ouroboros.Interactive.Store] do
+        assert :ok =
+                 :erpc.call(core, Supervisor, :terminate_child, [Ouroboros.Supervisor, child])
+      end
+
+      assert nil == :erpc.call(core, Process, :whereis, [Ouroboros.Interactive.Store])
       assert core in Node.list()
+
+      # Exercise a fresh observation while the store is unavailable, rather than
+      # depending on the monitor retaining its pre-failure snapshot until disconnect.
+      send(Ouroboros.Cluster.Monitor, {:refresh_connected, [core]})
+
+      assert_eventually(
+        fn ->
+          match?(
+            %{state: :connected, role: :core, runtime_running?: true},
+            Enum.find(Cluster.fleet_status().machines, &(&1.node == core))
+          )
+        end,
+        300
+      )
 
       assert {:error, -32_004, message, %{"reason" => "owner_query_incomplete", "node" => owner}} =
                Methods.invoke("interactive.list", %{})
