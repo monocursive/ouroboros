@@ -47,7 +47,12 @@ EOF
     fi
 
     case "$(uname -s)" in
-        Darwin) os=apple-darwin ;;
+        Darwin)
+            os=apple-darwin
+            macos_version=$(sw_vers -productVersion) || fail 'cannot determine macOS version'
+            [[ "$macos_version" =~ ^[0-9]+(\.[0-9]+)*$ ]] || fail 'invalid macOS version'
+            [ "${macos_version%%.*}" -ge 15 ] || fail 'releases require macOS 15 or newer'
+            ;;
         Linux)
             os=unknown-linux-gnu
             # The release includes ERTS but uses the host GNU C library.
@@ -71,7 +76,7 @@ EOF
         arch=aarch64
     fi
     download() {
-        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --tlsv1.2 --connect-timeout 15 --max-time 600 --retry 3 "$@"
     }
     if [ "$version" = latest ]; then

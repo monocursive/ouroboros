@@ -2,7 +2,7 @@
 //!
 //! The library half of the `ouro` product: runtime discovery and supervision, the bounded
 //! gateway transport and tolerant wire model, the Ratatui application, headless and ACP
-//! modes, fleet lifecycle, signed updates, MCP bridging, and the CLI surfaces that compose
+//! modes, fleet lifecycle, verified updates, MCP bridging, and the CLI surfaces that compose
 //! them. Keeping these modules in the library lets integration tests drive the same code
 //! the binary dispatches.
 
@@ -29,6 +29,7 @@ pub mod status;
 pub mod subprocess;
 pub mod transport;
 pub mod ui;
+pub mod update;
 pub mod wasm_cli;
 pub mod wasm_client;
 pub mod wasm_deploy_cli;

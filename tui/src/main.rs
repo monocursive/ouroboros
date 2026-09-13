@@ -58,7 +58,23 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
-    match run(Cli::parse()).await {
+    let cli = Cli::parse();
+    // Update owns no runtime or terminal state. In particular, broken XDG/config
+    // paths must not prevent repairing the standalone installation.
+    if let Some(Command::Update(args)) = &cli.command {
+        if cli.continue_session {
+            eprintln!("ouro: --continue belongs to the bare command, not `ouro update`");
+            return ExitCode::from(2);
+        }
+        return match ouro::update::execute(args.check, cli.dev).await {
+            Ok(outcome) => ExitCode::from(outcome.exit_code()),
+            Err(error) => {
+                eprintln!("ouro: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         // `ouro run` documents its exit codes, so it ends by carrying one out rather than
         // by describing a failure. It has already said whatever it had to say, on the
@@ -226,6 +242,7 @@ async fn run(cli: Cli) -> Result<()> {
             print!("{}", version());
             Ok(())
         }
+        Some(Command::Update(_)) => unreachable!("update is dispatched before runtime setup"),
     }
 }
 

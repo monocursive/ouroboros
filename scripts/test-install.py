@@ -23,6 +23,8 @@ elif command == "getconf":
     sys.exit(1 if config["libc"] == "musl" else 0)
 elif command == "sysctl":
     print(config.get("rosetta", "0"))
+elif command == "sw_vers":
+    print(config.get("macos_version", "15.0"))
 elif command == "curl":
     with open(config["calls"], "a") as stream:
         stream.write(json.dumps(args) + "\n")
@@ -55,7 +57,7 @@ class InstallerTests(unittest.TestCase):
                        "latest": REPO + "/releases/tag/v0.1.0", "calls": str(self.calls), "files": {}}
         self.env = dict(os.environ, HOME=str(self.home), TMPDIR=str(self.root),
                         PATH=f"{self.tools}:/usr/bin:/bin", INSTALL_FIXTURE=str(self.config_path))
-        for command in ("curl", "uname", "getconf", "sysctl"):
+        for command in ("curl", "uname", "getconf", "sysctl", "sw_vers"):
             self.stub(command)
 
     def stub(self, command):
@@ -171,6 +173,29 @@ class InstallerTests(unittest.TestCase):
                 self.config.update(os=system, arch=arch)
                 self.release(target=target)
                 self.run_install()
+
+    def test_shared_updater_release_contract(self):
+        contract = json.loads((ROOT / "test/support/release-contract.json").read_text())
+        for case in contract["targets"]:
+            self.config.update(os=case["uname"], arch=case["arch"],
+                               libc=case["version"], rosetta="1" if case["rosetta"] else "0",
+                               macos_version=case["version"])
+            for tag in contract["stable_tags"]:
+                self.config["latest"] = REPO + "/releases/tag/" + tag
+                self.release(tag, case["target"])
+                self.run_install()
+        self.config.update(os="Darwin", arch="arm64", macos_version="15.0")
+        for tag in contract["invalid_latest_tags"]:
+            self.config["latest"] = REPO + "/releases/tag/" + tag
+            before = len(self.calls.read_text().splitlines())
+            self.run_install(success=False)
+            calls = self.calls.read_text().splitlines()[before:]
+            self.assertEqual(len(calls), 1, "invalid latest tags must fail before asset downloads")
+
+    def test_old_macos_is_refused(self):
+        self.config["macos_version"] = "14.9"
+        self.run_install(success=False)
+        self.assertFalse(self.calls.exists())
 
     def test_rosetta_uses_arm64(self):
         self.config.update(arch="x86_64", rosetta="1")
