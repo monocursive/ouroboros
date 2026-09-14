@@ -5,7 +5,11 @@ import '../styles/global.css';
 const repository = 'https://github.com/monocursive/ouroboros';
 const docs = `${repository}/blob/main/docs`;
 const installCommand = 'curl -fsSL https://github.com/monocursive/ouroboros/releases/latest/download/install.sh | bash';
-const description = 'An experimental, distributed runtime for AI coding agents. Recover durable sessions, verify recorded runs, and place work across your own machines.';
+const title = 'Ouroboros — A distributed runtime for AI coding agents';
+const description = 'An experimental, open-source runtime for AI coding agents. Recover durable sessions, verify recorded runs, and distribute work across your own machines.';
+const canonicalURL = new URL('/', Astro.site);
+const socialImage = new URL('/social/ouroboros-preview-v1.png', Astro.site);
+const socialImageAlt = 'Ouroboros. Keep the work alive. A distributed runtime for AI coding agents, with the circular Ouroboros emblem on a dark background.';
 const capabilities = [
   { number: '01', title: 'Recover. Replay. Verify.', description: 'Durable sessions preserve the work. Verified replay checks recorded turns through the agent loop, without new model calls or tool execution.', href: `${docs}/REPLAY.md` },
   { number: '02', title: 'Put your fleet to work.', description: 'Place subagents by machine or toolchain tag. Native BEAM clustering tracks session ownership and each child’s Git worktree lease.', href: `${docs}/FLEET.md` },
@@ -32,14 +36,26 @@ const demos = [
     <meta name="description" content={description} />
     <meta name="theme-color" content="#0b0d0c" />
     <meta name="color-scheme" content="dark" />
-    <meta property="og:title" content="Ouroboros — Keep the work alive." />
+    <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content={Astro.site} />
-    <link rel="canonical" href={Astro.site} />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:site_name" content="Ouroboros" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:image" content={socialImage} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={socialImageAlt} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={socialImage} />
+    <meta name="twitter:image:alt" content={socialImageAlt} />
+    <link rel="canonical" href={canonicalURL} />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preload" href="/fonts/DepartureMono-Regular.woff2" as="font" type="font/woff2" crossorigin />
-    <title>Ouroboros — Keep the work alive.</title>
+    <title>{title}</title>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>

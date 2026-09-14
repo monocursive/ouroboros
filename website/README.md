@@ -55,6 +55,27 @@ Figma's connected font service does not provide Departure Mono. Its technical la
 
 ## Content maintenance
 
+### Social link previews
+
+The homepage emits its title, description, canonical URL, Open Graph image metadata,
+and X large-image card metadata in the static HTML, so crawlers do not need JavaScript.
+The preview image is `public/social/ouroboros-preview-v1.png` (1200 × 630 PNG).
+Its editable source is `design/social-preview.html`, which reuses the unchanged
+brand SVGs, local Manrope and Departure Mono fonts, and the site's palette.
+
+To update the artwork, install dependencies in both the repository root and
+`website/`, run `npx playwright install chromium` at the repository root once,
+then run `npm run social:render` from `website/`. Inspect the exported PNG before
+building. The PNG is checked in; ordinary website builds do not require Playwright.
+When replacing an already published image, increment its filename in the renderer
+and homepage metadata so crawlers get a fresh image URL.
+
+After deployment, check the page and image return HTTP 200 without authentication,
+including requests with social crawler user agents. Existing shares may retain
+cached previews; request a fresh scrape in the platform's inspection tool when
+available. Metadata and fetch checks alone do not prove a platform has refreshed
+its displayed card. See the [Open Graph specification](https://ogp.me/).
+
 The recorded demos and screenshot downloads use `public/demos/`. The repository
 README references those same files, so there is one copy to maintain. See the
 [capture notes](public/demos/README.md) for source revision, verified behavior,
