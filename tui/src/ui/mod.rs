@@ -49,6 +49,7 @@
 pub mod access;
 pub mod app;
 pub mod boot;
+mod chat_layout;
 pub mod code;
 pub mod dashboard;
 pub mod details;

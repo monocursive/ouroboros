@@ -150,8 +150,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:flush_scheduled?, false)
       |> assign(:subscribe_error, nil)
       |> assign(:expanded, MapSet.new())
-      |> assign(:cells, [])
-      |> assign(:drawn, 0)
+      |> assign(:cells, %{})
+      |> assign(:history_start, nil)
+      |> assign(:history_anchor, nil)
+      |> assign(:cell_targets, %{})
       |> assign(:session_action, nil)
       |> assign(:session_action_error, nil)
       |> assign(:truncated, 0)
@@ -218,6 +220,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   def handle_event("collapse", %{"block" => block}, socket),
     do: {:noreply, socket |> update(:expanded, &MapSet.delete(&1, block)) |> redraw(:reset)}
+
+  def handle_event("load-history", %{"session" => session}, socket) do
+    case socket.assigns.open && Enum.join(Tuple.to_list(socket.assigns.open), ":") do
+      ^session when not is_nil(session) ->
+        {:noreply, redraw(socket, :older)}
+
+      _closed_or_stale ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("load-history", _params, socket), do: {:noreply, socket}
 
   # The rail is an operator's index, not a second source of truth. Filtering changes only
   # which already-triaged rows are drawn; it never changes their order, their group, or the
@@ -615,7 +629,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:open, {plane, id})
     |> assign(:sessions_visible?, false)
     |> restore_draft(plane, id)
-    |> assign(:watch, Watch.new())
+    |> assign(:watch, Watch.new(retain_history: true))
     |> resubscribe()
     |> refresh_info()
     |> assign_page_title()
@@ -637,8 +651,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:watch, nil)
     |> assign(:info, nil)
     |> assign(:subscribe_error, nil)
-    |> assign(:cells, [])
-    |> assign(:drawn, 0)
+    |> assign(:cells, %{})
+    |> assign(:history_start, nil)
+    |> assign(:history_anchor, nil)
+    |> assign(:cell_targets, %{})
     |> assign(:truncated, 0)
     |> reset_session_state()
     |> stream(:cells, [], reset: true)
@@ -768,8 +784,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # Live events
   # ------------------------------------------------------------------------------------
 
-  # In-process the plane sends unconditionally. A mailbox at `Watch.window/0` is already
-  # more work than this view will hold, so the rest of the queue is a hole — the same
+  # In-process the plane sends unconditionally. A mailbox at `Watch.window/0` triggers
+  # a batched repair, so the discarded queue is a hole — the same
   # hole a `stream.lagged` frame names on the wire. Drop what is queued and resubscribe
   # from the cursor rather than dying: that is the `:DOWN` repair, and it keeps the page.
   defp resync_if_mailbox_lagged(socket) do
@@ -1272,10 +1288,22 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp redraw(socket, mode) do
     entries = Watch.entries(socket.assigns.watch)
-    window = Transcript.chat_entry_window()
-    total = length(entries)
-    truncated = max(total - window, 0)
-    cells = entries |> Enum.take(-window) |> Transcript.project()
+    projected = Transcript.project_with_ids(entries)
+    total = length(projected)
+
+    positions =
+      projected |> Enum.with_index() |> Map.new(fn {item, index} -> {item.id, index} end)
+
+    # Reconcile the loaded boundary by identity. Replay can insert cells before it or
+    # remove a gap without changing which message the reader has already loaded.
+    start = history_start(socket.assigns, positions, total)
+    start = if mode == :older, do: max(start - Transcript.chat_page_size(), 0), else: start
+
+    cells =
+      projected
+      |> Enum.drop(start)
+      |> Enum.with_index(start)
+      |> Map.new(fn {item, index} -> {item.id, Map.put(item, :index, index)} end)
 
     # Approvals come off the whole held ledger, not off the drawn window: a request that
     # scrolled past the redraw budget is still a request nobody has answered.
@@ -1283,7 +1311,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     socket =
       socket
-      |> assign(:truncated, truncated)
+      |> assign(:history_start, start)
+      |> assign(:history_anchor, projected |> Enum.at(start) |> then(&(&1 && &1.id)))
+      |> assign(:cell_targets, Map.new(positions, fn {id, index} -> {index, id} end))
+      |> assign(:truncated, start)
       |> assign(:approvals, approvals)
       # Read once here rather than twice per render. `Approval.detail/1` parses the
       # request's patch, and a poll every three seconds plus a flush every eighty
@@ -1294,7 +1325,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     socket =
       case mode do
         :reset -> reset_stream(socket, cells)
-        :delta -> patch_stream(socket, cells)
+        _delta_or_older -> patch_stream(socket, cells)
       end
 
     # Every path that changes what is pending ends here, so automation has exactly one
@@ -1304,46 +1335,50 @@ defmodule Ouroboros.Web.Live.DeckLive do
     socket |> auto_answer() |> announce_needs_you()
   end
 
-  # Everything changed underneath the list — a different session, a reopened block, a
-  # floor that moved every index. Cheaper and more honest than diffing a list whose
-  # positions no longer mean what they did.
+  defp history_start(%{history_start: nil}, _positions, total),
+    do: max(total - Transcript.chat_page_size(), 0)
+
+  defp history_start(%{history_start: 0}, _positions, _total), do: 0
+
+  defp history_start(assigns, positions, total) do
+    Map.get(positions, assigns.history_anchor) ||
+      Enum.find_value(items(assigns.cells), &Map.get(positions, &1.id)) ||
+      min(assigns.history_start, total)
+  end
+
+  # A reconnect or fold rebuilds the stream, retaining every surviving cell's identity.
   defp reset_stream(socket, cells) do
     socket
     |> stream(:cells, items(cells), reset: true)
     |> assign(:cells, cells)
-    |> assign(:drawn, length(cells))
   end
 
   # The ordinary case: a few deltas landed and one cell at the end changed. Only what
   # differs is sent, which is the whole reason this pane uses a stream.
   defp patch_stream(socket, cells) do
     previous = socket.assigns.cells
-    previous_by_index = previous |> Enum.with_index() |> Map.new(fn {cell, i} -> {i, cell} end)
+
+    # Remove obsolete gaps before inserting into the new positions.
+    socket =
+      Enum.reduce(Map.keys(previous) -- Map.keys(cells), socket, fn id, socket ->
+        stream_delete_by_dom_id(socket, :cells, "cells-#{id}")
+      end)
 
     socket =
-      cells
+      items(cells)
       |> Enum.with_index()
-      |> Enum.reduce(socket, fn {cell, index}, socket ->
-        if Map.get(previous_by_index, index) == cell do
+      |> Enum.reduce(socket, fn {item, position}, socket ->
+        if Map.get(previous, item.id) == item do
           socket
         else
-          stream_insert(socket, :cells, item(cell, index), at: index)
+          stream_insert(socket, :cells, item, at: position)
         end
       end)
 
-    socket =
-      Enum.reduce(length(cells)..(socket.assigns.drawn - 1)//1, socket, fn index, socket ->
-        stream_delete_by_dom_id(socket, :cells, "cells-cell-#{index}")
-      end)
-
-    socket
-    |> assign(:cells, cells)
-    |> assign(:drawn, length(cells))
+    assign(socket, :cells, cells)
   end
 
-  defp items(cells), do: cells |> Enum.with_index() |> Enum.map(fn {c, i} -> item(c, i) end)
-
-  defp item(cell, index), do: %{id: "cell-#{index}", index: index, cell: cell}
+  defp items(cells), do: cells |> Map.values() |> Enum.sort_by(& &1.index)
 
   # ------------------------------------------------------------------------------------
   # Render
@@ -1417,6 +1452,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             info={@info}
             error={@subscribe_error}
             truncated={@truncated}
+            targets={@cell_targets}
             expanded={@expanded}
             streams={@streams}
             approvals={@approvals}
@@ -1877,6 +1913,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :info, :any, required: true
   attr :error, :any, required: true
   attr :truncated, :integer, required: true
+  attr :targets, :map, default: %{}
   attr :expanded, :any, required: true
   attr :streams, :map, required: true
   attr :approvals, :list, required: true
@@ -1943,28 +1980,41 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     <p :if={@error} class="ouro-refusal">{@error}</p>
 
-    <p :if={@truncated > 0} class="ouro-quiet ouro-truncation">
-      the {@truncated} earlier entries this view holds are not drawn
-    </p>
-
     <div
       id="transcript"
       class="ouro-transcript"
-      phx-update="stream"
       phx-hook="ScrollPin"
+      data-session={"#{@plane}:#{@session_id}"}
+      data-history-start={@truncated}
       role="log"
       aria-live="polite"
       aria-relevant="additions text"
       aria-label="Session transcript"
+      tabindex="0"
     >
-      <div :for={{dom_id, item} <- @streams.cells} id={dom_id}>
-        <Cells.cell
-          cell={item.cell}
-          index={item.index}
-          expanded={@expanded}
-          plane={@plane}
-          session_id={@session_id}
-        />
+      <div :if={@truncated > 0} class="ouro-history-loader">
+        <button
+          type="button"
+          class="ouro-quiet-button"
+          phx-click="load-history"
+          phx-value-session={"#{@plane}:#{@session_id}"}
+          phx-disable-with="Loading earlier messages…"
+        >
+          Load earlier messages
+        </button>
+      </div>
+      <div id="transcript-cells" phx-update="stream">
+        <div :for={{dom_id, item} <- @streams.cells} id={dom_id} data-history-cell={item.index}>
+          <Cells.cell
+            cell={item.cell}
+            index={item.index}
+            identity={item.id}
+            targets={@targets}
+            expanded={@expanded}
+            plane={@plane}
+            session_id={@session_id}
+          />
+        </div>
       </div>
     </div>
 

@@ -23,14 +23,8 @@ use super::details;
 use super::editor::{CompletionKind, Editor};
 use super::logo::{self, Treatment};
 use super::theme;
-use super::transcript::{Recent, Watch};
+use super::transcript::Watch;
 use super::transcript_cells::{self, Verbosity};
-
-// Projection is rebuilt on every draw, so the default conversation surface is bounded to a
-// useful recent suffix. The complete retained ledger remains available through /details.
-// The constant lives beside the projection it bounds, because the memo that makes the
-// redraw affordable has to be sized against the same number.
-pub use super::transcript_cells::CHAT_ENTRY_WINDOW;
 
 /// Rows the plan panel may occupy above the composer, borders included. Past this it
 /// scrolls to its own tail rather than eating the conversation.
@@ -1283,14 +1277,16 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let width = inner.width.max(8) as usize;
     let resyncing = watch.resyncing;
-    // The tail, walked as the tail (A12): the pane draws a bounded suffix and always did,
-    // and building five thousand entries per frame to throw away all but the last hundred
-    // and twenty-eight was the O(ledger) shape the gate exists to catch.
-    let recent = watch.recent_entries(CHAT_ENTRY_WINDOW);
-    let mut lines = chat_lines(recent, width, ticks, verbosity);
+    let history = watch.chat_lines(width, ticks, verbosity);
+    let history_len = history.len();
+    let needs_separator = history.last().is_some_and(|line| line.width() > 0);
+    let mut lines = Vec::new();
 
     {
-        let empty = lines.is_empty();
+        let empty = history_len == 0;
+        if needs_separator {
+            lines.push(Line::from(""));
+        }
         if waiting_for_reply {
             push_working_indicator(&mut lines, ticks, theme::working_verb(ticks));
         } else if resyncing {
@@ -1322,7 +1318,12 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // The renderer is the only thing that knows how many rows this wrapped to, so it is
     // the only thing that can hold a scrolled-back viewport still while the tail grows.
-    watch.measured(lines.len(), inner.height as usize);
+    // Discard the separator when there was no working indicator to append.
+    if lines.len() == 1 && needs_separator {
+        lines.clear();
+    }
+    let total = history_len + lines.len();
+    watch.measured(total, inner.height as usize);
 
     if header_height == 1 {
         frame.render_widget(
@@ -1356,7 +1357,7 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    if lines.is_empty() {
+    if total == 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 if show_event_details {
@@ -1373,15 +1374,18 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let height = inner.height as usize;
-    let max_scroll = lines.len().saturating_sub(height);
+    let max_scroll = total.saturating_sub(height);
 
     // `measured` already clamped this against exactly these numbers.
     let scroll = if watch.follow { 0 } else { watch.scroll };
 
     let start = max_scroll.saturating_sub(scroll);
-    let end = (start + height).min(lines.len());
-
-    frame.render_widget(Paragraph::new(lines[start..end].to_vec()), inner);
+    let end = (start + height).min(total);
+    let mut visible = watch.chat_rows()[start.min(history_len)..end.min(history_len)].to_vec();
+    visible.extend_from_slice(
+        &lines[start.saturating_sub(history_len)..end.saturating_sub(history_len)],
+    );
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
 struct DetailsPane<'a> {
@@ -1754,31 +1758,6 @@ fn push_stream_state(spans: &mut Vec<Span<'static>>, watch: &Watch, tick: u64, t
     }
 }
 
-fn chat_lines(
-    recent: Recent<'_>,
-    width: usize,
-    tick: u64,
-    verbosity: Verbosity,
-) -> Vec<Line<'static>> {
-    let Recent { entries, omitted } = recent;
-    let mut lines = transcript_cells::render_at(entries, width, tick, verbosity);
-
-    if omitted == 0 {
-        return lines;
-    }
-
-    let mut bounded = vec![
-        divider(
-            &format!("{omitted} earlier events omitted here — /details shows all retained events"),
-            width,
-            theme::warn(),
-        ),
-        Line::from(""),
-    ];
-    bounded.append(&mut lines);
-    bounded
-}
-
 fn push_working_indicator(lines: &mut Vec<Line<'static>>, tick: u64, message: &str) {
     separate(lines);
     lines.push(theme::working(tick, message.to_string()));
@@ -1788,26 +1767,6 @@ fn separate(lines: &mut Vec<Line<'static>>) {
     if !lines.is_empty() && lines.last().map(Line::width).is_none_or(|width| width != 0) {
         lines.push(Line::from(""));
     }
-}
-
-fn divider(text: &str, width: usize, colour: ratatui::style::Color) -> Line<'static> {
-    // A rule is a row of cells with no word in it. In screen-reader mode the sentence is
-    // the whole divider, and the U+2500s go.
-    if access::screen_reader() {
-        return Line::from(Span::styled(text.to_string(), Style::default().fg(colour)));
-    }
-
-    let text = super::tree::truncate(text, width.saturating_sub(8));
-    let rule = width.saturating_sub(text.width() + 6);
-
-    Line::from(vec![
-        Span::styled("──── ".to_string(), Style::default().fg(colour)),
-        Span::styled(text, Style::default().fg(colour)),
-        Span::styled(
-            format!(" {}", "─".repeat(rule)),
-            Style::default().fg(colour),
-        ),
-    ])
 }
 
 fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
@@ -2502,42 +2461,17 @@ mod tests {
     }
 
     #[test]
-    fn chat_projection_names_the_ledger_when_older_entries_are_bounded() {
-        let watch = watch_of(CHAT_ENTRY_WINDOW as u64 + 1);
-        let recent = watch.recent_entries(CHAT_ENTRY_WINDOW);
-
-        let lines = chat_lines(recent, 160, 0, Verbosity::Compact);
-
-        assert!(
-            lines[0]
-                .to_string()
-                .contains("1 earlier events omitted here"),
-            "{}",
-            lines[0]
-        );
-        assert!(lines[0].to_string().contains("/details"), "{}", lines[0]);
-    }
-
-    /// The window is a redraw budget, not a retention policy: the ledger keeps everything
-    /// and the divider says how much this pane is not drawing.
-    #[test]
-    fn the_chat_window_still_bounds_the_newest_entries_it_projects() {
-        let watch = watch_of(CHAT_ENTRY_WINDOW as u64 + 72);
-        let recent = watch.recent_entries(CHAT_ENTRY_WINDOW);
-
-        let rendered = chat_lines(recent, 120, 0, Verbosity::Compact)
+    fn chat_projection_keeps_the_complete_conversation() {
+        let mut watch = watch_of(200);
+        let rendered = watch
+            .chat_lines(120, 0, Verbosity::Compact)
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-
-        assert!(
-            rendered.contains("72 earlier events omitted here"),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("message-72 "), "{rendered}");
-        assert!(rendered.contains("message-73"), "{rendered}");
+        assert!(rendered.contains("message-1\n"), "{rendered}");
         assert!(rendered.contains("message-200"), "{rendered}");
+        assert!(!rendered.contains("earlier events omitted"));
     }
 
     #[test]

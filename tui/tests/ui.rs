@@ -2046,6 +2046,111 @@ fn an_empty_running_session_shows_a_working_indicator() {
     assert!(!screen.contains("No messages yet."), "{}", screen.text());
 }
 
+#[test]
+fn scrolling_reaches_the_first_message_beyond_the_former_display_window() {
+    let mut app = with_open_session();
+    for sequence in 1..=200 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:03}"),
+            ),
+        );
+    }
+    let tail = render(&mut app, 120, 24);
+    assert!(tail.contains("message-200"), "{}", tail.text());
+    for _ in 0..100 {
+        app.apply(key(KeyCode::PageUp));
+    }
+    let top = render(&mut app, 120, 24);
+    assert!(top.contains("message-001"), "{}", top.text());
+    assert_eq!(open_watch(&app).scroll, open_watch(&app).max_scroll());
+    app.apply(Msg::Scroll(100_000));
+    let tail = render(&mut app, 120, 24);
+    assert!(tail.contains("message-200"), "{}", tail.text());
+    assert!(open_watch(&app).follow);
+}
+
+#[test]
+fn a_reply_streamed_over_hundreds_of_events_keeps_its_beginning() {
+    let mut app = with_open_session();
+    for sequence in 1..=200 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_delta",
+                &format!("chunk-{sequence:03}\n\n"),
+            ),
+        );
+    }
+    let tail = render(&mut app, 120, 24);
+    assert!(tail.contains("chunk-200"), "{}", tail.text());
+    app.apply(Msg::Scroll(-100_000));
+    let top = render(&mut app, 120, 24);
+    assert!(top.contains("chunk-001"), "{}", top.text());
+}
+
+#[test]
+fn a_long_review_is_complete_in_both_compact_and_verbose_views() {
+    let mut app = with_open_session();
+    let mut review = (1..=2_100)
+        .map(|n| {
+            format!(
+                "Review paragraph {n}. {}\n\n",
+                "Complete review text. ".repeat(6)
+            )
+        })
+        .collect::<String>();
+    review.push_str("REVIEW-END-SENTINEL");
+    notify(&mut app, event(1, "output_text_final", &review));
+    for _ in 0..2 {
+        let tail = render(&mut app, 120, 24);
+        assert!(tail.contains("REVIEW-END-SENTINEL"), "{}", tail.text());
+        app.apply(Msg::Scroll(-100_000));
+        let top = render(&mut app, 120, 24);
+        assert!(top.contains("Review paragraph 1."), "{}", top.text());
+        app.apply(Msg::Scroll(100_000));
+        app.apply(ctrl('o'));
+    }
+}
+
+#[test]
+fn a_scrolled_back_transcript_does_not_shift_when_crossing_the_old_event_window() {
+    let mut app = with_open_session();
+    for sequence in 1..=128 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:03}"),
+            ),
+        );
+    }
+    render(&mut app, 120, 24);
+    for _ in 0..4 {
+        app.apply(key(KeyCode::PageUp));
+    }
+    let before = render(&mut app, 120, 24);
+    let anchored = message_rows(&before);
+    assert!(!anchored.is_empty(), "{}", before.text());
+    for sequence in 129..=138 {
+        notify(
+            &mut app,
+            event(
+                sequence,
+                "output_text_final",
+                &format!("message-{sequence:03}"),
+            ),
+        );
+    }
+    let after = render(&mut app, 120, 24);
+    assert_eq!(message_rows(&after), anchored, "{}", after.text());
+}
+
 /// A transcript is drawn bottom-anchored, so anything appended moves every row up by as
 /// much. For a reader who has scrolled back into history that is the transcript sliding out
 /// from under them — and the working indicator alone adds and removes a row on every turn.

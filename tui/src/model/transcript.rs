@@ -19,8 +19,8 @@ mod semantic;
 
 use super::{compact, Event, EventType};
 
-// These ceilings apply only to the derived transcript projection. `Event::payload` and
-// `Event::raw` remain complete for event details, replay, and any future presentation.
+// These ceilings apply to derived tool and status details, not conversation messages.
+// `Event::payload` and `Event::raw` remain complete for event details and replay.
 const PRESENTATION_TEXT_BYTES: usize = 64 * 1024;
 const PRESENTATION_VALUE_BYTES: usize = 64 * 1024;
 const PRESENTATION_VALUE_NODES: usize = 2_048;
@@ -344,7 +344,7 @@ impl PresentationEvent {
         match event.kind {
             EventType::InputAccepted => input_accepted(&event.payload),
             EventType::OutputTextDelta | EventType::OutputTextFinal => {
-                let Some(text) = raw_text(&event.payload, &["text"]) else {
+                let Some(text) = message_text(&event.payload, &["text"]) else {
                     return Self::Hidden(Hidden::EmptyText);
                 };
 
@@ -483,7 +483,7 @@ impl PresentationEvent {
 /// deleted real turns from the chat — including every steer, which is the one kind of turn
 /// an operator is most likely to be looking for afterwards.
 fn input_accepted(payload: &Value) -> PresentationEvent {
-    let words = raw_text(payload, &["text"]).filter(|words| !words.trim().is_empty());
+    let words = message_text(payload, &["text"]).filter(|words| !words.trim().is_empty());
     let steered = text(payload, &["kind"])
         .map(|kind| kind == "steer")
         .unwrap_or(false);
@@ -867,6 +867,14 @@ fn raw_text(value: &Value, keys: &[&str]) -> Option<String> {
     string_value(value, keys)
         .filter(|text| !text.is_empty())
         .map(|text| bounded_copy(text, PRESENTATION_TEXT_BYTES, TEXT_TRUNCATION))
+        .or_else(|| first_value(value, keys).and_then(wire_marker))
+}
+
+/// Conversation text retains every received character, including delta whitespace.
+fn message_text(value: &Value, keys: &[&str]) -> Option<String> {
+    string_value(value, keys)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
         .or_else(|| first_value(value, keys).and_then(wire_marker))
 }
 
@@ -1266,6 +1274,21 @@ mod tests {
             "payload": payload
         }))
         .expect("an event")
+    }
+
+    #[test]
+    fn conversation_text_stays_complete_beyond_the_detail_ceiling() {
+        let text = format!("  {}\n", "あ".repeat(100_000));
+        for kind in ["output_text_delta", "output_text_final"] {
+            let projected = PresentationEvent::from_event(&event(kind, json!({"text": text})));
+            assert!(
+                matches!(projected, PresentationEvent::AgentText { text: words, .. } if words == text)
+            );
+        }
+        assert_eq!(
+            PresentationEvent::from_event(&event("input_accepted", json!({"text": text}))),
+            PresentationEvent::UserMessage(text)
+        );
     }
 
     #[test]

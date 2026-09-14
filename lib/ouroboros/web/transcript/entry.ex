@@ -23,7 +23,7 @@ defmodule Ouroboros.Web.Transcript.Entry.Note do
 
   alias Ouroboros.Web.Transcript.Cell
 
-  defstruct [:note]
+  defstruct [:note, :at]
 
   @type note ::
           {:lagged, non_neg_integer()}
@@ -31,7 +31,7 @@ defmodule Ouroboros.Web.Transcript.Entry.Note do
           | :reconnected
           | {:local, Cell.Runtime.t()}
 
-  @type t :: %__MODULE__{note: note()}
+  @type t :: %__MODULE__{note: note(), at: non_neg_integer() | nil}
 
   @doc "Says what happened, not what is being done about it."
   @spec text(note() | t()) :: String.t()

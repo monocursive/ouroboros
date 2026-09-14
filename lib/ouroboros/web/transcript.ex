@@ -52,12 +52,11 @@ defmodule Ouroboros.Web.Transcript do
   alias Ouroboros.Web.Transcript.Diff, as: ParsedDiff
 
   @doc """
-  How many ledger entries a conversation pane projects.
-
-  A redraw budget, not a retention policy: the surface is bounded to a useful recent
-  suffix and says how much it is not drawing.
+  How many complete display cells a conversation page initially draws or loads.
+  Project the retained ledger before paging, so a page cannot split streamed text,
+  lose a tool's start, or detach a turn's completion from its activity.
   """
-  def chat_entry_window, do: 128
+  def chat_page_size, do: 50
 
   # How many calls one grouped exploration cell lists before it starts counting instead.
   @exploration_calls 64
@@ -65,11 +64,9 @@ defmodule Ouroboros.Web.Transcript do
   @block_head 8
   @block_tail 6
 
-  @agent_output_bytes 128 * 1024
   @command_output_bytes 64 * 1024
   @thinking_bytes 128 * 1024
 
-  @agent_truncation "\n… agent stream truncated; full updates are available in event details"
   @command_truncation "\n… command stream truncated; full updates are available in event details"
   @thinking_truncation "\n… reasoning truncated; full text is available in event details"
 
@@ -142,7 +139,7 @@ defmodule Ouroboros.Web.Transcript do
     entries =
       note_list
       |> Enum.filter(fn {at, _note} -> at >= notes_from end)
-      |> Enum.reduce(entries, fn {_at, note}, acc -> [%Entry.Note{note: note} | acc] end)
+      |> Enum.reduce(entries, fn {at, note}, acc -> [%Entry.Note{note: note, at: at} | acc] end)
 
     entries = if is_binary(ended), do: [%Entry.Ended{status: ended} | entries], else: entries
 
@@ -155,7 +152,7 @@ defmodule Ouroboros.Web.Transcript do
     else
       note_list
       |> Enum.filter(fn {at, _note} -> at >= from and at <= through end)
-      |> Enum.reduce(entries, fn {_at, note}, acc -> [%Entry.Note{note: note} | acc] end)
+      |> Enum.reduce(entries, fn {at, note}, acc -> [%Entry.Note{note: note, at: at} | acc] end)
     end
   end
 
@@ -269,6 +266,12 @@ defmodule Ouroboros.Web.Transcript do
   @doc "Projects one ordered durable transcript into display cells."
   @spec project([Entry.t()]) :: [Cell.t()]
   def project(entries) when is_list(entries) do
+    Enum.map(project_with_ids(entries), & &1.cell)
+  end
+
+  @doc "Projects cells with identities tied to their originating events, not their positions."
+  @spec project_with_ids([Entry.t()]) :: [%{id: String.t(), cell: Cell.t()}]
+  def project_with_ids(entries) when is_list(entries) do
     # What this surface has already drawn in full from an operator verb's own reply, so
     # the runtime's durable record of the same act is not drawn beside it. Gathered in a
     # pass of its own because the two can arrive in either order: the reply usually lands
@@ -280,7 +283,9 @@ defmodule Ouroboros.Web.Transcript do
           do: block.key
 
     entries
-    |> Enum.reduce(new_state(drawn_locally), &absorb_entry/2)
+    |> Enum.reduce(new_state(drawn_locally), fn entry, state ->
+      absorb_entry(entry, %{state | origin: entry_origin(entry), ordinal: 0})
+    end)
     |> flush_agent(true)
     |> settle_thinking()
     |> settle_exploration()
@@ -291,6 +296,9 @@ defmodule Ouroboros.Web.Transcript do
   defp new_state(drawn_locally) do
     %{
       cells: %{},
+      ids: %{},
+      origin: "empty",
+      ordinal: 0,
       count: 0,
       pending: nil,
       thinking: nil,
@@ -320,15 +328,39 @@ defmodule Ouroboros.Web.Transcript do
   end
 
   defp materialise(state) do
-    Enum.map(0..(state.count - 1)//1, &Map.fetch!(state.cells, &1))
+    Enum.map(0..(state.count - 1)//1, fn index ->
+      %{id: Map.fetch!(state.ids, index), cell: Map.fetch!(state.cells, index)}
+    end)
   end
 
-  defp push(state, cell) do
-    {%{state | cells: Map.put(state.cells, state.count, cell), count: state.count + 1},
-     state.count}
+  defp entry_origin(%Entry.Event{event: event}), do: "event-#{Map.fetch!(event, :sequence)}"
+  defp entry_origin(%Entry.Gap{from: from}), do: "gap-#{from}"
+  defp entry_origin(%Entry.Floor{sequence: sequence}), do: "floor-#{sequence}"
+  defp entry_origin(%Entry.Ended{}), do: "ended"
+
+  defp entry_origin(%Entry.Note{at: at, note: note}) do
+    digest =
+      :crypto.hash(:sha256, :erlang.term_to_binary(note)) |> Base.url_encode64(padding: false)
+
+    "note-#{at}-#{digest}"
   end
 
-  defp push!(state, cell), do: state |> push(cell) |> elem(0)
+  defp reserve_id(state) do
+    {"#{state.origin}-#{state.ordinal}", %{state | ordinal: state.ordinal + 1}}
+  end
+
+  defp push(state, cell, id) do
+    {id, state} = if is_nil(id), do: reserve_id(state), else: {id, state}
+
+    {%{
+       state
+       | cells: Map.put(state.cells, state.count, cell),
+         ids: Map.put(state.ids, state.count, id),
+         count: state.count + 1
+     }, state.count}
+  end
+
+  defp push!(state, cell, id \\ nil), do: state |> push(cell, id) |> elem(0)
 
   defp put_at(state, index, cell), do: %{state | cells: Map.put(state.cells, index, cell)}
 
@@ -611,6 +643,7 @@ defmodule Ouroboros.Web.Transcript do
       final? ->
         had_draft? = not is_nil(state.pending)
         fallback = if state.pending, do: state.pending.text, else: ""
+        id = if state.pending, do: state.pending.id
         state = %{state | pending: nil}
         text = if text == "", do: fallback, else: text
 
@@ -625,7 +658,7 @@ defmodule Ouroboros.Web.Transcript do
           settled = if had_draft?, do: nil, else: settled_draft(state, text)
 
           case settled do
-            nil -> push!(state, message)
+            nil -> push!(state, message, id)
             index -> put_at(state, index, message)
           end
         end
@@ -634,12 +667,15 @@ defmodule Ouroboros.Web.Transcript do
         state
 
       true ->
-        draft = state.pending || %{turn_id: turn_id, text: ""}
+        {draft, state} =
+          if state.pending do
+            {state.pending, state}
+          else
+            {id, state} = reserve_id(state)
+            {%{id: id, turn_id: turn_id, text: ""}, state}
+          end
 
-        {appended, _spent} =
-          Text.append_bounded(draft.text, text, @agent_output_bytes, @agent_truncation)
-
-        %{state | pending: %{draft | text: appended}}
+        %{state | pending: %{draft | text: draft.text <> text}}
     end
   end
 
@@ -681,7 +717,11 @@ defmodule Ouroboros.Web.Transcript do
     if String.trim(draft.text) == "" do
       state
     else
-      push!(state, %Cell.Message{speaker: :agent, text: draft.text, streaming: streaming})
+      push!(
+        state,
+        %Cell.Message{speaker: :agent, text: draft.text, streaming: streaming},
+        draft.id
+      )
     end
   end
 

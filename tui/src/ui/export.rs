@@ -35,7 +35,7 @@
 //! ## Bounded, and it says so
 //!
 //! An export can only contain what this client still holds: [`Watch`] keeps
-//! [`transcript::WINDOW`] events and the gateway prunes below its own floor. When anything
+//! all delivered events; the gateway may prune below its own floor. When anything
 //! was dropped, the last line of the output says so and names the sequence — an export that
 //! looked complete and was not would be worse than no export at all.
 //!
@@ -204,9 +204,8 @@ fn footer(out: &mut String, watch: &Watch, width: usize) {
         line(
             out,
             &format!(
-                "bounded: everything at or below sequence {floor} was dropped by the gateway \
-                 or by this client's {} event window, and is not in this export",
-                super::transcript::WINDOW
+                "incomplete: the gateway no longer retains all history through sequence {floor}; \
+                 previously received events are included where available"
             ),
         );
     } else {
@@ -868,15 +867,17 @@ mod tests {
 
         let mut pruned = session();
         pruned.raise_floor(3);
-        let bounded = transcript(&pruned, 100);
+        let incomplete = transcript(&pruned, 100);
 
         assert!(
-            bounded.trim_end().ends_with("is not in this export"),
-            "{bounded}"
+            incomplete
+                .trim_end()
+                .ends_with("previously received events are included where available"),
+            "{incomplete}"
         );
         assert!(
-            bounded.contains("everything at or below sequence 3 was dropped"),
-            "{bounded}"
+            incomplete.contains("the gateway no longer retains all history through sequence 3"),
+            "{incomplete}"
         );
     }
 

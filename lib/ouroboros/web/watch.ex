@@ -47,11 +47,13 @@ defmodule Ouroboros.Web.Watch do
   divider, which is the point: a reader sees one sentence, "history before here is gone",
   whichever side let go of it.
 
-  ## Bounded
+  ## Retention
 
-  A session retains 10,000 events upstream. The window here is `window/0`, smaller than
-  the TUI's 5,000 because a browser holds this per open tab and the reading pane draws a
-  bounded suffix of it anyway (`Ouroboros.Web.Transcript.chat_entry_window/0`).
+  By default a watch keeps `window/0` events. The web conversation opts into
+  `retain_history: true`: it keeps every event delivered by the runtime for the life of
+  the view and pages the projected cells into the browser. Drawing a small page must not
+  discard the history that scrolling back will need. Upstream pruning still produces
+  the ordinary, explicit floor divider.
 
   Pure: no processes, no clock, no messages. The LiveView subscribes, receives, and calls
   in here; every property this module has can be tested by calling functions.
@@ -67,6 +69,7 @@ defmodule Ouroboros.Web.Watch do
   @max_notes 64
 
   defstruct events: %{},
+            retain_history: false,
             notes: %{},
             floor: 0,
             cursor: 0,
@@ -76,6 +79,7 @@ defmodule Ouroboros.Web.Watch do
   @type note :: Entry.Note.note()
   @type t :: %__MODULE__{
           events: %{optional(non_neg_integer()) => map()},
+          retain_history: boolean(),
           notes: %{optional(non_neg_integer()) => note()},
           floor: non_neg_integer(),
           cursor: non_neg_integer(),
@@ -90,9 +94,9 @@ defmodule Ouroboros.Web.Watch do
   @doc """
   Whether a LiveView mailbox has fallen behind the plane by a full watch of work.
 
-  The cap is `window/0`, not a second number. A queue that long is already a hole: even
-  absorbing every message would trim the oldest on the way in, and the repair is the
-  same as the coordinator's `:DOWN` — `subscribe(cursor)`. In-process subscribers have
+  The threshold is `window/0`, independent of whether this watch retains history. A
+  queue that long asks for a batched repair instead of processing each queued delivery;
+  the repair is the same as the coordinator's `:DOWN` — `subscribe(cursor)`. In-process subscribers have
   no `stream.lagged` protocol; this is that protocol's local equivalent, measured in
   mailbox depth rather than outbound frames.
 
@@ -114,7 +118,12 @@ defmodule Ouroboros.Web.Watch do
   @spec new(keyword()) :: t()
   def new(opts \\ []) when is_list(opts) do
     floor = Keyword.get(opts, :floor, 0)
-    %__MODULE__{floor: floor, cursor: floor}
+
+    %__MODULE__{
+      floor: floor,
+      cursor: floor,
+      retain_history: Keyword.get(opts, :retain_history, false)
+    }
   end
 
   @doc "The exclusive cursor every repair resubscribes from."
@@ -279,6 +288,7 @@ defmodule Ouroboros.Web.Watch do
 
   # Drops the oldest events past the window, raising the floor by exactly as much as was
   # dropped so the divider states the truth rather than an approximation.
+  defp trim(%__MODULE__{retain_history: true} = watch), do: watch
   defp trim(%__MODULE__{events: events} = watch) when map_size(events) <= @window, do: watch
 
   defp trim(%__MODULE__{} = watch) do

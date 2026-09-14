@@ -722,11 +722,22 @@ defmodule Ouroboros.EventPresentationTest do
       # 3-byte codepoints, so a naive byte cut would land inside one.
       text = String.duplicate("あ", 40_000)
 
-      assert %AgentText{text: bounded} =
-               Presentation.from_event(event(:output_text_delta, %{"text" => text}))
+      assert %Thinking{text: bounded} =
+               Presentation.from_event(event(:thinking_delta, %{"text" => text}))
 
       assert byte_size(bounded) <= 64 * 1024
       assert String.valid?(bounded)
+    end
+
+    test "conversation text stays complete beyond the detail ceiling" do
+      text = "  " <> String.duplicate("あ", 100_000) <> "\n"
+
+      for kind <- [:output_text_delta, :output_text_final] do
+        assert %AgentText{text: ^text} = Presentation.from_event(event(kind, %{"text" => text}))
+      end
+
+      assert %UserMessage{text: ^text} =
+               Presentation.from_event(event(:input_accepted, %{"text" => text}))
     end
 
     defp truncation_depth(%{"_truncated" => true}), do: 0
