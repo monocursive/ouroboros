@@ -346,7 +346,7 @@ what was read out of them.
 | Sandbox picker, thinking picker — "absent, not defaulted, when the runtime said nothing" | identical rule; `interactive.configure {sandbox_mode}` / `{reasoning_effort}`; label follows the session row after re-list, exactly as the removed `docs/DESKTOP.md` states it |
 | New-session form: provider/model pickers with search, workspace + Browse…, sandbox, effort | `runtime.providers` / `runtime.models` (fetched on form open, never on cadence — `mod.rs:107`); a `<select>`/combobox has none of the gpui-component filtered-cache pathology, so the authoritative-choice workaround dies with gpui; **Browse… becomes `workspace.browse`** (§7) — the native picker browsed the *client's* filesystem, which was only ever correct when client and daemon shared a machine |
 | ChatGPT / Grok account and API-key cards | ChatGPT uses `account.read` / `account.login.*`. Native `grok:` models read the local Grok OAuth sign-in and call the subscription endpoint directly; the card explains `grok login` and refreshes credential status through `runtime.providers`. Native `xai:` models use `credentials.xai.set` and API billing. Tokens never reach the page; Grok alone renews its rotating credentials. |
-| Settings | `/settings` groups the five editable new-session defaults first, subscription and direct API connections second, the detected provider/model catalogue third, and read-only boot/runtime facts last. Secret values never enter LiveView state; environment-owned configuration is shown as read-only rather than rendered as a control that cannot take effect. |
+| Settings | `/settings` groups subscription and API connections first (including Grok local sign-in, provider marks, status/source, refresh and setup guidance), editable new-session defaults second, the detected provider/model catalogue third, and read-only boot/runtime facts last. Secret values never enter LiveView state; environment-owned configuration is shown as read-only rather than rendered as a control that cannot take effect. |
 | Window title, connection pill, notices | page title, a connection indicator driven by LiveView socket state, one notice slot with the same "Info is deliberately dropped" rule |
 | Keyboard: Enter/Shift-Enter, ⌘., ⌘N | same bindings via LiveView key events (browser-permitting; ⌘N may need to become a different chord — browsers own it) |
 
@@ -582,9 +582,9 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
   plan-exit, auto-approve with the question carve-outs, suggested-rule row
   (`permissions.add`).
 - **W6 — new-session form.** ✅ **Landed.** Pickers from providers/models,
-  `workspace.browse` (method first, then the UI), sandbox + effort, ChatGPT and SpaceXAI
+  `workspace.browse` (method first, then the UI), sandbox + effort, ChatGPT and Grok
   subscription cards, and private Anthropic/xAI API-key entry. The same contracts now
-  have a dedicated `/settings` index: everyday defaults first, model connections second,
+  have a dedicated `/settings` index: model connections first, everyday defaults second,
   catalogue visibility third, and restart-owned runtime/security facts last.
 - **W7 — machines (read-only)** ✅ **Landed**, then **deleted** with the rest of the
   fleet product (`docs/proposals/core.md` §3). What survives is the deck's presence

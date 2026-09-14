@@ -1,0 +1,1 @@
+Provider marks from [Lobe Icons](https://github.com/lobehub/lobe-icons), fetched 2026-09-14 from `packages/static-svg/icons/{openai,anthropic,grok,xai}.svg`. Original SVGs, served locally without third-party requests. MIT license included in LICENSE. The marks identify their respective providers.

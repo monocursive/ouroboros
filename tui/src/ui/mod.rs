@@ -62,6 +62,7 @@ pub mod logs;
 pub mod markdown;
 pub mod notify;
 pub mod panels;
+mod provider_marks;
 pub mod sessions;
 pub mod statusline;
 pub mod theme;

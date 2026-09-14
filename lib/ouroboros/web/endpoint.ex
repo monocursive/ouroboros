@@ -96,15 +96,13 @@ defmodule Ouroboros.Web.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: false
 
-  # Public on purpose, and only these four names. Two are the prebuilt bundles that ship
-  # inside `phoenix` and `phoenix_live_view`; the other two are hand-written. None of
-  # them says anything a stranger does not already learn from the unauthenticated page,
-  # and serving them before the token check is what keeps that page from rendering naked.
+  # Public on purpose: the web bundles and bundled provider marks contain no runtime
+  # data. Serving them before authentication also styles the sign-in page.
   plug Plug.Static,
     at: "/web",
     from: {:ouroboros, "priv/static/web"},
     gzip: false,
-    only: ~w(app.css app.js phoenix.min.js phoenix_live_view.min.js)
+    only: ~w(app.css app.js phoenix.min.js phoenix_live_view.min.js providers)
 
   plug Plug.Head
   plug Plug.Session, @session_options
