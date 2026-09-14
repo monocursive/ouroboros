@@ -15,7 +15,7 @@ const capabilities = [
 const modelProviders = [
   { provider: 'OpenAI', models: 'GPT & Codex', access: 'ChatGPT sign-in or API key', description: 'Use your plan’s Codex allowance, or connect your OpenAI API account.' },
   { provider: 'Anthropic', models: 'Claude', access: 'API key', description: 'Connect directly with your Anthropic API account.' },
-  { provider: 'xAI', models: 'Grok', access: 'API key', description: 'Connect directly with your xAI API account.' },
+  { provider: 'xAI', models: 'Grok', access: 'Grok subscription or API key', description: 'Sign in with grok login to use your coding plan, including SuperGrok Heavy, or connect your xAI API account.' },
 ];
 const demos = [
   { id: 'fleet', title: 'Watch your fleet reconnect.', duration: '11 seconds', description: 'Two local nodes connected over TLS. A worker goes offline, then rejoins the running fleet.', width: 1240, height: 880 },
@@ -61,9 +61,9 @@ const demos = [
     <main id="main">
       <section class="hero container" aria-labelledby="hero-heading">
         <div class="hero-copy">
-          <a class="release eyebrow" href={`${repository}/releases/tag/v0.1.4`}>
+          <a class="release eyebrow" href={`${repository}/releases/tag/v0.1.5`}>
             <span class="status-dot" aria-hidden="true"></span>
-            <span>v0.1.4 is here</span><span class="release-divider" aria-hidden="true">/</span><span>Open source</span>
+            <span>v0.1.5 is here</span><span class="release-divider" aria-hidden="true">/</span><span>Open source</span>
           </a>
           <h1 id="hero-heading">Keep the<br />work alive.</h1>
           <p class="introduction">An experimental, distributed runtime for AI coding agents.<br class="desktop-break" /> Recover durable sessions, verify recorded runs, and place work<br class="desktop-break" /> across your own machines.</p>
@@ -171,7 +171,7 @@ const demos = [
             <p class="eyebrow">Also configurable</p>
             <p>Gemini API <span aria-hidden="true">/</span> OpenRouter API <span aria-hidden="true">/</span> Local models via Ollama</p>
           </div>
-          <p class="model-billing">API usage is billed separately by each provider. Claude and Grok app subscriptions do not provide API access here. <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan">ChatGPT plan access</a>, model availability, and usage limits depend on your account.</p>
+          <p class="model-billing">API usage is billed separately by each provider. Claude app subscriptions do not provide API access here. <a href="https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan">ChatGPT plan access</a>, Grok coding plan access, model availability, and usage limits depend on your account.</p>
         </div>
       </section>
     </main>
