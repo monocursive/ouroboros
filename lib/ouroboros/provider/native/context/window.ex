@@ -45,7 +45,7 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   """
   @spec resolve(String.t() | nil) :: window()
   def resolve(model_spec) do
-    from_db(model_spec) || configured()
+    from_db(Ouroboros.Provider.GrokSubscription.api_model(model_spec)) || configured()
   end
 
   @doc """

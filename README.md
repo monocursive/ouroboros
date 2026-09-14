@@ -128,6 +128,22 @@ Model access is a ChatGPT sign-in by default. An API key selects a direct lane i
 `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or `anthropic:<model>` /
 `xai:<model>` with the vendor's key, or the key saved from the web new-session page.
 
+To use a **Grok coding subscription**, including SuperGrok Heavy, sign in on the computer
+running Ouroboros with `grok login`, then select `grok:grok-4.6` in the web model picker
+or start a session with `ouro new --model grok:grok-4.6`. Grok is used for sign-in;
+Ouroboros calls the subscription endpoint directly and runs its own agent loop and tools.
+The `xai:` prefix continues to use separately billed API keys.
+
+Ouroboros reads the private `~/.grok/auth.json` OAuth credential on each request. Set
+`OUROBOROS_GROK_AUTH_FILE` in the service environment if that file lives elsewhere.
+Renew expired credentials with `grok login`; the web connection card has a Refresh
+button. Ouroboros does not copy or rotate Grok's refresh tokens. An unavailable sign-in
+fails explicitly, with no API-key fallback. Model access and subscription usage limits
+remain controlled by xAI; API token prices are not shown as subscription charges.
+
+xAI documents [subscription use in third-party agents](https://x.ai/news/grok-opencode)
+and [direct calls using Grok sign-in](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/README.md#using-authjson-for-api-access).
+
 ## A second machine
 
 Ouroboros runs as one BEAM cluster: several machines, one trust domain, sessions and

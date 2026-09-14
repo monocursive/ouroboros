@@ -20,7 +20,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   """
 
   @behaviour Ouroboros.Provider.Native.Model
-  alias Ouroboros.Provider.{AnthropicKey, XAIKey}
+  alias Ouroboros.Provider.{AnthropicKey, GrokSubscription, XAIKey}
   alias Ouroboros.Provider.Native.Model.{Admission, ToolSchema}
   alias ReqLLM.Provider.ChunkAccumulator
 
@@ -68,9 +68,14 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         |> audit_transport(audit)
 
       Admission.with_stream(fn ->
-        case ReqLLM.stream_text(request.model, context, generation_opts) do
-          {:ok, response} -> {:ok, normalize(response, request.tools)}
-          {:error, reason} -> {:error, reason}
+        # Sign-in may expire or be renewed while this request waits for capacity.
+        # Load it only after admission so the outgoing request uses current credentials.
+        with {:ok, model, generation_opts} <-
+               GrokSubscription.transport(request.model, generation_opts) do
+          case ReqLLM.stream_text(model, context, generation_opts) do
+            {:ok, response} -> {:ok, normalize(response, request.tools)}
+            {:error, reason} -> {:error, reason}
+          end
         end
       end)
     end
@@ -117,6 +122,17 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
       :unknown ->
         fields(:unknown, nil, error.provider_code, false, "API request failed")
     end
+  end
+
+  defp error_summary({:grok_subscription, reason})
+       when reason in [:absent, :invalid, :expired, :unavailable] do
+    fields(
+      :credentials,
+      nil,
+      nil,
+      false,
+      "Grok subscription sign-in #{reason}; run grok login on the Ouroboros computer, then retry"
+    )
   end
 
   defp error_summary(reason) do
@@ -360,7 +376,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         source: if(oauth_present?, do: :stored)
       }
 
-      Enum.sort_by([oauth, AnthropicKey.status(), XAIKey.status() | rows], &{&1.provider, &1.env})
+      Enum.sort_by(
+        [oauth, GrokSubscription.status(), AnthropicKey.status(), XAIKey.status() | rows],
+        &{&1.provider, &1.env}
+      )
     else
       []
     end
@@ -381,7 +400,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp build_tools([], _model_spec), do: {:ok, []}
 
   defp build_tools(specs, model_spec) do
-    {:ok, ToolSchema.prepare(specs, model_spec)}
+    {:ok, ToolSchema.prepare(specs, GrokSubscription.api_model(model_spec))}
   rescue
     error -> {:error, {:invalid_tool_schema, Exception.message(error)}}
   end
@@ -655,9 +674,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     end
   end
 
-  # Native's xAI lane is API-key-only. The environment-first boundary supplies a saved
-  # key only to this transient request; SpaceXAI subscription tokens remain owned by the
-  # first-party Grok CLI and never cross into ReqLLM.
+  # The xai: prefix always uses API keys. The separate grok: prefix selects subscription
+  # credentials and pins its endpoint in GrokSubscription.transport/2.
   defp put_transport_options(options, %{model: "xai:" <> _}) do
     options =
       options
@@ -785,7 +803,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
   defp vision?(model) do
-    case LLMDB.model(model) do
+    case LLMDB.model(GrokSubscription.api_model(model)) do
       {:ok, %{modalities: %{input: input}}} when is_list(input) -> :image in input
       _unknown -> false
     end
