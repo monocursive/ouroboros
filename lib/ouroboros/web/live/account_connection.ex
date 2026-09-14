@@ -3,9 +3,9 @@ defmodule Ouroboros.Web.Live.AccountConnection do
   Device-code login state shared by the ChatGPT account card on the session and settings
   pages.
 
-  One account, because there is one subscription this runtime connects: the ChatGPT one
-  the native `openai_codex:` model lane calls through. The vendor-CLI logins this module
-  used to dispatch over went with the vendor CLIs.
+  Owns the managed ChatGPT login flow for the native `openai_codex:` model lane.
+  Grok subscription credentials are observed separately through `runtime.providers`;
+  their sign-in and renewal remain with Grok.
   """
   import Phoenix.Component, only: [assign: 3]
   alias Ouroboros.Web.Live.NewSession

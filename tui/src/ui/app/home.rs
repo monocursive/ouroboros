@@ -216,6 +216,9 @@ impl App {
         }
         self.overlay = None;
         self.open_url_pending = None;
+        if self.restore_settings() {
+            return;
+        }
         if let Some((request, input)) = self.home_login_start.take() {
             if self.tab == Tab::Sessions
                 && self.sessions.open.is_none()
@@ -254,6 +257,9 @@ impl App {
                 "account.login.cancel",
                 json!({"login_id": login_id}),
             ));
+        }
+        if self.restore_settings() {
+            return;
         }
         if !connected {
             self.home_error = Some(
@@ -615,7 +621,7 @@ impl App {
             }
             Some(Overlay::Settings(settings)) => {
                 let taken = push_into(settings.text_mut(), &flattened);
-                settings.edited |= taken;
+                settings.edited |= taken && settings.editor.is_none();
                 taken
             }
             Some(Overlay::Commands(palette)) => {

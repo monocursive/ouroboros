@@ -1131,6 +1131,47 @@ pub struct ProviderProbe {
     pub version: Option<String>,
     #[serde(default)]
     pub executable: Option<String>,
+    #[serde(default, deserialize_with = "provider_details")]
+    pub details: ProviderDetails,
+}
+
+/// Only the non-secret credential projection is retained, never arbitrary provider details.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderDetails {
+    pub credentials: Vec<CredentialStatus>,
+}
+
+// Optional diagnostic details cannot invalidate the provider's execution capabilities.
+// Ignore malformed rows individually and retain only the non-secret wire projection.
+fn provider_details<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ProviderDetails, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let credentials = value
+        .get("credentials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| serde_json::from_value::<CredentialStatus>(row.clone()).ok())
+        .filter(|row| !row.provider.is_empty() && !row.env.is_empty() && row.present.is_some())
+        .collect();
+    Ok(ProviderDetails { credentials })
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CredentialStatus {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub env: String,
+    #[serde(default)]
+    pub present: Option<bool>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub credential_state: Option<String>,
+    #[serde(default)]
+    pub workspace_configured: bool,
 }
 
 impl ProviderEntry {

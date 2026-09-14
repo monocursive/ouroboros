@@ -79,7 +79,7 @@ pub use overlays::{
     APPROVAL_CHOICES, APPROVAL_REMEMBER, APPROVAL_ROWS, SANDBOX_ROWS,
 };
 pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
-pub use settings::{Settings, SettingsField};
+pub use settings::{Settings, SettingsConnection, SettingsField, SettingsSection};
 pub use start::{NewField, NewSession, DEFAULT_MODEL};
 
 /// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
@@ -222,6 +222,9 @@ pub enum Tag {
     AccountLogin,
     AccountCancel,
     AccountLogout,
+    SettingsCredential {
+        provider: String,
+    },
     Status,
     Providers,
     Sessions(Plane),
@@ -700,6 +703,8 @@ pub struct App {
     pub logs: Option<LogRing>,
     pub log_scroll: usize,
     pub overlay: Option<Overlay>,
+    pub settings_return: Option<Box<Settings>>,
+    pub(super) settings_refresh_queued: bool,
     /// B2. Whether this gateway has already refused a plan-exit answer's
     /// `provider_options`, and so must be answered with `decision`/`scope` alone.
     ///
@@ -917,6 +922,8 @@ impl App {
             logs,
             log_scroll: 0,
             overlay: None,
+            settings_return: None,
+            settings_refresh_queued: false,
             plan_options_refused: false,
             notice: None,
             quit: None,

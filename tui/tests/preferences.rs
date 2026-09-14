@@ -149,6 +149,7 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
 
         app.apply(key(KeyCode::Char(tab)));
         app.apply(key(KeyCode::Char(',')));
+        app.apply(key(KeyCode::F(2)));
 
         assert!(
             matches!(app.overlay, Some(Overlay::Settings(_))),
@@ -167,16 +168,10 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
 
     let mut app = with_providers(Defaults::default());
     app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
 
     let screen = render(&mut app, 120, 34);
 
-    assert!(
-        screen.contains("as reported by the runtime"),
-        "{}",
-        screen.text()
-    );
-    assert!(screen.contains("ouroboros@golden"), "{}", screen.text());
-    assert!(screen.contains("127.0.0.1:4560"), "{}", screen.text());
     assert!(
         screen.contains("the rows below are this client's session defaults"),
         "{}",
@@ -188,6 +183,15 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
         screen.text()
     );
     assert!(screen.contains("[ save ]"), "{}", screen.text());
+    app.apply(key(KeyCode::F(3)));
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("as reported by the runtime"),
+        "{}",
+        screen.text()
+    );
+    assert!(screen.contains("ouroboros@golden"), "{}", screen.text());
+    assert!(screen.contains("127.0.0.1:4560"), "{}", screen.text());
 }
 
 #[test]
@@ -199,6 +203,7 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
     app.config_path = Some(path.clone());
 
     app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
 
     // Nothing has been touched, so there is nothing to write — a default is something an
     // operator states, not something a first open invents.
@@ -279,6 +284,7 @@ fn esc_closes_settings_without_writing_anything() {
     app.config_path = Some(path.clone());
 
     app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Esc));
@@ -303,6 +309,7 @@ fn a_save_with_nowhere_to_write_says_so_instead_of_claiming_success() {
     app.config_path = None;
 
     app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Down));
@@ -327,6 +334,7 @@ fn enter_on_a_field_row_moves_rather_than_saving() {
     let mut app = with_providers(Defaults::default());
 
     app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
     app.apply(key(KeyCode::Enter));
 
     let Some(Overlay::Settings(settings)) = &app.overlay else {
@@ -345,6 +353,7 @@ fn settings_open_on_whatever_the_file_already_said() {
     });
 
     app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
 
     let screen = render(&mut app, 130, 34);
 
@@ -572,4 +581,311 @@ fn with_no_file_the_dialog_opens_on_the_model_a_first_session_would_use() {
         "{}",
         screen.text()
     );
+}
+
+fn connection_providers(grok: &str, xai_source: Option<&str>) -> serde_json::Value {
+    json!([{ "provider": "native", "status": { "installed": true, "compatible": true,
+    "details": { "credentials": [
+        {"provider": "openai_codex", "env": "OUROBOROS_OAUTH_FILE", "present": false},
+        {"provider": "grok", "env": "OUROBOROS_GROK_AUTH_FILE", "present": grok == "present", "credential_state": grok, "source": "stored", "key": "must-never-be-retained"},
+        {"provider": "openai", "env": "OPENAI_API_KEY", "present": false},
+        {"provider": "anthropic", "env": "ANTHROPIC_API_KEY", "present": false},
+        {"provider": "xai", "env": "XAI_API_KEY", "present": xai_source.is_some(), "source": xai_source},
+        {"provider": "google", "env": "GOOGLE_API_KEY", "present": true, "source": "environment"}
+    ]}}}])
+}
+
+#[test]
+fn connections_show_sources_refresh_and_never_retain_secret_fields() {
+    let mut app = connected(Defaults::default());
+    app.apply(key(KeyCode::Char(',')));
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("present", Some("environment")),
+    );
+    app.apply(key(KeyCode::Down));
+    for (width, height) in [(120, 34), (80, 24)] {
+        let screen = render(&mut app, width, height);
+        assert!(screen.contains("Grok"), "{}", screen.text());
+        assert!(screen.contains("Connected locally"), "{}", screen.text());
+        assert!(screen.contains("grok login"), "{}", screen.text());
+        assert!(!screen.contains("must-never-be-retained"));
+    }
+    assert!(!format!("{:?}", app.providers).contains("must-never-be-retained"));
+    let _ = app.drain();
+    app.apply(key(KeyCode::Char('r')));
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "runtime.providers"));
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("invalid", None),
+    );
+    assert_eq!(app.settings_connections()[1].state(), "Needs attention");
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("unavailable", None),
+    );
+    assert_eq!(app.settings_connections()[1].state(), "Status unavailable");
+}
+
+#[test]
+fn key_editor_masks_paste_submits_only_on_save_and_refreshes() {
+    let mut app = connected(Defaults::default());
+    app.apply(key(KeyCode::Char(',')));
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("absent", None),
+    );
+    for _ in 0..4 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+    app.apply(Msg::Paste("xai-private-settings-canary".into()));
+    let screen = render(&mut app, 100, 30);
+    assert!(screen.contains("xAI API key"), "{}", screen.text());
+    assert!(!screen.contains("xai-private-settings-canary"));
+    assert!(!format!("{:?}", app.overlay).contains("xai-private-settings-canary"));
+    let _ = app.drain();
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain().is_empty(),
+        "Enter in a text field is not a save"
+    );
+    app.apply(key(KeyCode::Enter));
+    let calls = app.drain();
+    let call = calls
+        .iter()
+        .find(|call| call.method == "credentials.xai.set")
+        .expect("save key");
+    assert_eq!(
+        call.params,
+        json!({"api_key": "xai-private-settings-canary"})
+    );
+    app.apply(Msg::Paste("not accepted while saving".into()));
+    answer(
+        &mut app,
+        call.tag.clone(),
+        json!({"present": true, "source": "stored"}),
+    );
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "runtime.providers"));
+    assert!(render(&mut app, 120, 34).contains("Credentials saved privately"));
+    assert!(
+        app.take_config_save().is_none(),
+        "keys never go in client preferences"
+    );
+}
+
+#[test]
+fn environment_and_read_scope_block_stored_key_edits() {
+    for environment in [true, false] {
+        let mut app = connected(Defaults::default());
+        if !environment {
+            app.hello.scope = "read".into();
+        }
+        app.apply(key(KeyCode::Char(',')));
+        answer(
+            &mut app,
+            Tag::Providers,
+            connection_providers("absent", environment.then_some("environment")),
+        );
+        for _ in 0..4 {
+            app.apply(key(KeyCode::Down));
+        }
+        let _ = app.drain();
+        app.apply(key(KeyCode::Enter));
+        assert!(matches!(&app.overlay, Some(Overlay::Settings(s)) if s.editor.is_none()));
+        assert!(!app
+            .drain()
+            .iter()
+            .any(|call| call.method == "credentials.xai.set"));
+    }
+}
+
+#[test]
+fn account_dialog_returns_to_settings_without_losing_defaults() {
+    let mut app = connected(Defaults::default());
+    app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
+    type_text(&mut app, "/unsaved");
+    app.apply(key(KeyCode::F(1)));
+    app.apply(key(KeyCode::Enter));
+    assert!(matches!(app.overlay, Some(Overlay::Account(_))));
+    app.apply(key(KeyCode::Esc));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Settings(s)) if s.workspace.ends_with("/unsaved"))
+    );
+}
+
+#[test]
+fn account_logout_returns_to_settings_and_consumes_the_return_state() {
+    let mut app = connected(Defaults::default());
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({"credentialState": "present", "account": {"type": "chatgpt"}}),
+    );
+    app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(2)));
+    type_text(&mut app, "/unsaved");
+    app.apply(key(KeyCode::F(1)));
+    app.apply(key(KeyCode::Enter));
+    app.apply(key(KeyCode::Char('l')));
+    answer(&mut app, Tag::AccountLogout, json!({}));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Settings(s)) if s.workspace.ends_with("/unsaved"))
+    );
+    assert!(app.settings_return.is_none());
+}
+
+#[test]
+fn optional_credential_details_cannot_remove_a_usable_runtime_provider() {
+    for details in [
+        serde_json::Value::Null,
+        json!({"credentials": null}),
+        json!({"credentials": [
+            {"provider": "xai", "env": "XAI_API_KEY", "present": true, "source": "stored"},
+            {"provider": "broken", "present": "unknown"}
+        ]}),
+    ] {
+        let mut app = connected(Defaults::default());
+        answer(
+            &mut app,
+            Tag::Providers,
+            json!([{"provider": "native", "status": {
+                "installed": true, "compatible": true, "details": details
+            }}]),
+        );
+        let providers = app.providers.value.as_ref().unwrap();
+        assert_eq!(
+            providers.len(),
+            1,
+            "optional details must not hide the runtime"
+        );
+        assert!(providers[0].ready());
+        if details["credentials"].is_array() {
+            assert_eq!(app.settings_connections()[4].state(), "Key configured");
+        }
+    }
+}
+
+#[test]
+fn absent_probe_details_are_unavailable_instead_of_zero_configured() {
+    let mut app = with_providers(Defaults::default());
+    app.apply(key(KeyCode::Char(',')));
+    answer(&mut app, Tag::Providers, providers());
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("Connection status unavailable"),
+        "{}",
+        screen.text()
+    );
+    assert!(!screen.contains("0 configured"));
+}
+
+#[test]
+fn refreshed_selection_and_setup_target_the_same_connection() {
+    let mut app = connected(Defaults::default());
+    app.apply(key(KeyCode::Char(',')));
+    let mut report = connection_providers("absent", None);
+    answer(&mut app, Tag::Providers, report.clone());
+    for _ in 0..5 {
+        app.apply(key(KeyCode::Down));
+    }
+    report[0]["status"]["details"]["credentials"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    answer(&mut app, Tag::Providers, report);
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Settings(s)) if s.editor.as_ref().is_some_and(|e| e.provider == "xai"))
+    );
+}
+
+#[test]
+fn saving_a_key_during_a_probe_requests_a_fresh_report_after_that_probe() {
+    let mut app = connected(Defaults::default());
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("absent", None),
+    );
+    app.apply(key(KeyCode::Char(',')));
+    assert!(app.providers.pending);
+    for _ in 0..4 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+    app.apply(Msg::Paste("private-key-canary".into()));
+    app.apply(key(KeyCode::Enter));
+    app.apply(key(KeyCode::Enter));
+    answer(
+        &mut app,
+        Tag::SettingsCredential {
+            provider: "xai".into(),
+        },
+        json!({}),
+    );
+    let _ = app.drain();
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("absent", None),
+    );
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "runtime.providers"),
+        "the older in-flight probe cannot satisfy the post-save refresh"
+    );
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("absent", Some("stored")),
+    );
+    assert_eq!(app.settings_connections()[4].state(), "Key configured");
+}
+
+#[test]
+fn compact_key_editor_keeps_save_and_failure_visible_with_long_workspace_id() {
+    let mut app = connected(Defaults::default());
+    app.apply(key(KeyCode::Char(',')));
+    answer(
+        &mut app,
+        Tag::Providers,
+        connection_providers("absent", None),
+    );
+    for _ in 0..3 {
+        app.apply(key(KeyCode::Down));
+    }
+    app.apply(key(KeyCode::Enter));
+    app.apply(Msg::Paste("private-key-canary".into()));
+    assert!(render(&mut app, 60, 18).contains("blank clears saved ID"));
+    app.apply(key(KeyCode::Tab));
+    app.apply(Msg::Paste(format!("wrkspc_{}", "a".repeat(200))));
+    app.apply(key(KeyCode::Tab));
+    let screen = render(&mut app, 60, 18);
+    assert!(screen.contains("[ Save key ]"), "{}", screen.text());
+    app.apply(key(KeyCode::Enter));
+    app.apply(Msg::Answer {
+        tag: Tag::SettingsCredential {
+            provider: "anthropic".into(),
+        },
+        result: Err(ouro::transport::ClientError::ConnectionClosed),
+    });
+    let screen = render(&mut app, 60, 18);
+    assert!(screen.contains("[ Save key ]"), "{}", screen.text());
+    assert!(screen.contains("Could not save"), "{}", screen.text());
+    assert!(screen.contains("re-enter"), "{}", screen.text());
+    assert!(screen.contains("the key to retry."), "{}", screen.text());
+    assert!(!screen.contains("private-key-canary"));
 }

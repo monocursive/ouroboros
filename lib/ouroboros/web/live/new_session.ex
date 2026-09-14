@@ -224,7 +224,10 @@ defmodule Ouroboros.Web.Live.NewSession do
               provider: provider,
               env: env,
               present: present,
-              credential_state: credential_state(value(row, :credential_state)),
+              credential_state:
+                credential_state(
+                  value(row, :credential_state) || if(present, do: :present, else: :absent)
+                ),
               source: source,
               workspace_env: workspace_env,
               workspace_configured?: workspace_configured

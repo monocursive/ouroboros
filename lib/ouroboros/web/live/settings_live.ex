@@ -126,6 +126,10 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   # Subscription connections
   # ------------------------------------------------------------------------------------
 
+  def handle_event("refresh-connections", _params, socket) do
+    {:noreply, socket |> load_providers() |> read_account() |> maybe_poll_account()}
+  end
+
   def handle_event("connect-chatgpt", _params, socket) do
     case Ouroboros.Web.Live.AccountConnection.connect(socket, &call/3, @account_poll) do
       {:ok, updated} -> {:noreply, clear_feedback(updated)}
@@ -213,12 +217,39 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       {:ok, entries} when is_list(entries) ->
         rows = NewSession.provider_rows(entries)
 
-        socket
-        |> assign(:providers, rows)
+        if Enum.any?(rows, &(&1.credentials != [])) do
+          socket
+          |> assign(:providers, rows)
+          |> assign(:providers_error, nil)
+        else
+          unavailable_providers(
+            assign(socket, :providers, rows),
+            "This runtime did not report credential status. Refresh or update the runtime."
+          )
+        end
 
       refused ->
-        assign(socket, :providers_error, refusal_message(refused))
+        unavailable_providers(
+          socket,
+          refusal_message(refused) || "The credential report could not be read."
+        )
     end
+  end
+
+  defp unavailable_providers(socket, message) do
+    rows =
+      Enum.map(socket.assigns.providers || [], fn row ->
+        %{
+          row
+          | credentials:
+              Enum.map(
+                row.credentials,
+                &Map.merge(&1, %{present: false, credential_state: "unavailable"})
+              )
+        }
+      end)
+
+    socket |> assign(:providers, rows) |> assign(:providers_error, message)
   end
 
   defp load_models(socket) do
@@ -352,6 +383,20 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     |> Enum.filter(&(&1.provider == provider and &1.env == env))
     |> Enum.sort_by(&if(&1.present, do: 0, else: 1))
     |> List.first()
+    |> case do
+      nil ->
+        %{
+          provider: provider,
+          env: env,
+          present: false,
+          source: nil,
+          credential_state: "unavailable",
+          workspace_configured?: false
+        }
+
+      credential ->
+        credential
+    end
   end
 
   defp credential(_rows, _provider, _env), do: nil
@@ -373,6 +418,8 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp stored_credential_managed?(_can_set?, %{source: "environment"}), do: false
   defp stored_credential_managed?(can_set?, _credential), do: can_set?
 
+  defp credential_state(%{credential_state: "invalid"}), do: :invalid
+  defp credential_state(%{credential_state: "unavailable"}), do: :unavailable
   defp credential_state(%{present: true}), do: :available
   defp credential_state(%{present: false}), do: :missing
   defp credential_state(_credential), do: :checking
@@ -426,6 +473,15 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       |> assign(:anthropic, credential(assigns.providers, "anthropic", "ANTHROPIC_API_KEY"))
       |> assign(:openai, credential(assigns.providers, "openai", "OPENAI_API_KEY"))
       |> assign(:xai, credential(assigns.providers, "xai", "XAI_API_KEY"))
+      |> assign(:grok, credential(assigns.providers, "grok", "OUROBOROS_GROK_AUTH_FILE"))
+      |> assign(
+        :additional_credentials,
+        Enum.filter(other_credentials(assigns.providers), &credential_visible?/1)
+      )
+      |> assign(
+        :other_credentials,
+        Enum.reject(other_credentials(assigns.providers), &credential_visible?/1)
+      )
       |> assign(:provider_summaries, provider_summaries(assigns.providers, assigns.catalogue))
       |> assign(:can_save?, Call.available?(assigns.scope, "interactive.start"))
       |> assign(:can_browse?, Call.available?(assigns.scope, "workspace.browse"))
@@ -441,18 +497,134 @@ defmodule Ouroboros.Web.Live.SettingsLive do
         </div>
         <p class="ouro-settings-eyebrow">Ouroboros preferences</p>
         <h1>Settings</h1>
-        <p>Choose how new sessions begin, connect model providers, and inspect this runtime.</p>
+        <p>Your models, connected accounts, and preferences. All in one place.</p>
       </header>
 
       <div class="ouro-settings-shell">
         <nav class="ouro-settings-nav" aria-label="Settings sections">
-          <a href="#defaults">Session defaults</a>
           <a href="#connections">AI connections</a>
+          <a href="#defaults">Session defaults</a>
           <a href="#providers">Providers & models</a>
           <a href="#runtime">Runtime & security</a>
         </nav>
 
         <div class="ouro-settings-content">
+          <section id="connections" class="ouro-settings-section" aria-labelledby="connections-title">
+            <.section_head
+              eyebrow="Accounts & billing"
+              title="AI connections"
+              id="connections-title"
+              copy="Choose a subscription or use your own API keys. Secrets stay on the runtime; their values are never shown here."
+            />
+
+            <div class="ouro-settings-connections-summary" aria-live="polite">
+              <p :if={@providers_error}>Connection status unavailable</p>
+              <p :if={is_nil(@providers) and is_nil(@providers_error)}>Reading connection status…</p>
+              <p :if={not is_nil(@providers) and is_nil(@providers_error)}>
+                <strong>{connection_count(@account_card, @providers)}</strong>
+                {if connection_count(@account_card, @providers) == 1,
+                  do: "connection",
+                  else: "connections"} configured on this runtime
+              </p>
+              <button
+                type="button"
+                class="ouro-new-secondary"
+                phx-click="refresh-connections"
+                phx-disable-with="Refreshing…"
+              >Refresh status</button>
+            </div>
+            <p :if={@providers_error} class="ouro-refusal" role="alert">
+              Connection status could not be refreshed. {@providers_error}
+            </p>
+            <p class="ouro-settings-verification-note">
+              Status reflects local credentials. Provider acceptance and model access are not verified.
+            </p>
+
+            <div class="ouro-settings-group">
+              <div class="ouro-settings-group-head">
+                <h3>Subscriptions</h3>
+                <p>First-party account connections for eligible models.</p>
+              </div>
+              <div class="ouro-settings-connection-grid">
+                <.subscription_card
+                  service="ChatGPT"
+                  detail="OpenAI Codex models"
+                  card={@account_card}
+                  connect="connect-chatgpt"
+                  cancel="cancel-chatgpt"
+                  can_connect={Call.available?(@scope, "account.login.start")}
+                />
+                <.grok_subscription_card credential={@grok} />
+              </div>
+            </div>
+
+            <div class="ouro-settings-group">
+              <div class="ouro-settings-group-head">
+                <h3>API credentials</h3>
+                <p>
+                  Direct usage billed by each provider. Stored keys can be replaced, never revealed.
+                </p>
+              </div>
+              <div class="ouro-settings-connection-list">
+                <.credential_card
+                  provider="OpenAI"
+                  logo="openai"
+                  env="OPENAI_API_KEY"
+                  credential={@openai}
+                  managed={false}
+                  read_only={@scope == :read}
+                />
+                <.credential_card
+                  provider="Anthropic"
+                  logo="anthropic"
+                  env="ANTHROPIC_API_KEY"
+                  credential={@anthropic}
+                  managed={stored_credential_managed?(@can_set_anthropic?, @anthropic)}
+                  event="open-anthropic-key"
+                  read_only={@scope == :read}
+                  workspace
+                />
+                <.credential_card
+                  provider="xAI"
+                  logo="xai"
+                  env="XAI_API_KEY"
+                  credential={@xai}
+                  managed={stored_credential_managed?(@can_set_xai?, @xai)}
+                  event="open-xai-key"
+                  read_only={@scope == :read}
+                />
+                <.credential_card
+                  :for={credential <- @additional_credentials}
+                  provider={provider_name(credential.provider)}
+                  env={credential.env}
+                  credential={credential}
+                  managed={false}
+                  read_only={@scope == :read}
+                />
+              </div>
+            </div>
+            <details
+              :if={@other_credentials != []}
+              class="ouro-settings-other"
+              data-ouro-disclosure
+              id="other-provider-credentials"
+            >
+              <summary>
+                Other API providers <span>{length(@other_credentials)} available to configure</span>
+              </summary>
+              <div class="ouro-settings-connection-list">
+                <.credential_card
+                  :for={credential <- @other_credentials}
+                  provider={provider_name(credential.provider)}
+                  env={credential.env}
+                  credential={credential}
+                  managed={false}
+                  read_only={@scope == :read}
+                />
+              </div>
+            </details>
+          </section>
+
           <section id="defaults" class="ouro-settings-section" aria-labelledby="defaults-title">
             <.section_head
               eyebrow="Everyday"
@@ -491,64 +663,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
                 </button>
               </div>
             </form>
-          </section>
-
-          <section id="connections" class="ouro-settings-section" aria-labelledby="connections-title">
-            <.section_head
-              eyebrow="Accounts & billing"
-              title="AI connections"
-              id="connections-title"
-              copy="Subscriptions and API keys are separate ways to pay for model usage. Secrets stay on the runtime and are never shown here."
-            />
-
-            <div class="ouro-settings-group">
-              <div class="ouro-settings-group-head">
-                <h3>Subscriptions</h3>
-                <p>First-party account connections for eligible models.</p>
-              </div>
-              <div class="ouro-settings-connection-grid">
-                <.subscription_card
-                  service="ChatGPT"
-                  detail="OpenAI Codex models"
-                  card={@account_card}
-                  connect="connect-chatgpt"
-                  cancel="cancel-chatgpt"
-                  can_connect={Call.available?(@scope, "account.login.start")}
-                />
-              </div>
-            </div>
-
-            <div class="ouro-settings-group">
-              <div class="ouro-settings-group-head">
-                <h3>API credentials</h3>
-                <p>
-                  Direct usage billed by each provider. Stored keys can be replaced, never revealed.
-                </p>
-              </div>
-              <div class="ouro-settings-connection-list">
-                <.credential_card
-                  provider="OpenAI"
-                  env="OPENAI_API_KEY"
-                  credential={@openai}
-                  managed={false}
-                />
-                <.credential_card
-                  provider="Anthropic"
-                  env="ANTHROPIC_API_KEY"
-                  credential={@anthropic}
-                  managed={stored_credential_managed?(@can_set_anthropic?, @anthropic)}
-                  event="open-anthropic-key"
-                  workspace
-                />
-                <.credential_card
-                  provider="xAI"
-                  env="XAI_API_KEY"
-                  credential={@xai}
-                  managed={stored_credential_managed?(@can_set_xai?, @xai)}
-                  event="open-xai-key"
-                />
-              </div>
-            </div>
           </section>
 
           <section id="providers" class="ouro-settings-section" aria-labelledby="providers-title">
@@ -651,23 +765,27 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   def subscription_card(assigns) do
     ~H"""
-    <article class="ouro-settings-connection-card">
+    <article class="ouro-settings-connection-card" id="connection-chatgpt">
       <div class="ouro-settings-connection-title">
+        <.provider_logo name="openai" />
         <div>
           <h4>{@service}</h4>
           <p>{@detail}</p>
         </div>
-        <span class="ouro-settings-state">{account_state(@card.state)}</span>
+        <span class={["ouro-settings-state", @card.state == :connected && "is-ready"]}>{account_state(
+          @card.state
+        )}</span>
       </div>
 
       <p :if={@card.state == :connected} class="ouro-settings-connection-copy">
-        Local account{if @card.identity, do: " — #{@card.identity}"}. Tokens remain with the
-        first-party runtime.
+        Local account{if @card.identity, do: " — #{@card.identity}"}. Sign-in stays on the runtime computer.
       </p>
       <p :if={@card.state == :checking} class="ouro-settings-connection-copy">
         Reading account readiness…
       </p>
-      <p class="ouro-settings-connection-copy">{@card.credential_note}</p>
+      <p :if={@card.state != :connected} class="ouro-settings-connection-copy">
+        {@card.credential_note}
+      </p>
 
       <div :if={@card.state == :waiting} class="ouro-account-wait">
         <p>Open the verification link, confirm the code, then return here.</p>
@@ -694,7 +812,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
           phx-click={@connect}
           disabled={not @can_connect}
         >
-          Connect
+          Connect ChatGPT
         </button>
         <button
           :if={@card.state == :waiting}
@@ -710,6 +828,8 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   end
 
   attr :provider, :string, required: true
+  attr :logo, :string, default: nil
+  attr :read_only, :boolean, default: false
   attr :env, :string, required: true
   attr :credential, :any, required: true
   attr :managed, :boolean, required: true
@@ -723,11 +843,19 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     assigns = assigns |> assign(:state, state) |> assign(:source, source)
 
     ~H"""
-    <article class="ouro-settings-credential-row">
-      <div>
+    <article
+      class="ouro-settings-credential-row"
+      id={"credential-" <> String.replace(@provider, " ", "-") <> "-" <> @env}
+    >
+      <.provider_logo :if={@logo} name={@logo} />
+      <div class="ouro-settings-credential-body">
         <div class="ouro-settings-credential-name">
           <strong>{@provider}</strong>
-          <span class="ouro-settings-state">{credential_label(@state, @source)}</span>
+          <span class={[
+            "ouro-settings-state",
+            @state == :available && "is-ready",
+            @state == :invalid && "is-warning"
+          ]}>{credential_label(@state, @source)}</span>
         </div>
         <p>
           <code>{@env}</code>{credential_copy(@state, @source)}
@@ -744,12 +872,124 @@ defmodule Ouroboros.Web.Live.SettingsLive do
         type="button"
         class="ouro-new-secondary"
         phx-click={@event}
+        aria-label={
+          if @state == :available, do: "Manage #{@provider} API key", else: "Add #{@provider} API key"
+        }
       >
-        {if @state == :available, do: "Manage", else: "Add key"}
+        {if @state == :available, do: "Manage key", else: "Add key"}
       </button>
-      <span :if={not @managed} class="ouro-settings-managed">Environment only</span>
+      <details
+        :if={not @managed}
+        class="ouro-settings-key-help"
+        id={"setup-" <> String.replace(@provider, " ", "-") <> "-" <> @env}
+        data-ouro-disclosure
+      >
+        <summary>{if @read_only, do: "View setup", else: "How to set up"}</summary>
+        <p :if={@read_only}>This link is view-only. Use an operate link to manage stored keys.</p>
+        <p :if={@source != "stored"}>
+          <strong>Environment only.</strong>
+          Set <code>{@env}</code>
+          in the environment that starts Ouroboros on the runtime computer, then restart it and refresh this page.
+        </p>
+      </details>
     </article>
     """
+  end
+
+  attr :name, :string, required: true
+
+  def provider_logo(assigns) do
+    ~H"""
+    <span class={["ouro-provider-logo", "ouro-provider-logo-" <> @name]} aria-hidden="true">
+      <img src={"/web/providers/" <> @name <> ".svg"} alt="" width="28" height="28" />
+    </span>
+    """
+  end
+
+  attr :credential, :any, required: true
+
+  def grok_subscription_card(assigns) do
+    assigns = assign(assigns, :state, credential_state(assigns.credential))
+
+    ~H"""
+    <article class="ouro-settings-connection-card" id="connection-grok">
+      <div class="ouro-settings-connection-title">
+        <.provider_logo name="grok" />
+        <div>
+          <h4>Grok</h4><p>Grok subscription models</p>
+        </div>
+        <span class={[
+          "ouro-settings-state",
+          @state == :available && "is-ready",
+          @state == :invalid && "is-warning"
+        ]}>
+          {grok_state(@state)}
+        </span>
+      </div>
+      <p class="ouro-settings-connection-copy">{grok_copy(@state)}</p>
+      <p class="ouro-settings-connection-copy">
+        On the runtime computer, run <code>grok login</code>, then choose <strong>Refresh status</strong>.
+      </p>
+      <details
+        class="ouro-settings-grok-setup"
+        id="grok-setup"
+        data-ouro-disclosure
+      >
+        <summary>Sign-in details</summary>
+        <p>
+          Uses your Grok subscription; the xAI API key is separate. Ouroboros reads the local sign-in; it does not copy or renew it.
+        </p>
+        <p class="ouro-settings-credential-path">
+          Default: <code>~/.grok/auth.json</code>. A custom location can be set with <code>OUROBOROS_GROK_AUTH_FILE</code>.
+        </p>
+      </details>
+    </article>
+    """
+  end
+
+  defp grok_state(:available), do: "Connected locally"
+  defp grok_state(:missing), do: "Not connected"
+  defp grok_state(:invalid), do: "Sign in again"
+  defp grok_state(:unavailable), do: "Status unavailable"
+  defp grok_state(_), do: "Checking"
+  defp grok_copy(:available), do: "A current Grok credential was found on this runtime."
+  defp grok_copy(:missing), do: "Connect your Grok subscription to use its models here."
+
+  defp grok_copy(:invalid),
+    do: "The local sign-in has expired or is invalid. Sign in again with Grok."
+
+  defp grok_copy(:unavailable),
+    do:
+      "The local sign-in could not be read. Check file access on the runtime computer, then refresh."
+
+  defp grok_copy(_), do: "Waiting for this runtime to report its Grok sign-in status."
+
+  defp credential_visible?(credential),
+    do: credential.present or credential.credential_state == "invalid"
+
+  defp other_credentials(rows) do
+    (rows || [])
+    |> Enum.flat_map(& &1.credentials)
+    |> Enum.reject(&(&1.provider in ["openai", "openai_codex", "anthropic", "xai", "grok"]))
+    |> Enum.uniq_by(& &1.env)
+    |> Enum.sort_by(&{not &1.present, &1.provider})
+  end
+
+  defp provider_name(name),
+    do:
+      name
+      |> String.replace("_", " ")
+      |> String.split()
+      |> Enum.map_join(" ", &String.capitalize/1)
+
+  defp connection_count(account, rows) do
+    if is_nil(rows),
+      do: "Checking",
+      else:
+        Enum.count(
+          Enum.uniq_by(Enum.flat_map(rows, & &1.credentials), & &1.env),
+          &(&1.present and &1.provider != "openai_codex")
+        ) + if(account.state == :connected, do: 1, else: 0)
   end
 
   attr :term, :string, required: true
@@ -772,14 +1012,17 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     }
   end
 
-  defp account_state(:connected), do: "Local account"
+  defp account_state(:connected), do: "Connected locally"
   defp account_state(:unavailable), do: "Status unavailable"
   defp account_state(:waiting), do: "Waiting"
   defp account_state(:required), do: "Not connected"
   defp account_state(:checking), do: "Checking"
 
-  defp credential_label(:available, "stored"), do: "Stored privately"
-  defp credential_label(:available, _source), do: "Available"
+  defp credential_label(:invalid, _source), do: "Needs attention"
+  defp credential_label(:unavailable, _source), do: "Status unavailable"
+  defp credential_label(:available, "stored"), do: "Key stored"
+  defp credential_label(:available, "environment"), do: "Environment key"
+  defp credential_label(:available, _source), do: "Key configured"
   defp credential_label(:missing, _source), do: "Not configured"
   defp credential_label(:checking, _source), do: "Checking"
 
@@ -787,6 +1030,12 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   defp credential_copy(:available, _source),
     do: " is available to the service. The value is hidden. "
+
+  defp credential_copy(:invalid, _source),
+    do: " could not be used. Check or replace the local credential. "
+
+  defp credential_copy(:unavailable, _source),
+    do: " status could not be read. Check access on the runtime computer, then refresh. "
 
   defp credential_copy(:missing, _source), do: " is not available to the service. "
   defp credential_copy(:checking, _source), do: " readiness has not been reported yet. "

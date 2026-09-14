@@ -14,7 +14,8 @@ use ratatui::Frame;
 use super::access;
 use super::app::{
     AccountDialog, AccountFlow, App, ApprovalRule, CommandPalette, Connection, Mode, NewField,
-    NewSession, NoticeKind, Overlay, SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES,
+    NewSession, NoticeKind, Overlay, SessionFacts, Settings, SettingsField, SettingsSection, Tab,
+    APPROVAL_CHOICES,
 };
 use super::editor::COMMANDS;
 use super::theme;
@@ -1620,132 +1621,421 @@ fn wrapped(lines: &[Line<'_>], inner: usize) -> u16 {
         .sum()
 }
 
-/// The `,` overlay. Facts above, preferences below, and the line between them labelled.
+/// Provider connections, client defaults, and runtime facts have separate categories.
 fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
-    let facts = vec![
-        Line::from(Span::styled(
-            "as reported by the runtime — not editable here",
-            theme::label(),
-        )),
-        field("address", &app.address),
-        field("node", &blank(&app.hello.node)),
-        field("scope", &blank(&app.hello.scope)),
-        field("protocol", &app.hello.protocol.to_string()),
-        field(
-            "data dir",
-            &match &app.data_dir {
-                Some(dir) => dir.clone(),
-                None => "not this client's — it attached to a runtime it did not start".into(),
-            },
-        ),
-        field(
-            "config",
-            &match &app.config_path {
-                Some(path) => path.display().to_string(),
-                None => "nowhere: neither XDG_CONFIG_HOME nor a home directory is set".into(),
-            },
-        ),
-        Line::from(""),
-        Line::from(Span::styled(
-            "the rows below are this client's session defaults",
-            theme::label(),
-        )),
-    ];
-
-    // The facts wrap, because the one most likely to overflow is the path of the file this
-    // overlay writes — and a half-shown path is a path nobody can act on.
-    let width = inner_width(area, SETTINGS_WIDTH);
-    let fact_rows = wrapped(&facts, width);
-
-    // Two footer rows plus a blank, on top of the facts and the editable rows.
-    let height = fact_rows + SettingsField::ALL.len() as u16 + 5;
-    let popup = centered(area, SETTINGS_WIDTH, height.min(area.height));
-
+    let popup = centered(
+        area,
+        if area.width < 85 { 98 } else { SETTINGS_WIDTH },
+        area.height.min(24),
+    );
     frame.render_widget(Clear, popup);
-
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(Span::styled(" settings ", theme::heading()));
-
+        .title(Span::styled(" Settings ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    let sections = [
+        (SettingsSection::Connections, "F1 Connections"),
+        (SettingsSection::Defaults, "F2 Defaults"),
+        (SettingsSection::Runtime, "F3 Runtime"),
+    ];
+    let tabs = Line::from(
+        sections
+            .iter()
+            .flat_map(|(section, label)| {
+                [
+                    Span::styled(
+                        format!(" {label} "),
+                        if *section == settings.section {
+                            theme::heading().add_modifier(Modifier::REVERSED)
+                        } else {
+                            theme::label()
+                        },
+                    ),
+                    Span::raw("  "),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
+    frame.render_widget(Paragraph::new(tabs), chunks[0]);
+    match settings.section {
+        SettingsSection::Connections => settings_connections(frame, chunks[1], app, settings),
+        SettingsSection::Defaults => settings_defaults(frame, chunks[1], app, settings),
+        SettingsSection::Runtime => {
+            let facts = vec![
+                Line::styled("Runtime & security", theme::heading()),
+                Line::styled("as reported by the runtime — not editable here", theme::label()),
+                Line::from(""), field("address", &app.address), field("node", &blank(&app.hello.node)),
+                field("scope", &blank(&app.hello.scope)), field("protocol", &app.hello.protocol.to_string()),
+                field("data dir", app.data_dir.as_deref().unwrap_or("Owned by the attached runtime")),
+                Line::from(""), Line::styled("Client configuration", theme::heading()),
+                field("config", &app.config_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "nowhere to keep preferences".into())),
+                Line::from(""), Line::from("Provider credentials belong to the attached runtime computer. Client session defaults are saved separately."),
+            ];
+            frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), chunks[1]);
+        }
+    }
+    let hint = if settings.editor.is_some() {
+        "Tab/arrows move · Enter on Save stores key · Esc cancels"
+    } else {
+        match settings.section {
+            SettingsSection::Connections => "↑↓/Tab select · Enter set up · r refresh · Esc close",
+            SettingsSection::Defaults => {
+                "Tab/↑↓ move · ←→ change · Enter on save writes · Esc close"
+            }
+            SettingsSection::Runtime => "F1 connections · F2 defaults · Esc close",
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(hint)
+            .style(theme::label())
+            .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(fact_rows),
-            Constraint::Length(SettingsField::ALL.len() as u16),
-            Constraint::Min(1),
-        ])
-        .split(inner);
+fn settings_connections(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
+    if let Some(editor) = &settings.editor {
+        let name = if editor.provider == "anthropic" {
+            "Anthropic"
+        } else {
+            "xAI"
+        };
+        let mut lines = vec![
+            Line::styled(format!("{name} API key"), theme::heading()),
+            Line::from(format!("Stored privately on {}", app.hello.node)),
+            Line::from("The existing key is never shown. A new key replaces it."),
+            Line::from(""),
+        ];
+        let masked = if editor.key.is_empty() {
+            "Paste a new API key".into()
+        } else {
+            "•".repeat(editor.key.chars().count().min(32))
+        };
+        lines.push(Line::styled(
+            format!(
+                "{} API key       {masked}",
+                if editor.field == 0 { ">" } else { " " }
+            ),
+            if editor.field == 0 {
+                theme::heading()
+            } else {
+                theme::label()
+            },
+        ));
+        if editor.provider == "anthropic" {
+            lines.push(Line::styled(
+                format!(
+                    "{} Workspace ID  {}",
+                    if editor.field == 1 { ">" } else { " " },
+                    input_tail(
+                        &text_or_hint(
+                            &editor.workspace,
+                            if editor.key.trim().is_empty() {
+                                "optional · keep existing"
+                            } else {
+                                "blank clears saved ID"
+                            }
+                        ),
+                        area.width.saturating_sub(16) as usize,
+                    )
+                ),
+                if editor.field == 1 {
+                    theme::heading()
+                } else {
+                    theme::label()
+                },
+            ));
+            lines.push(Line::from(
+                "Identity-linked keys may need an ANTHROPIC_WORKSPACE_ID.",
+            ));
+        }
+        let last = if editor.provider == "anthropic" { 2 } else { 1 };
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            if editor.pending {
+                "Saving…".into()
+            } else {
+                format!(
+                    "{} [ Save key ]",
+                    if editor.field == last { ">" } else { " " }
+                )
+            },
+            theme::heading(),
+        ));
+        if let Some(error) = &editor.error {
+            lines.push(Line::styled(
+                error.as_str(),
+                Style::default().fg(theme::warn()),
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
+    let rows = app.settings_connections();
+    let Some(selected) = rows.get(settings.connection.min(rows.len().saturating_sub(1))) else {
+        return;
+    };
+    let ready = rows
+        .iter()
+        .filter(|row| matches!(row.state(), "Connected locally" | "Key configured"))
+        .count();
+    let mut heading = if app.providers.error.is_some()
+        || (app.providers.value.is_some() && rows.iter().all(|row| row.stale))
+    {
+        format!("Connection status unavailable · {}", app.hello.node)
+    } else if app.providers.value.is_none() {
+        format!("Checking connections · {}", app.hello.node)
+    } else {
+        format!("{ready} configured · {}", app.hello.node)
+    };
+    if app.providers.pending {
+        heading.push_str(" · refreshing…");
+    }
+    let compact = area.height < 16;
+    let detail_height = if compact { 6 } else { 9 };
+    let chunks = Layout::vertical([
+        Constraint::Length(if compact { 1 } else { 2 }),
+        Constraint::Min(3),
+        Constraint::Length(detail_height),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(heading, theme::heading()),
+            Line::styled(
+                "Local credential status; model access is checked when used.",
+                theme::label(),
+            ),
+        ]),
+        chunks[0],
+    );
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| {
+            let category = if row.subscription {
+                "Subscription"
+            } else {
+                "API key"
+            };
+            let line = if area.width >= 74 {
+                format!(
+                    "{:<14} {:<13} {:<20} {}",
+                    row.name,
+                    category,
+                    row.state(),
+                    row.source()
+                )
+            } else {
+                format!(
+                    "{:<11} {:<3} {}",
+                    row.name,
+                    if row.subscription { "sub" } else { "key" },
+                    row.state()
+                )
+            };
+            ListItem::new(Line::styled(
+                line,
+                if row.state() == "Needs attention" {
+                    Style::default().fg(theme::warn())
+                } else {
+                    Style::default()
+                },
+            ))
+        })
+        .collect();
+    let mut state = ListState::default()
+        .with_selected(Some(settings.connection.min(rows.len().saturating_sub(1))));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("› ")
+            .highlight_style(theme::heading().add_modifier(Modifier::REVERSED)),
+        chunks[1],
+        &mut state,
+    );
+    let mut details = vec![Line::styled(
+        format!(
+            "{} · {}",
+            selected.name,
+            if selected.subscription {
+                "Subscription"
+            } else {
+                "API key"
+            }
+        ),
+        theme::heading(),
+    )];
+    if app.providers.error.is_some() {
+        details.push(Line::styled(
+            "Status could not be refreshed. Press r to retry.",
+            Style::default().fg(theme::warn()),
+        ));
+    }
+    if let Some(message) = &settings.message {
+        details.push(Line::styled(
+            message.as_str(),
+            Style::default().fg(theme::warn()),
+        ));
+    }
+    match selected.provider.as_str() {
+        "grok" => {
+            details.push(Line::from("On the runtime computer: grok login"));
+            details.push(Line::from("Then r to refresh. Sign in again if expired."));
+            details.push(Line::styled(
+                if compact {
+                    "Local sign-in: ~/.grok/auth.json"
+                } else {
+                    "~/.grok/auth.json · override: OUROBOROS_GROK_AUTH_FILE"
+                },
+                theme::label(),
+            ));
+            details.push(Line::from(
+                "Grok subscription and xAI API keys are separate.",
+            ));
+        }
+        "openai_codex" => {
+            details.push(Line::from(
+                "Enter to connect or manage ChatGPT on this runtime.",
+            ));
+            details.push(Line::from("Your sign-in stays on the runtime computer."));
+        }
+        _ => {
+            details.push(Line::styled(selected.env(), theme::label()));
+            if selected.source() == "Environment"
+                || !matches!(selected.provider.as_str(), "anthropic" | "xai")
+            {
+                details.push(Line::from(
+                    "Set this variable in the environment that starts Ouroboros.",
+                ));
+                details.push(Line::from(
+                    "Restart the runtime, then press r. Environment keys take precedence.",
+                ));
+            } else {
+                details.push(Line::from(
+                    "Enter to add or replace a private key on the runtime.",
+                ));
+                details.push(Line::from(
+                    "API usage is billed separately from subscriptions.",
+                ));
+            }
+            if selected.provider == "anthropic" {
+                details.push(Line::from(
+                    if selected
+                        .credential
+                        .as_ref()
+                        .is_some_and(|c| c.workspace_configured)
+                    {
+                        "Workspace ID configured."
+                    } else {
+                        "Identity-linked keys may also need a workspace ID."
+                    },
+                ));
+            }
+        }
+    }
 
-    frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), chunks[0]);
+    let mut detail_area = chunks[2];
+    if area.width >= 85 && !access::screen_reader() {
+        if let Some(mark) = super::provider_marks::lines(&selected.provider) {
+            let split =
+                Layout::horizontal([Constraint::Min(1), Constraint::Length(14)]).split(chunks[2]);
+            detail_area = split[0];
+            frame.render_widget(
+                Paragraph::new(mark).style(theme::heading()),
+                Rect {
+                    y: split[1].y + 2,
+                    height: split[1].height.saturating_sub(2),
+                    ..split[1]
+                },
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(details).wrap(Wrap { trim: false }),
+        detail_area,
+    );
+}
 
-    let mut rows = Vec::new();
+// A long one-line workspace identifier must not push Save and errors off screen.
+// Show its editable end, including an ellipsis when its beginning is out of view.
+fn input_tail(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 1;
+    let tail: Vec<char> = text
+        .chars()
+        .rev()
+        .take_while(|c| {
+            used += c.width().unwrap_or(0);
+            used <= width
+        })
+        .collect();
+    format!("…{}", tail.into_iter().rev().collect::<String>())
+}
 
+fn settings_defaults(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
+    let mut rows = vec![
+        Line::styled("Session defaults", theme::heading()),
+        Line::styled(
+            "the rows below are this client's session defaults",
+            theme::label(),
+        ),
+        Line::from(""),
+    ];
     for row in SettingsField::ALL {
         let focused = row == settings.field;
-
-        let (label, value, style) = match row {
+        let (label, value) = match row {
             SettingsField::Workspace => (
                 "workspace",
                 text_or_hint(&settings.workspace, "unset — stated per session"),
-                hint_style(&settings.workspace),
             ),
-            SettingsField::ApprovalMode => {
-                ("approval", settings.approval_label(), Style::default())
-            }
-            SettingsField::SandboxMode => ("files", settings.sandbox_label(), Style::default()),
-            SettingsField::Save => (
-                "",
-                "[ save ]".to_string(),
-                Style::default()
-                    .fg(theme::accent())
-                    .add_modifier(Modifier::BOLD),
-            ),
+            SettingsField::ApprovalMode => ("approval", settings.approval_label()),
+            SettingsField::SandboxMode => ("files", settings.sandbox_label()),
+            SettingsField::Save => ("", "[ save ]".to_string()),
         };
-
-        let mut spans = vec![
-            Span::styled(
-                if focused { "> " } else { "  " },
-                Style::default().fg(theme::accent()),
-            ),
-            // A fixed label column keeps edited preferences scannable.
+        rows.push(Line::from(vec![
+            Span::styled(if focused { "> " } else { "  " }, theme::heading()),
             Span::styled(format!("{label:<12}"), theme::label()),
-            Span::styled(value, style),
-        ];
-
-        if focused && row == SettingsField::Workspace {
-            spans.push(Span::styled(
-                "_",
-                Style::default().add_modifier(Modifier::SLOW_BLINK),
-            ));
-        }
-
-        rows.push(Line::from(spans));
-    }
-
-    frame.render_widget(Paragraph::new(rows), chunks[1]);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Tab/arrows move · Enter advances · Enter on [ save ] writes the file · Esc closes",
-                Style::default().fg(theme::muted()),
-            )),
-            Line::from(Span::styled(
-                if settings.edited {
-                    "changed, and not written yet"
+            Span::styled(
+                value,
+                if focused {
+                    theme::heading()
                 } else {
-                    ""
+                    Style::default()
                 },
-                Style::default().fg(theme::warn()),
-            )),
-        ])
-        .wrap(Wrap { trim: false }),
-        chunks[2],
-    );
+            ),
+        ]));
+    }
+    rows.push(Line::from(""));
+    rows.push(Line::styled(
+        if settings.edited {
+            "changed, and not written yet"
+        } else {
+            "Applies to new sessions. Existing sessions keep their settings."
+        },
+        theme::label(),
+    ));
+    rows.push(Line::from(""));
+    rows.push(field(
+        "config",
+        &app.config_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "nowhere to keep preferences".into()),
+    ));
+    frame.render_widget(Paragraph::new(rows).wrap(Wrap { trim: false }), area);
 }
 
 /// The new-session form: every choice on screen at once, none of them made for you.
