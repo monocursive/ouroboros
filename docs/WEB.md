@@ -407,10 +407,10 @@ modules, both pure:
   the generic provider-note, as the W1 corpus pins), **no ignore arm** — an unrecognized
   kind becomes a visible provider note, exactly as the Rust module header demands
   (`transcript.rs:7`). Display ceilings
-  applied here, not at render, with the same numbers (64 KiB text/value, 2,048 nodes,
+  applied here to tool and status details, with the same numbers (64 KiB text/value, 2,048 nodes,
   depth 32, 128 KiB diff, 256 file changes, 64 plan steps — `transcript.rs:22`). Input is
   the in-process `%Ouroboros.Interactive.Event{}` — uncapped, so these ceilings are
-  load-bearing, not decorative.
+  load-bearing for those details. User and agent message text stays complete.
 - `Ouroboros.Web.Transcript` — port of `project()`
   (`tui/src/ui/transcript_cells.rs:841`): delta accumulation into one message cell per
   turn, thinking 3-state, tool call/result correlation by `call_id`, exploration folding,
@@ -478,10 +478,8 @@ lag protocol but not the algorithm.
 **Backpressure is the honest new risk.** The plane sends to subscriber pids
 unconditionally (`interactive/task.ex:2149`) — the `Conn`'s `queue_limit`/`stream.lagged`
 machinery was the protection, and in-process subscribers don't have it. Mitigations, in
-order: LiveView renders O(delta) via streams with a bounded window (the TUI's
-`WINDOW = 5_000` is the ceiling; the web keeps less and raises its floor on trim, the
-`trim()`/divider rule); text deltas coalesce per render frame; and a LiveView that dies
-under load is cleaned up by the plane's monitor and recovers on remount via
+order: LiveView sends changed cells via streams; text deltas coalesce per render frame;
+and a LiveView that dies under load is cleaned up by the plane's monitor and recovers on remount via
 `subscribe(cursor)` — crash-and-resync **is** the lag path. If profiling ever shows
 mailbox growth on a wedged view, the remedy is a `Process.info(:message_queue_len)`
 self-check that kills the view, not a new protocol.
@@ -492,6 +490,20 @@ on plane events and the 80 ms flush. A lagged view drops queued plane events, no
 `:DOWN` — so the operator keeps the page. Crash-and-remount would also empty the
 mailbox; resubscribe is preferred. `Watch.mailbox_lagged?/1` is the predicate. No new
 wire protocol, no Wire byte caps.
+
+The conversation projects the full retained ledger before paging complete display cells.
+Streamed agent replies retain their full accumulated text, including beyond 128 KiB.
+It initially draws the latest 50 cells; scrolling near the top or selecting **Load earlier
+messages** prepends another 50. Already loaded cells stay visible as new output arrives,
+and the browser anchors the cell being read when a page is prepended or a replay repairs
+a gap. Cell identities, expansion keys and review links follow their originating events,
+so inserted history cannot retarget them. Automatic loading and the button share one
+in-flight request; the reading anchor is captured before stream deletions. A session change
+resets the page and follows the newest output. The mounted view retains all delivered
+events instead of imposing its former 2,000-event trim; events the runtime itself has
+already pruned still appear as an explicit history-gap divider. Retention and projection
+cost therefore grow with the mounted conversation, while older DOM content loads only
+when requested. Closing the view releases its retained history.
 
 Session lists, status, providers, models: polled with the TUI's cadences and its
 visibility rule ("Only the visible tab" — `ui/app/mod.rs:1912`), which for LiveView means

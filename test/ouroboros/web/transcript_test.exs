@@ -43,6 +43,46 @@ defmodule Ouroboros.Web.TranscriptTest do
 
   # ------------------------------------------------------------------------------------
 
+  describe "cell identities" do
+    test "filling a gap preserves every existing message identity" do
+      all =
+        for n <- 1..100,
+            into: %{},
+            do: {n, event(:output_text_final, %{"text" => "message #{n}"}, sequence: n)}
+
+      before =
+        all
+        |> Map.drop(Enum.to_list(21..30))
+        |> Transcript.entries()
+        |> Transcript.project_with_ids()
+
+      after_replay = all |> Transcript.entries() |> Transcript.project_with_ids()
+
+      identities = fn projected ->
+        for %{id: id, cell: %Cell.Message{text: text}} <- projected, into: %{}, do: {text, id}
+      end
+
+      assert Map.take(identities.(after_replay), Map.keys(identities.(before))) ==
+               identities.(before)
+
+      assert length(Enum.uniq_by(after_replay, & &1.id)) == length(after_replay)
+    end
+
+    test "a final and an intervening usage event retain the first delta identity" do
+      draft = event(:output_text_delta, %{"text" => "complete reply"}, sequence: 10)
+      usage = event(:usage, %{"input_tokens" => 1}, sequence: 11)
+      final = event(:output_text_final, %{"text" => "complete reply"}, sequence: 12)
+
+      for events <- [[draft], [draft, final], [draft, usage], [draft, usage, final]] do
+        assert [%{id: "event-10-0"}] =
+                 events
+                 |> entries()
+                 |> Transcript.project_with_ids()
+                 |> Enum.filter(&match?(%Cell.Message{}, &1.cell))
+      end
+    end
+  end
+
   describe "entries" do
     test "subagent progress refreshes elapsed time and the last activity" do
       alias Ouroboros.Web.Transcript.Cell.Subagent
@@ -236,15 +276,17 @@ defmodule Ouroboros.Web.TranscriptTest do
              ] = cells
     end
 
-    test "caps_accumulated_agent_streams" do
+    test "keeps_complete_accumulated_agent_streams" do
       deltas =
         for index <- 1..300 do
           event(:output_text_delta, %{"text" => String.duplicate("x", 1024)}, sequence: index)
         end
 
       assert [%Cell.Message{text: text}] = project(deltas)
-      assert byte_size(text) <= 128 * 1024
-      assert String.ends_with?(text, "full updates are available in event details")
+      assert text == String.duplicate("x", 300 * 1024)
+
+      final = event(:output_text_final, %{"text" => text}, sequence: 301)
+      assert [%Cell.Message{text: ^text, streaming: false}] = project(deltas ++ [final])
     end
 
     test "an_input_the_ledger_did_not_record_still_appears_in_the_chat" do

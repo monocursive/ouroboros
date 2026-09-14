@@ -772,7 +772,7 @@ defmodule Ouroboros.EventPresentation do
         input_accepted(payload)
 
       kind when kind in [:output_text_delta, :output_text_final] ->
-        case raw_text(payload, ["text"]) do
+        case raw_text(payload, ["text"], nil) do
           nil ->
             %Hidden{reason: :empty_text}
 
@@ -965,7 +965,7 @@ defmodule Ouroboros.EventPresentation do
   # operator is most likely to be looking for afterwards.
   defp input_accepted(payload) do
     words =
-      case raw_text(payload, ["text"]) do
+      case raw_text(payload, ["text"], nil) do
         nil -> nil
         words -> if String.trim(words) == "", do: nil, else: words
       end
@@ -1599,7 +1599,8 @@ defmodule Ouroboros.EventPresentation do
 
   # Like `text/2` but keeps leading and trailing whitespace: a streamed text delta's
   # spacing is the message.
-  defp raw_text(value, keys) do
+  # Conversation text has no presentation ceiling; nil keeps the entire received value.
+  defp raw_text(value, keys, limit \\ @text_bytes) do
     case string_value(value, keys) do
       nil ->
         case first_value(value, keys) do
@@ -1614,7 +1615,7 @@ defmodule Ouroboros.EventPresentation do
         end
 
       found ->
-        bounded_copy(found, @text_bytes, @text_truncation)
+        if is_nil(limit), do: found, else: bounded_copy(found, limit, @text_truncation)
     end
   end
 

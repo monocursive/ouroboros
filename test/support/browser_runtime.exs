@@ -25,3 +25,8 @@ Enum.each(
 
 :sys.replace_state(Ouroboros.Provider.OpenAIAuth, &%{&1 | credential_path: paths[:oauth_file]})
 File.mkdir_p!(Path.join([File.cwd!(), "_build", "playwright-workspace"]))
+Ouroboros.Test.BrowserHistory.seed()
+
+for client <- ["desktop", "mobile"] do
+  {:ok, _} = Ouroboros.Test.BrowserHistoryReplay.start("browser-history-replay-#{client}")
+end

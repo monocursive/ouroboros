@@ -13,10 +13,9 @@
 //!
 //! [`Verbosity::Compact`] is the reading view: collapsible cells show a header and a few
 //! rows. [`Verbosity::Verbose`] — `Ctrl+O`, the key the field settled on for "show more" —
-//! renders the same cells expanded in place. Both remain bounded; verbose raises the
-//! per-cell row ceiling to [`VERBOSE_LINES`] rather than removing it, because a transcript
-//! that re-lays out a 64 MiB tool result on every frame is a transcript that stops
-//! redrawing.
+//! renders the same cells expanded in place. Conversation messages are complete in both
+//! modes. Tool and status details remain bounded; verbose raises their per-cell row
+//! ceiling to [`VERBOSE_LINES`]. The chat caches settled layouts across frames.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
@@ -45,25 +44,12 @@ const TOOL_TAIL_LINES: usize = 6;
 /// this file used to spend. Six-and-six with a counted marker between them is R2 §10c
 /// recipe 4/8: enough of a result to recognise it, and an explicit statement of the rest.
 const TOOL_OUTPUT_LINES: usize = TOOL_HEAD_LINES + TOOL_TAIL_LINES;
-/// The live tail window for streaming command output (Kiro, Cursor): the newest rows, not
-/// the oldest, because a command that is still running is watched at its end.
-/// How many ledger entries the conversation pane projects.
-///
-/// A redraw budget, not a retention policy: the projection is rebuilt on every frame, so
-/// the surface is bounded to a useful recent suffix and the pane says how much it is not
-/// drawing. The complete retained ledger stays available through `/details`.
-///
-/// It lives here rather than in the pane because two other things are sized against it —
-/// [`super::markdown::MEMO_ENTRIES`], which has to be able to hold a whole window of prose
-/// or it evicts on the way round, and [`super::transcript::Watch::recent_entries`], which
-/// walks exactly this many.
-pub const CHAT_ENTRY_WINDOW: usize = 128;
-
+/// The live tail window for streaming command output (Kiro, Cursor).
 const COMMAND_OUTPUT_LINES: usize = 4;
 const DIFF_LINES: usize = super::diff::COMPACT_LINES;
 /// How many calls one grouped exploration cell lists before it starts counting instead.
 const EXPLORATION_CALLS: usize = 64;
-const MESSAGE_LINES: usize = 256;
+const NOTE_LINES: usize = 256;
 const STATUS_DETAIL_LINES: usize = 32;
 /// The per-cell row ceiling under `Ctrl+O`. Deliberately raised from the compact ceilings
 /// rather than removed: the point of verbose is to read a whole tool result on screen, and
@@ -80,13 +66,10 @@ const VERBOSE_LINES: usize = 2_000;
 const PLAIN_SPOKEN_LINES: usize = 32;
 /// Crush's middle state: the last N lines of a long block, with what came before named.
 const THINKING_TAIL_LINES: usize = 200;
-const AGENT_OUTPUT_BYTES: usize = 128 * 1024;
 const COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const THINKING_BYTES: usize = 128 * 1024;
 const TOOL_VALUE_BYTES: usize = 32 * 1024;
 const TOOL_INPUT_BYTES: usize = 8 * 1024;
-const AGENT_TRUNCATION: &str =
-    "\n… agent stream truncated; full updates are available in event details";
 const COMMAND_TRUNCATION: &str =
     "\n… command stream truncated; full updates are available in event details";
 const THINKING_TRUNCATION: &str =
@@ -934,9 +917,21 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                     }
                     PresentationEvent::AgentText {
                         turn_id,
-                        text,
+                        mut text,
                         final_text,
-                    } => project_agent_text(&mut cells, &mut pending, turn_id, text, final_text),
+                    } => {
+                        if final_text {
+                            if let Some(complete) = complete_streamed_final(
+                                &cells,
+                                pending.as_ref(),
+                                turn_id.as_deref(),
+                                &event.payload,
+                            ) {
+                                text = complete;
+                            }
+                        }
+                        project_agent_text(&mut cells, &mut pending, turn_id, text, final_text);
+                    }
                     PresentationEvent::Thinking { turn_id, text } => {
                         flush_agent(&mut cells, &mut pending, false);
                         project_thinking(&mut cells, &mut thinking, turn_id, text);
@@ -1413,68 +1408,64 @@ pub fn render_cells_at(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    // `/raw` is a different renderer, not a flag threaded through this one. Codex's raw
-    // mode exists so a terminal selection yields logical lines, and every `if raw` sprinkled
-    // through a decorating renderer is another place a gutter survives the toggle.
-    //
-    // Screen-reader mode wants the same renderer and a different vocabulary: no boxes, no
-    // gutters, no glyph column — and labels that are words with colons rather than the
-    // shorthand a sighted reader scans past. So it is one plain renderer and two
-    // [`Vocabulary`] values, not a third renderer to keep true.
-    if let Some(vocabulary) = Vocabulary::plain(verbosity) {
-        for cell in cells {
-            render_plain(&mut lines, cell, vocabulary);
-        }
-        return lines;
-    }
-
     for cell in cells {
-        match cell {
-            Cell::Message {
-                speaker,
-                text,
-                streaming,
-            } => render_message(
-                &mut lines, *speaker, text, width, *streaming, tick, verbosity,
-            ),
-            Cell::Thinking {
-                text,
-                lines: rows,
-                state,
-            } => render_thinking(&mut lines, text, *rows, *state, width, verbosity),
-            Cell::Plan(plan) => render_plan(&mut lines, plan, width, "Plan"),
-            Cell::Usage(usage) => {
-                if verbosity.verbose() {
-                    render_chat_note(&mut lines, &usage_note(usage), width);
-                }
-            }
-            Cell::Tool(tool) => render_tool(&mut lines, tool, width, tick, verbosity),
-            Cell::Exploration(group) => {
-                render_exploration(&mut lines, group, width, tick, verbosity)
-            }
-            Cell::CommandOutput(text) => render_command_output(&mut lines, text, width, verbosity),
-            Cell::File(file) => render_file(&mut lines, file, width),
-            Cell::Image(image) => render_image(&mut lines, image, width),
-            Cell::Diff(diff) => render_diff(&mut lines, diff, width, verbosity),
-            Cell::DiffStat {
-                files,
-                additions,
-                deletions,
-                in_excerpt,
-            } => render_diffstat(&mut lines, *files, *additions, *deletions, *in_excerpt),
-            Cell::Status {
-                label,
-                detail,
-                tone,
-            } => render_status(&mut lines, label, detail, colour(*tone), width, verbosity),
-            Cell::ChatNote { text } => render_chat_note(&mut lines, text, width),
-            Cell::Runtime(block) => render_runtime_block(&mut lines, block, width, verbosity),
-            Cell::Subagent(subagent) => render_subagent(&mut lines, subagent, width),
-            Cell::Divider { text, tone, .. } => lines.push(divider(text, width, colour(*tone))),
-        }
+        render_cell_into(&mut lines, cell, width, tick, verbosity);
     }
-
     lines
+}
+
+/// Appends one cell using the preceding row for the same spacing as a full render.
+/// The conversation layout can reuse its unchanged prefix and redraw only the suffix.
+pub(crate) fn render_cell_into(
+    lines: &mut Vec<Line<'static>>,
+    cell: &Cell,
+    width: usize,
+    tick: u64,
+    verbosity: Verbosity,
+) {
+    if let Some(vocabulary) = Vocabulary::plain(verbosity) {
+        render_plain(lines, cell, vocabulary);
+        return;
+    }
+    match cell {
+        Cell::Message {
+            speaker,
+            text,
+            streaming,
+        } => render_message(lines, *speaker, text, width, *streaming, tick, verbosity),
+        Cell::Thinking {
+            text,
+            lines: rows,
+            state,
+        } => render_thinking(lines, text, *rows, *state, width, verbosity),
+        Cell::Plan(plan) => render_plan(lines, plan, width, "Plan"),
+        Cell::Usage(usage) => {
+            if verbosity.verbose() {
+                render_chat_note(lines, &usage_note(usage), width);
+            }
+        }
+        Cell::Tool(tool) => render_tool(lines, tool, width, tick, verbosity),
+        Cell::Exploration(group) => render_exploration(lines, group, width, tick, verbosity),
+        Cell::CommandOutput(text) => render_command_output(lines, text, width, verbosity),
+        Cell::File(file) => render_file(lines, file, width),
+        Cell::Image(image) => render_image(lines, image, width),
+        Cell::Diff(diff) => render_diff(lines, diff, width, verbosity),
+        Cell::DiffStat {
+            files,
+            additions,
+            deletions,
+            in_excerpt,
+        } => render_diffstat(lines, *files, *additions, *deletions, *in_excerpt),
+        Cell::Status {
+            label,
+            detail,
+            tone,
+        } => render_status(lines, label, detail, colour(*tone), width, verbosity),
+        Cell::ChatNote { text } => render_chat_note(lines, text, width),
+        Cell::Runtime(block) => render_runtime_block(lines, block, width, verbosity),
+        Cell::Subagent(subagent) => render_subagent(lines, subagent, width),
+        Cell::Divider { text, tone, .. } => lines.push(divider(text, width, colour(*tone))),
+    }
 }
 
 /// Which plain rendering is being asked for, and therefore which words label a block.
@@ -1551,8 +1542,9 @@ fn render_plain(lines: &mut Vec<Line<'static>>, cell: &Cell, vocabulary: Vocabul
     // a copying view that folded half the transcript away would be a worse answer than the
     // one it replaced. Screen-reader mode is the opposite case — a ten-thousand-line tool
     // result read aloud in full is the thing the mode exists to prevent — so it keeps the
-    // pane's own budget and says, in a sentence, what it left out.
-    let budget = spoken.then_some(PLAIN_SPOKEN_LINES);
+    // pane's detail budget and says, in a sentence, what it left out. Conversation
+    // messages stay complete in every mode so scrolling can reach the whole reply.
+    let budget = (spoken && !matches!(cell, Cell::Message { .. })).then_some(PLAIN_SPOKEN_LINES);
 
     let body = move |lines: &mut Vec<Line<'static>>, text: &str, style: Style| {
         let all: Vec<&str> = text.lines().collect();
@@ -2029,6 +2021,40 @@ fn tail_lines(text: &str, limit: usize) -> (&str, usize) {
     (text, 0)
 }
 
+/// A gateway excerpt must not erase a complete reply already received as deltas.
+/// Use the structured marker (never a matching sentence in the text), and require the
+/// retained reply to match both the advertised byte count and the entire excerpt prefix.
+fn complete_streamed_final(
+    cells: &[Cell],
+    pending: Option<&PendingOutput>,
+    turn_id: Option<&str>,
+    payload: &Value,
+) -> Option<String> {
+    let marker = payload.get("text")?;
+    let prefix = marker.get("_excerpt")?.as_str()?;
+    let bytes = usize::try_from(marker.get("_bytes")?.as_u64()?).ok()?;
+    let matches = |text: &str| text.len() == bytes && text.starts_with(prefix);
+    if let Some(draft) = pending {
+        let same_turn =
+            draft.turn_id.as_deref() == turn_id || draft.turn_id.is_none() || turn_id.is_none();
+        return (same_turn && matches(&draft.text)).then(|| draft.text.clone());
+    }
+    // Usage or a tool update can flush the draft just before the final arrives. The
+    // normal final-message fold has the same user/divider boundaries.
+    for cell in cells.iter().rev() {
+        match cell {
+            Cell::Message {
+                speaker: Speaker::Agent,
+                text,
+                ..
+            } => return matches(text).then(|| text.clone()),
+            Cell::Message { .. } | Cell::Divider { .. } => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn project_agent_text(
     cells: &mut Vec<Cell>,
     pending: &mut Option<PendingOutput>,
@@ -2077,7 +2103,7 @@ fn project_agent_text(
             turn_id,
             text: String::new(),
         });
-        append_bounded(&mut draft.text, &text, AGENT_OUTPUT_BYTES, AGENT_TRUNCATION);
+        draft.text.push_str(&text);
     }
 }
 
@@ -2503,7 +2529,7 @@ fn render_user_message(
     width: usize,
     verbosity: Verbosity,
 ) {
-    let message_lines = verbosity.lines(MESSAGE_LINES);
+    let message_lines = usize::MAX;
 
     if width < 16 {
         lines.push(Line::from(vec![
@@ -2570,7 +2596,7 @@ fn render_agent_message(
     tick: u64,
     verbosity: Verbosity,
 ) {
-    let message_lines = verbosity.lines(MESSAGE_LINES);
+    let message_lines = usize::MAX;
     lines.push(Line::from(vec![
         Span::styled("◆ ", Style::default().fg(theme::system())),
         Span::styled(
@@ -3498,7 +3524,7 @@ fn render_runtime_block(
 fn render_chat_note(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
     separate(lines);
 
-    for line in wrap_limited(text, width.max(8), MESSAGE_LINES) {
+    for line in wrap_limited(text, width.max(8), NOTE_LINES) {
         lines.push(Line::from(Span::styled(line, theme::quiet())).alignment(Alignment::Center));
     }
 }
@@ -4735,7 +4761,56 @@ mod tests {
     }
 
     #[test]
-    fn caps_accumulated_agent_and_command_streams() {
+    fn an_excerpted_final_keeps_the_complete_received_stream() {
+        let text = format!(
+            "{}REVIEW-END-SENTINEL",
+            "あ complete paragraph.\n\n".repeat(6_000)
+        );
+        // Split only at a character boundary, as the wire does.
+        let split = (60_000..).find(|n| text.is_char_boundary(*n)).unwrap();
+        let first = event(1, "output_text_delta", json!({"text": &text[..split]}));
+        let second = event(2, "output_text_delta", json!({"text": &text[split..]}));
+        let prefix = &text[..split];
+        let marker = json!({"_excerpt": prefix, "_bytes": text.len()});
+        let mut final_event = event(4, "output_text_final", json!({"text": marker}));
+        let excerpt_label = format!("{prefix}… ({} bytes; full event via /details)", text.len());
+        final_event.raw["semantic"] = json!({"version":1, "kind":"AgentText", "data":{
+            "turn_id":null, "text":excerpt_label, "final_text":true
+        }});
+        let usage = event(3, "usage", json!({"total_tokens":42}));
+        for flushed in [false, true] {
+            let mut entries = vec![Entry::Event(&first), Entry::Event(&second)];
+            if flushed {
+                entries.push(Entry::Event(&usage));
+            }
+            entries.push(Entry::Event(&final_event));
+            let cells = project(entries);
+            let messages: Vec<_> = cells
+                .iter()
+                .filter_map(|cell| match cell {
+                    Cell::Message {
+                        text, streaming, ..
+                    } => Some((text, *streaming)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(messages, vec![(&text, false)]);
+        }
+        // A reader who did not receive the complete deltas must still see the excerpt.
+        let incomplete = project(vec![Entry::Event(&first), Entry::Event(&final_event)]);
+        assert!(matches!(&incomplete[0], Cell::Message {text, ..} if text == &excerpt_label));
+        // A changed final prefix is authoritative; do not replace it with an older draft.
+        final_event.payload["text"]["_excerpt"] = json!("different final");
+        let changed = project(vec![
+            Entry::Event(&first),
+            Entry::Event(&second),
+            Entry::Event(&final_event),
+        ]);
+        assert!(matches!(&changed[0], Cell::Message {text, ..} if text == &excerpt_label));
+    }
+
+    #[test]
+    fn keeps_complete_agent_text_and_bounds_command_streams() {
         let chunk = "output".repeat(3 * 1024);
         let agent_events: Vec<_> = (0..12)
             .map(|sequence| event(sequence, "output_text_delta", json!({"text": chunk})))
@@ -4750,8 +4825,7 @@ mod tests {
             panic!("expected accumulated agent text")
         };
 
-        assert!(agent_text.len() <= AGENT_OUTPUT_BYTES);
-        assert!(agent_text.ends_with(AGENT_TRUNCATION));
+        assert_eq!(*agent_text, chunk.repeat(12));
 
         let command_events: Vec<_> = (0..8)
             .map(|sequence| event(sequence, "command_output_delta", json!({"text": chunk})))
@@ -4854,16 +4928,16 @@ mod tests {
     }
 
     #[test]
-    fn bounds_message_and_status_rows_without_hiding_the_raw_ledger_path() {
+    fn keeps_complete_messages_while_bounding_status_details() {
         let message = Cell::Message {
             speaker: Speaker::Agent,
-            text: "x".repeat(3 * 1024 * 1024),
+            text: "x".repeat(30 * 1024),
             streaming: false,
         };
         let rendered = render_cells(&[message], 10);
 
-        assert!(rendered.len() <= MESSAGE_LINES + 2, "{}", rendered.len());
-        assert!(plain(&rendered).contains("full message · ctrl+o"));
+        assert!(rendered.len() > 2_000, "{}", rendered.len());
+        assert!(!plain(&rendered).contains("full message · ctrl+o"));
 
         let status = Cell::Status {
             label: "Failed".into(),
@@ -5085,7 +5159,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_code_block_is_capped_inside_its_frame() {
+    fn a_long_code_block_is_complete_inside_its_frame() {
         let block = format!(
             "```elixir\n{}\n```",
             (0..600)
@@ -5102,45 +5176,12 @@ mod tests {
         let rows: Vec<String> = rendered.iter().map(plain_line).collect();
         let text = rows.join("\n");
 
-        assert!(rendered.len() <= MESSAGE_LINES + 2, "{}", rendered.len());
-        let ceiling = rows
-            .iter()
-            .position(|row| row.contains("rest of this block in event details"))
-            .expect("the framed block owns its truncation notice");
-        let floor = rows
-            .iter()
-            .position(|row| row.starts_with('└'))
-            .expect("the truncated frame still closes");
-        assert_eq!(floor, ceiling + 1, "{text}");
-        assert!(
-            rows[2..floor]
-                .iter()
-                .all(|row| row.starts_with("│ ") && row.ends_with(" │")),
-            "every visible code row and notice stays inside the frame: {text}"
-        );
-        assert_eq!(
-            rows.last().map(String::as_str),
-            Some("… full message · ctrl+o"),
-            "the affordance follows rather than replaces the frame floor: {text}"
-        );
-        assert!(text.contains("line 0"), "{text}");
-        assert!(
-            !text.contains("line 599"),
-            "compact rendering must stay bounded: {text}"
-        );
-
-        let expanded = render_cells_at(&cells, 60, 0, Verbosity::Verbose);
-        let expanded_text = plain(&expanded);
-        assert!(expanded_text.contains("line 599"), "{expanded_text}");
-        assert!(
-            !expanded_text.contains("full message")
-                && !expanded_text.contains("rest of this block in event details"),
-            "an expansion that fits needs no truncation affordance: {expanded_text}"
-        );
-        assert!(
-            plain_line(expanded.last().expect("expanded rows")).starts_with('└'),
-            "the expanded frame closes too: {expanded_text}"
-        );
+        assert!(rendered.len() > 600);
+        assert!(rows.iter().any(|row| row.starts_with('└')), "{text}");
+        assert!(!text.contains("rest of this block in event details"));
+        assert!(!text.contains("full message · ctrl+o"));
+        assert!(text.contains("line 0"));
+        assert!(text.contains("line 599"));
     }
 
     #[test]

@@ -63,6 +63,8 @@ defmodule Ouroboros.Web.Live.CellsTest do
     render_component(&Cells.cell/1,
       cell: cell,
       index: Keyword.get(opts, :index, 0),
+      identity: Keyword.get(opts, :identity),
+      targets: Keyword.get(opts, :targets, %{}),
       expanded: Keyword.get(opts, :expanded, MapSet.new()),
       plane: Keyword.get(opts, :plane, :interactive),
       session_id: Keyword.get(opts, :session_id, "sess-1")
@@ -283,6 +285,36 @@ defmodule Ouroboros.Web.Live.CellsTest do
       assert opened =~ "ouro-explore-calls"
       assert opened =~ "and 6 more not listed"
     end
+  end
+
+  test "expansion and recap links follow event identities after a replay" do
+    cell = %Cell.Exploration{calls: [%Cell.Tool{name: "read", state: :completed}], done: true}
+
+    for index <- [4, 14] do
+      html =
+        paint(cell,
+          index: index,
+          identity: "event-50-0",
+          expanded: MapSet.new(["explore:event-50-0"])
+        )
+
+      assert html =~ "ouro-explore-calls"
+      assert html =~ ~s(phx-value-block="explore:event-50-0")
+    end
+
+    recap = %Cell.Divider{
+      kind: :turn_end,
+      recap: %{
+        reply: 4,
+        tools: [%{index: 5, label: "Read", state: :completed}],
+        files: [%{index: 6, path: "README.md"}],
+        unfinished_steps: 0
+      }
+    }
+
+    html = paint(recap, targets: %{4 => "event-50-0", 5 => "event-60-0", 6 => "event-70-0"})
+    for sequence <- [50, 60, 70], do: assert(html =~ ~s(href="#cells-event-#{sequence}-0"))
+    refute html =~ "#cells-cell-"
   end
 
   describe "diffs" do

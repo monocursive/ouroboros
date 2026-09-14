@@ -158,11 +158,9 @@ pub fn plain(rendered: &Rendered) -> String {
 
 /// How many rendered messages one thread keeps.
 ///
-/// The conversation pane projects [`crate::ui::sessions::CHAT_ENTRY_WINDOW`] entries and
-/// re-renders every one of them on every frame, so the memo has to be able to hold a whole
-/// window's worth of prose or it evicts on the way round and hits nothing. Sixteen was a
-/// screenful and measured a 0% hit rate at five thousand entries; this is the window, with
-/// [`MEMO_BYTES`] still the real ceiling.
+/// A bounded secondary memo for changed message layouts and standalone renders. The
+/// conversation owns its settled rows, so an old message need not remain in this memo
+/// to stay fast while scrolling. [`MEMO_BYTES`] also bounds retained source text.
 pub const MEMO_ENTRIES: usize = 192;
 
 /// …and how much source text those entries may hold between them. A cap in bytes as well

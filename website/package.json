@@ -7,6 +7,7 @@
     "dev": "astro dev --host 127.0.0.1",
     "build": "astro build",
     "preview": "astro preview --host 127.0.0.1",
+    "social:render": "node scripts/render-social-preview.mjs",
     "deploy": "npm run build && wrangler pages deploy dist --project-name ouroboros --branch main"
   },
   "dependencies": {

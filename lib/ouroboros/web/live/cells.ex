@@ -53,6 +53,8 @@ defmodule Ouroboros.Web.Live.Cells do
   """
   attr :cell, :any, required: true
   attr :index, :integer, required: true
+  attr :identity, :string, default: nil
+  attr :targets, :map, default: %{}
   attr :expanded, :any, required: true
   attr :plane, :atom, required: true
   attr :session_id, :string, required: true
@@ -77,12 +79,15 @@ defmodule Ouroboros.Web.Live.Cells do
   The key one collapsible block is remembered by.
 
   A `call_id` and a `task_id` are the runtime's own identifiers and survive a re-projection;
-  an index does not, so the cells that have no identifier of their own say so by using one
-  and are honestly a little fragile under a floor raise. The two blocks a reader actually
-  sits inside — a tool's output and a child agent's row — are the stable ones.
+  other blocks use the originating event identity so replay does not move their open state.
   """
   @spec key(atom(), term()) :: String.t()
   def key(kind, id), do: "#{kind}:#{id}"
+
+  defp identity(assigns), do: Map.get(assigns, :identity) || assigns.index
+
+  defp target(assigns, index),
+    do: "#cells-#{Map.get(Map.get(assigns, :targets, %{}), index, "cell-#{index}")}"
 
   # ------------------------------------------------------------------------------------
   # Messages
@@ -146,14 +151,14 @@ defmodule Ouroboros.Web.Live.Cells do
   defp tool(assigns) do
     summary = Tools.summarise(assigns.cell)
     body = output_lines(assigns.cell.output)
-    open = MapSet.member?(assigns.expanded, key(:tool, assigns.cell.call_id || assigns.index))
+    open = MapSet.member?(assigns.expanded, key(:tool, assigns.cell.call_id || identity(assigns)))
 
     assigns =
       assigns
       |> assign(:summary, summary)
       |> assign(:body, body)
       |> assign(:open, open)
-      |> assign(:block, key(:tool, assigns.cell.call_id || assigns.index))
+      |> assign(:block, key(:tool, assigns.cell.call_id || identity(assigns)))
       |> assign(:elapsed, Cell.Tool.elapsed(assigns.cell))
 
     ~H"""
@@ -231,7 +236,7 @@ defmodule Ouroboros.Web.Live.Cells do
   # ------------------------------------------------------------------------------------
 
   defp exploration(assigns) do
-    block = key(:explore, assigns.index)
+    block = key(:explore, identity(assigns))
 
     assigns =
       assigns
@@ -276,8 +281,8 @@ defmodule Ouroboros.Web.Live.Cells do
     assigns =
       assigns
       |> assign(:lines, String.split(assigns.cell.text, "\n"))
-      |> assign(:block, key(:command, assigns.index))
-      |> assign(:open, MapSet.member?(assigns.expanded, key(:command, assigns.index)))
+      |> assign(:block, key(:command, identity(assigns)))
+      |> assign(:open, MapSet.member?(assigns.expanded, key(:command, identity(assigns))))
 
     ~H"""
     <div class="ouro-cell ouro-command">
@@ -554,7 +559,7 @@ defmodule Ouroboros.Web.Live.Cells do
   end
 
   defp subagent(assigns) do
-    block = key(:subagent, assigns.cell.task_id || assigns.index)
+    block = key(:subagent, assigns.cell.task_id || identity(assigns))
 
     assigns =
       assigns
@@ -626,13 +631,13 @@ defmodule Ouroboros.Web.Live.Cells do
         Review result
         <span>{length(@cell.recap.tools)} recorded tool {plural(length(@cell.recap.tools), "call")}</span>
       </summary>
-      <a :if={not is_nil(@cell.recap.reply)} href={"#cells-cell-#{@cell.recap.reply}"}>Read the agent’s reply</a>
+      <a :if={not is_nil(@cell.recap.reply)} href={target(assigns, @cell.recap.reply)}>Read the agent’s reply</a>
       <p class="ouro-quiet">
         Activity recorded in this view. Open a call to inspect its output.
       </p>
       <ul :if={@cell.recap.tools != []}>
         <li :for={tool <- Enum.take(@cell.recap.tools, 8)}>
-          <a href={"#cells-cell-#{tool.index}"}>{tool.label}</a> · {tool.state}
+          <a href={target(assigns, tool.index)}>{tool.label}</a> · {tool.state}
         </li>
       </ul>
       <p :if={length(@cell.recap.tools) > 8} class="ouro-quiet">
@@ -643,7 +648,7 @@ defmodule Ouroboros.Web.Live.Cells do
       </p>
       <ul :if={@cell.recap.files != []} aria-label="Files in the recorded activity">
         <li :for={file <- @cell.recap.files}>
-          <a href={"#cells-cell-#{file.index}"}>{file.path}</a>
+          <a href={target(assigns, file.index)}>{file.path}</a>
         </li>
       </ul>
       <p :if={@cell.recap.unfinished_steps > 0}>

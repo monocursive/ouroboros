@@ -55,6 +55,27 @@ Figma's connected font service does not provide Departure Mono. Its technical la
 
 ## Content maintenance
 
+### Social link previews
+
+The homepage emits its title, description, canonical URL, Open Graph image metadata,
+and X large-image card metadata in the static HTML, so crawlers do not need JavaScript.
+The preview image is `public/social/ouroboros-preview-v1.png` (1200 × 630 PNG).
+Its editable source is `design/social-preview.html`, which reuses the unchanged
+brand SVGs, local Manrope and Departure Mono fonts, and the site's palette.
+
+To update the artwork, install dependencies in both the repository root and
+`website/`, run `npx playwright install chromium` at the repository root once,
+then run `npm run social:render` from `website/`. Inspect the exported PNG before
+building. The PNG is checked in; ordinary website builds do not require Playwright.
+When replacing an already published image, increment its filename in the renderer
+and homepage metadata so crawlers get a fresh image URL.
+
+After deployment, check the page and image return HTTP 200 without authentication,
+including requests with social crawler user agents. Existing shares may retain
+cached previews; request a fresh scrape in the platform's inspection tool when
+available. Metadata and fetch checks alone do not prove a platform has refreshed
+its displayed card. See the [Open Graph specification](https://ogp.me/).
+
 The recorded demos and screenshot downloads use `public/demos/`. The repository
 README references those same files, so there is one copy to maintain. See the
 [capture notes](public/demos/README.md) for source revision, verified behavior,
@@ -64,7 +85,7 @@ Demo videos do not autoplay or preload their video data.
 
 The install command in `src/pages/index.astro` points to the latest stable release. The release badge intentionally links to the specific announced version; update its text and URL together when announcing a new version. Capabilities and platform guidance link to the maintained repository documentation.
 
-The Models & access section describes the native runtime's authentication contract, checked against `lib/ouroboros/provider/openai_auth.ex` and `lib/ouroboros/provider/native/model/req_llm.ex`: OpenAI supports ChatGPT OAuth or API keys; Anthropic and xAI are API-key-only integrations. Gemini, OpenRouter, and Ollama are additional configurable ReqLLM transports, rather than default catalogue lanes. Model families are listed without fixed versions because catalogue metadata does not guarantee availability for a particular account. These statements are source-verified, not a claim that every provider was exercised with a live account.
+The Models & access section describes the native runtime's authentication contract, checked against `lib/ouroboros/provider/openai_auth.ex` and `lib/ouroboros/provider/native/model/req_llm.ex`: OpenAI supports ChatGPT OAuth or API keys; Anthropic uses API keys; xAI supports the local Grok coding subscription sign-in through `grok:` models or separately billed API keys through `xai:` models. Gemini, OpenRouter, and Ollama are additional configurable ReqLLM transports, rather than default catalogue lanes. Model families are listed without fixed versions because catalogue metadata does not guarantee availability for a particular account. These statements are source-verified, not a claim that every provider was exercised with a live account.
 
 Plan and billing references: [Codex with a ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan), [Claude subscriptions and API billing](https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console), and [xAI API billing](https://docs.x.ai/console/billing). Recheck the native authentication contract before adding another subscription option.
 

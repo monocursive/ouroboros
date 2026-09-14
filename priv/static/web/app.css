@@ -804,15 +804,20 @@ body.phx-loading {
   font-size: 0.72rem;
 }
 
-.ouro-truncation {
-  padding: 0.35rem var(--gutter) 0;
-  margin: 0;
+.ouro-history-loader {
+  text-align: center;
+  padding-bottom: 1rem;
+}
+
+.ouro-history-loader button {
+  min-height: 2.75rem;
 }
 
 .ouro-transcript {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 1rem var(--gutter) 2rem;
 }
 

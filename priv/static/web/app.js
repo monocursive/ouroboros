@@ -294,6 +294,7 @@
   //
   // The connection pill needs no hook: LiveView writes `phx-connected` and the three
   // `phx-*-error` classes onto its own root, and the stylesheet reads them.
+  var scrollPins = new Set();
   var ScrollPin = {
     // Within this many pixels of the bottom still counts as "at the bottom", because a
     // reader who has not deliberately scrolled away should not be stranded by a rounding
@@ -306,24 +307,77 @@
     },
 
     mounted: function () {
+      scrollPins.add(this);
+      this.session = this.el.dataset.session;
       this.pinned = true;
+      this.loadingHistory = false;
       this.el.scrollTop = this.el.scrollHeight;
 
       this.onScroll = function () {
         this.pinned = this.atBottom();
+        if (!this.pinned && this.el.scrollTop <= 160) this.loadHistory();
       }.bind(this);
 
+      // Scrolling a loader button into view can start automatic loading before its
+      // click lands. Route both through the same in-flight guard, including keyboard clicks.
+      this.onHistoryClick = function (event) {
+        if (!event.target.closest("[phx-click='load-history']")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.loadHistory();
+      }.bind(this);
+      this.el.addEventListener("click", this.onHistoryClick);
       this.el.addEventListener("scroll", this.onScroll, { passive: true });
     },
 
-    updated: function () {
-      if (this.pinned) {
-        this.el.scrollTop = this.el.scrollHeight;
+    loadHistory: function () {
+      if (this.loadingHistory || Number(this.el.dataset.historyStart) <= 0) return;
+      this.loadingHistory = true;
+      var session = this.session;
+      this.pushEvent("load-history", { session: session }, function () {
+        if (this.session === session) this.loadingHistory = false;
+      }.bind(this));
+    },
+
+    beforePatch: function () {
+      // Anchor an existing cell, rather than the total scroll height: new output can
+      // arrive below us during the same patch that prepends an older page above us.
+      this.anchor = null;
+      if (this.pinned) return;
+      var top = this.el.getBoundingClientRect().top;
+      var cells = this.el.querySelectorAll("[data-history-cell]");
+      for (var i = 0; i < cells.length; i++) {
+        var rect = cells[i].getBoundingClientRect();
+        if (rect.bottom > top) {
+          this.anchor = { id: cells[i].id, offset: rect.top - top };
+          break;
+        }
       }
     },
 
+    afterPatch: function () {
+      if (this.session !== this.el.dataset.session) {
+        this.session = this.el.dataset.session;
+        this.pinned = true;
+        this.loadingHistory = false;
+        this.anchor = null;
+      }
+      if (this.pinned) {
+        this.el.scrollTop = this.el.scrollHeight;
+      } else if (this.anchor) {
+        var cell = document.getElementById(this.anchor.id);
+        if (cell && this.el.contains(cell)) {
+          this.el.scrollTop += cell.getBoundingClientRect().top -
+            this.el.getBoundingClientRect().top - this.anchor.offset;
+        }
+      }
+      this.anchor = null;
+    },
+
     destroyed: function () {
+      scrollPins.delete(this);
       this.el.removeEventListener("scroll", this.onScroll);
+      this.el.removeEventListener("click", this.onHistoryClick);
     }
   };
 
@@ -501,13 +555,21 @@
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
     dom: {
+      // LiveView deletes obsolete stream rows before element beforeUpdate hooks run.
+      // Capture the reading anchor at patch start, while a repaired gap still exists.
       onPatchStart: function (container) {
+        scrollPins.forEach(function (pin) {
+          if (container.contains(pin.el)) pin.beforePatch();
+        });
         var focused = document.activeElement;
         if (focused && container.contains(focused) && focused.closest(".ouro-row-actions")) {
           sessionMenuFocus.set(container, focused);
         }
       },
       onPatchEnd: function (container) {
+        scrollPins.forEach(function (pin) {
+          if (container.contains(pin.el)) pin.afterPatch();
+        });
         var focused = sessionMenuFocus.get(container);
         sessionMenuFocus.delete(container);
         // Moving a keyed row can blur its summary or action button. LiveView restores

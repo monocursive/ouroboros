@@ -204,6 +204,25 @@ defmodule Ouroboros.Web.WatchTest do
   end
 
   describe "the window" do
+    test "a paginated view retains older events without inventing a prune" do
+      count = Watch.window() + 10
+
+      watch =
+        Watch.new(retain_history: true)
+        |> Watch.backlog(0, events(1..count))
+        |> Watch.absorb(event(count + 1))
+
+      assert Watch.size(watch) == count + 1
+      assert Watch.cursor(watch) == count + 1
+      assert Watch.floor(watch) == 0
+      assert Map.has_key?(watch.events, 1)
+
+      # Real upstream gaps still appear, while events already read remain available.
+      repaired = Watch.backlog(watch, count + 1, [event(count + 5)])
+      assert Watch.floor(repaired) == count + 4
+      assert Map.has_key?(repaired.events, 1)
+    end
+
     test "drops the oldest events and raises the floor by exactly as much" do
       window = Watch.window()
       watch = Watch.absorb(Watch.new(), events(1..(window + 10)))

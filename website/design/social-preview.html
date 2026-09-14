@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ouroboros social preview artwork</title>
+    <style>
+      @font-face {
+        font-family: Manrope;
+        src: url('../node_modules/@fontsource-variable/manrope/files/manrope-latin-wght-normal.woff2') format('woff2');
+        font-weight: 200 800;
+      }
+      @font-face {
+        font-family: 'Departure Mono';
+        src: url('../public/fonts/DepartureMono-Regular.woff2') format('woff2');
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+      body { background: #0b0d0c; color: #f2efe8; font-family: Manrope, sans-serif; -webkit-font-smoothing: antialiased; }
+      .card { position: relative; width: 1200px; height: 630px; padding: 52px 64px; }
+      .brand { display: flex; align-items: center; gap: 14px; font-size: 30px; font-weight: 650; letter-spacing: -1px; }
+      .brand img { width: 42px; height: 42px; }
+      h1 { position: relative; z-index: 1; margin: 57px 0 28px; font-size: 86px; line-height: 1.04; letter-spacing: -4px; font-weight: 500; }
+      .description { position: relative; z-index: 1; margin: 0; color: #b3bdb6; font-size: 27px; line-height: 1.45; }
+      .emblem { position: absolute; top: 110px; right: 52px; width: 430px; height: 430px; }
+      .orbit, .mark { position: absolute; }
+      .outer { inset: 0; width: 100%; height: 100%; }
+      .middle { inset: 10.682%; width: 78.636%; height: 78.636%; }
+      .inner { inset: 22.5%; width: 55%; height: 55%; }
+      .mark { width: 86.364%; height: 86.364%; left: 6.818%; top: 5.455%; }
+      .point { position: absolute; left: 83.864%; top: 14.091%; width: 6px; height: 6px; }
+      footer { position: absolute; left: 64px; right: 64px; bottom: 44px; display: flex; align-items: center; justify-content: space-between; padding-top: 24px; border-top: 1px solid #29342d; font-family: 'Departure Mono', monospace; font-size: 14px; }
+      .status { color: #b5d8a5; }
+      .domain { color: #a0aaa3; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand"><img src="../public/brand/ouroboros.svg" alt="" />ouroboros</div>
+      <h1>Keep the<br />work alive.</h1>
+      <p class="description">A distributed runtime<br />for AI coding agents.</p>
+      <div class="emblem" aria-hidden="true">
+        <img class="orbit outer" src="../public/brand/orbit-outer.svg" alt="" />
+        <img class="orbit middle" src="../public/brand/orbit-middle.svg" alt="" />
+        <img class="orbit inner" src="../public/brand/orbit-inner.svg" alt="" />
+        <img class="mark" src="../public/brand/ouroboros.svg" alt="" />
+        <img class="point" src="../public/brand/orbit-point.svg" alt="" />
+      </div>
+      <footer><span class="status">Open source / Experimental</span><span class="domain">ouroboros.monocursive.com</span></footer>
+    </main>
+  </body>
+</html>

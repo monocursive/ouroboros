@@ -929,6 +929,116 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   # Folds
   # ------------------------------------------------------------------------------------
 
+  describe "scrollable history" do
+    test "projects a whole long response before paging, including events beyond the watch window",
+         %{conn: conn} do
+      id = session_id()
+
+      deltas =
+        for n <- 1..2_100,
+            do: event(n, :output_text_delta, %{"text" => "review-part-#{n}; "})
+
+      _plane = plane(id: id, backlogs: [{:ok, deltas ++ [said(2_101, "")]}])
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      text = view |> element("#transcript") |> render()
+
+      assert text =~ "review-part-1;"
+      assert text =~ "review-part-2100;"
+      refute has_element?(view, "button[phx-click=load-history]")
+    end
+
+    test "loads every earlier page in order with stable ids and retains it during new output",
+         %{conn: conn} do
+      id = session_id()
+      events = for n <- 1..125, do: said(n, "history-message-#{n};")
+      pid = plane(id: id, backlogs: [{:ok, events}])
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      assert has_element?(view, "#cells-event-76-0", "history-message-76;")
+      refute has_element?(view, "#cells-event-75-0")
+
+      view |> element("button[phx-click=load-history]") |> render_click()
+      assert has_element?(view, "#cells-event-26-0", "history-message-26;")
+      assert has_element?(view, "#cells-event-76-0", "history-message-76;")
+
+      FakePlane.emit(pid, said(126, "newest-message;"))
+      flush(view)
+      assert has_element?(view, "#cells-event-26-0", "history-message-26;")
+      assert has_element?(view, "#cells-event-126-0", "newest-message;")
+
+      view |> element("button[phx-click=load-history]") |> render_click()
+      refute has_element?(view, "button[phx-click=load-history]")
+
+      html = view |> element("#transcript-cells") |> render()
+
+      assert Regex.scan(~r/data-history-cell="(\d+)"/, html, capture: :all_but_first) ==
+               Enum.map(0..125, &[to_string(&1)])
+
+      for n <- 1..125, do: assert(occurrences(html, "history-message-#{n};") == 1)
+
+      # Neither duplicate requests at the start nor an ordinary refresh hide history.
+      render_hook(view, "load-history", %{"session" => "interactive:#{id}"})
+      poll(view)
+      assert has_element?(view, "#cells-event-1-0", "history-message-1;")
+    end
+
+    test "replayed gaps preserve the loaded boundary and message identities", %{conn: conn} do
+      id = session_id()
+      events = for n <- Enum.to_list(1..20) ++ Enum.to_list(31..100), do: said(n, "message-#{n};")
+      pid = plane(id: id, backlogs: [{:ok, events}])
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      assert has_element?(view, "#transcript[data-history-start='41']")
+      assert has_element?(view, "#cells-event-71-0[data-history-cell='61']", "message-71;")
+
+      for n <- 21..30, do: FakePlane.emit(pid, said(n, "message-#{n};"))
+      flush(view)
+      assert has_element?(view, "#transcript[data-history-start='50']")
+      assert has_element?(view, "#cells-event-51-0", "message-51;")
+      refute has_element?(view, "#cells-event-50-0")
+      assert has_element?(view, "#cells-event-71-0[data-history-cell='70']", "message-71;")
+      view |> element("button[phx-click=load-history]") |> render_click()
+      html = view |> element("#transcript-cells") |> render()
+
+      assert Regex.scan(~r/id="cells-event-(\d+)-0"/, html, capture: :all_but_first) ==
+               Enum.map(1..100, &[to_string(&1)])
+    end
+
+    test "a gap repaired inside loaded history inserts messages in chronological order", %{
+      conn: conn
+    } do
+      id = session_id()
+      events = for n <- [1, 2, 5, 6], do: said(n, "message-#{n};")
+      pid = plane(id: id, backlogs: [{:ok, events}])
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      assert has_element?(view, "#cells-gap-3-0")
+      for n <- [3, 4], do: FakePlane.emit(pid, said(n, "message-#{n};"))
+      flush(view)
+      refute has_element?(view, "#cells-gap-3-0")
+      html = view |> element("#transcript-cells") |> render()
+
+      assert Regex.scan(~r/id="cells-event-(\d+)-0"/, html, capture: :all_but_first) ==
+               Enum.map(1..6, &[to_string(&1)])
+    end
+
+    test "resets pagination on session changes and ignores a previous session's request",
+         %{conn: conn} do
+      first = session_id()
+      second = session_id()
+      events = for n <- 1..100, do: said(n, "history-message-#{n};")
+      _first = plane(id: first, backlogs: [{:ok, events}])
+      _second = plane(id: second, backlogs: [{:ok, events}])
+      {:ok, view, _html} = live(conn, "/s/interactive/#{first}")
+      view |> element("button[phx-click=load-history]") |> render_click()
+      assert has_element?(view, "#cells-event-1-0")
+
+      render_patch(view, "/s/interactive/#{second}")
+      assert has_element?(view, "#cells-event-51-0")
+      refute has_element?(view, "#cells-event-1-0")
+      render_hook(view, "load-history", %{"session" => "interactive:#{first}"})
+      refute has_element?(view, "#cells-event-1-0")
+    end
+  end
+
   describe "folding" do
     test "a long tool body opens and closes on click, keyed by call_id", %{conn: conn} do
       id = session_id()

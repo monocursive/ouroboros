@@ -1620,9 +1620,8 @@ cursor, in order":
   Without this the transcript would show a hole that can never fill.
 - A prune raises the floor but must **not** discard what the client already holds. Events
   obtained before a prune are real history; the divider is placed where the hole is
-  instead of at the top. The same divider marks the client's own window when a long
-  session runs past it, so "history truncated below N" means one thing whichever side
-  dropped it.
+  instead of at the top. The client retains every event it receives for the lifetime of
+  that watch; it no longer discards older events after 5,000 entries.
 
 Two more facts the implementation had to add rather than discover at runtime: a second
 interruption arriving while a repair is in flight is *remembered*, because responses and
@@ -1824,11 +1823,11 @@ frame, without a floor, so streaming code keeps its highlighting — and a fence
 info line has not ended yet is not yet a fence, because `ru` is neither `rust` nor `ruby`.
 
 Rendering is a pure function of (text, width, row budget, streaming), and it is
-**remembered** under exactly those four things, sixteen entries and four megabytes deep per
-thread, most-recently-used first: a settled turn is parsed once per width instead of twelve
-times a second. Every row passes one budget check, so a message costs the rows the pane
-asked for and not the rows its bytes imply — 128 KiB of Markdown draws its 256 rows in
-about 2 ms unoptimised.
+**remembered** under those four things plus the theme generation, up to 192 entries and
+four megabytes of source text per thread. The chat also retains settled layouts, so
+scrolling does not parse old prose even after it leaves the Markdown memo. User and agent
+messages have no display row ceiling, and streamed replies are assembled from all received
+events before rendering.
 
 A copy is a copy of the **source**. `ctrl+x y` and every export hand back the Markdown the
 agent wrote, folded to the measure and otherwise untouched; the rows above are a lossy
@@ -1841,15 +1840,21 @@ expanded by default in a long session buries the conversation it is about.
 
 `Ouroboros.Gateway.Wire` markers never reach the screen as JSON: `_excerpt` renders as its
 own prefix followed by "… (N bytes; full event via /details)", and `_opaque`, `_b64`, and
-`_truncated` render as short labels. An excerpted diff is marked as an excerpt, so its
+`_truncated` render as short labels. If a final reply is excerpted after its complete
+text arrived in deltas, the TUI retains the complete reply when its prefix and byte count
+match. An excerpted diff is marked as an excerpt, so its
 `+`/`-` counts are never read as a diffstat of the whole patch.
 
-Redraw work is bounded in every view: chat projects the newest 128 entries and bounded
-per-cell excerpts with an explicit omission marker, `Ctrl-O` raises the per-cell row ceiling
-to 2,000 rather than removing it, and `/details` exposes every event retained by the local
-5,000-event window. A tool result's compact ceiling is twelve rows — six of head and six of
-tail — raised from the three it was before the head/tail layout; every byte cap on the
-underlying values is unchanged. One diff parse keeps sixty-four files and twenty thousand
+Chat scrolling reaches the whole received conversation. It projects the complete ledger
+when events change, caches settled cell layouts, and copies only the visible rows into the
+terminal viewport. New output redraws only changed cells; scrolling back holds the same
+rows while output is appended. The mouse wheel, Shift+Up/Down and PageUp/PageDown all reach
+the first message, and scrolling back down resumes following live output. Resizing,
+changing verbosity or switching theme rebuilds the layout.
+
+Tool and status details still use excerpts: `Ctrl-O` raises their row ceiling to 2,000,
+and `/details` exposes every received event. A tool result's compact ceiling is twelve
+rows — six of head and six of tail; byte caps on these underlying tool values are unchanged. One diff parse keeps sixty-four files and twenty thousand
 body lines and marks itself truncated at either ceiling. A ten-thousand-line tool result
 projects and renders in a small fraction of one frame, because head/tail is chosen on
 *source* lines before anything is wrapped: twelve rows cost one scan and twelve pointers,
@@ -3095,8 +3100,8 @@ Screen-reader mode is Claude Code's `--ax-screen-reader` (R2 §7):
   `thinking:`, `tool:`, `tool error:`, `error:`, `warning:`, `approval needed:` — one prefix
   per block. Not a third renderer: `/raw` was already a plain, labelled one, so it grew a
   `Vocabulary`. Raw is for a *selection* (one row per logical line, nothing folded, this
-  client's own shorthand); screen-reader is for a *voice* (the colon, a 32-row budget per
-  block, ` · ` said as a comma, and `… +12 lines · ctrl+o` said as
+  client's own shorthand); screen-reader is for a *voice* (the colon, complete messages,
+  a 32-row budget for tool and status details, ` · ` said as a comma, and `… +12 lines · ctrl+o` said as
   "12 more lines not shown here; press ctrl+o to show all").
 - **Static spinners.** The working indicator is the word `working:` rather than a braille
   glyph that changes ten times a second.
@@ -3122,39 +3127,18 @@ are things a person states.
 
 ### Performance (A12)
 
-`tui/tests/perf.rs` builds a synthetic 5,000-event session in the proportions a real one
-arrives in and measures one 120×40 frame through `Watch::recent_entries` →
-`transcript_cells::project` → `render_cells_at`. 5,000 because that is the number the field
-publishes (Amp Neo's 5,000-message thread, R2 §8) and because it is `transcript::WINDOW`.
+`tui/tests/perf.rs` exercises the same `Watch::chat_lines` cache as the session pane,
+using 5,000 mixed events and a prose-heavy conversation. These are workload sizes, not
+retention limits. The cold layout is measured separately from warm frames. Warm redraws
+have a generous 40 ms debug-build ceiling; a tenfold larger settled history must not make
+idle redraws grow proportionally.
 
-Measured on Apple Silicon, worst of eight warm frames over three runs:
-
-| build | cold frame | worst warm frame |
-|---|---|---|
-| `--release` | 1.2–2.0 ms | **0.63–1.30 ms** |
-| debug | 4.5–4.9 ms | **2.63–2.68 ms** |
-
-The release number is the one A12 budgets and it is more than twelve times under the 16 ms
-frame. The asserted ceiling is the debug one at 40 ms, deliberately generous: an
-unoptimised build on a loaded CI box is not what the budget is about, and a gate that fails
-on a busy machine is a gate people delete. What it catches is the shape.
-
-Two things it caught:
-
-- **`Watch::entries` was O(ledger) per frame.** It built five thousand `Entry` values so the
-  pane could keep the last 128. `Watch::recent_entries(limit)` walks the tail — the same
-  interleaving code entered at a bounded start, with a test asserting it is exactly the tail
-  of the whole walk over a ledger carrying a raised floor, a hole, notes, and a terminal
-  status. 3.16 ms → 2.76 ms in debug, and a 500-entry session now costs what a 5,000-entry
-  one does. The pane's divider counts *events* rather than entries, because the number of
-  entries below a window cannot be had without the walk it replaces.
-- **The Markdown memo was too small for its own window.** Sixteen renders against a
-  128-entry projection window. On an agentic session that happened to be enough; on a
-  prose-heavy one, where the window holds sixty-four agent messages, it measured **0 hits in
-  640 lookups** — each frame evicting exactly what the next one wanted. The ceiling is
-  `CHAT_ENTRY_WINDOW` now and the same measurement is 640 of 640. The memo also keys on the
-  theme generation, so a `/theme` switch misses rather than answering with rows the previous
-  palette styled.
+The regression gates also require scrolling to make zero calls into the Markdown
+renderer, appending a reply to render only changed cells, and cached rows to match a
+complete stateless render after width, verbosity and stream changes. Terminal rendering
+tests cover reaching the first message beyond the former 128-entry window, retaining a
+reply assembled from hundreds of deltas, reading past 2,000 reply rows, and preserving a
+scrolled viewport as new events arrive. Retention tests cover more than 5,000 events.
 
 ### 3.5 Rust tests
 

@@ -6,7 +6,7 @@ defmodule Ouroboros.MixProject do
   def project do
     [
       app: :ouroboros,
-      version: "0.1.5",
+      version: "0.1.6",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

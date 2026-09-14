@@ -187,6 +187,38 @@ fn every_kind() -> Vec<(&'static str, Cell)> {
 }
 
 #[test]
+fn screen_reader_messages_remain_complete_and_cached_when_the_mode_changes() {
+    use ouro::model::{Event, Plane};
+    use ouro::ui::transcript::Watch;
+    use ouro::ui::transcript_cells::render_at;
+
+    let _held = holding(Settings::default());
+    let mut watch = Watch::new(Plane::Interactive, "accessible-history".into());
+    watch.absorb(vec![Event::decode(&json!({
+        "id": "reply", "sequence": 1, "type": "output_text_final",
+        "payload": {"text": (1..=300).map(|n| format!("Reply line {n}.\n")).collect::<String>()}
+    }))
+    .unwrap()]);
+    let decorated = watch.chat_lines(100, 0, Verbosity::Compact).to_vec();
+    access::install(Settings {
+        screen_reader: true,
+        reduced_motion: true,
+    });
+    for verbosity in [Verbosity::Compact, Verbosity::Verbose] {
+        let expected = render_at(watch.entries(), 100, 7, verbosity);
+        let cached = watch.chat_lines(100, 7, verbosity);
+        assert_eq!(cached, expected);
+        let text = text_of(cached);
+        assert_plain(&text);
+        assert!(text.contains("Reply line 1."));
+        assert!(text.contains("Reply line 300."));
+        assert!(!text.contains("omitted"));
+    }
+    access::install(Settings::default());
+    assert_eq!(watch.chat_lines(100, 0, Verbosity::Compact), decorated);
+}
+
+#[test]
 fn every_cell_kind_comes_out_as_a_labelled_line_with_no_box_drawing() {
     let _held = screen_reader();
 
