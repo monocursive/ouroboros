@@ -10,6 +10,35 @@ requirements and upgrade instructions are in the
 
 No unreleased changes recorded yet.
 
+## [0.1.6] - 2026-09-14
+
+### Fixed
+
+- Web chat now shows complete retained reviews and conversations. The latest 50
+  display cells load first; scrolling up or choosing **Load earlier messages**
+  loads earlier pages without splitting streamed replies.
+- Replayed events and repaired history gaps preserve message identities, reading
+  position, expanded blocks and review links. Automatic and manual page loading
+  share one request to keep messages in chronological order.
+- The TUI retains every delivered event and renders complete conversation text,
+  so scrolling can reach earlier messages and the end of long replies. An
+  excerpted final event no longer replaces a complete reply received in deltas.
+- TUI scrolling reuses settled message layouts. Live updates to an older running
+  tool no longer reformat the entire conversation after it.
+
+### Website
+
+- Shared website links include dedicated social preview images.
+- The release badge links to this version.
+
+### Upgrade notes
+
+- Run `ouro update` from an official standalone installation. Finish active work,
+  then run `ouro stop` and `ouro` to activate the new runtime. Reload open web views.
+- History already pruned by the runtime cannot be recovered by these changes;
+  unavailable ranges remain visible as history-gap markers. Retaining more
+  conversation history increases the memory used by an open view.
+
 ## [0.1.5] - 2026-09-14
 
 ### Added
@@ -94,7 +123,8 @@ No unreleased changes recorded yet.
 
 Earlier `v0.1.0` and `v0.1.1` tags have no published release assets.
 
-[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.5...dev
+[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.6...dev
+[0.1.6]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.6
 [0.1.5]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.5
 [0.1.4]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.4
 [0.1.3]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.3
