@@ -82,6 +82,9 @@ impl App {
                     Err(error) => self.account.failed(error.to_string(), ticks, ACCOUNT_TICKS),
                 }
             }
+            Tag::SettingsCredential { provider } => {
+                self.settings_credential_answered(&provider, result)
+            }
             Tag::AccountLogin => self.account_login_answered(result),
             Tag::AccountCancel => {
                 self.account.invalidate();
@@ -105,6 +108,12 @@ impl App {
                         NoticeKind::Error,
                     ),
                 }
+                if self.overlay.is_none() {
+                    self.restore_settings();
+                } else {
+                    // A new dialog opened while logout was in flight owns the screen.
+                    self.settings_return = None;
+                }
             }
             Tag::Status => match result {
                 Ok(value) => match RuntimeStatus::decode(&value) {
@@ -120,15 +129,22 @@ impl App {
                 },
                 Err(error) => self.status.failed(error.to_string(), ticks, STATUS_TICKS),
             },
-            Tag::Providers => match result {
-                Ok(value) => {
-                    let providers = ProviderEntry::decode_list(&value);
-                    self.providers.ok(providers, ticks, PROVIDER_TICKS);
+            Tag::Providers => {
+                match result {
+                    Ok(value) => {
+                        let selected = self.settings_connection_identity();
+                        let providers = ProviderEntry::decode_list(&value);
+                        self.providers.ok(providers, ticks, PROVIDER_TICKS);
+                        self.reconcile_settings_connection(selected);
+                    }
+                    Err(error) => self
+                        .providers
+                        .failed(error.to_string(), ticks, PROVIDER_TICKS),
                 }
-                Err(error) => self
-                    .providers
-                    .failed(error.to_string(), ticks, PROVIDER_TICKS),
-            },
+                if self.settings_refresh_queued {
+                    self.refresh_settings_connections();
+                }
+            }
             Tag::Sessions(plane) => match result {
                 Ok(value) => {
                     let sessions = self.retain_offline_session_rows(

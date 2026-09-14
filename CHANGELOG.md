@@ -10,6 +10,37 @@ requirements and upgrade instructions are in the
 
 No unreleased changes recorded yet.
 
+## [0.1.7] - 2026-09-14
+
+### Settings
+
+- Grok subscriptions now appear in web and TUI Settings with sign-in guidance and
+  a status refresh action, alongside the separately billed xAI API connection.
+- Provider logos, connection status and credential sources make accounts and API
+  keys easier to identify. Settings group connections, defaults and runtime options.
+- The TUI supports masked entry for Anthropic and xAI API keys, saved through the
+  runtime's credential store.
+
+### Fixed
+
+- Missing or malformed credential reports no longer prevent Settings from
+  loading. Saving an API key refreshes its connection status even when a previous
+  refresh is still running.
+- TUI connection refreshes preserve the selected provider, ChatGPT logout returns
+  to Settings, and long Anthropic workspace values remain editable in compact views.
+
+### Website
+
+- The release badge links to this version.
+
+### Upgrade notes
+
+- Run `ouro update` from an official standalone installation. Finish active work,
+  then run `ouro stop` and `ouro` to activate the new runtime. Reload open web views.
+- To connect a Grok subscription, run `grok login` on the computer hosting
+  Ouroboros, then refresh its status in Settings. The status reports the local
+  sign-in; model access and allowances remain controlled by xAI.
+
 ## [0.1.6] - 2026-09-14
 
 ### Fixed
@@ -123,7 +154,8 @@ No unreleased changes recorded yet.
 
 Earlier `v0.1.0` and `v0.1.1` tags have no published release assets.
 
-[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.6...dev
+[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.7...dev
+[0.1.7]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.7
 [0.1.6]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.6
 [0.1.5]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.5
 [0.1.4]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.4

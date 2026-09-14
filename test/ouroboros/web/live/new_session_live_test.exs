@@ -166,7 +166,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                provider: "anthropic",
                env: "ANTHROPIC_API_KEY",
                present: true,
-               credential_state: "unavailable",
+               credential_state: "present",
                source: nil,
                workspace_env: "ANTHROPIC_WORKSPACE_ID",
                workspace_configured?: false

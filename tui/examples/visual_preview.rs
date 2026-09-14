@@ -13,6 +13,12 @@ fn main() {
     let directory = std::env::args().nth(1).expect("output directory");
     std::fs::create_dir_all(&directory).unwrap();
     for (name, width, height, connected) in [
+        ("settings", 120, 34, true),
+        ("settings-compact", 80, 24, true),
+        ("settings-small", 60, 18, true),
+        ("settings-defaults", 120, 34, true),
+        ("settings-key", 80, 24, true),
+        ("settings-key-small", 60, 18, true),
         ("welcome", 120, 34, false),
         ("ready", 120, 34, true),
         ("compact", 80, 24, false),
@@ -37,6 +43,50 @@ fn main() {
                 "login": {"status":"idle"}
             })),
         });
+        if name.starts_with("settings") {
+            app.tab = ouro::ui::app::Tab::Dashboard;
+            app.apply(Msg::Key(KeyEvent::new(
+                KeyCode::Char(','),
+                KeyModifiers::NONE,
+            )));
+            app.apply(Msg::Answer { tag: Tag::Providers, result: Ok(json!([
+                {"provider":"native","status":{"installed":true,"compatible":true,"details":{"credentials":[
+                    {"provider":"openai_codex","env":"OUROBOROS_OAUTH_FILE","present":true,"source":"stored"},
+                    {"provider":"grok","env":"OUROBOROS_GROK_AUTH_FILE","present":false,"credential_state":"absent"},
+                    {"provider":"openai","env":"OPENAI_API_KEY","present":false},
+                    {"provider":"anthropic","env":"ANTHROPIC_API_KEY","present":true,"source":"stored"},
+                    {"provider":"xai","env":"XAI_API_KEY","present":false}
+                ]}}}
+            ])) });
+            app.apply(Msg::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+            if name == "settings-defaults" {
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
+            }
+            if name == "settings-key" {
+                for _ in 0..3 {
+                    app.apply(Msg::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+                }
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+                app.apply(Msg::Paste("fixture-key-not-a-real-credential".into()));
+            }
+            if name == "settings-key-small" {
+                for _ in 0..2 {
+                    app.apply(Msg::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+                }
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+                app.apply(Msg::Paste("fixture-key-not-a-real-credential".into()));
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+                app.apply(Msg::Paste(format!("wrkspc_{}", "a".repeat(200))));
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+                app.apply(Msg::Answer {
+                    tag: Tag::SettingsCredential {
+                        provider: "anthropic".into(),
+                    },
+                    result: Err(ouro::transport::ClientError::ConnectionClosed),
+                });
+            }
+        }
         if name.starts_with("location") || name == "project-picker" {
             let fixture: serde_json::Value = serde_json::from_str(include_str!(
                 "../../test/support/gateway_golden/runtime_status_result.json"

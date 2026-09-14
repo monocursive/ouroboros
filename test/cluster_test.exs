@@ -1846,6 +1846,17 @@ defmodule Ouroboros.ClusterTest do
           assert {:ok, owners} = Cluster.session_owners(:interactive)
           assert MapSet.member?(owners, Atom.to_string(core))
 
+          # The peer still advertises the real protocol. Pause background facts probes
+          # so they cannot replace the simulated skew before the peer disconnects.
+          :sys.replace_state(
+            Ouroboros.Cluster.Monitor,
+            &Map.put(&1, :facts_probe, :fixture_paused)
+          )
+
+          on_exit(fn ->
+            :sys.replace_state(Ouroboros.Cluster.Monitor, &Map.put(&1, :facts_probe, nil))
+          end)
+
           revision =
             Cluster.fleet_status().machines
             |> Enum.find(&(&1.node == core))

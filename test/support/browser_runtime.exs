@@ -10,7 +10,8 @@ data = Application.fetch_env!(:ouroboros, :data_dir)
 paths = [
   oauth_file: Path.join(data, "browser-absent-oauth.json"),
   anthropic_api_key_file: Path.join(data, "browser-absent-anthropic.key"),
-  xai_api_key_file: Path.join(data, "browser-absent-xai.key")
+  xai_api_key_file: Path.join(data, "browser-absent-xai.key"),
+  grok_auth_file: Path.join(data, "browser-absent-grok-auth.json")
 ]
 
 Enum.each(paths, fn {key, path} -> Application.put_env(:ouroboros, key, path) end)

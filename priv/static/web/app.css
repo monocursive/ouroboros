@@ -20,6 +20,9 @@
  */
 
 :root {
+  --provider-mark-bg: #f1f0eb;
+  --provider-mark-border: #dcded5;
+  --provider-anthropic-bg: #e4bfa7;
   color-scheme: dark;
   /* Layers, back to front. */
   --page: #121310;
@@ -63,6 +66,9 @@
 }
 
 [data-theme="light"] {
+  --provider-mark-bg: #ffffff;
+  --provider-mark-border: #c9c9c4;
+  --provider-anthropic-bg: #f4dbc8;
   color-scheme: light;
   --page: #e9e9e6;
   --workspace: #ededea;
@@ -3989,3 +3995,213 @@ body .ouro-gate {
 .ouro-audit-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .85rem; }
 .ouro-audit-table th, .ouro-audit-table td { padding: .7rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); vertical-align: top; }
 .ouro-audit-event { padding: .7rem 0; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+
+/* Provider settings: local brand assets, explicit state, and setup at the point of need. */
+body .ouro-settings-head .ouro-top-row {
+  margin-bottom: 2rem;
+}
+
+body .ouro-settings-section {
+  padding-block: 2.5rem;
+}
+
+body .ouro-settings-connection-title {
+  display: grid;
+  grid-template-columns: 2.6rem minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+body .ouro-settings-connection-title > .ouro-settings-state {
+  grid-column: auto;
+  justify-self: start;
+}
+
+body .ouro-provider-logo {
+  display: grid;
+  place-items: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 0.7rem;
+  background: var(--provider-mark-bg);
+  border: 1px solid var(--provider-mark-border);
+}
+
+body .ouro-provider-logo-anthropic {
+  background: var(--provider-anthropic-bg);
+  border-color: var(--provider-anthropic-bg);
+}
+
+body .ouro-provider-logo img {
+  width: 1.65rem;
+  height: 1.65rem;
+  display: block;
+}
+
+body .ouro-settings-state {
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  padding: 0.2rem 0.5rem;
+  color: var(--secondary);
+}
+
+body .ouro-settings-state.is-ready {
+  color: var(--ink);
+  background: var(--inset);
+}
+
+body .ouro-settings-state.is-warning {
+  color: var(--warn-amber);
+}
+
+body .ouro-settings-credential-row {
+  grid-template-columns: 2.6rem minmax(0, 1fr) auto;
+}
+
+body .ouro-settings-credential-body {
+  min-width: 0;
+}
+
+body .ouro-settings-credential-row:not(:has(.ouro-provider-logo)) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+body .ouro-settings-credential-name {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+body .ouro-settings-connections-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.8rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-control);
+}
+
+body .ouro-settings-connections-summary p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--secondary);
+}
+
+body .ouro-settings-connections-summary strong {
+  color: var(--ink);
+}
+
+body .ouro-settings-verification-note {
+  color: var(--tertiary);
+  font-size: 0.75rem;
+  margin: 0.65rem 0 1.8rem;
+}
+
+body .ouro-settings-key-help {
+  max-width: 19rem;
+  font-size: 0.8rem;
+}
+
+body .ouro-settings-key-help summary, body .ouro-settings-grok-setup summary, body .ouro-settings-other summary {
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 0.8rem;
+}
+
+body .ouro-settings-key-help p, body .ouro-settings-grok-setup p {
+  margin: 0.7rem 0 0;
+  color: var(--secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+body .ouro-settings-grok-setup {
+  border-top: 1px solid var(--hairline-2);
+  padding-top: 0.8rem;
+}
+
+body .ouro-settings-command {
+  display: block;
+  padding: 0.65rem 0.8rem;
+  margin-top: 0.65rem;
+  background: var(--inset);
+  border-radius: var(--radius-control);
+  font-size: 0.85rem;
+  user-select: all;
+}
+
+body .ouro-settings-other {
+  margin-top: 1.5rem;
+}
+
+body .ouro-settings-other > summary {
+  padding-block: 0.7rem;
+}
+
+body .ouro-settings-other > summary span {
+  color: var(--tertiary);
+  margin-left: 0.6rem;
+  font-size: 0.75rem;
+}
+
+body .ouro-settings-credential-path code, body .ouro-settings-credential-row code {
+  overflow-wrap: anywhere;
+}
+
+body .ouro-settings-key-help[open] {
+  grid-column: 2 / -1;
+  max-width: none;
+}
+
+body .ouro-settings-credential-row:not(:has(.ouro-provider-logo)) > .ouro-settings-key-help[open] {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 640px) {
+  body .ouro-settings-shell {
+    gap: 0;
+  }
+
+  body .ouro-settings-credential-row {
+    grid-template-columns: 2.6rem minmax(0, 1fr);
+    gap: 0.75rem;
+  }
+
+  body .ouro-settings-credential-row:not(:has(.ouro-provider-logo)) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  body .ouro-settings-credential-row > button, body .ouro-settings-credential-row > details {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  body .ouro-settings-credential-row:not(:has(.ouro-provider-logo)) > details {
+    grid-column: 1;
+  }
+
+  body .ouro-settings-connections-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  body .ouro-settings-head h1 {
+    font-size: 2.4rem;
+  }
+
+}
+
+body .ouro-settings-key-help summary,
+body .ouro-settings-grok-setup summary {
+  min-height: 2.5rem;
+  padding-block: 0.6rem;
+}
+
+@media (max-width: 420px) {
+  body .ouro-settings-connection-title {
+    grid-template-columns: 2.6rem minmax(0, 1fr);
+  }
+  body .ouro-settings-connection-title > .ouro-settings-state {
+    grid-column: 2;
+  }
+}

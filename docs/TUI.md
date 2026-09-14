@@ -2987,7 +2987,13 @@ rediscovered:
   this build knows it — Option on iTerm2, Fn on Terminal.app, Shift on the terminals that
   identify themselves in `TERM_PROGRAM` — and an unidentified terminal is told all three
   rather than the wrong one.
-- **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
+- **`,` opens settings.** `F1` Connections lists subscriptions and API keys with local
+  status, credential source, provider marks, and setup guidance. Select a provider with
+  arrows/Tab, use Enter to connect ChatGPT or add a private Anthropic/xAI key, and `r`
+  to refresh. Grok uses `grok login` on the attached runtime computer; it remains separate
+  from the xAI API key. Environment keys take precedence and are managed in the service
+  environment. Keys are masked and never saved to client preferences.
+  `F3` Runtime shows facts as reported by the attached runtime; `F2` Defaults edits
   this client's own `[defaults]` — workspace, approval mode, and sandbox mode (there is no
   provider picker: `:native` is the only provider, see [proposals/core.md](proposals/core.md)
   §3 D2) — with an explicit
