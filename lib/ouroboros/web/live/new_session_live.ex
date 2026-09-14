@@ -315,6 +315,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   def handle_event("refresh-chatgpt", _params, socket),
     do: {:noreply, socket |> read_account() |> maybe_poll_account() |> assign(:refusal, nil)}
 
+  def handle_event("refresh-grok", _params, socket),
+    do: {:noreply, socket |> load_providers() |> assign(:refusal, nil)}
+
   def handle_event("open-anthropic-key", _params, socket) do
     cond do
       not Call.available?(socket.assigns.scope, "credentials.anthropic.set") ->
@@ -450,6 +453,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
 
     api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
+    grok = NewSession.grok_card(form, field(socket), socket.assigns.providers)
 
     cond do
       Ouroboros.Web.Launch.workspace(form.workspace) == :error ->
@@ -464,6 +468,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
          assign(socket, :refusal, %{
            message: "Settings are still loading.",
            detail: "Wait a moment, then start the session."
+         })}
+
+      match?(%{usable?: false}, grok) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "Grok subscription sign-in is required.",
+           detail: "Run grok login on the selected computer, then refresh the Grok connection."
          })}
 
       match?(%{usable?: false}, api_key) ->
@@ -780,6 +791,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
     api_key = NewSession.api_key_card(assigns.form, field, assigns.providers)
+    grok = NewSession.grok_card(assigns.form, field, assigns.providers)
     chatgpt_ready? = not gated? or account.usable?
     api_key_required? = match?(%{usable?: false}, api_key)
     can_start? = Call.available?(assigns.scope, "interactive.start")
@@ -797,6 +809,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:gated?, gated?)
       |> assign(:chatgpt_ready?, chatgpt_ready?)
       |> assign(:api_key_card, api_key)
+      |> assign(:grok_card, grok)
+      |> assign(:grok_required?, match?(%{usable?: false}, grok))
       |> assign(:api_key_required?, api_key_required?)
       |> assign(
         :can_set_api_key?,
@@ -901,6 +915,30 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             />
           </section>
 
+          <section
+            :if={is_map(@grok_card)}
+            class="ouro-new-field ouro-account"
+            aria-labelledby="grok-connection-label"
+          >
+            <div class="ouro-new-label-row">
+              <span id="grok-connection-label" class="ouro-new-label">Grok subscription</span>
+              <span class="ouro-new-aside">{account_aside(@grok_card.state)}</span>
+            </div>
+            <p class="ouro-new-hint">
+              Uses your Grok subscription with Ouroboros's own tools and agent loop.
+              Sign in with <code>grok login</code> on <strong>{@machine_label}</strong>,
+              then refresh this connection.
+            </p>
+            <p :if={@grok_card.usable?} class="ouro-new-hint">
+              An unexpired local sign-in was found. Subscription allowance and model access
+              are checked by xAI when a request runs.
+            </p>
+            <p :if={not @grok_card.usable?} class="ouro-new-hint">
+              A usable sign-in has not been found. Renew expired credentials with <code>grok login</code>.
+            </p>
+            <button type="button" class="ouro-new-secondary" phx-click="refresh-grok">Refresh Grok connection</button>
+          </section>
+
           <details
             id="new-session-advanced"
             class="ouro-new-advanced"
@@ -953,7 +991,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
               not @can_start? or @starting? or
                 (not @locked? and
                    (Ouroboros.Web.Launch.workspace(@form.workspace) == :error or
-                      not @chatgpt_ready? or @api_key_required?))
+                      not @chatgpt_ready? or @api_key_required? or @grok_required?))
             }
           >
             {if @locked?,

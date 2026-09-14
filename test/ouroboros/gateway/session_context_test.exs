@@ -108,8 +108,13 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   describe "parameter contracts" do
     test "safe status is owner-routed, closed, bounded, and contains no prompt or credential value",
          context do
-      id = unique_id("safe-status")
-      _session = start_native(id, context, [%{text: "ok"}])
+      # Ordinary text such as "ok" can also occur in opaque runtime identities.
+      id = unique_id("safe-status-ok")
+      prompt = "SAFE_STATUS_PROMPT_CANARY_b6e0e9a4"
+      response = "SAFE_STATUS_OUTPUT_CANARY_847db36a"
+      session = start_native(id, context, [[{:text, response}, {:finish, :stop}]])
+      assert {:ok, _turn} = InteractiveSession.send_message(session, prompt, id: "status-turn")
+      await_turn(session)
 
       assert {:ok, status} = Methods.invoke("interactive.safe_status", %{"id" => id})
       assert status["scope"] == "session"
@@ -130,8 +135,10 @@ defmodule Ouroboros.Gateway.SessionContextTest do
                "birth" => nil
              }
 
-      assert byte_size(JSON.encode!(status)) <= 16_384
-      refute JSON.encode!(status) =~ "ok"
+      encoded = JSON.encode!(status)
+      assert byte_size(encoded) <= 16_384
+      refute encoded =~ prompt
+      refute encoded =~ response
 
       assert {:error, -32_602, message} =
                Methods.invoke("interactive.safe_status", %{"id" => id, "owner" => "other"})

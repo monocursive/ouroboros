@@ -55,6 +55,13 @@ Figma's connected font service does not provide Departure Mono. Its technical la
 
 ## Content maintenance
 
+The recorded demos and screenshot downloads use `public/demos/`. The repository
+README references those same files, so there is one copy to maintain. See the
+[capture notes](public/demos/README.md) for source revision, verified behavior,
+timing edits, and recovery/fleet limits. Use MP4 plus posters on the website;
+GIFs are supplied for GitHub and other surfaces without native video controls.
+Demo videos do not autoplay or preload their video data.
+
 The install command in `src/pages/index.astro` points to the latest stable release. The release badge intentionally links to the specific announced version; update its text and URL together when announcing a new version. Capabilities and platform guidance link to the maintained repository documentation.
 
 The Models & access section describes the native runtime's authentication contract, checked against `lib/ouroboros/provider/openai_auth.ex` and `lib/ouroboros/provider/native/model/req_llm.ex`: OpenAI supports ChatGPT OAuth or API keys; Anthropic and xAI are API-key-only integrations. Gemini, OpenRouter, and Ollama are additional configurable ReqLLM transports, rather than default catalogue lanes. Model families are listed without fixed versions because catalogue metadata does not guarantee availability for a particular account. These statements are source-verified, not a claim that every provider was exercised with a live account.

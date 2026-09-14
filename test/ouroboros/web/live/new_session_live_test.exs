@@ -1546,6 +1546,47 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
   end
 
+  describe "Grok subscription gating" do
+    setup :endpoint
+
+    test "requires a local subscription sign-in, then refreshes without an API key", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/new")
+      change(view, %{"model_choice" => "custom"})
+      html = change(view, %{"model_text" => "grok:grok-4.6", "workspace" => System.tmp_dir!()})
+      assert html =~ "Grok subscription"
+      assert html =~ "grok login"
+      refute html =~ "Add xAI API key first"
+      refute has_element?(view, ~s(button[phx-click="connect-chatgpt"]))
+      assert has_element?(view, "button[type=submit][disabled]")
+
+      path = Application.fetch_env!(:ouroboros, :grok_auth_file)
+
+      credential = %{
+        "auth_mode" => "oidc",
+        "oidc_issuer" => "https://auth.x.ai",
+        "oidc_client_id" => "b1a00492-073a-47ea-816f-4c329264a828",
+        "key" => "grok-web-secret-canary",
+        "refresh_token" => "grok-refresh-canary",
+        "expires_at" => DateTime.utc_now() |> DateTime.add(3_600) |> DateTime.to_iso8601()
+      }
+
+      File.write!(
+        path,
+        JSON.encode!(%{"https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828" => credential})
+      )
+
+      File.chmod!(path, 0o600)
+      html = view |> element(~s(button[phx-click="refresh-grok"])) |> render_click()
+      assert html =~ "An unexpired local sign-in was found"
+      refute html =~ "canary"
+      refute has_element?(view, "button[type=submit][disabled]")
+
+      File.rm!(path)
+      view |> element(~s(button[phx-click="refresh-grok"])) |> render_click()
+      assert has_element?(view, "button[type=submit][disabled]")
+    end
+  end
+
   describe "xAI API-key gating" do
     setup :endpoint
 

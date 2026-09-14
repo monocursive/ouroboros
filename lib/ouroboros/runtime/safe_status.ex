@@ -13,7 +13,7 @@ defmodule Ouroboros.Runtime.SafeStatus do
   @max_output_bytes 16_384
   @max_age_ms 60_000
   @max_integer 9_223_372_036_854_775_807
-  @providers ~w(openai openai_codex anthropic xai google gemini mistral groq together openrouter ollama)
+  @providers ~w(openai openai_codex anthropic xai grok google gemini mistral groq together openrouter ollama)
   @credential_sources %{
     environment: "environment",
     file: "file",

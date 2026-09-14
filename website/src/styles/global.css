@@ -89,6 +89,25 @@
   .install-notes code { color: var(--color-text); }
   .install-notes a { flex: none; padding-block: 7px; }
   #copy-status:not(.sr-only) { margin-top: 12px; font-size: 13px; color: var(--color-accent); }
+  .demos { border-top: 1px solid var(--color-line); padding-block: 60px 70px; }
+  .demos-heading { display: flex; justify-content: space-between; align-items: end; gap: 32px; margin-bottom: 36px; }
+  .demos-heading h2 { font-size: clamp(30px, 3.2vw, 44px); line-height: 1.15; font-weight: 500; letter-spacing: -.04em; }
+  .demos-heading > p, .demo-copy > p:not(.eyebrow) { color: var(--color-muted); font-size: 14px; }
+  .demo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; }
+  .demo { min-width: 0; border: 1px solid var(--color-line); border-radius: 12px; overflow: hidden; background: var(--color-surface); }
+  .demo-copy { padding: 25px 28px 12px; }
+  .demo-copy .eyebrow { color: var(--color-accent); }
+  .demo-copy .eyebrow span { margin-inline: 8px; color: var(--color-muted); }
+  .demo-copy h3 { margin-block: 12px; font-size: 23px; line-height: 1.3; font-weight: 500; letter-spacing: -.025em; }
+  .demo-copy .text-link { margin-top: 6px; }
+  .demo video { display: block; width: 100%; height: auto; background: #0b0d0c; }
+  .demo-coding { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; }
+  .demo-coding .demo-copy { padding: clamp(28px, 5vw, 64px); }
+  .demo-coding .demo-copy h3 { font-size: clamp(26px, 3vw, 40px); }
+  .demo-coding video { max-height: 680px; object-fit: contain; }
+  .demo-notes { margin-top: 28px; color: var(--color-muted); font-size: 12px; max-width: 940px; }
+  .demo-downloads { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 14px; }
+  .demo-downloads a { display: inline-flex; align-items: center; min-height: 32px; text-decoration: underline; text-underline-offset: 4px; }
   .runtime { border-top: 1px solid var(--color-line); padding-block: 60px 70px; }
   .section-eyebrow { color: var(--color-accent); margin-bottom: 42px; }
   .runtime h2, .models h2 { font-size: clamp(36px, 3.612vw, 52px); line-height: 1.15; letter-spacing: -.04em; font-weight: 500; }
@@ -136,6 +155,12 @@
     .install-notes p span { margin-left: 0; display: block; }
   }
   @media (max-width: 767px) {
+    .demos { padding-block: 44px; }
+    .demos-heading { display: block; }
+    .demos-heading > p { margin-top: 20px; }
+    .demo-grid, .demo-coding { display: grid; grid-template-columns: minmax(0, 1fr); }
+    .demo-copy, .demo-coding .demo-copy { padding: 22px 22px 12px; }
+    .demo-coding .demo-copy h3 { font-size: 23px; }
     .navigation { min-height: 80px; gap: 12px; }
     .brand { font-size: 21px; gap: 8px; }
     .brand img { width: 30px; height: 30px; }

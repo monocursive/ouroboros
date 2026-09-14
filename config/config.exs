@@ -140,8 +140,8 @@ config :ouroboros,
   # set `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or select
   # `anthropic:<model>` or `xai:<model>` with the vendor API key or the private credential
   # saved from the web new-session page. Identity-linked Anthropic keys additionally use
-  # `ANTHROPIC_WORKSPACE_ID`. Direct Anthropic and xAI lanes are API-key-only; managed
-  # Grok subscription access stays in the first-party CLI.
+  # `ANTHROPIC_WORKSPACE_ID`. `grok:<model>` instead uses the Grok subscription sign-in
+  # from `grok login` while retaining Ouroboros's native loop and tools.
   native_model: "openai_codex:gpt-5.6-sol",
   # How long a terminal interactive session is retained before the recovery sweep
   # deletes it. `nil` disables the sweep and keeps everything.
