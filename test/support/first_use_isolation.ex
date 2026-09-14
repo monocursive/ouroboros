@@ -8,6 +8,7 @@ defmodule Ouroboros.Test.FirstUseIsolation do
       oauth_file: Path.join(dir, "absent-oauth.json"),
       anthropic_api_key_file: Path.join(dir, "anthropic.key"),
       xai_api_key_file: Path.join(dir, "xai.key"),
+      grok_auth_file: Path.join(dir, "absent-grok-auth.json"),
       account_adapter: Ouroboros.Test.OpenAIAccountAdapter,
       openai_account_failure: nil,
       anthropic_key_adapter: Ouroboros.Provider.AnthropicKey,
@@ -27,7 +28,8 @@ defmodule Ouroboros.Test.FirstUseIsolation do
             "ANTHROPIC_WORKSPACE_ID",
             "OUROBOROS_OAUTH_FILE",
             "OUROBOROS_ANTHROPIC_API_KEY_FILE",
-            "OUROBOROS_XAI_API_KEY_FILE"
+            "OUROBOROS_XAI_API_KEY_FILE",
+            "OUROBOROS_GROK_AUTH_FILE"
           ]
       )
 

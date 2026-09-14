@@ -10,9 +10,9 @@ defmodule Ouroboros.Models do
   nothing about models nobody here can reach.
 
   `:native` is the only provider, and it is the multi-catalogue shape: its in-process
-  transport reaches the ChatGPT-backed OpenAI lane plus the Anthropic and xAI API-key
-  lanes, so its row combines those catalogues and prefixes every id with the transport
-  ReqLLM must use. There is no per-provider catalogue table any more, and no
+  transport reaches ChatGPT and Grok subscriptions plus the Anthropic and xAI API-key
+  lanes, so its row combines those catalogues and prefixes every id with its connection.
+  There is no per-provider catalogue table any more, and no
   `config :ouroboros, model_catalogs` override: a lane is a model prefix, not a CLI.
 
   ## What this is not
@@ -106,6 +106,7 @@ defmodule Ouroboros.Models do
         :desc
       )
       |> Enum.map(fn {prefix, _catalog, model} -> model(model, Atom.to_string(prefix)) end)
+      |> then(&(subscription_models() ++ &1))
       |> pin_configured(default_model(:native))
 
     %{
@@ -119,6 +120,16 @@ defmodule Ouroboros.Models do
       total: length(models),
       models: Enum.take(models, @max_models)
     }
+  end
+
+  # A separate connection to the same model. Public API prices cannot describe a
+  # subscription allowance, and catalogue metadata is not an entitlement claim.
+  defp subscription_models do
+    catalog_models(:xai)
+    |> Enum.filter(&(&1.id in ["grok-4.6", "grok-4.5"]))
+    |> Enum.map(fn entry ->
+      entry |> model("grok") |> Map.put(:pricing, nil) |> Map.put(:billing, :subscription)
+    end)
   end
 
   # Configured intent is selectable even when the packaged snapshot predates it or
@@ -252,6 +263,10 @@ defmodule Ouroboros.Models do
     _unavailable -> false
   end
 
+  defp find_model(:native, "grok:" <> id) do
+    Enum.find(catalog_models(:xai), &(&1.id == id))
+  end
+
   defp find_model(:native, model_id) do
     Enum.find_value(native_catalogs(), fn {prefix, catalog} ->
       prefix = Atom.to_string(prefix)
@@ -265,6 +280,9 @@ defmodule Ouroboros.Models do
         nil ->
           []
 
+        :grok ->
+          []
+
         provider ->
           catalog = native_catalog(provider)
           if is_nil(catalog), do: [], else: [{provider, catalog}]
@@ -276,6 +294,7 @@ defmodule Ouroboros.Models do
   end
 
   defp native_catalog(:openai_codex), do: :openai
+  defp native_catalog(:grok), do: :xai
 
   defp native_catalog(provider) when is_atom(provider) and not is_nil(provider) do
     if known_catalog?(provider), do: provider

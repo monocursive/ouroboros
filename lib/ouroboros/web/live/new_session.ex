@@ -428,6 +428,8 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   def model_groups(_rows), do: []
 
+  defp model_group_label("grok:" <> _), do: "Grok subscription · direct via Ouroboros"
+
   defp model_group_label(model),
     do: "#{model_provider_label(model)} · direct via Ouroboros (no CLI)"
 
@@ -627,6 +629,20 @@ defmodule Ouroboros.Web.Live.NewSession do
     case effective_model(form, field) do
       model when is_binary(model) -> String.starts_with?(model, "openai_codex:")
       nil -> false
+    end
+  end
+
+  @doc "Local sign-in readiness for the explicit Grok subscription connection."
+  def grok_card(%__MODULE__{} = form, field, provider_rows) do
+    case effective_model(form, field) do
+      "grok:" <> _ ->
+        card =
+          api_key_card(provider_rows, "grok", "Grok subscription", "OUROBOROS_GROK_AUTH_FILE", [])
+
+        %{card | state: if(card.state == :available, do: :connected, else: card.state)}
+
+      _ ->
+        nil
     end
   end
 
