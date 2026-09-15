@@ -249,13 +249,28 @@ defmodule Ouroboros.Web.Live.RailTest do
       assert html =~ "<kbd>/</kbd>"
     end
 
-    test "draws all three headings, always, so an empty group is a fact and not a gap" do
+    # W1.7. Three headings over three "nothing here"s said one thing three times on a rail
+    # that holds nothing at all (`docs/design-qa/ui-review-2026-09-15.md` §3.1). The
+    # headings still earn their place the moment any group has a row, because then the
+    # empty ones are saying *which* group is empty.
+    test "a rail with nothing in it is one line, not three empty headings" do
       html = render_rail([])
+
+      assert html =~ "No sessions yet"
+      refute html =~ "NEEDS YOU"
+      refute html =~ "AT WORK"
+      refute html =~ "SETTLED"
+      refute html =~ "nothing here"
+    end
+
+    test "draws all three headings as soon as any group has a row" do
+      html = render_rail([interactive("d", status: :completed)])
 
       assert html =~ "NEEDS YOU"
       assert html =~ "AT WORK"
       assert html =~ "SETTLED"
       assert html =~ "nothing here"
+      refute html =~ "No sessions yet"
     end
 
     test "puts the count beside the only heading that earns one" do
@@ -290,8 +305,28 @@ defmodule Ouroboros.Web.Live.RailTest do
     test "an at-work row says provider and machine when nothing is watching it" do
       html = render_rail([interactive("w", status: :running)])
 
-      assert html =~ "native · core@one"
+      # The machine, not the BEAM's address for it. `core@one` is the release `core` on the
+      # machine `one`, and it is the host half that names the machine: every node in a
+      # fleet shares the release. Ground rule 6 keeps the node atom off every template.
+      assert html =~ "native · one"
+      refute html =~ "core@one"
       assert html =~ "ouro-glyph-work"
+    end
+
+    test "a row names the machine the fleet roster calls it, where there is one" do
+      # F4. Every node in a fleet shares its release name, so the host half is the fallback
+      # and the cluster's own directory is the better answer where the status carried one.
+      html =
+        render_component(&DeckLive.rail/1,
+          triaged: Rail.triaged([interactive("w", status: :running)]),
+          open: nil,
+          error: nil,
+          activity: %{},
+          roster: [%{node: :core@one, machine: "the core box"}]
+        )
+
+      assert html =~ "native · the core box"
+      refute html =~ "core@one"
     end
 
     test "an at-work row says what the watched session is doing when one is" do

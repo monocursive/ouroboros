@@ -40,6 +40,10 @@ const DIFF_TRUNCATION: &str = "\n… diff truncated; full diff is available in e
 #[derive(Debug, Clone, PartialEq)]
 pub enum PresentationEvent {
     UserMessage(String),
+    UserImages {
+        text: String,
+        images: Vec<Value>,
+    },
     /// A steer. The text is optional because a checkpointed event from before the runtime
     /// carried it, and every recovered turn, arrives without one.
     UserSteer(Option<String>),
@@ -488,6 +492,28 @@ fn input_accepted(payload: &Value) -> PresentationEvent {
         .map(|kind| kind == "steer")
         .unwrap_or(false);
 
+    let images: Vec<Value> = payload
+        .get("image_attachments")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .take(32)
+                .filter(|v| {
+                    v["id"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("att_") && id.len() == 36)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if !steered && !images.is_empty() {
+        return PresentationEvent::UserImages {
+            text: words.unwrap_or_default(),
+            images,
+        };
+    }
     match (steered, words) {
         (true, words) => PresentationEvent::UserSteer(words),
         (false, Some(words)) => PresentationEvent::UserMessage(words),

@@ -154,15 +154,139 @@ defmodule Ouroboros.Gateway.Methods.Contract do
                       [
                         :string,
                         object: [
-                          {"prompt", :required, :string, nil},
+                          {"prompt", :required, {:either, [:string, {:const, ""}]},
+                           "may be empty when image_attachments is nonempty"},
                           {"attachments", :optional, {:list, :string, 32},
                            "each must be an existing regular file the leased workspace contains"},
+                          {"image_attachments", :optional,
+                           {:list,
+                            {:object,
+                             [
+                               {"id", :required, :string,
+                                "opaque attachment ID returned by attachment.finish/status"}
+                             ]}, 32},
+                           "opaque managed image references; prompt may be empty with at least one ready image"},
                           {"reasoning_effort", :optional, {:enum_of, @reasoning_efforts}, nil}
                         ]
                       ]}, nil}
   @turn_id_param {"turn_id", :optional, :string,
                   "caller-supplied; resending the same `{id, input, turn_id}` returns the same turn rather than starting a second"}
   @methods %{
+    "attachment.limits" => %{
+      scope: :read,
+      timeout: 15_000,
+      handler: :handle_attachment_limits,
+      params:
+        {:closed, [{"node", :optional, :node, "the runtime that owns the image or session"}]}
+    },
+    "attachment.begin" => %{
+      scope: :operate,
+      timeout: 15_000,
+      handler: :handle_attachment_begin,
+      params:
+        {:closed,
+         [
+           {"client_id", :required, :string, nil},
+           {"draft_id", :required, :string, nil},
+           {"client_attachment_id", :required, :string, nil},
+           {"attempt_id", :required, :string, nil},
+           {"byte_size", :required, :non_negative_integer, nil},
+           {"display_name", :optional, :string, nil},
+           {"source", :optional, :string, nil},
+           {"session_id", :optional, :string, nil},
+           {"client_max_frame", :optional, :non_negative_integer, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.append" => %{
+      scope: :operate,
+      timeout: 15_000,
+      handler: :handle_attachment_append,
+      params:
+        {:closed,
+         [
+           {"upload_id", :required, :string, nil},
+           {"offset", :required, :non_negative_integer, nil},
+           {"data", :required, :string, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.finish" => %{
+      scope: :operate,
+      timeout: 15_000,
+      handler: :handle_attachment_finish,
+      params:
+        {:closed,
+         [
+           {"upload_id", :required, :string, nil},
+           {"sha256", :required, :string, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.status" => %{
+      scope: :read,
+      timeout: 15_000,
+      handler: :handle_attachment_status,
+      params:
+        {:closed,
+         [
+           {"upload_id", :optional, :string, nil},
+           {"attachment_id", :optional, :string, nil},
+           {"session_id", :optional, :string, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.bind_draft" => %{
+      scope: :operate,
+      timeout: 15_000,
+      handler: :handle_attachment_bind_draft,
+      params:
+        {:closed,
+         [
+           {"draft_id", :required, :string, nil},
+           {"session_id", :required, :string, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.touch_draft" => %{
+      scope: :operate,
+      timeout: 15_000,
+      handler: :handle_attachment_touch_draft,
+      params:
+        {:closed,
+         [
+           {"draft_id", :required, :string, nil},
+           {"revision", :optional, :non_negative_integer, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.discard" => %{
+      scope: :operate,
+      timeout: 15_000,
+      handler: :handle_attachment_discard,
+      params:
+        {:closed,
+         [
+           {"upload_id", :optional, :string, nil},
+           {"attachment_id", :optional, :string, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
+    "attachment.read" => %{
+      scope: :read,
+      timeout: 15_000,
+      handler: :handle_attachment_read,
+      params:
+        {:closed,
+         [
+           {"attachment_id", :required, :string, nil},
+           {"session_id", :optional, :string, nil},
+           {"variant", :required, :string, nil},
+           {"offset", :optional, :non_negative_integer, nil},
+           {"length", :optional, :non_negative_integer, nil},
+           {"node", :optional, :node, "the runtime that owns the image or session"}
+         ]}
+    },
     "audit.hold" => %{
       scope: :operate,
       timeout: 30_000,

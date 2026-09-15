@@ -386,3 +386,174 @@ fn an_operator_who_has_already_seen_the_hint_never_sees_it_again() {
     assert!(app.notice.is_none(), "{:?}", app.notice);
     assert!(app.take_config_save().is_none());
 }
+
+// ---------------------------------------------------------------------------------------
+// ui-parity T1.5 — the third way out of the alternate screen
+// ---------------------------------------------------------------------------------------
+
+/// `ctrl+z` is the escape hatch the other two are named after: it hands the terminal back
+/// to the shell for as long as the operator wants it, rather than for the length of one
+/// command.
+///
+/// The signal itself is [`ouro::ui::run`]'s — `raise(SIGTSTP)` between the same
+/// `suspend`/`resume` pair `$EDITOR` uses — and a test that raised it would stop the test
+/// runner. What is pinned here is the half a state machine owns: the key asks, once, and
+/// asking is not confused with any of the other things the driver drains.
+#[test]
+fn ctrl_z_asks_the_driver_to_hand_the_terminal_back() {
+    let mut app = conversing();
+
+    assert!(!app.take_suspend(), "nothing asked for it yet");
+
+    app.apply(ctrl('z'));
+
+    assert!(app.take_suspend(), "ctrl+z asked for nothing");
+    assert!(
+        !app.take_suspend(),
+        "the request was not drained, so every frame would suspend again"
+    );
+
+    // And it is its own request: the editor and the two transcript hatches are untouched.
+    assert!(app.take_external_editor().is_none());
+    assert!(app.take_scrollback_dump().is_none());
+    assert!(app.take_transcript_view().is_none());
+}
+
+/// Not while something is open over the screen. Every other global chord carries this
+/// guard, and suspending out from under a confirmation would leave the operator returning
+/// to a dialog they had forgotten they were in.
+#[test]
+fn ctrl_z_is_not_claimed_over_an_overlay() {
+    let mut app = conversing();
+
+    app.apply(ctrl('p'));
+    assert!(matches!(app.overlay, Some(Overlay::Commands(_))));
+
+    app.apply(ctrl('z'));
+
+    assert!(!app.take_suspend());
+    assert!(matches!(app.overlay, Some(Overlay::Commands(_))));
+}
+
+// ---------------------------------------------------------------------------------------
+// ui-parity T1 fix wave — H1: coming back from `fg` repaints, and never by asking
+// ---------------------------------------------------------------------------------------
+
+/// The bug this pins, exactly as it happened in tmux under a real shell.
+///
+/// `ctrl+z` leaves the alternate screen; `fg` re-enters it and the terminal hands back a
+/// **blank** one. Ratatui does not know that: its previous-frame buffer still holds what
+/// was on screen before the shell had the terminal, so the next diff finds nothing to
+/// write and the pane stays empty while still eating keys.
+///
+/// `Terminal::clear` is the obvious cure and is the disease: it snapshots the cursor with
+/// `get_cursor_position`, which writes a Device Status Report and waits on stdin for the
+/// answer — and this process has a task reading stdin. The reader ate the reply, the query
+/// timed out after two seconds ("The cursor position could not be read within a normal
+/// duration"), and the repaint never happened.
+///
+/// Driven here through a `TestBackend`, which can be blanked the way `fg` blanks a real
+/// one, so the assertion is about the mechanism rather than about a terminal.
+#[test]
+fn a_blanked_screen_comes_back_without_asking_the_terminal_anything() {
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::widgets::Paragraph;
+    use ratatui::Terminal;
+
+    let mut terminal = Terminal::new(TestBackend::new(24, 3)).expect("a terminal");
+
+    let frame = |terminal: &mut Terminal<TestBackend>| {
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("the conversation"), frame.area());
+            })
+            .expect("a frame");
+    };
+
+    frame(&mut terminal);
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
+        "the first frame drew nothing"
+    );
+
+    // `fg`: the alternate screen comes back empty, and nothing told this process.
+    terminal.backend_mut().clear().expect("a blanked screen");
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
+        "the backend was not blanked"
+    );
+
+    // Without the forced redraw the diff finds nothing and the pane stays empty.
+    frame(&mut terminal);
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
+        "this is the bug, and it is gone: the diff repainted on its own"
+    );
+
+    ouro::ui::force_full_redraw(&mut terminal).expect("no terminal question to time out");
+    frame(&mut terminal);
+
+    assert!(
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
+        "the screen did not come back:\n{:?}",
+        terminal.backend().buffer()
+    );
+}
+
+/// A repaint the driver could not honour is kept for the next frame, never dropped. A
+/// dropped one is a pane that stays blank until something else happens to redraw it —
+/// which is the terminal state this must not leave behind.
+#[test]
+fn a_repaint_that_cannot_be_honoured_is_asked_for_again() {
+    let mut app = conversing();
+
+    assert!(!app.take_repaint(), "nothing asked for one yet");
+
+    app.request_repaint();
+    assert!(app.take_repaint(), "the request was not recorded");
+    assert!(!app.take_repaint(), "and it drained exactly once");
+
+    // The driver's failure path: it asks again rather than swallowing it.
+    app.request_repaint();
+    assert!(app.take_repaint());
+    app.request_repaint();
+    assert!(app.take_repaint(), "the retry was dropped");
+}
+
+/// `ctrl+z` asks for the repaint as well as the signal, because the pane it comes back to
+/// is blank whether or not the resume itself succeeds.
+#[test]
+fn suspending_asks_for_the_repaint_that_fg_will_need() {
+    let mut app = conversing();
+    let _ = app.take_repaint();
+
+    app.apply(ctrl('z'));
+    assert!(app.take_suspend());
+
+    // The driver raises the signal; what the App owes afterwards is the full redraw.
+    ouro::ui::returned_from_a_detour(&mut app);
+    assert!(
+        app.take_repaint(),
+        "coming back from the shell would have diffed against a screen that is gone"
+    );
+}

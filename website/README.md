@@ -85,6 +85,10 @@ Demo videos do not autoplay or preload their video data.
 
 The install command in `src/pages/index.astro` points to the latest stable release. The release badge intentionally links to the specific announced version; update its text and URL together when announcing a new version. Capabilities and platform guidance link to the maintained repository documentation.
 
+The homepage's `#changelog` section summarizes that release. Keep `release`, its date,
+the highlights, and the pinned full-changelog link in sync with the repository's
+`CHANGELOG.md`. Deploy an announcement only after the release's packages are published.
+
 The Models & access section describes the native runtime's authentication contract, checked against `lib/ouroboros/provider/openai_auth.ex` and `lib/ouroboros/provider/native/model/req_llm.ex`: OpenAI supports ChatGPT OAuth or API keys; Anthropic uses API keys; xAI supports the local Grok coding subscription sign-in through `grok:` models or separately billed API keys through `xai:` models. Gemini, OpenRouter, and Ollama are additional configurable ReqLLM transports, rather than default catalogue lanes. Model families are listed without fixed versions because catalogue metadata does not guarantee availability for a particular account. These statements are source-verified, not a claim that every provider was exercised with a live account.
 
 Plan and billing references: [Codex with a ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan), [Claude subscriptions and API billing](https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console), and [xAI API billing](https://docs.x.ai/console/billing). Recheck the native authentication contract before adding another subscription option.

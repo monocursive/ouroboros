@@ -446,6 +446,7 @@ defmodule Ouroboros.Cluster.Monitor do
 
   defp refresh_expected(state) do
     expected = MapSet.new(Ouroboros.Cluster.expected_nodes())
+    named = Ouroboros.Cluster.roster_labels()
 
     machines =
       state.machines
@@ -455,14 +456,30 @@ defmodule Ouroboros.Cluster.Monitor do
           Map.update(
             acc,
             target,
-            %{new_machine(target, nil) | expected?: true},
-            &%{&1 | expected?: true}
+            roster_label(%{new_machine(target, nil) | expected?: true}, named),
+            &roster_label(%{&1 | expected?: true}, named)
           )
         end)
       end)
 
     %{state | machines: machines}
   end
+
+  # The roster's word for a machine, until the machine says its own. `runtime` is set by
+  # the first posture a machine answers with and never cleared, so `nil` is "never probed"
+  # and the label it holds was derived from the node name. An operator who typed
+  # `--machine vps` should read `vps` on a machine that is still offline, not the host the
+  # name was derived from. Once probed, the machine's own posture — carrying the same name,
+  # exported to it from its profile by `ouro daemon` — has already replaced the default and
+  # is left alone.
+  defp roster_label(%{runtime: nil, node: target} = machine, named) do
+    case Map.fetch(named, target) do
+      {:ok, label} -> %{machine | machine: label}
+      :error -> machine
+    end
+  end
+
+  defp roster_label(machine, _named), do: machine
 
   defp render(state, now) do
     local_runtime = Ouroboros.Cluster.local_fleet_posture().runtime
@@ -525,7 +542,10 @@ defmodule Ouroboros.Cluster.Monitor do
   defp new_machine(target, now) do
     %{
       node: target,
-      machine: target |> Atom.to_string() |> String.split("@", parts: 2) |> List.first(),
+      # The default until the machine says its own name — see
+      # `Ouroboros.Cluster.default_machine_label/1` for why it is the host half and not
+      # the release half every machine in a fleet shares.
+      machine: Ouroboros.Cluster.default_machine_label(target),
       role: :unknown,
       state: if(target == node(), do: :local, else: :offline),
       expected?: false,
@@ -1253,6 +1273,55 @@ defmodule Ouroboros.Cluster do
     end
   end
 
+  @doc """
+  The label a machine reads as when nobody named it.
+
+  `OUROBOROS_MACHINE_NAME` — which `ouro daemon` exports from the profile's `--machine`
+  name — is the operator's word and always wins (`local_fleet_posture/0`); a roster member
+  that has not answered a probe yet reads as its roster name (`roster_labels/0`). This is
+  the answer when there is neither: the **host** half of `name@host`.
+
+  The half before the `@` is the release name, which every machine in a fleet shares.
+  Labelling `ouro@alpha` and `ouro@beta` both `ouro` put one word on two computers — on
+  the Dashboard, the rail, the picker and the vitals alike, because every surface prefers
+  the roster's label to its own string split. The host is the half that differs. A name
+  with no host, or with an empty one, is itself. The unnamed BEAM's `nonode@nohost` stays
+  `nonode`: it is not a machine name, and it is the sentinel every surface already reads
+  as "this computer" rather than a host called `nohost`.
+
+  `Ouroboros.Web.Presentation.node_label/2` and the TUI's `App::machine_label` fall back
+  to the same half, so a label derived here and one a surface derives for itself agree.
+  """
+  @spec default_machine_label(node() | String.t()) :: String.t()
+  def default_machine_label(target) when is_atom(target),
+    do: target |> Atom.to_string() |> default_machine_label()
+
+  def default_machine_label("nonode@nohost"), do: "nonode"
+
+  def default_machine_label(name) when is_binary(name) do
+    case String.split(name, "@", parts: 2) do
+      [release, ""] -> release
+      [_release, host] -> host
+      [release] -> release
+    end
+  end
+
+  # The roster's own word for each member, by node — `--machine vps` for
+  # `ouro-vps@vps.example`. Empty when this node runs without a profile or the profile is
+  # unreadable: a label is display, and never worth failing a directory over. The node
+  # atoms are the ones `membership_hosts/0` already makes from the same validated strings.
+  @doc false
+  @spec roster_labels() :: %{node() => String.t()}
+  def roster_labels do
+    case __MODULE__.Monitor.fleet_profile_storage() do
+      {:ok, _fleet_id, profile, _opts} ->
+        Map.new(profile.members, fn {machine, owner} -> {String.to_atom(owner), machine} end)
+
+      _ephemeral_or_unreadable ->
+        %{}
+    end
+  end
+
   @doc false
   @spec session_owners(:interactive) :: {:ok, MapSet.t(String.t())} | {:error, term()}
   def session_owners(plane) when plane in @session_planes do
@@ -1832,10 +1901,12 @@ defmodule Ouroboros.Cluster do
     }
   end
 
+  # The operator's word where there is one — `ouro daemon` exports the profile's
+  # `--machine` name here — and otherwise the same default every other reader derives.
   defp machine_name do
     case env("OUROBOROS_MACHINE_NAME") do
       value when is_binary(value) -> String.slice(value, 0, 120)
-      _absent -> node() |> Atom.to_string() |> String.split("@", parts: 2) |> List.first()
+      _absent -> default_machine_label(node())
     end
   end
 
@@ -1900,6 +1971,7 @@ defmodule Ouroboros.Cluster do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
     expected = MapSet.new(expected_nodes())
     connected = MapSet.new([node() | Node.list()])
+    named = roster_labels()
 
     machines =
       MapSet.union(expected, connected)
@@ -1912,10 +1984,12 @@ defmodule Ouroboros.Cluster do
 
         %{
           node: target,
+          # The machine's own word, then the roster's, then the default — the monitor's
+          # order, so the label does not change with whether the monitor is up.
           machine:
             if(posture,
               do: posture.machine,
-              else: target |> Atom.to_string() |> String.split("@", parts: 2) |> List.first()
+              else: Map.get(named, target, default_machine_label(target))
             ),
           role: if(posture, do: posture.role, else: :unknown),
           state:

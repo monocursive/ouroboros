@@ -116,13 +116,21 @@ client. Open it from the project you want to work on, describe a task, and press
 Enter. If needed, connect ChatGPT; your submitted task starts after sign-in.
 For a guided first task, press F2 to explore the project, edit the prompt, then
 press Enter. The selected folder and file permissions are visible before you start;
-`/options` opens advanced setup.
+`/options` opens advanced setup. Three keys are worth learning first: `ctrl+p` lists every
+command, `ctrl+x` is the leader the shortcuts hang from, and `?` shows the whole key map —
+all three, and every key in them, are rebindable from `[keys]` in `config.toml`
+([docs/TUI.md](docs/TUI.md)).
 
 To use the browser interface:
 
 ```sh
 ./tui/target/release/ouro web
 ```
+
+On a session page, `⌘K` (`ctrl+K` elsewhere) opens the command palette — every verb this
+surface can run, and only the ones it can run right now — and `?` lists the keys. A
+transcript downloads as text or NDJSON from the palette's "Export this transcript"
+([docs/WEB.md](docs/WEB.md)).
 
 Model access is a ChatGPT sign-in by default. An API key selects a direct lane instead:
 `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or `anthropic:<model>` /

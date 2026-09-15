@@ -67,6 +67,17 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // T2.12. `leader.rail` (`ctrl+x b`) hides the rails; the transcript takes the width
+    // they were using. Both of them: the fleet card lives in the session rail and the
+    // context panels in the right-hand one, and "hide the sidebar" that left one of them
+    // behind would be a toggle that half worked. The header says the state and the key,
+    // because a rail that vanished with nothing on screen to bring it back is a terminal
+    // an operator has to restart.
+    if app.rail_hidden {
+        primary(frame, area, app, true);
+        return;
+    }
+
     match workspace_layout(area) {
         WorkspaceLayout::Focused => primary(frame, area, app, true),
         WorkspaceLayout::SessionRail => {
@@ -297,11 +308,14 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                     // `unavailable` mark stays where it always was — a dimmed title —
                     // because an offline owner is a fact about the observation, not about
                     // the session's own state.
+                    // T2.8. The machine, not the host half of an Erlang node name. The
+                    // card used to print `IDLE · native · nohost`, which names the one
+                    // thing about an unnamed BEAM nobody needs to know.
                     let node = session
                         .node
                         .as_deref()
-                        .map(|node| node.split('@').next_back().unwrap_or(node))
-                        .map(|host| format!(" · {}", super::tree::truncate(host, 12)));
+                        .map(|node| app.machine_label(node))
+                        .map(|node| format!(" · {}", super::tree::truncate(&node, 14)));
 
                     // I2. Only where the runtime reported one, and only where the whole
                     // cell fits: the footer's rule, because a half-drawn `42.5k · $0.4` is
@@ -392,7 +406,10 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(
             format!(
                 " FLEET / {} ",
-                super::tree::truncate(&summary.machine, inner.width.saturating_sub(11) as usize)
+                super::tree::truncate(
+                    &super::panels::node_label(&summary.machine),
+                    inner.width.saturating_sub(11) as usize
+                )
             ),
             theme::label(),
         ));
@@ -635,7 +652,13 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         theme::muted(),
         vec![
             context_panel_value("MODE", &summary.mode, panel_width, Style::default()),
-            context_panel_value("MACHINE", &summary.machine, panel_width, Style::default()),
+            // T2.8. `MACHINE nonode` was the rail's version of the same Erlang trivia.
+            context_panel_value(
+                "MACHINE",
+                &super::panels::node_label(&summary.machine),
+                panel_width,
+                Style::default(),
+            ),
             context_panel_value("ENDPOINT", &app.address, panel_width, Style::default()),
         ],
     );
@@ -1022,6 +1045,41 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
 
 /// One composed start surface: identity, workspace, task, then optional discovery.
 /// The task keeps its space first; ornament yields on short terminals.
+/// T2.11. Which of the two answers the home screen's folder is, where it is one of them.
+///
+/// Three states and only two of them are worth a suffix: a path that came from
+/// `config.toml` is the one that surprises people, and a path that is the launch directory
+/// is the one the README promised. A path the operator typed into the location dialog is
+/// neither, and saying nothing about it is the honest answer — this client did not choose
+/// it and has nothing to add.
+fn workspace_origin(app: &App, workspace: &str) -> &'static str {
+    if workspace.trim().is_empty() {
+        return "";
+    }
+
+    // The config default first: `default_workspace` prefers it over the launch directory,
+    // so when both name the same path the config is the one that decided.
+    if app
+        .config
+        .defaults
+        .workspace
+        .as_deref()
+        .is_some_and(|configured| configured == workspace)
+    {
+        return "  · from config.toml";
+    }
+
+    if app
+        .launch_dir
+        .as_deref()
+        .is_some_and(|launched| launched == workspace)
+    {
+        return "  · this directory";
+    }
+
+    ""
+}
+
 fn home(frame: &mut Frame, area: Rect, app: &App) {
     let width = area
         .width
@@ -1036,7 +1094,8 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
     let composer_height = COMPOSER_CHROME
         + editor_rows(Some(&app.home_draft), width)
         + completion_rows(Some(&app.home_draft))
-        + home_error_rows(app, width);
+        + home_error_rows(app, width)
+        + app.home_images.len().min(4) as u16;
     let examples = app.home_draft.is_empty() && !app.home_pending && app.home_error.is_none();
     let example_rows = if examples && area.height >= composer_height + 12 {
         4
@@ -1099,15 +1158,21 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
     }
     frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), hero);
 
+    // T2.11. Where the path came from, not only what it is. The README says to open
+    // `ouro` from the project you want to work on, and with `[defaults] workspace` set the
+    // home screen showed that stored path instead — with nothing on the line to say the
+    // directory the operator was standing in had been overridden. `f5` is named on the row
+    // below, so the line states the fact and the row below states the key that changes it.
     let workspace = app.home_workspace();
     let folder = format!(
-        "{} · Folder: {}",
+        "{} · Folder: {}{}",
         app.home_machine_label(),
         if workspace.is_empty() {
             "Choose a project"
         } else {
             &workspace
-        }
+        },
+        workspace_origin(app, &workspace)
     );
     frame.render_widget(
         Paragraph::new(vec![
@@ -1859,6 +1924,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         _ => "sends",
     };
 
+    let escape = escape_cell(app);
     let pending_reconciliations = app.open_pending_reconciliation_count();
     let footer = if pending_reconciliations > 0 {
         format!(
@@ -1869,14 +1935,16 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         .and_then(|composer| composer.editor.completion())
         .is_some()
     {
+        // T1 made Enter accept the highlighted row, so this is the one state where Enter
+        // does not send. Saying "sends" here is how somebody submits `/ke` as a task.
         key_footer(
             "↑↓ choose · Tab complete · Esc close",
             app.keyboard_enhanced,
-            "sends",
+            "accepts",
         )
     } else if area.width < 76 {
         format!(
-            "Esc abort · {} · Ctrl+J newline · Enter {verb_key}",
+            "{escape} · {} · Ctrl+J newline · Enter {verb_key}",
             if sandbox_writable {
                 "/ commands"
             } else {
@@ -1902,11 +1970,11 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
                     // B2. Supersedes both other hints: a planning session writes nothing
                     // whatever its sandbox allows, so "/write to edit" would be pointing at
                     // the wrong lever, and `/plan off` is the one that actually applies.
-                    "esc abort · planning: read-only until /plan off · / commands"
+                    format!("{escape} · planning: read-only until /plan off · / commands")
                 } else if sandbox_writable {
-                    "esc abort · shift+↑ scroll · / commands"
+                    format!("{escape} · shift+↑ scroll · / commands")
                 } else {
-                    "esc abort · /write to edit · / commands"
+                    format!("{escape} · /write to edit · / commands")
                 }
             ),
             app.keyboard_enhanced,
@@ -1972,8 +2040,20 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         Constraint::Length(completion_rows(Some(&app.home_draft))),
         Constraint::Length(home_error_rows(app, area.width)),
         Constraint::Length(1),
+        Constraint::Length(app.home_images.len().min(4) as u16),
     ])
     .split(inner);
+    frame.render_widget(
+        Paragraph::new(
+            app.home_images
+                .iter()
+                .enumerate()
+                .take(4)
+                .map(|(i, image)| Line::from(format!("{}. ▣ {}", i + 1, image.label())))
+                .collect::<Vec<_>>(),
+        ),
+        rows[4],
+    );
     if app.home_pending {
         frame.render_widget(
             Paragraph::new(theme::working(app.ticks, "Starting your task…")),
@@ -2005,6 +2085,12 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         " Starting… "
     } else if app.home_reconciling() {
         " Enter retries safely "
+    } else if app.home_draft.completion().is_some() {
+        // T1 made Enter accept the highlighted row, and this is the screen the review
+        // caught it on: typing `/ke` and pressing Enter submitted "/ke" as the first task
+        // and opened a device-code sign-in. The primary action has to say what the key
+        // does *now*, not what it does once the menu is gone.
+        " Enter accepts "
     } else if ready {
         " Enter starts "
     } else if !app.home_draft.is_empty() {
@@ -2037,6 +2123,39 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         )),
         columns[1],
     );
+}
+
+/// What `Esc` does in the composer *right now*, named as it does it.
+///
+/// The composer said `esc abort` in every state, and after T1 that is wrong in two of the
+/// three: `Esc` interrupts only while a turn is running, and on an idle session it banks
+/// the draft where `up` finds it or — on an empty draft — leaves the session. A footer
+/// that names one of three meanings is a footer that is wrong twice as often as it is
+/// right.
+///
+/// The interrupting key comes out of the keymap, because after T1 it is `Action::Interrupt`
+/// and an operator may have moved it; the other two are `Esc` itself, which is not
+/// rebindable — the editor matches it literally.
+fn escape_cell(app: &App) -> String {
+    if app.turn_running() {
+        return match app.bound(Action::Interrupt) {
+            true => format!("{} interrupts", app.keymap.label(Action::Interrupt)),
+            // The operator turned the interrupt off. Saying nothing about `Esc` is the
+            // honest answer: it does not interrupt, and it has no other meaning mid-turn.
+            false => "shift+↑ scroll".to_string(),
+        };
+    }
+
+    let empty = app
+        .sessions
+        .composer
+        .as_ref()
+        .is_some_and(|composer| composer.editor.text().trim().is_empty());
+
+    match empty {
+        true => "esc leaves".to_string(),
+        false => "esc clears the draft".to_string(),
+    }
 }
 
 /// A composer footer, naming only the newline bindings this terminal actually has.
@@ -2122,7 +2241,7 @@ fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(
                 format!(
                     " {}{} ",
-                    if attachment.kind == AttachmentKind::Image {
+                    if attachment.kind != AttachmentKind::Path {
                         "▣ "
                     } else {
                         "@"

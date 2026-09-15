@@ -2,6 +2,16 @@ use super::*;
 
 use crate::keymap::Scope;
 
+/// The tab a digit selects, or `None` when this build has no such tab.
+///
+/// Bounded by [`Tab::ALL`] rather than by a literal range, which is what T1.6 asks for:
+/// the range and the table used to be two numbers that agreed by accident, and a build
+/// with three tabs would have gone on swallowing `4`.
+fn tab_for_digit(digit: char) -> Option<Tab> {
+    let index = digit.to_digit(10)?.checked_sub(1)? as usize;
+    Tab::ALL.get(index).copied()
+}
+
 impl App {
     // ----- keys ----------------------------------------------------------------------
 
@@ -15,7 +25,6 @@ impl App {
         }
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if self.leader_until.is_some() {
             self.leader_key(key);
             return;
@@ -33,8 +42,24 @@ impl App {
             return;
         }
 
-        if self.keymap.hits(Action::Quit, key) {
+        // Guarded like every other global chord. Without `overlay.is_none()` a `ctrl+q`
+        // typed into the credential editor replaced it with the quit dialog and took the
+        // keystroke with it (R1 §2.4).
+        if self.keymap.hits(Action::Quit, key) && self.overlay.is_none() {
             self.open_quit();
+            return;
+        }
+
+        // Prefills `/rename <current title>`, which is the same verb the composer takes
+        // rather than a second surface that could disagree with it.
+        if self.keymap.hits(Action::Rename, key) && self.overlay.is_none() {
+            self.rename_prefill();
+            return;
+        }
+
+        // The driver does the work; this only asks. See [`App::request_suspend`].
+        if self.keymap.hits(Action::Suspend, key) && self.overlay.is_none() {
+            self.request_suspend();
             return;
         }
 
@@ -96,7 +121,11 @@ impl App {
             return;
         }
 
-        if self.keymap.hits(Action::Help, key) && !shift && self.focused_prompt_empty() {
+        // No `!shift`: `Chord::hit` already masks SHIFT on character keys, because the
+        // case of the character carries it and terminals disagree about sending both. The
+        // guard here meant `?` was unreachable on every terminal that reports it with the
+        // modifier (R1 §2.4).
+        if self.keymap.hits(Action::Help, key) && self.focused_prompt_empty() {
             self.open_help();
             return;
         }
@@ -110,6 +139,23 @@ impl App {
         // claims the keys the composer would otherwise type — but only while the draft is
         // empty, exactly as `?` and `,` do above.
         if self.details_key(key) {
+            return;
+        }
+
+        // The interrupt is whatever `Action::Interrupt` is bound to, and nothing else.
+        //
+        // Before this it was a hardcoded `Esc` in two places, so rebinding `[keys]
+        // interrupt` moved the footer hint, the `?` row, the palette column and `/keys`
+        // — and left the key itself where it was. That is the exact failure this map
+        // exists to prevent (R1 §2.4), and the reason it survived is that `Esc` means
+        // several things at once.
+        //
+        // Claimed *last*, immediately before the composer, so every other reading of the
+        // key keeps its turn first: closing an overlay, arming `Esc Esc`, clearing the
+        // event ledger's filter. What is left after all of those is the composer's own
+        // `Esc`, and interrupting is the one meaning of it that follows the binding
+        // rather than the key.
+        if self.interrupt_key(key) {
             return;
         }
 
@@ -128,15 +174,17 @@ impl App {
             return;
         }
 
+        // The list layer, reachable only from the three tabs that are lists. `i`, `s`,
+        // `a` and `,` used to be here too and could never run: each of their handlers
+        // returns unless `tab == Sessions`, which is the one state this match cannot be
+        // reached from (R1 §2.1). They are gone rather than documented.
         match key.code {
-            // The literal range is the key range this shortcut has always claimed; the
-            // bound that matters is the table's. A digit past the last tab is a keypress
-            // with nowhere to go, not an index into a shorter array.
-            KeyCode::Char(digit @ '1'..='7') if !ctrl => {
-                let index = digit as usize - '1' as usize;
-
-                if let Some(tab) = Tab::ALL.get(index) {
-                    self.select_tab(*tab);
+            // Bounded by the table rather than by a literal range. `5`-`7` used to be
+            // claimed here and dropped on the floor, so a digit past the last tab was a
+            // keypress that was swallowed instead of falling through.
+            KeyCode::Char(digit) if !ctrl && tab_for_digit(digit).is_some() => {
+                if let Some(tab) = tab_for_digit(digit) {
+                    self.select_tab(tab);
                 }
             }
             KeyCode::Tab => self.select_tab(Tab::ALL[(self.tab.index() + 1) % Tab::ALL.len()]),
@@ -144,7 +192,11 @@ impl App {
                 let index = (self.tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len();
                 self.select_tab(Tab::ALL[index]);
             }
-            KeyCode::Char('q') => self.open_quit(),
+            // Kept literal: a bare `q` on a list is the field's convention (`less`,
+            // `htop`, `k9s`) and is not the `quit` *chord*, which is `ctrl+q` and carries
+            // its own binding. It is silenced when that binding is `off`, so an operator
+            // who turned quitting off is not quit by a letter (R1 §2.1).
+            KeyCode::Char('q') if self.bound(Action::Quit) => self.open_quit(),
             KeyCode::Char('?') => self.open_help(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
@@ -155,14 +207,44 @@ impl App {
             KeyCode::Char('l') | KeyCode::Right => self.right(),
             KeyCode::Enter => self.activate(),
             KeyCode::Esc => self.escape(),
-            KeyCode::Char('i') => self.compose(ComposerVerb::Message),
-            KeyCode::Char('s') => self.compose(ComposerVerb::Steer),
-            KeyCode::Char('a') => self.reopen_approval(),
             KeyCode::Char('n') => self.open_new_session(),
-            KeyCode::Char('x') => self.open_close_confirm(),
-            KeyCode::Char(',') => self.open_settings(),
+            // Only with a session to end. Without one this opened the picker and told the
+            // operator to press `x` — advice that was wrong the moment `leader.end` moved
+            // to `k`, and a second spelling of a verb that has one.
+            KeyCode::Char('x') if self.sessions.open.is_some() => self.open_close_confirm(),
             _ => {}
         }
+    }
+
+    /// Whether `key` interrupts a turn in the visible session.
+    ///
+    /// The binding is what makes the map the authority; the running turn is what keeps
+    /// the other meanings of `Esc` — closing a completion
+    /// menu, arming `Esc Esc`, leaving an idle session — on `Esc` where they belong.
+    fn interrupt_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        // Runtime tabs retain the open session in the background. Their Escape belongs
+        // to navigation, not to the turn that happens to be running behind them.
+        if self.tab != Tab::Sessions
+            || !self.keymap.hits(Action::Interrupt, key)
+            || !self.turn_running()
+        {
+            return false;
+        }
+
+        // A completion menu is the composer's own state and `Esc` dismisses it first,
+        // even mid-turn: interrupting the agent because somebody wanted the `/` list to
+        // go away is not what either keystroke asked for.
+        if self
+            .sessions
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.editor.completion().is_some())
+        {
+            return false;
+        }
+
+        self.interrupt_turn();
+        true
     }
 
     /// Handles the backtrack chord, returning whether it consumed the key.
@@ -239,6 +321,21 @@ impl App {
             Some(Action::LeaderShellRule) => self.add_shell_rule(),
             Some(Action::LeaderEnd) => self.open_close_confirm(),
             Some(Action::LeaderDetails) => self.toggle_session_details(),
+            Some(Action::LeaderSettings) => self.open_settings(),
+            // T2 replaces the stand-in with the preview-then-save picker.
+            Some(Action::LeaderTheme) => self.open_theme_picker(),
+            // Each of these runs the same code its `/` verb runs, so there is one
+            // spelling of the behaviour and not two that can drift.
+            Some(Action::LeaderExport) => self.activate_command(Command::Export),
+            Some(Action::LeaderCompact) => self.activate_command(Command::Compact),
+            Some(Action::LeaderModel) => self.prefill_composer("/model "),
+            Some(Action::LeaderBacktrack) => self.activate_command(Command::Backtrack),
+            Some(Action::LeaderStatus) => self.select_tab(Tab::Dashboard),
+            Some(Action::LeaderRail) => self.toggle_rail(),
+            Some(Action::LeaderTabDashboard) => self.select_tab(Tab::Dashboard),
+            Some(Action::LeaderTabSessions) => self.select_tab(Tab::Sessions),
+            Some(Action::LeaderTabUpgrade) => self.select_tab(Tab::Upgrade),
+            Some(Action::LeaderTabLogs) => self.select_tab(Tab::Logs),
             Some(Action::LeaderQuit) => self.open_quit(),
             Some(Action::LeaderHelp) => self.open_help(),
             _unbound => {
@@ -250,15 +347,16 @@ impl App {
                     return;
                 }
 
-                // Two aliases that predate the map and were never drawn in the which-key
-                // overlay: `g` beside `e` for the editor, `o` beside `d` for details.
-                // Kept because removing a working key without telling anyone is the
-                // failure R1 §2.5 names, and *not* made actions because an alias is not a
-                // binding — `/keys` would then show two rows for one verb.
+                // One alias that predates the map and was never drawn in the which-key
+                // overlay: `o` beside `d` for details. Kept because removing a working
+                // key without telling anyone is the failure R1 §2.5 names, and *not* made
+                // an action because an alias is not a binding — `/keys` would then show
+                // two rows for one verb.
+                //
+                // Its twin, `g` beside `e` for the editor, is gone: `g` is
+                // `leader.backtrack` now, `leader_verb` claims it above, and an alias that
+                // can never be reached is not an alias.
                 match key.code {
-                    KeyCode::Char('g') if self.bound(Action::LeaderEditor) => {
-                        self.request_external_editor()
-                    }
                     KeyCode::Char('o') if self.bound(Action::LeaderDetails) => {
                         self.toggle_session_details()
                     }
@@ -364,6 +462,22 @@ impl App {
             return false;
         }
 
+        // `home` and `end` are the transcript's ends only on an empty draft. With text in
+        // it they are what readline says they are, and the editor below claims them: a
+        // client that jumped the transcript while somebody was editing the middle of a
+        // line would have taken a motion key away to buy a scroll.
+        if self.focused_prompt_empty() {
+            if self.keymap.hits(Action::TranscriptTop, key) {
+                self.transcript_to_top();
+                return true;
+            }
+
+            if self.keymap.hits(Action::TranscriptBottom, key) {
+                self.transcript_to_bottom();
+                return true;
+            }
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
@@ -376,6 +490,28 @@ impl App {
         }
 
         true
+    }
+
+    /// The oldest row the last frame measured. Clamped to what was drawn, exactly as
+    /// [`App::move_by`] clamps a held PageUp, so this cannot buy an offset nothing has.
+    fn transcript_to_top(&mut self) {
+        if let Some(watch) = self.sessions.open_watch_mut() {
+            let top = watch.max_scroll();
+
+            if top > 0 {
+                watch.follow = false;
+                watch.scroll = top;
+            }
+        }
+    }
+
+    /// Back to the newest row, and following again — which is what being at the bottom of
+    /// a live transcript means.
+    fn transcript_to_bottom(&mut self) {
+        if let Some(watch) = self.sessions.open_watch_mut() {
+            watch.scroll = 0;
+            watch.follow = true;
+        }
     }
 
     pub(super) fn scroll_view(&mut self, delta: isize) {
@@ -490,20 +626,12 @@ impl App {
         }
     }
 
+    /// `Esc` on a list tab returns to the conversation. On the Sessions tab the composer
+    /// owns `Esc` (`escape_from_prompt`), so this is never reached there: the branch that
+    /// used to close a composer here served a state the client cannot be in.
     fn escape(&mut self) {
         if self.tab != Tab::Sessions {
             self.select_tab(Tab::Sessions);
-            return;
-        }
-
-        if self.tab == Tab::Sessions {
-            if self.sessions.composer.is_some() {
-                self.remember_composer_history();
-                self.sessions.composer = None;
-                return;
-            }
-
-            self.sessions.open = None;
         }
     }
 }

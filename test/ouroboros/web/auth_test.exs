@@ -73,9 +73,12 @@ defmodule Ouroboros.Web.AuthTest do
       # W3 replaced W0's status page at `/` with the deck; this assertion follows the
       # route rather than the page it used to serve. What it is checking has not changed:
       # that the cookie reached a LiveView which reached the runtime and got an answer
-      # back — the machine's own name in the presence row is that answer.
-      assert conn.resp_body =~ "NEEDS YOU"
-      assert conn.resp_body =~ to_string(node())
+      # back — the presence row is that answer. W1 collapsed the three group headings on
+      # an empty rail into one line and put the machine's name through
+      # `Ouroboros.Web.Presentation`, so the proof of an answer is the presence dot rather
+      # than a heading or a raw node atom.
+      assert conn.resp_body =~ ~s(class="ouro-presence")
+      assert conn.resp_body =~ "ouro-dot-on"
     end
 
     test "a second exchange mints a different session rather than adopting the first" do

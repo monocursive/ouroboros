@@ -983,6 +983,26 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   describe "the page" do
     setup :endpoint
 
+    # W1.1. `/new` used to carry a "← Sessions" link and a theme toggle and nothing else,
+    # so a person filling this form in had no route to Settings, Audit or Status and no
+    # signal that the socket had dropped (review §3.1).
+    test "carries the one top bar, with the breadcrumb under it", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/new")
+
+      assert html =~ ~s(class="ouro-topbar")
+
+      for href <- ["/", "/new", "/settings", "/audit", "/status"] do
+        assert html =~ ~s(href="#{href}"), "the new-session top bar does not link to #{href}"
+      end
+
+      assert html =~ ~s(class="ouro-pill")
+      assert html =~ "← Sessions"
+
+      bar = :binary.match(html, ~s(class="ouro-topbar")) |> elem(0)
+      breadcrumb = :binary.match(html, "← Sessions") |> elem(0)
+      assert bar < breadcrumb, "the breadcrumb is above the top bar"
+    end
+
     test "the packaged Astra entry is selectable with its supported thinking levels", %{
       conn: conn
     } do

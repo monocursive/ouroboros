@@ -334,10 +334,18 @@ fn a_subagent_relayed_approval_names_the_asker_and_the_machine_it_runs_on() {
         "a relayed request names which child is asking:\n{}",
         screen.text()
     );
+    // T2.8/F7: the machine, named the way the session cards and the picker name one —
+    // `machine_label`, because the claim is about *which computer* and the reader has just
+    // seen that machine called `fleet` on the row they opened.
     assert!(
-        screen.contains("on ouro-2@fleet"),
+        screen.contains("on fleet"),
         "approving this authorizes a machine the approver is not looking at, and the \
          modal must say which:\n{}",
+        screen.text()
+    );
+    assert!(
+        !screen.contains("ouro-2@fleet"),
+        "the raw node name reached the screen:\n{}",
         screen.text()
     );
 }
@@ -1028,4 +1036,158 @@ fn the_escalation_modal_states_the_command_the_cwd_the_reason_and_the_rule() {
         "the fifth answer saves only the separate escalation authority:\n{}",
         screen.text()
     );
+}
+
+// ----- T2.7: moving between the answers ----------------------------------------------
+
+/// The modal named `enter`, `tab`/`r`, `ctrl+o` and `esc` and never once said how to move
+/// between the five answers it draws. On a numbered list, that is the one thing a
+/// first-time reader has to be told.
+#[test]
+fn the_approval_hint_names_the_keys_that_move_and_the_digits_that_choose() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    let screen = render(&mut app, 120, 34);
+    let hint = screen.row("enter answers");
+
+    assert!(
+        hint.contains("↑↓ or j k move"),
+        "the movement keys are not named: {hint}"
+    );
+    assert!(
+        hint.contains("1-5 choose"),
+        "the digits are not named, although they select: {hint}"
+    );
+    // On the line the hint wrapped onto at this width, which is still the same hint.
+    assert!(screen.contains("esc closes"), "{}", screen.text());
+}
+
+/// A10 numbered the rows and bound the digits only under screen-reader mode, so everybody
+/// else saw an unnumbered list whose digits did nothing. Nothing is being *typed* on this
+/// modal — it has no text field until `r` or `Tab` opens one — so the numbers are a
+/// keybinding, not a collision.
+#[test]
+fn a_digit_picks_an_approval_row_without_screen_reader_mode() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    // The rows are numbered for everyone, because for everyone the number selects.
+    let screen = render(&mut app, 120, 34);
+    assert!(screen.contains("1. approve (once)"), "{}", screen.text());
+    assert!(screen.contains("4. deny (session)"), "{}", screen.text());
+
+    // Row three — `deny (once)` — reached by its own number rather than by three presses
+    // of `j`, and the frame confirms the selection moved before anything is sent.
+    app.apply(key(KeyCode::Char('3')));
+    app.apply(key(KeyCode::Enter));
+
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the answer");
+
+    assert_eq!(call.params["response"]["decision"], "deny");
+    assert_eq!(call.params["response"]["scope"], "once");
+}
+
+// ----- review: the digits must not reach a text field -------------------------------------
+
+/// T2.7 gave the modal's digits to everyone. The reason field is a *different* overlay —
+/// `Overlay::Prompt` — and digits there are characters, not choices. Proving it, because
+/// the two live one keypress apart: `3` chooses, `r` opens the field, `12` is a reason.
+#[test]
+fn digits_type_into_the_approval_reason_rather_than_re_choosing() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    // Choose `deny (once)` by its number, then open the reason field.
+    app.apply(key(KeyCode::Char('3')));
+    app.apply(key(KeyCode::Char('r')));
+
+    app.apply(key(KeyCode::Char('1')));
+    app.apply(key(KeyCode::Char('2')));
+
+    match app.overlay.as_ref() {
+        Some(ouro::ui::app::Overlay::Prompt { buffer, .. }) => {
+            assert_eq!(buffer, "12", "the digits did not reach the reason field")
+        }
+        other => panic!("not a text prompt: {other:?}"),
+    }
+
+    // Enter attaches the reason and returns to the modal; it does not answer.
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.respond_approval"),
+        "enter in the reason field submitted the approval"
+    );
+    assert!(
+        matches!(
+            app.overlay.as_ref(),
+            Some(ouro::ui::app::Overlay::Approval { .. })
+        ),
+        "enter in the reason field did not return to the modal"
+    );
+
+    // …and the digit-chosen answer survived the detour, with the reason attached.
+    app.apply(key(KeyCode::Enter));
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the answer");
+
+    assert_eq!(call.params["response"]["decision"], "deny");
+    assert_eq!(call.params["response"]["scope"], "once");
+    assert_eq!(call.params["response"]["reason"], "12");
+}
+
+/// `Tab` opens the same field, so it answers the same way.
+#[test]
+fn digits_type_into_the_reason_field_opened_with_tab() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    app.apply(key(KeyCode::Char('2')));
+    app.apply(key(KeyCode::Tab));
+    app.apply(key(KeyCode::Char('4')));
+    app.apply(key(KeyCode::Char('5')));
+
+    match app.overlay.as_ref() {
+        Some(ouro::ui::app::Overlay::Prompt { buffer, .. }) => assert_eq!(buffer, "45"),
+        other => panic!("not a text prompt: {other:?}"),
+    }
+}
+
+/// `Esc` out of the reason field comes back to the modal with the digit-chosen answer
+/// intact — the answer is not lost by looking at the field and changing your mind.
+#[test]
+fn escaping_the_reason_field_keeps_the_chosen_answer() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    app.apply(key(KeyCode::Char('3')));
+    app.apply(key(KeyCode::Char('r')));
+    app.apply(key(KeyCode::Char('x')));
+    app.apply(key(KeyCode::Esc));
+
+    assert!(
+        matches!(
+            app.overlay.as_ref(),
+            Some(ouro::ui::app::Overlay::Approval { .. })
+        ),
+        "esc did not return to the modal"
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the answer");
+
+    assert_eq!(call.params["response"]["decision"], "deny");
 }

@@ -57,6 +57,7 @@ pub mod diff;
 pub mod editor;
 pub mod explorer;
 pub mod export;
+mod image_draft_file;
 pub mod logo;
 pub mod logs;
 pub mod markdown;
@@ -731,6 +732,71 @@ impl Drop for Screen {
     }
 }
 
+/// Makes the next frame draw every cell, **without asking the terminal anything**.
+///
+/// This exists because [`Terminal::clear`] does ask. It snapshots the cursor with
+/// `get_cursor_position`, which writes a Device Status Report to the terminal and then
+/// waits on stdin for the answer — and by the time anything here calls it, this process
+/// already has a task reading stdin. The reader eats the reply, the query times out after
+/// two seconds with "The cursor position could not be read within a normal duration", and
+/// the screen it was supposed to repaint is left blank.
+///
+/// `Terminal::resize` reaches the same state by a different road: it resizes both buffers
+/// and resets the back one, so Ratatui's next diff is against nothing and writes the whole
+/// frame. The size comes from `TIOCGWINSZ`, which is a question for the kernel rather than
+/// for the terminal, and nothing is read from stdin at all.
+pub fn force_full_redraw<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> Result<(), B::Error> {
+    let area = ratatui::layout::Rect::from(terminal.size()?);
+    terminal.resize(area)
+}
+
+/// What the App owes after the terminal has been handed to something else and taken back.
+///
+/// Three paths reach it — `$EDITOR` on the draft, the transcript viewer, and `ctrl+z` —
+/// and all three come back to the same two facts: the alternate screen is blank, and the
+/// window title belongs to whatever had the terminal. Both are asked for rather than done,
+/// and asked for *before* anything that can fail, because a resume that went wrong is
+/// exactly when a pane must not be left blank and silent.
+pub fn returned_from_a_detour(app: &mut App) {
+    app.request_repaint();
+    app.forget_title();
+}
+
+/// Hands the terminal back to the shell and takes it again on `fg`.
+///
+/// Unix only, because `SIGTSTP` is: a terminal that cannot be suspended is told so rather
+/// than left with a key that silently does nothing. The `raise` is the whole of the
+/// unsafe surface — one signal, to this process, with no arguments to get wrong.
+#[cfg(unix)]
+fn suspend_to_shell(screen: &mut Screen, app: &mut App) {
+    screen.suspend();
+
+    // SAFETY: `raise` sends a signal to the calling process and touches nothing else.
+    // The default disposition of SIGTSTP stops this process until SIGCONT.
+    unsafe {
+        libc::raise(libc::SIGTSTP);
+    }
+
+    returned_from_a_detour(app);
+
+    if let Err(error) = screen.resume() {
+        app.inform(
+            format!("the screen could not be taken back after fg: {error:#}"),
+            app::NoticeKind::Error,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn suspend_to_shell(_screen: &mut Screen, app: &mut App) {
+    app.inform(
+        "suspending is a unix signal; this terminal cannot be handed back",
+        app::NoticeKind::Warn,
+    );
+}
+
 fn restore() {
     // Popped before the screen is left, and exactly as many times as it was pushed — the
     // terminal keeps a stack, and a process that exited without unwinding its own entry
@@ -788,34 +854,89 @@ fn statusline_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>) {
 /// running the platform tool, and writing the file — exactly like `$EDITOR` and `pbcopy`.
 /// The App is told what happened either way, because a `Ctrl+V` that produced nothing and
 /// said nothing is a key the operator has to guess about.
-fn clipboard_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>) {
+fn clipboard_pending(app: &mut App, sender: &mpsc::UnboundedSender<Msg>, client: &Client) {
     let Some(request) = app.take_clipboard_request() else {
         return;
     };
-
     let sender = sender.clone();
-
-    tokio::task::spawn_blocking(move || {
-        let scratch = clipboard::scratch_path(&request.id);
-        let clip = clipboard::read(
-            &clipboard::image_readers(),
-            &clipboard::text_readers(),
-            &scratch,
-        );
-
-        let outcome = match clip {
-            clipboard::Clip::Image(bytes) => {
-                match clipboard::write_image(Path::new(&request.workspace), &request.id, &bytes) {
-                    Ok(relative) => ClipboardOutcome::Image(relative),
+    let client = client.clone();
+    static UPLOADS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let limit = UPLOADS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone();
+    tokio::spawn(async move {
+        let Ok(_permit) = limit.acquire_owned().await else {
+            return;
+        };
+        let read_request = request.clone();
+        let read =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<(clipboard::Clip, String)> {
+                if let Some(path) = read_request.path {
+                    use std::io::Read;
+                    #[cfg(unix)]
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let path = if let Some(tail) = path.strip_prefix("~/") {
+                        std::env::var("HOME")
+                            .map(|home| format!("{home}/{tail}"))
+                            .unwrap_or(path)
+                    } else {
+                        path
+                    };
+                    let mut options = std::fs::OpenOptions::new();
+                    options.read(true);
+                    #[cfg(unix)]
+                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                    let file = options.open(&path)?;
+                    let metadata = file.metadata()?;
+                    anyhow::ensure!(
+                        metadata.is_file() && metadata.len() <= 20 * 1024 * 1024,
+                        "Image must be a regular file of at most 20 MiB"
+                    );
+                    let mut bytes = Vec::new();
+                    file.take(20 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+                    anyhow::ensure!(bytes.len() <= 20 * 1024 * 1024, "Image exceeds 20 MiB");
+                    let name = Path::new(&path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    Ok((clipboard::Clip::Image(bytes), name))
+                } else {
+                    let scratch = clipboard::scratch_path(&read_request.id);
+                    Ok((
+                        clipboard::read(
+                            &clipboard::image_readers(),
+                            &clipboard::text_readers(),
+                            &scratch,
+                        ),
+                        "Clipboard image.png".to_string(),
+                    ))
+                }
+            })
+            .await;
+        let outcome = match read {
+            Ok(Ok((clipboard::Clip::Image(bytes), name))) => {
+                match crate::image_upload::upload(&client, &request, &bytes, &name, |value| {
+                    let _ = sender.send(Msg::ImageProgress {
+                        request: request.clone(),
+                        value,
+                    });
+                })
+                .await
+                {
+                    Ok(value) => ClipboardOutcome::Uploaded(value),
                     Err(error) => ClipboardOutcome::Failed(format!("{error:#}")),
                 }
             }
-            clipboard::Clip::Text(text) => ClipboardOutcome::Text(text),
-            clipboard::Clip::Empty => ClipboardOutcome::Empty,
-            clipboard::Clip::NoTool => ClipboardOutcome::NoTool,
+            Ok(Ok((clipboard::Clip::Text(text), _))) => ClipboardOutcome::Text(text),
+            Ok(Ok((clipboard::Clip::Empty, _))) => ClipboardOutcome::Empty,
+            Ok(Ok((clipboard::Clip::NoTool, _))) => ClipboardOutcome::NoTool,
+            Ok(Ok((clipboard::Clip::Failed(error), _))) => ClipboardOutcome::Failed(error),
+            Ok(Err(error)) => ClipboardOutcome::Failed(format!("{error:#}")),
+            Err(error) => ClipboardOutcome::Failed(format!("{error}")),
         };
-
-        let _ = sender.send(Msg::Clipboard(outcome));
+        let _ = sender.send(Msg::ImageUpload { request, outcome });
     });
 }
 
@@ -1385,6 +1506,35 @@ pub async fn run(
     } = channel;
 
     app.cursors = cursors;
+    let persistence = tokio::time::timeout(
+        Duration::from_secs(3),
+        client.call("attachment.limits", serde_json::json!({})),
+    )
+    .await;
+    let namespace = persistence
+        .as_ref()
+        .ok()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(image_draft_file::DraftFile::namespace);
+    let mut image_drafts = if let Some(namespace) = namespace {
+        app.config_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|directory| image_draft_file::DraftFile::open(directory, namespace))
+    } else {
+        None
+    };
+    if let Some(Ok((_, Some(value)))) = image_drafts.as_ref() {
+        app.restore_image_drafts(value.clone());
+    }
+    if let Some(Err(error)) = &image_drafts {
+        app.inform(
+            format!("Image drafts are held in memory: {error}"),
+            app::NoticeKind::Warn,
+        );
+    }
+    let mut draft_save_failed = false;
+    let mut image_lease_at = std::time::Instant::now();
 
     let mut screen = match screen {
         Some(screen) => screen,
@@ -1441,6 +1591,19 @@ pub async fn run(
     app.apply(Msg::Tick);
 
     loop {
+        if let Some(Ok((file, _))) = image_drafts.as_mut() {
+            if let Err(error) = file.save(&app.image_draft_snapshot()) {
+                if !draft_save_failed {
+                    app.inform(
+                        format!("Image draft recovery could not be saved: {error}"),
+                        app::NoticeKind::Warn,
+                    );
+                }
+                draft_save_failed = true;
+            } else {
+                draft_save_failed = false;
+            }
+        }
         for call in app.drain() {
             spawn_call(client.clone(), call, sender.clone());
         }
@@ -1451,7 +1614,52 @@ pub async fn run(
         open_pending_url(&mut app);
         open_pending_path(&mut app);
         copy_pending(&mut app);
-        clipboard_pending(&mut app, &sender);
+        clipboard_pending(&mut app, &sender, &client);
+        for (id, node) in std::mem::take(&mut app.image_discards) {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut params = serde_json::json!({"upload_id": id});
+                if let Some(node) = node {
+                    params["node"] = serde_json::json!(node);
+                }
+                let _ = client.call("attachment.discard", params).await;
+            });
+        }
+        if image_lease_at.elapsed() >= Duration::from_secs(60) {
+            image_lease_at = std::time::Instant::now();
+            for params in app.image_draft_leases() {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let _ = client.call("attachment.touch_draft", params).await;
+                });
+            }
+        }
+        if let Some((id, node, session)) = app.image_preview_pending.take() {
+            let client = client.clone();
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let result =
+                    crate::image_upload::preview(&client, &id, node.as_deref(), session.as_deref())
+                        .await;
+                let _ = sender.send(Msg::ImagePreview(result.map_err(|e| e.to_string())));
+            });
+        }
+        if let Some((id, node, draft, input)) = app.image_bind_pending.take() {
+            let client = client.clone();
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let mut result =
+                    crate::image_upload::bind(&client, node.as_deref(), &draft, &id).await;
+                if result.is_err() {
+                    result = crate::image_upload::bind(&client, node.as_deref(), &draft, &id).await;
+                }
+                let _ = sender.send(Msg::ImagesBound {
+                    id,
+                    input,
+                    error: result.err().map(|e| e.to_string()),
+                });
+            });
+        }
         chrome_pending(&mut app);
         statusline_pending(&mut app, &sender);
         if let Some(request) = app.take_export() {
@@ -1507,19 +1715,10 @@ pub async fn run(
                     // sitting in the data directory after the editor closes.
                     let _ = fs::remove_file(&path);
 
-                    // Re-entering the alternate screen leaves it blank, and this detour
-                    // changed no App state at all — so without a clear, Ratatui's diff
-                    // would find nothing to repaint and the operator would come back from
-                    // their editor to an empty screen.
-                    let result = screen
-                        .resume()
-                        .and_then(|()| {
-                            screen
-                                .terminal
-                                .clear()
-                                .context("repainting after the transcript viewer")
-                        })
-                        .and(opened);
+                    // See [`force_full_redraw`] for why this must not be a `clear`.
+                    returned_from_a_detour(&mut app);
+
+                    let result = screen.resume().and(opened);
 
                     if let Err(error) = result {
                         app.inform(
@@ -1535,6 +1734,15 @@ pub async fn run(
             }
         }
 
+        // `Action::Suspend`. The same two functions `$EDITOR` uses, around the signal
+        // that hands this terminal back to the shell: the alternate screen is left and
+        // raw mode dropped first, or the shell inherits a terminal this process
+        // configured and never restored. Execution resumes on the line after `raise`
+        // once `fg` delivers SIGCONT.
+        if app.take_suspend() {
+            suspend_to_shell(&mut screen, &mut app);
+        }
+
         if let Some(draft) = app.take_external_editor() {
             screen.suspend();
 
@@ -1544,15 +1752,13 @@ pub async fn run(
                     Err(anyhow::anyhow!("the editor task failed: {join_error}"))
                 });
 
+            returned_from_a_detour(&mut app);
+
             let result = if let Err(error) = screen.resume() {
                 Err(error)
             } else {
                 edited
             };
-
-            // `suspend` restored the terminal through the same path that empties the
-            // title on exit, so the next tick has to write it again.
-            app.forget_title();
 
             match result {
                 Ok(text) => app.apply(Msg::ExternalEditor(text)),
@@ -1561,6 +1767,14 @@ pub async fn run(
                     app::NoticeKind::Error,
                 ),
             }
+        }
+
+        // Every detour that handed the terminal away comes back through here. A repaint
+        // that cannot be forced right now is kept and tried again on the next frame,
+        // because the alternative — a blank pane that also eats keys — is a terminal
+        // state, and this one is a notice nobody can read anyway.
+        if app.take_repaint() && force_full_redraw(&mut screen.terminal).is_err() {
+            app.request_repaint();
         }
 
         draw_synchronized(&mut screen.terminal, |frame| {

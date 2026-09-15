@@ -172,7 +172,8 @@ defmodule Ouroboros.Application do
           },
           Ouroboros.Mesh.Directory,
           Ouroboros.Upgrade.Rollout.Registry,
-          Ouroboros.Interactive.Store
+          Ouroboros.Interactive.Store,
+          Ouroboros.Attachments
           # P4. The target-owned maintenance fence starts only after the session store it
           # inventories and before every workspace, permission, and session consumer. Its
           # retained marker is loaded synchronously; a corrupt or unreadable marker fails

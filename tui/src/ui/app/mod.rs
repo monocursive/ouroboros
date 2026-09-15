@@ -54,6 +54,7 @@ mod cluster;
 mod details;
 mod footer;
 mod home;
+mod image_drafts;
 mod keys;
 mod location;
 pub mod native;
@@ -81,6 +82,9 @@ pub use overlays::{
 pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsConnection, SettingsField, SettingsSection};
 pub use start::{NewField, NewSession, DEFAULT_MODEL};
+// ui-parity T2
+pub use overlays::Group;
+pub use settings::{provider_name, ClientField};
 
 /// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
 /// cadences below are counted in these frames so wall-clock meaning stays put.
@@ -149,6 +153,19 @@ impl Tab {
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
     }
+}
+
+/// The screen an armed `Action::Cancel` was armed on (`ui-parity` T1).
+///
+/// Three facts, and each of them is a thing the *middle* press of a three-press sequence
+/// could have been for: closing an overlay, moving to another tab, changing session. An
+/// arm that outlived any of them would make the next press quit on a screen nobody
+/// pressed `ctrl+c` twice on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelArm {
+    tab: Tab,
+    open: Option<(Plane, String)>,
+    over_an_overlay: bool,
 }
 
 /// Whether this client started the runtime it is attached to. It decides what the quit
@@ -456,6 +473,20 @@ pub enum Msg {
     StatusLine(Result<String, String>),
     /// What the driver found on the clipboard after a `Ctrl+V` (B4).
     Clipboard(ClipboardOutcome),
+    ImageProgress {
+        request: ClipboardRequest,
+        value: Value,
+    },
+    ImageUpload {
+        request: ClipboardRequest,
+        outcome: ClipboardOutcome,
+    },
+    ImagePreview(Result<crate::image_upload::PreviewFile, String>),
+    ImagesBound {
+        id: String,
+        input: TurnInput,
+        error: Option<String>,
+    },
 }
 
 /// A `Ctrl+V` the driver should service.
@@ -465,10 +496,11 @@ pub enum Msg {
 /// exactly as `$EDITOR` and `pbcopy` already do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardRequest {
-    /// The **session's** workspace, as the runtime reported it. An attachment has to live
-    /// inside it or `authorize_turn_attachments` refuses the turn, so this is where the
-    /// image goes — and a fleet session's workspace is a path on another machine, which
-    /// the driver discovers by failing to find the directory and says so.
+    pub target: Option<(Plane, String)>,
+    pub node: Option<String>,
+    pub draft_id: String,
+    pub path: Option<String>,
+    /// Retained for old clipboard adapters; managed images never use a workspace path.
     pub workspace: String,
     /// The id the file is named after, minted here so the state machine stays the thing
     /// that decides names.
@@ -480,6 +512,7 @@ pub struct ClipboardRequest {
 pub enum ClipboardOutcome {
     /// A PNG was written; the path is relative to the session workspace.
     Image(String),
+    Uploaded(Value),
     /// No image. This is the ordinary text paste, performed unchanged.
     Text(String),
     /// Tools exist and the clipboard held nothing either of them could read.
@@ -790,6 +823,27 @@ pub struct App {
     /// How far the `?` panel is scrolled. Reset when it opens: a help panel that
     /// remembered where the last reader left it would open on the middle of a table.
     pub help_scroll: usize,
+    // ui-parity base: the session rail can be hidden (leader.rail); T1 flips it, T2 draws it.
+    pub rail_hidden: bool,
+    // ui-parity T1
+    /// Set by `Action::Suspend`, drained by the driver, which is the only half of this
+    /// that can leave the alternate screen and raise `SIGTSTP`.
+    suspend_pending: bool,
+    /// Whether the next frame must draw every cell rather than a diff.
+    ///
+    /// Set by every detour that hands the terminal to something else — `$EDITOR`, the
+    /// transcript viewer, `ctrl+z` — because each of them comes back to a blank alternate
+    /// screen that this client's own buffer does not know is blank. Kept, not consumed,
+    /// when the driver cannot honour it yet: a repaint that is dropped once is a pane that
+    /// stays empty forever.
+    repaint_pending: bool,
+    /// What was on screen when `Action::Cancel` armed the quit window.
+    ///
+    /// The arm is only good for the screen it was made on. A `ctrl+c` whose *first* press
+    /// armed and whose second press closed an overlay that opened in between did
+    /// something with that second press, and letting the arm outlive it would make a
+    /// third press quit when nobody asked twice.
+    ctrl_c_arm_on: Option<CancelArm>,
     /// The armed first half of an `Esc Esc`, and the session it was pressed in.
     ///
     /// The session travels with the arm because the first Escape may have *left* it: on an
@@ -859,6 +913,15 @@ pub struct App {
     statusline: StatusLine,
     /// A `Ctrl+V` the driver should service (B4).
     clipboard_pending: Option<ClipboardRequest>,
+    pub home_images: Vec<Attachment>,
+    pub home_image_node: String,
+    pub image_discards: Vec<(String, Option<String>)>,
+    image_last_edit: u64,
+    pub image_preview_pending: Option<(String, Option<String>, Option<String>)>,
+    image_previews: std::collections::VecDeque<crate::image_upload::PreviewFile>,
+    pub image_bind_pending: Option<(String, Option<String>, String, TurnInput)>,
+    image_draft_id: String,
+    home_image_draft_id: String,
     /// Whether "this machine has no clipboard tool" has been said. Once per run: the
     /// thing it explains does not change between keystrokes.
     clipboard_tool_reported: bool,
@@ -951,6 +1014,11 @@ impl App {
             open_url_pending: None,
             leader_until: None,
             help_scroll: 0,
+            rail_hidden: false,
+            // ui-parity T1
+            suspend_pending: false,
+            repaint_pending: false,
+            ctrl_c_arm_on: None,
             backtrack_arm: None,
             context: None,
             shell_refusal: None,
@@ -973,6 +1041,15 @@ impl App {
             notify_pending: Vec::new(),
             statusline: StatusLine::default(),
             clipboard_pending: None,
+            home_images: Vec::new(),
+            home_image_node: String::new(),
+            image_discards: Vec::new(),
+            image_last_edit: 0,
+            image_preview_pending: None,
+            image_previews: std::collections::VecDeque::new(),
+            image_bind_pending: None,
+            image_draft_id: new_turn_id(),
+            home_image_draft_id: new_turn_id(),
             clipboard_tool_reported: false,
             budget_warned: HashSet::new(),
         }
@@ -1168,17 +1245,6 @@ impl App {
         self.config.onboarding.prompts_sent += 1;
         self.save_pending = true;
         self.save_quiet = true;
-    }
-
-    /// `/theme`: the next palette in the cycle, live, and remembered.
-    ///
-    /// The preview *is* the switch. There is nothing useful to preview a palette in but the
-    /// screen already showing the conversation, and a modal that painted swatches would be
-    /// showing the operator six rectangles instead of their own transcript. Cycling back
-    /// round is one more `/theme`, and what is written to the file is whatever they stopped
-    /// on — so the preview is undoable by the same key that made it.
-    pub(super) fn cycle_theme(&mut self) {
-        self.switch_theme(self.config.theme.name().next());
     }
 
     /// `/theme <name>`.
@@ -1811,8 +1877,14 @@ impl App {
 
     pub fn apply(&mut self, message: Msg) {
         match message {
-            Msg::Key(key) => self.key(key),
-            Msg::Paste(text) => self.paste(&text),
+            Msg::Key(key) => {
+                self.image_last_edit = self.ticks;
+                self.key(key)
+            }
+            Msg::Paste(text) => {
+                self.image_last_edit = self.ticks;
+                self.paste(&text)
+            }
             Msg::WorkspaceFiles(files) => {
                 self.completion_catalog.set_files(files);
                 self.home_draft.update_completions(&self.completion_catalog);
@@ -1886,6 +1958,22 @@ impl App {
                 }
             }
             Msg::Clipboard(outcome) => self.clipboard_read(outcome),
+            Msg::ImageProgress { request, value } => self.image_progress(request, value),
+            Msg::ImageUpload { request, outcome } => self.image_uploaded(request, outcome),
+            Msg::ImagePreview(result) => match result {
+                Ok(file) => {
+                    self.open_path_pending = Some(file.path().to_path_buf());
+                    self.image_previews.push_back(file);
+                    while self.image_previews.len() > 4 {
+                        self.image_previews.pop_front();
+                    }
+                }
+                Err(error) => self.inform(
+                    format!("Image could not be opened: {error}"),
+                    NoticeKind::Warn,
+                ),
+            },
+            Msg::ImagesBound { id, input, error } => self.images_bound(id, input, error),
             Msg::Answer { tag, result } => {
                 self.answer(tag, result);
                 // The acknowledgement that was blocking the queue may have just landed.
@@ -2099,6 +2187,159 @@ impl App {
                 self.notice = None;
             }
         }
+    }
+
+    // ui-parity T2
+
+    /// T2.8. Which *computer* a row is on, for the surfaces that list several.
+    ///
+    /// Not the same question [`super::panels::node_label`] answers, and the difference
+    /// matters on exactly these screens. `node_label` names a runtime — it is what the
+    /// Dashboard, the settings header and the help footer want, where there is one node
+    /// and the question is "what am I attached to". The session rail, the session cards
+    /// and the picker ask a different question: *which of my machines*. A fleet's nodes
+    /// are `ouro@alpha` and `ouro@beta`, so the name half is the release and the host half
+    /// is the computer — a column of `ouro` on every row would be a column that
+    /// distinguishes nothing, which is the failure G2 put the node on these rows to avoid.
+    ///
+    /// Three answers, in the order they are trustworthy:
+    ///
+    /// 1. the fleet's own roster, where there is one — a `Member` carries the node *and*
+    ///    the machine name the operator gave it, and that name is the best of the three;
+    /// 2. the host half, which is what differs between machines when nobody has named
+    ///    them;
+    /// 3. `node_label`, which covers the unnamed BEAM (`this computer`) and anything that
+    ///    is not an `name@host` pair at all.
+    pub fn machine_label(&self, node: &str) -> String {
+        if let Some(profile) = &self.fleet_profile {
+            if let Some(member) = profile
+                .members
+                .iter()
+                .find(|member| member.node == node)
+                .filter(|member| !member.machine.trim().is_empty())
+            {
+                return member.machine.clone();
+            }
+        }
+
+        match node.split_once('@') {
+            Some((_name, host)) if !host.trim().is_empty() && host.trim() != "nohost" => {
+                host.trim().to_string()
+            }
+            _unnamed => super::panels::node_label(node),
+        }
+    }
+
+    /// T2.9. `/theme` with no argument, and `leader.theme`: the list, previewed live.
+    ///
+    /// Toggles, like `/keys` and `/cost`: pressing the verb twice is how someone checks
+    /// what this build has and gets back to what they were doing. Closing by the verb is
+    /// the same statement `Esc` makes — nothing was chosen — so it restores as well.
+    pub fn open_theme_picker(&mut self) {
+        if let Some(Overlay::Theme { previous, .. }) = self.overlay {
+            self.overlay = None;
+            super::switch_theme(previous);
+            return;
+        }
+
+        let previous = super::theme_request();
+        let choice = super::theme::ThemeName::ALL
+            .iter()
+            .position(|name| *name == self.config.theme.name())
+            .unwrap_or(0);
+
+        self.overlay = Some(Overlay::Theme { choice, previous });
+    }
+
+    // ui-parity T1
+
+    /// Whether the open session has a turn in flight.
+    ///
+    /// This is the condition that decides what `Action::Interrupt` *means*: the key that
+    /// interrupts is whatever the map says, and it only interrupts while there is
+    /// something to interrupt. The same predicate as `overlays::session_busy`, which is
+    /// private to that file; the two are one function after the slices merge.
+    pub fn turn_running(&self) -> bool {
+        if self.waiting_for_open_agent_reply() {
+            return true;
+        }
+
+        self.sessions.open_info().is_some_and(|session| {
+            matches!(
+                session.status.as_str(),
+                "running" | "starting" | "awaiting_approval"
+            )
+        })
+    }
+
+    /// Whether a second `Action::Cancel` inside the window will open the quit dialog.
+    ///
+    /// Read by the footer — `view::footer` draws `ctrl+c again to quit` from it — because
+    /// a key that quits on its second press and says nothing about the first is a key that
+    /// surprises somebody once and is then never trusted again.
+    ///
+    /// Two conditions, not one. The window is the obvious half; the *screen* is the half
+    /// that was missing. An arm made on an idle session, kept across an overlay opening
+    /// and a tab change, would turn a `ctrl+c` that closed something into the middle press
+    /// of a quit nobody asked for.
+    pub fn quit_armed(&self) -> bool {
+        self.ctrl_c_until.is_some_and(|until| self.ticks < until)
+            && self.ctrl_c_arm_on.as_ref() == Some(&self.cancel_arm())
+    }
+
+    /// The screen an arm belongs to. Anything here changing is a press that did something.
+    pub(super) fn cancel_arm(&self) -> CancelArm {
+        CancelArm {
+            tab: self.tab,
+            open: self.sessions.open.clone(),
+            over_an_overlay: self.overlay.is_some(),
+        }
+    }
+
+    /// Arms the quit window on the screen that is showing now.
+    pub(super) fn arm_quit(&mut self) {
+        self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
+        self.ctrl_c_arm_on = Some(self.cancel_arm());
+    }
+
+    /// Drops the arm, whatever state it was in.
+    pub(super) fn disarm_quit(&mut self) {
+        self.ctrl_c_until = None;
+        self.ctrl_c_arm_on = None;
+    }
+
+    /// Asks for the next frame to draw every cell. See [`super::force_full_redraw`].
+    pub fn request_repaint(&mut self) {
+        self.repaint_pending = true;
+    }
+
+    /// Whether the driver owes a full redraw, taken once. A caller that cannot honour it
+    /// asks again rather than dropping it.
+    pub fn take_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.repaint_pending)
+    }
+
+    /// `leader.rail`: hide or show the session rail.
+    ///
+    /// Flips the flag and says nothing. The rail is drawn by `ui::sessions`, which this
+    /// slice does not own, so a notice claiming the rail had moved would be this client
+    /// describing a screen it had not changed.
+    pub(super) fn toggle_rail(&mut self) {
+        self.rail_hidden = !self.rail_hidden;
+    }
+
+    /// The draft the driver should suspend for, taken exactly once.
+    pub fn take_suspend(&mut self) -> bool {
+        std::mem::take(&mut self.suspend_pending)
+    }
+
+    /// `Action::Suspend`: asks the driver to hand the terminal back to the shell.
+    ///
+    /// Only the driver can do it — leaving raw mode and the alternate screen is I/O, and
+    /// this state machine has none — so the key sets a flag and the loop drains it beside
+    /// `$EDITOR`, which suspends and resumes through the same two functions.
+    pub(super) fn request_suspend(&mut self) {
+        self.suspend_pending = true;
     }
 }
 

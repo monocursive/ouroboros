@@ -110,8 +110,21 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         match &app.sessions.open {
             Some((_plane, _id)) => {
                 let session = "Agent chat".to_string();
-                if app.waiting_for_open_agent_reply() {
+                let session = if app.waiting_for_open_agent_reply() {
                     format!("{} {session}", theme::spinner(app.ticks))
+                } else {
+                    session
+                };
+
+                // T2.12. A hidden rail is a state, and the header is the one surface that
+                // is drawn whether or not the rail is. Without this the two screens differ
+                // by two missing panels and nothing says which key put them away.
+                // The key comes out of the keymap, so a rebound toggle is the one named.
+                if app.rail_hidden {
+                    format!(
+                        "{session}  ·  rail hidden · {}",
+                        app.keymap.label(Action::LeaderRail)
+                    )
                 } else {
                     session
                 }
@@ -235,17 +248,125 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         let right = (account.width() as u16).saturating_add(2).min(inner.width);
         let bottom =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(right)]).split(rows[1]);
-        let subtitle = shell_subtitle(&context, &workspace, bottom[0].width as usize, app);
-        frame.render_widget(Paragraph::new(subtitle), bottom[0]);
+        header_second_row(frame, bottom[0], &context, &workspace, app);
         frame.render_widget(
             Paragraph::new(account).alignment(Alignment::Right),
             bottom[1],
         );
     } else {
         frame.render_widget(Paragraph::new(brand), rows[0]);
-        let subtitle = shell_subtitle(&context, &workspace, rows[1].width as usize, app);
-        frame.render_widget(Paragraph::new(subtitle), rows[1]);
+        header_second_row(frame, rows[1], &context, &workspace, app);
     }
+}
+
+/// The gap the subtitle keeps from the tab strip and from the account chip beside it.
+///
+/// The subtitle's own minimum is measured rather than guessed — see
+/// [`header_second_row`] — because `LOCAL  ·  Runtime & distribution: Dashboard` and
+/// `LOCAL  ·  Agent chat` are twenty cells apart and a fixed floor would clip one of them.
+const SUBTITLE_MIN: usize = 2;
+
+/// The gap the tab strip keeps to its right, so the two halves of the row cannot touch.
+const STRIP_SEAM: usize = 3;
+
+/// T2.4. The header's second row: the tab strip, and the subtitle where both fit.
+fn header_second_row(frame: &mut Frame, area: Rect, context: &str, workspace: &str, app: &App) {
+    let strip = tab_strip(app);
+    // Plus the seam. The subtitle is right-aligned in the column beside this one, so a
+    // strip sized to exactly its own text puts `ctrl+x 1-4LOCAL` on the row whenever the
+    // two happen to meet.
+    let strip_width = strip
+        .width()
+        .saturating_add(STRIP_SEAM)
+        .min(area.width as usize);
+    let spare = (area.width as usize).saturating_sub(strip_width);
+
+    // The subtitle is drawn whole or not at all. Its first two segments do not ellipsize —
+    // `shell_subtitle` only yields the workspace — so a column that can hold *some* of it
+    // draws `Runtime & distribution: Da` and calls it a header. The strip is the half a
+    // reader cannot get anywhere else, so the subtitle is the half that goes.
+    let minimum = shell_subtitle(context, "", usize::MAX, app).width() + SUBTITLE_MIN;
+
+    if spare < minimum {
+        frame.render_widget(Paragraph::new(strip), area);
+        return;
+    }
+
+    let columns = Layout::horizontal([Constraint::Length(strip_width as u16), Constraint::Min(0)])
+        .split(area);
+    frame.render_widget(Paragraph::new(strip), columns[0]);
+    frame.render_widget(
+        Paragraph::new(shell_subtitle(
+            context,
+            workspace,
+            columns[1].width as usize,
+            app,
+        ))
+        .alignment(Alignment::Right),
+        columns[1],
+    );
+}
+
+/// T2.4. The four tabs, on the header's second row, with the current one marked.
+///
+/// The shell has always had four tabs and has never drawn the list: the header printed
+/// `Runtime & distribution: Dashboard`, which names the tab you are on and says nothing
+/// about the three you are not. Nothing on screen said they existed, so nothing on screen
+/// could be used to reach them (§2.1).
+///
+/// The strip replaces the subtitle rather than sharing the row with it. Two competing
+/// left-aligned strings on one line is what put the workspace path into the account chip,
+/// and `Tab::ALL` plus its hint is the more useful of the two — the subtitle's only unique
+/// fact is the tab's own title, which the highlighted cell already carries.
+fn tab_strip(app: &App) -> Line<'static> {
+    let hint_owned = format!(
+        "{}-{}",
+        app.keymap.label(Action::LeaderTabDashboard),
+        app.keymap.spec(Action::LeaderTabLogs)
+    );
+    let hint = hint_owned.as_str();
+
+    // Screen-reader mode: a list, in words, with the current one said rather than shown.
+    // A REVERSED cell is not a fact a screen reader can read out.
+    if access::screen_reader() {
+        let tabs = Tab::ALL
+            .iter()
+            .map(|tab| {
+                if *tab == app.tab {
+                    format!("{} (current)", tab.title())
+                } else {
+                    tab.title().to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        return Line::from(Span::styled(
+            format!("tabs: {tabs} · {hint}"),
+            theme::label(),
+        ));
+    }
+
+    let mut spans = Vec::new();
+
+    for tab in Tab::ALL {
+        spans.push(Span::styled(
+            format!(" {} ", tab.title()),
+            if tab == app.tab {
+                theme::heading().add_modifier(Modifier::REVERSED)
+            } else {
+                theme::label()
+            },
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    spans.push(Span::styled(
+        format!(" {hint}"),
+        Style::default().fg(theme::muted()),
+    ));
+
+    Line::from(spans)
 }
 
 /// The header's left half, fitted to the space it actually has.
@@ -788,6 +909,22 @@ fn footer_keys(app: &App, facts: Option<&SessionFacts>) -> Vec<Segment> {
         }
     }
 
+    // T1.2/T2. While `ctrl+c` is armed the row says so, ranked with the quit hint it is
+    // about — a second press inside the window opens the quit dialog, and a state the
+    // operator cannot see is a state they discover by leaving the session. The chord comes
+    // out of the keymap like every other hint, so a rebound cancel is the one named.
+    if app.quit_armed() {
+        if let Some(text) = hint(Action::Cancel, "again to quit") {
+            keys.push(Segment::new(
+                text,
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+                12,
+            ));
+        }
+    }
+
     // Discoverable through the palette and `?`; the first to yield when the row is tight.
     for action in [Action::Leader, Action::Quit] {
         let verb = if action == Action::Leader {
@@ -963,6 +1100,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         } => approval(
             frame,
             area,
+            app,
             ApprovalModal {
                 id,
                 request_id,
@@ -1012,9 +1150,14 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             super::panels::mcp(frame, area, node.as_deref(), list, *choice)
         }
         Overlay::Peek {
-            title, text, id, ..
-        } => super::panels::peek(frame, area, app, title, id, text.as_deref()),
+            title,
+            text,
+            id,
+            from_picker,
+            ..
+        } => super::panels::peek(frame, area, app, title, id, text.as_deref(), *from_picker),
         Overlay::Settings(settings) => self_settings(frame, area, app, settings),
+        Overlay::Theme { choice, previous } => theme_picker(frame, area, *choice, *previous),
         Overlay::Diff(state) => changed_files(frame, area, state),
     }
 }
@@ -1159,6 +1302,13 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
     );
 }
 
+/// T2.1. The least space the palette keeps between a label and its shortcut column.
+///
+/// Two cells rather than one, because a single space between a sentence and a chord reads
+/// as part of the sentence — `…source Markdown /copy raw` — and the column this is
+/// protecting is the one the operator is here to read.
+const PALETTE_GAP: usize = 2;
+
 fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPalette) {
     let commands = app.palette_commands(palette);
     let width = if area.width >= 110 {
@@ -1228,22 +1378,24 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
     );
 
     let mut lines = Vec::new();
-    let mut previous_group = "";
+    let mut previous_group: Option<super::app::Group> = None;
     let mut selected_line = 0;
     let content_width = rows[2].width as usize;
 
     for (index, command) in commands.iter().enumerate() {
-        if command.group() != previous_group {
-            if !previous_group.is_empty() {
+        // T2.1. The rows arrive sorted by group, so a change of group is the first row of
+        // that group and each heading is drawn exactly once.
+        if previous_group != Some(command.group()) {
+            if previous_group.is_some() {
                 lines.push(Line::from(""));
             }
             lines.push(Line::from(Span::styled(
-                command.group(),
+                command.group().as_str(),
                 Style::default()
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             )));
-            previous_group = command.group();
+            previous_group = Some(command.group());
         }
 
         let selected = index == palette.selected;
@@ -1251,10 +1403,21 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
             selected_line = lines.len();
         }
         let prefix = if selected { "  › " } else { "    " };
-        let start = format!("{prefix}{}", command.label());
         // B8/D14: the keymap, never a literal. A command whose chord the operator rebound
         // shows the chord they rebound it to.
         let shortcut = app.command_shortcut(*command);
+
+        // T2.1. The shortcut column is the one that must survive: a label is a sentence a
+        // reader can finish from its first half, and a chord read as `/copy ra` is a chord
+        // that does not exist. The gap used to be `width - (label + shortcut)` saturating
+        // to zero, so at 140 columns "Copy last agent message as source Markdown" simply
+        // ran into `/copy raw` with no seam. The label is ellipsized to whatever is left
+        // after the shortcut and one space instead.
+        let room = content_width
+            .saturating_sub(prefix.chars().count())
+            .saturating_sub(shortcut.chars().count() + PALETTE_GAP);
+        let label = super::tree::truncate(command.label(), room);
+        let start = format!("{prefix}{label}");
         let gap = content_width.saturating_sub(start.chars().count() + shortcut.chars().count());
         let row = format!("{start}{}{shortcut}", " ".repeat(gap));
 
@@ -1279,6 +1442,84 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
     let start = selected_line.saturating_sub(height.saturating_sub(1));
     let end = (start + height).min(lines.len());
     frame.render_widget(Paragraph::new(lines[start..end].to_vec()), rows[2]);
+}
+
+/// T2.9. The palettes this build has, with the one that is drawing marked.
+///
+/// Deliberately not a swatch grid. The only honest preview of a palette is the screen
+/// already showing the conversation, which is why moving the cursor installs it — the
+/// popup is a list of names and a statement of what the two exits do, and everything
+/// behind it is the sample.
+fn theme_picker(frame: &mut Frame, area: Rect, choice: usize, previous: theme::ThemeName) {
+    let names = theme::ThemeName::ALL;
+    let popup = centered(
+        area,
+        44,
+        (names.len() as u16).saturating_add(6).min(area.height),
+    );
+
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::muted()))
+        .title(Span::styled(" theme ", theme::heading()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(names.len() as u16),
+        Constraint::Min(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "moving previews it on this screen",
+            theme::label(),
+        ))),
+        rows[0],
+    );
+
+    let items: Vec<ListItem> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mark = if *name == previous { "  · in use" } else { "" };
+            ListItem::new(Line::from(access::number_row(
+                index,
+                &format!("{}{mark}", name.as_str()),
+            )))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(choice.min(names.len() - 1)));
+
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("› ")
+            .highlight_style(theme::selected()),
+        rows[1],
+        &mut state,
+    );
+
+    // The two exits, named, because "nothing is written until Enter" is the fact that
+    // makes the preview safe to use and it is not visible from anywhere else.
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "\u{2191}\u{2193} or j k preview \u{b7} enter keeps it",
+                Style::default().fg(theme::muted()),
+            )),
+            Line::from(Span::styled(
+                "esc puts back what was drawing and writes nothing",
+                Style::default().fg(theme::muted()),
+            )),
+        ])
+        .wrap(Wrap { trim: false }),
+        rows[2],
+    );
 }
 
 /// The managed sign-in dialog.
@@ -1534,9 +1775,12 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
             ];
 
             // G2. Which machine, on the row, because the list spans every fleet node.
+            // T2.8: as a machine name, never as the raw Erlang node. A column of
+            // `nonode@nohost` on every row of a single-machine picker taught the reader
+            // nothing and cost twelve cells of the id beside it.
             if let Some(node) = session.node.as_deref() {
                 spans.push(Span::styled(
-                    format!("  {}", super::tree::truncate(node, 24)),
+                    format!("  {}", super::tree::truncate(&app.machine_label(node), 24)),
                     Style::default().fg(theme::muted()),
                 ));
             }
@@ -1609,16 +1853,113 @@ fn wrapped(lines: &[Line<'_>], inner: usize) -> u16 {
 
     lines
         .iter()
-        .map(|line| {
-            let width = line.width();
-
-            if width <= inner {
-                1
-            } else {
-                width.div_ceil(inner) as u16 + 1
-            }
-        })
+        .map(|line| wrapped_rows(line, inner) as u16)
         .sum()
+}
+
+/// [`wrapped`] for one line, which is the unit a scrolling panel has to count in.
+///
+/// The same estimate, in one place: a panel that sized itself with one formula and scrolled
+/// with another would be a panel whose "N more rows" marker is off by however far the two
+/// disagreed.
+fn wrapped_rows(line: &Line<'_>, inner: usize) -> usize {
+    if inner == 0 {
+        return 1;
+    }
+
+    let width = line.width();
+
+    if width <= inner {
+        1
+    } else {
+        width.div_ceil(inner) + 1
+    }
+}
+
+/// How many rows `Wrap { trim: false }` really makes of one line of prose.
+///
+/// [`wrapped_rows`] deliberately errs long, which is right for a popup being *sized* — a
+/// row of blank space costs nothing and a clipped path costs the path. It is wrong for a
+/// panel being *scrolled*: every row it over-counts is a row of the table the reader
+/// cannot see and the marker does not account for, so a `?` panel measured that way shows
+/// three fewer rows per screen than it has room for.
+///
+/// Ratatui breaks on whitespace and keeps leading indentation, so this packs words the
+/// same way. A word longer than the width gets the rows it needs on its own, which is what
+/// ratatui does with an unbreakable token.
+fn wrapped_prose(line: &Line<'_>, inner: usize) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    if inner == 0 {
+        return 1;
+    }
+
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    if text.width() <= inner {
+        return 1;
+    }
+
+    let mut rows = 1;
+    let mut used = 0;
+
+    // Runs of spaces are measured, not collapsed. `trim: false` keeps them, and every row
+    // of this table is a key, a column of padding, and a description — collapsing that
+    // padding loses twenty-odd cells and under-counts the row, which is the one direction
+    // this must not be wrong in.
+    for token in wrap_tokens(&text) {
+        let width = token.width();
+
+        if used + width <= inner {
+            used += width;
+            continue;
+        }
+
+        // The break itself swallows the whitespace it broke on.
+        if token.trim().is_empty() {
+            rows += 1;
+            used = 0;
+            continue;
+        }
+
+        rows += 1;
+
+        // A word wider than the whole column takes as many rows as it needs, and what is
+        // left of the last one is where the next token starts.
+        if width > inner {
+            rows += (width - 1) / inner;
+            used = width % inner;
+        } else {
+            used = width;
+        }
+    }
+
+    rows
+}
+
+/// A line split into alternating runs of whitespace and non-whitespace, which is the unit
+/// a wrap actually moves.
+fn wrap_tokens(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+
+        let space = rest.starts_with(char::is_whitespace);
+        let end = rest
+            .find(|c: char| c.is_whitespace() != space)
+            .unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(end);
+        rest = tail;
+
+        Some(token)
+    })
 }
 
 /// Provider connections, client defaults, and runtime facts have separate categories.
@@ -1645,6 +1986,9 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         (SettingsSection::Connections, "F1 Connections"),
         (SettingsSection::Defaults, "F2 Defaults"),
         (SettingsSection::Runtime, "F3 Runtime"),
+        // T2.10. The fourth section: how this client behaves, as against what a session is
+        // started with (`F2`) and what the runtime reports (`F3`).
+        (SettingsSection::Client, "F4 Client"),
     ];
     let tabs = Line::from(
         sections
@@ -1672,7 +2016,9 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             let facts = vec![
                 Line::styled("Runtime & security", theme::heading()),
                 Line::styled("as reported by the runtime — not editable here", theme::label()),
-                Line::from(""), field("address", &app.address), field("node", &blank(&app.hello.node)),
+                Line::from(""), field("address", &app.address),
+                // T2.8. The runtime's own name for itself, made readable.
+                field("node", &super::panels::node_label(&app.hello.node)),
                 field("scope", &blank(&app.hello.scope)), field("protocol", &app.hello.protocol.to_string()),
                 field("data dir", app.data_dir.as_deref().unwrap_or("Owned by the attached runtime")),
                 Line::from(""), Line::styled("Client configuration", theme::heading()),
@@ -1681,16 +2027,22 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             ];
             frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), chunks[1]);
         }
+        SettingsSection::Client => settings_client(frame, chunks[1], app, settings),
     }
     let hint = if settings.editor.is_some() {
         "Tab/arrows move · Enter on Save stores key · Esc cancels"
     } else {
         match settings.section {
-            SettingsSection::Connections => "↑↓/Tab select · Enter set up · r refresh · Esc close",
-            SettingsSection::Defaults => {
-                "Tab/↑↓ move · ←→ change · Enter on save writes · Esc close"
+            SettingsSection::Connections => {
+                "↑↓/Tab select · Enter set up · r refresh · F4 client · Esc close"
             }
-            SettingsSection::Runtime => "F1 connections · F2 defaults · Esc close",
+            SettingsSection::Defaults => {
+                "Tab/↑↓ move · ←→ change · Enter on save writes · F4 client · Esc close"
+            }
+            SettingsSection::Runtime => "F1 connections · F2 defaults · F4 client · Esc close",
+            SettingsSection::Client => {
+                "Tab/↑↓ move · ←→ or space change · Enter on save writes · Esc close"
+            }
         }
     };
     frame.render_widget(
@@ -1710,7 +2062,10 @@ fn settings_connections(frame: &mut Frame, area: Rect, app: &App, settings: &Set
         };
         let mut lines = vec![
             Line::styled(format!("{name} API key"), theme::heading()),
-            Line::from(format!("Stored privately on {}", app.hello.node)),
+            Line::from(format!(
+                "Stored privately on {}",
+                super::panels::node_label(&app.hello.node)
+            )),
             Line::from("The existing key is never shown. A new key replaces it."),
             Line::from(""),
         ];
@@ -1790,11 +2145,20 @@ fn settings_connections(frame: &mut Frame, area: Rect, app: &App, settings: &Set
     let mut heading = if app.providers.error.is_some()
         || (app.providers.value.is_some() && rows.iter().all(|row| row.stale))
     {
-        format!("Connection status unavailable · {}", app.hello.node)
+        format!(
+            "Connection status unavailable · {}",
+            super::panels::node_label(&app.hello.node)
+        )
     } else if app.providers.value.is_none() {
-        format!("Checking connections · {}", app.hello.node)
+        format!(
+            "Checking connections · {}",
+            super::panels::node_label(&app.hello.node)
+        )
     } else {
-        format!("{ready} configured · {}", app.hello.node)
+        format!(
+            "{ready} configured · {}",
+            super::panels::node_label(&app.hello.node)
+        )
     };
     if app.providers.pending {
         heading.push_str(" · refreshing…");
@@ -1983,6 +2347,91 @@ fn input_tail(text: &str, width: usize) -> String {
         })
         .collect();
     format!("…{}", tail.into_iter().rev().collect::<String>())
+}
+
+/// T2.10. `F4 Client`: the `config.toml` sections that decide how this client behaves.
+///
+/// The rows are the file's answers, not the running process's. `[accessibility]` in
+/// particular can be turned on by an environment variable or a command-line flag as well,
+/// and a row that showed the *resolved* answer would write that resolution back into the
+/// file the next time anything was saved — recording a decision nobody made here.
+///
+/// The two sections with no rows are named rather than left out. "`[keys]` is edited in
+/// the file" is a fact; a settings page that simply never mentions `[keys]` is how an
+/// operator concludes their chords cannot be rebound at all.
+fn settings_client(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
+    use super::app::ClientField;
+
+    let mut rows = vec![
+        Line::styled("This client", theme::heading()),
+        Line::styled(
+            "how ouro behaves here — saved to config.toml, not to the runtime",
+            theme::label(),
+        ),
+        Line::from(""),
+    ];
+
+    let mut section = "";
+
+    for field in ClientField::ALL {
+        // The `config.toml` heading each group of rows belongs to, once, so a reader can
+        // find the same setting in the file.
+        if field.section() != section && !field.section().is_empty() {
+            section = field.section();
+            rows.push(Line::from(Span::styled(
+                format!("  {section}"),
+                theme::quiet(),
+            )));
+        }
+
+        let focused = field == settings.client;
+
+        rows.push(Line::from(vec![
+            Span::styled(if focused { "> " } else { "  " }, theme::heading()),
+            Span::styled(format!("{:<16}", field.label()), theme::label()),
+            Span::styled(
+                settings.client_value(field),
+                if focused {
+                    theme::heading()
+                } else {
+                    Style::default()
+                },
+            ),
+        ]));
+    }
+
+    rows.push(Line::from(""));
+
+    if let Some(message) = &settings.message {
+        rows.push(Line::styled(
+            message.as_str(),
+            Style::default().fg(theme::warn()),
+        ));
+    } else {
+        rows.push(Line::styled(
+            if settings.edited {
+                "changed, and not written yet"
+            } else {
+                "mouse and accessibility apply on the next start; the rest apply on save"
+            },
+            theme::label(),
+        ));
+    }
+
+    rows.push(Line::from(""));
+    rows.push(Line::styled(
+        "[keys] and [statusline] are edited in config.toml — /keys shows the effective map",
+        theme::label(),
+    ));
+    rows.push(field(
+        "config",
+        &app.config_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "nowhere to keep preferences".into()),
+    ));
+
+    frame.render_widget(Paragraph::new(rows).wrap(Wrap { trim: false }), area);
 }
 
 fn settings_defaults(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) {
@@ -2468,12 +2917,12 @@ const APPROVAL_DIFF_EXPANDED: usize = 400;
 ///
 /// Warp's rule for the diff — expanded while the approval is pending — is the default
 /// here, bounded by the rows the popup can spare; `ctrl+o` raises the ceiling in place.
-fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+fn approval(frame: &mut Frame, area: Rect, app: &App, modal: ApprovalModal<'_>) {
     // B2. A plan exit is a different question with different answers, so it gets its own
     // modal rather than a decorated version of this one: the four fixed rows would offer a
     // fourth answer the payload never named, and the plan itself has nowhere to go here.
     if modal.detail.plan.is_some() {
-        plan_exit(frame, area, modal);
+        plan_exit(frame, area, app, modal);
         return;
     }
 
@@ -2496,7 +2945,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         theme::quiet(),
     )));
 
-    if let Some(asker) = approval_asker(detail, modal.session_node, inner) {
+    if let Some(asker) = approval_asker(app, detail, modal.session_node, inner) {
         body.push(asker);
     }
 
@@ -2576,7 +3025,8 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 
     // Everything above is chrome the popup must keep; whatever height is left after it and
     // the answer rows is the diff's budget.
-    let fixed = body.len() + answers.len() + approval_notes(&modal).len() + 5;
+    // Six rather than five: the borders, the blank, and the *two* hint rows below.
+    let fixed = body.len() + answers.len() + approval_notes(&modal).len() + 6;
     let budget = if modal.expanded {
         APPROVAL_DIFF_EXPANDED
     } else {
@@ -2589,12 +3039,29 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         body.push(note);
     }
 
+    // T2.7. The hint names how to *move* as well as how to answer. It used to name enter,
+    // tab/r, ctrl+o and esc and never once said which keys change the selected row — on a
+    // modal whose whole content is a numbered list of answers, which is the one thing a
+    // first-time reader needs. The digits are named because they now select for everyone
+    // rather than only under screen-reader mode.
+    // Two lines, because this popup clips rather than wraps: one long row at a hundred
+    // and twenty columns lost `esc closes` off its end, which is the worst key to drop
+    // from a hint.
+    let answer_digits = format!("1-{}", answers.len().clamp(1, 9));
+
     body.push(Line::from(Span::styled(
-        if modal.expanded {
-            "enter answers · tab or r attach a reason · ctrl+o collapses the diff · esc closes"
-        } else {
-            "enter answers · tab or r attach a reason · ctrl+o expands the diff · esc closes"
-        },
+        format!("\u{2191}\u{2193} or j k move · {answer_digits} choose · enter answers"),
+        theme::quiet(),
+    )));
+    body.push(Line::from(Span::styled(
+        format!(
+            "tab or r attach a reason · ctrl+o {} the diff · esc closes",
+            if modal.expanded {
+                "collapses"
+            } else {
+                "expands"
+            }
+        ),
         theme::quiet(),
     )));
 
@@ -2626,7 +3093,11 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
     let items: Vec<ListItem> = answers
         .into_iter()
         .enumerate()
-        .map(|(index, label)| ListItem::new(Line::from(access::numbered(index, &label))))
+        // T2.7. `access::number_row`, not `access::numbered`: the digits select here for
+        // everyone, so the numbers are drawn for everyone. `numbered` stays the right call
+        // on the menus whose digits are still screen-reader-only — printing `1.` beside a
+        // row no key reaches would be claiming a binding this client does not have.
+        .map(|(index, label)| ListItem::new(Line::from(access::number_row(index, &label))))
         .collect();
     let mut state = ListState::default().with_selected(Some(modal.choice));
 
@@ -2653,7 +3124,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 ///   would make the exit look better-founded than it is.
 /// * **The follow-up is optional and says so.** Answering with an empty one is the
 ///   ordinary path: the runtime emits the held terminal event and the turn is over.
-fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+fn plan_exit(frame: &mut Frame, area: Rect, app: &App, modal: ApprovalModal<'_>) {
     let detail = modal.detail;
     let Some(plan) = detail.plan.as_ref() else {
         return;
@@ -2676,7 +3147,7 @@ fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         theme::quiet(),
     )));
 
-    if let Some(asker) = approval_asker(detail, modal.session_node, inner) {
+    if let Some(asker) = approval_asker(app, detail, modal.session_node, inner) {
         body.push(asker);
     }
 
@@ -2831,20 +3302,28 @@ fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         )));
     }
 
-    body.push(Line::from(Span::styled(
-        if modal.expanded {
-            "enter answers · tab or r write what to do first · ctrl+o shows less · esc closes"
-        } else {
-            "enter answers · tab or r write what to do first · ctrl+o shows more · esc closes"
-        },
-        theme::quiet(),
-    )));
-
     let answers: Vec<String> = plan
         .choices
         .iter()
         .map(|option| format!("{}  ({})", option.name, option.choice.as_str()))
         .collect();
+
+    // T2.7. The same hint as the ordinary approval modal, and for the same reason: this is
+    // a numbered menu whose keys were never named on it.
+    body.push(Line::from(Span::styled(
+        format!(
+            "\u{2191}\u{2193} or j k move · 1-{} choose · enter answers",
+            answers.len().clamp(1, 9)
+        ),
+        theme::quiet(),
+    )));
+    body.push(Line::from(Span::styled(
+        format!(
+            "tab or r write what to do first · ctrl+o shows {} · esc closes",
+            if modal.expanded { "less" } else { "more" }
+        ),
+        theme::quiet(),
+    )));
 
     let heading = match &plan.header {
         Some(header) => format!(" {} ", header.to_ascii_lowercase()),
@@ -2874,7 +3353,11 @@ fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
     let items: Vec<ListItem> = answers
         .into_iter()
         .enumerate()
-        .map(|(index, label)| ListItem::new(Line::from(access::numbered(index, &label))))
+        // T2.7. `access::number_row`, not `access::numbered`: the digits select here for
+        // everyone, so the numbers are drawn for everyone. `numbered` stays the right call
+        // on the menus whose digits are still screen-reader-only — printing `1.` beside a
+        // row no key reaches would be claiming a binding this client does not have.
+        .map(|(index, label)| ListItem::new(Line::from(access::number_row(index, &label))))
         .collect();
     let mut state = ListState::default().with_selected(Some(modal.choice));
 
@@ -2925,6 +3408,7 @@ fn approval_answers(modal: &ApprovalModal<'_>) -> Vec<String> {
 /// the node the *child* runs on, so where that is not the session's own machine the node
 /// carries the modal's warning color rather than the quiet one.
 fn approval_asker(
+    app: &App,
     detail: &ApprovalDetail,
     session_node: Option<&str>,
     inner: usize,
@@ -2934,7 +3418,11 @@ fn approval_asker(
 
     Some(match subagent.remote_node(session_node) {
         Some(node) => {
-            let on = format!(" on {node}");
+            // T2.8/F7. The machine this answer authorizes work on, named the way the
+            // session cards and the picker name one — `machine_label`, because this is a
+            // claim about *which computer* and the reader has just seen that machine
+            // called `alpha` on the row they opened.
+            let on = format!(" on {}", app.machine_label(node));
             Line::from(vec![
                 Span::styled(
                     super::tree::truncate(&attribution, inner.saturating_sub(on.chars().count())),
@@ -3337,115 +3825,145 @@ fn backtrack(
 /// The rows that are not chords — `@ path`, the tab digits, the wheel, the `/` verbs — are
 /// spelled here because they are not rebindable, and the "keys are data" row below says so
 /// rather than leaving a reader to infer it.
-fn help_keys(app: &App) -> Vec<(&'static str, String, &'static str)> {
+/// T2.3. Which of the plan's five groups an action belongs to: `Action::group()`'s own
+/// answer, capitalised the way the headings are drawn. One taxonomy for the palette, this
+/// panel and the which-key overlay.
+fn plan_group(action: Action) -> &'static str {
+    use crate::ui::app::Group;
+
+    Group::parse(action.group())
+        .unwrap_or(Group::Client)
+        .as_str()
+}
+
+/// Rows drawn as one although they are several actions: each is one idea, and a reader
+/// looking for "kill word" is not looking for three rows. Listed here rather than inline
+/// so the panel knows which actions it has already spent.
+const HELP_MERGED: [(&[Action], &str); 2] = [
+    (
+        &[
+            Action::EditorKillWordBack,
+            Action::EditorKillLine,
+            Action::EditorKillToStart,
+        ],
+        "kill word, to line end, to line start",
+    ),
+    (
+        &[Action::EditorWordBack, Action::EditorWordForward],
+        "move by word",
+    ),
+];
+
+/// Rows that are not chords: nothing rebinds them, so they are spelled here.
+///
+/// The "keys are data" line under the table says which of the two a reader is looking at,
+/// rather than leaving them to infer it from a row that never changes.
+const HELP_LITERAL: [(&str, &str, &str); 3] = [
+    (
+        "Turn",
+        "@ path",
+        "completes a workspace file, and attaches it to the turn",
+    ),
+    (
+        "Turn",
+        "backspace",
+        "on an empty draft, removes the newest attachment",
+    ),
+    (
+        "Client",
+        "wheel",
+        "scrolls; shift/ctrl+\u{2191}\u{2193}, pageup/down; config mouse = false frees it",
+    ),
+];
+
+/// The gap the `?` panel keeps between its key column and the descriptions beside it.
+const HELP_KEY_GAP: usize = 2;
+
+/// The key that deletes the character after the caret.
+///
+/// A literal because `editor.rs` matches it literally: it is not an [`Action`], so there is
+/// no spec to resolve and nothing for `[keys]` to rebind.
+const DELETE_FORWARD: &str = "ctrl+d";
+
+/// T2.3. The panel's rows: every live action exactly once, under the plan's five groups.
+///
+/// Public so a test can read the table without a terminal — the panel scrolls, so a
+/// render assertion can only ever see the rows that happened to fit, and "every action
+/// appears exactly once" is a claim about all of them. [`super::panels::keymap_lines`] is
+/// public for the same reason.
+///
+/// Every row that *is* a chord reads its key out of the resolved keymap, so the panel
+/// states the effective binding and not a literal this file happened to carry (D14, B8) —
+/// and a verb the operator set to `off` is not drawn at all, because `?` answers "what can
+/// I press here", not "what does this build ship with".
+pub fn help_keys(app: &App) -> Vec<(&'static str, String, &'static str)> {
     let keymap = &app.keymap;
     let mut rows: Vec<(&'static str, String, &'static str)> = Vec::new();
 
-    // A free helper rather than a closure over `rows`: the interleaved literal rows below
-    // need the vector too, and a closure holding it would lock them out.
-    fn row(keymap: &crate::keymap::Keymap, action: Action) -> (&'static str, String, &'static str) {
-        (action.group(), keymap.label(action), action.describe())
+    // Actions a merged row already covers, so the loop below does not draw them twice.
+    let mut merged_actions: Vec<Action> = HELP_MERGED
+        .iter()
+        .flat_map(|(actions, _description)| actions.iter().copied())
+        .collect();
+
+    // `quit_empty` ships on the same chord as delete-forward, and today both are true of
+    // it: an empty prompt gets the quit dialog, a draft with text loses a character. One
+    // row says both, because two rows each saying half is how `ctrl+d` came to have no
+    // hint anywhere but `/keys`. T1.4 turns `quit_empty` off by default and this becomes
+    // the plain delete-forward row.
+    let shared_delete = !keymap.spec(Action::QuitEmpty).is_off()
+        && keymap.label(Action::QuitEmpty) == DELETE_FORWARD;
+
+    if shared_delete {
+        merged_actions.push(Action::QuitEmpty);
     }
 
-    rows.push(row(keymap, Action::Send));
-    rows.push(row(keymap, Action::Steer));
-    rows.push(row(keymap, Action::Newline));
-    rows.push((
-        "composing",
-        "@ path".to_string(),
-        "completes a workspace file, and attaches it to the turn",
-    ));
-    rows.push(row(keymap, Action::PasteImage));
-    rows.push((
-        "composing",
-        "backspace".to_string(),
-        "on an empty draft, removes the newest attachment",
-    ));
-    rows.push(row(keymap, Action::QueueRetract));
-    rows.push((
-        "composing",
-        format!(
-            "{} / {} / {}",
-            keymap.label(Action::EditorKillWordBack),
-            keymap.label(Action::EditorKillLine),
-            keymap.label(Action::EditorKillToStart)
-        ),
-        "kill word, to line end, to line start",
-    ));
-    rows.push((
-        "composing",
-        format!(
-            "{} / {}",
-            keymap.label(Action::EditorWordBack),
-            keymap.label(Action::EditorWordForward)
-        ),
-        "move by word",
-    ));
-    rows.push(row(keymap, Action::Editor));
+    for group in crate::ui::app::Group::ALL.map(|group| group.as_str()) {
+        // T2.3. `Action::ALL` order inside a group, which is the order the map is written
+        // in; `live` is the filter, so `off` is absent rather than drawn as a key that
+        // does nothing.
+        for action in Action::ALL {
+            if plan_group(action) != group
+                || merged_actions.contains(&action)
+                || keymap.spec(action).is_off()
+            {
+                continue;
+            }
 
-    rows.push(row(keymap, Action::Interrupt));
-    rows.push(row(keymap, Action::Backtrack));
-    rows.push(row(keymap, Action::Cancel));
-    rows.push(row(keymap, Action::Verbose));
-    rows.push(row(keymap, Action::PlanPanel));
+            rows.push((group, keymap.label(action), action.describe()));
+        }
 
-    rows.push((
-        "session",
-        "/model /effort".to_string(),
-        "the model, and reasoning effort for the next turn only",
-    ));
-    rows.push((
-        "session",
-        "/sandbox".to_string(),
-        "file access: full / workspace / read-only; bare reports",
-    ));
-    rows.push((
-        "session",
-        "/fork".to_string(),
-        "branch this session, where the runtime serves it",
-    ));
-    rows.push((
-        "session",
-        format!(
-            "{} / {}",
-            keymap.label(Action::LeaderScrollback),
-            keymap.spec(Action::LeaderEditorView)
-        ),
-        "this transcript into native scrollback / into $EDITOR",
-    ));
-    rows.push((
-        "session",
-        "1-7 / Tab".to_string(),
-        "runtime tabs when the prompt is not focused",
-    ));
+        for (actions, description) in HELP_MERGED {
+            let keys = actions
+                .iter()
+                .copied()
+                .filter(|action| plan_group(*action) == group && !keymap.spec(*action).is_off())
+                .map(|action| keymap.label(action))
+                .collect::<Vec<_>>();
 
-    rows.push(row(keymap, Action::Leader));
-    rows.push(row(keymap, Action::Palette));
-    rows.push(row(keymap, Action::Quit));
-    rows.push((
-        "runtime",
-        format!(
-            "{} / {}",
-            keymap.label(Action::Help),
-            keymap.label(Action::Settings)
-        ),
-        "this page / settings, when the prompt is empty",
-    ));
-    rows.push((
-        "runtime",
-        "wheel".to_string(),
-        "scrolls; shift/ctrl+\u{2191}\u{2193}, pageup/down; config mouse = false frees it",
-    ));
-    rows.push((
-        "runtime",
-        "/keys".to_string(),
-        "every action, its key, and which came from config.toml",
-    ));
-    rows.push((
-        "runtime",
-        "/cost".to_string(),
-        "what this session has spent, as the provider reported it",
-    ));
+            if !keys.is_empty() {
+                rows.push((group, keys.join(" / "), description));
+            }
+        }
+
+        if group == "Turn" {
+            rows.push((
+                group,
+                DELETE_FORWARD.to_string(),
+                if shared_delete {
+                    "delete the character after the caret; the quit dialog on an empty prompt"
+                } else {
+                    "delete the character after the caret"
+                },
+            ));
+        }
+
+        for (literal_group, key, description) in HELP_LITERAL {
+            if literal_group == group {
+                rows.push((group, key.to_string(), description));
+            }
+        }
+    }
 
     rows
 }
@@ -3457,19 +3975,48 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
     //
     // The list itself is the keymap's, not a table beside it: a rebound verb is drawn on
     // the key that reaches it, and a verb turned `off` is not drawn at all.
-    let chords = app
+    let live = app
         .keymap
         .live(Scope::Leader)
         .into_iter()
         .filter(|action| *action != Action::LeaderSteer || app.steer_offered())
         .filter(|action| *action != Action::LeaderApproval || app.approvals_offered())
-        .map(|action| (app.keymap.spec(action).to_string(), action.describe()))
         .collect::<Vec<_>>();
 
-    let height = (chords.len() as u16).saturating_add(2).min(area.height);
+    // T2.5. Under the same five headings the palette and `?` use, through the same
+    // mapping. Seventeen verbs in one flat column is a list that is read once and
+    // memorised by nobody; the headings are what make it scannable in the two seconds it
+    // is on screen.
+    let mut chords: Vec<(&'static str, String, &'static str)> = Vec::new();
+
+    for group in crate::ui::app::Group::ALL.map(|group| group.as_str()) {
+        for action in live.iter().copied() {
+            if plan_group(action) == group {
+                chords.push((
+                    group,
+                    app.keymap.spec(action).to_string(),
+                    action.describe(),
+                ));
+            }
+        }
+    }
+
+    let headings = chords
+        .iter()
+        .map(|(group, _key, _description)| *group)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    let height = (chords.len() + headings) as u16;
+    let height = height.saturating_add(2).min(area.height);
     let width = area.width.clamp(24, 56);
+    // T2.5. Above the footer, on the right. Bottom-left put it over the composer's own
+    // frame and over the first characters of whatever was being typed — which is the text
+    // the operator is holding in their head while they look for the verb. The right-hand
+    // edge is the one the composer does not reach into, and the row above the footer is
+    // the one the footer is not using.
     let popup = Rect::new(
-        area.x.saturating_add(2),
+        area.right().saturating_sub(width + 1),
         area.bottom().saturating_sub(height + 1),
         width,
         height,
@@ -3486,27 +4033,50 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    let lines = chords
-        .iter()
-        .map(|(key, description)| {
-            Line::from(vec![
-                Span::styled(format!(" {key:<4}"), Style::default().fg(theme::accent())),
-                Span::raw(*description),
-            ])
-        })
-        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    let mut group = "";
+
+    for (heading, key, description) in &chords {
+        if *heading != group {
+            group = heading;
+            lines.push(Line::from(Span::styled(
+                format!(" {}", heading.to_uppercase()),
+                theme::label(),
+            )));
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {key:<4}"), Style::default().fg(theme::accent())),
+            Span::raw(*description),
+        ]));
+    }
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// How wide the `?` panel is, as a percentage of the frame. Named because the panel has to
+/// know its own content width *before* it is laid out, to count the rows a wrap will make.
+const HELP_WIDTH: u16 = 84;
+
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let (rows, limits) = help_sections(app);
 
+    // F1. Counted in *rendered* rows, not logical ones. The paragraph wraps, so at eighty
+    // columns nineteen table rows become twenty-two lines on screen: sizing and scrolling
+    // by `rows.len()` put the "N more rows" marker below the viewport and left thirty-five
+    // rows unreachable with nothing on screen saying so.
+    let content = inner_width(area, HELP_WIDTH).max(1);
+    let heights: Vec<usize> = rows.iter().map(|row| wrapped_prose(row, content)).collect();
+    let limits_height: u16 = limits
+        .iter()
+        .map(|limit| wrapped_prose(limit, content) as u16)
+        .sum();
+
     // The panel never reaches the last row: the notice line lives there, and a help panel
     // that covered it would hide the sentence explaining why a key did nothing.
-    let wanted = (rows.len() + limits.len()) as u16 + 2;
+    let wanted = heights.iter().sum::<usize>() as u16 + limits_height + 2;
     let ceiling = area.height.saturating_sub(2).max(6);
-    let popup = centered(area, 84, wanted.min(ceiling));
+    let popup = centered(area, HELP_WIDTH, wanted.min(ceiling));
 
     frame.render_widget(Clear, popup);
 
@@ -3520,31 +4090,70 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
 
     // The limits are pinned rather than scrolled. They are the part of this panel that
     // stops it being a brochure, and a reader who never pressed a key would not see them.
-    let split = Layout::vertical([Constraint::Min(1), Constraint::Length(limits.len() as u16)])
-        .split(inner);
+    // Their height is measured too: the `read`-scope line wraps at eighty columns, and a
+    // pane sized to `limits.len()` cut it off at the border.
+    let split =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(limits_height)]).split(inner);
 
-    let height = split[0].height as usize;
-    let hidden = rows.len().saturating_sub(height);
-    let scroll = app.help_scroll.min(hidden);
+    let budget = split[0].height as usize;
 
-    let mut visible = rows[scroll..].to_vec();
+    // The furthest the table can usefully scroll: the first row from which everything
+    // left fits on screen. Walked from the end, in rendered rows, so the last press of
+    // `j` lands on the real end of the table rather than on an index nobody can reach.
+    let mut used = 0;
+    let mut max_scroll = rows.len();
+    for (index, height) in heights.iter().enumerate().rev() {
+        if used + height > budget {
+            break;
+        }
+        used += height;
+        max_scroll = index;
+    }
 
-    if hidden > 0 {
-        // The last visible row says there is more, because a panel that silently ends is
-        // one whose remaining half nobody finds (R1 4d(8)).
-        let marker = Line::from(Span::styled(
+    let scroll = app.help_scroll.min(max_scroll);
+
+    // How many rows fit from here, in rendered rows.
+    let fits = |from: usize, budget: usize| {
+        let mut used = 0;
+        let mut count = 0;
+
+        for height in &heights[from..] {
+            if used + height > budget {
+                break;
+            }
+            used += height;
+            count += 1;
+        }
+
+        count
+    };
+
+    let shown = fits(scroll, budget);
+    let remaining = rows.len().saturating_sub(scroll + shown);
+
+    let mut visible: Vec<Line> = if remaining == 0 {
+        rows[scroll..scroll + shown].to_vec()
+    } else {
+        // One rendered row goes to the marker, so the count is taken again against the
+        // smaller budget — a panel that silently ends is one whose remaining half nobody
+        // finds (R1 4d(8)).
+        let shown = fits(scroll, budget.saturating_sub(1));
+        let remaining = rows.len().saturating_sub(scroll + shown);
+        let mut visible = rows[scroll..scroll + shown].to_vec();
+
+        visible.push(Line::from(Span::styled(
             format!(
-                "\u{2191}\u{2193} scrolls \u{b7} {} more row{}",
-                hidden - scroll,
-                if hidden - scroll == 1 { "" } else { "s" }
+                "\u{2191}\u{2193} scrolls \u{b7} {remaining} more row{}",
+                if remaining == 1 { "" } else { "s" }
             ),
             Style::default().fg(theme::accent()),
-        ));
+        )));
 
-        if hidden > scroll && visible.len() >= height && height > 0 {
-            visible[height - 1] = marker;
-        }
-    }
+        visible
+    };
+
+    // Whatever is left of the budget after the rows that fit: blank, not a half-drawn row.
+    visible.truncate(budget.max(1));
 
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), split[0]);
     frame.render_widget(Paragraph::new(limits).wrap(Wrap { trim: false }), split[1]);
@@ -3552,11 +4161,26 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
 
 /// The help panel, split into the part that scrolls and the part that never does.
 fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    use unicode_width::UnicodeWidthStr;
+
     let mut rows: Vec<Line> = Vec::new();
     let mut group = "";
+    let keys = help_keys(app);
 
-    for (heading, key, description) in help_keys(app) {
-        if heading != group {
+    // T2.3. Measured, not guessed. `{key:<15}` was a guess, and it was wrong for the row
+    // it mattered on: "ctrl+w / ctrl+k / ctrl+u" is twenty-four cells, so the key ran
+    // straight into its own description — `ctrl+ukill word…` — on the one row a reader
+    // opens this panel to find. A rebound chord can be longer still, which is exactly why
+    // this is read off the table rather than written down.
+    let column = keys
+        .iter()
+        .map(|(_group, key, _description)| key.width())
+        .max()
+        .unwrap_or(0)
+        + HELP_KEY_GAP;
+
+    for (heading, key, description) in &keys {
+        if *heading != group {
             group = heading;
             rows.push(Line::from(Span::styled(
                 heading.to_uppercase(),
@@ -3564,9 +4188,13 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
             )));
         }
 
+        // Padded by width rather than by `char` count: a chord is ASCII, but a rebound one
+        // need not be, and `{:<n}` counts characters.
+        let pad = " ".repeat(column.saturating_sub(key.width()));
+
         rows.push(Line::from(vec![
-            Span::styled(format!("{key:<15}"), Style::default().fg(theme::accent())),
-            Span::raw(description),
+            Span::styled(format!("{key}{pad}"), Style::default().fg(theme::accent())),
+            Span::raw(*description),
         ]));
     }
 
@@ -3576,7 +4204,7 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let commands: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
     for chunk in commands.chunks(8) {
         rows.push(Line::from(vec![
-            Span::styled(format!("{:<15}", ""), Style::default().fg(theme::accent())),
+            Span::styled(" ".repeat(column), Style::default().fg(theme::accent())),
             Span::raw(chunk.join("  ")),
         ]));
     }
@@ -3585,14 +4213,13 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     // lines rather than one long one, so a narrow terminal cannot wrap either of them
     // into something that reads as a different claim.
     let mut limits = vec![
+        // T2.8. The node, as a person would name it. This line is read by someone who is
+        // confused, and `nonode@nohost` is a piece of Erlang trivia standing exactly where
+        // the answer should be.
         Line::from(Span::styled(
             format!(
                 "one gateway view of the fleet through {}",
-                if app.hello.node.is_empty() {
-                    "this runtime".to_string()
-                } else {
-                    app.hello.node.clone()
-                }
+                super::panels::node_label(&app.hello.node)
             ),
             Style::default().fg(theme::muted()),
         )),
@@ -3604,7 +4231,16 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
 
     if !app.hello.operates() {
         limits.push(Line::from(Span::styled(
-            "this listener runs at scope `read`: every mutating verb is refused with -32003",
+            // F4. The word the code stands for, through the same label every other refusal
+            // on screen goes through. A reader who is here because a key did nothing needs
+            // "scope_denied", not a number they would have to look up to learn the same.
+            format!(
+                "this listener runs at scope `read`: every mutating verb is refused, {}",
+                super::panels::refusal_label(
+                    crate::proto::ErrorCode::ScopeDenied.as_i64(),
+                    "this connection may only read"
+                )
+            ),
             Style::default().fg(theme::warn()),
         )));
     }
@@ -3651,9 +4287,17 @@ pub fn panel_title(name: &str, pending: bool, error: Option<&String>, tick: u64)
         ));
     }
 
+    // T2.8. The reason, never the number. The Upgrade tab's title carried
+    // `[unavailable (-32004): no signing node is configured…` — the code is the wire's
+    // way of saying the word in front of it, and the word is the part that can be acted
+    // on. `refusal_text` reads the one shape `ClientError` formats and leaves anything
+    // else — a transport failure is already a sentence — untouched.
     if let Some(error) = error {
         spans.push(Span::styled(
-            format!("[{}] ", super::tree::truncate(error, 60)),
+            format!(
+                "[{}] ",
+                super::tree::truncate(&super::panels::refusal_text(error), 60)
+            ),
             Style::default().fg(theme::bad()),
         ));
     }

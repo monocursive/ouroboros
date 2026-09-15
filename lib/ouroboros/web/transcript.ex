@@ -85,7 +85,9 @@ defmodule Ouroboros.Web.Transcript do
       at the top would delete a transcript an operator is reading
       (`tui/src/ui/transcript.rs:1038-1043`).
     * `:notes` — a sequence-keyed map of `Entry.Note` notes, anchored at the sequence they
-      were recorded after.
+      were recorded after. One anchor may hold a list: two of the operator's own verbs can
+      answer inside one event-free window, and they are two blocks
+      (`Ouroboros.Web.Watch.note/3`). A bare note is one note, as it always was.
     * `:ended` — the terminal status, once `stream.ended` said so.
   """
   @spec entries(%{optional(non_neg_integer()) => map()}, keyword()) :: [Entry.t()]
@@ -139,7 +141,7 @@ defmodule Ouroboros.Web.Transcript do
     entries =
       note_list
       |> Enum.filter(fn {at, _note} -> at >= notes_from end)
-      |> Enum.reduce(entries, fn {at, note}, acc -> [%Entry.Note{note: note, at: at} | acc] end)
+      |> Enum.reduce(entries, fn {at, note}, acc -> anchored(acc, note, at) end)
 
     entries = if is_binary(ended), do: [%Entry.Ended{status: ended} | entries], else: entries
 
@@ -152,8 +154,16 @@ defmodule Ouroboros.Web.Transcript do
     else
       note_list
       |> Enum.filter(fn {at, _note} -> at >= from and at <= through end)
-      |> Enum.reduce(entries, fn {at, note}, acc -> [%Entry.Note{note: note, at: at} | acc] end)
+      |> Enum.reduce(entries, fn {at, note}, acc -> anchored(acc, note, at) end)
     end
+  end
+
+  # One anchor, one note or several, oldest first. `entries` is accumulated reversed and
+  # reversed once at the end, so prepending in list order is what puts them in order.
+  defp anchored(entries, notes, at) do
+    notes
+    |> List.wrap()
+    |> Enum.reduce(entries, fn note, acc -> [%Entry.Note{note: note, at: at} | acc] end)
   end
 
   # ------------------------------------------------------------------------------------
@@ -428,10 +438,10 @@ defmodule Ouroboros.Web.Transcript do
   # The per-presentation arms
   # ------------------------------------------------------------------------------------
 
-  defp project_event(state, %UserMessage{text: text}) do
+  defp project_event(state, %UserMessage{text: text, images: images}) do
     state
     |> flush_agent(false)
-    |> push!(%Cell.Message{speaker: :you, text: text, streaming: false})
+    |> push!(%Cell.Message{speaker: :you, text: text, streaming: false, images: images})
   end
 
   defp project_event(state, %UserSteer{text: text}) do

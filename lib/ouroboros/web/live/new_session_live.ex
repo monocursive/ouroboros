@@ -48,6 +48,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   """
 
   use Phoenix.LiveView
+  alias Ouroboros.Web.Live.ImageAttachments
+
+  # The needs-you bell is in the one top bar, so it is on this page too. This is what makes
+  # that honest: the same edge computation and the same three-second `interactive.list`
+  # poll the deck runs, so a bell switched on here rings rather than sitting quiet
+  # (`Ouroboros.Web.NeedsYou`).
+  on_mount {Ouroboros.Web.NeedsYou, :bell}
 
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
@@ -93,6 +100,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:refusal, nil)
       |> assign(:initial_message, starter(params["starter"]))
       |> assign(:started_id, nil)
+      |> assign(:initial_images, %{})
 
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
@@ -102,6 +110,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
        do: socket |> load_machines() |> apply_launch(params) |> load(),
        else: apply_launch(socket, params)
      )}
+  end
+
+  defp image_key(assigns) do
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({assigns[:web_session], "new", assigns.form.machine})
+    )
+    |> Base.url_encode64(padding: false)
   end
 
   defp initial_form(prefs, params) do
@@ -229,6 +245,17 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # reading of it. The submit handler reads the browser payload through the same function;
   # rendered controls and the request can therefore never disagree.
   @impl true
+  def handle_event("image-action", params, socket) do
+    {:reply,
+     ImageAttachments.action(
+       socket,
+       params,
+       image_key(socket.assigns),
+       socket.assigns.form.machine,
+       socket.assigns.started_id
+     ), socket}
+  end
+
   def handle_event(event, _params, %{assigns: %{pending_start: pending}} = socket)
       when event not in ["start", "connect-chatgpt", "cancel-chatgpt", "refresh-chatgpt"] and
              not is_nil(pending),
@@ -451,6 +478,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       socket
       |> assign(:form, form)
       |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
+      |> assign(:initial_images, Map.take(params, ["images_json", "images_draft"]))
 
     api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
     grok = NewSession.grok_card(form, field(socket), socket.assigns.providers)
@@ -634,19 +662,38 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp do_send_initial(socket, id) do
+    case ImageAttachments.bind(
+           socket,
+           socket.assigns.initial_images,
+           id,
+           socket.assigns.form.machine
+         ) do
+      {:ok, refs} ->
+        do_send_initial_images(socket, id, refs)
+
+      {:error, message} ->
+        assign(socket, :refusal, %{
+          message: message,
+          detail: "Your first message and images remain here. Retry when ready."
+        })
+    end
+  end
+
+  defp do_send_initial_images(socket, id, refs) do
     message = String.trim(socket.assigns.initial_message)
 
-    if message == "" do
+    if message == "" and refs == [] do
       push_navigate(socket, to: NewSession.deck_path(id))
     else
       digest =
-        :crypto.hash(:sha256, id <> <<0>> <> message)
+        :crypto.hash(:sha256, id <> <<0>> <> message <> JSON.encode!(refs))
         |> Base.encode16(case: :lower)
         |> binary_part(0, 24)
 
       params = %{
         "id" => id,
-        "input" => message,
+        "input" =>
+          if(refs == [], do: message, else: %{"prompt" => message, "image_attachments" => refs}),
         "turn_id" => "web-" <> digest
       }
 
@@ -657,7 +704,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       case call(socket, "interactive.send_message", params) do
         {:ok, _turn} ->
-          push_navigate(socket, to: NewSession.deck_path(id))
+          socket
+          |> push_event("draft-sent", %{
+            key: image_key(socket.assigns),
+            images: refs,
+            text: message
+          })
+          |> push_navigate(to: NewSession.deck_path(id))
 
         refused ->
           detail =
@@ -827,204 +880,212 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       )
 
     ~H"""
-    <div class="ouro-new">
-      <header class="ouro-new-top">
-        <div class="ouro-top-row">
-          <a class="ouro-new-back" href="/">← Sessions</a>
-          <Layouts.theme_toggle />
-        </div>
-        <h1 class="ouro-new-title">New session</h1>
-        <p class="ouro-new-sub">Choose a project and describe what you want done</p>
-      </header>
+    <div>
+      <Layouts.topbar current={:new} />
 
-      <form id="new-session" class="ouro-new-form" phx-change="change" phx-submit="start">
-        <fieldset class="ouro-new-fields" disabled={@locked? or @starting?} aria-label="Task setup">
-          <section class="ouro-new-field" aria-labelledby="machine-label">
-            <div class="ouro-new-label-row">
-              <label id="machine-label" class="ouro-new-label" for="machine">Computer</label>
-            </div>
-            <select
-              id="machine"
-              name="machine"
-              class="ouro-new-input"
-              disabled={@starting? or not is_nil(@pending_start) or not is_nil(@started_id)}
+      <div class="ouro-new">
+        <header class="ouro-new-top">
+          <div class="ouro-top-row">
+            <a class="ouro-new-back" href="/">← Sessions</a>
+          </div>
+          <h1 class="ouro-new-title">New session</h1>
+          <p class="ouro-new-sub">Choose a project and describe what you want done</p>
+        </header>
+
+        <form id="new-session" class="ouro-new-form" phx-change="change" phx-submit="start">
+          <fieldset class="ouro-new-fields" disabled={@locked? or @starting?} aria-label="Task setup">
+            <section class="ouro-new-field" aria-labelledby="machine-label">
+              <div class="ouro-new-label-row">
+                <label id="machine-label" class="ouro-new-label" for="machine">Computer</label>
+              </div>
+              <select
+                id="machine"
+                name="machine"
+                class="ouro-new-input"
+                disabled={@starting? or not is_nil(@pending_start) or not is_nil(@started_id)}
+              >
+                <option value="" selected={@form.machine == ""}>
+                  {@local_machine} · runs this web app
+                </option>
+                <option
+                  :for={machine <- @machines}
+                  :if={machine[:state] != :local}
+                  value={to_string(machine[:node])}
+                  selected={@form.machine == to_string(machine[:node])}
+                  disabled={machine[:state] != :connected}
+                >
+                  {machine[:machine] || to_string(machine[:node])}{if machine[:state] != :connected,
+                    do: " · offline"}
+                </option>
+                <option
+                  :if={@form.machine != "" and not @destination_known?}
+                  value={@form.machine}
+                  selected
+                >
+                  {@form.machine} · saved selection
+                </option>
+              </select>
+              <p class="ouro-new-hint">
+                Your project, AI sign-in, and task stay on <strong>{@machine_label}</strong>.
+              </p>
+              <p :if={@providers_error} class="ouro-refusal" role="alert">{@providers_error}</p>
+              <button
+                :if={@providers_error}
+                type="button"
+                class="ouro-new-secondary"
+                phx-click="refresh-computer"
+              >Check again</button>
+            </section>
+            <.workspace_field
+              workspace={@form.workspace}
+              machine_label={@machine_label}
+              can_browse={@can_browse?}
+              open={@browse_open?}
+              listing={@browse}
+              refusal={@browse_refusal}
+            />
+
+            <section class="ouro-new-field" aria-labelledby="initial-message-label">
+              <div class="ouro-new-label-row">
+                <label class="ouro-new-label" id="initial-message-label" for="initial-message">
+                  What should the agent do?
+                </label>
+                <span class="ouro-new-aside">Optional</span>
+              </div>
+              <textarea
+                id="initial-message"
+                class="ouro-new-input ouro-new-message"
+                name="initial_message"
+                rows="5"
+                placeholder="Describe the result you want. You can add more instructions later."
+              >{@initial_message}</textarea>
+              <ImageAttachments.tray
+                locked={@locked?}
+                draft_key={image_key(assigns)}
+                node={@form.machine}
+              />
+              <p class="ouro-new-hint">This becomes the first message in the session.</p>
+            </section>
+
+            <section :if={is_map(@api_key_card)} aria-label="AI connection">
+              <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
+              <.api_key_card
+                card={@api_key_card}
+                can_set={@can_set_api_key?}
+              />
+            </section>
+
+            <section
+              :if={is_map(@grok_card)}
+              class="ouro-new-field ouro-account"
+              aria-labelledby="grok-connection-label"
             >
-              <option value="" selected={@form.machine == ""}>
-                {@local_machine} · runs this web app
-              </option>
-              <option
-                :for={machine <- @machines}
-                :if={machine[:state] != :local}
-                value={to_string(machine[:node])}
-                selected={@form.machine == to_string(machine[:node])}
-                disabled={machine[:state] != :connected}
-              >
-                {machine[:machine] || to_string(machine[:node])}{if machine[:state] != :connected,
-                  do: " · offline"}
-              </option>
-              <option
-                :if={@form.machine != "" and not @destination_known?}
-                value={@form.machine}
-                selected
-              >
-                {@form.machine} · saved selection
-              </option>
-            </select>
-            <p class="ouro-new-hint">
-              Your project, AI sign-in, and task stay on <strong>{@machine_label}</strong>.
-            </p>
-            <p :if={@providers_error} class="ouro-refusal" role="alert">{@providers_error}</p>
-            <button
-              :if={@providers_error}
-              type="button"
-              class="ouro-new-secondary"
-              phx-click="refresh-computer"
-            >Check again</button>
-          </section>
-          <.workspace_field
-            workspace={@form.workspace}
-            machine_label={@machine_label}
-            can_browse={@can_browse?}
-            open={@browse_open?}
-            listing={@browse}
-            refusal={@browse_refusal}
-          />
+              <div class="ouro-new-label-row">
+                <span id="grok-connection-label" class="ouro-new-label">Grok subscription</span>
+                <span class="ouro-new-aside">{account_aside(@grok_card.state)}</span>
+              </div>
+              <p class="ouro-new-hint">
+                Uses your Grok subscription with Ouroboros's own tools and agent loop.
+                Sign in with <code>grok login</code> on <strong>{@machine_label}</strong>,
+                then refresh this connection.
+              </p>
+              <p :if={@grok_card.usable?} class="ouro-new-hint">
+                An unexpired local sign-in was found. Subscription allowance and model access
+                are checked by xAI when a request runs.
+              </p>
+              <p :if={not @grok_card.usable?} class="ouro-new-hint">
+                A usable sign-in has not been found. Renew expired credentials with <code>grok login</code>.
+              </p>
+              <button type="button" class="ouro-new-secondary" phx-click="refresh-grok">Refresh Grok connection</button>
+            </section>
 
-          <section class="ouro-new-field" aria-labelledby="initial-message-label">
-            <div class="ouro-new-label-row">
-              <label class="ouro-new-label" id="initial-message-label" for="initial-message">
-                What should the agent do?
-              </label>
-              <span class="ouro-new-aside">Optional</span>
-            </div>
-            <textarea
-              id="initial-message"
-              class="ouro-new-input ouro-new-message"
-              name="initial_message"
-              rows="5"
-              placeholder="Describe the result you want. You can add more instructions later."
-            >{@initial_message}</textarea>
-            <p class="ouro-new-hint">This becomes the first message in the session.</p>
-          </section>
+            <details
+              id="new-session-advanced"
+              class="ouro-new-advanced"
+              data-ouro-disclosure="setup:false"
+            >
+              <summary>
+                <span>Advanced settings</span>
+                <span class="ouro-new-advanced-summary">
+                  {@provider_label} · {@intent.send ||
+                    if(@field == :unsupported,
+                      do: "Provider chooses the model",
+                      else: "Recommended model"
+                    )} · {sandbox_title(@form.sandbox)}
+                </span>
+              </summary>
 
-          <section :if={is_map(@api_key_card)} aria-label="AI connection">
+              <.model_field
+                field={@field}
+                visible={@visible}
+                form={@form}
+                intent={@intent}
+                error={@catalogue_error}
+              />
+
+              <.thinking_field effort={@form.effort} choices={@efforts} />
+              <.sandbox_field sandbox={@form.sandbox} />
+            </details>
+          </fieldset>
+
+          <section :if={@gated?} aria-label="AI connection">
             <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
-            <.api_key_card
-              card={@api_key_card}
-              can_set={@can_set_api_key?}
-            />
+            <.account_card card={@account_card} scope={@scope} refresh?={@locked?} />
           </section>
 
-          <section
-            :if={is_map(@grok_card)}
-            class="ouro-new-field ouro-account"
-            aria-labelledby="grok-connection-label"
-          >
-            <div class="ouro-new-label-row">
-              <span id="grok-connection-label" class="ouro-new-label">Grok subscription</span>
-              <span class="ouro-new-aside">{account_aside(@grok_card.state)}</span>
-            </div>
-            <p class="ouro-new-hint">
-              Uses your Grok subscription with Ouroboros's own tools and agent loop.
-              Sign in with <code>grok login</code> on <strong>{@machine_label}</strong>,
-              then refresh this connection.
-            </p>
-            <p :if={@grok_card.usable?} class="ouro-new-hint">
-              An unexpired local sign-in was found. Subscription allowance and model access
-              are checked by xAI when a request runs.
-            </p>
-            <p :if={not @grok_card.usable?} class="ouro-new-hint">
-              A usable sign-in has not been found. Renew expired credentials with <code>grok login</code>.
-            </p>
-            <button type="button" class="ouro-new-secondary" phx-click="refresh-grok">Refresh Grok connection</button>
-          </section>
+          <p :if={@locked?} class="ouro-new-hint" role="status">
+            Your task may already exist. Check and retry the same task before changing its computer or project.
+          </p>
 
-          <details
-            id="new-session-advanced"
-            class="ouro-new-advanced"
-            data-ouro-disclosure="setup:false"
-          >
-            <summary>
-              <span>Advanced settings</span>
-              <span class="ouro-new-advanced-summary">
-                {@provider_label} · {@intent.send ||
-                  if(@field == :unsupported,
-                    do: "Provider chooses the model",
-                    else: "Recommended model"
-                  )} · {sandbox_title(@form.sandbox)}
-              </span>
-            </summary>
+          <p :if={@refusal} class="ouro-refusal ouro-new-refusal" role="alert">
+            {@refusal.message}
+            <span :if={@refusal.detail} class="ouro-new-refusal-detail">{@refusal.detail}</span>
+          </p>
 
-            <.model_field
-              field={@field}
-              visible={@visible}
-              form={@form}
-              intent={@intent}
-              error={@catalogue_error}
-            />
+          <footer class="ouro-new-foot">
+            <a class="ouro-new-cancel" href="/">Cancel</a>
+            <button
+              type="submit"
+              class="ouro-button"
+              disabled={
+                not @can_start? or @starting? or
+                  (not @locked? and
+                     (Ouroboros.Web.Launch.workspace(@form.workspace) == :error or
+                        not @chatgpt_ready? or @api_key_required? or @grok_required?))
+              }
+            >
+              {if @locked?,
+                do: "Check & retry task",
+                else:
+                  start_label(
+                    @can_start?,
+                    @starting?,
+                    @chatgpt_ready?,
+                    @api_key_required?,
+                    @api_key_card
+                  )}
+            </button>
+          </footer>
 
-            <.thinking_field effort={@form.effort} choices={@efforts} />
-            <.sandbox_field sandbox={@form.sandbox} />
-          </details>
-        </fieldset>
+          <p :if={@providers_error} class="ouro-new-note" role="alert">
+            The runtime's provider status could not be read: {@providers_error}
+          </p>
+          <p :if={not @can_start?} class="ouro-new-note">
+            This link is view-only. Ask the person who set up Ouroboros for permission to start
+            sessions.
+          </p>
+        </form>
 
-        <section :if={@gated?} aria-label="AI connection">
-          <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
-          <.account_card card={@account_card} scope={@scope} refresh?={@locked?} />
-        </section>
-
-        <p :if={@locked?} class="ouro-new-hint" role="status">
-          Your task may already exist. Check and retry the same task before changing its computer or project.
-        </p>
-
-        <p :if={@refusal} class="ouro-refusal ouro-new-refusal" role="alert">
-          {@refusal.message}
-          <span :if={@refusal.detail} class="ouro-new-refusal-detail">{@refusal.detail}</span>
-        </p>
-
-        <footer class="ouro-new-foot">
-          <a class="ouro-new-cancel" href="/">Cancel</a>
-          <button
-            type="submit"
-            class="ouro-button"
-            disabled={
-              not @can_start? or @starting? or
-                (not @locked? and
-                   (Ouroboros.Web.Launch.workspace(@form.workspace) == :error or
-                      not @chatgpt_ready? or @api_key_required? or @grok_required?))
-            }
-          >
-            {if @locked?,
-              do: "Check & retry task",
-              else:
-                start_label(
-                  @can_start?,
-                  @starting?,
-                  @chatgpt_ready?,
-                  @api_key_required?,
-                  @api_key_card
-                )}
-          </button>
-        </footer>
-
-        <p :if={@providers_error} class="ouro-new-note" role="alert">
-          The runtime's provider status could not be read: {@providers_error}
-        </p>
-        <p :if={not @can_start?} class="ouro-new-note">
-          This link is view-only. Ask the person who set up Ouroboros for permission to start
-          sessions.
-        </p>
-      </form>
-
-      <.anthropic_key_dialog
-        :if={(@api_key_dialog? and @api_key_card) && @api_key_card.key == "anthropic"}
-        error={@api_key_error}
-        card={@api_key_card}
-      />
-      <.xai_key_dialog
-        :if={(@api_key_dialog? and @api_key_card) && @api_key_card.key == "xai"}
-        error={@api_key_error}
-      />
+        <.anthropic_key_dialog
+          :if={(@api_key_dialog? and @api_key_card) && @api_key_card.key == "anthropic"}
+          error={@api_key_error}
+          card={@api_key_card}
+        />
+        <.xai_key_dialog
+          :if={(@api_key_dialog? and @api_key_card) && @api_key_card.key == "xai"}
+          error={@api_key_error}
+        />
+      </div>
     </div>
     """
   end

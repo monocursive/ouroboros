@@ -80,6 +80,21 @@ defmodule Ouroboros.Models do
   @spec default_model(atom()) :: String.t() | nil
   def default_model(:native), do: Ouroboros.Provider.Native.Model.configured_model()
 
+  @doc "Catalogue evidence for image input; unknown is distinct from unsupported."
+  def image_support(model_id) when is_binary(model_id) do
+    case find_model(:native, model_id) do
+      %{modalities: %{input: inputs}} when is_list(inputs) and inputs != [] ->
+        if :image in inputs or "image" in inputs, do: :supported, else: :unsupported
+
+      _ ->
+        :unknown
+    end
+  rescue
+    _ -> :unknown
+  end
+
+  def image_support(_), do: :unknown
+
   @doc "Reasoning levels advertised by one selected model and accepted by the transport."
   @spec reasoning_efforts(String.t() | nil) :: [String.t()]
   def reasoning_efforts(model_id) do
@@ -182,6 +197,7 @@ defmodule Ouroboros.Models do
       max_output_tokens: number(Map.get(limits, :output)),
       release_date: Map.get(model, :release_date),
       reasoning_efforts: model_reasoning_efforts(model),
+      image_input: image_support(model_id(prefix, model.id)),
       pricing: pricing(Map.get(model, :pricing))
     }
   end

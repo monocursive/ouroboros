@@ -133,9 +133,24 @@ downstream of everything — the same argument the gateway already carries
 absent configuration means no endpoint at all, so tests, `:builder`, and `:signer` never
 acquire one.
 
-`"Elixir.Ouroboros.Web."` joins `@protected_prefixes` in
-`lib/ouroboros/upgrade/verifier.ex:53-64` in the same commit that creates the namespace.
-An operator surface must not be hot-patchable by the thing it operates.
+`"Elixir.Ouroboros.Web."` joined `@protected_prefixes` in
+`lib/ouroboros/upgrade/verifier.ex` in the commit that created the namespace. That list
+and the verifier holding it went with the BEAM hot-patch lane in
+[the core reduction](proposals/core.md) §4 A1, and nothing replaced them, because no lane
+is left to gate: lane W is the only rollout, and a lane-W capability "introduces no BEAM
+module and no atom" ([`capability.ex:5`](../lib/ouroboros/wasm/capability.ex)) — its
+identity is the sha256 of its bytes, the signer takes a lowercase component name, one of
+two kinds and the one world that kind requires
+([`artifact.ex:140`](../lib/ouroboros/wasm/artifact.ex),
+[`policy.ex:328`](../lib/ouroboros/upgrade/signing/policy.ex)), and the one module a
+deploy may start is the shipped wrapper ([`mesh.ex:46`](../lib/ouroboros/mesh.ex)).
+Nothing under `lib/` calls `:code.load_binary/3`, `Module.create/3`,
+`Code.compile_string/2` or `Code.eval_string/2`. The sentence stands — an operator surface
+must not be hot-patchable by the thing it operates — and is true by absence rather than by
+a gate. Honest limit: the two-node rollout test proves a deploy *adds* no capability
+module on any peer
+([`rollout_two_node_test.exs:164`](../test/wasm/rollout_two_node_test.exs)); that it
+cannot *replace* one under `Ouroboros.Web.` rests on that grep, and no test pins it.
 
 ### D2 — One authorization surface
 
@@ -330,11 +345,235 @@ mechanism.
 
 ## 4. Parity map
 
-**The parity target is the GPUI desktop surface, not the seven-tab TUI.** The TUI remains
-the full-surface client; the web starts where the desktop stopped and can grow later.
-Inventory source: the removed `docs/DESKTOP.md` and the verified feature map of the GPUI
-client's `tui/src/desktop.rs`, deleted at W9. Neither file is in the tree; this table is
-what was read out of them.
+**The parity target was the GPUI desktop surface, not the seven-tab TUI**, and W1–W3 moved
+it: `docs/design-qa/ui-review-2026-09-15.md` §4 counted the dashes against the terminal
+client, and the slices closed the ones the gateway already served. The table below is that
+matrix as it now stands. "Served" is the method `Ouroboros.Web.Call.available?/2` asks
+about, which is the same question `hello` answers for a socket client; a row with no method
+is a client-side or presentation fact and says so.
+
+| Capability | TUI | Web | Served |
+|---|---|---|---|
+| New session, switch, close | `ctrl+x n`/`N`/`l`, `/new`, palette | `/new`, the rail, the row menu, palette **Session** | `interactive.start`, `interactive.close` |
+| Rename session | `ctrl+r`, `/rename` | row menu, palette | `interactive.rename` |
+| Delete a finished session | `ctrl+x k`, `/close` | row menu, palette (only once the session has ended) | `interactive.delete` |
+| Interrupt | `esc` | the composer's button, `esc` **inside the composer**, palette | `interactive.interrupt` |
+| Queue follow-up | `Enter` while busy | the same `Enter`; the button says "Queue" while a turn runs | `interactive.follow_up` |
+| Steer | `alt+enter`, `/steer` | the composer's second submit button, palette | `interactive.steer` |
+| Effort | `/effort` (next turn only) | the thinking picker, and a per-turn "next turn only" | `interactive.configure` |
+| Sandbox | `/sandbox` | the file-access picker — drawn **only** where the session reported a posture | `interactive.configure` |
+| Model change mid-session | `ctrl+x m`, `/model` | the composer's "Change" row, palette | `interactive.configure` |
+| Plan mode | `/plan` | the composer's toggle, palette | `interactive.configure` |
+| Auto-approve | `ctrl+x A`, `/auto-approve` | the toggle in the composer's status row | client-side; answers with `interactive.respond_approval` |
+| Approvals, suggested rule | the modal's fifth answer | the card's "Remember" | `interactive.respond_approval` + `permissions.add` |
+| Backtrack | `esc esc`, `ctrl+x g`, `/backtrack` | a dialog over the held `input_accepted` turns, palette | `interactive.send_message` (resend) / `interactive.fork` |
+| Fork | `/fork` | the backtrack dialog's second verb, and its own palette row | `interactive.fork` |
+| Rewind | `/rewind` | two screens, warning first, palette | `interactive.rewind_points`, `interactive.rewind` |
+| Compact | `ctrl+x c`, `/compact [focus]` | a one-question dialog, then the report, then a fresh context read | `interactive.compact` |
+| Handoff | `/handoff <prompt>` | a one-question dialog; opens the child and says whether it was `ready` | `interactive.handoff` |
+| Context | `/context` | a panel whose first line is `source`; the vitals meter reads the same answer | `interactive.context` |
+| Event ledger | `/details`, `ctrl+x d` | a panel, one row per held event, expandable to the wire object | `interactive.event_detail` (for an excerpted leaf) |
+| Export transcript | `/export [--json] [path]`, `ctrl+x [`, `ctrl+x v` | a **download route**, text or NDJSON — see below | `interactive.replay` |
+| Copy last message | `ctrl+x y`, `/copy raw` | a copy button on every settled agent message, and two palette rows (rendered text, source Markdown) | none — the browser's clipboard |
+| Operator shell `!cmd` | yes | yes, claimed by the composer, with the refusal and its `suggested_rule` kept on the composer | `workspace.exec` (+ `permissions.add`) |
+| MCP servers | `/mcp` | a panel: the node's servers and the entries its loader refused, read fresh on open | `mcp.list` |
+| Cost / usage | `/cost` overlay, the footer | the vitals column and the per-turn cells | `interactive.info` |
+| Changed files (`/diff`), raw copy mode (`/raw`) | two overlays | inline diffs only | n/a — presentation, see D10 |
+| Verbose expand-all, plan panel | `ctrl+o`, `ctrl+t` | per-cell disclosure; the plan is an inline cell | n/a |
+| Image paste, file picker, drop | yes; clipboard and `/attach` | yes; composer and first message | `attachment.*` and model image support |
+| `@` file completion | yes | — | workspace index |
+| Budget warning | the footer's `WARN` past `[budget] max_cost_usd` | — | client-side, and `[budget]` is the terminal client's file |
+| Capabilities preview / admit | palette + `/capabilities`, `/preview`, `/admit` | — | `capabilities.list`, `.preview`, `.admit` (served, unexposed) |
+| Dashboard / nodes | the Dashboard tab | `/status`, linked from the top bar on every page | `runtime.status` |
+| Logs | the Logs tab | — | **nothing**: the gateway's method table has no log-reading verb at all |
+| Upgrades | the Upgrade tab | — | `wasm.*`, `signing.decisions` (served, no design) |
+| Audit search, evidence streams, bundle export | — | `/audit` | `audit.*` |
+| Workspace browser | the `f5` location dialog | "Browse…" on `/new` | `workspace.browse` |
+| Notifications | the terminal bell, `[notifications]` | the top bar's bell, on every page | none — the browser's Notifications API |
+| Theme | `/theme`, `ctrl+x t` — six palettes | the top bar's toggle — two | n/a |
+| Help / key map | `?`, `/keys` | `?` opens the shortcut sheet; palette **Client** | n/a |
+| Settings | four sections (`F1`–`F4`) | four sections | `runtime.status`, `runtime.providers`, `credentials.*` |
+
+**Logs and upgrades are absent for two different reasons, and only one of them is a
+decision.** No method on the wire reads logs: the terminal client's Logs tab shows the
+output of the runtime **it spawned**, which a browser attached over a socket has no
+equivalent of, and `docs/TUI.md` §6 already defers streaming them. Upgrades are the other
+kind of absence — `wasm.deploy`, `.upload`, `.sign`, `.rollback`, `.status`, `.list` and
+`signing.decisions` are all served at operate scope, and there is simply no design for what
+a browser should show for a signing decision. That one is deferred, not impossible, and it
+is on the parity plan's own deferred list.
+
+**The export is a route, and it says how much of the session is in it.**
+`GET /s/:plane/:id/export?format=text|ndjson` ([`router.ex:56`](../lib/ouroboros/web/router.ex),
+[`transcript_export_controller.ex`](../lib/ouroboros/web/transcript_export_controller.ex)) —
+a controller rather than a LiveView, like the audit bundle, because it answers bytes, and
+inside the authenticated scope so the cookie that opened the deck is the only thing that
+opens it. It does **not** read the deck's held window, which is a fact about one browser
+tab: it calls `interactive.replay` itself and builds a `Watch` out of the answer, so the
+file and the page get the same floor inference, the same dividers and the same projection.
+One reading, two renderings.
+
+The bound is stated rather than left in the code. `interactive.replay` answers at most
+`Contract.replay_limit/0` (500) events per call, so the controller pages from an exclusive
+cursor until a page comes back short and stops at **40 pages either way** — twenty thousand
+events. Both forms carry an `x-ouroboros-export-extent` response header naming what is in
+the file: the count, the sequence range, whether anything was dropped below the floor, and
+whether the page's own ceiling cut it. The text form carries the count and the sequence
+range in its own header band, and its **last line** is the only place that file claims
+anything about completeness: `complete: no history was dropped from this session`, or
+`incomplete:` and the sequence the runtime no longer retains through — plus a line naming
+the twenty-thousand-event ceiling where it was hit, and a count of events this build could
+not decode, which are counted rather than shown. The NDJSON form adds nothing
+and reshapes nothing — a leaf the gateway excerpted travels as `{"_excerpt": …, "_bytes": n}`,
+because that is what a client was sent, and rewriting it as the prefix alone would produce
+a file that looked whole and was not. `interactive.replay` is a read-scope method, so a
+read-scope endpoint exports exactly as an operate one does. There is **no file on the
+daemon's disk**: the TUI's `/export` writes one `0600` under the data directory, and the web's
+equivalent is a download to the reader's own machine.
+
+### The command palette and the one catalogue
+
+[`Ouroboros.Web.Commands`](../lib/ouroboros/web/commands.ex) is every verb this surface can
+run, as one list — thirty-five rows in the five groups the parity plan fixes (Session, Turn,
+Conversation, Runtime, Client), in that order and sorted by nothing else. The palette, the
+shortcut sheet and (at S1) a shared `priv/ui/commands.json` read it rather than each keeping
+a list of their own: a verb added to the web is added here or it exists nowhere a reader can
+find it.
+
+**Every row is gated twice, and a row that fails either is not drawn.** The gate is a
+one-argument function of the deck's assigns, and both halves are load-bearing: does this
+build serve the method *at this scope* (`Call.available?/2` — a read-scope endpoint lists no
+mutating verb), and does the session's own state allow it (an interrupt with no turn
+running, a delete of a session that has not ended, a steer into a transport that declared it
+cannot be steered). That is the honesty invariant in its narrowest form: the palette is a
+list of things that will happen, not a menu of things that might be refused. `available/1`
+draws it and `run_command/2` asks the same question again before doing anything
+([`deck_live.ex:1081`](../lib/ouroboros/web/live/deck_live.ex)), so a row that went stale
+while the modal was open cannot be run by pressing Enter on it, and a hand-made
+`palette-run` is refused by the same line. A gate that raises answers "not offered" rather
+than taking the page down.
+
+The filtering is the server's too. `Commands.search/2` matches the label, the slash
+spelling, the shortcut and the group's own heading — so typing `turn` narrows to the Turn
+group, exactly as the terminal palette does — and it filters without reordering, so a row's
+flat position and its position on screen are the same number and `↑`/`↓` move one visible
+row. Nothing about which verbs exist is sent to the browser to be narrowed there: a
+client-side filter would need the whole ungated catalogue in the DOM, and a row the runtime
+cannot serve would then be one broken selector away from being drawn.
+
+### Keyboard
+
+The document-level keys — `⌘K`, `?`, `n`, `[`/`]` and the composer's `Esc` — are
+[`app.js`](../priv/static/web/app.js)'s `Keys` hook, on an element inside the LiveView
+because a listener outside a hook has nothing to `pushEvent` to. That element is rendered
+by the deck and nowhere else, so **these are the deck's keys**: `/settings`, `/new`,
+`/status` and `/audit` get the top bar and the bell, not the palette. The rest of the table
+is noted where it belongs to something else — the palette's own `<dialog>`, the composer's
+hook, or a listener older than either.
+
+| Key | What it does |
+|---|---|
+| `⌘K` / `ctrl+K` | opens or closes the palette, from anywhere on the page **including inside the composer** — which is where a person is most likely to want it. Any *other* open `<dialog>` takes the key entirely, so ⌘K cannot put a palette over a question nobody has answered |
+| `?` | the shortcut sheet — only when focus is not in an editable field, and not behind another dialog |
+| `n` | a new session (the same gated `session.new` row the palette runs) |
+| `[` / `]` | the previous or next session in the rail |
+| `/` | focuses the rail's search box. Not the hook's — it is a separate document listener that predates it, and it does only the focus move, because that should never cost a round trip; LiveView owns the query and the filtering |
+| `Esc` **in the composer** | interrupts a running turn, and only where a control on screen says one is running (`[data-ouro-interrupt]`). Everywhere else `Esc` keeps its existing meanings — a `<dialog>`'s native cancel, which the `Modal` hook turns into a close event |
+| `↑` / `↓` | move the palette's selection. Bound with `phx-window-keydown` on two elements that exist **only while the palette is open**, which is what scopes a window binding to a modal; a bare `phx-keydown` would send a message for every character typed into the query box |
+| `Enter` | runs the selected command — the palette's own form submit, not the hook — or sends the message being written, which is the `Composer` hook's |
+| `shift`+`Enter` | a newline in the message being written (the `Composer` hook) |
+
+**⌘N and ⌘. are deliberately not bound**, and the claim that they were is gone from this
+document. They are the browser's and the operating system's, and a page that stole them
+would be taking a window away from somebody to save them one keystroke. An IME's composing
+keydowns are ignored, as they are for `Enter`.
+
+### One top bar, on every page
+
+[`Ouroboros.Web.Layouts.topbar/1`](../lib/ouroboros/web/layouts.ex) is rendered by all five
+LiveViews. Until W1 it existed only on the deck, which is why the review found three header
+treatments, no route to `/status` from anywhere, and a connection pill and a bell that a
+person filling in `/new` or reading `/audit` could not see (§3.1). The spokes keep their
+"← Sessions" breadcrumb *below* it rather than instead of it.
+
+What it may say is bounded the same way everything else here is. The machine presence dots
+and the day's token total are the deck's own measurements; every other page renders the bar
+without them and therefore draws neither, because a presence readout on `/settings` would be
+a claim about cluster connectivity made by a page that never asked. Absent, not defaulted,
+applies to chrome too. `aria-current="page"` marks exactly one element per page — the
+section link, not the wordmark as well — and a spoke is marked at its section, because that
+is where the reader is.
+
+### Names and refusals (D7's sixth ground rule)
+
+[`Ouroboros.Web.Presentation`](../lib/ouroboros/web/presentation.ex) is the one place an
+internal name becomes a word a reader was meant to see, and the TUI's `ui::presentation` is
+its twin. `node_label/2` reads `nonode@nohost` (and `nil`, and `""`) as **"this computer"**,
+and a real `release@host` as its **host** — the half before the `@` is the release name that
+every machine in a fleet shares, so shortening `ouro@alpha` and `ouro@beta` both to "ouro"
+would put the same word under two presence dots. Where `runtime.status`'s fleet roster names
+a machine, *its* label wins. Something reported that this build cannot read is
+`"not reported"` rather than "this computer": absent and unreadable are different facts.
+
+`refusal/1` turns atoms, `{:error, reason}` pairs and the gateway's numeric codes into
+sentences — `:audit_disabled` became `/audit`'s first line verbatim before W1 (§3.5), and
+`-32004` is "That part of the runtime is not available here." A term it has no sentence for
+is said **in words** rather than given a meaning nobody wrote down. It translates; it never
+invents.
+
+### The composer's status row and the per-session controls
+
+The two standing risks the terminal client keeps permanently in its footer are on the
+composer's bottom edge rather than one click behind "Session details", where the review found
+them on every viewport (§3.2): the **auto-approve toggle**, which says on its own face that
+it lasts only for this session while it is open and that questions and screen control still
+ask, and the **file-access posture** — named only when it is `unrestricted`, because the
+"Change" summary states it one line above and the vitals a third time, and three statements
+of one fact in one band is noise. The rest of the vitals are a **real third grid column**
+above 1100px — `.ouro-columns:has(> .ouro-vitals)`, which is what the moduledoc and seven
+stranded CSS rules had always expected — and the `ouro-vitals-mobile` disclosure only below
+it, where the column is hidden. Before W1 that disclosure was the only home the vitals had,
+on every viewport, and the auto-approve toggle was inside it.
+
+The pickers under the composer follow the same rule the TUI's do: **a sandbox picker is
+offered only where the session reported a posture.** One defaulted to `workspace_write`
+because nothing said otherwise would be this page telling an operator what a session is
+allowed to do on no evidence. The sandbox and thinking pickers are marked-button groups
+rather than `<select>`s on purpose — a `<select>` carries its own client-side value and
+would show the operator's pick whether or not the transport accepted it, while a button
+group has no state of its own, so the mark moves only when the runtime's next answer says it
+moved. The model control is a searchable `<select>` because a 113-row catalogue is not a
+button group, but the sentence saying which model this session is running is still drawn
+from the session's own re-read.
+
+### Capability gates: silence is not a refusal
+
+Four keys of `info.options.capabilities` gate controls here — `steer`, `dynamic_model`,
+`dynamic_configuration` and `fork` — and all four are read the way `Capability::offered`
+reads them in the terminal client:
+
+- **boolean `false` is the only refusal.** It is the one value the runtime sends on purpose
+  to say a transport cannot do this, and it is the only one that takes a control off screen;
+- **a string is a mechanism, not a verdict** — `"native"`, `"managed"` are declarations that
+  it *can*;
+- **absence, `nil`, and a shape this build cannot read are silence**, which keeps whatever
+  the client did before the declaration existed. Hiding a working verb on a gateway's
+  silence would be this surface inventing a ceiling it was never told about.
+
+`dynamic_model` and `dynamic_configuration` are asked **separately**, because a transport can
+serve one and refuse the other: a model-only transport keeps its model picker and loses the
+plan, effort and sandbox controls. A fifth key, `transport`, is read differently and on
+purpose — it is a *label* rather than a yes/no, so `native_transport?/1` compares it and
+**silence stays offerable**. Four verbs are gated on it (compact, handoff, rewind and the
+rewind's own points), because only a native session hands this runtime the conversation to
+work on.
+
+### What the desktop surface had, and how the web took it over
+
+The original target, kept because it is where most of these surfaces came from and the
+only record of the contracts they were ported under. Inventory source: the removed
+`docs/DESKTOP.md` and the verified feature map of the GPUI client's `tui/src/desktop.rs`,
+deleted at W9. Neither file is in the tree; this table is what was read out of them.
 
 | Desktop feature (today) | Web treatment |
 |---|---|
@@ -348,20 +587,26 @@ what was read out of them.
 | ChatGPT / Grok account and API-key cards | ChatGPT uses `account.read` / `account.login.*`. Native `grok:` models read the local Grok OAuth sign-in and call the subscription endpoint directly; the card explains `grok login` and refreshes credential status through `runtime.providers`. Native `xai:` models use `credentials.xai.set` and API billing. Tokens never reach the page; Grok alone renews its rotating credentials. |
 | Settings | `/settings` groups subscription and API connections first (including Grok local sign-in, provider marks, status/source, refresh and setup guidance), editable new-session defaults second, the detected provider/model catalogue third, and read-only boot/runtime facts last. Secret values never enter LiveView state; environment-owned configuration is shown as read-only rather than rendered as a control that cannot take effect. |
 | Window title, connection pill, notices | page title, a connection indicator driven by LiveView socket state, one notice slot with the same "Info is deliberately dropped" rule |
-| Keyboard: Enter/Shift-Enter, ⌘., ⌘N | same bindings via LiveView key events (browser-permitting; ⌘N may need to become a different chord — browsers own it) |
+| Keyboard: Enter/Shift-Enter, ⌘., ⌘N | Enter and Shift+Enter are the composer's, as they were. **⌘. and ⌘N were never built and are not going to be** — they are the operating system's and the browser's. What the web binds instead is above: ⌘K/ctrl+K, `?`, `n`, `[`/`]`, `/`, and Esc-in-the-composer |
 
-**D10 — deferred, stated plainly:**
+**D10 — deferred, and three of these are now done:**
 
-- **`runtime.shutdown`, the ledger and upgrade tabs, `workspace.exec`, /raw
-  and /export, statusline.** TUI-only today or TUI-appropriate; none existed on the
-  desktop. `[statusline]` in particular must never be ported naively — it runs a shell
-  command on the client's machine, which server-side would mean shell execution on the
-  daemon host (`tui/src/config.rs:295`).
+- ~~`workspace.exec`~~ (W3: `!cmd` in the composer), ~~the ledger~~ (W3: the event details
+  panel) and ~~`/export`~~ (W3: the download route) have landed. What is left of the
+  original list is **`runtime.shutdown`**, the **upgrade tab**, and **`/raw`** — the
+  whole-transcript copy mode, which is a second renderer rather than a flag inside the
+  first and has no browser equivalent worth the name, since a browser selection already
+  yields logical lines.
+- **`[statusline]` must never be ported**, and this is not a scheduling decision. It runs a
+  shell command on the client's machine (`tui/src/config.rs:295`); server-side that would
+  mean shell execution on the daemon host, configured from a browser. `!cmd` is the verb
+  that runs a command in the workspace, it goes through `workspace.exec` and the permission
+  engine, and it is refused by name where a rule says no — which is exactly what a
+  statusline would have bypassed.
 - **Web-side prefs.** Form defaults (`[defaults]` provider/model/workspace) get a
   server-side home in the data dir (`web.prefs.json`, atomic 0600 writes), because
   `config.toml` belongs to the terminal client's machine. Per-browser conveniences
-  (collapsed sections, theme) live in `localStorage`. Notifications API, reduced-motion,
-  and keybinding remapping are later slices.
+  (collapsed sections, theme) live in `localStorage`.
 
   **As built** (W8 — `lib/ouroboros/web/prefs.ex`), with three corrections:
 
@@ -379,11 +624,24 @@ what was read out of them.
     W9). The web matches it. "Absent, not defaulted" keeps its
     meaning: what never reaches the plane is what the operator has never chosen, this time
     or last. A file that was drawn but not sent would show one posture and request another.
-  - **Notifications are not a later slice; they landed in W8.** A topbar bell, off by
-    default, that asks the browser for permission on enable and posts one notification per
-    session *entering* the needs-you group while the tab is hidden. Reduced-motion was
-    already honoured by the streaming pulse (`@media (prefers-reduced-motion: reduce)` in
-    `app.css`, since W3). Keybinding remapping is still a later slice.
+  - **Notifications are not a later slice; they landed in W8** and reached every page in
+    W1. A top bar bell, off by default and off is the only state it can be born in —
+    asking for notification permission is a thing a person does on purpose, so enabling it
+    is what asks the browser, and `app.js` re-checks the permission every time it would
+    post rather than silently keeping a promise it cannot keep. It posts one notification
+    per session **entering** the needs-you group while the tab is hidden. What was already
+    waiting when the page opened is *recorded rather than announced*, so a page opened in a
+    background tab does not post one banner per pending approval on arrival and a reconnect
+    does not do it again; a refused or unreadable `interactive.list` rings nothing and
+    leaves the announced set alone, because a page that cannot see the group must not claim
+    it is empty. The arithmetic is
+    [`Ouroboros.Web.NeedsYou`](../lib/ouroboros/web/needs_you.ex), and the four spokes get
+    it as an `on_mount` hook that polls `interactive.list` once every three seconds — the
+    deck's own cadence. The deck does **not** use the hook: it holds a live subscription and
+    recomputes on every redraw, so its bell fires the moment a request arrives rather than
+    up to three seconds later. What it shares is the arithmetic, so there is one definition
+    of "has just entered the group" rather than two that can drift. Reduced-motion was
+    already honoured by the streaming pulse. Keybinding remapping is still a later slice.
 
   The theme did stay in `localStorage` as specified, with one thing this paragraph did not
   anticipate: it has to be applied **before first paint**, or a viewer who chose light sees
@@ -723,3 +981,57 @@ packages and gained nothing; no surviving crate moved versions.
   the defaulted posture should eventually serve the web on the tailnet automatically once
   a `tailscale serve` handshake exists (out of scope here); server-side fleet-add (its
   own spec, if wanted).
+
+
+## Image attachments
+
+Paste a screenshot into the composer, drop image files, or use **Attach images**.
+Images appear in order with preparation status, a thumbnail, preview, and removal.
+Send a message with text, images, or both; attaching alone never invokes a model.
+An unfinished or failed image blocks the entire submission until it is ready or
+removed. Image-bearing messages use Send or Queue; mid-turn Steer and shell commands
+cannot carry images. The same flow works for the initial message on `/new`.
+
+Uploads go to the selected runtime before Send. PNG, JPEG, static WebP, and static
+GIF are decoded by `ouro-media` inside the runtime's OS sandbox, oriented and
+converted to PNG with metadata removed. Animated inputs are refused. Limits are
+20 MiB per source and normalized image, 64 MiB per message, 32 total attachments,
+16,384 pixels per dimension, and 40 million pixels per image. Images are never
+written into the project directory. A runtime without the packaged normalizer or
+read/network containment reports image uploads unavailable.
+
+The browser retains upload IDs and metadata in tab session storage, while original
+files stay in memory across LiveView conversation switches. Returning to a draft
+resumes its unfinished uploads. The page retains at most 64 unfinished sources and
+64 MiB across drafts; finish or remove images before adding beyond this limit.
+Reload recovers ready uploads and completed preparation; an incomplete upload whose
+source was lost must be selected again. Retry resumes interrupted transfers with the
+same upload identity, while a terminal preparation failure starts a fresh attempt
+from the retained source. Each successfully sent initial message rotates its image
+draft so another new session cannot inherit the previous session's images. Unsent
+ready images expire after 24 hours without a draft heartbeat. Accepted images live with the
+conversation and appear after reload or in another authorized client. A pinned
+first-message retry keeps its original text and images while account setup is repaired.
+
+History thumbnails and previews use authenticated, non-cacheable requests; image
+bytes never appear in gateway event notifications. Remote owners receive bounded
+chunks through the existing authenticated gateway. The browser upload uses WebCrypto
+and therefore requires HTTPS or a localhost browser connection. Clipboard image
+availability depends on the browser and OS; the file picker is always the explicit
+fallback when uploads are available.
+
+For source development, build the native decoder with `make media` before starting
+the runtime. `make dev` and release packaging include it. See
+[the detailed design](proposals/chat-image-attachments.md) and the generated
+[protocol reference](PROTOCOL.md) for storage, limits, and wire behavior.
+
+Storage defaults reserve 256 MiB of unused uploads per identity, 1 GiB of runtime
+staging, 2 GiB per conversation, and 10 GiB per runtime. Operators can set
+`config :ouroboros, :attachment_quotas, client_bytes: ..., staging_bytes: ...,
+session_bytes: ..., runtime_bytes: ...` before starting the runtime. Reservations
+include bounded preparation overhead; accepted-image retention follows conversations.
+
+Connections configured with small gateway frames advertise a smaller source-file
+limit so an upload stays within 4,096 chunks. Clients use the negotiated chunk size;
+the runtime also rejects excessive fragmentation. This bounds upload metadata as
+well as the image bytes themselves.

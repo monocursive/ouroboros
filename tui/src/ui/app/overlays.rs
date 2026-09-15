@@ -91,6 +91,112 @@ pub fn sandbox_label(index: usize) -> String {
     }
 }
 
+/// T2.1. The five groups every discovery surface sorts by, in the order they are drawn.
+///
+/// One list, used by the palette, the `?` panel and the which-key overlay, because the
+/// review's finding was not that the palette's groups were wrong — it was that each
+/// surface had invented its own. A verb learned in one place is looked for under the same
+/// heading in the next, and the order is the order a session is lived: what this
+/// conversation *is*, what the turn in front of you is doing, the conversation as a
+/// document, the runtime around it, and this client.
+///
+/// Ordinal order is drawing order — [`Group::ALL`] and the `derive`d `Ord` are the same
+/// sequence — so a sort by group cannot disagree with the headings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    Session,
+    Turn,
+    Conversation,
+    Runtime,
+    Client,
+}
+
+impl Group {
+    pub const ALL: [Group; 5] = [
+        Group::Session,
+        Group::Turn,
+        Group::Conversation,
+        Group::Runtime,
+        Group::Client,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "Session",
+            Self::Turn => "Turn",
+            Self::Conversation => "Conversation",
+            Self::Runtime => "Runtime",
+            Self::Client => "Client",
+        }
+    }
+
+    /// The group a query names outright, so `runtime` in the palette is a filter and not a
+    /// substring match. Case-insensitive, because a heading is drawn capitalised and typed
+    /// however the operator types it.
+    pub fn parse(query: &str) -> Option<Self> {
+        let query = query.trim();
+
+        Self::ALL
+            .into_iter()
+            .find(|group| group.as_str().eq_ignore_ascii_case(query))
+    }
+}
+
+/// S1. The verbs both surfaces draw, as one file.
+///
+/// `priv/ui/commands.json` is the list; this client and `Ouroboros.Web.Commands` read the
+/// same bytes, so a verb's heading, its wording and its typed spelling are written once.
+/// What stays in code on each side is *behaviour*: the [`Command`] enum, [`Command::action`]
+/// and every gate in [`App::palette_commands`], because whether a verb can run here is a
+/// question about this runtime and not a fact about a catalogue.
+///
+/// The file is `include_str!`d, so a release cannot ship a bad one — a malformed file is a
+/// panic at the first lookup, which the tests in `tui/tests/catalogue.rs` reach first.
+const CATALOGUE_JSON: &str = include_str!("../../../../priv/ui/commands.json");
+
+/// One row of the file, in the shape this client reads it.
+///
+/// `label` and `slash` are the spelling both surfaces share. Where a surface genuinely
+/// spells a verb differently — because one of them splits it in two, or because only one
+/// of them parses a draft — that surface carries its own inside its own block, and the
+/// row's `note` says why. A side that is `null` is a verb the other surface does not have.
+///
+/// The row's other keys — `tui.command`, `tui.action`, the whole `web` block and `note` —
+/// are deliberately absent here: serde ignores what it is not asked for, and asking for a
+/// field this crate never reads would only mean a struct that lies about who uses it.
+/// `tui/tests/catalogue.rs` parses the same bytes for itself and checks every one of them,
+/// which is also what makes it an independent reader rather than a second opinion from
+/// this parse.
+#[derive(Debug, serde::Deserialize)]
+pub struct CatalogueEntry {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    pub slash: Option<String>,
+    pub tui: Option<CatalogueTui>,
+}
+
+/// The terminal client's half of a row: only the spellings it may keep for itself.
+#[derive(Debug, serde::Deserialize)]
+pub struct CatalogueTui {
+    pub label: Option<String>,
+    pub slash: Option<String>,
+}
+
+/// The file, parsed once, in the order it is written.
+pub static CATALOGUE: std::sync::LazyLock<Vec<CatalogueEntry>> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(CATALOGUE_JSON).expect("priv/ui/commands.json is not a valid catalogue")
+});
+
+/// The same rows, by id, because every lookup here starts from [`Command::id`].
+static BY_ID: std::sync::LazyLock<HashMap<&'static str, &'static CatalogueEntry>> =
+    std::sync::LazyLock::new(|| {
+        CATALOGUE
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect()
+    });
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     NewSession,
@@ -109,7 +215,6 @@ pub enum Command {
     CloseSession,
     ConnectChatGpt,
     Runtime,
-    Nodes,
     Upgrades,
     ListCapabilities,
     PreviewCapability,
@@ -157,10 +262,22 @@ pub enum Command {
     Sandbox,
     /// D4: the MCP servers this session's node runs, and the entries it refused.
     Mcp,
+    /// F12. Three verbs the parity plan's group table names and the palette did not carry.
+    /// A palette that is missing a verb the plan lists is a palette the plan's own table
+    /// cannot be checked against.
+    ///
+    /// `interactive.rename`, taught by prefilling the composer — it takes a title nobody
+    /// but the operator can write.
+    Rename,
+    /// The quit dialog, which had a key and a slash verb and no row.
+    Quit,
+    /// The approval waiting on an answer. `ctrl+x a` reopens it; this is the row for
+    /// anyone who has not learnt the chord.
+    Approval,
 }
 
 impl Command {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 43] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -179,7 +296,6 @@ impl Command {
         Self::WriteAccess,
         Self::ConnectChatGpt,
         Self::Runtime,
-        Self::Nodes,
         Self::Upgrades,
         Self::Logs,
         Self::Settings,
@@ -202,141 +318,148 @@ impl Command {
         Self::AutoApprove,
         Self::Sandbox,
         Self::Mcp,
+        Self::Rename,
+        Self::Quit,
+        Self::Approval,
     ];
 
-    pub fn group(self) -> &'static str {
-        match self {
-            Self::NewSession
-            | Self::NewSessionOptions
-            | Self::WriteAccess
-            | Self::SwitchSession
-            | Self::SessionDetails
-            | Self::CopyLast
-            | Self::CopyRawLast
-            | Self::Export
-            | Self::DumpScrollback
-            | Self::ViewTranscript
-            | Self::Interrupt
-            | Self::Steer
-            | Self::ExternalEditor
-            | Self::CloseSession
-            | Self::ConnectChatGpt
-            | Self::ShowDiff
-            | Self::RawMode
-            | Self::Backtrack
-            | Self::Fork
-            | Self::Model
-            | Self::Effort
-            | Self::Cost
-            | Self::Keys
-            | Self::Compact
-            | Self::Handoff
-            | Self::Context
-            | Self::Rewind
-            | Self::Theme
-            | Self::Plan
-            | Self::AutoApprove
-            | Self::Sandbox
-            | Self::Help => "Coding",
-            _ => "Runtime & distribution",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::NewSession => "New session",
-            Self::NewSessionOptions => "New session options",
-            Self::WriteAccess => "Start a session that can edit files",
-            Self::SwitchSession => "Switch session",
-            Self::SessionDetails => "Toggle event details",
-            Self::CopyLast => "Copy last agent message",
-            Self::CopyRawLast => "Copy last agent message as source Markdown",
-            Self::Export => "Export the transcript to a file",
-            Self::DumpScrollback => "Print transcript into terminal scrollback",
-            Self::ViewTranscript => "Open transcript in $EDITOR",
-            Self::Interrupt => "Interrupt the running turn",
-            Self::Steer => "Steer the running turn",
-            Self::ExternalEditor => "Edit prompt in $EDITOR",
-            Self::CloseSession => "End or remove session",
-            Self::ConnectChatGpt => "Connect ChatGPT",
-            Self::Runtime => "Runtime & distribution",
-            Self::Nodes => "Nodes",
-            Self::Upgrades => "Upgrades",
-            Self::ListCapabilities => "List capability proposals",
-            Self::PreviewCapability => "Preview a capability",
-            Self::AdmitCapability => "Admit a capability",
-            Self::Logs => "Logs",
-            Self::Settings => "Settings",
-            Self::Help => "Keyboard shortcuts",
-            Self::ShowDiff => "Show changed files",
-            Self::RawMode => "Toggle raw copy mode",
-            Self::Backtrack => "Go back to an earlier message",
-            Self::Fork => "Fork this session",
-            Self::Model => "Change the model",
-            Self::Effort => "Reasoning effort for the next turn",
-            Self::Keys => "Show the effective key map",
-            Self::Cost => "Show tokens and cost for this session",
-            Self::Compact => "Compact this conversation now",
-            Self::Handoff => "Hand this session's work to a fresh one",
-            Self::Context => "Show what fills the context window",
-            Self::Rewind => "Rewind to an earlier turn",
-            Self::Theme => "Cycle the colour theme",
-            Self::Plan => "Plan without editing anything",
-            Self::AutoApprove => "Auto-approve everything this session asks",
-            Self::Sandbox => "Change file access (OS sandbox)",
-            Self::Mcp => "Show this node's MCP servers",
-        }
-    }
-
-    /// The chord or verb this command answers to, as a *literal*.
+    /// S1. This command's row in `priv/ui/commands.json`.
     ///
-    /// Only for the commands whose spelling is a slash verb rather than a key. Anything
-    /// with a key goes through [`Command::action`] and the resolved keymap instead, so a
-    /// rebound chord is what the palette shows (D14, B8) — see [`App::command_shortcut`].
-    fn slash(self) -> &'static str {
+    /// The web's dotted ids, because that catalogue had them first and a verb the two
+    /// surfaces share should be looked up under one name. The `match` is total, so a
+    /// variant added without an id here does not compile; a row whose `tui` block names no
+    /// variant is what `tui/tests/catalogue.rs` refuses.
+    pub fn id(self) -> &'static str {
         match self {
-            Self::NewSession => "ctrl+x n",
-            Self::NewSessionOptions => "ctrl+x N",
-            Self::WriteAccess => "/write",
-            Self::SwitchSession => "ctrl+x l",
-            Self::SessionDetails => "ctrl+x d",
-            Self::CopyLast => "ctrl+x y",
-            Self::CopyRawLast => "/copy raw",
-            Self::Export => "/export",
-            Self::DumpScrollback => "ctrl+x [",
-            Self::ViewTranscript => "ctrl+x v",
-            Self::Interrupt => "esc",
-            Self::Steer => "ctrl+x s",
-            Self::ExternalEditor => "ctrl+g",
-            Self::CloseSession => "ctrl+x x",
-            Self::ConnectChatGpt => "/connect",
-            Self::Runtime => "/runtime",
-            Self::Nodes => "/runtime",
-            Self::Upgrades => "/upgrades",
-            Self::ListCapabilities => "/capabilities",
-            Self::PreviewCapability => "/preview",
-            Self::AdmitCapability => "/admit",
-            Self::Logs => "/logs",
-            Self::Settings => "/settings",
-            Self::Help => "?",
-            Self::ShowDiff => "/diff",
-            Self::RawMode => "/raw",
-            Self::Backtrack => "esc esc",
-            Self::Fork => "/fork",
-            Self::Model => "/model",
-            Self::Effort => "/effort",
-            Self::Keys => "/keys",
-            Self::Cost => "/cost",
-            Self::Compact => "/compact",
-            Self::Handoff => "/handoff",
-            Self::Context => "/context",
-            Self::Rewind => "/rewind",
-            Self::Theme => "/theme",
-            Self::Plan => "/plan",
-            Self::AutoApprove => "/auto-approve",
-            Self::Sandbox => "/sandbox",
-            Self::Mcp => "/mcp",
+            Self::NewSession => "session.new",
+            Self::SwitchSession => "session.switch",
+            Self::SessionDetails => "conversation.details",
+            Self::ShowDiff => "conversation.diff",
+            Self::RawMode => "conversation.raw",
+            Self::CopyLast => "conversation.copy",
+            Self::CopyRawLast => "conversation.copy_source",
+            Self::Export => "conversation.export",
+            Self::DumpScrollback => "conversation.scrollback",
+            Self::ViewTranscript => "conversation.view",
+            Self::Interrupt => "turn.interrupt",
+            Self::Steer => "turn.steer",
+            Self::ExternalEditor => "turn.editor",
+            Self::CloseSession => "session.end",
+            Self::NewSessionOptions => "session.options",
+            Self::WriteAccess => "session.writable",
+            Self::ConnectChatGpt => "runtime.connect",
+            Self::Runtime => "runtime.status",
+            Self::Upgrades => "runtime.upgrades",
+            Self::Logs => "runtime.logs",
+            Self::Settings => "client.settings",
+            Self::Help => "client.help",
+            Self::ListCapabilities => "runtime.capabilities",
+            Self::PreviewCapability => "runtime.capability_preview",
+            Self::AdmitCapability => "runtime.capability_admit",
+            Self::Backtrack => "conversation.backtrack",
+            Self::Fork => "session.fork",
+            Self::Model => "turn.model",
+            Self::Effort => "turn.effort",
+            Self::Cost => "conversation.cost",
+            Self::Keys => "client.shortcuts",
+            Self::Compact => "conversation.compact",
+            Self::Handoff => "session.handoff",
+            Self::Context => "conversation.context",
+            Self::Rewind => "conversation.rewind",
+            Self::Theme => "client.theme",
+            Self::Plan => "turn.plan",
+            Self::AutoApprove => "turn.auto_approve",
+            Self::Sandbox => "turn.sandbox",
+            Self::Mcp => "runtime.mcp",
+            Self::Rename => "session.rename",
+            Self::Quit => "client.quit",
+            Self::Approval => "turn.approval",
         }
+    }
+
+    /// This command's row in the shared file.
+    ///
+    /// Panics when the file does not carry it. That is the loud failure S1 asked for: the
+    /// bytes are `include_str!`d, so a build that runs at all has a file, and a file
+    /// missing a row is a mistake for a test to catch rather than a palette drawing a row
+    /// with no wording in it.
+    fn entry(self) -> &'static CatalogueEntry {
+        BY_ID
+            .get(self.id())
+            .copied()
+            .unwrap_or_else(|| panic!("priv/ui/commands.json has no row for {}", self.id()))
+    }
+
+    /// T2.1. The five groups of the parity plan, and nothing else.
+    ///
+    /// Two groups of thirty-five and six were a split that told a reader nothing: a
+    /// palette whose first heading covers everything from "new session" to "change the
+    /// model" has one heading. These five are the question each verb answers — what is
+    /// this conversation, what is this turn doing, what is the conversation *as a
+    /// document*, what is the runtime around it, and what is this client — and they are
+    /// the same five the `?` panel, the which-key overlay and the web palette use, so a
+    /// verb learned on one surface is found in the same place on the next.
+    ///
+    /// S1: the heading is read from the shared file rather than from a table here, so the
+    /// two palettes cannot file one verb under two headings. [`Group::parse`] is the same
+    /// function a typed query goes through, which is why the file spells a group the way
+    /// an operator would type it.
+    pub fn group(self) -> Group {
+        let group = &self.entry().group;
+
+        Group::parse(group).unwrap_or_else(|| {
+            panic!(
+                "{} is filed under {group:?}, which is not one of the five",
+                self.id()
+            )
+        })
+    }
+
+    /// The wording both palettes draw, from the shared file.
+    ///
+    /// A `tui` block may carry a `label` of its own, and none does today: the six rows
+    /// spelled two ways keep the web's wording in the `web` block, where the two surfaces
+    /// mean measurably different things by one verb (this client's `session.end` dialog
+    /// also removes; its `conversation.details` toggles a level rather than opening one
+    /// event; `runtime.status` is a tab here and a page there; `client.shortcuts` is the
+    /// map in force here and the only sheet there; `/copy raw` and the approval are typed
+    /// differently or not at all). Every other row is worded once, and the row's `note`
+    /// says which.
+    pub fn label(self) -> &'static str {
+        let entry = self.entry();
+
+        entry
+            .tui
+            .as_ref()
+            .and_then(|tui| tui.label.as_deref())
+            .unwrap_or(entry.label.as_str())
+    }
+
+    /// The typed spelling this command answers to, as a *literal*.
+    ///
+    /// Only reached for the commands with no [`Action`]. Anything with a key goes through
+    /// [`Command::action`] and the resolved keymap instead, so a rebound chord is what the
+    /// palette shows (D14, B8) — see [`App::command_shortcut`]. Which is why S1 could put
+    /// the `/verb` here for the rows that *do* have a key: the default chord this table
+    /// used to hold beside them was never read, and the catalogue wants the spelling the
+    /// web prints next to the same verb.
+    ///
+    /// Empty for the three commands that have a key and no verb at all —
+    /// `conversation.scrollback`, `conversation.view` and `turn.approval` — and
+    /// `tui/tests/catalogue.rs` holds the line that every *keyless* command has one.
+    ///
+    /// Public for that test and for no other caller: the spelling is a fact about the
+    /// shared file, and a drift test that could not read it would only be checking the
+    /// rows that happen to reach the screen.
+    pub fn slash(self) -> &'static str {
+        let entry = self.entry();
+
+        entry
+            .tui
+            .as_ref()
+            .and_then(|tui| tui.slash.as_deref())
+            .or(entry.slash.as_deref())
+            .unwrap_or_default()
     }
 
     /// The keymap action this command is also reachable by, where there is one.
@@ -353,23 +476,36 @@ impl Command {
             Self::DumpScrollback => Action::LeaderScrollback,
             Self::ViewTranscript => Action::LeaderEditorView,
             Self::Interrupt => Action::Interrupt,
-            Self::Steer => Action::LeaderSteer,
-            Self::ExternalEditor => Action::Editor,
+            // The keys that work: `leader.steer` and `editor` default to `off` since T1,
+            // and a column reading `off` for a verb `alt+enter` and `ctrl+x e` reach would
+            // say the verb has no key.
+            Self::Steer => Action::Steer,
+            Self::ExternalEditor => Action::LeaderEditor,
             Self::CloseSession => Action::LeaderEnd,
-            Self::Settings => Action::Settings,
+            Self::Settings => Action::LeaderSettings,
+            Self::Theme => Action::LeaderTheme,
             Self::Help => Action::Help,
             Self::Backtrack => Action::Backtrack,
             Self::AutoApprove => Action::LeaderAutoApprove,
+            Self::Quit => Action::Quit,
+            Self::Approval => Action::LeaderApproval,
             _slash_only => return None,
         })
     }
 
+    /// T2.1. Whether this row answers the query: its label, or the chord it is reached by.
+    ///
+    /// The group name is *not* matched as a substring. It used to be, and the effect was
+    /// that typing `co` — two letters of `copy`, `compact`, `context` — returned all
+    /// thirty-five rows of the group called "Coding", because every one of them contained
+    /// those letters in a column the operator was not typing about. A query that is a
+    /// group name *exactly* is handled one level up, in [`CommandPalette::matching`],
+    /// where it filters to that group instead of matching rows.
     fn matches(self, query: &str, shortcut: &str) -> bool {
         let query = query.trim().to_ascii_lowercase();
         query.is_empty()
             || self.label().to_ascii_lowercase().contains(&query)
-            || self.group().to_ascii_lowercase().contains(&query)
-            || shortcut.contains(&query)
+            || shortcut.to_ascii_lowercase().contains(&query)
     }
 }
 
@@ -380,15 +516,33 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    /// Every command whose label, group, or shortcut matches the query — before the
-    /// capability filter. [`App::palette_commands`] is what a caller draws or activates;
-    /// this is the half that does not need to know which session is open.
+    /// Every command that answers the query, in the order the palette draws them — before
+    /// the capability filter. [`App::palette_commands`] is what a caller draws or
+    /// activates; this is the half that does not need to know which session is open.
+    ///
+    /// T2.1. Sorted by group, then by [`Command::ALL`] order within it. The rows used to
+    /// come out in `ALL` order with a heading printed on every change of group, and `ALL`
+    /// crossed between the two groups six times — so a palette that fitted twenty rows
+    /// printed each heading three times and put "Settings" a page away from "Theme". A
+    /// stable sort is the whole fix: every heading appears exactly once, and the order
+    /// inside a group is still the deliberate one the table is written in.
     pub fn matching(&self, offered: &[Command], keymap: &Keymap) -> Vec<Command> {
-        offered
+        // A query that *is* a group name selects the group. It is the one query where a
+        // substring match on the group would be right and every other one where it would
+        // be wrong, so it is answered here and nowhere else.
+        let group = Group::parse(&self.query);
+
+        let mut rows = offered
             .iter()
             .copied()
-            .filter(|command| command.matches(&self.query, &shortcut_of(*command, keymap)))
-            .collect()
+            .filter(|command| match group {
+                Some(group) => command.group() == group,
+                None => command.matches(&self.query, &shortcut_of(*command, keymap)),
+            })
+            .collect::<Vec<_>>();
+
+        rows.sort_by_key(|command| command.group());
+        rows
     }
 }
 
@@ -403,8 +557,16 @@ impl App {
             .iter()
             .copied()
             .filter(|command| match command {
-                Command::Steer => self.steer_offered(),
-                Command::Interrupt => self.open_capabilities().interrupt.offered(),
+                // T2.1. Two gates, not one. The transport capability says whether this
+                // verb *can ever* work here; `session_busy` says whether there is a turn
+                // for it to act on. Both rows used to be offered on an idle or ended
+                // session, where pressing them does nothing at all — which is the same
+                // "advertising a verb that will be refused" failure D14 names, arrived at
+                // from the other direction.
+                Command::Steer => self.steer_offered() && self.session_busy(),
+                Command::Interrupt => {
+                    self.open_capabilities().interrupt.offered() && self.session_busy()
+                }
                 Command::Fork => self.fork_offered(),
                 Command::Model => self.hello.serves("interactive.configure"),
                 // B2/D4. Same rule: a control the runtime cannot serve is not offered.
@@ -422,6 +584,15 @@ impl App {
                     self.sessions.open.is_some() && self.hello.serves("interactive.configure")
                 }
                 Command::Mcp => self.hello.serves("mcp.list"),
+                // F12. The same two questions the verb itself asks: is there a session,
+                // and does this gateway serve the method that renames one.
+                Command::Rename => {
+                    self.sessions.open.is_some() && self.hello.serves("interactive.rename")
+                }
+                // The transport must have an approvals channel at all, *and* something
+                // must actually be waiting — a row that opens an empty modal is a row that
+                // does nothing, which is the failure the Interrupt gate exists to avoid.
+                Command::Approval => self.approvals_offered() && self.pending_approval(),
                 // D9/D6. Native only, and the gate is the same two questions the verb
                 // itself asks: a row that always refuses is a row that should not be
                 // drawn.
@@ -435,6 +606,19 @@ impl App {
             .collect::<Vec<_>>();
 
         palette.matching(&offered, &self.keymap)
+    }
+
+    /// F12. Whether the open session has an approval still waiting on an answer.
+    ///
+    /// The same question `reopen_approval` asks before it opens anything, so the palette
+    /// row and the key it duplicates cannot disagree about whether there is one.
+    fn pending_approval(&self) -> bool {
+        self.sessions
+            .open
+            .as_ref()
+            .and_then(|key| self.sessions.watches.get(key))
+            .and_then(Watch::next_approval)
+            .is_some()
     }
 
     /// What the palette prints in a command's shortcut column.
@@ -507,11 +691,27 @@ pub enum Overlay {
     },
     /// This client's own preferences, beside the facts the runtime reports.
     Settings(Box<Settings>),
+    /// T2.9. `/theme` with no argument, and `leader.theme`: the palettes this build has,
+    /// previewed on the screen already showing the conversation.
+    ///
+    /// The preview really is the switch — there is nothing useful to preview a palette in
+    /// but the transcript — but a preview that *wrote* it was the problem: bare `/theme`
+    /// cycled one step and saved `config.toml` on the spot, so looking at the next palette
+    /// and looking at the next palette **and keeping it** were the same keystroke. This
+    /// separates them: moving previews, `Enter` writes, `Esc` puts back what was drawing
+    /// before the overlay opened and writes nothing at all.
+    Theme {
+        choice: usize,
+        /// What was drawing when this opened, so `Esc` can restore it exactly. Held rather
+        /// than re-read on close: the config is what `Enter` edits, and restoring from it
+        /// would restore whatever the last preview had already made of it.
+        previous: super::super::theme::ThemeName,
+    },
     Quit {
         options: Vec<(String, Quit)>,
         choice: usize,
     },
-    /// Opened by an `approval_requested` event, or by `a` while one is outstanding.
+    /// Opened by an `approval_requested` event, or by `ctrl+x a` while one is outstanding.
     Approval {
         plane: Plane,
         id: String,
@@ -608,6 +808,17 @@ pub enum Overlay {
         id: String,
         title: String,
         text: Option<String>,
+        /// T2.6. Whether the session picker is underneath, so leaving goes back to it.
+        ///
+        /// `Space` is advertised as looking *without leaving the list* — the whole reason
+        /// a triage key is cheap — and an overlay that replaced the list made the cheap
+        /// key cost the place in it.
+        ///
+        /// No separate copy of the picker's selection, because there is only one answer
+        /// it could hold: the picker peeks the row under its own cursor, so this overlay's
+        /// `plane` and `id` *are* that selection. Carrying a second copy would be a second
+        /// thing that could disagree with it.
+        from_picker: bool,
     },
 }
 
@@ -869,10 +1080,17 @@ impl App {
                     KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     // A10, as above: the number on the row is the key that picks it.
+                    //
+                    // T2.7. For everyone, not only under screen-reader mode. The general
+                    // rule — that `1` through `9` are ordinary characters and taking them
+                    // would be a keybinding nobody asked for — is about surfaces where
+                    // something is being *typed*. Nothing is being typed here: this modal
+                    // draws a numbered list of at most five answers and has no text field
+                    // until `r` or `Tab` opens one. A number that does not select on a
+                    // numbered menu is a number printed for decoration.
                     KeyCode::Char(digit)
-                        if super::super::access::screen_reader()
-                            && super::super::access::row_for_digit(digit)
-                                .is_some_and(|row| row < rows) =>
+                        if super::super::access::row_for_digit(digit)
+                            .is_some_and(|row| row < rows) =>
                     {
                         *choice = super::super::access::row_for_digit(digit).expect("a digit row");
                     }
@@ -958,6 +1176,58 @@ impl App {
                     _ => {}
                 }
             }
+            // T2.9. Moving previews; `Enter` keeps; `Esc` puts back. Nothing reaches
+            // `config.toml` until `Enter`, which is the whole point of the overlay.
+            Overlay::Theme { choice, previous } => {
+                let previous = *previous;
+                let last = super::super::theme::ThemeName::ALL.len() - 1;
+
+                let moved = match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        *choice = (*choice + 1).min(last);
+                        true
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        *choice = choice.saturating_sub(1);
+                        true
+                    }
+                    // F2. The rows are drawn `1.` through `6.` for everyone, so the digits
+                    // select for everyone — the same rule T2.7 applied to the approval
+                    // modal, and for the same reason: nothing is being typed here, and a
+                    // number printed beside a row no key reaches is decoration claiming to
+                    // be a binding. Previewing, like the arrows, because that is what
+                    // landing on a row means in this overlay.
+                    KeyCode::Char(digit)
+                        if super::super::access::row_for_digit(digit)
+                            .is_some_and(|row| row <= last) =>
+                    {
+                        *choice = super::super::access::row_for_digit(digit).expect("a digit row");
+                        true
+                    }
+                    _elsewhere => false,
+                };
+
+                if moved {
+                    let name = super::super::theme::ThemeName::ALL[*choice];
+                    // The process-wide install only: this is a look, not a decision.
+                    super::super::switch_theme(name);
+                    return;
+                }
+
+                match key.code {
+                    KeyCode::Enter => {
+                        let name = super::super::theme::ThemeName::ALL[*choice];
+                        self.overlay = None;
+                        // The App's own, which is the one that records and announces it.
+                        self.switch_theme(name);
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.overlay = None;
+                        super::super::switch_theme(previous);
+                    }
+                    _ => {}
+                }
+            }
             // D9. A read-only page, with the same discipline as `?`.
             Overlay::Context { scroll, .. } => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
@@ -1001,11 +1271,28 @@ impl App {
             }
             // G2. One key in, one key out. `r` goes on from the peek to the reply, so a
             // triage pass is Space to look and r to answer without a detour.
-            Overlay::Peek { plane, id, .. } => {
-                let (plane, id) = (*plane, id.clone());
+            //
+            // T2.6. Four keys, and each of them does what the hint says. `Enter` *opens*,
+            // which is what the hint has always claimed and what the picker's own Enter
+            // does; `Space` and `q` put the peek away the way it was opened; `Esc` steps
+            // back to the list rather than out of it, because a triage pass that lost its
+            // place every time it looked at a row is a pass nobody finishes.
+            Overlay::Peek {
+                plane,
+                id,
+                from_picker,
+                ..
+            } => {
+                let (plane, id, from_picker) = (*plane, id.clone(), *from_picker);
 
                 match key.code {
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | ' ') => self.overlay = None,
+                    KeyCode::Esc | KeyCode::Char('q' | ' ') => {
+                        self.restore_picker(from_picker.then(|| (plane, id.clone())))
+                    }
+                    KeyCode::Enter => {
+                        self.overlay = None;
+                        self.open_session(plane, id);
+                    }
                     KeyCode::Char('r') => {
                         self.overlay = None;
                         self.reply_to_session(plane, id);
@@ -1175,7 +1462,7 @@ impl App {
                 self.overlay = None;
                 self.open_account();
             }
-            Command::Runtime | Command::Nodes => {
+            Command::Runtime => {
                 self.overlay = None;
                 self.select_tab(Tab::Dashboard);
             }
@@ -1239,9 +1526,12 @@ impl App {
                 self.overlay = None;
                 self.open_rewind();
             }
+            // T2.9. The list, not a step through it. A palette is a thing you look at and
+            // keep or put back, and the palette row was the one place the verb was reached
+            // by people who do not know the names.
             Command::Theme => {
                 self.overlay = None;
-                self.cycle_theme();
+                self.open_theme_picker();
             }
             // B2. The palette row toggles, because the palette has nowhere to type
             // `on`/`off`; the slash verb takes both.
@@ -1264,6 +1554,20 @@ impl App {
             Command::Mcp => {
                 self.overlay = None;
                 self.open_mcp();
+            }
+            // F12. A title is words the operator has to type, so the palette teaches the
+            // verb by prefilling it — the same thing `/model` and `/handoff` do.
+            Command::Rename => {
+                self.overlay = None;
+                self.prefill_composer("/rename ");
+            }
+            Command::Quit => {
+                self.overlay = None;
+                self.open_quit();
+            }
+            Command::Approval => {
+                self.overlay = None;
+                self.reopen_approval();
             }
             Command::ShowDiff => {
                 self.overlay = None;
@@ -1690,28 +1994,68 @@ impl App {
         None
     }
 
+    /// One predicate with `App::turn_running`, which the interrupt key and the `ctrl+c`
+    /// state machine read; the palette gates on the same fact.
     fn session_busy(&self) -> bool {
-        if self.waiting_for_open_agent_reply() {
-            return true;
-        }
-
-        self.sessions.open_info().is_some_and(|session| {
-            matches!(
-                session.status.as_str(),
-                "running" | "starting" | "awaiting_approval"
-            )
-        })
+        self.turn_running()
     }
 
+    /// `Esc` in the composer, after the interrupt has had its chance at the key.
+    ///
+    /// Interrupting is no longer decided here. `App::interrupt_key` claims the key bound
+    /// to `Action::Interrupt` while a turn is running, so this runs only when there is
+    /// nothing to interrupt — or when the operator moved the interrupt somewhere else,
+    /// in which case `Esc` genuinely no longer interrupts and must not pretend to.
+    ///
+    /// The two meanings that are left are the two `Esc` has always had on an idle
+    /// session, and the first of them used to do nothing at all: `docs/TUI.md` said a
+    /// draft was kept and the code dropped the keystroke (R1 §2.1). The draft goes where
+    /// `up` finds it rather than into a modal nobody asked for.
     pub(super) fn escape_from_prompt(&mut self) {
-        if self.session_busy() {
-            self.interrupt_turn();
+        if self.focused_prompt_empty() {
+            self.leave_session();
             return;
         }
 
-        if self.focused_prompt_empty() {
-            self.leave_session();
+        let remembered = self
+            .sessions
+            .composer
+            .as_mut()
+            .and_then(|composer| {
+                let remembered = composer.editor.accept_submission();
+                composer.user_changed_draft();
+                remembered
+            })
+            .is_some();
+
+        if !remembered {
+            return;
         }
+
+        // This `Esc` had a job and did it, so it is not also the first half of `Esc Esc`.
+        // Leaving the arm set cost a third keystroke to leave a session that had text in
+        // it: press one banked the draft *and* armed, press two was eaten by the chord,
+        // and only press three left. A chord's first key keeps its own job — it does not
+        // get to keep somebody else's as well.
+        self.backtrack_arm = None;
+
+        self.remember_composer_history();
+
+        let mut note = format!(
+            "draft cleared; {} brings it back",
+            self.keymap.label(Action::QueueRetract)
+        );
+
+        // This key only gets here mid-turn when the interrupt lives somewhere else, and
+        // whoever pressed it out of habit is owed the key that is one.
+        if self.session_busy() && self.bound(Action::Interrupt) {
+            note.push_str(&format!(
+                " · {} interrupts the turn",
+                self.keymap.label(Action::Interrupt)
+            ));
+        }
+
+        self.inform(note, NoticeKind::Info);
     }
 
     fn leave_session(&mut self) {

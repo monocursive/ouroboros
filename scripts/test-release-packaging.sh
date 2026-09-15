@@ -32,7 +32,7 @@ EOF
 
 build() {
     (cd "$dir" && NO_TARBALL="${1:-0}" FAIL_MIX="${2:-0}" \
-        PATH="$dir/bin:$PATH" make -o wasm ouro MIX=mix CARGO=cargo)
+        PATH="$dir/bin:$PATH" make -o wasm -o media ouro MIX=mix CARGO=cargo)
 }
 
 VERSION=0.1.0-rc.1

@@ -102,7 +102,8 @@ defmodule Ouroboros.Web.Endpoint do
     at: "/web",
     from: {:ouroboros, "priv/static/web"},
     gzip: false,
-    only: ~w(app.css app.js phoenix.min.js phoenix_live_view.min.js providers)
+    only:
+      ~w(app.css app.js image-attachments.js phoenix.min.js phoenix_live_view.min.js providers)
 
   plug Plug.Head
   plug Plug.Session, @session_options

@@ -21,12 +21,19 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 39] = [
+pub(crate) const COMMANDS: [(&str, &str); 49] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
     ("/sessions", "switch sessions"),
     ("/details", "toggle normalized event details"),
+    // T2.2. Five verbs the dispatcher has always accepted and this table never named, so
+    // `/di` offered nothing and the `?` panel — which is derived from this table — could
+    // not advertise them either. `/rename` is the sixth and the only new one.
+    ("/diff", "the files this session changed, by turn"),
+    ("/changes", "the files this session changed, by turn"),
+    ("/raw", "cells with no frame or gutter, for a native copy"),
+    ("/rename", "rename this session (<title>)"),
     (
         "/export",
         "write the transcript to a file ([--json] [path])",
@@ -35,6 +42,19 @@ pub(crate) const COMMANDS: [(&str, &str); 39] = [
     ("/theme", "switch the colour theme ([name])"),
     ("/interrupt", "abort the running turn"),
     ("/steer", "steer the running turn"),
+    (
+        "/attach",
+        "attach one local image file (quote paths with spaces)",
+    ),
+    (
+        "/view-image",
+        "open a ready draft position or history attachment ID locally",
+    ),
+    ("/paste-image", "paste an image from the local clipboard"),
+    (
+        "/remove-image",
+        "remove an attachment by its 1-based position",
+    ),
     ("/effort", "reasoning effort for the next turn only"),
     ("/backtrack", "go back to an earlier message"),
     ("/fork", "fork this session"),
@@ -65,7 +85,12 @@ pub(crate) const COMMANDS: [(&str, &str); 39] = [
     ("/help", "show keyboard help"),
     ("/hotkeys", "show keyboard help"),
     ("/keys", "show the effective key map and where it came from"),
+    (
+        "/keymap",
+        "show the effective key map and where it came from",
+    ),
     ("/cost", "tokens and cost for this session"),
+    ("/usage", "tokens and cost for this session"),
     ("/quit", "detach, disconnect, or stop the runtime"),
     ("/clear", "clear this draft"),
     ("/close", "end or remove the selected session"),
@@ -74,6 +99,122 @@ pub(crate) const COMMANDS: [(&str, &str); 39] = [
         "new session with provider and workspace options",
     ),
 ];
+
+/// The verbs that take the rest of the line, so accepting one from the menu leaves the
+/// caret after a space rather than at the end of a word.
+///
+/// Derived from the `slash_arg` arms of `App::activate_slash_command`, which is the only
+/// place a `/` verb reads an argument; a unit test below pins every entry to a row of
+/// [`COMMANDS`], so a verb that is renamed there cannot leave a ghost here. The table
+/// itself is one column wide and belongs to another slice, which is why this is a list
+/// beside it rather than a field in it.
+pub(crate) const COMMANDS_TAKING_AN_ARGUMENT: [&str; 16] = [
+    "/attach",
+    "/remove-image",
+    "/view-image",
+    "/effort",
+    "/model",
+    "/rename",
+    "/preview",
+    "/admit",
+    "/export",
+    "/copy",
+    "/theme",
+    "/compact",
+    "/handoff",
+    "/plan",
+    "/auto-approve",
+    "/sandbox",
+];
+
+/// The `/verb` at the head of `input`, when the line begins with something that is
+/// *shaped* like one.
+///
+/// Deliberately narrow. `"/usr/bin/env is missing"` and `"/tmp/x.log"` are sentences a
+/// person may legitimately want to send, and they are not verbs: a verb is a single
+/// leading `/` followed by letters, digits, `-` or `_` and nothing else. Anything looser
+/// would turn this client's refusal into a refusal to send ordinary messages.
+pub(crate) fn slash_verb(input: &str) -> Option<&str> {
+    let verb = input.split_whitespace().next()?;
+    let name = verb.strip_prefix('/')?;
+
+    let named = !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        });
+
+    named.then_some(verb)
+}
+
+/// Whether [`COMMANDS`] has a row for `verb`, spelled with its `/`.
+pub(crate) fn is_known_command(verb: &str) -> bool {
+    COMMANDS
+        .iter()
+        .any(|(name, _detail)| name.eq_ignore_ascii_case(verb))
+}
+
+/// Up to three verbs a mistyped one might have meant, best first.
+///
+/// Three ranks, because three different mistakes produce three different misses: a verb
+/// typed short (`/ke`), a verb remembered by its middle (`/board`), and a verb typed
+/// wrong (`/comapct`). The distance bound is half the word, so a three-letter stub does
+/// not drag in every verb with three letters in common.
+pub(crate) fn nearest_commands(verb: &str) -> Vec<&'static str> {
+    let typed = verb.trim_start_matches('/').to_ascii_lowercase();
+
+    if typed.is_empty() {
+        return Vec::new();
+    }
+
+    let bound = (typed.chars().count() / 2).max(1);
+    let mut ranked: Vec<(usize, usize, &'static str)> = Vec::new();
+
+    for (index, (name, _detail)) in COMMANDS.iter().enumerate() {
+        let candidate = name.trim_start_matches('/').to_ascii_lowercase();
+
+        let rank = if candidate.starts_with(&typed) {
+            0
+        } else if candidate.contains(&typed) {
+            1
+        } else if edit_distance(&typed, &candidate) <= bound {
+            2
+        } else {
+            continue;
+        };
+
+        ranked.push((rank, index, *name));
+    }
+
+    ranked.sort_by_key(|(rank, index, _name)| (*rank, *index));
+    ranked
+        .into_iter()
+        .take(3)
+        .map(|(_rank, _index, name)| name)
+        .collect()
+}
+
+/// Levenshtein distance over characters, two rows at a time. Both inputs here are verb
+/// names, so the quadratic is over a dozen characters against forty rows.
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+
+    for (row, left_character) in left.chars().enumerate() {
+        current[0] = row + 1;
+
+        for (column, right_character) in right.iter().enumerate() {
+            let substitution = previous[column] + usize::from(left_character != *right_character);
+            current[column + 1] = substitution
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right.len()]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionKind {
@@ -349,6 +490,14 @@ impl Editor {
                 self.insert("\n");
                 EditorAction::None
             }
+            // A menu that is open is what Enter is answering. opencode, Claude Code and
+            // Codex all select on Enter, and this client used to submit instead: `/ke`
+            // plus Enter sent "/ke" as a turn, and on the home screen it started a
+            // session and opened a sign-in for it (R1 §2.3). Tab still completes, and
+            // Enter with no menu still sends.
+            _accept if keymap.hits(Action::Send, key) && self.accept_for_send() => {
+                EditorAction::None
+            }
             _send if keymap.hits(Action::Send, key) => EditorAction::Submit,
             KeyCode::Tab if self.apply_completion() => EditorAction::None,
             KeyCode::Tab => EditorAction::None,
@@ -490,6 +639,11 @@ impl Editor {
             _ => return EditorAction::None,
         };
 
+        // An accepted word is refreshed like any other edit, and that is safe *because*
+        // `accept_command_for_send` only completes a strict prefix: the menu this rebuilds
+        // holds the word it just wrote, so the next Enter finds nothing to continue and
+        // sends. A looser accept rule would loop here, which is what the flag that used to
+        // guard this line was hiding.
         if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc)
             && !matches!(
                 action,
@@ -741,6 +895,108 @@ impl Editor {
             (menu.selected as isize + delta).rem_euclid(menu.items.len() as isize) as usize;
     }
 
+    /// Enter's half of the completion menu.
+    ///
+    /// The two menus want two different rules, because they are two different promises.
+    /// A `/` row is a *command* and accepting the wrong one runs the wrong thing; an `@`
+    /// row is a path and accepting it only writes text and an attachment.
+    fn accept_for_send(&mut self) -> bool {
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+
+        let token = self.text[menu.start..menu.end].to_string();
+
+        match menu.selected().map(|item| item.kind) {
+            Some(CompletionKind::Command) => self.accept_command_for_send(&token),
+            Some(CompletionKind::File) => self.accept_path_for_send(&token),
+            None => {
+                self.completion = None;
+                false
+            }
+        }
+    }
+
+    /// Enter on a `/` menu completes only a verb the typed word actually *continues* into.
+    ///
+    /// The rule has to be prefix-of-the-name, and nothing looser, because the menu itself
+    /// is looser: [`matching_commands`] matches each row's description as well as its
+    /// name, which is right for *offering* rows and catastrophic for choosing one. `/new`'s
+    /// description is "start a new coding session", so `/session`, `/start`, `/s`, `/c`
+    /// and `/e` all matched it — and `/new` is row 0, so Enter answered every one of them
+    /// with `/new`, which a second Enter then ran. A lone `/` matched all forty-five.
+    ///
+    /// So: the highlighted row if the word continues into it — somebody who moved the
+    /// selection meant it — otherwise the first row in table order that it continues into,
+    /// and otherwise nothing at all, which sends the word as typed and lets the
+    /// unknown-verb refusal say so. `/ke` is `/keys` and not `/keymap` by that order.
+    ///
+    /// "Continues into" is strict: a word that already *is* a row is finished, and
+    /// completing it again would charge a second Enter for every verb typed out in full.
+    fn accept_command_for_send(&mut self, token: &str) -> bool {
+        // A lone sigil is not a word anybody started.
+        if token.chars().count() <= 1 {
+            self.completion = None;
+            return false;
+        }
+
+        let typed = token.to_ascii_lowercase();
+        let continues = |value: &str| {
+            let value = value.to_ascii_lowercase();
+            value.len() > typed.len() && value.starts_with(&typed)
+        };
+
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+
+        let chosen = menu
+            .selected()
+            .filter(|item| continues(&item.value))
+            .map(|_highlighted| menu.selected)
+            .or_else(|| menu.items.iter().position(|item| continues(&item.value)));
+
+        let Some(index) = chosen else {
+            self.completion = None;
+            return false;
+        };
+
+        if let Some(menu) = self.completion.as_mut() {
+            menu.selected = index;
+        }
+
+        self.apply_completion()
+    }
+
+    /// Enter on an `@` menu takes the highlighted row, because a path menu matches on any
+    /// part of the path and `@main` meaning `src/main.rs` is what the menu is *for*.
+    ///
+    /// The one word it does not complete is a path already typed out in full — and that
+    /// word still has to leave here as an attachment. B4's promise is that an `@path`
+    /// is both the sentence and the structured file; a path somebody typed rather than
+    /// Tab-completed used to be only the sentence.
+    fn accept_path_for_send(&mut self, token: &str) -> bool {
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+
+        if menu.items.iter().any(|item| item.value == token) {
+            self.completion = None;
+            self.record_completed_path(token);
+            return false;
+        }
+
+        self.apply_completion()
+    }
+
+    /// B4. The path half of an applied `@` completion, bounded by [`COMPLETED_PATH_LIMIT`].
+    fn record_completed_path(&mut self, value: &str) {
+        if self.completed_paths.len() < COMPLETED_PATH_LIMIT {
+            self.completed_paths
+                .push(value.trim_start_matches('@').to_string());
+        }
+    }
+
     fn apply_completion(&mut self) -> bool {
         let Some(menu) = self.completion.take() else {
             return false;
@@ -752,6 +1008,17 @@ impl Editor {
         self.detach_history();
         self.text.replace_range(menu.start..menu.end, &item.value);
         self.cursor = menu.start + item.value.len();
+
+        // A verb that takes the rest of the line gets the space it is waiting for; one
+        // that is the whole command does not, so accepting it leaves a line that is
+        // already exactly what would be sent.
+        if item.kind == CompletionKind::Command
+            && COMMANDS_TAKING_AN_ARGUMENT.contains(&item.value.as_str())
+            && !self.text[self.cursor..].starts_with(' ')
+        {
+            self.text.insert(self.cursor, ' ');
+            self.cursor += 1;
+        }
 
         if item.kind == CompletionKind::File {
             self.text.insert(self.cursor, ' ');
@@ -765,10 +1032,7 @@ impl Editor {
             // Bounded, and by more than the composer's own ceiling: this buffer is drained
             // on the next keystroke, so anything left in it is a completion nobody
             // collected.
-            if self.completed_paths.len() < COMPLETED_PATH_LIMIT {
-                self.completed_paths
-                    .push(item.value.trim_start_matches('@').to_string());
-            }
+            self.record_completed_path(&item.value);
         }
 
         self.preferred_column = None;
@@ -1004,6 +1268,39 @@ mod tests {
 
     fn modified(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    /// The list beside [`COMMANDS`] has to name rows that are in it. A verb renamed in the
+    /// table would otherwise leave a ghost here, and the ghost's only symptom is a missing
+    /// space after a completion — which nobody would trace back to this list.
+    #[test]
+    fn every_verb_that_takes_an_argument_is_a_row_of_the_command_table() {
+        for verb in COMMANDS_TAKING_AN_ARGUMENT {
+            assert!(
+                COMMANDS.iter().any(|(name, _detail)| *name == verb),
+                "{verb} takes an argument and is not in COMMANDS"
+            );
+        }
+
+        // And the list is a set: a duplicate is a line somebody added twice.
+        for (index, verb) in COMMANDS_TAKING_AN_ARGUMENT.iter().enumerate() {
+            assert!(
+                !COMMANDS_TAKING_AN_ARGUMENT[..index].contains(verb),
+                "{verb} is listed twice"
+            );
+        }
+    }
+
+    /// The command table itself has no duplicate names — two rows with one name would make
+    /// "the first row in table order" a coin toss.
+    #[test]
+    fn the_command_table_names_each_verb_once() {
+        for (index, (name, _detail)) in COMMANDS.iter().enumerate() {
+            assert!(
+                !COMMANDS[..index].iter().any(|(other, _)| other == name),
+                "{name} has two rows"
+            );
+        }
     }
 
     #[test]

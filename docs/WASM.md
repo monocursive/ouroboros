@@ -386,12 +386,20 @@ Consequences, all verified against the seams in §4.1:
   Admitting the whole `Ouroboros.Wasm.` prefix was safe only by accident — no other
   module in that namespace exports `new/0` or `new/1` — and a host module added there
   tomorrow would have become startable from any connected node. Forged code still
-  structurally cannot enter the namespace (verifier introduce-prefix requires
-  `Ouroboros.Capability.*`; signer policy refuses anything else), but the allow-list no
+  cannot enter the namespace — a lane-W deploy introduces no module at all, and the
+  signer has no field in which to name one (`policy.ex:328`) — but the allow-list no
   longer depends on that.
-- `Ouroboros.Wasm.` joins the verifier's `@protected_prefixes` (`verifier.ex:53-67`):
+- `Ouroboros.Wasm.` joined the verifier's `@protected_prefixes` when this was built:
   the wasm host machinery must not be hot-patchable by the thing it contains — the
-  same sentence that puts the permission engine under `Control.` (D10).
+  same sentence that puts the permission engine under `Control.` (D10). That list went
+  with the verifier and the BEAM lane in [proposals/core.md](proposals/core.md) §4 A1,
+  and nothing replaced it because nothing is left to gate: no lane loads a BEAM module
+  (`wasm/capability.ex:5`), and nothing under `lib/` calls `:code.load_binary/3`,
+  `Module.create/3`, `Code.compile_string/2` or `Code.eval_string/2`. The sentence is
+  now true by absence. Honest limit: that absence is pinned by the grep, not by a test —
+  `rollout_two_node_test.exs:164` proves a deploy *adds* no capability module on any
+  peer, and no test proves one cannot *replace* a host module. A BEAM loader that
+  returns must bring the protected set back with it.
 - `Probe.ready?/1` and `Evaluation.run/3` take a module today
   (`Mesh.start_agent(id, agent: module, …)`). Both are generalized over a *start
   spec* — `module | {module, initial_state}` — a small additive change; lane B passes
@@ -769,11 +777,13 @@ The `Signer` behaviour is reused unchanged — `sign_artifact/2` already takes
    path cannot disagree about which process a component owns, and the config is bounded
    at 16 KiB.
 
-Loading-node verification mirrors the BEAM verifier's split: signature verified
-against `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` (same key format, `verifier.ex:355-382`
-posture), sha recomputed from bytes before staging, and the helper's `inspect` result
-cross-checked against the signed manifest at `load` — a mismatch quarantines, it
-never "just links less." Since W8 each **form** is bound to its own digest:
+Loading-node verification keeps the split the BEAM verifier had before
+[proposals/core.md](proposals/core.md) §4 A1 deleted it, now in `wasm/verifier.ex`
+alone: signature verified against `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` (same key format;
+`wasm/verifier.ex:244-282`, delegating the Ed25519 check to `signing/signature.ex:25`
+rather than owning a copy), sha recomputed from bytes before staging, and the helper's
+`inspect` result cross-checked against the signed manifest at `load` — a mismatch
+quarantines, it never "just links less." Since W8 each **form** is bound to its own digest:
 `Wasm.Verifier.verify_precompiled/2` holds the bundle's artifact section to
 `precompiled.sha256`, because a signature over one digest says nothing about bytes that
 merely travelled beside it, and a section the manifest does not declare — or a declaration
@@ -1500,9 +1510,18 @@ machinery — it is a backend, not a lane (D9).
 - **D9 — microVM is a sandbox backend, not part of the wasm design.** It must speak
   the three-string denial vocabulary and stay congruent across layers, or it is
   invisible to the escalation loop.
-- **D10 — `Ouroboros.Wasm.` is a protected namespace** (verifier
-  `@protected_prefixes`) and joins the mesh agent allow-list. The container must not
-  be hot-patchable by its contents.
+- **D10 — `Ouroboros.Wasm.` is a protected namespace.** The container must not be
+  hot-patchable by its contents. As decided, the prefix joined the verifier's
+  `@protected_prefixes`; that list went with the verifier in
+  [proposals/core.md](proposals/core.md) §4 A1 and nothing replaced it, because the
+  hot-patch lane it gated is gone: a lane-W capability introduces no BEAM module
+  (`wasm/capability.ex:5`), the signer takes a lowercase component name, a kind and the
+  world that kind requires (`policy.ex:328,397`), and nothing under `lib/` calls a BEAM
+  loader (`:code.load_binary/3`, `Module.create/3`, `Code.compile_string/2`,
+  `Code.eval_string/2`). The decision stands, satisfied by absence; its limit is that
+  the absence is pinned by that grep and not by a test. The mesh half became one named
+  module rather than the prefix: `Ouroboros.Wasm.Capability` alone is startable
+  (`mesh.ex:46`, F5), and `test/mesh_test.exs` enumerates the namespace.
 - **D11 — capability messages are not individually ledgered in v1.** They are mesh
   traffic, like every agent's. The audit story is the signed manifest, the registry,
   and the effect ledger on forge/deploy. A per-instance journal is a later, separate

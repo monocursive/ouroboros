@@ -58,6 +58,7 @@ defmodule Ouroboros.Web.Live.Cells do
   attr :expanded, :any, required: true
   attr :plane, :atom, required: true
   attr :session_id, :string, required: true
+  attr :node, :any, default: nil
 
   def cell(%{cell: %Cell.Message{}} = assigns), do: message(assigns)
   def cell(%{cell: %Cell.Thinking{}} = assigns), do: thinking(assigns)
@@ -96,17 +97,73 @@ defmodule Ouroboros.Web.Live.Cells do
   defp message(%{cell: %Cell.Message{speaker: :you}} = assigns) do
     ~H"""
     <div class="ouro-cell ouro-said ouro-said-you">
-      <div class="ouro-bubble">{@cell.text}</div>
+      <div class="ouro-bubble">
+        <span :if={@cell.text != ""}>{@cell.text}</span>
+        <div :if={@cell.images != []} class="ouro-image-tray" aria-label="Message images">
+          <button
+            :for={image <- @cell.images}
+            type="button"
+            class="ouro-image-card"
+            data-image-preview={
+              Ouroboros.Web.Live.ImageAttachments.url(image["id"], "content", @session_id, @node)
+            }
+          >
+            <img
+              src={
+                Ouroboros.Web.Live.ImageAttachments.url(image["id"], "thumbnail", @session_id, @node)
+              }
+              alt={image["display_name"] || "Attached image"}
+              loading="lazy"
+            />
+            <span>{image["display_name"] || "Image"} · {image["width"]} × {image["height"]}</span>
+          </button>
+        </div>
+      </div>
     </div>
     """
   end
 
   defp message(assigns) do
-    assigns = assign(assigns, :html, Markdown.to_html(assigns.cell.text))
+    assigns =
+      assigns
+      |> assign(:html, Markdown.to_html(assigns.cell.text))
+      # ui-parity W2. Two different strings, fetched from the two places each of them
+      # actually exists: the rendered words come back out of the prose the browser just
+      # drew, and the Markdown comes from the projection over the socket.
+      #
+      # The source is deliberately **not** a `data-` attribute. A message is untrusted
+      # prose, and `Ouroboros.Web.Live.MarkdownTest` refuses to let a rendered agent
+      # message carry `javascript:` anywhere in the document — an escaped attribute would
+      # put the raw bytes back into the page for no reason a reader can see.
+      |> assign(:cell_id, identity(assigns))
 
     ~H"""
     <div class={["ouro-cell", "ouro-said", "ouro-said-agent", @cell.streaming && "ouro-streaming"]}>
       <div class="ouro-prose">{@html}</div>
+      <div
+        :if={not @cell.streaming}
+        id={"copy-#{@cell_id}"}
+        class="ouro-cell-actions"
+        phx-hook="Clipboard"
+      >
+        <button
+          type="button"
+          class="ouro-copy"
+          data-ouro-copy="rendered"
+          aria-label={"Copy message #{@index + 1}"}
+        >
+          Copy
+        </button>
+        <button
+          type="button"
+          class="ouro-copy"
+          phx-click="copy-source"
+          phx-value-cell={@cell_id}
+          aria-label={"Copy the Markdown of message #{@index + 1}"}
+        >
+          Copy source
+        </button>
+      </div>
     </div>
     """
   end

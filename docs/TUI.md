@@ -38,10 +38,24 @@ Design invariants, in the codebase's own idiom:
 4. **Polymorphism survives as data.** Wire payloads are self-describing trees.
    A forged capability that appears tomorrow renders through the TUI's generic
    value-tree widget today, with zero Rust changes.
-5. **The gateway is unpatchable.** `Elixir.Ouroboros.Gateway.` joins
-   `@protected_prefixes` in
-   [verifier.ex:32](../lib/ouroboros/upgrade/verifier.ex). A runtime that can
-   author code must not be able to author its own operator-auth away.
+5. **The gateway is unpatchable — by absence, not by a gate.** The BEAM hot-patch
+   lane, and the verifier whose `@protected_prefixes` refused it an
+   `Elixir.Ouroboros.Gateway.` target, went with [core.md §4 A1](proposals/core.md);
+   no list replaced them because no lane is left to gate. Lane W is the only
+   rollout, and a lane-W capability "introduces no BEAM module and no atom"
+   ([capability.ex:5](../lib/ouroboros/wasm/capability.ex)): its identity is the
+   digest of its bytes, the signer takes a lowercase component name, one of two
+   kinds and the one world that kind requires
+   ([policy.ex:328](../lib/ouroboros/upgrade/signing/policy.ex)), and the one
+   module a deploy may start is the shipped wrapper
+   ([mesh.ex:46](../lib/ouroboros/mesh.ex)). Nothing under `lib/` calls
+   `:code.load_binary/3`, `Module.create/3`, `Code.compile_string/2` or
+   `Code.eval_string/2`. Honest limit: the two-node rollout test proves a deploy
+   *adds* no capability module on any peer
+   ([rollout_two_node_test.exs:164](../test/wasm/rollout_two_node_test.exs)); that
+   it cannot *replace* one — which is what authoring operator-auth away would be —
+   rests on that grep, and no test pins it. A BEAM loader that returns must bring
+   the protected set back with it.
 
 ---
 
@@ -338,7 +352,16 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, `runtime_exposure`, `worktree`, `plan`, plus fleet `machine`/`node`). `worktree` (D7) is a boolean on **both** planes: both already carried `worktree_requested` durably and provision a `git worktree` under the data directory *before* the lease is taken, so the lease and every containment check apply to the worktree rather than the repository — only the wire could not ask for one, which is what `ouro new --worktree` needed. It is deliberately not in `interactive.configure`'s set: a workspace that has been admitted and leased cannot be moved underneath a running session. The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.preview_native` `{provider_session_id, node?}` | Operate-scoped, read-only preview of one known native checkpoint ID. It resolves only the provider ID under the selected node's durable native root, verifies checkpoint version and content digest, and reports digest, retained message count, omitted-prefix offset, rewind floor, and an advisory current logical owner. It neither scans nor creates paths. Actual import rechecks ownership atomically; preview is not an ownership lease. `ouro preview-native` feature-gates on this exact method. |
 | `interactive.import_native` `{provider_session_id, expected_digest, id?, workspace, acknowledge_partial_tail?, start opts}` | Digest-bound, non-destructive import into a new logical ID and a new native ID. Commit means the target checkpoint and logical record are durable; `ready` and `error` separately report ordinary coordinator/workspace admission. A committed but not-ready terminal record remains inspectable and removable through ordinary session removal after repair, then the source can be explicitly imported under a new ID. The source messages are context only; the new public stream begins with `native_checkpoint_imported` and does not synthesize old events, approvals, effects, outcome, cursor, timestamps, or ancestry. Nonzero offset requires explicit acknowledgement. The operator action is effect-ledger-gated; exact retries converge and changed logical/source/digest/start fingerprints conflict. The source checkpoint and sibling records are never changed. The 120s timeout has unknown outcome; `ouro import-native` retries once with its same pre-minted logical ID. |
-| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before native dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
+| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, image_attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before native dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
+| `attachment.limits` `{node?}` | Owner image capability, source/message limits, safe chunk size, client persistence policy, and stable `client_recovery_namespace`. |
+| `attachment.begin` `{client_id,draft_id,client_attachment_id,attempt_id,byte_size,session_id?,display_name?,source?,node?}` | Idempotently reserves a private upload on the selected runtime. |
+| `attachment.append` `{upload_id,offset,data,node?}` | Bounded base64 chunk; exact duplicate offsets are idempotent, conflicting bytes are refused. |
+| `attachment.finish` `{upload_id,sha256,node?}` | Verify source digest and start contained image preparation. Poll status until ready. |
+| `attachment.status` `{upload_id?,attachment_id?,session_id?,node?}` | Upload progress, failure, or canonical ready manifest. |
+| `attachment.bind_draft` `{draft_id,session_id,node?}` | Bind a new-session draft to its created session before the first send. |
+| `attachment.touch_draft` `{draft_id,node?}` | Renew unused ready images while an active client holds the draft. |
+| `attachment.discard` `{upload_id?,attachment_id?,node?}` | Remove unused images; accepted turn references remain retained. |
+| `attachment.read` `{attachment_id,variant,offset?,length?,session_id?,node?}` | Authorized, bounded content or thumbnail chunk with integrity metadata. |
 | `interactive.retry_turn` `{id, source_turn_id, node?}` | Retries the latest failed turn from its private checkpoint, preserving attachments and reasoning effort. Operate scope only; a stable retry id per source deduplicates repeated calls. Refuses a new retry while busy or after newer work; the original request is never reconstructed from redacted transcript text. Bounded `last_turn` outcomes in session rows keep failures visible between turns. |
 | `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Attachment paths pass the same canonical workspace-containment gate as `send_message` before the runtime sees them, whichever public API spelling supplied them. Steering injects into the running turn and is not durably keyed by the plane: the coordinator mints the runtime request ID, so it has no idempotency, and a lost acknowledgement is unreconcilable — the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. What *is* durable since the steer-text enrichment: the session coordinator remembers the prompt keyed by that request id and writes it, redacted, into the projected `input_accepted(kind=steer)` event, so the transcript quotes every accepted steer in replay exactly once. |
 | `interactive.configure` `{id, approval_mode?, sandbox_mode?, model?, reasoning_effort?}` | `InteractiveSession.configure/2` — moves an open session's posture instead of making the operator start a second one. Exactly four fields, a strict subset of `interactive.start`'s: everything else there is immutable start intent. Validated against what the transport declares (`Ouroboros.Provider.session_configuration/1`): the option list a start is held to, and the adapter's `normalized_values` allowlists. The reply is `{options, applies, changed}`, and `applies` is `"now"`: the one transport carries the change to a live session process rather than to the next re-execution of a CLI. The field stays on the wire because a footer has to be able to state when a change lands rather than imply it. Refusals: `["unconfigurable_session", {reason, …}]` with `reason` one of `option_not_configurable`, `value_not_accepted`, `unknown_provider`; and `["invalid_configuration", {reason, …}]` for `no_changes` and `unknown_field`. The change is durable in `State` (so a resume rebuilds the request from the options the session is actually running with) and is a runtime-native `status` event with `kind: "configured"`, the changed keys, and `applies`. **`plan` is deliberately not a fifth field** and takes its own path: it is an explicit owned session setting, so the native session is told through `Ouroboros.Session.plan_mode/2` (`applies: now`) through a live process call, and a session that has not opened its transport is refused as `["native_transport_unavailable", {verb: "plan", …}]`. A plan exit the session applies is folded back into the record, so `interactive.info` reports the posture the session runs under. |
@@ -758,22 +781,41 @@ strings, numbers, lists, and maps, and the TUI has a generic tree widget.
 
 ### 2.8 Verifier protection
 
-Add to [verifier.ex](../lib/ouroboros/upgrade/verifier.ex):
+This section added `"Elixir.Ouroboros.Gateway."` to `@protected_prefixes` in
+`lib/ouroboros/upgrade/verifier.ex` and promised a verifier test that a
+`Gateway.`-targeting artifact is rejected. Both went with the BEAM hot-patch lane in
+[core.md §4 A1](proposals/core.md) (`8c29a747`, 2026-09-09): the verifier gated a lane
+that could load a forged module into the running VM, and a module loaded that way runs
+with the VM's whole authority whatever names it was refused. No list replaced it because
+no lane is left to gate. What protects the gateway now is absence — §0 invariant 5 —
+and these are the files that show it:
 
-```elixir
-@protected_prefixes [
-  "Elixir.Ouroboros.Upgrade.",
-  "Elixir.Ouroboros.Release.",
-  "Elixir.Ouroboros.Storage.",
-  "Elixir.Ouroboros.Control.",
-  "Elixir.Ouroboros.Gateway."   # operator surface: patchable auth is no auth
-]
-```
+- Lane W is the only rollout, and a lane-W capability "introduces no BEAM module and no
+  atom" ([capability.ex:5](../lib/ouroboros/wasm/capability.ex)); its identity is the
+  sha256 of its component bytes, not a module name.
+- The signer takes a lowercase component name
+  ([artifact.ex:140](../lib/ouroboros/wasm/artifact.ex)), one of two kinds, and the one
+  world that kind requires
+  ([policy.ex:328](../lib/ouroboros/upgrade/signing/policy.ex),
+  [policy.ex:397](../lib/ouroboros/upgrade/signing/policy.ex)). There is no field in
+  which to name `Ouroboros.Gateway.*`, or any module.
+- The mesh allow-list admits one lane-W module, the shipped wrapper
+  `Ouroboros.Wasm.Capability` ([mesh.ex:34-46](../lib/ouroboros/mesh.ex)), and
+  [mesh_test.exs](../test/mesh_test.exs) enumerates the namespace so that a second
+  startable module fails the suite.
+- Nothing under `lib/` calls `:code.load_binary/3`, `Module.create/3`,
+  `Code.compile_string/2` or `Code.eval_string/2`.
 
-Plus a verifier test proving a `Gateway.`-targeting artifact is rejected. The
-signing policy's hard Capability-namespace rule already refuses to sign such a
-patch; this is the second, independent gate, consistent with how the other
-control-plane namespaces are treated.
+Honest limit. The two-node rollout test proves a deploy *adds* no
+`Ouroboros.Capability.*` module on any peer
+([rollout_two_node_test.exs:164](../test/wasm/rollout_two_node_test.exs)); that it
+cannot *replace* a gateway module — which is what patching operator auth away would be —
+rests on the grep above, and no test pins it. The "second, independent gate" this
+section once promised does not exist and has nothing to stand in front of; the first
+gate, the signing policy's Capability-namespace rule, has become a component-name rule
+([policy.ex:328](../lib/ouroboros/upgrade/signing/policy.ex)) because lane W gives it
+no module name to rule on. A BEAM loader that returns must bring the protected set, and
+this section's test, back with it.
 
 ### 2.9 Logging
 
@@ -1651,12 +1693,14 @@ fails, not the shape of a successful one. A client must therefore treat `cluster
 either — which is exactly what the "unknown fields ignored, fall back to the tree widget"
 rule already buys it. `runtime_status_result.json` pins the successful shape.
 
-Tabs (build order within §5): **1 Dashboard** (node/role, availability
+Tabs (build order within §5, and the digits are `ctrl+x 1`–`ctrl+x 4`):
+**1 Dashboard** (node/role, availability
 matrix from `status.availability`, connected nodes, providers), **2 Sessions**
 (the interactive list; focused session = conversation-first scrollback via replay +
 live tail, input box, approval modal), **3 Upgrade**
 (rollouts, history, signing decisions, grants-by-principal prompt), **4 Logs**
-(spawn mode only; attach mode shows "logs live with the spawner").
+(spawn mode only; attach mode shows "logs live with the spawner"). Four, not seven: the
+strip is drawn from `Tab::ALL` and so is every digit that selects one.
 
 The focused session opens as **Agent chat**. It renders durable `input_accepted` text as
 the user's message, collapses output deltas into the corresponding final agent message,
@@ -1899,6 +1943,19 @@ because the pinned `ApprovalResponse` schema admits only `once` and `session` (�
 `Tab` from the answer rows opens the reason field, as Claude Code does; `r` still does too,
 and the modal's hint names both. `Esc` closes without answering.
 
+**The hint names how to move, and the digits select for everyone.** It used to name
+`enter`, `tab`/`r`, `ctrl+o` and `esc` and never once say which keys change the highlighted
+row — on a modal whose whole content is a numbered list of answers, which is the one thing
+a first-time reader needs (R1 §2.5). Two lines, because this popup clips rather than wraps
+and one long row at 120 columns lost `esc closes` off its end:
+`↑↓ or j k move · 1-N choose · enter answers`, then
+`tab or r attach a reason · ctrl+o expands the diff · esc closes`. The answer rows are drawn
+`1.` through `N.` for everyone rather than only under screen-reader mode, and the digits
+select for everyone to match: the general rule that `1`–`9` are ordinary characters is about
+surfaces where something is being *typed*, and nothing is typed here until `r` or `Tab`
+opens a field. A number printed beside a row no key reaches is decoration claiming to be a
+binding. A plan exit's modal carries the same two lines over the payload's own choices.
+
 **A pending approval never scrolls away (Kiro's snack bar).** One row above the composer
 reads `⏸ approval needed · <command> · ctrl+x a to answer`, for as long as the session is
 waiting. It names `ctrl+x a` rather than `a` because the composer holds the keyboard while a
@@ -1954,20 +2011,144 @@ that already ran after each absorb — a replay overlaps by design, and a total 
 events arrived would count the overlap twice — and `UsageTotals::complete` is false once
 pruning means the numbers are a lower bound.
 
-Keys: `1-7`/`Tab` tabs, `j/k` move, `n` new session (Sessions tab), `i` composer /
-`Enter` send, `Alt+Enter` steer, `Ctrl-C` interrupt active turn (never the TUI), `a` (or
-`ctrl+x a`) approval modal, `s` steer, `Ctrl-O` expand/collapse the conversation's cells,
-`Ctrl-T` plan panel, `Ctrl-V` paste, `Esc Esc` go back to an earlier message,
-`/details` (or `ctrl+x d`) the event ledger — and `ctrl+x d` again to leave it, since `/`
-inside it is the filter — `/export [--json] [path]` a file, `ctrl+x y` copy the last agent
-message and `/copy raw` its source, `ctrl+x [` transcript into the terminal's
-scrollback, `ctrl+x v` transcript in `$EDITOR`, `Ctrl-E` opens `$EDITOR`, `,` settings,
-`q` quit dialog, `?` help with the authoritative key map, grouped by
-composing / while the agent works / session / runtime.
-`s`, `Alt+Enter`, `a`, and the interrupt hint are **conditional**: see
-"Capability-driven chrome" below. `/diff` (also `/changes`) opens the review overlay and
-`/raw` toggles copy mode; both are reachable from the palette and neither takes a chord,
+**The composer owns the keyboard whenever the Sessions tab is showing**, and that decides
+the shape of everything below. `open_session_on` recreates the composer for every session
+it opens ([streaming.rs](../tui/src/ui/app/streaming.rs)), so on that tab a bare letter
+types a letter: every verb is a chord, a `/` command, or a palette row. The single-letter
+list layer — `j`/`k`/`h`/`l`, `Enter`, `Esc`, `n`, `r`, `q`, `x`, PageUp/PageDown — is
+reachable only from the three tabs that *are* lists
+([keys.rs:181-216](../tui/src/ui/app/keys.rs)), and its digits are bounded by `Tab::ALL`
+rather than by a literal range, so a digit past the last tab falls through instead of being
+swallowed. `i`, `s`, `a` and `,` used to sit in that match and could never run — each of
+their handlers returns unless the tab *is* Sessions, which is the one state the match
+cannot be reached from (R1 §2.1). They are gone rather than documented.
+
+**The four tabs are drawn and reachable with a session open.** A strip on the header's
+second row lists Dashboard / Sessions / Upgrade / Logs with the current one reversed and
+the digit hint beside it ([`view::tab_strip`](../tui/src/ui/view.rs)); under a screen
+reader it becomes the same list in words, with the current one *said*. The leader digits
+select them with a session open, which the bare digits never could.
+The header used to print only the current tab's title, so
+nothing on screen said the other three existed (R1 §2.1). `Tab`/`BackTab` still cycle the
+tabs from the home screen with an empty draft; everywhere else `Tab` belongs to the
+completion menu.
+
+The chords, with the condition where a key has one. Every default below is a row in the
+`[keys]` table further down, and every one of them can be rebound or turned `off`:
+
+| Key | What it does |
+|---|---|
+| `Enter` | sends; **accepts the highlighted `/` or `@` row while a completion menu is open**; queues a follow-up while the agent is busy |
+| `Alt+Enter` | steers, where the transport declares `steer` *and* the terminal reports the modifier at all |
+| `Ctrl-J` | newline — and `Shift+Enter` where the kitty keyboard protocol makes it distinguishable from `Enter` |
+| `Esc` | interrupts the running turn, dispatched through `Action::Interrupt` and not a literal; dismisses a completion menu first; with text in an idle draft it **banks the draft** where `up` finds it; on an empty idle draft it leaves the session |
+| `Esc Esc` | the backtrack menu (below) |
+| `Ctrl-C` | four steps, in order: close what is open → clear a draft that has text → interrupt a running turn → arm, and a second press inside the window opens the quit dialog. See below |
+| `Ctrl-Q` | the quit dialog, claimed **only when no overlay is open** |
+| `Ctrl-P` | the command palette |
+| `Ctrl-X` | the leader, claimed only when no overlay is open; the which-key overlay draws for as long as it is pending |
+| `Ctrl-R` | the composer, prefilled `/rename <current title>` — the same verb, not a second surface for it |
+| `Ctrl-Z` | hands the terminal back to the shell (`SIGTSTP`); `fg` brings this screen back, repainted |
+| `Home` / `End` | the transcript's first and newest rows, with a session open and **on an empty draft**; with text in the draft they are readline's line start and end, which is where the editor claims them |
+| `Ctrl-O` / `Ctrl-T` / `Ctrl-V` | expand every cell / the plan panel / paste a clipboard image |
+| `?` | the key map, on an empty draft. There is no `!shift` guard: `Chord::hit` already masks SHIFT on character keys, and the guard made `?` unreachable on every terminal that reports it with the modifier (R1 §2.4) |
+| `Ctrl-D` | delete-forward, and nothing else |
+| `F5`, `F2`/`F3`/`F4` | the location dialog, and the three starter prompts — home screen only, and the starters only on an empty draft ([home.rs:73-86](../tui/src/ui/app/home.rs)) |
+
+The leader is `ctrl+x`, and the verb is the single key after it: `n` new session · `N`
+session options · `l` switch session · `w` writable session · `k` end or remove session ·
+`e` `$EDITOR` on the draft · `y` copy the last agent message · `[` transcript into
+scrollback · `v` transcript in `$EDITOR` · `i` the newest image in the system viewer ·
+`a` the approval modal · `A` auto-approve everything this session asks · `r` the rule a
+refused `!` named · `d` event details · `x` export · `c` compact · `m` prefill `/model ` ·
+`t` the theme picker · `g` backtrack · `s` the Dashboard tab · `b` hide or show the rail ·
+`,` settings · `1`–`4` the four tabs · `q` quit · `?` help. `ctrl+x o` is kept as an alias
+of `ctrl+x d`; it is an alias rather than an action, so `/keys` does not print a second row
+for one verb. Each leader verb runs the same code its `/` verb runs, so there is one
+spelling of the behaviour rather than two that can drift.
+
+**Three keys the realignment freed.** `ctrl+g` is nothing here — it is *abort* in readline
+and in every shell, and `$EDITOR` on the draft is `ctrl+x e` and `/editor`. A bare `,` is a
+comma a message may start with; settings are `ctrl+x ,` and `/settings`. `ctrl+d` on an
+empty prompt no longer opens the quit dialog, because two meanings on one key, one of which
+ends the process, is not a key anybody can hold confidently. All three actions still exist
+and are still rebindable — `editor`, `settings` and `quit_empty` default to `off`, so a
+`[keys]` line written against an older build still parses and still binds.
+
+Three of these are **conditional** — `ctrl+x a`, `alt+enter`, and the footer's
+`esc interrupt` hint: see "Capability-driven chrome" below. `leader.steer` defaults
+to `off` — `alt+enter` and `/steer` are the two ways to steer, and `s` is status everywhere
+else in the field. `/diff` (also `/changes`) opens the review overlay and `/raw` toggles
+copy mode; both are reachable from the palette and the `/` menu and neither takes a chord,
 because the composer owns the keyboard while a session is open.
+
+**`Ctrl-C` is a state machine, not a key with one meaning**
+([session.rs:2575-2633](../tui/src/ui/app/session.rs)). The first three steps each *did*
+something, so none of them leaves an arm behind: the press that closed an overlay is not
+half of a quit. Only a press that found nothing to close, nothing to clear and no turn to
+interrupt arms, and the arm remembers the screen it was made on — the tab, the open session,
+and whether an overlay was up ([`CancelArm`](../tui/src/ui/app/mod.rs)) — so an overlay
+opening, a tab change or a session change between the two presses drops it. The window is
+thirteen ticks, which at this client's 80 ms tick is a little over a second. While it is
+armed the footer says `ctrl+c again to quit` for as long as the window lasts, and the notice
+names only keys that are actually bound. The third step used to ask "is a session open"
+rather than "is a turn running", which is why this key could never reach the fourth one with
+a session open: every press on an idle session issued an interrupt for a turn that was not
+there, and somebody arriving from opencode, Claude Code or Codex — where `ctrl+c` exits —
+had no exit key they would find (R1 §2.4).
+
+### What a submitted draft is (the slash grammar)
+
+One grammar, read off the draft exactly as it was typed, used by the session composer and
+by the home screen ([`classify_line`](../tui/src/ui/app/session.rs)). It answers one of
+three things, and each rule exists to protect a sentence somebody will want to send:
+
+| The draft | What happens |
+|---|---|
+| begins with whitespace | a **message**. That is the escape hatch: a leading space sends `/keys` as the characters it is, and it settles a draft whose first line is blank |
+| a first token that is not verb-shaped | a **message**. `/usr/bin/env is missing` has two slashes; `!ls` is the operator shell's |
+| a known verb, alone on its line, nothing under it | the **verb** |
+| a known verb with a paragraph under it | a **message**. Somebody wrote it to be read, not to be eaten by a verb on line one |
+| an unknown verb with more words after it | a **message**. `/tmp is full`. This is the rule that costs something — `/exprot the log` goes to the model — and it is the cheaper mistake, because the other direction refuses sentences forever |
+| an unknown verb alone | **refused**, naming up to three nearest verbs — or pointing at `/help` where nothing is near enough — and saying that a leading space sends it as text. The draft is kept |
+
+A verb is a single leading `/` followed by letters, digits, `-` or `_` and nothing else
+([`slash_verb`](../tui/src/ui/editor.rs)); anything looser would turn this client's refusal
+into a refusal to send ordinary messages. A **known verb whose argument this client could
+not read** is refused *by name* — `/keys did not take that argument` — rather than sent to
+the model as a turn, which is what used to happen. The draft is kept either way, because
+the fix is one keystroke away and throwing the line out would cost more than the mistake.
+
+The refusal is what `Enter`-accepts-a-completion is for. `Enter` used to submit while a
+menu was open, so `/ke` plus `Enter` sent "/ke" as the first task and opened the ChatGPT
+device-code sign-in (R1 §2.3); opencode, Claude Code and Codex all select on `Enter`. Now
+`Enter` completes **only a verb the typed word strictly continues into**
+([`accept_command_for_send`](../tui/src/ui/editor.rs)): the highlighted row if the word
+continues into it, otherwise the first row in table order that it does, otherwise nothing —
+which sends the word as typed and lets the unknown-verb refusal say so. The rule has to be
+prefix-of-the-*name* and nothing looser, because the menu itself is looser: it matches a
+row's description as well as its name, `/new`'s description is "start a new coding session",
+and a menu that accepted on a description answered `/s`, `/c` and `/e` with `/new`. "Strictly"
+means a word that already *is* a row is finished: a verb typed out in full sends on the first
+`Enter` rather than costing a second. `Tab` still completes, `@` rows accept the highlighted
+path because a path menu matches any part of a path, and a fully typed `@path` still leaves
+as an attachment. A verb that takes the rest of the line leaves the caret after a space
+([`COMMANDS_TAKING_AN_ARGUMENT`](../tui/src/ui/editor.rs), thirteen of them, each pinned by
+a unit test to a row of the completion table).
+
+The `/` completion table is forty-five rows and is the single source of the `?` panel's
+COMMANDS block, so help cannot advertise a verb completion does not offer. `/diff`,
+`/changes`, `/raw`, `/keymap` and `/usage` were accepted by the dispatcher and named by
+neither, so `/di` offered nothing (R1 §2.3); `/rename` is the sixth row and the only new
+verb.
+
+**Two drafts are banked, not dropped.** `Esc` with text on an idle session puts the draft
+into prompt history, clears the editor and says in one line that `up` brings it back — the
+key used to do nothing at all, although this document said it kept the draft (R1 §2.1) —
+and it does *not* arm `Esc Esc`, because a chord's first key keeps its own job and does not
+also get to keep somebody else's. `ctrl+r` and `ctrl+x m` bank the draft they replace the
+same way ([`prefill_composer`](../tui/src/ui/app/session.rs)); before that they were a bare
+`clear_text`, which ate fifty typed characters with no way back.
 
 ### Queue and steer (B3)
 
@@ -2001,7 +2182,7 @@ disabled by queued state, which is Claude Code #16905 exactly.
 ### Structured input: attachments, images, effort (B4)
 
 `params.input` may be a bare string **or** the object
-`{prompt, attachments[≤32], reasoning_effort}` (`structured_turn_input`,
+`{prompt, attachments[≤32], image_attachments:[{id}], reasoning_effort}` (`structured_turn_input`,
 `gateway/methods.ex`). This client sends both, and which one is a fact about the turn:
 a plain prompt stays a bare string — byte for byte what it was before B4 — and the
 object appears the moment there is something in it a string could not carry. Golden
@@ -2017,15 +2198,34 @@ fixtures and `tests/input_grammar.rs` pin both shapes.
   path itself — the workspace may be on another machine — and a refusal that names an
   attachment is rendered on the composer that produced it, beside the chips, rather than
   only in a notice that scrolls away in eight seconds.
-- **`Ctrl+V`** reads the clipboard through whichever tool this machine actually has,
-  probed with `command -v` and never assumed: `pngpaste` then `osascript` on macOS,
-  `wl-paste` then `xclip` on Linux, or the one command named by
-  `OURO_CLIPBOARD_IMAGE_COMMAND`. An image is written `0600` as
-  `.ouroboros/images/image-<id>.png` **under the session workspace** — the only place
-  the runtime will take an attachment from — and attached as a chip. A clipboard holding
-  text falls through to an ordinary paste. A machine with none of the tools is told once,
-  and told what to install. Bounded: 16 MiB, a 5 s tool timeout, PNG signature checked
-  before anything is written under a `.png` name.
+- **`Ctrl+V`** or **`/paste-image`** reads an image from the clipboard of the machine
+  running the TUI, using `pngpaste`/`osascript` on macOS or `wl-paste`/`xclip` on
+  Linux (or `OURO_CLIPBOARD_IMAGE_COMMAND`). Text-only clipboard contents remain text.
+  Terminal bracketed paste itself carries text; a remote TUI does not read the local
+  laptop's clipboard. Use `/attach` on the TUI host or the web file picker in that case.
+- **`/attach "local path.png"`** reads one explicitly selected local file, with spaces
+  supported and no shell evaluation. Source images are bounded to 20 MiB and uploaded
+  in chunks to the conversation's owner. The workspace is never used as a clipboard
+  staging directory. `/remove-image N` removes the Nth attachment; Backspace on an
+  empty draft removes the newest one.
+- A pending or failed image blocks sending the whole draft. Ready images may be sent
+  with an empty text prompt, including the first message of a new session. Send/Queue
+  carry managed image IDs; Steer and shell commands refuse image attachments.
+- Ready drafts, local queues, and uncertain send IDs are saved in a private client
+  recovery file when the owner permits private persistence and supplies a stable
+  recovery namespace. That namespace identifies the attachment store and authenticated
+  principal, so restarting the runtime with a rotated gateway token still recovers the
+  same drafts. Older runtimes without this namespace and owners configured for
+  operational content encryption use memory-only client image drafts. Source files
+  are always held in memory; interrupted source acquisition requires attaching again.
+  Accepted images remain in the runtime's durable storage under its encryption policy.
+  Each new session gets a fresh initial image draft; a retry of an unresolved initial
+  message keeps its original draft and turn identities.
+- **`/view-image N`** opens a ready draft image locally; `/view-image att_…` opens an
+  authorized history image. Bytes are downloaded with size and integrity checks to a
+  private temporary file, then passed to the configured desktop opener. At most four
+  preview files are kept, and normal client shutdown removes them. Headless terminals
+  retain filename/dimension labels; inline terminal graphics are not placed by this UI.
 - **`/effort low|medium|high`** sets `reasoning_effort` on the next turn and clears
   itself after the send. It is per turn, not a mode; `/effort none` clears it early, and
   a value outside the gateway's enum is refused here rather than as a `-32602`.
@@ -2043,9 +2243,10 @@ with a refused turn. A same-id reconciliation replays the whole envelope, becaus
 that replayed the prompt without its attachments would present a different fingerprint
 and come back `:turn_id_conflict`.
 
-The whole path is capability-gated. Where the runtime declared `multimodal: false` there
-is no chip and no image: the `@` still completes as text, `Ctrl+V` still pastes text, and
-both refusals name the transport.
+Managed images are gated by `attachment.limits` and the selected model's image-input
+support. A known text-only model refuses before dispatch; an unknown model may report
+a provider refusal, preserving the full draft. Legacy `@` attachments retain their
+existing workspace and transport capability rules.
 
 ### Images in the transcript (A11)
 
@@ -2156,10 +2357,21 @@ leak.
 
 | Key | What it does |
 |---|---|
-| `Esc` while a turn runs | interrupts it. Never disabled by a queue, a chord, or anything else (Claude Code #16905) |
+| `Esc` while a turn runs | interrupts it. Never disabled by a queue, a chord, or anything else (Claude Code #16905) — but a completion menu that is open is dismissed first, even mid-turn, because interrupting the agent is not what "make this list go away" asked for |
 | `Esc` on an idle session with an empty prompt | leaves the session, as it always did |
-| `Esc` with text in the prompt | closes the composer, keeping the draft |
+| `Esc` with text in an idle prompt | **banks the draft**: the text goes to prompt history, the editor is cleared, and one notice says `up` brings it back. This `Esc` had a job and did it, so it is *not* also the first half of `Esc Esc` |
 | `Esc Esc` within 400 ms | opens the backtrack menu |
+
+Only the first row follows the *binding*. `Esc`'s other meanings are `Esc`'s, and the
+interrupt is whatever `Action::Interrupt` is bound to: it is claimed last, immediately
+before the composer, so closing an overlay, arming the chord and clearing the ledger's
+filter each keep their turn first ([keys.rs:224-243](../tui/src/ui/app/keys.rs)). Before
+this slice `Esc` was hardcoded in two places, so rebinding `[keys] interrupt` moved the
+footer hint, the `?` row, the palette column and `/keys` — and left the key itself where it
+was, which is the exact failure the map exists to prevent (R1 §2.4). The composer's own
+footer names which of the three `Esc` is right now: `esc interrupts` (or the key the
+operator moved it to), `esc clears the draft`, or `esc leaves`
+([`escape_cell`](../tui/src/ui/sessions.rs)).
 
 The backtrack menu lists the last ten user turns, read out of the durable
 `input_accepted` ledger rather than this client's own prompt history — a second `ouro`
@@ -2191,6 +2403,10 @@ that session with the menu rather than finding nothing to show.
 ### The native context verbs (D9, D6)
 
 Four verbs only a `native` session can honour, and one that answers for every transport.
+Two of them now have a leader key as well — `ctrl+x c` is the unfocused `/compact`, and
+`ctrl+x g` opens the same backtrack menu `Esc Esc` and `/backtrack` do — and each key runs
+the command its verb runs rather than a second copy of it
+([keys.rs:303-335](../tui/src/ui/app/keys.rs)).
 All five are gated twice and refused *locally*: `hello.methods` decides whether this
 gateway serves the verb, and `options.capabilities.transport` decides whether this
 conversation can. A key that is drawn and always fails is worse than a key that is not
@@ -2205,7 +2421,7 @@ Two refusal shapes are told apart, because only one of them is worth retrying:
 
 | Verb | Call | What the client draws |
 |---|---|---|
-| `/compact [focus]` | `interactive.compact {id, focus?}` | the report as a transcript block — what was archived, what was elided, the tokens before and after, the archive id — then a fresh `interactive.context`, because a fold resets `context_used` and rotates the prefix fingerprint, and an *inferred* meter would be a number nobody measured |
+| `/compact [focus]`, `ctrl+x c` | `interactive.compact {id, focus?}` | the report as a transcript block — what was archived, what was elided, the tokens before and after, the archive id — then a fresh `interactive.context`, because a fold resets `context_used` and rotates the prefix fingerprint, and an *inferred* meter would be a number nobody measured |
 | `/handoff <prompt>` | `interactive.handoff {id, prompt?, handoff_id}` | opens the child the moment the runtime names it, whether `ready` is true or `outcome` is `unknown`, and says which of the two happened. `handoff_id` is caller-owned for the same reason `fork_id` is. The child's header carries `handed off from <parent>` |
 | `/context` | `interactive.context {id}` | an overlay whose first line is `source`, because that decides what the rest of it means. Native: the prefix fingerprint, a `context_used / context_window` bar, the compactions, the archive ids, the instruction files loaded and dropped. Every other transport: the subset its own `usage` events reported, **labelled as a subset**, with the native headings absent rather than empty |
 | `/rewind` | `interactive.rewind_points {id}`, then `interactive.rewind {id, to_turn, what}` | two screens, on purpose |
@@ -2233,7 +2449,11 @@ carries no window at all.
 ### `!cmd` — the operator's own shell (B7)
 
 A draft beginning with `!` is claimed by the composer, beside the slash verbs, and sent
-to `workspace.exec {id, command}`. It is never a turn.
+to `workspace.exec {id, command}`. It is never a turn. The slash grammar above runs first
+and reads `!ls` as a message — `!` is not a verb shape — so the `!` arm is reached with the
+line intact ([session.rs:2038-2076](../tui/src/ui/app/session.rs)). The leading-space
+escape is shared: a draft that starts with whitespace is prose for `!` exactly as it is for
+`/`, so ` !ls` is sent as a message and only an unindented `!` runs a command.
 
 **The composer says where it will run before Enter is pressed**, every time: not here,
 but on the session's owner node, in the workspace the agent is editing. That is the one
@@ -2283,16 +2503,67 @@ narrow.
 
 The footer states the fleet's own `N waiting · N working` beside the open session's
 approvals. The picker (`ctrl+x l`) labels every row with its group and its node, `Space`
-peeks the last thing that agent said without leaving the list, and `r` opens that session
-with the cursor in its composer. A peek at a session this client never subscribed to says
-so rather than showing an empty box — it reads the transcript already held and never opens
-a subscription, because a cheap key that changed what the runtime is streaming would not
-stay cheap.
+peeks the last thing that agent said, and `r` opens that session with the cursor in its
+composer. A peek at a session this client never subscribed to says so rather than showing
+an empty box — it reads the transcript already held and never opens a subscription, because
+a cheap key that changed what the runtime is streaming would not stay cheap.
+
+**The peek keeps the list underneath it.** `Space` was advertised as looking *without
+leaving the list*, and the overlay it opened replaced the picker: `Esc` and `Enter` both
+closed everything, although the hint said "enter opens" (R1 §2.1). Four keys now, and each
+does what the hint says — `Enter` **opens** the session, `r` replies, `Space` and `q` put
+the peek away the way it was opened, and `Esc` steps back to the picker *on the row it
+peeked* ([overlays.rs:1242-1264](../tui/src/ui/app/overlays.rs)). The overlay carries one
+flag, `from_picker`, and no second copy of the selection: the picker peeks the row under
+its own cursor, so the peek's `plane` and `id` **are** that selection, and a second copy
+would be a second thing that could disagree with it. A peek reached from anywhere else
+closes rather than opening a list nobody was looking at, and its hint names `ctrl+x l` for
+the list instead ([panels.rs:604-615](../tui/src/ui/panels.rs)).
+
+**The rails can be put away.** `ctrl+x b` (`leader.rail`) flips `App.rail_hidden` and the
+transcript takes the width both rails were using — the session rail on the left and the
+context rail on the right, together, because "hide the sidebar" that left one of them
+behind is a toggle that half worked ([sessions.rs:61-103](../tui/src/ui/sessions.rs)). The
+key says nothing in the notice row — a notice claiming the rail had moved would be the key
+describing a screen it does not draw — and instead the header, which is drawn whether or
+not the rails are, reads `Agent chat · rail hidden · ctrl+x b`. The chord comes out of the
+keymap, so a rebound toggle is the one named, and two screens that differ by two missing
+panels are never left with nothing on them saying which key did it.
 
 `ouro agents` prints the same grouping once, plain or `--json`, and starts no runtime: a
 command whose whole job is to answer "is anything waiting on me" must not answer it by
 creating something to wait on. Its counts can differ from the rail's by the approvals the
 rail is holding on an open stream, which `ouro agents` does not have.
+
+### Names on screen, never wire words (T2.8)
+
+Erlang node names, JSON-RPC codes and atoms are facts about the encoding, not about the
+operator's situation, and none of them reaches a pane title or a row raw. Two label
+functions do the whole of it, and they answer two different questions.
+
+[`ui::panels::presentation::node_label`](../tui/src/ui/panels.rs) names **a runtime**:
+`nonode@nohost` (and the bare `nonode` some callers have already reduced it to) is
+`this computer`, because that is the single-machine case and that is what it is; `ouro@studio`
+is `ouro`, the half that identifies a release in a fleet. The Dashboard, the settings header
+and the `?` panel's limits line read it — the places where there is one node and the question
+is "what am I attached to". `nonode@nohost` used to stand in all four (R1 §2.5).
+
+[`App::machine_label`](../tui/src/ui/app/mod.rs) names **which of my machines**, which is
+what the session rail, the session cards and the picker are asking. Three answers in the
+order they are trustworthy: the fleet roster's own machine name where the profile has one,
+then the *host* half of `name@host`, then `node_label`. The host half is the one that
+differs between machines when nobody has named them — a column reading `ouro` on every row
+distinguishes nothing, which is the failure G2 put the node on those rows to avoid.
+
+A refusal reads as its word and its message, never its number:
+[`refusal_label`](../tui/src/ui/panels.rs) turns `-32004` into `unavailable`, and
+[`refusal_text`](../tui/src/ui/panels.rs) does the same for the callers that only kept the
+formatted `name (code): message` string. An unmapped code reads as `unknown` rather than as
+its integer, for the same reason. Anything that is not exactly that shape is returned
+untouched — a transport failure is already a sentence, and a head that merely *ends* in a
+number in brackets (`Connection to node (10): refused`) must not have its beginning thrown
+away. The Upgrade tab's pane title used to read `[unavailable (-32004): no signing node is
+configured…`; it now carries `unavailable: no signing node is configured` and no code.
 
 ### Plan mode, from the client (B2)
 
@@ -2547,57 +2818,96 @@ space are a sequence (`"esc esc"`, `"ctrl+x d"`); more than two is refused. `"of
 case already carries it and terminals disagree about reporting both — `N` and `n` stay two
 different leader verbs, and `shift+s` and `s` do not.
 
-**The actions.**
+**The actions.** Sixty-three of them, in `Action::ALL`'s own order — which is the
+order `/keys` and the `?` panel list them in. The *group* column is
+[`Action::group`](../tui/src/keymap.rs), the five words every discovery surface files
+a verb under; it cuts across scope on purpose, because `ctrl+x y` and `ctrl+o` do the
+same kind of thing to the same conversation and filing one under "leader" would be
+filing by keyboard rather than by question.
 
-| Scope | Action | Default |
-|---|---|---|
-| global | `send` | `enter` |
-| | `steer` | `alt+enter` |
-| | `newline` | `ctrl+j` |
-| | `queue_retract` | `up` |
-| | `paste_image` | `ctrl+v` |
-| | `editor` | `ctrl+g` |
-| | `interrupt` | `esc` |
-| | `backtrack` | `esc esc` |
-| | `cancel` | `ctrl+c` |
-| | `verbose` | `ctrl+o` |
-| | `plan_panel` | `ctrl+t` |
-| | `palette` | `ctrl+p` |
-| | `leader` | `ctrl+x` |
-| | `help` | `?` |
-| | `settings` | `,` |
-| | `quit` | `ctrl+q` |
-| | `quit_empty` | `ctrl+d` |
-| leader | `leader.new` | `n` |
-| | `leader.new_options` | `N` |
-| | `leader.sessions` | `l` |
-| | `leader.writable` | `w` |
-| | `leader.editor` | `e` |
-| | `leader.copy` | `y` |
-| | `leader.scrollback` | `[` |
-| | `leader.editor_view` | `v` |
-| | `leader.steer` | `s` |
-| | `leader.approval` | `a` |
-| | `leader.auto_approve` | `A` |
-| | `leader.end` | `x` |
-| | `leader.details` | `d` |
-| | `leader.quit` | `q` |
-| | `leader.help` | `?` |
-| composer | `editor.word_back` | `alt+b` |
-| | `editor.word_forward` | `alt+f` |
-| | `editor.kill_word_back` | `ctrl+w` |
-| | `editor.kill_word_forward` | `alt+d` |
-| | `editor.kill_line` | `ctrl+k` |
-| | `editor.kill_to_start` | `ctrl+u` |
-| | `editor.yank` | `ctrl+y` |
-| | `editor.line_start` | `ctrl+a` |
-| | `editor.line_end` | `ctrl+e` |
-| empty home composer | `starter_explore` | `f2` |
-| | `starter_review` | `f3` |
-| | `starter_plan` | `f4` |
+| Scope | Action | Default | Group |
+|---|---|---|---|
+| global | `choose_location` | `f5` | session |
+|  | `starter_explore` | `f2` | turn |
+|  | `starter_review` | `f3` | turn |
+|  | `starter_plan` | `f4` | turn |
+|  | `send` | `enter` | turn |
+|  | `steer` | `alt+enter` | turn |
+|  | `newline` | `ctrl+j` | turn |
+|  | `queue_retract` | `up` | turn |
+|  | `paste_image` | `ctrl+v` | turn |
+|  | `editor` | `off` | turn |
+|  | `interrupt` | `esc` | turn |
+|  | `backtrack` | `esc esc` | conversation |
+|  | `cancel` | `ctrl+c` | client |
+|  | `verbose` | `ctrl+o` | conversation |
+|  | `plan_panel` | `ctrl+t` | conversation |
+|  | `rename` | `ctrl+r` | session |
+|  | `suspend` | `ctrl+z` | client |
+|  | `transcript_top` | `home` | conversation |
+|  | `transcript_bottom` | `end` | conversation |
+|  | `palette` | `ctrl+p` | client |
+|  | `leader` | `ctrl+x` | client |
+|  | `help` | `?` | client |
+|  | `settings` | `off` | client |
+|  | `quit` | `ctrl+q` | client |
+|  | `quit_empty` | `off` | client |
+| leader | `leader.new` | `n` | session |
+|  | `leader.new_options` | `N` | session |
+|  | `leader.sessions` | `l` | session |
+|  | `leader.writable` | `w` | session |
+|  | `leader.editor` | `e` | turn |
+|  | `leader.copy` | `y` | conversation |
+|  | `leader.scrollback` | `[` | conversation |
+|  | `leader.editor_view` | `v` | conversation |
+|  | `leader.open_image` | `i` | conversation |
+|  | `leader.steer` | `off` | turn |
+|  | `leader.approval` | `a` | turn |
+|  | `leader.auto_approve` | `A` | turn |
+|  | `leader.shell_rule` | `r` | turn |
+|  | `leader.end` | `k` | session |
+|  | `leader.details` | `d` | conversation |
+|  | `leader.settings` | `,` | client |
+|  | `leader.theme` | `t` | client |
+|  | `leader.export` | `x` | conversation |
+|  | `leader.compact` | `c` | conversation |
+|  | `leader.model` | `m` | turn |
+|  | `leader.backtrack` | `g` | conversation |
+|  | `leader.status` | `s` | runtime |
+|  | `leader.rail` | `b` | client |
+|  | `leader.tab_dashboard` | `1` | runtime |
+|  | `leader.tab_sessions` | `2` | runtime |
+|  | `leader.tab_upgrade` | `3` | runtime |
+|  | `leader.tab_logs` | `4` | runtime |
+|  | `leader.quit` | `q` | client |
+|  | `leader.help` | `?` | client |
+| composer | `editor.word_back` | `alt+b` | turn |
+|  | `editor.word_forward` | `alt+f` | turn |
+|  | `editor.kill_word_back` | `ctrl+w` | turn |
+|  | `editor.kill_word_forward` | `alt+d` | turn |
+|  | `editor.kill_line` | `ctrl+k` | turn |
+|  | `editor.kill_to_start` | `ctrl+u` | turn |
+|  | `editor.yank` | `ctrl+y` | turn |
+|  | `editor.line_start` | `ctrl+a` | turn |
+|  | `editor.line_end` | `ctrl+e` | turn |
+
+`choose_location` and the three `starter_*` actions are global chords that only act on
+the home screen, and the starters only while its draft is empty
+([home.rs:73-86](../tui/src/ui/app/home.rs)); the map does not invent a fourth scope
+for them, because a scope is the set a key can collide inside and these collide with
+the global ones.
+
+Four defaults are **`off`**, and each is a key given back rather than a verb removed.
+`editor` was `ctrl+g`, which is *abort* in readline and in every shell; `settings` was
+a bare `,`, so no message could start with a comma; `quit_empty` shared `ctrl+d` with
+delete-forward, one of whose two meanings ends the process; `leader.steer` was `s`,
+which is status everywhere else in the field. All four keep their names and their
+describability, so a `[keys]` line written against an older build still parses and
+still binds — and all four verbs are still reachable: `ctrl+x e` and `/editor`,
+`ctrl+x ,` and `/settings`, `ctrl+c` twice, `alt+enter` and `/steer`.
 
 A **leader verb** is the single key pressed *after* `leader`, so rebinding `leader` moves
-all fourteen with it. Its spec is normally one bare chord (`"o"`); the long form
+all twenty-nine with it. Its spec is normally one bare chord (`"o"`); the long form
 `"ctrl+x o"` is accepted when its first chord is the current leader, because that is what
 the `?` panel shows an operator and it should mean what it looks like. A two-key spec whose
 first chord is *not* the leader is reported and ignored.
@@ -2631,10 +2941,100 @@ why someone opened it — the lines of `[keys]` this build could not use.
 arrow keys, Home/End, Tab through a completion menu, and the characters themselves — is
 what a text field is, and this client does not offer to rebind it into something that is no
 longer one. Nor are the transcript's scroll aliases (`shift`/`ctrl` + arrows, PageUp/Down,
-the wheel), the tab digits `1`-`7` and Tab, the list navigation `j`/`k`/`h`/`l`, or the keys
-*inside* an overlay, which are that overlay's own discipline. Two leader aliases predate the
-map and are kept rather than silently removed: `ctrl+x g` beside `ctrl+x e`, and `ctrl+x o`
-beside `ctrl+x d`. They are not actions, so `/keys` does not list a second row for one verb.
+the wheel), the list layer's own digits and `Tab` on the three tabs that are lists, the list
+navigation `j`/`k`/`h`/`l`, `ctrl+d`'s delete-forward, or the keys *inside* an overlay, which
+are that overlay's own discipline. The list layer's bare `q` is the field's convention
+(`less`, `htop`, `k9s`) rather than the `quit` chord, and it is silenced when `quit` is
+`off`, so an operator who turned quitting off is not quit by a letter. One leader alias
+predates the map and is kept rather than silently removed — `ctrl+x o` beside `ctrl+x d`;
+it is not an action, so `/keys` does not list a second row for one verb. Its twin, `ctrl+x g`
+beside `ctrl+x e`, is **gone**: `g` is `leader.backtrack` now and claims the key first, and
+an alias that can never be reached is not an alias.
+
+### The five groups, and the three surfaces that use them
+
+One vocabulary, so a verb learnt in one place is looked for under the same heading in the
+next. [`Action::group`](../tui/src/keymap.rs) and
+[`Command::group`](../tui/src/ui/app/overlays.rs) answer with the same five words, in the
+same order, and [`Group::ALL`](../tui/src/ui/app/overlays.rs) is that order as a type — the
+`derive`d `Ord` is the drawing sequence, so a sort by group cannot disagree with the
+headings.
+
+| Group | The question it answers |
+|---|---|
+| **Session** | starting one, choosing where it runs, switching between them, renaming, ending |
+| **Turn** | composing the next turn and everything aimed at the one that is running — including the composer motions, which are how a turn is typed |
+| **Conversation** | what has already been said, and what can be done to it |
+| **Runtime** | the machines, and the tabs that describe them |
+| **Client** | this program: how it looks, what it binds, and how it ends |
+
+The review's finding was not that the palette's groups were wrong — it was that each
+surface had invented its own. The palette had two, "Coding" (35 rows) and "Runtime &
+distribution" (6); the `?` panel used a literal `SESSION` heading and never showed the
+five the map already defined; the which-key overlay had none (R1 §2.2, §2.5).
+
+**The command palette** (`ctrl+p`) sorts by group and then by `Command::ALL` order inside
+it, so each heading is drawn exactly once. It used to draw rows in `ALL` order with a
+heading on every change of group, and `ALL` crossed between the two groups six times, so a
+scrolled palette printed each heading three times and put Settings a page from Theme. Other
+things it now does:
+
+- **the shortcut column survives, the label gives way.** The label is ellipsized to
+  whatever is left after the shortcut and a gap, because a sentence can be finished from
+  its first half and `/copy ra` is a chord that does not exist. At 140 columns "Copy last
+  agent message as source Markdown" used to run straight into `/copy raw` with no seam;
+- **a query that *is* a group name filters to that group**, and a substring of one does
+  not match anything for being a substring of a heading. `co` returned all thirty-five
+  Coding rows, because every one of them carried the group's letters in a column the
+  operator was not typing about ([`Command::matches`](../tui/src/ui/app/overlays.rs));
+- **Interrupt and Steer are offered only while a turn is running**, on top of the
+  transport gate. Two questions, not one: the capability says whether the verb can *ever*
+  work here, `session_busy` whether there is anything for it to act on, and a row that
+  does nothing on an idle session is the same "advertising a verb that will be refused"
+  failure from the other direction;
+- **the second Dashboard row is gone.** "Runtime & distribution" and "Nodes" both mapped
+  to `/runtime` and both selected the same tab;
+- **three verbs that had a key and no row have one**: Rename (which prefills `/rename `,
+  gated on a session and on `interactive.rename`), Quit, and Approval — which is gated on
+  the transport having an approvals channel *and* on something actually waiting, the same
+  question `ctrl+x a` asks before it opens anything.
+
+The shortcut column is the resolved keymap wherever a command has an action, and the verb's
+own slash spelling where it has none ([`shortcut_of`](../tui/src/ui/app/overlays.rs)). Each
+row names **the action that reaches it**, which is not always the one sharing its name:
+`Command::Steer` points at `Action::Steer` (`alt+enter`) and "Edit prompt in `$EDITOR`" at
+`Action::LeaderEditor` (`ctrl+x e`), because `leader.steer` and `editor` default to `off`
+since T1 and a column reading `off` would say the verb has no key at all. An action an
+operator sets to `off` themselves still reads `off`, which is what `off` means there.
+
+**The `?` panel** draws every live action exactly once under the same five headings, in
+`Action::ALL` order inside each ([`view::help_keys`](../tui/src/ui/view.rs)). `live` is the
+filter, so an action an operator set to `off` is absent rather than drawn as a key that does
+nothing: the panel answers "what can I press here", not "what does this build ship with".
+Fifteen of the seventeen leader verbs used to appear only in the two-second which-key
+overlay and in `/keys`. Five actions are merged into two rows (the three kills, the two word
+motions), because a reader looking for "kill word" is not looking for three rows, and four
+rows are literals spelled in the file because nothing rebinds them — `@ path`, `backspace`
+on an empty draft, the wheel, and `ctrl+d`. The key column is **measured** against the
+longest key rather than padded to fifteen, which is what rendered
+`ctrl+w / ctrl+k / ctrl+u` as `ctrl+ukill word…` on the one row a reader opens the panel to
+find; a rebound chord can be longer still, which is exactly why it is read off the table.
+Below the rows, the COMMANDS block is derived from the `/` completion table and never
+restated, so help cannot advertise a verb completion does not offer. The panel scrolls, and
+when it does the last drawn row says how many are left — counted against the budget the
+marker itself is taking, because a panel that silently ends is one whose remaining half
+nobody finds.
+
+**The which-key overlay** draws for as long as the leader is pending, grouped under the same
+five headings, **above the footer on the right**
+([`view::leader_hint`](../tui/src/ui/view.rs)). Bottom-left put it over the composer's own
+frame and over the first characters of whatever was being typed, which is the text the
+operator is holding in their head while they look for the verb. Its list is the keymap's:
+a rebound verb is drawn on the key that reaches it, a verb turned `off` is not drawn at all,
+and a chord the open session cannot honour — steer without the capability, approval without
+a channel — is filtered out rather than taught by being refused. A key under the leader that
+is not a verb prints the first eight verbs as one notice row instead, bounded so a notice
+cannot become a page.
 
 ### The footer
 
@@ -2663,7 +3063,12 @@ on it.
 | `42.5k tokens` | `usage.total_tokens` | a `· 34%` share is appended **only** where the runtime reports a context window. Nothing reports one today; `runtime.models` is where it is meant to arrive, and dividing by a client-side table of model windows would be a lie presented as a measurement |
 | `$0.42` | `usage.cost_usd` | `<$0.01` for a spend too small to show, never `$0.00`. Turns `WARN` past `[budget] max_cost_usd` — see "Cost and usage" |
 | `esc interrupt` | conditional; see below | |
+| `ctrl+c again to quit` | `App::quit_armed` | only while the cancel chord is armed, ranked with the quit hint it is about. A key that quits on its second press and says nothing about the first is a key that surprises somebody once and is then never trusted again |
 | `ctrl+p commands`, `ctrl+x leader`, `ctrl+q quit` | this client | the chords come from the keymap, so a rebound key is what the row offers and an action set to `off` produces no hint at all. The last two are also on `?` and in the palette, so they yield first |
+
+On the three tabs that are not Sessions the row is three cells and nothing else —
+`ctrl+p commands`, `Esc returns to coding`, `r refresh` — because none of the session facts
+above it has anything to say there.
 
 The notice line keeps precedence: while a notice is showing it owns the whole row, folded
 onto one line, exactly as before.
@@ -2735,16 +3140,20 @@ client inventing a ceiling it was never told about.
 What that gates today, in all four places a verb is advertised — the footer, the command
 palette, the `ctrl+x` which-key overlay, and `/` completion in the composer:
 
-- the Steer verb, `s`, `ctrl+x s`, `/steer`, and the palette's Steer entry exist only
-  where `steer` is truthy. Native declares it because its in-process loop accepts a
-  steered message between tool calls; where it is false the key points at the durable
-  follow-up queue instead;
-- `a`, `ctrl+x a`, and the palette's approval entry only where `approvals` is truthy, and
+- the Steer verb — `alt+enter`, `/steer`, the `leader.steer` action for anyone who binds
+  it, and the palette's Steer entry — exists only where `steer` is truthy. Native declares
+  it because its in-process loop accepts a steered message between tool calls; where it is
+  false the key points at the durable follow-up queue instead;
+- `ctrl+x a` and the palette's approval entry only where `approvals` is truthy, and
   where it is `false` the key says *why* nothing will ever open that modal rather than
   "not waiting on one" (X1);
 - `esc interrupt` in the footer, the palette's Interrupt entry, and `/interrupt` only
   where `interrupt` is truthy — and the footer adds the second condition that a turn is
   actually running;
+- **the palette adds that second condition too**, for Interrupt and for Steer. Both rows
+  were gated on transport capability alone, so both were offered on an idle or ended
+  session where pressing them does nothing at all (R1 §2.2). The approval row carries the
+  matching pair: an approvals channel, and an approval actually waiting;
 - `multimodal` gates the attachment chips and `Ctrl+V` image paste (B4). Where it is
   `false` the `@` completion still substitutes text and `Ctrl+V` still pastes text; what
   is withheld is the structured attachment, and the refusal names the transport;
@@ -2905,9 +3314,14 @@ rediscovered:
   draft remains visibly editable and unsent. After the earlier request is accepted—or
   reconciled under its stable turn ID—the operator presses Enter again to send the draft.
 - **`h`/`l` and the arrows** move between the panes of a tab and collapse/expand a tree
-  node; `Esc` unwinds one level at a time (composer, then transcript, then the session);
-  `ctrl+x x` or `/close` ends the open session, or the highlighted row in the session
-  switcher (`ctrl+x l`), behind a confirmation. A live session offers close or kill. A
+  node, on the three tabs that are lists; `Esc` on a session banks a draft that has text
+  and leaves the session when it has none — there is no "session open, composer closed"
+  state to unwind through, because `open_session_on` recreates the composer for every
+  session it opens;
+  `ctrl+x k` or `/close` ends the open session, or the highlighted row in the session
+  switcher (`ctrl+x l`), behind a confirmation. It was `ctrl+x x` until this key map
+  moved export onto `x` — one key away from ending a session was the most dangerous
+  collision in the map, and a confirm dialog was the only guard. A live session offers close or kill. A
   terminal session (`failed`/`lost`/`closed`/`cancelled`) is removed via
   `interactive.delete` so it leaves the list instead of lingering until the seven-day
   retention sweep. An offline last-known row is hidden in this client only; `x` in the
@@ -2935,8 +3349,17 @@ rediscovered:
 - **The transcript-first coding home is the front door.** `ouro` lands on the Sessions
   tab instead of an onboarding modal. The composer accepts typing and paste
   immediately, before sign-in. F2/F3/F4 insert editable project exploration, change review,
-  or improvement prompts without sending them. The folder, model, file access, and approval
-  policy sit beside the task; `/options` exposes advanced setup.
+  or improvement prompts without sending them, and only while the draft is empty. The
+  folder, model, file access, and approval
+  policy sit beside the task; `/options` exposes advanced setup. **The `Folder:` line says
+  where the path came from** when it is one of two answers — `· from config.toml` or
+  `· this directory` ([`workspace_origin`](../tui/src/ui/sessions.rs)) — and the row under
+  it names `f5` as the key that changes it. The README says to open `ouro` from the project
+  you want to work on, and with `[defaults] workspace` set the home screen showed that
+  stored path instead, with nothing on the line to say the directory the operator was
+  standing in had been overridden (R1 §2.5). A path typed into the location dialog is
+  neither of the two and gets no suffix: this client did not choose it and has nothing to
+  add.
   The OAuth-backed native path uses managed ChatGPT sign-in. Enter on a nonempty task
   captures that exact request, connects, and starts it once after sign-in succeeds. Empty
   Enter connects only. Esc, Ctrl-C, or opening quit revokes automatic start and keeps the
@@ -2966,8 +3389,13 @@ rediscovered:
   conversation into the *normal* buffer where the terminal's own scrollback keeps it,
   re-enters, and repaints. `ctrl+x v` ("Open transcript in `$EDITOR`") writes the same
   text 0600 under the data directory, opens it in `$VISUAL`/`$EDITOR` through the same
-  suspend/restore the composer's `ctrl+g` uses, then removes the file; it never touches
-  the draft. Both render `ui::export`, which projects through the same
+  suspend/restore the composer's `ctrl+x e` uses — and the same two that `ctrl+z` uses to
+  hand the terminal to the shell — then removes the file; it never touches
+  the draft. All three come back through
+  [`returned_from_a_detour`](../tui/src/ui/mod.rs), which asks for a full repaint and
+  forgets the window title *before* anything that can fail, because a resume that went
+  wrong is exactly when a pane must not be left blank and silent.
+  Both hatches render `ui::export`, which projects through the same
   `transcript_cells::project` the pane does and then drops the render caps and the
   gutters: full tool results, full diffs, dividers, notes, and a timestamp on each of the
   operator's own messages. Prose folds to the terminal's current width; diffs, tool
@@ -2987,18 +3415,41 @@ rediscovered:
   this build knows it — Option on iTerm2, Fn on Terminal.app, Shift on the terminals that
   identify themselves in `TERM_PROGRAM` — and an unidentified terminal is told all three
   rather than the wrong one.
-- **`,` opens settings.** `F1` Connections lists subscriptions and API keys with local
+- **`ctrl+x ,` opens settings**, and so does `/settings` and the palette's row; a bare `,`
+  is a comma a message may start with. Four sections.
+  `F1` Connections lists subscriptions and API keys with local
   status, credential source, provider marks, and setup guidance. Select a provider with
   arrows/Tab, use Enter to connect ChatGPT or add a private Anthropic/xAI key, and `r`
   to refresh. Grok uses `grok login` on the attached runtime computer; it remains separate
   from the xAI API key. Environment keys take precedence and are managed in the service
-  environment. Keys are masked and never saved to client preferences.
+  environment. Keys are masked and never saved to client preferences. Every row is named
+  through one table ([`provider_name`](../tui/src/ui/app/settings.rs)) — `OpenAI`,
+  `Anthropic`, `xAI`, `Alibaba`, `Alibaba (CN)`, `ChatGPT`, `Grok` — because the five this
+  client knew by name used to be capitalised properly while everything else fell through to
+  the wire id with its underscores replaced, so `alibaba cn` sat in a column beside
+  `Anthropic`. A provider this build has never heard of is title-cased rather than invented.
   `F3` Runtime shows facts as reported by the attached runtime; `F2` Defaults edits
   this client's own `[defaults]` — workspace, approval mode, and sandbox mode (there is no
   provider picker: `:native` is the only provider, see [proposals/core.md](proposals/core.md)
   §3 D2) — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
+  `F4` Client is the fourth ([`settings_client`](../tui/src/ui/view.rs)): `[terminal] mouse`,
+  `[accessibility] screen_reader` and `reduced_motion`, `[notifications] mode` and `when`,
+  and `[budget] max_cost_usd` — typed rather than cycled, because it is a number and not a
+  choice between named ones. The rows are the *file's* answers rather than the running
+  process's: `[accessibility]` can also be turned on by a flag or an environment variable,
+  and a row showing the resolved answer would write that resolution into the file the next
+  time anything was saved. One `[ save ]`, and the budget is validated before anything
+  reaches the config, so "nothing was saved" stays true when it is refused. Each group of
+  rows is headed by the `config.toml` section it writes, so the same setting can be found
+  in the file. The review counted eight sections with no UI at all; these are the four that
+  are about this client, and the section **names the others rather than leaving them out** —
+  `[keys]` and `[statusline]` are a chord grammar and a shell command, whose editors are
+  their own designs, and the line under the rows points at the file and at `/keys`;
+  `[theme]` has the picker, which can preview where a cycler row could not; `[location]` is
+  the `f5` dialog, which browses the runtime's filesystem. A settings page that simply never
+  mentions `[keys]` is how an operator concludes their chords cannot be rebound at all.
 - **There is no Machines overlay.** The cluster is not a product this client sets up:
   `ouro fleet create` gives one machine its identity, `ouro fleet status` and
   `ouro fleet doctor` read it, and two machines are joined by hand with the environment
@@ -3044,12 +3495,24 @@ rediscovered:
 ### Themes (A10)
 
 `[theme] name = "auto" | "dark" | "light" | "ansi" | "dark-daltonized" | "light-daltonized"`,
-default `auto`. `/theme` cycles the five named ones live and writes down whichever the
-operator stops on; `/theme <name>` goes straight to one. A name this build does not have is
-refused *by name* — the alternatives are listed and nothing changes — rather than quietly
-becoming the default. It is a typed command with a `/` completion entry and, for now, no
-row in the `Ctrl+P` palette; the palette's catalogue is being edited alongside this and a
-second entry in it would have been a merge conflict rather than a feature.
+default `auto`. `/theme <name>` goes straight to one and is immediate, because naming a
+palette is already the choice. A name this build does not have is refused *by name* — the
+alternatives are listed and nothing changes — rather than quietly becoming the default.
+
+**Bare `/theme`, `ctrl+x t` and the palette's "Change the colour theme" row open a picker**
+([`Overlay::Theme`](../tui/src/ui/app/overlays.rs)). It used to *cycle* one step and write
+`config.toml` on the spot, with a one-line notice: looking at the next palette and keeping
+it were the same keystroke, and the review's own live run changed the reviewer's theme
+(R1 §2.3).
+Now `↑`/`↓` (and `j`/`k`, and the digits `1`–`6` that are printed beside the rows) move and
+**preview**, `Enter` keeps the highlighted one and is the only thing that writes the file,
+and `Esc` puts back exactly what was drawing when the overlay opened and writes nothing at
+all. The overlay holds that previous palette rather than re-reading the config, because the
+config is what `Enter` edits and restoring from it would restore whatever the last preview
+had already made of it. Pressing the verb again closes and restores, the same statement
+`Esc` makes. The popup is deliberately not a swatch grid: the only honest preview of a
+palette is the screen already showing the conversation, so the list is names — with the one
+in use marked — over two lines saying what the two exits do.
 
 The palette is a [`Theme`](../tui/src/ui/theme.rs) value resolved once at startup, held as
 an index in an atomic rather than behind a lock: colour accessors run thousands of times a
@@ -3321,3 +3784,9 @@ public gateway does not expose — a lost acknowledgement still means the
 provider may have received the same text twice); a keyboard path back to the advanced `n` session
 dialog from the coding home (the composer owns `n` there, so the dialog is
 reachable only with a session open — pinned behavior, chosen by nobody).
+
+
+Managed image uploads require the `attachment.*` methods and a usable, contained
+`ouro-media` helper on the owner runtime. Build it with `make media` for a source
+runtime; release packaging includes the matching native binary. Limits and static
+formats match the web client; see [Image attachments](WEB.md#image-attachments).

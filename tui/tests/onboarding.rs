@@ -1028,14 +1028,17 @@ fn a_busy_first_message_restores_the_prompt_as_a_fresh_queued_follow_up() {
 }
 
 #[test]
-fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
+fn ctrl_p_opens_a_searchable_palette_grouped_by_the_five_plan_groups() {
     let mut app = harness(true);
     app.apply(ctrl('p'));
 
+    // T2.1: the parity plan's five groups, in place of the two that put "New session" and
+    // "Change the model" under one heading called "Coding". The duplicate `Nodes` row —
+    // which ran `/runtime` exactly as "Runtime & distribution" did — is gone with them.
     let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("Coding"), "{}", screen.text());
-    assert!(screen.contains("Runtime & distribution"));
-    assert!(screen.contains("Nodes"));
+    assert!(screen.contains("Session"), "{}", screen.text());
+    assert!(screen.contains("Turn"), "{}", screen.text());
+    assert!(!screen.contains("Nodes"), "{}", screen.text());
 
     type_text(&mut app, "settings");
     let screen = render(&mut app, 120, 34);
@@ -1044,9 +1047,16 @@ fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
     app.apply(key(KeyCode::Esc));
     app.apply(ctrl('p'));
 
+    // F11. `dist` still filters correctly — the group-name rule only fires on a query that
+    // *is* a group name — and the assertion names the palette row rather than a string the
+    // header's own subtitle now also carries.
     type_text(&mut app, "dist");
     let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("Runtime & distribution"));
+    let row = screen.row("/runtime");
+    assert!(
+        row.contains("Runtime & distribution"),
+        "the palette row is not the match: {row}"
+    );
     assert!(
         !screen.contains("New session"),
         "a query must filter the list, not only move the selection: {}",
@@ -1277,7 +1287,11 @@ fn connect_and_start_dispatches_the_captured_task_once_after_sign_in() {
 
 #[test]
 fn every_way_out_of_sign_in_revokes_automatic_start() {
-    for cancel in [key(KeyCode::Esc), ctrl('c'), ctrl('q')] {
+    // Two ways, not three. `ctrl+q` was the third until it was guarded by
+    // `overlay.is_none()` (`ui-parity` T1.2): it used to replace whatever overlay was
+    // open with the quit dialog and take the keystroke with it, which is the bug, not the
+    // exit. The test below pins that it now leaves the sign-in alone.
+    for cancel in [key(KeyCode::Esc), ctrl('c')] {
         let mut app = harness(false);
         type_text(&mut app, "keep this task");
         app.apply(key(KeyCode::Enter));
@@ -1487,4 +1501,318 @@ fn closing_a_connected_account_does_not_claim_sign_in_was_cancelled() {
     assert!(app.overlay.is_none());
     assert!(app.home_error.is_none());
     assert!(!app.home_connect_and_start_pending());
+}
+
+// ---------------------------------------------------------------------------------------
+// ui-parity T1.1 / T1.2 — the home screen refuses a verb it does not have
+// ---------------------------------------------------------------------------------------
+
+/// The finding this resolves, on the screen it was found on: typing `/ke` and pressing
+/// Enter started a session whose first task was the string "/ke", and opened the ChatGPT
+/// device-code sign-in to pay for it (R1 §2.3).
+///
+/// Nothing is started, nothing is sent, and the words are still in the draft.
+#[test]
+fn a_mistyped_verb_on_the_home_screen_starts_nothing() {
+    let mut app = harness(false);
+
+    type_text(&mut app, "/keyq");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        app.drain().iter().all(|call| !matches!(
+            call.method.as_str(),
+            "interactive.start" | "account.login.start"
+        )),
+        "a verb this client does not have started something"
+    );
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+    assert_eq!(app.home_draft.text(), "/keyq", "the draft was thrown away");
+
+    let refusal = app.home_error.as_deref().expect("a refusal on the home");
+    assert!(refusal.contains("unknown command /keyq"), "{refusal}");
+    assert!(
+        refusal.contains("/keys"),
+        "the nearest verb is named: {refusal}"
+    );
+}
+
+/// The same line typed out in full still runs, so the refusal is a refusal and not a
+/// wall: `/settings` is a verb, and it opens.
+#[test]
+fn a_verb_the_home_screen_does_have_still_runs() {
+    let mut app = harness(false);
+
+    type_text(&mut app, "/settings");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Settings(_))),
+        "{:?}",
+        app.overlay
+    );
+    assert!(app.home_error.is_none(), "{:?}", app.home_error);
+}
+
+/// An ordinary message that happens to begin with a path is a message. The refusal reads
+/// a *verb* — one `/`, then letters — and `/usr/bin/env` is not one.
+#[test]
+fn a_message_that_starts_with_a_path_is_still_a_message() {
+    let mut app = harness(true);
+
+    type_text(&mut app, "/usr/bin/env is missing on the runner");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.home_error.is_none(), "{:?}", app.home_error);
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.start"),
+        "an ordinary message was refused as a verb"
+    );
+}
+
+/// T1.2. `ctrl+q` inside an overlay is not an exit: it used to replace the credential
+/// editor, or here the sign-in, with the quit dialog and take the keystroke with it
+/// (R1 §2.4). Every other global chord already carried this guard.
+#[test]
+fn ctrl_q_over_an_overlay_leaves_the_overlay_alone() {
+    let mut app = harness(false);
+    type_text(&mut app, "keep this task");
+    app.apply(key(KeyCode::Enter));
+    login_reply(&mut app, "leave-me-alone");
+    let _ = app.drain();
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Account(_))),
+        "{:?}",
+        app.overlay
+    );
+
+    app.apply(ctrl('q'));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Account(_))),
+        "ctrl+q replaced the sign-in: {:?}",
+        app.overlay
+    );
+    assert!(
+        app.drain()
+            .iter()
+            .all(|call| call.method != "account.login.cancel"),
+        "and it cancelled the sign-in on its way past"
+    );
+
+    // With nothing open it is still the quit dialog it has always been.
+    app.apply(key(KeyCode::Esc));
+    let _ = app.drain();
+    app.apply(ctrl('q'));
+    assert!(
+        matches!(app.overlay, Some(Overlay::Quit { .. })),
+        "{:?}",
+        app.overlay
+    );
+}
+
+/// M2, on the home screen: the grammar that keeps ordinary prose sendable is the same one.
+///
+/// The home is where a refusal is most expensive in both directions — a mistyped verb
+/// starts a session and a refused sentence cannot be started at all.
+#[test]
+fn the_home_screen_sends_prose_that_begins_with_a_slash_word() {
+    let mut app = harness(true);
+
+    type_text(&mut app, "/tmp is full on the build box");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.home_error.is_none(), "{:?}", app.home_error);
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.start"),
+        "an ordinary sentence was refused as a verb"
+    );
+}
+
+/// …and a leading space is the escape hatch for a word that is a verb.
+#[test]
+fn a_leading_space_sends_a_verb_from_the_home_screen_as_text() {
+    let mut app = harness(true);
+
+    type_text(&mut app, " /keys");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+}
+
+/// The refusal that remains names the nearest verbs *and* the way out.
+#[test]
+fn a_mistyped_verb_alone_on_the_home_screen_says_how_to_send_it_anyway() {
+    let mut app = harness(false);
+
+    type_text(&mut app, "/keyq");
+    app.apply(key(KeyCode::Enter));
+
+    let refusal = app.home_error.as_deref().expect("a refusal on the home");
+    assert!(refusal.contains("unknown command /keyq"), "{refusal}");
+    assert!(refusal.contains("/keys"), "{refusal}");
+    assert!(
+        refusal.contains("start the line with a space"),
+        "the refusal is a dead end without this: {refusal}"
+    );
+    assert_eq!(app.home_draft.text(), "/keyq");
+}
+
+#[test]
+fn image_only_home_obeys_disabled_and_rebound_send_keys() {
+    use ouro::model::{Attachment, AttachmentKind};
+    for binding in ["off", "ctrl+enter"] {
+        let mut app = harness(true);
+        let mut image = Attachment::image("att_abcdefghijklmnopqrstuvwx12345678");
+        image.kind = AttachmentKind::ManagedImage;
+        image.ephemeral = false;
+        image.byte_size = 72;
+        app.home_images.push(image);
+        app.config
+            .keys
+            .bindings
+            .insert("send".into(), toml::Value::String(binding.into()));
+        app.reload_keymap();
+        app.drain();
+        app.apply(key(KeyCode::Enter));
+        assert!(!app.drain().iter().any(|c| c.method == "interactive.start"));
+        assert_eq!(app.home_images.len(), 1);
+
+        app.apply(Msg::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+        let calls = app.drain();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.method == "interactive.start")
+                .count(),
+            usize::from(binding != "off")
+        );
+    }
+}
+
+#[test]
+fn image_only_first_message_recovery_reuses_the_created_session_and_binds_before_send() {
+    use ouro::model::{Attachment, AttachmentKind};
+    let mut app = harness(true);
+    let id = "att_abcdefghijklmnopqrstuvwx12345678";
+    let mut image = Attachment::image(id);
+    image.kind = AttachmentKind::ManagedImage;
+    image.ephemeral = false;
+    image.byte_size = 72;
+    app.home_images.push(image);
+    app.drain();
+    app.apply(key(KeyCode::Enter));
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.start")
+        .expect("image-only start");
+    let snapshot = app.image_draft_snapshot();
+    let original_image_draft = snapshot["home_draft_id"].as_str().unwrap().to_string();
+    let mut recovered = harness(true);
+    recovered.restore_image_drafts(snapshot);
+    assert!(recovered.home_reconciling());
+    recovered.drain();
+    recovered.apply(key(KeyCode::Enter));
+    let retry = recovered
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.start")
+        .expect("same start");
+    assert_eq!(retry.params, start.params);
+    answer(
+        &mut recovered,
+        retry.tag,
+        json!({"_struct":"Ouroboros.Interactive.Ref", "id":start.params["id"]}),
+    );
+    assert!(!recovered
+        .drain()
+        .iter()
+        .any(|c| c.method == "interactive.send_message"));
+    let (session, _, bound_draft, input) = recovered
+        .image_bind_pending
+        .take()
+        .expect("bind on selected owner");
+    assert!(bound_draft.starts_with(&original_image_draft));
+    assert_eq!(input.attachments[0].path, id);
+    recovered.apply(Msg::ImagesBound {
+        id: session,
+        input,
+        error: None,
+    });
+    let sent = recovered
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.send_message")
+        .expect("send after bind");
+    assert_eq!(sent.params["input"]["prompt"], "");
+    assert_eq!(
+        sent.params["input"]["image_attachments"],
+        json!([{"id":id}])
+    );
+}
+
+#[test]
+fn consecutive_image_first_messages_use_distinct_home_drafts() {
+    use ouro::ui::ClipboardOutcome;
+    let mut app = harness(true);
+    let mut drafts = Vec::new();
+    for id in [
+        "att_abcdefghijklmnopqrstuvwx12345678",
+        "att_abcdefghijklmnopqrstuvwx12345679",
+    ] {
+        app.apply(ctrl('v'));
+        let upload = app
+            .take_clipboard_request()
+            .expect("home image acquisition");
+        drafts.push(upload.draft_id.clone());
+        app.apply(Msg::ImageUpload {
+            request: upload,
+            outcome: ClipboardOutcome::Uploaded(json!({
+                "id":id, "byte_size":72, "source_size":72, "client_ephemeral":false
+            })),
+        });
+        app.drain();
+        app.apply(key(KeyCode::Enter));
+        let start = app
+            .drain()
+            .into_iter()
+            .find(|c| c.method == "interactive.start")
+            .expect("image-only start");
+        answer(
+            &mut app,
+            start.tag,
+            json!({"_struct":"Ouroboros.Interactive.Ref", "id":start.params["id"]}),
+        );
+        let (session, _, draft, input) = app
+            .image_bind_pending
+            .take()
+            .expect("original bind request");
+        assert_eq!(&draft, drafts.last().unwrap());
+        app.apply(Msg::ImagesBound {
+            id: session,
+            input,
+            error: None,
+        });
+        assert!(app
+            .drain()
+            .iter()
+            .any(|c| c.method == "interactive.send_message"));
+        app.apply(ctrl('x'));
+        app.apply(key(KeyCode::Char('n')));
+        assert!(app.sessions.open.is_none());
+    }
+    assert_ne!(drafts[0], drafts[1]);
 }

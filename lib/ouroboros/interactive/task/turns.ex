@@ -43,6 +43,8 @@ defmodule Ouroboros.Interactive.Task.Turns do
          :ok <- ensure_serializable(request),
          :ok <- ensure_secret_free_options(request),
          :ok <- ensure_exposable_turn(runtime.session, request),
+         {:ok, request} <- reserve_images(runtime.session.id, nil, request),
+         {:ok, request} <- pin_image_model(runtime.session, id, request),
          turn = State.new_turn(id, mode, request) do
       case Map.fetch(runtime.session.turns, id) do
         {:ok, existing} ->
@@ -80,6 +82,14 @@ defmodule Ouroboros.Interactive.Task.Turns do
     do: {:error, :invalid_turn_request, runtime}
 
   defp persist_and_dispatch_turn(runtime, turn, request) do
+    with {:ok, request} <- reserve_images(runtime.session.id, turn.id, request) do
+      persist_reserved_turn(runtime, turn, request)
+    else
+      {:error, reason} -> {:error, reason, runtime}
+    end
+  end
+
+  defp persist_reserved_turn(runtime, turn, request) do
     session =
       %{runtime.session | turns: Map.put(runtime.session.turns, turn.id, turn)} |> State.touch()
 
@@ -88,6 +98,14 @@ defmodule Ouroboros.Interactive.Task.Turns do
         dispatch_persisted_turn(runtime, turn, request)
 
       {:error, runtime} ->
+        if Map.get(request, :image_attachments, []) != [],
+          do:
+            Ouroboros.Attachments.release_reservation(
+              runtime.session.id,
+              turn.id,
+              request.image_attachments
+            )
+
         {:error, {:turn_intent_checkpoint_failed, :storage_error}, runtime}
     end
   end
@@ -217,7 +235,14 @@ defmodule Ouroboros.Interactive.Task.Turns do
   defp ensure_exposable_turn(_session, _request), do: :ok
 
   defp build_turn_request(input, opts) do
-    allowed = [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]
+    allowed = [
+      :attachments,
+      :image_attachments,
+      :reasoning_effort,
+      :output_schema,
+      :metadata,
+      :provider_options
+    ]
 
     case Enum.find(Keyword.keys(opts), &(&1 not in allowed)) do
       nil ->
@@ -240,6 +265,44 @@ defmodule Ouroboros.Interactive.Task.Turns do
 
       key ->
         {:error, {:unknown_turn_option, key}}
+    end
+  end
+
+  defp pin_image_model(session, id, request) do
+    if Map.get(request, :image_attachments, []) == [] do
+      {:ok, request}
+    else
+      previous =
+        get_in(session.turns, [id, :request, Access.key(:metadata, %{}), "ouroboros_image_model"])
+
+      model =
+        previous || Map.get(request.metadata || %{}, "ouroboros_image_model") ||
+          Map.get(session.options, :model) || Ouroboros.Models.default_model(:native)
+
+      if Ouroboros.Models.image_support(model) == :unsupported do
+        {:error, :image_model_unsupported}
+      else
+        {:ok,
+         %{request | metadata: Map.put(request.metadata || %{}, "ouroboros_image_model", model)}}
+      end
+    end
+  end
+
+  defp reserve_images(session_id, turn_id, request) do
+    case Map.get(request, :image_attachments, []) do
+      [] ->
+        {:ok, request}
+
+      refs ->
+        with {:ok, manifest} <-
+               Ouroboros.Attachments.reserve(
+                 session_id,
+                 turn_id,
+                 refs,
+                 length(request.attachments)
+               ) do
+          {:ok, Map.put(request, :image_attachments, manifest)}
+        end
     end
   end
 

@@ -397,6 +397,18 @@
 
     mounted: function () {
       this.loadDraft();
+      this.handleEvent("draft-replace", function (event) {
+        if (event.key !== this.key || typeof event.text !== "string") return;
+        // Backtrack explicitly replaces the draft, including this hook's local copy.
+        // It is not a send acknowledgement and must survive the next LiveView patch.
+        this.draft = event.text;
+        this.el.value = this.draft;
+        this.saveDraft();
+        this.autosize();
+        this.syncSend();
+        this.el.focus();
+        this.el.setSelectionRange(this.draft.length, this.draft.length);
+      }.bind(this));
       this.handleEvent("draft-sent", function (event) {
         if (event.key !== this.key) return;
         // A slow acknowledgement must not clear words typed after the submitted draft.
@@ -408,22 +420,17 @@
           this.syncSend();
         }
       }.bind(this));
+      // Read the current form, including managed images and upload state. The server's
+      // debounced draft can be older than the text the operator is submitting.
+      this.handleEvent("composer-submit", function (event) {
+        if (event.key === this.key) this.submit();
+      }.bind(this));
       this.onKeyDown = function (event) {
         if (event.key !== "Enter" || event.shiftKey || event.altKey || event.metaKey) return;
         // An IME composing a character sends Enter to commit it; that Enter is not a send.
         if (event.isComposing || event.keyCode === 229) return;
 
-        var form = this.el.form;
-        if (!form || form.classList.contains("phx-submit-loading")) return;
-        if (this.el.value.trim() === "") return;
-
-        event.preventDefault();
-
-        if (typeof form.requestSubmit === "function") {
-          form.requestSubmit();
-        } else {
-          form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-        }
+        this.submit(event);
       }.bind(this);
 
       this.onInput = function () {
@@ -448,6 +455,19 @@
     destroyed: function () {
       this.el.removeEventListener("keydown", this.onKeyDown);
       this.el.removeEventListener("input", this.onInput);
+    },
+
+    submit: function (event) {
+      var form = this.el.form;
+      if (!form || form.classList.contains("phx-submit-loading")) return;
+      if (this.el.value.trim() === "" && form.dataset.imagesReady !== "true") return;
+      if (form.dataset.imagesPending === "true") return;
+      if (event) event.preventDefault();
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
     },
 
     loadDraft: function () {
@@ -477,8 +497,16 @@
 
     syncSend: function () {
       var form = this.el.form;
-      var button = form && form.querySelector("[data-ouro-send]");
-      if (button) button.disabled = this.el.value.trim() === "";
+      if (!form) return;
+      // ui-parity W2. Steer submits the same form under a different verb, so it follows
+      // the same rule: a turn with nothing in it is not a turn.
+      var buttons = form.querySelectorAll("[data-ouro-send], [data-ouro-steer]");
+      var empty = this.el.value.trim() === "";
+      for (var i = 0; i < buttons.length; i++) {
+        var steer = buttons[i].hasAttribute("data-ouro-steer");
+        buttons[i].disabled = form.dataset.imagesPending === "true" ||
+          (steer ? (empty || form.dataset.imagesReady === "true") : (empty && form.dataset.imagesReady !== "true"));
+      }
     }
   };
 
@@ -502,6 +530,14 @@
 
     destroyed: function () {
       this.el.removeEventListener("cancel", this.onCancel);
+      // ui-parity W2. Removing an open `<dialog>` from the document leaves the top layer
+      // holding an element nothing listens to: `Escape` stops closing anything and focus
+      // falls to `<body>`. Close it first, while it is still ours.
+      try {
+        if (this.el.open && typeof this.el.close === "function") this.el.close();
+      } catch (error) {
+        // A dialog the browser already tore down is nothing left to close.
+      }
       if (this.previouslyFocused && this.previouslyFocused.isConnected) {
         this.previouslyFocused.focus();
       }
@@ -519,6 +555,24 @@
 
     focusIfInvalid: function () {
       if (this.el.getAttribute("aria-invalid") === "true") this.el.focus();
+    }
+  };
+
+  // The server owns selection; the browser keeps that row visible without moving the
+  // caret out of the search box. The list's selected-id attribute also changes when
+  // filtering resets the selection, so both paths run this hook after the patch.
+  var PaletteSelection = {
+    mounted: function () {
+      this.revealSelection();
+    },
+
+    updated: function () {
+      this.revealSelection();
+    },
+
+    revealSelection: function () {
+      var selected = this.el.querySelector('[aria-selected="true"]');
+      if (selected) selected.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
   };
 
@@ -549,6 +603,284 @@
       window.clearInterval(this.timer);
     }
   };
+
+  // ------------------------------------------------------------------------------------
+  // ui-parity W2 — the clipboard, and the keys that are not a character
+  // ------------------------------------------------------------------------------------
+
+  // `navigator.clipboard` is unavailable on an insecure origin and rejects when the
+  // browser decides the write was not user-initiated. Neither is an error worth throwing
+  // at somebody: the fallback puts the text somewhere they can copy it by hand, and the
+  // button says which of the two happened. Nothing here ever claims a copy it did not do.
+  function writeClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        var written = navigator.clipboard.writeText(text);
+        if (written && typeof written.then === "function") return written;
+      } catch (error) {
+        // Fall through to the selection path.
+      }
+    }
+    return Promise.reject(new Error("no async clipboard"));
+  }
+
+  // The old path: an off-screen textarea, selected, and `execCommand`. Returns whether the
+  // copy actually happened, because a button that said "Copied" on a browser that refused
+  // would be the one lie this whole surface is written to avoid.
+  function selectAndCopy(text, visible) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+
+    var copied = false;
+    try {
+      area.select();
+      copied = document.execCommand && document.execCommand("copy");
+    } catch (error) {
+      copied = false;
+    }
+    document.body.removeChild(area);
+
+    // Still nothing. Leave the words the person asked for selected on the page so the
+    // browser's own copy key finishes the job.
+    if (!copied && visible && window.getSelection) {
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(visible);
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch (error) {
+        // A selection that cannot be made changes nothing about the answer below.
+      }
+    }
+
+    return copied;
+  }
+
+  function copy(text, visible, settle) {
+    if (typeof text !== "string" || text === "") {
+      settle(false);
+      return;
+    }
+
+    writeClipboard(text).then(
+      function () {
+        settle(true);
+      },
+      function () {
+        settle(selectAndCopy(text, visible));
+      }
+    );
+  }
+
+  // Where a copy announces itself when it did not come from a button of its own — the
+  // palette's "copy the last message". `phx-update="ignore"`, so a transcript patch does
+  // not wipe the word mid-flash.
+  function announceCopy(copied) {
+    var status = document.getElementById("ouro-copy-status");
+    if (!status) return;
+
+    status.textContent = copied ? "Copied" : "Could not copy — press ⌘C";
+    window.clearTimeout(status.ouroTimer);
+    status.ouroTimer = window.setTimeout(function () {
+      status.textContent = "";
+    }, 1500);
+  }
+
+  // "Copy" on an agent message: the *rendered* words, read back out of the prose the
+  // browser has already drawn. That is the only place the rendered text exists — this
+  // side does not render Markdown, and a second renderer here would be a second answer to
+  // what the message says.
+  //
+  // "Copy source" is not handled here at all. It is a `phx-click`, because the Markdown a
+  // provider sent is untrusted prose and belongs in a socket payload rather than in a
+  // `data-` attribute on the page.
+  var Clipboard = {
+    mounted: function () {
+      this.onClick = function (event) {
+        var button = event.target.closest && event.target.closest("[data-ouro-copy]");
+        if (!button || !this.el.contains(button)) return;
+
+        event.preventDefault();
+
+        var prose = this.el.parentElement && this.el.parentElement.querySelector(".ouro-prose");
+        var label = button.ouroLabel || button.textContent;
+        button.ouroLabel = label;
+
+        copy((prose && prose.innerText) || "", prose, function (copied) {
+          button.textContent = copied ? "Copied" : "Press ⌘C";
+          window.clearTimeout(button.ouroTimer);
+          button.ouroTimer = window.setTimeout(function () {
+            button.textContent = label;
+          }, 1500);
+        });
+      }.bind(this);
+
+      this.el.addEventListener("click", this.onClick);
+    },
+
+    destroyed: function () {
+      this.el.removeEventListener("click", this.onClick);
+    }
+  };
+
+  // Every shape a caret can be in. `contenteditable` with no value and
+  // `contenteditable="plaintext-only"` are both editable, and a widget wearing
+  // `role="textbox"` is one as far as the person typing into it is concerned.
+  function editable(element) {
+    if (!element || !element.matches) return false;
+    if (element.isContentEditable) return true;
+
+    return element.matches(
+      "input, textarea, select, [contenteditable]:not([contenteditable='false'])," +
+        " [role='textbox'], [role='searchbox'], [role='combobox']"
+    );
+  }
+
+  // A `<dialog>` owns the screen while it is open. Nothing bound here may open a second
+  // one over it: two stacked dialogs leave the lower one in the top layer with nothing
+  // listening for its `cancel`, and — far worse — a palette row forwarding
+  // `session-action` would rewrite the confirmation underneath into a different question
+  // about a different session, with no click of the operator's in between.
+  function blockingDialog(except) {
+    var open = document.querySelectorAll("dialog[open]");
+
+    for (var i = 0; i < open.length; i++) {
+      if (open[i].id !== except) return true;
+    }
+    return false;
+  }
+
+  // The document-level keys, on an element inside the LiveView so they have somewhere to
+  // push to. Everything here is a *shortcut*: the server owns what each one does, gates it
+  // exactly as it gates the palette row of the same name, and may answer by doing nothing.
+  //
+  // ⌘N and ⌘. are deliberately not bound. They are the browser's and the operating
+  // system's, and a page that stole them would be taking a window away from somebody to
+  // save them one keystroke.
+  var Keys = {
+    mounted: function () {
+      this.onKeyDown = function (event) {
+        if (event.defaultPrevented || !event.key) return;
+        // An IME sends real keydowns while composing a character; none of them is a
+        // shortcut. Same guard the Composer hook uses for Enter.
+        if (event.isComposing || event.keyCode === 229) return;
+
+        // The palette, from anywhere at all — including from inside the composer, which
+        // is where a person is most likely to want it and which is not a dialog. Its own
+        // dialog is excepted so ⌘K still closes what ⌘K opened; any *other* open dialog
+        // takes the key entirely.
+        if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+          if (blockingDialog("ouro-palette")) return;
+          event.preventDefault();
+          this.pushEvent("palette-toggle", {});
+          return;
+        }
+
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+        // Esc in the composer stops a running turn, and only where there is a control on
+        // screen saying one is running. Anywhere else Esc keeps its existing meanings.
+        if (event.key === "Escape") {
+          if (event.target && event.target.id === "ouro-composer-input") {
+            if (document.querySelector("[data-ouro-interrupt]")) {
+              event.preventDefault();
+              this.pushEvent("interrupt", {});
+            }
+          }
+          return;
+        }
+
+        if (editable(document.activeElement)) return;
+        // A modal owns the keyboard while it is open; `?` behind a confirmation dialog
+        // would put a second sheet over a question nobody has answered.
+        if (blockingDialog(null)) return;
+
+        if (event.key === "?") {
+          event.preventDefault();
+          this.pushEvent("shortcuts-open", {});
+        } else if (event.key === "n") {
+          event.preventDefault();
+          this.pushEvent("palette-run", { id: "session.new" });
+        } else if (event.key === "[") {
+          event.preventDefault();
+          this.pushEvent("rail-move", { direction: "prev" });
+        } else if (event.key === "]") {
+          event.preventDefault();
+          this.pushEvent("rail-move", { direction: "next" });
+        }
+      }.bind(this);
+
+      document.addEventListener("keydown", this.onKeyDown);
+    },
+
+    destroyed: function () {
+      document.removeEventListener("keydown", this.onKeyDown);
+    }
+  };
+
+  // The palette's own copy rows: the server names either the text it holds (the Markdown)
+  // or the element whose rendered words to read. It never sends both, because they are
+  // not the same string and only one of them is what was asked for.
+  window.addEventListener("phx:ouro-copy", function (event) {
+    var detail = event.detail || {};
+    var visible = detail.selector && document.querySelector(detail.selector);
+    var text = typeof detail.text === "string" ? detail.text : (visible && visible.innerText) || "";
+
+    copy(text, visible, announceCopy);
+  });
+
+  // A palette row that leads to a control rather than running one: open whatever
+  // disclosure the control is inside, then put the keyboard on it.
+  window.addEventListener("phx:ouro-reveal", function (event) {
+    var detail = event.detail || {};
+    var target = detail.selector && document.querySelector(detail.selector);
+    if (!target) return;
+
+    var parent = target.parentElement;
+    while (parent) {
+      if (parent.tagName === "DETAILS") parent.open = true;
+      parent = parent.parentElement;
+    }
+
+    if (target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
+    if (target.focus) target.focus();
+  });
+
+  // ui-parity W3 — a download the palette asked for.
+  //
+  // An anchor the browser makes and clicks, never `window.location`. The export route
+  // answers a refusal — a 404 for a session this node no longer holds, a 502 for a runtime
+  // that could not answer — with no `content-disposition` on it, and a navigation would
+  // then take the deck away and replace it with the failure. `download` keeps a successful
+  // export from navigating at all; `target="_blank"` puts a refusal in a tab of its own.
+  window.addEventListener("phx:ouro-open", function (event) {
+    var url = (event.detail || {}).url;
+    if (typeof url !== "string" || url === "" || url.charAt(0) !== "/") return;
+
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = "";
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  });
+
+  // The two chrome toggles have no server state behind them, so a palette row for either
+  // is a request to press the button that is already on the page.
+  window.addEventListener("phx:ouro-chrome", function (event) {
+    var detail = event.detail || {};
+    if (detail.control === "theme") toggleTheme();
+    else if (detail.control === "bell") toggleBell();
+  });
 
   var sessionMenuFocus = new WeakMap();
 
@@ -599,9 +931,14 @@
     hooks: {
       ScrollPin: ScrollPin,
       Composer: Composer,
+      ImageAttachments: window.OuroImageAttachments,
       ElapsedTimer: ElapsedTimer,
       FocusInvalid: FocusInvalid,
-      Modal: Modal
+      Modal: Modal,
+      PaletteSelection: PaletteSelection,
+      // ui-parity W2
+      Clipboard: Clipboard,
+      Keys: Keys
     }
   });
 

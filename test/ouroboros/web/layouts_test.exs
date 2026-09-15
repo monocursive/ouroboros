@@ -111,6 +111,186 @@ defmodule Ouroboros.Web.LayoutsTest do
   end
 
   # ------------------------------------------------------------------------------------
+  # The one top bar
+  # ------------------------------------------------------------------------------------
+
+  # Every route this surface serves, and the section each one is.
+  @pages [
+    {"/", :sessions},
+    {"/s/interactive/some-session", :sessions},
+    {"/new", :new},
+    {"/settings", :settings},
+    {"/status", :status},
+    {"/audit", :audit},
+    {"/audit/some-stream", :audit}
+  ]
+
+  describe "the top bar" do
+    test "is on every page, with every destination on it", %{conn: conn} do
+      # §3.1: the topbar existed only on the deck, `/new` and `/settings` carried a
+      # "← Sessions" link and a theme toggle, `/status` and `/audit` carried a breadcrumb,
+      # and `grep href="/status"` came back empty — three header treatments, none of which
+      # reached the other spokes.
+      for {path, _section} <- @pages do
+        {:ok, _view, html} = live(conn, path)
+
+        assert html =~ ~s(class="ouro-topbar"), "#{path} has no top bar"
+
+        for {href, label} <- [
+              {"/", "Sessions"},
+              {"/new", "New session"},
+              {"/settings", "Settings"},
+              {"/audit", "Audit"},
+              {"/status", "Status"}
+            ] do
+          assert html =~ ~s(href="#{href}"), "#{path}'s top bar does not link to #{href}"
+          assert html =~ label, "#{path}'s top bar does not name #{label}"
+        end
+
+        assert html =~ "Ouroboros"
+      end
+    end
+
+    test "marks the page being read, and marks exactly one element", %{conn: conn} do
+      # `aria-current="page"` on two elements tells a screen-reader user there are two
+      # current pages. The wordmark goes to `/` and deliberately carries none; a spoke of
+      # a section is marked at its section, because that is where the reader is.
+      for {path, section} <- @pages do
+        {:ok, _view, html} = live(conn, path)
+
+        href =
+          case section do
+            :sessions -> "/"
+            :new -> "/new"
+            :settings -> "/settings"
+            :audit -> "/audit"
+            :status -> "/status"
+          end
+
+        top = topbar(html)
+
+        assert Regex.run(~r/href="#{Regex.escape(href)}"[^>]*aria-current="page"/, top) ||
+                 Regex.run(~r/aria-current="page"[^>]*href="#{Regex.escape(href)}"/, top),
+               "#{path} does not mark #{href} as the current page"
+
+        marks = length(String.split(html, ~s(aria-current="page"))) - 1
+
+        assert marks == 1,
+               "#{path} marks #{marks} elements as the current page, not one"
+
+        refute Regex.run(~r/ouro-wordmark[^>]*aria-current/, html),
+               "#{path} marks the wordmark as the current page as well as the section"
+      end
+    end
+
+    test "carries the connection pill on every page, as a live region", %{conn: conn} do
+      # The pill's two halves are swapped by `.phx-connected` / `.phx-loading` in the
+      # stylesheet, so the classes are the whole contract: a page that renders the element
+      # without them would show both words at once.
+      for {path, _section} <- @pages do
+        {:ok, _view, html} = live(conn, path)
+
+        assert html =~ ~s(class="ouro-pill")
+        assert html =~ ~s(role="status")
+        assert html =~ ~s(aria-live="polite")
+        assert html =~ "ouro-pill-on"
+        assert html =~ "ouro-pill-off"
+      end
+    end
+
+    test "says nothing about machines or spend on a page that measured neither",
+         %{conn: conn} do
+      # Absent, not defaulted. The deck polls `runtime.status` and sums today's rows; the
+      # spokes do neither, so they draw no presence row and no token total rather than an
+      # empty one.
+      for path <- ["/new", "/settings", "/status", "/audit"] do
+        {:ok, _view, html} = live(conn, path)
+
+        refute topbar(html) =~ "ouro-presence", "#{path} claims to know about machines"
+        refute topbar(html) =~ "ouro-today", "#{path} claims to know today's spend"
+      end
+
+      {:ok, _view, deck} = live(conn, "/")
+      assert topbar(deck) =~ "ouro-presence"
+    end
+
+    test "never spells an Erlang node name", %{conn: conn} do
+      # Ground rule 6. `nonode@nohost` is the BEAM's word for "nobody named this machine",
+      # not a machine name, and it reached the deck's presence row verbatim.
+      for {path, _section} <- @pages do
+        {:ok, _view, html} = live(conn, path)
+        refute topbar(html) =~ "nonode@nohost", "#{path}'s top bar spells the node atom"
+      end
+
+      {:ok, _view, deck} = live(conn, "/")
+      # A named BEAM (a distributed test module that ran earlier) is drawn by its label.
+      if node() == :nonode@nohost do
+        assert topbar(deck) =~ "this computer"
+      else
+        refute topbar(deck) =~ to_string(node())
+      end
+    end
+
+    # PROOF F, inverted. Two machines in a fleet share a release name, so the bar must draw
+    # the label its caller resolved rather than shorten the node itself.
+    test "draws the caller's own word for a machine, not a second opinion" do
+      html =
+        render_component(&Layouts.topbar/1, %{
+          machines: [
+            %{name: "ouro@alpha", label: "the build box", connected?: true},
+            %{name: "ouro@beta", label: "the spare", connected?: false}
+          ]
+        })
+
+      hidden =
+        ~r/class="ouro-visually-hidden">([^<]*)</
+        |> Regex.scan(html, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.map(&String.trim/1)
+
+      assert hidden == ["the build box", "the spare"]
+
+      assert html =~ "the build box — connected"
+      assert html =~ "the spare — not connected"
+      refute html =~ "ouro@alpha"
+    end
+
+    test "falls back to the node's own host where a caller has no roster" do
+      html =
+        render_component(&Layouts.topbar/1, %{
+          machines: [
+            %{name: "ouro@alpha", connected?: true},
+            %{name: "ouro@beta", connected?: false}
+          ]
+        })
+
+      hidden =
+        ~r/class="ouro-visually-hidden">([^<]*)</
+        |> Regex.scan(html, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.map(&String.trim/1)
+
+      # Two machines, two words — never "ouro" twice.
+      assert hidden == ["alpha", "beta"]
+    end
+
+    test "renders standalone with no machines and no totals" do
+      html = render_component(&Layouts.topbar/1, %{})
+
+      assert html =~ "ouro-topbar"
+      refute html =~ "ouro-presence"
+      refute html =~ "ouro-today"
+      refute html =~ ~s(aria-current="page")
+    end
+  end
+
+  # The bar itself, cut out of whatever page it was drawn on.
+  defp topbar(html) do
+    [bar] = Regex.run(~r|<header class="ouro-topbar">.*?</header>|s, html)
+    bar
+  end
+
+  # ------------------------------------------------------------------------------------
   # The toggles as markup
   # ------------------------------------------------------------------------------------
 
@@ -141,9 +321,22 @@ defmodule Ouroboros.Web.LayoutsTest do
     end
 
     test "is on every operator page", %{conn: conn} do
-      for path <- ["/", "/new", "/settings"] do
+      for path <- ["/", "/new", "/settings", "/status", "/audit"] do
         {:ok, _view, html} = live(conn, path)
         assert html =~ "data-ouro-theme", "#{path} has no theme toggle"
+      end
+    end
+
+    test "is drawn once per page, not once per header treatment", %{conn: conn} do
+      # W1.1 gave the spokes the shared top bar; their own headers gave up the copy of the
+      # toggle they used to carry beside "← Sessions". Two toggles on one page would be
+      # two controls for one preference, and `app.js` would leave whichever it reached
+      # second disagreeing with the document.
+      for path <- ["/", "/new", "/settings", "/status", "/audit"] do
+        {:ok, _view, html} = live(conn, path)
+
+        assert length(String.split(html, "data-ouro-theme")) == 2,
+               "#{path} draws more than one theme toggle"
       end
     end
   end
@@ -163,15 +356,33 @@ defmodule Ouroboros.Web.LayoutsTest do
       refute render_component(&Layouts.bell_toggle/1, %{}) =~ ~s|aria-pressed="true"|
     end
 
-    test "is on the deck and nowhere else", %{conn: conn} do
-      {:ok, _view, deck} = live(conn, "/")
-      assert deck =~ "data-ouro-bell"
-
-      for path <- ["/new", "/settings"] do
+    # W1.1. The bell used to be the deck's alone, so a person filling in `/new` or reading
+    # `/audit` got no signal that a session had started waiting
+    # (`docs/design-qa/ui-review-2026-09-15.md` §3.1). It rings for the fleet, not for the
+    # page, and it now sits in the one top bar every page renders.
+    test "is on every page, because a session starts waiting wherever the reader is",
+         %{conn: conn} do
+      for path <- ["/", "/new", "/settings", "/status", "/audit"] do
         {:ok, _view, html} = live(conn, path)
 
-        refute html =~ "data-ouro-bell",
-               "#{path} offers a needs-you bell, but has no needs-you group to ring for"
+        assert html =~ "data-ouro-bell", "#{path} offers no needs-you bell"
+
+        assert length(String.split(html, "data-ouro-bell")) == 2,
+               "#{path} draws more than one needs-you bell"
+      end
+    end
+
+    # A bell that asked the browser for notification permission and then could never ring
+    # would be the page promising something it cannot do. That every spoke can actually
+    # ring is proven in `Ouroboros.Web.NeedsYouTest`, which drives the edge; what is
+    # asserted here is only that each page holds the state the hook installs.
+    test "every page that draws it has the machinery behind it", %{conn: conn} do
+      for path <- ["/new", "/settings", "/status", "/audit"] do
+        {:ok, view, _html} = live(conn, path)
+
+        assert :sys.get_state(view.pid).socket.assigns
+               |> Map.has_key?(:needs_you_announced),
+               "#{path} draws a bell but has not attached the needs-you hook"
       end
     end
 

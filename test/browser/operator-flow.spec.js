@@ -110,7 +110,7 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
   const sessions = page.getByRole("button", { name: "← Sessions", exact: true });
   if (await sessions.isVisible()) await sessions.click();
   const row = page.locator(".ouro-row-wrap").filter({
-    has: page.locator('a[aria-current="page"]')
+    has: page.locator('a[aria-current="true"]')
   });
   const actions = row.locator(".ouro-row-actions > summary");
   await expectMinimumTarget(actions);

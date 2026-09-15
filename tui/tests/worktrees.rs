@@ -227,7 +227,7 @@ fn a_session_without_a_worktree_draws_no_badge_at_all() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-fn the_theme_command_is_in_the_palette_and_cycles_from_there() {
+fn the_theme_command_is_in_the_palette_and_opens_the_picker_from_there() {
     let mut app = opened(json!([session_with_worktree(None)]));
 
     app.apply(modified(KeyCode::Char('p'), KeyModifiers::CONTROL));
@@ -244,13 +244,20 @@ fn the_theme_command_is_in_the_palette_and_cycles_from_there() {
         "\"theme\" names exactly the theme row"
     );
 
+    // T2.9: the row opens the picker, exactly as the bare verb does. It used to cycle one
+    // palette forward and write `config.toml` on the spot — the press that looked at the
+    // next theme and the press that kept it were the same press.
     let before = app.config.theme.name();
     app.apply(key(KeyCode::Enter));
 
-    assert!(app.overlay.is_none(), "the palette closes on the choice");
-    assert_ne!(
+    assert!(
+        matches!(app.overlay, Some(Overlay::Theme { .. })),
+        "the palette row did not open the picker: {:?}",
+        app.overlay
+    );
+    assert_eq!(
         app.config.theme.name(),
         before,
-        "the palette row cycles, exactly as the verb does"
+        "opening the picker wrote a theme nobody chose"
     );
 }

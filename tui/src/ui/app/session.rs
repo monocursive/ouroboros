@@ -175,7 +175,7 @@ pub(super) enum PendingReconciliationKind {
     Composer(ComposerVerb),
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct PendingFirstMessage {
     pub(super) input: String,
     pub(super) turn_id: String,
@@ -819,6 +819,17 @@ impl App {
             return;
         }
 
+        if self.keymap.hits(Action::Send, key)
+            && self
+                .sessions
+                .composer
+                .as_ref()
+                .is_some_and(|c| c.editor.is_empty() && !c.attachments.is_empty())
+        {
+            self.submit_composer();
+            return;
+        }
+
         if key.code == KeyCode::Backspace && key.modifiers.is_empty() && self.detach_newest() {
             return;
         }
@@ -869,12 +880,110 @@ impl App {
 
         self.compose(ComposerVerb::Message);
 
+        // Whatever was in the draft goes where `up` finds it, exactly as `Esc` banks one.
+        // This used to be a bare `clear_text`, which is not a bank: `ctrl+r` and `ctrl+x m`
+        // ate fifty typed characters with no way back, and the notice that says `up`
+        // brings a draft back was true of one key and not of these two.
+        let banked = self
+            .sessions
+            .composer
+            .as_mut()
+            .and_then(|composer| {
+                let banked = composer.editor.accept_submission();
+                composer.user_changed_draft();
+                banked
+            })
+            .is_some();
+
+        if banked {
+            self.remember_composer_history();
+        }
+
         let catalog = self.completion_catalog.clone();
         if let Some(composer) = self.sessions.composer.as_mut() {
             composer.editor.clear_text();
             composer.editor.paste(text, &catalog);
             composer.user_changed_draft();
         }
+
+        if banked {
+            self.inform(
+                format!(
+                    "draft cleared; {} brings it back",
+                    self.keymap.label(Action::QueueRetract)
+                ),
+                NoticeKind::Info,
+            );
+        }
+    }
+
+    /// `Action::Rename`: the composer, prefilled with the verb and the title it has now.
+    ///
+    /// The current title is in the draft rather than replaced by it, so the key is an
+    /// edit of what the session is called and not a blank field over a name nobody can
+    /// see. A session the runtime has not named yet gets the bare verb and a space.
+    pub(super) fn rename_prefill(&mut self) {
+        // Its own refusal rather than `prefill_composer`'s, which talks about a next turn
+        // this key has nothing to do with.
+        if self.sessions.open.is_none() {
+            self.inform("open a session to rename it", NoticeKind::Info);
+            return;
+        }
+
+        let title = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.title.clone())
+            .unwrap_or_default();
+
+        self.prefill_composer(&format!("/rename {title}"));
+    }
+
+    /// `/rename <title>`. The gateway holds the bound and the sanitising (`B6`), so this
+    /// sends what was typed and reports what came back.
+    pub(super) fn rename_session(&mut self, title: &str) {
+        let title = title.trim();
+
+        if title.is_empty() {
+            self.inform(
+                "name it: /rename what this session is about",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform("open a session before renaming it", NoticeKind::Info);
+            return;
+        };
+
+        // Belt as well as braces: a gateway without the method answers `-32601`, so the
+        // call would be refused anyway. The gate is here for the *message* — "this runtime
+        // does not serve interactive.rename" is a fact about the far side that an operator
+        // can act on, and a raw JSON-RPC code is not.
+        if !self.hello.serves("interactive.rename") {
+            self.inform(
+                "this runtime does not serve interactive.rename",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        let params = self.routed_session_params(plane, &id, json!({ "id": id, "title": title }));
+
+        self.issue(Call::new(
+            Tag::Action {
+                label: "rename",
+                plane,
+                id: id.clone(),
+            },
+            plane.method("rename"),
+            params,
+        ));
     }
 
     // ----- B5: Esc, Esc Esc, and going back ------------------------------------------
@@ -1152,6 +1261,7 @@ impl App {
         };
 
         composer.attachment_refusal = None;
+        self.discard_image(&removed);
         self.remember_composer_history();
         self.inform(
             format!("removed the attachment {}", removed.path),
@@ -1599,56 +1709,320 @@ impl App {
         );
     }
 
+    pub(super) fn discard_image(&mut self, image: &Attachment) {
+        let id = image
+            .upload_id
+            .clone()
+            .or_else(|| crate::image_upload::valid_id(&image.path).then(|| image.path.clone()));
+        if let Some(id) = id {
+            let node = self
+                .sessions
+                .open
+                .as_ref()
+                .and_then(|(plane, id)| self.sessions.owner_node(*plane, id).map(str::to_string))
+                .or_else(|| {
+                    (!self.home_image_node.is_empty()).then(|| self.home_image_node.clone())
+                });
+            self.image_discards.push((id, node));
+        }
+    }
+
+    pub fn image_draft_leases(&self) -> Vec<Value> {
+        if self.ticks.saturating_sub(self.image_last_edit) as u128 * TICK.as_millis() > 90_000 {
+            return Vec::new();
+        }
+        let active = if let Some((plane, id)) = &self.sessions.open {
+            self.sessions
+                .composer
+                .as_ref()
+                .filter(|c| {
+                    c.attachments
+                        .iter()
+                        .any(|a| a.kind == crate::model::AttachmentKind::ManagedImage)
+                })
+                .map(|_| {
+                    (
+                        Some((*plane, id.clone())),
+                        self.sessions.owner_node(*plane, id).map(str::to_string),
+                    )
+                })
+        } else if !self.home_images.is_empty() {
+            Some((
+                None,
+                (!self.home_image_node.is_empty()).then(|| self.home_image_node.clone()),
+            ))
+        } else {
+            None
+        };
+        active
+            .into_iter()
+            .map(|(target, node)| {
+                let mut params =
+                    json!({"draft_id": self.image_draft_for(target.as_ref(), node.as_deref())});
+                if let Some(node) = node {
+                    params["node"] = json!(node);
+                }
+                params
+            })
+            .collect()
+    }
+
     /// `Ctrl+V`: the clipboard, as an image where it holds one.
-    fn request_clipboard_paste(&mut self) {
-        let Some((plane, id)) = self.sessions.open.clone() else {
+    pub(super) fn image_draft_for(
+        &self,
+        target: Option<&(Plane, String)>,
+        node: Option<&str>,
+    ) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}-{:x}",
+            if target.is_none() {
+                &self.home_image_draft_id
+            } else {
+                &self.image_draft_id
+            },
+            Sha256::digest(format!("{target:?}/{node:?}"))
+        )
+    }
+
+    pub(super) fn request_clipboard_paste(&mut self) {
+        self.request_image(None);
+    }
+
+    pub(super) fn request_image(&mut self, path: Option<String>) {
+        if self.clipboard_pending.is_some() {
+            return;
+        }
+        let target = self.sessions.open.clone();
+        if target
+            .as_ref()
+            .is_some_and(|(plane, _)| *plane != Plane::Interactive)
+        {
+            return;
+        }
+        let node = match &target {
+            Some((plane, id)) => self.sessions.owner_node(*plane, id).map(str::to_string),
+            None => (!self.config.location.machine.is_empty())
+                .then(|| self.config.location.machine.clone()),
+        };
+        if target.is_none() {
+            if !self.home_images.is_empty() && self.home_image_node != self.config.location.machine
+            {
+                self.inform("These images belong to the previously selected computer. Return to it or remove the images first.", NoticeKind::Warn);
+                return;
+            }
+            self.home_image_node = self.config.location.machine.clone();
+        }
+        let request = ClipboardRequest {
+            workspace: String::new(),
+            id: new_turn_id(),
+            target: target.clone(),
+            node: node.clone(),
+            draft_id: self.image_draft_for(target.as_ref(), node.as_deref()),
+            path: path.clone(),
+        };
+        let mut attachment = Attachment::image(request.id.clone());
+        attachment.kind = crate::model::AttachmentKind::PendingImage;
+        attachment.name = Some(format!(
+            "{} · uploading",
+            path.as_deref().unwrap_or("Clipboard image")
+        ));
+        let attachments = if target.is_none() {
+            &mut self.home_images
+        } else if let Some(composer) = self.sessions.composer.as_mut() {
+            &mut composer.attachments
+        } else {
             return;
         };
-
-        if plane != Plane::Interactive {
+        if attachments.len() >= TurnInput::ATTACHMENT_LIMIT {
+            self.inform("At most 32 attachments fit in a message", NoticeKind::Warn);
             return;
         }
+        attachments.push(attachment);
+        self.clipboard_pending = Some(request);
+    }
 
-        if !self.multimodal_offered() {
-            let capabilities = self.open_capabilities();
-            let transport = capabilities
-                .transport
-                .as_deref()
-                .map(|transport| transport.to_string())
-                .unwrap_or_else(|| "this transport".to_string());
-
-            self.inform(
-                format!("{transport} takes no images, so ctrl+v pastes text only here"),
-                NoticeKind::Info,
-            );
-            return;
+    pub(super) fn image_progress(&mut self, request: ClipboardRequest, value: Value) {
+        let entries = if request.target.is_none() {
+            Some(&mut self.home_images)
+        } else if self.sessions.open == request.target {
+            self.sessions.composer.as_mut().map(|c| &mut c.attachments)
+        } else {
+            request
+                .target
+                .as_ref()
+                .and_then(|key| self.sessions.composer_drafts.get_mut(key))
+                .map(|d| &mut d.attachments)
+        };
+        if let Some(image) = entries.and_then(|entries| {
+            entries.iter_mut().find(|a| {
+                a.path == request.id && a.kind == crate::model::AttachmentKind::PendingImage
+            })
+        }) {
+            image.ephemeral = value["client_ephemeral"] != false;
+            image.upload_id = value["upload_id"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| image.upload_id.clone());
+            let progress = value["received"].as_u64().unwrap_or(0) * 100
+                / value["source_size"].as_u64().unwrap_or(1).max(1);
+            image.name = Some(format!(
+                "{} · {} {}%",
+                value["display_name"].as_str().unwrap_or("Image"),
+                value["state"].as_str().unwrap_or("uploading"),
+                progress
+            ));
         }
+        self.remember_composer_history();
+    }
 
-        let Some(workspace) = self
-            .sessions
-            .open_info()
-            .and_then(|session| session.workspace.clone())
-            .filter(|workspace| !workspace.trim().is_empty())
-        else {
+    pub(super) fn image_uploaded(&mut self, request: ClipboardRequest, outcome: ClipboardOutcome) {
+        // The placeholder, not whichever editor is open now, owns this completion.
+        let entries = if request.target.is_none() {
+            Some(&mut self.home_images)
+        } else if self.sessions.open == request.target {
+            self.sessions.composer.as_mut().map(|c| &mut c.attachments)
+        } else {
+            request
+                .target
+                .as_ref()
+                .and_then(|key| self.sessions.composer_drafts.get_mut(key))
+                .map(|h| &mut h.attachments)
+        };
+        let Some(entries) = entries else {
+            if let ClipboardOutcome::Uploaded(value) = &outcome {
+                if let Some(id) = value["id"].as_str() {
+                    self.image_discards.push((id.into(), request.node.clone()));
+                }
+            }
+            return;
+        };
+        let Some(index) = entries.iter().position(|a| a.path == request.id) else {
+            if let ClipboardOutcome::Uploaded(value) = &outcome {
+                if let Some(id) = value["id"].as_str() {
+                    self.image_discards.push((id.into(), request.node.clone()));
+                }
+            }
+            return;
+        };
+        match outcome {
+            ClipboardOutcome::Uploaded(value) => {
+                let id = value["id"].as_str().unwrap_or("");
+                let size = value["byte_size"].as_u64().unwrap_or(0);
+                let source_size = value["source_size"].as_u64().unwrap_or(0);
+                let digest = value["sha256"].as_str().map(str::to_string);
+                if digest.is_some()
+                    && entries.iter().enumerate().any(|(i, a)| {
+                        i != index
+                            && a.kind == crate::model::AttachmentKind::ManagedImage
+                            && a.sha256 == digest
+                    })
+                {
+                    entries.remove(index);
+                    self.image_discards.push((id.into(), request.node.clone()));
+                    self.inform("Image already attached", NoticeKind::Info);
+                    self.remember_composer_history();
+                    return;
+                }
+                if id.is_empty()
+                    || entries.iter().map(|a| a.byte_size).sum::<u64>() + size.max(source_size)
+                        > 64 * 1024 * 1024
+                {
+                    self.image_discards.push((id.into(), request.node.clone()));
+                    entries[index].kind = crate::model::AttachmentKind::FailedImage;
+                    entries[index].name =
+                        Some("Image exceeds this message's 64 MiB limit · remove it".into());
+                } else {
+                    entries[index].path = id.to_string();
+                    entries[index].kind = crate::model::AttachmentKind::ManagedImage;
+                    entries[index].byte_size = size.max(source_size);
+                    entries[index].sha256 = digest;
+                    entries[index].ephemeral = value["client_ephemeral"] != false;
+                    entries[index].name = Some(format!(
+                        "{} · {} × {} · ready",
+                        value["display_name"].as_str().unwrap_or("Image"),
+                        value["width"],
+                        value["height"]
+                    ));
+                }
+            }
+            ClipboardOutcome::Failed(error) => {
+                entries[index].kind = crate::model::AttachmentKind::FailedImage;
+                entries[index].name =
+                    Some(format!("Image failed: {error} · remove and attach again"));
+            }
+            other => {
+                entries.remove(index);
+                if self.sessions.open == request.target {
+                    self.clipboard_read(other);
+                } else if request.target.is_none() {
+                    if let ClipboardOutcome::Text(text) = other {
+                        self.home_draft.paste(&text, &self.completion_catalog);
+                    }
+                }
+            }
+        }
+        self.remember_composer_history();
+    }
+
+    pub(super) fn images_bound(&mut self, id: String, input: TurnInput, error: Option<String>) {
+        if let Some(error) = error {
+            if self
+                .sessions
+                .open
+                .as_ref()
+                .is_some_and(|(_, open)| open == &id)
+            {
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.attachment_refusal = Some(error.clone());
+                    for image in &mut composer.attachments {
+                        if input.attachments.iter().any(|sent| sent.path == image.path) {
+                            image.kind = crate::model::AttachmentKind::FailedImage;
+                            image.name =
+                                Some("Image binding failed · remove and attach again".into());
+                        }
+                    }
+                }
+            }
+            self.remember_composer_history();
             self.inform(
                 format!(
-                    "{id} reported no workspace, and an attachment has to live inside one for \
-                     the runtime to accept it"
+                    "Could not bind the first message's images: {error}. The draft is retained."
                 ),
                 NoticeKind::Warn,
             );
             return;
-        };
-
-        self.clipboard_pending = Some(ClipboardRequest {
-            workspace,
-            id: new_turn_id(),
-        });
+        }
+        if self.sessions.open == Some((Plane::Interactive, id.clone())) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer
+                    .attachments
+                    .retain(|a| !input.attachments.iter().any(|sent| sent.path == a.path));
+                if composer.editor.text() == input.prompt {
+                    composer.editor.accept_submission();
+                }
+            }
+            self.remember_composer_history();
+        }
+        if let Some(saved) = self
+            .sessions
+            .composer_drafts
+            .get_mut(&(Plane::Interactive, id.clone()))
+        {
+            saved
+                .attachments
+                .retain(|a| !input.attachments.iter().any(|sent| sent.path == a.path));
+            if saved.input == input.prompt {
+                saved.input.clear();
+            }
+        }
+        self.dispatch_composer_turn(Plane::Interactive, &id, ComposerVerb::Message, input);
     }
 
     /// What the driver found on the clipboard.
     pub(super) fn clipboard_read(&mut self, outcome: ClipboardOutcome) {
         match outcome {
+            ClipboardOutcome::Uploaded(_) => {}
             ClipboardOutcome::Image(path) => {
                 let attachment = Attachment::image(path.clone());
 
@@ -1928,24 +2302,83 @@ impl App {
             return;
         };
 
-        let Some(input) = composer.editor.submission() else {
+        let Some(input) = composer.editor.submission().or_else(|| {
+            composer
+                .attachments
+                .iter()
+                .any(|a| a.kind == crate::model::AttachmentKind::ManagedImage)
+                .then(String::new)
+        }) else {
             return;
         };
+        // The draft exactly as it was typed. `submission()` trims, and the grammar below
+        // reads leading whitespace as an instruction, so the trimmed form cannot be what
+        // decides whether this line is a verb.
+        let raw = composer.editor.text().to_string();
         let verb = composer.verb;
 
-        if self.activate_slash_command(&input) {
-            if let Some(composer) = self.sessions.composer.as_mut() {
-                composer.editor.accept_submission();
-                composer.user_changed_draft();
+        match classify_line(&raw) {
+            Line::Verb => {
+                if self.activate_slash_command(&input) {
+                    if let Some(composer) = self.sessions.composer.as_mut() {
+                        composer.editor.accept_submission();
+                        composer.user_changed_draft();
+                    }
+                    self.remember_composer_history();
+                    return;
+                }
+
+                // A verb this client has, with an argument it could not read.
+                self.inform(verb_argument_refusal(&raw), NoticeKind::Warn);
+                return;
             }
-            self.remember_composer_history();
+            // A verb this client does not have, alone on its line. Before this it went to
+            // the model as a turn (R1 §2.3) — a typo became a paid request, and on the
+            // home screen it became a whole session.
+            Line::Refused(refusal) => {
+                self.inform(refusal, NoticeKind::Warn);
+                return;
+            }
+            Line::Message => {}
+        }
+
+        if self.sessions.composer.as_ref().is_some_and(|c| {
+            c.attachments.iter().any(|a| {
+                matches!(
+                    a.kind,
+                    crate::model::AttachmentKind::PendingImage
+                        | crate::model::AttachmentKind::FailedImage
+                )
+            })
+        }) {
+            self.inform(
+                "Finish or remove pending images before sending",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+        if self.sessions.composer.as_ref().is_some_and(|c| {
+            c.attachments
+                .iter()
+                .any(|a| a.kind == crate::model::AttachmentKind::ManagedImage)
+        }) && (verb == ComposerVerb::Steer || raw.starts_with('!'))
+        {
+            self.inform(
+                "Use Send or Queue for images; shell commands and steering accept text only",
+                NoticeKind::Warn,
+            );
             return;
         }
 
         // B7. A draft that begins with `!` is the operator's own command, not a message to
         // the model. Claimed here, beside the slash verbs, because it is the same kind of
         // thing: a line the composer acts on itself rather than sending as a turn.
-        if let Some(command) = input.strip_prefix('!') {
+        // The same escape the slash grammar has: a line that starts with whitespace is
+        // prose, whatever its first printable character.
+        if let Some(command) = input
+            .strip_prefix('!')
+            .filter(|_command| !raw.starts_with(char::is_whitespace))
+        {
             self.run_operator_shell(command);
 
             if let Some(composer) = self.sessions.composer.as_mut() {
@@ -2058,7 +2491,7 @@ impl App {
 
     /// Issues one turn. The single place a composer submission, a queued draft, and a
     /// retried steer all become a call, so the three cannot drift apart.
-    fn dispatch_composer_turn(
+    pub(super) fn dispatch_composer_turn(
         &mut self,
         plane: Plane,
         id: &str,
@@ -2267,6 +2700,76 @@ impl App {
 
     pub(super) fn activate_slash_command(&mut self, input: &str) -> bool {
         let trimmed = input.trim();
+        if let Some(reference) = slash_arg(trimmed, "/view-image") {
+            let entries = if self.sessions.open.is_none() {
+                Some(&self.home_images)
+            } else {
+                self.sessions.composer.as_ref().map(|c| &c.attachments)
+            };
+            let id = reference
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|index| entries.and_then(|images| images.get(index)))
+                .filter(|image| image.kind == crate::model::AttachmentKind::ManagedImage)
+                .map(|image| image.path.clone())
+                .unwrap_or_else(|| reference.into());
+            if !crate::image_upload::valid_id(&id) {
+                self.inform(
+                    "Use /view-image with a ready draft position or an attachment ID from history",
+                    NoticeKind::Warn,
+                );
+                return true;
+            }
+            let node = self
+                .sessions
+                .open
+                .as_ref()
+                .and_then(|(plane, id)| self.sessions.owner_node(*plane, id).map(str::to_string))
+                .or_else(|| {
+                    (!self.home_image_node.is_empty()).then(|| self.home_image_node.clone())
+                });
+            let session = self.sessions.open.as_ref().map(|(_, id)| id.clone());
+            self.image_preview_pending = Some((id, node, session));
+            self.inform("Opening the image on this computer…", NoticeKind::Info);
+            return true;
+        }
+        if trimmed == "/paste-image" {
+            self.request_clipboard_paste();
+            return true;
+        }
+        if let Some(path) = slash_arg(trimmed, "/attach").filter(|p| !p.is_empty()) {
+            let paths = match crate::image_upload::local_paths(path) {
+                Ok(paths) => paths,
+                Err(_) => return false,
+            };
+            if paths.len() != 1 {
+                self.inform(
+                    "Use /attach with one quoted local image path",
+                    NoticeKind::Warn,
+                );
+                return true;
+            }
+            self.request_image(paths.first().cloned());
+            return true;
+        }
+        if let Some(index) =
+            slash_arg(trimmed, "/remove-image").and_then(|s| s.parse::<usize>().ok())
+        {
+            let entries = if self.sessions.open.is_none() {
+                Some(&mut self.home_images)
+            } else {
+                self.sessions.composer.as_mut().map(|c| &mut c.attachments)
+            };
+            if let Some(entries) = entries {
+                if index > 0 && index <= entries.len() {
+                    let removed = entries.remove(index - 1);
+                    self.discard_image(&removed);
+                }
+            }
+            self.remember_composer_history();
+            return true;
+        }
 
         if let Some(level) = slash_arg(trimmed, "/effort") {
             self.set_reasoning_effort(level);
@@ -2275,6 +2778,11 @@ impl App {
 
         if let Some(model) = slash_arg(trimmed, "/model") {
             self.configure_model(model);
+            return true;
+        }
+
+        if let Some(title) = slash_arg(trimmed, "/rename") {
+            self.rename_session(title);
             return true;
         }
 
@@ -2300,11 +2808,12 @@ impl App {
             return true;
         }
 
-        // A10. Bare `/theme` cycles; `/theme <name>` goes straight to one. Both take effect
-        // on the next frame, which is the preview: there is nothing to preview a palette
-        // *in* but the screen already showing the conversation.
+        // A10/T2.9. Bare `/theme` opens the list; `/theme <name>` goes straight to one and
+        // is immediate, because naming a palette is already the choice. Both take effect on
+        // the screen already showing the conversation — there is nothing else to preview a
+        // palette in — but only the picker's `Enter` writes the file.
         if trimmed == "/theme" {
-            self.cycle_theme();
+            self.open_theme_picker();
             return true;
         }
 
@@ -2439,10 +2948,20 @@ impl App {
         true
     }
 
-    /// Ctrl-C: clear the prompt if it has text; otherwise interrupt a running turn;
-    /// a second press on an idle surface opens the quit dialog. Never a single-press quit.
+    /// Ctrl-C, in four steps, in this order: close what is open over the screen; clear a
+    /// draft that has text; interrupt a turn that is running; otherwise arm, and a second
+    /// press inside the window opens the quit dialog.
+    ///
+    /// The third step used to be "a session is open", which is not the same question and
+    /// is why this key could never reach the fourth one with a session open (R1 §2.4):
+    /// every press on an idle session issued an interrupt for a turn that was not there,
+    /// and somebody arriving from opencode, Claude Code or Codex — where `ctrl+c` exits —
+    /// had no exit key they would find. It reaches the fourth step now, from any tab.
     pub(super) fn ctrl_c(&mut self) {
+        // Each of the first three steps *did* something, so none of them may leave an
+        // arm behind: the press that closed an overlay is not half of a quit.
         if self.overlay.is_some() {
+            self.disarm_quit();
             self.interrupt();
             return;
         }
@@ -2455,35 +2974,44 @@ impl App {
             } else if let Some(editor) = self.focused_editor_mut() {
                 editor.clear_text();
             }
-            self.ctrl_c_until = None;
+            self.disarm_quit();
             return;
         }
 
-        if self.sessions.open.is_some() {
+        if self.turn_running() {
             self.interrupt_turn();
-            self.ctrl_c_until = None;
+            self.disarm_quit();
             return;
         }
 
-        if self.ctrl_c_until.is_some_and(|until| self.ticks < until) {
-            self.ctrl_c_until = None;
+        if self.quit_armed() {
+            self.disarm_quit();
             self.open_quit();
             return;
         }
 
-        self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
-        let (cancel, interrupt, quit) = (
-            self.keymap.label(Action::Cancel),
-            self.keymap.label(Action::Interrupt),
-            self.keymap.label(Action::Quit),
-        );
-        self.inform(
-            format!(
-                "press {cancel} again to quit · {interrupt} aborts a running turn · \
-                 {quit} opens the quit dialog"
-            ),
-            NoticeKind::Info,
-        );
+        self.arm_quit();
+
+        // Only keys that are actually bound are named. The footer says the same thing
+        // from `App::quit_armed` for as long as the window is open, which is the half a
+        // notice cannot do.
+        let mut line = format!("press {} again to quit", self.keymap.label(Action::Cancel));
+
+        if self.bound(Action::Interrupt) {
+            line.push_str(&format!(
+                " · {} aborts a running turn",
+                self.keymap.label(Action::Interrupt)
+            ));
+        }
+
+        if self.bound(Action::Quit) {
+            line.push_str(&format!(
+                " · {} opens the quit dialog",
+                self.keymap.label(Action::Quit)
+            ));
+        }
+
+        self.inform(line, NoticeKind::Info);
     }
 
     /// Ctrl-C / Esc: the active turn, never this process.
@@ -2923,6 +3451,103 @@ impl App {
             .clone()
             .or_else(|| self.sessions.picker_key(0));
         self.overlay = Some(Overlay::SessionPicker { selected });
+    }
+}
+
+/// The refusal for a line that begins with a `/verb` this client does not have, or `None`
+/// when the line is an ordinary message.
+///
+/// Called *after* `activate_slash_command` has had its turn, so every verb that exists
+/// has already run. What is left is a typo, and a typo must not become a paid turn: on a
+/// session it used to be sent to the model, and on the home screen it started a session
+/// and opened a sign-in for it (R1 §2.3). The draft is kept by the caller, because the
+/// fix is one keystroke away and throwing the line out would cost more than the mistake.
+/// What a submitted draft *is*.
+///
+/// One grammar, read off the draft exactly as it was typed, used by the session composer
+/// and by the home screen. The first cut of this read only a trimmed first token and was
+/// far too eager: `/tmp is full` and `/usr is read-only on this box` are ordinary
+/// sentences, and a client that cannot send them is a client you cannot talk to about
+/// your filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Line {
+    /// Hand it to `activate_slash_command`.
+    Verb,
+    /// Send it to the model.
+    Message,
+    /// Refuse it, with this reason. The draft stays where it is.
+    Refused(String),
+}
+
+/// Reads `raw` — the editor's text, *untrimmed* — as one of the three.
+///
+/// The rules, and the sentence each of them exists to protect:
+///
+/// 1. **Anything that starts with whitespace is a message.** That is the escape hatch: a
+///    leading space sends `/keys` as the four characters rather than as the verb, and it
+///    is the answer to "how do I talk about a command". It also settles a draft whose
+///    first line is blank, which is otherwise a question nobody has a good answer to.
+/// 2. **A first token that is not verb-shaped is a message.** `/usr/bin/env` has two
+///    slashes; `!ls` is the operator shell's.
+/// 3. **A known verb runs only when the rest of the draft is blank.** `/context` followed
+///    by a paragraph is a paragraph — somebody wrote it to be read, not to be eaten by a
+///    verb on line one.
+/// 4. **An unknown verb with more words after it is a message.** `/tmp is full`. This is
+///    the rule that costs something: `/exprot the log` is a typo that goes to the model.
+///    It is the cheaper mistake — the other direction refuses sentences forever.
+/// 5. **An unknown verb alone on one line is refused**, which is the `/ke` case the whole
+///    refusal was built for, and the notice says how to send it as text anyway.
+pub(super) fn classify_line(raw: &str) -> Line {
+    if raw.starts_with(char::is_whitespace) {
+        return Line::Message;
+    }
+
+    let Some(verb) = crate::ui::editor::slash_verb(raw) else {
+        return Line::Message;
+    };
+
+    let (first_line, rest) = match raw.split_once('\n') {
+        Some((first_line, rest)) => (first_line, rest),
+        None => (raw, ""),
+    };
+
+    let alone = rest.trim().is_empty();
+
+    if crate::ui::editor::is_known_command(verb) {
+        // A verb with a paragraph under it was never a verb.
+        return match alone {
+            true => Line::Verb,
+            false => Line::Message,
+        };
+    }
+
+    let more_words = first_line.split_whitespace().nth(1).is_some();
+
+    if more_words || !alone {
+        return Line::Message;
+    }
+
+    let nearest = crate::ui::editor::nearest_commands(verb);
+    let hint = match nearest.is_empty() {
+        true => "/help lists the verbs this client takes".to_string(),
+        false => format!("nearest: {}", nearest.join(", ")),
+    };
+
+    Line::Refused(format!(
+        "unknown command {verb}; {hint} · start the line with a space to send it as text"
+    ))
+}
+
+/// The refusal for a known verb whose argument this client could not read.
+///
+/// Reached only after `activate_slash_command` has said no about a line
+/// [`classify_line`] called a [`Line::Verb`] — so the verb exists and the argument is what
+/// was wrong. "Unknown" would be untrue, and sending the line on to the model as a turn,
+/// which is what used to happen, is worse than either.
+pub(super) fn verb_argument_refusal(raw: &str) -> String {
+    match crate::ui::editor::slash_verb(raw) {
+        Some(verb) => format!("{verb} did not take that argument"),
+        None => "that verb did not take that argument".to_string(),
     }
 }
 

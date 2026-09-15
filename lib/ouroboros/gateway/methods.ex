@@ -1697,6 +1697,125 @@ defmodule Ouroboros.Gateway.Methods do
     with_turn(params, :interactive, &InteractiveSession.send_message/3)
   end
 
+  def handle_attachment_limits(params), do: attachment_call("limits", params)
+  def handle_attachment_begin(params), do: attachment_call("begin", params)
+  def handle_attachment_append(params), do: attachment_call("append", params)
+  def handle_attachment_finish(params), do: attachment_call("finish", params)
+  def handle_attachment_status(params), do: attachment_call("status", params)
+  def handle_attachment_bind_draft(params), do: attachment_call("bind_draft", params)
+  def handle_attachment_touch_draft(params), do: attachment_call("touch_draft", params)
+  def handle_attachment_discard(params), do: attachment_call("discard", params)
+  def handle_attachment_read(params), do: attachment_call("read", params)
+
+  defp attachment_call(operation, params) do
+    with {:ok, owner} <- permissions_node(params) do
+      safe(fn ->
+        if owner == node() do
+          attachment_here(operation, params, Ouroboros.Audit.Identity.actor())
+        else
+          :erpc.call(
+            owner,
+            __MODULE__,
+            :invoke_attachment_as,
+            [
+              Ouroboros.Audit.Identity.current(),
+              operation,
+              Map.delete(params, "node"),
+              attachment_chunk_bytes()
+            ],
+            12_000
+          )
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  @doc false
+  def invoke_attachment_as(subject, operation, params, chunk_bytes) do
+    Process.put(:ouroboros_attachment_chunk, chunk_bytes)
+    invoke_as(subject, "attachment." <> operation, params)
+  end
+
+  defp attachment_chunk_bytes do
+    frame = Process.get(:ouroboros_attachment_frame, 1024 * 1024)
+    relay = Process.get(:ouroboros_attachment_chunk, 256 * 1024)
+    min(relay, min(256 * 1024, max(1, div(max(0, frame - 768) * 3, 4))))
+  end
+
+  defp attachment_here("limits", _params, actor),
+    do:
+      {:ok,
+       Ouroboros.Attachments.limits()
+       |> Map.put(
+         :client_recovery_namespace,
+         if(Process.whereis(Ouroboros.Attachments),
+           do: Ouroboros.Attachments.recovery_namespace(actor)
+         )
+       )
+       |> Map.put(:max_source_bytes, min(20 * 1024 * 1024, attachment_chunk_bytes() * 4096))
+       |> Map.put(:chunk_bytes, attachment_chunk_bytes())
+       |> Map.put(:image_attachments_v1, Ouroboros.Attachments.available?())}
+
+  defp attachment_here("begin", %{"byte_size" => size} = params, actor)
+       when is_integer(size) do
+    if size > min(20 * 1024 * 1024, attachment_chunk_bytes() * 4096) do
+      {:error, -32006, "Image exceeds this connection's source size limit",
+       %{"reason" => "attachment_too_large", "outcome" => "not_dispatched"}}
+    else
+      attachment_operation("begin", params, actor)
+    end
+  end
+
+  defp attachment_here(operation, params, actor),
+    do: attachment_operation(operation, params, actor)
+
+  defp attachment_operation(operation, params, actor) do
+    params =
+      if operation == "read" and is_integer(Map.get(params, "length", attachment_chunk_bytes())),
+        do:
+          Map.put(
+            params,
+            "length",
+            min(Map.get(params, "length", attachment_chunk_bytes()), attachment_chunk_bytes())
+          ),
+        else: params
+
+    admission =
+      if operation in ["begin", "bind_draft"] and params["session_id"],
+        do: InteractiveSession.info(params["session_id"]),
+        else: {:ok, nil}
+
+    case admission do
+      {:ok, %{status: status}} when status in [:closed, :cancelled, :failed] ->
+        {:error, -32006, "Image attachment: session is closed",
+         %{"reason" => "attachment_session_closed", "outcome" => "not_dispatched"}}
+
+      {:ok, _session} ->
+        case Ouroboros.Attachments.operation(operation, Map.delete(params, "node"), actor) do
+          {:ok, result} ->
+            {:ok, result}
+
+          {:error, reason} ->
+            {:error, -32006, "Image attachment: #{reason}",
+             %{
+               "reason" => to_string(reason),
+               "outcome" => "not_dispatched",
+               "retryable" =>
+                 reason in [
+                   :attachment_busy,
+                   :attachment_storage_failed,
+                   :attachment_owner_unavailable
+                 ]
+             }}
+        end
+
+      _ ->
+        not_found("interactive session")
+    end
+  end
+
   @doc false
   def handle_interactive_retry_turn(params) do
     with_session(params, :interactive, fn session ->
@@ -3172,13 +3291,16 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp structured_turn_input(input) do
-    with :ok <- only_keys(input, ["prompt", "attachments", "reasoning_effort"]),
-         {:ok, prompt} <- fetch_string(input, "prompt"),
+    with :ok <-
+           only_keys(input, ["prompt", "attachments", "image_attachments", "reasoning_effort"]),
+         {:ok, images} <- image_refs(input),
+         {:ok, prompt} <- image_prompt(input, images),
          {:ok, attachments} <- fetch_optional_string_list(input, "attachments", 32),
          {:ok, reasoning_effort} <-
            fetch_optional_enum(input, "reasoning_effort", @reasoning_efforts) do
       turn = %{prompt: prompt}
       turn = if attachments == [], do: turn, else: Map.put(turn, :attachments, attachments)
+      turn = if images == [], do: turn, else: Map.put(turn, :image_attachments, images)
 
       {:ok,
        if(reasoning_effort,
@@ -3187,6 +3309,33 @@ defmodule Ouroboros.Gateway.Methods do
        )}
     end
   end
+
+  defp image_refs(input) do
+    refs = Map.get(input, "image_attachments", [])
+
+    if is_list(refs) and length(refs) <= 32 and
+         Enum.all?(refs, fn
+           %{"id" => id} = ref ->
+             map_size(ref) == 1 and is_binary(id) and
+               Regex.match?(~r/\Aatt_[A-Za-z0-9_-]{32}\z/, id)
+
+           _ ->
+             false
+         end) do
+      {:ok, refs}
+    else
+      {:invalid, "params.input.image_attachments must contain at most 32 opaque image references"}
+    end
+  end
+
+  defp image_prompt(input, [_ | _]) do
+    case input["prompt"] do
+      prompt when is_binary(prompt) -> {:ok, prompt}
+      _ -> {:invalid, "params.input.prompt must be a string"}
+    end
+  end
+
+  defp image_prompt(input, []), do: fetch_string(input, "prompt")
 
   defp fetch_optional_string_list(params, key, limit) do
     case Map.get(params, key, []) do

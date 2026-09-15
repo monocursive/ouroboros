@@ -571,4 +571,56 @@ defmodule Ouroboros.Web.Live.CellsTest do
       assert html =~ "hello"
     end
   end
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W2 — copying one message
+  # ------------------------------------------------------------------------------------
+
+  describe "the copy controls" do
+    test "an agent message carries both, keyed by the cell's own identity" do
+      html = paint(%Cell.Message{speaker: :agent, text: "the answer"}, identity: "event-7-0")
+
+      assert html =~ ~s(id="copy-event-7-0")
+      assert html =~ ~s(phx-hook="Clipboard")
+      assert html =~ ~s(data-ouro-copy="rendered")
+      assert html =~ ~s(phx-click="copy-source")
+      assert html =~ ~s(phx-value-cell="event-7-0")
+    end
+
+    test "the Markdown the model sent is never put back into the document" do
+      # The rendered half is the browser's to read out of the prose; the source half is
+      # fetched over the socket. A `data-` attribute holding the raw bytes would put a
+      # provider's `javascript:` back on the page for nothing a reader can see — which is
+      # the rule `markdown_test.exs` and the sanitizer suite both hold.
+      html =
+        paint(%Cell.Message{speaker: :agent, text: "[click](javascript:alert(1))"},
+          identity: "event-7-0"
+        )
+
+      refute html =~ "javascript:"
+      refute html =~ "data-ouro-source"
+    end
+
+    test "each control names the message it is about, for a reader who cannot see it" do
+      # Twenty "Copy" buttons in a transcript are twenty identical announcements. The
+      # visible label stays short; the accessible name says which message.
+      html = paint(%Cell.Message{speaker: :agent, text: "the answer"}, index: 11)
+
+      assert html =~ ~s(aria-label="Copy message 12")
+      assert html =~ ~s(aria-label="Copy the Markdown of message 12")
+    end
+
+    test "a message still streaming has nothing to copy yet" do
+      streaming = paint(%Cell.Message{speaker: :agent, text: "half a th", streaming: true})
+
+      refute streaming =~ "ouro-cell-actions"
+      assert paint(%Cell.Message{speaker: :agent, text: "whole"}) =~ "ouro-cell-actions"
+    end
+
+    test "what the operator typed wears no copy control" do
+      # It is already in their own composer history, and the rail's own rule applies: a
+      # control that does nothing new is a control in the way.
+      refute paint(%Cell.Message{speaker: :you, text: "mine"}) =~ "ouro-cell-actions"
+    end
+  end
 end

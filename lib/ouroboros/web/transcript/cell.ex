@@ -1,6 +1,6 @@
 defmodule Ouroboros.Web.Transcript.Cell.Message do
   @moduledoc "One speaker's words. `streaming` marks an agent draft still being written."
-  defstruct [:speaker, text: "", streaming: false]
+  defstruct [:speaker, text: "", streaming: false, images: []]
 
   @type speaker :: :you | :agent
   @type t :: %__MODULE__{speaker: speaker(), text: String.t(), streaming: boolean()}

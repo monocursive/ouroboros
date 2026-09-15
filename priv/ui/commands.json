@@ -1,0 +1,448 @@
+[
+  {
+    "id": "session.new",
+    "label": "New session",
+    "group": "session",
+    "slash": "/new",
+    "tui": { "command": "NewSession", "action": "leader.new" },
+    "web": { "event": "session.new" }
+  },
+  {
+    "id": "session.options",
+    "label": "New session options",
+    "group": "session",
+    "slash": "/options",
+    "tui": { "command": "NewSessionOptions", "action": "leader.new_options" },
+    "web": null,
+    "note": "The web's New session page draws the options on the form itself, so it has no second row for them."
+  },
+  {
+    "id": "session.writable",
+    "label": "Start a session that can edit files",
+    "group": "session",
+    "slash": "/write",
+    "tui": { "command": "WriteAccess", "action": null },
+    "web": null,
+    "note": "The web's New session form carries the file-access choice, so it needs no verb of its own."
+  },
+  {
+    "id": "session.switch",
+    "label": "Switch session",
+    "group": "session",
+    "slash": "/switch",
+    "tui": { "command": "SwitchSession", "action": "leader.sessions" },
+    "web": { "event": "session.switch" }
+  },
+  {
+    "id": "session.rename",
+    "label": "Rename this session",
+    "group": "session",
+    "slash": "/rename",
+    "tui": { "command": "Rename", "action": null },
+    "web": { "event": "session.rename" }
+  },
+  {
+    "id": "session.end",
+    "label": "End or remove session",
+    "group": "session",
+    "slash": "/close",
+    "tui": { "command": "CloseSession", "action": "leader.end" },
+    "web": { "event": "session.end", "label": "End this session", "slash": "/end" },
+    "note": "One dialog in the terminal client both ends and removes; the web splits removal out into session.delete, so its row is the narrower one and says so."
+  },
+  {
+    "id": "session.delete",
+    "label": "Delete this session",
+    "group": "session",
+    "slash": "/delete",
+    "tui": null,
+    "web": { "event": "session.delete" },
+    "note": "The terminal client reaches removal through session.end's dialog rather than from a row of its own."
+  },
+  {
+    "id": "session.fork",
+    "label": "Fork this session",
+    "group": "session",
+    "slash": "/fork",
+    "tui": { "command": "Fork", "action": null },
+    "web": { "event": "session.fork" }
+  },
+  {
+    "id": "session.handoff",
+    "label": "Hand off to a new session",
+    "group": "session",
+    "slash": "/handoff",
+    "tui": { "command": "Handoff", "action": null },
+    "web": { "event": "session.handoff" }
+  },
+
+  {
+    "id": "turn.send",
+    "label": "Send the draft",
+    "group": "turn",
+    "slash": "/send",
+    "tui": null,
+    "web": { "event": "turn.send" },
+    "note": "The terminal client sends with Enter and lists no row for the key it is already showing."
+  },
+  {
+    "id": "turn.queue",
+    "label": "Queue the draft",
+    "group": "turn",
+    "slash": "/queue",
+    "tui": null,
+    "web": { "event": "turn.queue" },
+    "note": "Same Enter in the terminal client: whether it sends or queues is the turn's state, not a second row."
+  },
+  {
+    "id": "turn.steer",
+    "label": "Steer the running turn",
+    "group": "turn",
+    "slash": "/steer",
+    "tui": { "command": "Steer", "action": "steer" },
+    "web": { "event": "turn.steer" }
+  },
+  {
+    "id": "turn.interrupt",
+    "label": "Interrupt the running turn",
+    "group": "turn",
+    "slash": "/interrupt",
+    "tui": { "command": "Interrupt", "action": "interrupt" },
+    "web": { "event": "turn.interrupt" }
+  },
+  {
+    "id": "turn.retry",
+    "label": "Retry the last message",
+    "group": "turn",
+    "slash": "/retry",
+    "tui": null,
+    "web": { "event": "turn.retry" },
+    "note": "interactive.retry_turn has no terminal-client verb yet."
+  },
+  {
+    "id": "turn.editor",
+    "label": "Edit prompt in $EDITOR",
+    "group": "turn",
+    "slash": "/editor",
+    "tui": { "command": "ExternalEditor", "action": "leader.editor" },
+    "web": null,
+    "note": "$EDITOR is a terminal's; a browser has no editor to hand the draft to."
+  },
+  {
+    "id": "turn.effort",
+    "label": "Thinking effort",
+    "group": "turn",
+    "slash": "/effort",
+    "tui": { "command": "Effort", "action": null },
+    "web": { "event": "turn.effort" }
+  },
+  {
+    "id": "turn.model",
+    "label": "Change the model",
+    "group": "turn",
+    "slash": "/model",
+    "tui": { "command": "Model", "action": null },
+    "web": { "event": "turn.model" }
+  },
+  {
+    "id": "turn.plan",
+    "label": "Plan without editing anything",
+    "group": "turn",
+    "slash": "/plan",
+    "tui": { "command": "Plan", "action": null },
+    "web": { "event": "turn.plan" }
+  },
+  {
+    "id": "turn.sandbox",
+    "label": "Change file access (OS sandbox)",
+    "group": "turn",
+    "slash": "/sandbox",
+    "tui": { "command": "Sandbox", "action": null },
+    "web": { "event": "turn.sandbox" }
+  },
+  {
+    "id": "turn.auto_approve",
+    "label": "Auto-approve everything this session asks",
+    "group": "turn",
+    "slash": "/auto-approve",
+    "tui": { "command": "AutoApprove", "action": "leader.auto_approve" },
+    "web": { "event": "turn.auto_approve" }
+  },
+  {
+    "id": "turn.approval",
+    "label": "Answer the pending approval",
+    "group": "turn",
+    "slash": null,
+    "tui": { "command": "Approval", "action": "leader.approval" },
+    "web": { "event": "turn.approval", "label": "Answer the waiting request", "slash": "/approve" },
+    "note": "The terminal client reaches the waiting request by ctrl+x a and has no typed spelling for it."
+  },
+  {
+    "id": "turn.shell",
+    "label": "Run a command in the workspace",
+    "group": "turn",
+    "slash": "!",
+    "tui": null,
+    "web": { "event": "turn.shell" },
+    "note": "The terminal client sends a draft that begins with ! to workspace.exec without carrying a palette row for it."
+  },
+
+  {
+    "id": "conversation.details",
+    "label": "Toggle event details",
+    "group": "conversation",
+    "slash": "/details",
+    "tui": { "command": "SessionDetails", "action": "leader.details" },
+    "web": { "event": "conversation.details", "label": "Event details" },
+    "note": "The terminal client toggles the detail level over the whole transcript; the web opens one event's tree, so neither label fits both."
+  },
+  {
+    "id": "conversation.diff",
+    "label": "Show changed files",
+    "group": "conversation",
+    "slash": "/diff",
+    "tui": { "command": "ShowDiff", "action": null },
+    "web": null,
+    "note": "The web has no view of a session's changed files yet."
+  },
+  {
+    "id": "conversation.raw",
+    "label": "Toggle raw copy mode",
+    "group": "conversation",
+    "slash": "/raw",
+    "tui": { "command": "RawMode", "action": null },
+    "web": null,
+    "note": "A native terminal selection needs cells with no frame or gutter; the browser copies with a button instead."
+  },
+  {
+    "id": "conversation.copy",
+    "label": "Copy last agent message",
+    "group": "conversation",
+    "slash": "/copy",
+    "tui": { "command": "CopyLast", "action": "leader.copy" },
+    "web": { "event": "conversation.copy" }
+  },
+  {
+    "id": "conversation.copy_source",
+    "label": "Copy last agent message as source Markdown",
+    "group": "conversation",
+    "slash": "/copy raw",
+    "tui": { "command": "CopyRawLast", "action": null },
+    "web": {
+      "event": "conversation.copy_source",
+      "label": "Copy the last message's Markdown",
+      "slash": "/copy source"
+    },
+    "note": "The terminal client's dispatcher spells the argument raw; the web's palette shows source. Only one of them parses a draft, so the spellings have not been merged."
+  },
+  {
+    "id": "conversation.history",
+    "label": "Load earlier messages",
+    "group": "conversation",
+    "slash": "/history",
+    "tui": null,
+    "web": { "event": "conversation.history" },
+    "note": "The terminal client holds the whole transcript and scrolls it, so there is nothing to fetch."
+  },
+  {
+    "id": "conversation.export",
+    "label": "Export this transcript",
+    "group": "conversation",
+    "slash": "/export",
+    "tui": { "command": "Export", "action": null },
+    "web": { "event": "conversation.export" }
+  },
+  {
+    "id": "conversation.scrollback",
+    "label": "Print transcript into terminal scrollback",
+    "group": "conversation",
+    "slash": null,
+    "tui": { "command": "DumpScrollback", "action": "leader.scrollback" },
+    "web": null,
+    "note": "Scrollback is a terminal's; the web downloads the transcript through conversation.export instead."
+  },
+  {
+    "id": "conversation.view",
+    "label": "Open transcript in $EDITOR",
+    "group": "conversation",
+    "slash": null,
+    "tui": { "command": "ViewTranscript", "action": "leader.editor_view" },
+    "web": null,
+    "note": "$EDITOR is a terminal's."
+  },
+  {
+    "id": "conversation.backtrack",
+    "label": "Go back to an earlier message",
+    "group": "conversation",
+    "slash": "/backtrack",
+    "tui": { "command": "Backtrack", "action": "backtrack" },
+    "web": { "event": "conversation.backtrack" }
+  },
+  {
+    "id": "conversation.rewind",
+    "label": "Rewind to an earlier turn",
+    "group": "conversation",
+    "slash": "/rewind",
+    "tui": { "command": "Rewind", "action": null },
+    "web": { "event": "conversation.rewind" }
+  },
+  {
+    "id": "conversation.compact",
+    "label": "Compact this conversation",
+    "group": "conversation",
+    "slash": "/compact",
+    "tui": { "command": "Compact", "action": null },
+    "web": { "event": "conversation.compact" }
+  },
+  {
+    "id": "conversation.context",
+    "label": "Show what fills the context window",
+    "group": "conversation",
+    "slash": "/context",
+    "tui": { "command": "Context", "action": null },
+    "web": { "event": "conversation.context" }
+  },
+  {
+    "id": "conversation.cost",
+    "label": "Show tokens and cost for this session",
+    "group": "conversation",
+    "slash": "/cost",
+    "tui": { "command": "Cost", "action": null },
+    "web": null,
+    "note": "The web reports spend in the vitals column rather than as a verb."
+  },
+
+  {
+    "id": "runtime.status",
+    "label": "Runtime & distribution",
+    "group": "runtime",
+    "slash": "/runtime",
+    "tui": { "command": "Runtime", "action": null },
+    "web": { "event": "runtime.status", "label": "Runtime status", "slash": "/status" },
+    "note": "The terminal client's Dashboard tab and the web's /status page are the same subject on two differently shaped surfaces, and each is named after the thing it opens."
+  },
+  {
+    "id": "runtime.audit",
+    "label": "Audit",
+    "group": "runtime",
+    "slash": "/audit",
+    "tui": null,
+    "web": { "event": "runtime.audit" },
+    "note": "The terminal client has no audit view yet."
+  },
+  {
+    "id": "runtime.mcp",
+    "label": "Show this node's MCP servers",
+    "group": "runtime",
+    "slash": "/mcp",
+    "tui": { "command": "Mcp", "action": null },
+    "web": { "event": "runtime.mcp" }
+  },
+  {
+    "id": "runtime.logs",
+    "label": "Logs",
+    "group": "runtime",
+    "slash": "/logs",
+    "tui": { "command": "Logs", "action": null },
+    "web": null,
+    "note": "The web has no logs page yet."
+  },
+  {
+    "id": "runtime.connect",
+    "label": "Connect ChatGPT",
+    "group": "runtime",
+    "slash": "/connect",
+    "tui": { "command": "ConnectChatGpt", "action": null },
+    "web": null,
+    "note": "The web connects an account from its Settings page rather than from the palette."
+  },
+  {
+    "id": "runtime.upgrades",
+    "label": "Upgrades",
+    "group": "runtime",
+    "slash": "/upgrades",
+    "tui": { "command": "Upgrades", "action": null },
+    "web": null,
+    "note": "A web upgrades page is deferred in the parity plan."
+  },
+  {
+    "id": "runtime.capabilities",
+    "label": "List capability proposals",
+    "group": "runtime",
+    "slash": "/capabilities",
+    "tui": { "command": "ListCapabilities", "action": null },
+    "web": null,
+    "note": "Workspace capability proposals have no web surface yet."
+  },
+  {
+    "id": "runtime.capability_preview",
+    "label": "Preview a capability",
+    "group": "runtime",
+    "slash": "/preview",
+    "tui": { "command": "PreviewCapability", "action": null },
+    "web": null,
+    "note": "Workspace capability proposals have no web surface yet."
+  },
+  {
+    "id": "runtime.capability_admit",
+    "label": "Admit a capability",
+    "group": "runtime",
+    "slash": "/admit",
+    "tui": { "command": "AdmitCapability", "action": null },
+    "web": null,
+    "note": "Workspace capability proposals have no web surface yet."
+  },
+
+  {
+    "id": "client.settings",
+    "label": "Settings",
+    "group": "client",
+    "slash": "/settings",
+    "tui": { "command": "Settings", "action": "leader.settings" },
+    "web": { "event": "client.settings" }
+  },
+  {
+    "id": "client.theme",
+    "label": "Change the colour theme",
+    "group": "client",
+    "slash": "/theme",
+    "tui": { "command": "Theme", "action": "leader.theme" },
+    "web": { "event": "client.theme" }
+  },
+  {
+    "id": "client.shortcuts",
+    "label": "Show the effective key map",
+    "group": "client",
+    "slash": "/keys",
+    "tui": { "command": "Keys", "action": null },
+    "web": { "event": "client.shortcuts", "label": "Keyboard shortcuts" },
+    "note": "The terminal client's keys are rebindable, so its row names the map in force; the web's keys are not, so /keys there is the one sheet it has."
+  },
+  {
+    "id": "client.help",
+    "label": "Keyboard shortcuts",
+    "group": "client",
+    "slash": "/help",
+    "tui": { "command": "Help", "action": "help" },
+    "web": null,
+    "note": "The terminal client's ? opens a second, static sheet; on the web ? opens the sheet client.shortcuts names, so there is one row there and two here."
+  },
+  {
+    "id": "client.notifications",
+    "label": "Notify me when a session needs me",
+    "group": "client",
+    "slash": "/notify",
+    "tui": null,
+    "web": { "event": "client.notifications" },
+    "note": "The terminal client's notification preferences live in Settings rather than as a verb."
+  },
+  {
+    "id": "client.quit",
+    "label": "Quit",
+    "group": "client",
+    "slash": "/quit",
+    "tui": { "command": "Quit", "action": "quit" },
+    "web": null,
+    "note": "A browser tab is closed by the browser."
+  }
+]
