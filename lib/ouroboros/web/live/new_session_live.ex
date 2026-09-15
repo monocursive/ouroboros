@@ -48,6 +48,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   """
 
   use Phoenix.LiveView
+  alias Ouroboros.Web.Live.ImageAttachments
 
   # The needs-you bell is in the one top bar, so it is on this page too. This is what makes
   # that honest: the same edge computation and the same three-second `interactive.list`
@@ -99,6 +100,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:refusal, nil)
       |> assign(:initial_message, starter(params["starter"]))
       |> assign(:started_id, nil)
+      |> assign(:initial_images, %{})
 
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
@@ -108,6 +110,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
        do: socket |> load_machines() |> apply_launch(params) |> load(),
        else: apply_launch(socket, params)
      )}
+  end
+
+  defp image_key(assigns) do
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({assigns[:web_session], "new", assigns.form.machine})
+    )
+    |> Base.url_encode64(padding: false)
   end
 
   defp initial_form(prefs, params) do
@@ -235,6 +245,17 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # reading of it. The submit handler reads the browser payload through the same function;
   # rendered controls and the request can therefore never disagree.
   @impl true
+  def handle_event("image-action", params, socket) do
+    {:reply,
+     ImageAttachments.action(
+       socket,
+       params,
+       image_key(socket.assigns),
+       socket.assigns.form.machine,
+       socket.assigns.started_id
+     ), socket}
+  end
+
   def handle_event(event, _params, %{assigns: %{pending_start: pending}} = socket)
       when event not in ["start", "connect-chatgpt", "cancel-chatgpt", "refresh-chatgpt"] and
              not is_nil(pending),
@@ -457,6 +478,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       socket
       |> assign(:form, form)
       |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
+      |> assign(:initial_images, Map.take(params, ["images_json", "images_draft"]))
 
     api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
     grok = NewSession.grok_card(form, field(socket), socket.assigns.providers)
@@ -640,19 +662,38 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp do_send_initial(socket, id) do
+    case ImageAttachments.bind(
+           socket,
+           socket.assigns.initial_images,
+           id,
+           socket.assigns.form.machine
+         ) do
+      {:ok, refs} ->
+        do_send_initial_images(socket, id, refs)
+
+      {:error, message} ->
+        assign(socket, :refusal, %{
+          message: message,
+          detail: "Your first message and images remain here. Retry when ready."
+        })
+    end
+  end
+
+  defp do_send_initial_images(socket, id, refs) do
     message = String.trim(socket.assigns.initial_message)
 
-    if message == "" do
+    if message == "" and refs == [] do
       push_navigate(socket, to: NewSession.deck_path(id))
     else
       digest =
-        :crypto.hash(:sha256, id <> <<0>> <> message)
+        :crypto.hash(:sha256, id <> <<0>> <> message <> JSON.encode!(refs))
         |> Base.encode16(case: :lower)
         |> binary_part(0, 24)
 
       params = %{
         "id" => id,
-        "input" => message,
+        "input" =>
+          if(refs == [], do: message, else: %{"prompt" => message, "image_attachments" => refs}),
         "turn_id" => "web-" <> digest
       }
 
@@ -663,7 +704,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       case call(socket, "interactive.send_message", params) do
         {:ok, _turn} ->
-          push_navigate(socket, to: NewSession.deck_path(id))
+          socket
+          |> push_event("draft-sent", %{
+            key: image_key(socket.assigns),
+            images: refs,
+            text: message
+          })
+          |> push_navigate(to: NewSession.deck_path(id))
 
         refused ->
           detail =
@@ -912,6 +959,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
                 rows="5"
                 placeholder="Describe the result you want. You can add more instructions later."
               >{@initial_message}</textarea>
+              <ImageAttachments.tray
+                locked={@locked?}
+                draft_key={image_key(assigns)}
+                node={@form.machine}
+              />
               <p class="ouro-new-hint">This becomes the first message in the session.</p>
             </section>
 

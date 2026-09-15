@@ -935,6 +935,13 @@ defmodule Ouroboros.Interactive.State do
 
   @spec fingerprint(:message | :follow_up, map()) :: String.t()
   def fingerprint(mode, request) do
+    # Preserve the byte-for-byte legacy fingerprint for requests that predate the
+    # optional managed-image field (including structs restored from old checkpoints).
+    request =
+      if Map.get(request, :image_attachments, []) == [],
+        do: Map.delete(request, :image_attachments),
+        else: request
+
     :sha256
     |> :crypto.hash(:erlang.term_to_binary({mode, request}, [:deterministic]))
     |> Base.encode16(case: :lower)

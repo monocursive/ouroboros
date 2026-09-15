@@ -325,18 +325,22 @@ defmodule Ouroboros.Interactive.Task do
       {:ok, input, opts} ->
         case ReasoningEffort.turn_request(input, opts) do
           {:ok, request} ->
-            request_id =
-              "steer-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+            if Map.get(request, :image_attachments, []) != [] do
+              {:reply, {:error, :image_steer_unsupported}, runtime}
+            else
+              request_id =
+                "steer-" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
 
-            case with_runtime(runtime, &Session.steer(&1, request_id, request)) do
-              {:ok, request_id} when is_binary(request_id) ->
-                {:reply, {:ok, request_id},
-                 runtime
-                 |> remember_steer(request_id, request)
-                 |> schedule_reconcile(0)}
+              case with_runtime(runtime, &Session.steer(&1, request_id, request)) do
+                {:ok, request_id} when is_binary(request_id) ->
+                  {:reply, {:ok, request_id},
+                   runtime
+                   |> remember_steer(request_id, request)
+                   |> schedule_reconcile(0)}
 
-              reply ->
-                {:reply, reply, schedule_reconcile(runtime, 0)}
+                reply ->
+                  {:reply, reply, schedule_reconcile(runtime, 0)}
+              end
             end
 
           {:error, reason} ->
@@ -558,7 +562,12 @@ defmodule Ouroboros.Interactive.Task do
       do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:fork_plan, id}, _from, runtime) do
-    {:reply, fork_plan(runtime.session, id, %{}), runtime}
+    result =
+      with {:ok, opts} <- fork_plan(runtime.session, id, %{}),
+           :ok <- Ouroboros.Attachments.inherit(runtime.session.id, id),
+           do: {:ok, opts}
+
+    {:reply, result, runtime}
   end
 
   # R3. The three-element form carries the branch point and the model substitution. Both
@@ -570,7 +579,12 @@ defmodule Ouroboros.Interactive.Task do
       do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:fork_plan, id, overrides}, _from, runtime) do
-    {:reply, fork_plan(runtime.session, id, overrides), runtime}
+    result =
+      with {:ok, opts} <- fork_plan(runtime.session, id, overrides),
+           :ok <- Ouroboros.Attachments.inherit(runtime.session.id, id),
+           do: {:ok, opts}
+
+    {:reply, result, runtime}
   end
 
   # Counted only once the child exists, so the number never claims a session nobody can
@@ -1329,7 +1343,10 @@ defmodule Ouroboros.Interactive.Task do
        ) do
     with turn when is_map(turn) <- find_turn_by_runtime_id(session, event.turn_id),
          prompt when is_binary(prompt) <- get_in(turn, [:request, :prompt]) do
-      %{event | payload: Map.put(event.payload, "text", Ouroboros.Redaction.redact(prompt))}
+      payload = Map.put(event.payload, "text", Ouroboros.Redaction.redact(prompt))
+      images = Map.get(turn.request, :image_attachments, [])
+      payload = if images == [], do: payload, else: Map.put(payload, "image_attachments", images)
+      %{event | payload: payload}
     else
       _missing -> event
     end

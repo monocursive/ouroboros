@@ -21,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 45] = [
+pub(crate) const COMMANDS: [(&str, &str); 49] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -42,6 +42,19 @@ pub(crate) const COMMANDS: [(&str, &str); 45] = [
     ("/theme", "switch the colour theme ([name])"),
     ("/interrupt", "abort the running turn"),
     ("/steer", "steer the running turn"),
+    (
+        "/attach",
+        "attach one local image file (quote paths with spaces)",
+    ),
+    (
+        "/view-image",
+        "open a ready draft position or history attachment ID locally",
+    ),
+    ("/paste-image", "paste an image from the local clipboard"),
+    (
+        "/remove-image",
+        "remove an attachment by its 1-based position",
+    ),
     ("/effort", "reasoning effort for the next turn only"),
     ("/backtrack", "go back to an earlier message"),
     ("/fork", "fork this session"),
@@ -95,7 +108,10 @@ pub(crate) const COMMANDS: [(&str, &str); 45] = [
 /// [`COMMANDS`], so a verb that is renamed there cannot leave a ghost here. The table
 /// itself is one column wide and belongs to another slice, which is why this is a list
 /// beside it rather than a field in it.
-pub(crate) const COMMANDS_TAKING_AN_ARGUMENT: [&str; 13] = [
+pub(crate) const COMMANDS_TAKING_AN_ARGUMENT: [&str; 16] = [
+    "/attach",
+    "/remove-image",
+    "/view-image",
     "/effort",
     "/model",
     "/rename",

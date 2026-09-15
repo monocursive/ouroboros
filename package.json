@@ -2,7 +2,7 @@
   "name": "ouroboros-browser-tests",
   "private": true,
   "scripts": {
-    "test:browser": "playwright test"
+    "test:browser": "node --test test/web/image-attachments.test.cjs && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "1.55.1"

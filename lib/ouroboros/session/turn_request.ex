@@ -6,6 +6,7 @@ defmodule Ouroboros.Session.TurnRequest do
     :prompt,
     :content,
     :attachments,
+    :image_attachments,
     :reasoning_effort,
     :output_schema,
     :metadata,
@@ -20,6 +21,9 @@ defmodule Ouroboros.Session.TurnRequest do
                 Zoi.array(Zoi.map(Zoi.union([Zoi.string(), Zoi.atom()]), Zoi.any()))
                 |> Zoi.default([]),
               attachments: Zoi.array(Zoi.string()) |> Zoi.default([]),
+              image_attachments:
+                Zoi.array(Zoi.map(Zoi.union([Zoi.string(), Zoi.atom()]), Zoi.any()))
+                |> Zoi.default([]),
               reasoning_effort: Zoi.enum(@reasoning_efforts) |> Zoi.nullish(),
               output_schema: Zoi.map(Zoi.string(), Zoi.any()) |> Zoi.nullish(),
               metadata:
@@ -101,7 +105,8 @@ defmodule Ouroboros.Session.TurnRequest do
            details: %{key: shadow}
          )}
 
-      is_binary(prompt) and String.trim(prompt) != "" and content == [] ->
+      is_binary(prompt) and content == [] and
+          (String.trim(prompt) != "" or Map.get(attrs, :image_attachments, []) != []) ->
         :ok
 
       is_nil(prompt) and is_list(content) and content != [] ->

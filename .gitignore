@@ -47,6 +47,7 @@ ouroboros-*.tar
 
 # The Rust TUI crate's build directory.
 /tui/target/
+/priv/media/
 
 # The lane-W acceptance guest: its own build directory, and the component `make wasm-guest`
 # copies out of it. Source — Cargo.toml, Cargo.lock, src/lib.rs — is kept; the built

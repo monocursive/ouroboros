@@ -3,6 +3,7 @@
 import argparse
 import http.client
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -83,6 +84,9 @@ def smoke(binary, version, target, *, require_self_update=False):
             helpers = list(release.glob("lib/ouroboros-*/priv/wasm/ouro-wasm"))
             if len(helpers) != 1:
                 raise ValueError("expected exactly one packaged helper")
+            media = list(release.glob("lib/ouroboros-*/priv/media/ouro-media"))
+            if len(media) != 1 or not os.access(media[0], os.X_OK):
+                raise ValueError("bundled image normalizer missing or not executable")
             doctor = json.loads(run(str(helpers[0]), "doctor"))
             if doctor["usable"] is not True or doctor["target"] != target:
                 raise ValueError("helper cannot run or has the wrong architecture")

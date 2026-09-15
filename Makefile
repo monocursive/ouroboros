@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox-host-test dev-host-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox-host-test dev-host-test media wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
 .PHONY: release-packaging-test
 
 help:
@@ -42,6 +42,7 @@ help:
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
 	@echo "make wasm-linux-test     prove the wasm suites under bubblewrap, in a Linux container"
+	@echo "make media            build the contained image normalizer into priv/media/"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
 	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"
@@ -49,7 +50,7 @@ help:
 	@echo "make wasm-sdk-cache   warm this node's cargo cache with exactly the SDK's dependencies"
 	@echo "make wasm-skew-test   prove the precompiled skew refusals with two real toolchains"
 
-dev:
+dev: media
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
 	@test -d deps || $(MIX) deps.get
 	cd tui && $(CARGO) run -- --dev
@@ -89,7 +90,7 @@ sandbox-host-test:
 dev-host-test:
 	@sh scripts/test-dev-host.sh
 
-# The WebAssembly containment helper, and the only helper this repository builds. It
+# The WebAssembly containment helper. It
 # enforces the same on every platform — the boundary is wasmtime's linker, not a kernel
 # feature — so there is no per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a
 # newer Rust than the rest of this workspace; see the rust-version note in tui/wasm/Cargo.toml.
@@ -304,7 +305,21 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: wasm
+media:
+	cd tui && $(CARGO) build --locked --release -p ouro-media
+	mkdir -p priv/media
+	cp tui/target/release/ouro-media priv/media/ouro-media
+	chmod 0755 priv/media/ouro-media
+	@for env in dev test prod; do \
+	  dest="_build/$$env/lib/ouroboros/priv/media"; \
+	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
+	    mkdir -p "$$dest"; \
+	    if ! [ priv/media/ouro-media -ef "$$dest/ouro-media" ]; then cp priv/media/ouro-media "$$dest/ouro-media"; fi; \
+	    chmod 0755 "$$dest/ouro-media"; \
+	  fi; \
+	done
+
+release-tarball: wasm media
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

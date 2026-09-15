@@ -52,7 +52,9 @@ pub mod transcript;
 
 /// Which plane an id belongs to. One plane today; the pair is still how a session is
 /// addressed, so a future one costs a variant rather than a signature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Plane {
     Interactive,
 }
@@ -2033,7 +2035,7 @@ impl ApprovalScope {
 /// rather than inferred. The gateway matches a client's string against those literal terms
 /// and answers `-32602` **naming the parameter** for anything else — an option that was
 /// silently dropped would run the session under a policy nobody chose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalMode {
     Default,
     Prompt,
@@ -2078,7 +2080,7 @@ impl ApprovalMode {
 /// Transcribed from `Gateway.Methods` `@sandbox_modes`. Sending anything else is `-32602`
 /// naming the parameter. The TUI default is to omit this field so the plane can apply
 /// workspace write where the provider allows it, and omit it where the provider cannot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SandboxMode {
     Default,
     ReadOnly,
@@ -2262,7 +2264,7 @@ impl StartError {
 ///
 /// `id` is always client-owned. It is retained across an indeterminate reply so retrying
 /// reconciles the same logical start instead of creating and billing another session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StartRequest {
     pub id: String,
     pub plane: Plane,
@@ -2653,18 +2655,32 @@ fn clip_utf8(text: &str, limit: usize) -> String {
 /// another machine entirely, where this client cannot stat anything. What is sent is what
 /// the operator picked; what comes back when it is outside the workspace is a refusal this
 /// client renders on the composer that produced it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub path: String,
     pub kind: AttachmentKind,
+    pub name: Option<String>,
+    pub byte_size: u64,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub upload_id: Option<String>,
+    #[serde(default = "image_ephemeral_default")]
+    pub ephemeral: bool,
+}
+fn image_ephemeral_default() -> bool {
+    true
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AttachmentKind {
     /// Completed from the workspace index with `@`.
     Path,
     /// Written by this client from the clipboard, under the session workspace.
     Image,
+    ManagedImage,
+    PendingImage,
+    FailedImage,
 }
 
 impl Attachment {
@@ -2672,6 +2688,11 @@ impl Attachment {
         Self {
             path: path.into(),
             kind: AttachmentKind::Path,
+            name: None,
+            byte_size: 0,
+            sha256: None,
+            upload_id: None,
+            ephemeral: true,
         }
     }
 
@@ -2679,12 +2700,20 @@ impl Attachment {
         Self {
             path: path.into(),
             kind: AttachmentKind::Image,
+            name: None,
+            byte_size: 0,
+            sha256: None,
+            upload_id: None,
+            ephemeral: true,
         }
     }
 
     /// What the chip says: the tail of the path, because a chip row has no width for a
     /// repository-root prefix that is the same on every chip.
     pub fn label(&self) -> &str {
+        if let Some(name) = &self.name {
+            return name;
+        }
         self.path
             .rsplit_once('/')
             .map(|(_head, tail)| tail)
@@ -2694,7 +2723,7 @@ impl Attachment {
 
 /// Reasoning effort, exactly the six values `@reasoning_efforts` declares in
 /// `gateway/methods.ex`. It can be a session default or a per-turn override.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Effort {
     NoReasoning,
     Low,
@@ -2754,7 +2783,7 @@ impl Effort {
 /// This is also the unit a reconciliation replays. A same-id retry that dropped the
 /// attachments would change the turn's fingerprint and come back `:turn_id_conflict`, so
 /// the whole envelope travels with the tag rather than the prompt alone.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct TurnInput {
     pub prompt: String,
     pub attachments: Vec<Attachment>,
@@ -2793,16 +2822,23 @@ impl TurnInput {
         let mut input = serde_json::Map::new();
         input.insert("prompt".into(), Value::String(self.prompt.clone()));
 
-        if !self.attachments.is_empty() {
-            input.insert(
-                "attachments".into(),
-                Value::Array(
-                    self.attachments
-                        .iter()
-                        .map(|attachment| Value::String(attachment.path.clone()))
-                        .collect(),
-                ),
-            );
+        let paths: Vec<Value> = self
+            .attachments
+            .iter()
+            .filter(|a| matches!(a.kind, AttachmentKind::Path | AttachmentKind::Image))
+            .map(|a| Value::String(a.path.clone()))
+            .collect();
+        let images: Vec<Value> = self
+            .attachments
+            .iter()
+            .filter(|a| a.kind == AttachmentKind::ManagedImage)
+            .map(|a| serde_json::json!({"id": a.path}))
+            .collect();
+        if !paths.is_empty() {
+            input.insert("attachments".into(), Value::Array(paths));
+        }
+        if !images.is_empty() {
+            input.insert("image_attachments".into(), Value::Array(images));
         }
 
         if let Some(effort) = self.reasoning_effort {

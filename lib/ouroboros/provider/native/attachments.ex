@@ -5,6 +5,26 @@ defmodule Ouroboros.Provider.Native.Attachments do
   @max_image_bytes 20 * 1024 * 1024
   @max_total_bytes 64 * 1024 * 1024
 
+  def message(text, paths, [], _session_id, session_dir), do: message(text, paths, session_dir)
+
+  def message(text, paths, refs, session_id, session_dir) do
+    with true <-
+           length(paths) + length(refs) <= @max_images || {:error, :attachment_count_exceeded},
+         {:ok, managed} <- managed_images(session_id, refs),
+         {:ok, legacy, files} <- stage_all(paths, session_dir),
+         true <-
+           Enum.sum(Enum.map(managed ++ legacy, & &1.size)) <= @max_total_bytes ||
+             {:error, :attachment_too_large} do
+      parts =
+        if(text == "", do: [], else: [%{type: :text, text: text}]) ++
+          managed ++ legacy ++ file_mentions(files)
+
+      {:ok, %{role: :user, content: parts}}
+    end
+  end
+
+  defp managed_images(session_id, refs), do: Ouroboros.Attachments.content(session_id, refs)
+
   @spec message(String.t(), [String.t()], String.t()) :: {:ok, map()} | {:error, term()}
   def message(text, [], session_dir) when is_binary(text) and is_binary(session_dir),
     do: {:ok, %{role: :user, content: text}}

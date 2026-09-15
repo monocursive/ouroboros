@@ -22,14 +22,14 @@ defmodule Ouroboros.Web.Live.Composer do
 
   `input` is sent as the bare prompt, which is the common case of the closed envelope
   (`docs/PROTOCOL.md` `interactive.send_message`). The object form
-  `{prompt, attachments, reasoning_effort}` appears only where there is something in it a
-  string could not carry — which, on this surface, means a per-turn effort and nothing
-  else. That is the terminal client's own rule, not a second one invented here
+  `{prompt, image_attachments, reasoning_effort}` appears only where there is something
+  in it a string could not carry: managed image references or a per-turn effort.
+  That is the terminal client's own rule, not a second one invented here
   (`TurnInput::to_value`, `tui/src/model.rs:2789-2815`): sending the object for every turn
   would rewrite the wire for nothing.
 
-  Attachments are still not built here: they must name files inside the leased workspace,
-  which a browser cannot enumerate until `workspace.browse` lands.
+  Uploaded images use the runtime's private attachment store. Legacy workspace path
+  attachments retain their separate authorization boundary.
 
   ## Steer is the form's second submit button
 
@@ -220,6 +220,8 @@ defmodule Ouroboros.Web.Live.Composer do
   """
   attr :draft, :string, required: true
   attr :draft_key, :string, default: "standalone"
+  attr :image_node, :any, default: nil
+  attr :image_session_id, :any, default: nil
   attr :error, :any, required: true
   attr :turn, :map, required: true
   attr :status, :any, required: true
@@ -320,13 +322,17 @@ defmodule Ouroboros.Web.Live.Composer do
               class="ouro-composer-input"
               phx-hook="Composer"
               data-draft-key={@draft_key}
-              required
               phx-debounce="400"
               rows="1"
               aria-label="message"
               placeholder="Ask a question or describe the next step…"
             >{@draft}</textarea>
 
+            <Ouroboros.Web.Live.ImageAttachments.tray
+              draft_key={@draft_key}
+              node={@image_node}
+              session_id={@image_session_id}
+            />
             <div class="ouro-composer-actions">
               <span :if={@turn.queued > 0} class="ouro-chip ouro-mono">{@turn.queued} queued</span>
 

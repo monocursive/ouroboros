@@ -109,6 +109,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Web.Layouts
   alias Ouroboros.Web.Live.ApprovalCard
   alias Ouroboros.Web.Live.Cells
+  alias Ouroboros.Web.Live.ImageAttachments
   alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Live.LoadingState
   alias Ouroboros.Web.Live.Palette
@@ -187,6 +188,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:open, nil)
       |> assign(:drafts, %{})
       |> assign(:draft_key, nil)
+      |> assign(:image_refs, [])
       |> assign(:sessions_visible?, false)
       |> assign(:watch, nil)
       |> assign(:info, nil)
@@ -1447,9 +1449,19 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # `tui/src/model.rs:2789-2815`. Sending the object for every turn would rewrite the wire
   # for nothing.
   defp turn_input(socket, text) do
-    case armed_effort(socket.assigns) do
-      nil -> text
-      effort -> %{"prompt" => text, "reasoning_effort" => effort}
+    refs = Map.get(socket.assigns, :image_refs, [])
+    effort = armed_effort(socket.assigns)
+
+    if refs == [] and is_nil(effort) do
+      text
+    else
+      %{"prompt" => text}
+      |> then(fn input ->
+        if refs == [], do: input, else: Map.put(input, "image_attachments", refs)
+      end)
+      |> then(fn input ->
+        if effort, do: Map.put(input, "reasoning_effort", effort), else: input
+      end)
     end
   end
 
@@ -1591,9 +1603,20 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def handle_event("send", %{"verb" => "steer", "message" => text} = params, socket)
       when is_binary(text) do
     socket =
-      if current_composer?(socket, params),
-        do: steer(socket, String.trim_trailing(text)),
-        else: socket
+      cond do
+        not current_composer?(socket, params) ->
+          socket
+
+        ImageAttachments.refs(params) != {:ok, []} ->
+          assign(
+            socket,
+            :composer_error,
+            "Images can be queued with Send; steering accepts text only."
+          )
+
+        true ->
+          steer(socket, String.trim_trailing(text))
+      end
 
     {:noreply, socket}
   end
@@ -1685,6 +1708,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
   #
   # A change also forgets the last send, which is what makes a deliberate repeat of the
   # same words a second turn while a double-click stays one — see `turn_id_for/2`.
+  def handle_event("image-action", params, socket) do
+    id =
+      case socket.assigns.open do
+        {:interactive, id} -> id
+        _ -> nil
+      end
+
+    {:reply,
+     ImageAttachments.action(socket, params, socket.assigns.draft_key, mcp_node(socket), id),
+     socket}
+  end
+
   def handle_event("draft", %{"message" => text} = params, socket) when is_binary(text) do
     socket = if current_composer?(socket, params), do: put_draft(socket, text), else: socket
     {:noreply, socket}
@@ -1694,9 +1729,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   def handle_event("send", %{"message" => text} = params, socket) when is_binary(text) do
     socket =
-      if current_composer?(socket, params),
-        do: send_turn(socket, String.trim_trailing(text)),
-        else: socket
+      if current_composer?(socket, params) do
+        id =
+          case socket.assigns.open do
+            {:interactive, id} -> id
+            _ -> nil
+          end
+
+        case ImageAttachments.bind(socket, params, id, mcp_node(socket)) do
+          {:ok, refs} ->
+            socket |> assign(:image_refs, refs) |> send_turn(String.trim_trailing(text))
+
+          {:error, message} ->
+            assign(socket, :composer_error, message)
+        end
+      else
+        socket
+      end
 
     {:noreply, socket}
   end
@@ -2357,6 +2406,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
   #     the same rule on the verb beside it.
   defp send_turn(socket, text) when is_binary(text) do
     cond do
+      String.starts_with?(text, "!") and Map.get(socket.assigns, :image_refs, []) != [] ->
+        assign(socket, :composer_error, "Remove the images before running a shell command.")
+
       String.starts_with?(text, "!") ->
         operator_shell(socket, String.slice(text, 1..-1//1))
 
@@ -2372,7 +2424,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  defp dispatch_turn(%{assigns: %{open: {:interactive, _id}}} = socket, "") do
+  defp dispatch_turn(%{assigns: %{open: {:interactive, _id}, image_refs: []}} = socket, "") do
     assign(socket, :composer_error, "Write a message before sending.")
   end
 
@@ -2385,7 +2437,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
       # ui-parity W2: `turn_input/2` is the bare prompt unless a per-turn effort is armed.
       |> Map.merge(%{"input" => turn_input(socket, text), "turn_id" => turn_id})
 
-    socket = assign(socket, :last_send, {text, turn_id})
+    socket =
+      socket
+      |> assign(:last_send, {text, turn_id})
+      |> assign(:last_send_input, turn_input(socket, text))
+
     method = Composer.verb(socket.assigns.turn, session_status(socket))
 
     case call(socket, method, params) do
@@ -2426,7 +2482,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
     # ui-parity W2: a per-turn effort rode this send and is spent.
     |> clear_next_effort()
     |> assign(:composer_error, nil)
-    |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: text})
+    |> push_event("draft-sent", %{
+      key: socket.assigns.draft_key,
+      text: text,
+      images: Map.get(socket.assigns, :image_refs, [])
+    })
+    |> assign(:image_refs, [])
   end
 
   defp current_composer?(socket, params),
@@ -2464,9 +2525,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # A second click of the same words with no typing in between is the same turn; anything
   # else is a new one. The runtime does the deduplicating — `{id, input, turn_id}` repeated
   # returns the turn it already has — so this only has to decide when the id is the same.
-  defp turn_id_for(%{assigns: %{last_send: {text, turn_id}}}, text), do: turn_id
+  defp turn_id_for(%{assigns: %{last_send: {text, turn_id}}} = socket, text) do
+    if Map.get(socket.assigns, :last_send_input, text) == turn_input(socket, text),
+      do: turn_id,
+      else: new_turn_id()
+  end
 
-  defp turn_id_for(_socket, _text) do
+  defp turn_id_for(_socket, _text), do: new_turn_id()
+
+  defp new_turn_id do
     "web-" <>
       (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
   end
@@ -3535,6 +3602,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             expanded={@expanded}
             plane={@plane}
             session_id={@session_id}
+            node={@node}
           />
         </div>
       </div>
@@ -3560,6 +3628,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
       :if={@plane == :interactive}
       draft={@draft}
       draft_key={@draft_key}
+      image_node={@node}
+      image_session_id={@session_id}
       error={@composer_error}
       turn={display_turn(@turn, @info)}
       status={@status}

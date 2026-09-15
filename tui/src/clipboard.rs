@@ -15,7 +15,8 @@
 //!   because the operator copied a sentence instead of a screenshot.
 //!
 //! Everything is bounded: [`IMAGE_LIMIT`] bytes read at all, [`TIMEOUT`] for the tool, and
-//! the file is written `0600` with `O_NOFOLLOW` under a directory this process creates.
+//! legacy file adapters write `0600` with `O_NOFOLLOW`. Current chat uploads use
+//! private runtime storage through `image_upload`, never the workspace writer below.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -24,11 +25,8 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 
 /// The largest clipboard image this client will carry into a turn.
-///
-/// The wire has no byte cap on outbound payloads (X6) and an attachment is a *path*, so
-/// this bounds the file rather than the frame — but a 200 MB screenshot in a session's
-/// workspace is still a surprise nobody asked for, and the number has to be somewhere.
-pub const IMAGE_LIMIT: usize = 16 * 1024 * 1024;
+/// Managed uploads split these bytes into negotiated gateway chunks.
+pub const IMAGE_LIMIT: usize = 20 * 1024 * 1024;
 
 /// How long a clipboard tool gets. Long enough for `osascript` to start, short enough that
 /// a wedged helper does not become a wedged composer.
@@ -89,7 +87,26 @@ pub enum Clip {
     Empty,
     /// This machine has none of the tools. Said once, by the caller.
     NoTool,
+    /// Acquisition failed; keep the pending attachment failed rather than dropping it.
+    Failed(String),
 }
+
+#[derive(Debug)]
+enum ReadLimit {
+    TooLarge,
+    Timeout,
+}
+
+impl std::fmt::Display for ReadLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => write!(f, "Clipboard image produced more than {IMAGE_LIMIT} bytes (20 MiB). Use /attach with a smaller image."),
+            Self::Timeout => f.write_str("Clipboard reader did not finish within its deadline. Try again or use /attach."),
+        }
+    }
+}
+
+impl std::error::Error for ReadLimit {}
 
 /// The image readers to try, in order, on this platform.
 ///
@@ -167,10 +184,12 @@ pub fn available(program: &str) -> bool {
 /// Reads the clipboard: an image if there is one, otherwise the text, otherwise nothing.
 ///
 /// `scratch` is where a [`Sink::File`] reader is told to write. It is removed before this
-/// returns whatever happened — the caller writes the real file itself, under the session
-/// workspace, with the permissions it wants.
+/// returns whatever happened. The caller uploads the bounded bytes to private runtime
+/// storage; no workspace file is created by the current chat path.
 pub fn read(images: &[Reader], texts: &[Reader], scratch: &Path) -> Clip {
     let mut any_tool = false;
+    let mut failure = None;
+    let deadline = std::time::Instant::now() + TIMEOUT;
 
     for reader in images {
         if !available(&reader.program) {
@@ -179,13 +198,19 @@ pub fn read(images: &[Reader], texts: &[Reader], scratch: &Path) -> Clip {
 
         any_tool = true;
 
-        match run(reader, scratch) {
+        match run_with_timeout(
+            reader,
+            scratch,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        ) {
             Ok(bytes) if !bytes.is_empty() => return Clip::Image(bytes),
-            // An empty answer is the ordinary "no image on the clipboard" reply from every
-            // one of these tools, and an error is the other one. Neither is a reason to
-            // stop asking, and neither is worth a sentence: the fall-through below is what
-            // the operator will see.
-            _other => {}
+            // A missing image representation often uses a nonzero exit. Permit text
+            // fallback, but never turn an oversized image or timeout into text-only input.
+            Err(error) if error.downcast_ref::<ReadLimit>().is_some() => {
+                return Clip::Failed(error.to_string());
+            }
+            Err(error) => failure = Some(error.to_string()),
+            _ => {}
         }
     }
 
@@ -196,25 +221,39 @@ pub fn read(images: &[Reader], texts: &[Reader], scratch: &Path) -> Clip {
 
         any_tool = true;
 
-        if let Ok(bytes) = run(reader, scratch) {
-            if let Ok(text) = String::from_utf8(bytes) {
-                if !text.is_empty() {
-                    return Clip::Text(text);
+        match run_with_timeout(
+            reader,
+            scratch,
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        ) {
+            Ok(bytes) => {
+                match String::from_utf8(bytes) {
+                    Ok(text) if !text.is_empty() => return Clip::Text(text),
+                    Ok(_) => return Clip::Empty,
+                    Err(_) => failure = Some(
+                        "Clipboard text could not be decoded as UTF-8. Use /attach for an image."
+                            .to_string(),
+                    ),
                 }
+            }
+            Err(error) => {
+                if error.downcast_ref::<ReadLimit>().is_some() {
+                    return Clip::Failed(error.to_string());
+                }
+                failure = Some(error.to_string());
             }
         }
     }
 
-    if any_tool {
+    if let Some(error) = failure {
+        Clip::Failed(format!(
+            "Clipboard read failed: {error}. Try again or use /attach."
+        ))
+    } else if any_tool {
         Clip::Empty
     } else {
         Clip::NoTool
     }
-}
-
-/// Runs one reader and returns what it produced, bounded in bytes and wall time.
-fn run(reader: &Reader, scratch: &Path) -> Result<Vec<u8>> {
-    run_with_timeout(reader, scratch, TIMEOUT)
 }
 
 fn run_with_timeout(
@@ -222,6 +261,7 @@ fn run_with_timeout(
     scratch: &Path,
     timeout: std::time::Duration,
 ) -> Result<Vec<u8>> {
+    anyhow::ensure!(!timeout.is_zero(), ReadLimit::Timeout);
     let args = reader.args.iter().map(|arg| match reader.sink {
         Sink::File => arg.replace("{}", &scratch.to_string_lossy()),
         Sink::Stdout => arg.clone(),
@@ -290,7 +330,7 @@ fn run_with_timeout(
                 if let Some(thread) = reader_thread.take() {
                     let _ = thread.join();
                 }
-                bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
+                bail!(ReadLimit::TooLarge);
             }
         }
 
@@ -299,7 +339,7 @@ fn run_with_timeout(
         {
             terminate_process_group(&mut child);
             let _ = std::fs::remove_file(scratch);
-            bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
+            bail!(ReadLimit::TooLarge);
         }
 
         if status.is_none() {
@@ -324,7 +364,7 @@ fn run_with_timeout(
                 let _ = thread.join();
             }
             let _ = std::fs::remove_file(scratch);
-            bail!("{} did not finish within {timeout:?}", reader.program);
+            bail!(ReadLimit::Timeout);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -351,7 +391,7 @@ fn run_with_timeout(
 
             if length > IMAGE_LIMIT as u64 {
                 let _ = std::fs::remove_file(scratch);
-                bail!("{} produced more than {IMAGE_LIMIT} bytes", reader.program);
+                bail!(ReadLimit::TooLarge);
             }
 
             let result = std::fs::read(scratch).with_context(|| {
@@ -658,8 +698,31 @@ mod tests {
     fn a_tool_that_produces_more_than_the_limit_is_refused_rather_than_read() {
         let reader = shell(&format!("head -c {} /dev/zero", IMAGE_LIMIT + 4_096));
 
-        // Nothing usable came back, and nothing was buffered past the bound.
-        assert_eq!(read(&[reader], &[], &scratch_path("test-e")), Clip::Empty);
+        // An accompanying text representation must not hide a refused image.
+        assert!(matches!(
+            read(&[reader], &[shell("printf 'caption'")], &scratch_path("test-e")),
+            Clip::Failed(error) if error.contains("20 MiB")
+        ));
+    }
+
+    #[test]
+    fn failed_readers_are_distinct_from_empty_and_text_fallback_still_works() {
+        assert!(matches!(
+            read(
+                &[shell("exit 1")],
+                &[shell("exit 2")],
+                &scratch_path("test-failed")
+            ),
+            Clip::Failed(_)
+        ));
+        assert_eq!(
+            read(
+                &[shell("exit 1")],
+                &[shell("printf 'text'")],
+                &scratch_path("test-fallback")
+            ),
+            Clip::Text("text".into())
+        );
     }
 
     #[test]

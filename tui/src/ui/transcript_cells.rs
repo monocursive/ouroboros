@@ -900,6 +900,29 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                             streaming: false,
                         });
                     }
+                    PresentationEvent::UserImages { text, images } => {
+                        flush_agent(&mut cells, &mut pending, false);
+                        cells.push(Cell::Message {
+                            speaker: Speaker::You,
+                            text,
+                            streaming: false,
+                        });
+                        for image in images.into_iter().take(32) {
+                            cells.push(Cell::Image(ImageCell {
+                                named: format!(
+                                    "{} · {}",
+                                    image["display_name"].as_str().unwrap_or("Image"),
+                                    image["id"].as_str().unwrap_or("unavailable")
+                                ),
+                                pixels: image["width"]
+                                    .as_u64()
+                                    .zip(image["height"].as_u64())
+                                    .map(|(w, h)| (w as u32, h as u32)),
+                                format: Some("PNG".into()),
+                                note: Some("attached to this message".into()),
+                            }));
+                        }
+                    }
                     PresentationEvent::UserSteer(text) => {
                         flush_agent(&mut cells, &mut pending, false);
                         cells.push(Cell::ChatNote {

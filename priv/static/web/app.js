@@ -427,7 +427,8 @@
 
         var form = this.el.form;
         if (!form || form.classList.contains("phx-submit-loading")) return;
-        if (this.el.value.trim() === "") return;
+        if (this.el.value.trim() === "" && form.dataset.imagesReady !== "true") return;
+        if (form.dataset.imagesPending === "true") return;
 
         event.preventDefault();
 
@@ -494,7 +495,11 @@
       // the same rule: a turn with nothing in it is not a turn.
       var buttons = form.querySelectorAll("[data-ouro-send], [data-ouro-steer]");
       var empty = this.el.value.trim() === "";
-      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = empty;
+      for (var i = 0; i < buttons.length; i++) {
+        var steer = buttons[i].hasAttribute("data-ouro-steer");
+        buttons[i].disabled = form.dataset.imagesPending === "true" ||
+          (steer ? (empty || form.dataset.imagesReady === "true") : (empty && form.dataset.imagesReady !== "true"));
+      }
     }
   };
 
@@ -919,6 +924,7 @@
     hooks: {
       ScrollPin: ScrollPin,
       Composer: Composer,
+      ImageAttachments: window.OuroImageAttachments,
       ElapsedTimer: ElapsedTimer,
       FocusInvalid: FocusInvalid,
       Modal: Modal,

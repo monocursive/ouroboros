@@ -950,9 +950,11 @@ defmodule Ouroboros.Gateway.Conn do
   defp start_request(state, {id, method, params, entry}) do
     method_invoker = state.method_invoker
     identity = state.identity
+    max_frame = state.config.max_frame
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        Process.put(:ouroboros_attachment_frame, max_frame)
         Ouroboros.Audit.Identity.with_subject(identity, fn -> method_invoker.(method, params) end)
       end)
 

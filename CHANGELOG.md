@@ -8,7 +8,21 @@ requirements and upgrade instructions are in the
 
 ## [Unreleased]
 
-No unreleased changes recorded yet.
+### Added
+
+- Paste, drop, or choose images in web chat, or use Ctrl+V, `/paste-image`, and
+  `/attach` in the TUI. Send images with or without text, including the first
+  message in a new conversation; accepted images remain visible in history.
+- Image uploads support progress, removal, retries, and remote conversation
+  owners. Browser drafts survive conversation switches, and private TUI draft
+  recovery survives runtime restarts and gateway token rotation.
+
+### Upgrade notes
+
+- Source builds require `make media` for the image decoder; `make dev` and release
+  packaging include it. Image uploads require working runtime OS containment.
+- After upgrading, finish active work, restart the runtime, and reload web views
+  to use image attachments. Encrypted owners keep client image drafts in memory.
 
 ## [0.1.7] - 2026-09-14
 

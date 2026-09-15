@@ -432,6 +432,10 @@ impl App {
         // error would trap the caller in same-id reconciliation despite a known outcome.
         if let Some(failure) = start_failure {
             if let Some(first_message) = self.first_message.take() {
+                if !self.home_images.is_empty() {
+                    self.home_draft
+                        .paste(&first_message.input, &self.completion_catalog);
+                }
                 self.restore_refused_first_message(
                     plane,
                     &started.id,
@@ -448,6 +452,37 @@ impl App {
                 ),
                 NoticeKind::Error,
             );
+            return;
+        }
+
+        if !self.home_images.is_empty() {
+            let images = std::mem::take(&mut self.home_images);
+            let prompt = self
+                .first_message
+                .take()
+                .map(|first| first.input)
+                .unwrap_or_default();
+            let input = TurnInput {
+                prompt: prompt.clone(),
+                attachments: images.clone(),
+                reasoning_effort: None,
+            };
+            let draft_node =
+                (!self.home_image_node.is_empty()).then_some(self.home_image_node.as_str());
+            let draft = self.image_draft_for(None, draft_node);
+            // The original draft travels with the bind request. A later home message
+            // must not try to bind this session's retained attachments a second time.
+            self.home_image_draft_id = new_turn_id();
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer.editor.paste(&prompt, &self.completion_catalog);
+                composer.attachments = images;
+                for image in &mut composer.attachments {
+                    image.kind = crate::model::AttachmentKind::PendingImage;
+                }
+            }
+            self.image_bind_pending =
+                Some((started.id.clone(), started.node.clone(), draft, input));
+            self.remember_composer_history();
             return;
         }
 

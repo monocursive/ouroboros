@@ -58,6 +58,7 @@ defmodule Ouroboros.Web.Live.Cells do
   attr :expanded, :any, required: true
   attr :plane, :atom, required: true
   attr :session_id, :string, required: true
+  attr :node, :any, default: nil
 
   def cell(%{cell: %Cell.Message{}} = assigns), do: message(assigns)
   def cell(%{cell: %Cell.Thinking{}} = assigns), do: thinking(assigns)
@@ -96,7 +97,28 @@ defmodule Ouroboros.Web.Live.Cells do
   defp message(%{cell: %Cell.Message{speaker: :you}} = assigns) do
     ~H"""
     <div class="ouro-cell ouro-said ouro-said-you">
-      <div class="ouro-bubble">{@cell.text}</div>
+      <div class="ouro-bubble">
+        <span :if={@cell.text != ""}>{@cell.text}</span>
+        <div :if={@cell.images != []} class="ouro-image-tray" aria-label="Message images">
+          <button
+            :for={image <- @cell.images}
+            type="button"
+            class="ouro-image-card"
+            data-image-preview={
+              Ouroboros.Web.Live.ImageAttachments.url(image["id"], "content", @session_id, @node)
+            }
+          >
+            <img
+              src={
+                Ouroboros.Web.Live.ImageAttachments.url(image["id"], "thumbnail", @session_id, @node)
+              }
+              alt={image["display_name"] || "Attached image"}
+              loading="lazy"
+            />
+            <span>{image["display_name"] || "Image"} · {image["width"]} × {image["height"]}</span>
+          </button>
+        </div>
+      </div>
     </div>
     """
   end

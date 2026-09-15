@@ -132,7 +132,7 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-${{ hashFiles('tui/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock', 'tui/wasm/guest/examples/*/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-
 
-      - run: make wasm
+      - run: make wasm media
       - run: make wasm-guest
 
       # `test/wasm/sdk_acceptance_test.exs` runs the SDK's built components through
@@ -205,6 +205,10 @@ jobs:
       - run: mix deps.get
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal && rustup default ${{ env.RUST_VERSION }}
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: make media
       - run: npm run test:browser
 
   dialyzer:
@@ -313,7 +317,7 @@ jobs:
       # real helper and the real guest; without these two steps it would skip green on every
       # run, which is the silence W7 already had to fix once on the Elixir side. `make` from the
       # repository root, since this job's default working directory is `tui`.
-      - run: make wasm
+      - run: make wasm media
         working-directory: .
       - run: make wasm-guest
         working-directory: .
@@ -342,6 +346,8 @@ jobs:
       # missing the wasm32 target would print its skip and pass, which is the same silence the
       # Elixir job was fixed for. With it, a guest the SDK cannot build fails the job.
       - run: cargo clippy -p ouro-wasm --all-targets -- -D warnings
+      - run: cargo test -p ouro-media
+      - run: cargo clippy -p ouro-media --all-targets -- -D warnings
       - run: cargo test -p ouro-wasm
         env:
           OUROBOROS_REQUIRE_WASM: "1"
