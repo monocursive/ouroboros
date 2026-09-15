@@ -75,8 +75,13 @@ defmodule Ouroboros.Web.StatusLiveTest do
   test "never spells an Erlang node name", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/status")
 
+    # In a full `mix test` a distributed test module started earlier has already named
+    # this BEAM, so the page reads its label rather than "this computer"; what holds in
+    # every run is that the raw `name@host` never reaches the page and the word drawn is
+    # the one `Presentation.node_label/1` chose for it.
     refute html =~ "nonode@nohost"
-    assert html =~ "this computer"
+    refute html =~ to_string(node())
+    assert html =~ Ouroboros.Web.Presentation.node_label(node())
   end
 
   test "refreshing answers again without changing what it claims", %{conn: conn} do
