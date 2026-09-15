@@ -63,6 +63,9 @@ the web shortcut sheet, in this order:
 
 ## Phase 1 — four parallel slices
 
+**Done.** T1 `7e10d452`, T2 `c0917e68`, W1 `e2020238`, W2 `07250025` (+ `6d2b9807`),
+on the shared seed `984b8032`.
+
 ### T1 — TUI key layer (Rust)
 
 Files: `tui/src/keymap.rs`, `tui/src/ui/app/keys.rs`, `tui/src/ui/app/home.rs`,
@@ -161,6 +164,9 @@ Phase 3 adds the remaining verbs to the same palette.
 
 ## Phase 2 — review and integrate
 
+**Done.** Integrated at `c0028f00`; review fixes W2 `b2c3e819` (+ `ea721127`), W1
+`10f42ec7`, T2 `440c82cc`, T1 `0214969d`.
+
 - One adversarial Opus reviewer per slice, in its own worktree, told to break it: reproduce
   every claim, mutation-test every new enforcement, run the TUI in tmux / the web in the
   fixture runtime. Findings PROVED or PLAUSIBLE.
@@ -186,6 +192,9 @@ does not name.
 ### T3 — docs
 `docs/TUI.md` (§2.1 and §2.4 corrections, new key map, five groups), `docs/WEB.md`
 (parity map rewritten from §4 of the review; drop ⌘./⌘N), `README.md` key hints.
+
+**T3a done** — `docs/TUI.md`, `README.md`, the review's "Status" section and this file.
+T3b (`docs/WEB.md`) is pending and waits on W3; W3 and S1 are pending.
 
 ## Phase 4 — final review, gates, PR
 
