@@ -224,6 +224,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
     config = Config.new!(data_dir: dir, scope: :operate)
     start_supervised!({Ouroboros.Web, config: config, server: false})
+    freeze_recovery()
 
     {:ok, conn: signed_in()}
   end
@@ -241,11 +242,35 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     pid
   end
 
+  # The recovery sweep, parked for the test's lifetime. A row `listed/2` plants is exactly
+  # what `Ouroboros.Session.Recovery` exists to restart: this node's, a provider this build
+  # serves, not terminal, and last touched long before the sweep's two-second grace. Left
+  # running, its one-second tick starts a real coordinator for the row, which opens a
+  # native runtime and rewrites the row — `:idle`, a `runtime_id`, a fresh `updated_at` —
+  # over whatever the test just `put`. That write is what emptied the needs-you group
+  # between a test's `awaiting_approval` and its `poll/1` (the bell never rang, and the
+  # wait ended with nothing in the mailbox but the sign-in's 302), and what made a row's
+  # `on_exit` delete refuse the row it had just closed.
+  #
+  # `:sys.suspend/1` holds the sweep without stopping it. The resume is registered here,
+  # before any row's cleanup, and `on_exit` runs last-registered first: every row is
+  # closed and deleted before the sweep ticks again.
+  defp freeze_recovery do
+    case Process.whereis(Ouroboros.Interactive.Recovery) do
+      nil ->
+        :ok
+
+      pid ->
+        :ok = :sys.suspend(pid)
+        on_exit(fn -> if Process.alive?(pid), do: :sys.resume(pid) end)
+    end
+  end
+
   # A durable row, so a test of the *rail* is testing the list the deck actually draws
   # rather than a fixture beside it. `interactive.list` reads the store and nothing else.
   #
   # The store is global to the node and this row is real, which makes the cleanup part of
-  # the fixture rather than tidiness. Two rules, both of which this file got wrong first:
+  # the fixture rather than tidiness. Three rules, all of which this file got wrong first:
   #
   #   * the workspace has to exist. `Ouroboros.Workspace.Manager` recovers every live
   #     session's lease at boot and refuses to start on a path that is not there, so a row
@@ -254,6 +279,9 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   #   * the row has to be closed before it can be removed. `Store.delete/1` refuses a
   #     session that is not terminal, so a plain delete leaves the row exactly where it
   #     would do that damage.
+  #   * the recovery sweep has to be held while the row exists (`freeze_recovery/0`, from
+  #     `setup`). To the sweep this row is a coordinator's orphaned record, and it starts
+  #     one — which then rewrites the row under the test.
   defp listed(id, opts \\ []) do
     workspace =
       Keyword.get_lazy(opts, :workspace, fn ->
@@ -634,8 +662,9 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       :ok = Ouroboros.Interactive.Store.put(%{row | status: :awaiting_approval})
       poll(view)
 
-      assert_push_event(view, "needs-you", %{sessions: [%{key: key}]}, 500)
-      assert key == "interactive:#{id}"
+      # Pinned, so only this session's own re-entry satisfies the wait.
+      key = "interactive:#{id}"
+      assert_push_event(view, "needs-you", %{sessions: [%{key: ^key}]}, 500)
     end
 
     test "a row that is merely running is never announced", %{conn: conn} do

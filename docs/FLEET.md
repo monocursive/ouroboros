@@ -54,7 +54,7 @@ Read by `rel/env.sh.eex`, `config/runtime.exs` and `Ouroboros.Cluster`, except t
 | `OUROBOROS_DIST_TLS`, `OUROBOROS_DIST_TLS_OPTFILE` | `rel/vm.args.eex` turns these into `-proto_dist inet_tls` and an ssl options file. |
 | `OUROBOROS_DIST_PORT_MIN`, `OUROBOROS_DIST_PORT_MAX` | pin the distribution listener to a firewall-friendly range. Set together. |
 | `ERL_EPMD_ADDRESS`, `ERL_EPMD_PORT` | keep EPMD on one private address and a non-default port. |
-| `OUROBOROS_MACHINE_NAME` | the friendly label this node reports in `fleet.status`. |
+| `OUROBOROS_MACHINE_NAME` | the friendly label this node reports in `fleet.status`; `ouro daemon` sets it from the profile's `--machine` name. Unset, the label is the host half of the node name — `ouro@alpha` reads as `alpha` — so two nodes that share a release name never share a label. A roster member that has not answered a probe yet reads as its roster name. |
 | `OUROBOROS_FLEET_ID` | with `OUROBOROS_DATA_DIR`, selects the durable cluster directory under `<data dir>/fleet/`. Without it, session-owner evidence is in-memory only. |
 | `OUROBOROS_ALLOW_INSECURE_DIST` | `1` accepts cleartext distribution. See below. |
 
@@ -172,7 +172,9 @@ roster and tombstones — which `ouro fleet leave` plus `ouro fleet create` woul
 exactly as set, so an operator with their own CA can set `OUROBOROS_NODE`,
 `OUROBOROS_COOKIE_FILE`, `OUROBOROS_CLUSTER_STRATEGY=epmd`, `OUROBOROS_CLUSTER_HOSTS`,
 `OUROBOROS_DIST_TLS=1` and `OUROBOROS_DIST_TLS_OPTFILE` by hand and cluster without
-`ouro fleet` at all. What it costs is stated plainly: there is no `OUROBOROS_FLEET_ID`, so
+`ouro fleet` at all. Name each machine with `OUROBOROS_MACHINE_NAME` or accept the default,
+the host half of its `OUROBOROS_NODE` — the half that differs between two nodes that both
+release as `ouro`. What it costs is stated plainly: there is no `OUROBOROS_FLEET_ID`, so
 there is no durable session-owner directory under `<data dir>/fleet/cluster-directory/`
 (`Cluster.Monitor.fleet_profile_storage/0`, `lib/ouroboros/cluster.ex:819-836`), session ownership is in-memory only, and
 `ouro fleet sessions forget` has nothing to retire. `ouro fleet status` and

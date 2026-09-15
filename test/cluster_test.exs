@@ -768,6 +768,94 @@ defmodule Ouroboros.ClusterTest do
       )
     end
 
+    # Two nodes configured by hand share a release name, and a label taken from the half
+    # before the `@` put the one word `ouro` on two computers — on the Dashboard, the rail,
+    # the picker and the vitals alike, because every surface prefers the roster's label to
+    # its own string split. The host is the half that differs.
+    test "two machines nobody named are two words, not one" do
+      alpha = :ouro@alpha
+      beta = :ouro@beta
+      on_exit(fn -> forget_fixture_machines([alpha, beta]) end)
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => "ouro@alpha,ouro@beta",
+          "OUROBOROS_MACHINE_NAME" => nil
+        },
+        fn ->
+          machines = Cluster.fleet_status().machines
+
+          assert %{machine: "alpha", state: :offline, expected?: true} =
+                   Enum.find(machines, &(&1.node == alpha))
+
+          assert %{machine: "beta", state: :offline, expected?: true} =
+                   Enum.find(machines, &(&1.node == beta))
+
+          # The same rule names this node, so a peer that probes it reads the word a
+          # surface would have derived for it. The unnamed BEAM is still `nonode`, the
+          # sentinel every surface reads as "this computer", never a host called `nohost`.
+          assert Cluster.local_fleet_posture().machine == Cluster.default_machine_label(node())
+          assert Cluster.default_machine_label(:nonode@nohost) == "nonode"
+          assert Cluster.default_machine_label(:"ouro@10.0.0.4") == "10.0.0.4"
+          assert Cluster.default_machine_label("@build-box") == "build-box"
+          assert Cluster.default_machine_label("alpha") == "alpha"
+        end
+      )
+    end
+
+    # The other half of the rule: a name an operator typed is never replaced by a default.
+    # `ouro daemon` exports the profile's `--machine` name as `OUROBOROS_MACHINE_NAME`, so a
+    # running machine reports it; a roster member nobody has reached yet reads as the name
+    # the roster holds for it — not the host that name was derived from, and not the
+    # release half. Either way the operator's word is the one that shows.
+    test "a machine an operator named keeps that name, reached or not" do
+      fleet_id = "bbbb2222cccc3333dddd5555"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+
+      owner = test_fleet_member("owner", "127.0.0.1")
+      vps = test_fleet_member("vps", "vps.example-tailnet.ts.net")
+      owner_node = :"ouro-owner@127.0.0.1"
+      vps_node = :"ouro-vps@vps.example-tailnet.ts.net"
+
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Cluster.reset_membership_cache()
+
+      on_exit(fn ->
+        Cluster.reset_membership_cache()
+        forget_fixture_machines([owner_node, vps_node])
+
+        if previous_data_dir,
+          do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+          else: Application.delete_env(:ouroboros, :data_dir)
+      end)
+
+      with_env(
+        %{
+          "OUROBOROS_CLUSTER_STRATEGY" => "epmd",
+          "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(owner_node),
+          "OUROBOROS_FLEET_ID" => fleet_id,
+          "OUROBOROS_MACHINE_NAME" => "owner"
+        },
+        fn ->
+          Application.put_env(:ouroboros, :data_dir, data_dir)
+          write_test_fleet_profile!(fleet_dir, fleet_id, local: owner, members: [owner, vps])
+
+          assert Cluster.local_fleet_posture().machine == "owner"
+
+          machines = Cluster.fleet_status().machines
+
+          assert %{machine: "vps", state: :offline, expected?: true} =
+                   Enum.find(machines, &(&1.node == vps_node))
+
+          assert %{machine: "owner", state: :offline, expected?: true} =
+                   Enum.find(machines, &(&1.node == owner_node))
+        end
+      )
+    end
+
     test "doctor never calls an explicitly overridden cleartext fleet healthy" do
       ensure_distributed!()
       absent = :"cleartext-core@127.0.0.1"
@@ -2247,6 +2335,22 @@ defmodule Ouroboros.ClusterTest do
         {name, nil} -> System.delete_env(name)
         {name, value} -> System.put_env(name, value)
       end)
+    end
+  end
+
+  # Drops machines a test invented from the monitor's directory, so a later test that
+  # counts or names offline machines is not reading this one's fixtures.
+  defp forget_fixture_machines(targets) do
+    case Process.whereis(Ouroboros.Cluster.Monitor) do
+      monitor when is_pid(monitor) ->
+        :sys.replace_state(monitor, fn state ->
+          %{state | machines: Map.drop(state.machines, targets)}
+        end)
+
+        :ok
+
+      _absent ->
+        :ok
     end
   end
 

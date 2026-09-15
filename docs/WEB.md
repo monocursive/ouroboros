@@ -133,9 +133,24 @@ downstream of everything — the same argument the gateway already carries
 absent configuration means no endpoint at all, so tests, `:builder`, and `:signer` never
 acquire one.
 
-`"Elixir.Ouroboros.Web."` joins `@protected_prefixes` in
-`lib/ouroboros/upgrade/verifier.ex:53-64` in the same commit that creates the namespace.
-An operator surface must not be hot-patchable by the thing it operates.
+`"Elixir.Ouroboros.Web."` joined `@protected_prefixes` in
+`lib/ouroboros/upgrade/verifier.ex` in the commit that created the namespace. That list
+and the verifier holding it went with the BEAM hot-patch lane in
+[the core reduction](proposals/core.md) §4 A1, and nothing replaced them, because no lane
+is left to gate: lane W is the only rollout, and a lane-W capability "introduces no BEAM
+module and no atom" ([`capability.ex:5`](../lib/ouroboros/wasm/capability.ex)) — its
+identity is the sha256 of its bytes, the signer takes a lowercase component name, one of
+two kinds and the one world that kind requires
+([`artifact.ex:140`](../lib/ouroboros/wasm/artifact.ex),
+[`policy.ex:328`](../lib/ouroboros/upgrade/signing/policy.ex)), and the one module a
+deploy may start is the shipped wrapper ([`mesh.ex:46`](../lib/ouroboros/mesh.ex)).
+Nothing under `lib/` calls `:code.load_binary/3`, `Module.create/3`,
+`Code.compile_string/2` or `Code.eval_string/2`. The sentence stands — an operator surface
+must not be hot-patchable by the thing it operates — and is true by absence rather than by
+a gate. Honest limit: the two-node rollout test proves a deploy *adds* no capability
+module on any peer
+([`rollout_two_node_test.exs:164`](../test/wasm/rollout_two_node_test.exs)); that it
+cannot *replace* one under `Ouroboros.Web.` rests on that grep, and no test pins it.
 
 ### D2 — One authorization surface
 

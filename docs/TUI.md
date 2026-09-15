@@ -38,10 +38,24 @@ Design invariants, in the codebase's own idiom:
 4. **Polymorphism survives as data.** Wire payloads are self-describing trees.
    A forged capability that appears tomorrow renders through the TUI's generic
    value-tree widget today, with zero Rust changes.
-5. **The gateway is unpatchable.** `Elixir.Ouroboros.Gateway.` joins
-   `@protected_prefixes` in
-   [verifier.ex:32](../lib/ouroboros/upgrade/verifier.ex). A runtime that can
-   author code must not be able to author its own operator-auth away.
+5. **The gateway is unpatchable — by absence, not by a gate.** The BEAM hot-patch
+   lane, and the verifier whose `@protected_prefixes` refused it an
+   `Elixir.Ouroboros.Gateway.` target, went with [core.md §4 A1](proposals/core.md);
+   no list replaced them because no lane is left to gate. Lane W is the only
+   rollout, and a lane-W capability "introduces no BEAM module and no atom"
+   ([capability.ex:5](../lib/ouroboros/wasm/capability.ex)): its identity is the
+   digest of its bytes, the signer takes a lowercase component name, one of two
+   kinds and the one world that kind requires
+   ([policy.ex:328](../lib/ouroboros/upgrade/signing/policy.ex)), and the one
+   module a deploy may start is the shipped wrapper
+   ([mesh.ex:46](../lib/ouroboros/mesh.ex)). Nothing under `lib/` calls
+   `:code.load_binary/3`, `Module.create/3`, `Code.compile_string/2` or
+   `Code.eval_string/2`. Honest limit: the two-node rollout test proves a deploy
+   *adds* no capability module on any peer
+   ([rollout_two_node_test.exs:164](../test/wasm/rollout_two_node_test.exs)); that
+   it cannot *replace* one — which is what authoring operator-auth away would be —
+   rests on that grep, and no test pins it. A BEAM loader that returns must bring
+   the protected set back with it.
 
 ---
 
@@ -767,22 +781,41 @@ strings, numbers, lists, and maps, and the TUI has a generic tree widget.
 
 ### 2.8 Verifier protection
 
-Add to [verifier.ex](../lib/ouroboros/upgrade/verifier.ex):
+This section added `"Elixir.Ouroboros.Gateway."` to `@protected_prefixes` in
+`lib/ouroboros/upgrade/verifier.ex` and promised a verifier test that a
+`Gateway.`-targeting artifact is rejected. Both went with the BEAM hot-patch lane in
+[core.md §4 A1](proposals/core.md) (`8c29a747`, 2026-09-09): the verifier gated a lane
+that could load a forged module into the running VM, and a module loaded that way runs
+with the VM's whole authority whatever names it was refused. No list replaced it because
+no lane is left to gate. What protects the gateway now is absence — §0 invariant 5 —
+and these are the files that show it:
 
-```elixir
-@protected_prefixes [
-  "Elixir.Ouroboros.Upgrade.",
-  "Elixir.Ouroboros.Release.",
-  "Elixir.Ouroboros.Storage.",
-  "Elixir.Ouroboros.Control.",
-  "Elixir.Ouroboros.Gateway."   # operator surface: patchable auth is no auth
-]
-```
+- Lane W is the only rollout, and a lane-W capability "introduces no BEAM module and no
+  atom" ([capability.ex:5](../lib/ouroboros/wasm/capability.ex)); its identity is the
+  sha256 of its component bytes, not a module name.
+- The signer takes a lowercase component name
+  ([artifact.ex:140](../lib/ouroboros/wasm/artifact.ex)), one of two kinds, and the one
+  world that kind requires
+  ([policy.ex:328](../lib/ouroboros/upgrade/signing/policy.ex),
+  [policy.ex:397](../lib/ouroboros/upgrade/signing/policy.ex)). There is no field in
+  which to name `Ouroboros.Gateway.*`, or any module.
+- The mesh allow-list admits one lane-W module, the shipped wrapper
+  `Ouroboros.Wasm.Capability` ([mesh.ex:34-46](../lib/ouroboros/mesh.ex)), and
+  [mesh_test.exs](../test/mesh_test.exs) enumerates the namespace so that a second
+  startable module fails the suite.
+- Nothing under `lib/` calls `:code.load_binary/3`, `Module.create/3`,
+  `Code.compile_string/2` or `Code.eval_string/2`.
 
-Plus a verifier test proving a `Gateway.`-targeting artifact is rejected. The
-signing policy's hard Capability-namespace rule already refuses to sign such a
-patch; this is the second, independent gate, consistent with how the other
-control-plane namespaces are treated.
+Honest limit. The two-node rollout test proves a deploy *adds* no
+`Ouroboros.Capability.*` module on any peer
+([rollout_two_node_test.exs:164](../test/wasm/rollout_two_node_test.exs)); that it
+cannot *replace* a gateway module — which is what patching operator auth away would be —
+rests on the grep above, and no test pins it. The "second, independent gate" this
+section once promised does not exist and has nothing to stand in front of; the first
+gate, the signing policy's Capability-namespace rule, has become a component-name rule
+([policy.ex:328](../lib/ouroboros/upgrade/signing/policy.ex)) because lane W gives it
+no module name to rule on. A BEAM loader that returns must bring the protected set, and
+this section's test, back with it.
 
 ### 2.9 Logging
 

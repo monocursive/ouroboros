@@ -171,6 +171,7 @@ defmodule Ouroboros.Web.Live.DeckLiveW2Test do
 
     config = Config.new!(data_dir: dir, scope: :operate)
     start_supervised!({Ouroboros.Web, config: config, server: false})
+    freeze_recovery()
 
     {:ok, conn: signed_in()}
   end
@@ -188,6 +189,29 @@ defmodule Ouroboros.Web.Live.DeckLiveW2Test do
     pid
   end
 
+  # The recovery sweep, parked for the test's lifetime. A row `listed/2` plants is exactly
+  # what `Ouroboros.Session.Recovery` exists to restart: this node's, a provider this build
+  # serves, not terminal, and last touched long before the sweep's two-second grace. Left
+  # running, its one-second tick starts a real coordinator for the row, which opens a
+  # native runtime and rewrites the row — `:idle`, a `runtime_id`, a fresh `updated_at` —
+  # over whatever the test just `put`. `DeckLiveTest.freeze_recovery/0` says the rest.
+  #
+  # `:sys.suspend/1` holds the sweep without stopping it. The resume is registered here,
+  # before any row's cleanup, and `on_exit` runs last-registered first: every row is
+  # closed and deleted before the sweep ticks again.
+  defp freeze_recovery do
+    case Process.whereis(Ouroboros.Interactive.Recovery) do
+      nil ->
+        :ok
+
+      pid ->
+        :ok = :sys.suspend(pid)
+        on_exit(fn -> if Process.alive?(pid), do: :sys.resume(pid) end)
+    end
+  end
+
+  # A durable row with no coordinator. Its cleanup rules are explained beside
+  # `DeckLiveTest.listed/2`; the sweep it would otherwise wake is held by `freeze_recovery/0`.
   defp listed(id, opts \\ []) do
     workspace =
       Keyword.get_lazy(opts, :workspace, fn ->
