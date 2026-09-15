@@ -483,10 +483,17 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp call_model(state, iteration) do
     if state.tool_source == :live, do: Ouroboros.Audit.ensure_actor(state.session_request)
 
+    # Appended, and kept: see `turn_budget_messages/2` for why the conversation is
+    # append-only from here on.
+    state = %{
+      state
+      | messages: state.messages ++ turn_budget_messages(iteration, state.max_iterations)
+    }
+
     request = %{
       model: state.model_spec,
       system: state.system,
-      messages: state.messages ++ turn_budget_messages(iteration, state.max_iterations),
+      messages: state.messages,
       tools: iteration_tools(state, iteration),
       provider_session_id: state.provider_session_id,
       turn_id: state.turn_id,
@@ -495,9 +502,9 @@ defmodule Ouroboros.Provider.Native.Loop do
     }
 
     # Digested over the module's own projection of the wire request, not over
-    # `state.messages`: that is what makes it cover the transient turn-budget message
-    # and the reserved final round's empty tool list, and what makes two conversations
-    # that project to the same request digest to the same value.
+    # `state.messages`: that is what makes it cover the reserved final round's empty
+    # tool list, and what makes two conversations that project to the same request
+    # digest to the same value.
     prompt_sha256 = Journal.digest(Model.project(state.model_module, request))
     effect_id = inference_effect_id(state, iteration)
 
@@ -559,8 +566,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   # A user-role message rather than a system suffix, for the same reason a compaction
   # summary is one (`Context.Compaction`): the prefix must not carry a value that changes
   # per call. It goes after the tool results the same way a lazily loaded rule or a
-  # steer does, and it is not kept — the next call computes its own, and a transcript
-  # that recorded ten countdowns would be ten messages nobody re-reads.
+  # steer does — and, like them, it stays. It used to be dropped from the next request,
+  # which made every request after it a history edit: the prompt cache missed from the
+  # removed message onward, and a model that binds each thinking block to the prefix
+  # before it (Claude Fable 5.1 onward) refuses or silently drops every block that
+  # followed the message it can no longer find. Ten countdowns at the end of a
+  # hundred-iteration turn are a few hundred tokens nobody re-reads; a cache miss on the
+  # whole conversation, ten times over, is not.
   defp turn_budget_messages(iteration, max_iterations) do
     remaining = max_iterations - iteration + 1
 

@@ -129,8 +129,17 @@ defmodule Ouroboros.Provider.Native.SessionJournalTest do
       handle |> records_of("model_call") |> Enum.filter(&(&1["turn_id"] == "compact_2"))
 
     assert [call] = summariser_calls
-    assert call["tools_sha256"] == Journal.digest([])
     assert String.starts_with?(call["ledger_effect_id"], "inference-")
+
+    # The summariser sends the turn's own prefix — the same tool list, the same system
+    # prompt — so its digests are the turn's, not an empty list's. That is what lets it
+    # read the cache the turn's calls wrote instead of paying for the folded history again.
+    [turn_call | _rest] =
+      handle |> records_of("model_call") |> Enum.filter(&(&1["turn_id"] == "turn-1"))
+
+    assert call["tools_sha256"] == turn_call["tools_sha256"]
+    assert call["tools_sha256"] != Journal.digest([])
+    assert call["system_sha256"] == turn_call["system_sha256"]
 
     assert [_result] =
              handle |> records_of("model_result") |> Enum.filter(&(&1["turn_id"] == "compact_2"))
