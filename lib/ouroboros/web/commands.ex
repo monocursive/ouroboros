@@ -16,9 +16,11 @@ defmodule Ouroboros.Web.Commands do
 
   Where the two surfaces genuinely spell one verb differently — this deck's `session.end`
   ends but does not remove, its `conversation.details` opens one event rather than
-  toggling a level, `/status` is a page here and a tab there, and `/keys` opens the only
-  sheet this surface has — the file carries the terminal client's spelling and this one's
-  beside it, with a `note` saying why. Everything else is written once.
+  toggling a level, `/status` is a page here and a tab there, `/keys` opens the only
+  sheet this surface has, `/copy source` takes the argument the terminal client spells
+  `raw`, and `/approve` is a verb the terminal client reaches by chord alone — the file
+  carries the terminal client's spelling and this one's beside it, with a `note` saying
+  why. Everything else is written once.
 
   ## A gate is a question about the runtime, not a preference
 

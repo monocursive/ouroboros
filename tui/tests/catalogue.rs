@@ -92,7 +92,9 @@ fn variant(command: Command) -> &'static str {
 }
 
 /// What this surface actually spells a row, which is the shared spelling unless the `tui`
-/// block overrides it. Five rows do; each says why in its `note`.
+/// block overrides it. None does today — the six rows spelled two ways carry the web's
+/// spelling in the `web` block — but an override here would be read, and would need a
+/// `note`.
 fn tui_spelling(row: &Value, key: &str) -> Option<String> {
     row["tui"]
         .get(key)

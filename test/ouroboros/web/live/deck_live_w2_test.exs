@@ -827,7 +827,9 @@ defmodule Ouroboros.Web.Live.DeckLiveW2Test do
       refute html =~ ~s(phx-click="copy-source")
 
       render_hook(view, "palette-open", %{})
-      refute render(view) =~ "Copy the last message"
+      palette = render(view)
+      refute palette =~ "Copy last agent message"
+      refute palette =~ "Copy the last message's Markdown"
 
       render_hook(view, "palette-run", %{"id" => "conversation.copy_source"})
       refute_push_event(view, "ouro-copy", _nothing)
@@ -862,7 +864,9 @@ defmodule Ouroboros.Web.Live.DeckLiveW2Test do
       assert html =~ "what I typed"
 
       render_hook(view, "palette-open", %{})
-      refute render(view) =~ "Copy the last message"
+      palette = render(view)
+      refute palette =~ "Copy last agent message"
+      refute palette =~ "Copy the last message's Markdown"
 
       render_hook(view, "palette-run", %{"id" => "conversation.copy_source"})
       refute_push_event(view, "ouro-copy", _nothing)

@@ -69,12 +69,11 @@
   },
   {
     "id": "session.handoff",
-    "label": "Hand this session's work to a fresh one",
+    "label": "Hand off to a new session",
     "group": "session",
     "slash": "/handoff",
     "tui": { "command": "Handoff", "action": null },
-    "web": { "event": "session.handoff", "label": "Hand off to a new session" },
-    "note": "Two wordings for one verb; S1 moved both into this file without moving either screen, and converging them is a change to one of them."
+    "web": { "event": "session.handoff" }
   },
 
   {
@@ -131,12 +130,11 @@
   },
   {
     "id": "turn.effort",
-    "label": "Reasoning effort for the next turn",
+    "label": "Thinking effort",
     "group": "turn",
     "slash": "/effort",
     "tui": { "command": "Effort", "action": null },
-    "web": { "event": "turn.effort", "label": "Thinking effort" },
-    "note": "The terminal client's row names the scope and the web's names the control; converging them is a screen change S1 did not make."
+    "web": { "event": "turn.effort" }
   },
   {
     "id": "turn.model",
@@ -152,8 +150,7 @@
     "group": "turn",
     "slash": "/plan",
     "tui": { "command": "Plan", "action": null },
-    "web": { "event": "turn.plan", "label": "Plan mode" },
-    "note": "One row named for the posture and one for the mode, and S1 recorded both rather than moving either screen."
+    "web": { "event": "turn.plan" }
   },
   {
     "id": "turn.sandbox",
@@ -161,8 +158,7 @@
     "group": "turn",
     "slash": "/sandbox",
     "tui": { "command": "Sandbox", "action": null },
-    "web": { "event": "turn.sandbox", "label": "File access" },
-    "note": "docs/TUI.md quotes the terminal client's wording of this row, so converging the pair belongs to a slice that can edit that page."
+    "web": { "event": "turn.sandbox" }
   },
   {
     "id": "turn.auto_approve",
@@ -170,8 +166,7 @@
     "group": "turn",
     "slash": "/auto-approve",
     "tui": { "command": "AutoApprove", "action": "leader.auto_approve" },
-    "web": { "event": "turn.auto_approve", "label": "Automatic approvals for routine actions" },
-    "note": "Two wordings for one toggle; S1 recorded both rather than moving either screen."
+    "web": { "event": "turn.auto_approve" }
   },
   {
     "id": "turn.approval",
@@ -225,8 +220,7 @@
     "group": "conversation",
     "slash": "/copy",
     "tui": { "command": "CopyLast", "action": "leader.copy" },
-    "web": { "event": "conversation.copy", "label": "Copy the last message" },
-    "note": "tui/tests/onboarding.rs pins the terminal client's wording, so converging the pair is a change to that test as well as to the screen."
+    "web": { "event": "conversation.copy" }
   },
   {
     "id": "conversation.copy_source",
@@ -252,12 +246,11 @@
   },
   {
     "id": "conversation.export",
-    "label": "Export the transcript to a file",
+    "label": "Export this transcript",
     "group": "conversation",
     "slash": "/export",
     "tui": { "command": "Export", "action": null },
-    "web": { "event": "conversation.export", "label": "Export this transcript" },
-    "note": "Two wordings for one verb, and S1 changed neither screen."
+    "web": { "event": "conversation.export" }
   },
   {
     "id": "conversation.scrollback",
@@ -295,12 +288,11 @@
   },
   {
     "id": "conversation.compact",
-    "label": "Compact this conversation now",
+    "label": "Compact this conversation",
     "group": "conversation",
     "slash": "/compact",
     "tui": { "command": "Compact", "action": null },
-    "web": { "event": "conversation.compact", "label": "Compact this conversation" },
-    "note": "Two wordings for one verb, and S1 changed neither screen."
+    "web": { "event": "conversation.compact" }
   },
   {
     "id": "conversation.context",
@@ -308,8 +300,7 @@
     "group": "conversation",
     "slash": "/context",
     "tui": { "command": "Context", "action": null },
-    "web": { "event": "conversation.context", "label": "Context" },
-    "note": "The terminal client's row says what the overlay shows and the web's names the panel; converging them is a screen change."
+    "web": { "event": "conversation.context" }
   },
   {
     "id": "conversation.cost",
@@ -345,8 +336,7 @@
     "group": "runtime",
     "slash": "/mcp",
     "tui": { "command": "Mcp", "action": null },
-    "web": { "event": "runtime.mcp", "label": "MCP servers" },
-    "note": "The terminal client names the node whose servers it lists; the web's panel is titled for the servers themselves."
+    "web": { "event": "runtime.mcp" }
   },
   {
     "id": "runtime.logs",
@@ -417,8 +407,7 @@
     "group": "client",
     "slash": "/theme",
     "tui": { "command": "Theme", "action": "leader.theme" },
-    "web": { "event": "client.theme", "label": "Switch theme" },
-    "note": "docs/TUI.md quotes the terminal client's wording and deck_live_test.exs asserts the web's, so converging the pair moves both."
+    "web": { "event": "client.theme" }
   },
   {
     "id": "client.shortcuts",

@@ -417,12 +417,14 @@ impl Command {
 
     /// The wording both palettes draw, from the shared file.
     ///
-    /// A `tui` block may carry a `label` of its own, and five rows do — where the two
-    /// surfaces mean measurably different things by one verb (this client's `session.end`
-    /// dialog also removes; its `conversation.details` toggles a level rather than opening
-    /// one event; `runtime.status` is a tab here and a page there; `client.shortcuts` is
-    /// the map in force here and the only sheet there) or where converging would rename a
-    /// row that `docs/TUI.md` and the tests already name. The row's `note` says which.
+    /// A `tui` block may carry a `label` of its own, and none does today: the six rows
+    /// spelled two ways keep the web's wording in the `web` block, where the two surfaces
+    /// mean measurably different things by one verb (this client's `session.end` dialog
+    /// also removes; its `conversation.details` toggles a level rather than opening one
+    /// event; `runtime.status` is a tab here and a page there; `client.shortcuts` is the
+    /// map in force here and the only sheet there; `/copy raw` and the approval are typed
+    /// differently or not at all). Every other row is worded once, and the row's `note`
+    /// says which.
     pub fn label(self) -> &'static str {
         let entry = self.entry();
 

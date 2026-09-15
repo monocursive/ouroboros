@@ -169,15 +169,14 @@ defmodule Ouroboros.Web.CatalogueTest do
             Map.has_key?(row["web"], "label") or Map.has_key?(row["web"], "slash"),
             do: row["id"]
 
-      # Seventeen wordings and four spellings. Converging any of them is a good change and
-      # deleting a line here is how it is declared; letting a new one in without touching
-      # this list is the drift the file exists to stop.
+      # Six wordings, four of them with a typed spelling of their own — the rows whose
+      # notes say the two surfaces mean different things by one verb, not merely say it
+      # differently. Converging one is a good change and deleting a line here is how it is
+      # declared; letting a new one in without touching this list is the drift the file
+      # exists to stop.
       assert Enum.sort(divergent) ==
-               ~w(client.shortcuts client.theme conversation.compact conversation.context
-                  conversation.copy conversation.copy_source conversation.details
-                  conversation.export runtime.mcp runtime.status session.end
-                  session.handoff turn.approval turn.auto_approve turn.effort turn.plan
-                  turn.sandbox)
+               ~w(client.shortcuts conversation.copy_source conversation.details
+                  runtime.status session.end turn.approval)
     end
   end
 end

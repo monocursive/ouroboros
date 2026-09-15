@@ -2576,7 +2576,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         |> form("#ouro-palette form", %{"query" => "theme"})
         |> render_change()
 
-      assert html =~ "Switch theme"
+      assert html =~ "Change the colour theme"
       assert html =~ ">Client</p>"
       refute html =~ ~s(phx-value-id="session.new")
       refute html =~ ">Session</p>"
