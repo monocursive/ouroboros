@@ -731,6 +731,38 @@ impl Drop for Screen {
     }
 }
 
+/// Makes the next frame draw every cell, **without asking the terminal anything**.
+///
+/// This exists because [`Terminal::clear`] does ask. It snapshots the cursor with
+/// `get_cursor_position`, which writes a Device Status Report to the terminal and then
+/// waits on stdin for the answer — and by the time anything here calls it, this process
+/// already has a task reading stdin. The reader eats the reply, the query times out after
+/// two seconds with "The cursor position could not be read within a normal duration", and
+/// the screen it was supposed to repaint is left blank.
+///
+/// `Terminal::resize` reaches the same state by a different road: it resizes both buffers
+/// and resets the back one, so Ratatui's next diff is against nothing and writes the whole
+/// frame. The size comes from `TIOCGWINSZ`, which is a question for the kernel rather than
+/// for the terminal, and nothing is read from stdin at all.
+pub fn force_full_redraw<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> Result<(), B::Error> {
+    let area = ratatui::layout::Rect::from(terminal.size()?);
+    terminal.resize(area)
+}
+
+/// What the App owes after the terminal has been handed to something else and taken back.
+///
+/// Three paths reach it — `$EDITOR` on the draft, the transcript viewer, and `ctrl+z` —
+/// and all three come back to the same two facts: the alternate screen is blank, and the
+/// window title belongs to whatever had the terminal. Both are asked for rather than done,
+/// and asked for *before* anything that can fail, because a resume that went wrong is
+/// exactly when a pane must not be left blank and silent.
+pub fn returned_from_a_detour(app: &mut App) {
+    app.request_repaint();
+    app.forget_title();
+}
+
 /// Hands the terminal back to the shell and takes it again on `fg`.
 ///
 /// Unix only, because `SIGTSTP` is: a terminal that cannot be suspended is told so rather
@@ -746,16 +778,9 @@ fn suspend_to_shell(screen: &mut Screen, app: &mut App) {
         libc::raise(libc::SIGTSTP);
     }
 
-    // `suspend` restored the terminal through the same path that empties the title on
-    // exit, and the alternate screen comes back blank — so Ratatui's diff would find
-    // nothing to repaint and the operator would return from `fg` to an empty screen.
-    let resumed = screen
-        .resume()
-        .and_then(|()| screen.terminal.clear().context("repainting after fg"));
+    returned_from_a_detour(app);
 
-    app.forget_title();
-
-    if let Err(error) = resumed {
+    if let Err(error) = screen.resume() {
         app.inform(
             format!("the screen could not be taken back after fg: {error:#}"),
             app::NoticeKind::Error,
@@ -1547,19 +1572,10 @@ pub async fn run(
                     // sitting in the data directory after the editor closes.
                     let _ = fs::remove_file(&path);
 
-                    // Re-entering the alternate screen leaves it blank, and this detour
-                    // changed no App state at all — so without a clear, Ratatui's diff
-                    // would find nothing to repaint and the operator would come back from
-                    // their editor to an empty screen.
-                    let result = screen
-                        .resume()
-                        .and_then(|()| {
-                            screen
-                                .terminal
-                                .clear()
-                                .context("repainting after the transcript viewer")
-                        })
-                        .and(opened);
+                    // See [`force_full_redraw`] for why this must not be a `clear`.
+                    returned_from_a_detour(&mut app);
+
+                    let result = screen.resume().and(opened);
 
                     if let Err(error) = result {
                         app.inform(
@@ -1593,15 +1609,13 @@ pub async fn run(
                     Err(anyhow::anyhow!("the editor task failed: {join_error}"))
                 });
 
+            returned_from_a_detour(&mut app);
+
             let result = if let Err(error) = screen.resume() {
                 Err(error)
             } else {
                 edited
             };
-
-            // `suspend` restored the terminal through the same path that empties the
-            // title on exit, so the next tick has to write it again.
-            app.forget_title();
 
             match result {
                 Ok(text) => app.apply(Msg::ExternalEditor(text)),
@@ -1610,6 +1624,14 @@ pub async fn run(
                     app::NoticeKind::Error,
                 ),
             }
+        }
+
+        // Every detour that handed the terminal away comes back through here. A repaint
+        // that cannot be forced right now is kept and tried again on the next frame,
+        // because the alternative — a blank pane that also eats keys — is a terminal
+        // state, and this one is a notice nobody can read anyway.
+        if app.take_repaint() && force_full_redraw(&mut screen.terminal).is_err() {
+            app.request_repaint();
         }
 
         draw_synchronized(&mut screen.terminal, |frame| {

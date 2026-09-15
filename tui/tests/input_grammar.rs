@@ -1927,3 +1927,400 @@ fn escape_with_text_on_an_idle_session_banks_the_draft() {
     app.apply(key(KeyCode::Esc));
     assert!(app.sessions.open.is_none(), "{:?}", app.overlay);
 }
+
+// ---------------------------------------------------------------------------------------
+// (f) ui-parity T1 fix wave — the reviewer's probes, kept as regressions
+// ---------------------------------------------------------------------------------------
+
+/// H2. Enter completes only a verb the typed word continues into.
+///
+/// The menu matches descriptions as well as names, which is right for *offering* rows and
+/// wrong for choosing one: `/new`'s description is "start a new coding session", so
+/// `/session`, `/start`, `/s`, `/c` and `/e` all matched it — and `/new` is row 0, so
+/// Enter answered every one of them with `/new`, which a second Enter then ran.
+#[test]
+fn enter_never_rewrites_a_word_into_a_verb_it_does_not_continue_into() {
+    for typed in ["/session", "/start", "/s", "/c", "/e", "/a"] {
+        let mut app = opened("idle", steering_capabilities(), Vec::new());
+        compose(&mut app);
+        type_text(&mut app, typed);
+        app.apply(key(KeyCode::Enter));
+
+        assert_ne!(draft(&app), "/new", "{typed:?} became /new");
+        assert!(
+            draft(&app).is_empty() || draft(&app).starts_with(typed),
+            "{typed:?} became {:?}, which it does not continue into",
+            draft(&app)
+        );
+    }
+}
+
+/// A lone sigil is not a word anybody started, and every row "matches" it.
+#[test]
+fn a_bare_slash_accepts_nothing_and_starts_nothing() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "/");
+    app.apply(key(KeyCode::Enter));
+
+    assert_ne!(draft(&app), "/new", "a lone slash became a verb nobody typed");
+
+    // Whatever it did, it did not start anything and did not open a dialog.
+    app.apply(key(KeyCode::Enter));
+    let methods: Vec<String> = app.drain().iter().map(|call| call.method.clone()).collect();
+    assert!(
+        !methods.iter().any(|method| method == "interactive.start"),
+        "{methods:?}"
+    );
+}
+
+/// The words it *does* continue into, including the two that share a stem.
+#[test]
+fn enter_completes_the_first_verb_in_table_order_that_the_word_continues_into() {
+    for (typed, expected) in [("/ke", "/keys"), ("/st", "/steer"), ("/backtr", "/backtrack")] {
+        let mut app = opened("idle", steering_capabilities(), Vec::new());
+        compose(&mut app);
+        type_text(&mut app, typed);
+        app.apply(key(KeyCode::Enter));
+        assert_eq!(draft(&app), expected, "{typed:?}");
+    }
+}
+
+/// And a verb typed out in full is sent on the first Enter, not completed into a sibling.
+#[test]
+fn a_verb_typed_in_full_is_sent_on_the_first_enter() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "/help");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Help)),
+        "{:?}",
+        app.overlay
+    );
+    assert_eq!(draft(&app), "");
+}
+
+// ----- M2: the slash grammar ------------------------------------------------------------
+
+/// (a) An unknown verb-shaped word with more words after it is a sentence, and is sent.
+#[test]
+fn prose_that_begins_with_a_slash_word_is_sent_as_a_message() {
+    for line in ["/tmp is full", "/usr is read-only on this box"] {
+        let mut app = opened("idle", steering_capabilities(), Vec::new());
+        compose(&mut app);
+        type_text(&mut app, line);
+        app.apply(key(KeyCode::Enter));
+
+        let sent = turn_calls(&app.drain());
+        assert_eq!(sent.len(), 1, "{line:?} was not sent: {:?}", app.notice);
+        assert_eq!(sent[0].1["input"], line);
+    }
+}
+
+/// (b) An unknown verb alone on one line is still refused — that is the `/ke` case — and
+/// the notice says how to send it as text anyway.
+#[test]
+fn an_unknown_verb_alone_is_refused_and_the_notice_says_how_to_send_it() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "/etc");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(turn_calls(&app.drain()).is_empty());
+    assert_eq!(draft(&app), "/etc");
+
+    let notice = app.notice.as_ref().expect("a refusal").text.clone();
+    assert!(notice.contains("unknown command /etc"), "{notice}");
+    assert!(
+        notice.contains("start the line with a space"),
+        "the refusal is a dead end without this: {notice}"
+    );
+}
+
+/// (c) …and that escape hatch works.
+#[test]
+fn a_leading_space_sends_a_verb_as_the_text_it_is() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, " /keys");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        !matches!(app.overlay, Some(Overlay::Keys { .. })),
+        "the space did not escape the grammar"
+    );
+
+    let sent = turn_calls(&app.drain());
+    assert_eq!(sent.len(), 1, "{:?}", app.notice);
+    assert_eq!(sent[0].1["input"], "/keys");
+}
+
+/// (d) A verb this client has, with an argument it cannot read, stays refused.
+#[test]
+fn a_known_verb_with_an_argument_it_cannot_take_is_refused_by_name() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "/keys foo");
+    app.apply(key(KeyCode::Enter));
+
+    assert_eq!(
+        app.notice.as_ref().map(|notice| notice.text.as_str()),
+        Some("/keys did not take that argument")
+    );
+    assert!(turn_calls(&app.drain()).is_empty());
+    assert_eq!(draft(&app), "/keys foo", "the draft was thrown away");
+}
+
+/// (e) A verb on line one with a paragraph under it was never a verb.
+#[test]
+fn a_verb_with_a_paragraph_under_it_is_a_paragraph() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "/context");
+    app.apply(modified(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    type_text(&mut app, "and explain what fills it");
+    app.apply(key(KeyCode::Enter));
+
+    let sent = turn_calls(&app.drain());
+    assert_eq!(sent.len(), 1, "{:?}", app.notice);
+    assert_eq!(sent[0].1["input"], "/context\nand explain what fills it");
+}
+
+/// (f4d) A draft whose first line is blank is a message, by the same rule as (c): leading
+/// whitespace is leading whitespace, and a command has to be the first thing in the draft.
+#[test]
+fn a_draft_that_opens_with_a_blank_line_is_a_message() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    app.apply(modified(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    type_text(&mut app, "/keys");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        !matches!(app.overlay, Some(Overlay::Keys { .. })),
+        "a blank first line still ran the verb"
+    );
+    assert_eq!(turn_calls(&app.drain()).len(), 1);
+}
+
+// ----- H4: the prefills bank the draft they replace ---------------------------------------
+
+/// `ctrl+r` and `ctrl+x m` used to eat an unsent draft with no way back: they cleared the
+/// editor without banking it, so the `up` this client advertises brought back nothing.
+#[test]
+fn a_prefill_banks_the_draft_it_replaces() {
+    for prefill in ['r', 'm'] {
+        let mut app = opened("idle", steering_capabilities(), Vec::new());
+        compose(&mut app);
+        type_text(&mut app, "a long answer I have been writing for ten minutes");
+
+        match prefill {
+            'r' => app.apply(modified(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            _ => leader(&mut app, 'm'),
+        }
+
+        assert!(draft(&app).starts_with("/"), "{prefill}: {:?}", draft(&app));
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains("brings it back")),
+            "{prefill}: {:?}",
+            app.notice
+        );
+
+        app.apply(key(KeyCode::Up));
+        assert_eq!(
+            draft(&app),
+            "a long answer I have been writing for ten minutes",
+            "{prefill}: the draft is not in history"
+        );
+    }
+}
+
+/// An empty draft is not banked, so `up` still reaches whatever came before it.
+#[test]
+fn a_prefill_over_an_empty_draft_says_nothing() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    app.apply(modified(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+    assert_eq!(draft(&app), "/rename ");
+    assert!(
+        app.notice.is_none() || !app.notice.as_ref().unwrap().text.contains("brings it back"),
+        "{:?}",
+        app.notice
+    );
+}
+
+// ----- M4: the arm belongs to the screen it was made on -----------------------------------
+
+/// Three presses used to quit when the middle one closed something. An arm is only good
+/// for the screen it was made on.
+#[test]
+fn an_overlay_between_two_cancels_takes_the_arm_with_it() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit_armed());
+
+    app.sessions.composer = None;
+    app.apply(key(KeyCode::Char('?')));
+    assert!(matches!(app.overlay, Some(Overlay::Help)), "{:?}", app.overlay);
+    assert!(!app.quit_armed(), "an overlay opened over the arm");
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.overlay.is_none(), "that press closed the overlay");
+    assert!(!app.quit_armed(), "and did not leave an arm behind");
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(
+        app.overlay.is_none(),
+        "so the third press arms rather than quitting: {:?}",
+        app.overlay
+    );
+    assert!(app.quit_armed());
+}
+
+/// The same for a tab change and for leaving the session.
+#[test]
+fn the_arm_does_not_survive_a_tab_change_or_a_session_change() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit_armed());
+    leader(&mut app, '1');
+    assert!(!app.quit_armed(), "the arm followed the operator to another tab");
+
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit_armed());
+    app.sessions.open = None;
+    assert!(!app.quit_armed(), "the arm outlived the session it was made on");
+}
+
+// ----- L1: a path typed in full is still an attachment ------------------------------------
+
+/// B4's promise is that an `@path` is both the sentence and the structured file. A path
+/// somebody typed rather than Tab-completed used to be only the sentence.
+#[test]
+fn a_fully_typed_at_path_still_becomes_an_attachment() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    with_files(&mut app, &["src/main.rs"]);
+    compose(&mut app);
+    type_text(&mut app, "@src/main.rs");
+    app.apply(key(KeyCode::Enter));
+
+    let sent = turn_calls(&app.drain());
+    assert_eq!(sent.len(), 1, "the path was not sent: {:?}", app.notice);
+    assert_eq!(
+        sent[0].1["input"]["attachments"][0], "src/main.rs",
+        "sent without the structured attachment: {}",
+        sent[0].1
+    );
+    assert_eq!(sent[0].1["input"]["prompt"], "@src/main.rs", "and without the words");
+}
+
+// ----- L2: an Esc that banked a draft is not half of a chord -------------------------------
+
+/// Two Escapes, not three: the first banked the draft and therefore did its job, so it is
+/// not also the arm of `Esc Esc`.
+#[test]
+fn two_escapes_leave_a_session_that_had_text_in_it() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "x");
+
+    app.apply(key(KeyCode::Esc));
+    assert_eq!(draft(&app), "", "the first banked the draft");
+    assert!(app.sessions.open.is_some());
+
+    app.apply(key(KeyCode::Esc));
+    assert!(
+        app.overlay.is_none(),
+        "the second was eaten by the backtrack chord: {:?}",
+        app.overlay
+    );
+    assert!(app.sessions.open.is_none(), "the second leaves the session");
+}
+
+/// And `Esc Esc` on an empty draft is still the chord it always was.
+#[test]
+fn esc_esc_on_an_empty_draft_is_still_the_chord() {
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+    compose(&mut app);
+
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+    assert!(overlay_is_backtrack(&app), "{:?}", app.overlay);
+}
+
+// ----- M14: /rename's own gates -----------------------------------------------------------
+
+/// An empty title is refused locally rather than sent for the gateway to refuse.
+#[test]
+fn slash_rename_with_no_title_is_refused_and_sends_nothing() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, "/rename   ");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("name it")),
+        "{:?}",
+        app.notice
+    );
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.rename"));
+}
+
+/// `ctrl+r` with no session says what it is for rather than talking about a next turn.
+#[test]
+fn ctrl_r_without_a_session_says_what_the_key_is_for() {
+    let mut app = app(full_hello());
+    app.apply(modified(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("rename")),
+        "{:?}",
+        app.notice
+    );
+}
+
+// ----- H3: the `?` panel's five headings ---------------------------------------------------
+
+/// Each of the five groups is a heading, and each appears exactly **once**. The taxonomy
+/// is only worth having if the panel is sorted by it; twelve headings over twenty-five
+/// rows is a list with decoration rather than a grouped page.
+#[test]
+fn the_help_panel_draws_each_group_heading_exactly_once() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    app.sessions.composer = None;
+    app.apply(key(KeyCode::Char('?')));
+
+    let text = render(&mut app, 180, 90).text();
+
+    // The panel is a box drawn over the session behind it, so a heading shares its
+    // terminal row with whatever is either side of the frame. A row *is* a heading when
+    // one of the cells the frame divides it into is exactly that word.
+    for heading in ["SESSION", "TURN", "CONVERSATION", "RUNTIME", "CLIENT"] {
+        let seen = text
+            .lines()
+            .filter(|line| {
+                line.split('\u{2502}')
+                    .any(|cell| cell.trim() == heading)
+            })
+            .count();
+        assert_eq!(seen, 1, "{heading} appears {seen} times:\n{text}");
+    }
+}

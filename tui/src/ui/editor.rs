@@ -447,12 +447,6 @@ impl Editor {
             return EditorAction::None;
         }
 
-        // Whether this keystroke *consumed* a completion menu. An accepted value is
-        // final until the operator types again: refreshing here would re-derive a menu
-        // from the word just inserted — `/keys` matches `/keys` — and the next Enter
-        // would accept it all over again instead of sending.
-        let mut accepted_completion = false;
-
         let action = match key.code {
             KeyCode::Esc => {
                 if self.completion.take().is_some() {
@@ -483,7 +477,6 @@ impl Editor {
             // session and opened a sign-in for it (R1 §2.3). Tab still completes, and
             // Enter with no menu still sends.
             _accept if keymap.hits(Action::Send, key) && self.accept_for_send() => {
-                accepted_completion = true;
                 EditorAction::None
             }
             _send if keymap.hits(Action::Send, key) => EditorAction::Submit,
@@ -627,8 +620,12 @@ impl Editor {
             _ => return EditorAction::None,
         };
 
-        if !accepted_completion
-            && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc)
+        // An accepted word is refreshed like any other edit, and that is safe *because*
+        // `accept_command_for_send` only completes a strict prefix: the menu this rebuilds
+        // holds the word it just wrote, so the next Enter finds nothing to continue and
+        // sends. A looser accept rule would loop here, which is what the flag that used to
+        // guard this line was hiding.
+        if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc)
             && !matches!(
                 action,
                 EditorAction::Submit | EditorAction::Cancel | EditorAction::Scroll(_)
@@ -879,28 +876,106 @@ impl Editor {
             (menu.selected as isize + delta).rem_euclid(menu.items.len() as isize) as usize;
     }
 
-    /// Enter's half of the completion menu: accept the highlighted row, unless the word
-    /// under the caret is already one of the rows.
+    /// Enter's half of the completion menu.
     ///
-    /// The exception is the whole difference between helping and overruling. `/keys` is
-    /// a finished verb, and the menu it leaves open also holds `/hotkeys`, which sorts
-    /// first — so a rule that always accepted the highlighted row would answer a
-    /// completely typed `/keys` with somebody else's command. It would also charge a
-    /// second Enter for every verb anyone ever types out in full. A word that is already
-    /// on the menu is a word its author finished; Enter sends it.
+    /// The two menus want two different rules, because they are two different promises.
+    /// A `/` row is a *command* and accepting the wrong one runs the wrong thing; an `@`
+    /// row is a path and accepting it only writes text and an attachment.
     fn accept_for_send(&mut self) -> bool {
         let Some(menu) = self.completion.as_ref() else {
             return false;
         };
 
-        let token = &self.text[menu.start..menu.end];
+        let token = self.text[menu.start..menu.end].to_string();
 
-        if menu.items.iter().any(|item| item.value == token) {
+        match menu.selected().map(|item| item.kind) {
+            Some(CompletionKind::Command) => self.accept_command_for_send(&token),
+            Some(CompletionKind::File) => self.accept_path_for_send(&token),
+            None => {
+                self.completion = None;
+                false
+            }
+        }
+    }
+
+    /// Enter on a `/` menu completes only a verb the typed word actually *continues* into.
+    ///
+    /// The rule has to be prefix-of-the-name, and nothing looser, because the menu itself
+    /// is looser: [`matching_commands`] matches each row's description as well as its
+    /// name, which is right for *offering* rows and catastrophic for choosing one. `/new`'s
+    /// description is "start a new coding session", so `/session`, `/start`, `/s`, `/c`
+    /// and `/e` all matched it — and `/new` is row 0, so Enter answered every one of them
+    /// with `/new`, which a second Enter then ran. A lone `/` matched all forty-five.
+    ///
+    /// So: the highlighted row if the word continues into it — somebody who moved the
+    /// selection meant it — otherwise the first row in table order that it continues into,
+    /// and otherwise nothing at all, which sends the word as typed and lets the
+    /// unknown-verb refusal say so. `/ke` is `/keys` and not `/keymap` by that order.
+    ///
+    /// "Continues into" is strict: a word that already *is* a row is finished, and
+    /// completing it again would charge a second Enter for every verb typed out in full.
+    fn accept_command_for_send(&mut self, token: &str) -> bool {
+        // A lone sigil is not a word anybody started.
+        if token.chars().count() <= 1 {
             self.completion = None;
             return false;
         }
 
+        let typed = token.to_ascii_lowercase();
+        let continues = |value: &str| {
+            let value = value.to_ascii_lowercase();
+            value.len() > typed.len() && value.starts_with(&typed)
+        };
+
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+
+        let chosen = menu
+            .selected()
+            .filter(|item| continues(&item.value))
+            .map(|_highlighted| menu.selected)
+            .or_else(|| menu.items.iter().position(|item| continues(&item.value)));
+
+        let Some(index) = chosen else {
+            self.completion = None;
+            return false;
+        };
+
+        if let Some(menu) = self.completion.as_mut() {
+            menu.selected = index;
+        }
+
         self.apply_completion()
+    }
+
+    /// Enter on an `@` menu takes the highlighted row, because a path menu matches on any
+    /// part of the path and `@main` meaning `src/main.rs` is what the menu is *for*.
+    ///
+    /// The one word it does not complete is a path already typed out in full — and that
+    /// word still has to leave here as an attachment. B4's promise is that an `@path`
+    /// is both the sentence and the structured file; a path somebody typed rather than
+    /// Tab-completed used to be only the sentence.
+    fn accept_path_for_send(&mut self, token: &str) -> bool {
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+
+        if menu.items.iter().any(|item| item.value == token) {
+            self.completion = None;
+            self.record_completed_path(token);
+            return false;
+        }
+
+        self.apply_completion()
+    }
+
+    /// B4. The path half of an applied `@` completion, bounded by [`COMPLETED_PATH_LIMIT`].
+    fn record_completed_path(&mut self, value: &str) {
+        if self.completed_paths.len() < COMPLETED_PATH_LIMIT {
+            self.completed_paths
+                .push(value.trim_start_matches('@').to_string());
+        }
     }
 
     fn apply_completion(&mut self) -> bool {
@@ -938,10 +1013,7 @@ impl Editor {
             // Bounded, and by more than the composer's own ceiling: this buffer is drained
             // on the next keystroke, so anything left in it is a completion nobody
             // collected.
-            if self.completed_paths.len() < COMPLETED_PATH_LIMIT {
-                self.completed_paths
-                    .push(item.value.trim_start_matches('@').to_string());
-            }
+            self.record_completed_path(&item.value);
         }
 
         self.preferred_column = None;
@@ -1177,6 +1249,39 @@ mod tests {
 
     fn modified(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    /// The list beside [`COMMANDS`] has to name rows that are in it. A verb renamed in the
+    /// table would otherwise leave a ghost here, and the ghost's only symptom is a missing
+    /// space after a completion — which nobody would trace back to this list.
+    #[test]
+    fn every_verb_that_takes_an_argument_is_a_row_of_the_command_table() {
+        for verb in COMMANDS_TAKING_AN_ARGUMENT {
+            assert!(
+                COMMANDS.iter().any(|(name, _detail)| *name == verb),
+                "{verb} takes an argument and is not in COMMANDS"
+            );
+        }
+
+        // And the list is a set: a duplicate is a line somebody added twice.
+        for (index, verb) in COMMANDS_TAKING_AN_ARGUMENT.iter().enumerate() {
+            assert!(
+                !COMMANDS_TAKING_AN_ARGUMENT[..index].contains(verb),
+                "{verb} is listed twice"
+            );
+        }
+    }
+
+    /// The command table itself has no duplicate names — two rows with one name would make
+    /// "the first row in table order" a coin toss.
+    #[test]
+    fn the_command_table_names_each_verb_once() {
+        for (index, (name, _detail)) in COMMANDS.iter().enumerate() {
+            assert!(
+                !COMMANDS[..index].iter().any(|(other, _)| other == name),
+                "{name} has two rows"
+            );
+        }
     }
 
     #[test]

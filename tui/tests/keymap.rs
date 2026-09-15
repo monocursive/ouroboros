@@ -916,3 +916,156 @@ fn the_new_actions_are_rebindable_and_listed() {
     assert_eq!(app.keymap.label(Action::LeaderRail), "ctrl+x B");
     assert!(app.keymap.problems().is_empty(), "{:?}", app.keymap.problems());
 }
+
+// ---------------------------------------------------------------------------------------
+// (7) ui-parity T1 fix wave — the reviewer's probes over the map itself
+// ---------------------------------------------------------------------------------------
+
+/// F9. The list tabs' bare `q` follows `[keys] quit`'s on/off and not its *chord*: moving
+/// the chord leaves the letter alone, turning it off takes the letter with it.
+#[test]
+fn the_lists_bare_q_follows_whether_quit_is_bound_and_not_where() {
+    let mut app = configured(&[("quit", "ctrl+w")]);
+    app.tab = Tab::Dashboard;
+    app.apply(key(KeyCode::Char('q')));
+    assert!(
+        matches!(app.overlay, Some(Overlay::Quit { .. })),
+        "a rebound chord took the letter with it: {:?}",
+        app.overlay
+    );
+
+    let mut app = configured(&[("quit", "off")]);
+    app.tab = Tab::Dashboard;
+    app.apply(key(KeyCode::Char('q')));
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+}
+
+/// And `describe()` says so, because `/keys` and the `?` panel are where somebody looks
+/// when a letter they pressed did nothing.
+#[test]
+fn the_quit_description_names_the_letter_it_gates() {
+    let described = Action::Quit.describe();
+    assert!(described.contains('q'), "{described}");
+    assert!(described.contains("list"), "{described}");
+}
+
+/// F10b. `interrupt = off` leaves the verb and nothing else — an action turned off keeps
+/// its `/` spelling, which is the whole promise of `off`.
+#[test]
+fn an_interrupt_turned_off_leaves_only_its_verb() {
+    let mut app = opened(&[("interrupt", "off")]);
+    assert!(!app.bound(Action::Interrupt));
+
+    app.apply(key(KeyCode::Enter));
+    for character in "x".chars() {
+        app.apply(key(KeyCode::Char(character)));
+    }
+    app.apply(key(KeyCode::Esc));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.interrupt"));
+
+    slash(&mut app, "/interrupt");
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.interrupt"),
+        "`/interrupt` is what `off` leaves behind"
+    );
+}
+
+/// F10c. An interrupt bound over `send` is a collision the map must report rather than
+/// apply — two actions on one key in one scope is a chord whose meaning depends on which
+/// handler is checked first.
+#[test]
+fn an_interrupt_bound_over_send_is_reported_and_ignored() {
+    let map = Keymap::resolve(&overrides(&[("interrupt", "enter")]));
+
+    assert_eq!(map.problems().len(), 1, "{:?}", map.problems());
+    assert!(
+        map.problems()[0].contains("interrupt") && map.problems()[0].contains("send"),
+        "{:?}",
+        map.problems()
+    );
+    assert_eq!(map.spec(Action::Interrupt).to_string(), "esc");
+    assert_eq!(map.spec(Action::Send).to_string(), "enter");
+}
+
+/// F15. `ctrl+q` closes nothing, and the keys that are meant to still do.
+#[test]
+fn ctrl_q_closes_no_overlay_and_esc_still_does() {
+    let mut app = opened(&[]);
+
+    app.apply(modified(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(app.overlay.is_some(), "the palette did not open");
+
+    app.apply(modified(KeyCode::Char('q'), KeyModifiers::CONTROL));
+    assert!(
+        matches!(app.overlay, Some(ouro::ui::app::Overlay::Commands(_))),
+        "ctrl+q replaced the palette: {:?}",
+        app.overlay
+    );
+
+    app.apply(key(KeyCode::Esc));
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+}
+
+/// F17. Suspend is a global chord and carries the same overlay guard as the rest.
+#[test]
+fn suspend_is_not_claimed_over_an_overlay_and_is_taken_once() {
+    let mut app = opened(&[]);
+    app.apply(modified(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    app.apply(modified(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert!(!app.take_suspend(), "suspended out from under an overlay");
+
+    let mut app = opened(&[]);
+    app.apply(modified(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert!(app.take_suspend());
+    assert!(!app.take_suspend(), "drained more than once");
+}
+
+/// F19. The leader never arms over an overlay, so its digits cannot move a tab out from
+/// under a dialog somebody is reading.
+#[test]
+fn the_leader_does_not_arm_over_an_overlay() {
+    let mut app = opened(&[]);
+    let before = app.tab;
+
+    app.apply(modified(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    app.apply(modified(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    app.apply(key(KeyCode::Char('1')));
+
+    assert_eq!(app.tab, before, "a leader digit moved the tab under the palette");
+}
+
+/// F20. The arming notice names only keys that exist. It used to print `off`.
+#[test]
+fn the_arming_notice_names_only_bound_keys() {
+    let mut app = opened(&[("interrupt", "off"), ("quit", "off")]);
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    let line = app.notice.as_ref().expect("an arming notice").text.clone();
+    assert!(line.contains("ctrl+c again to quit"), "{line}");
+    assert!(!line.contains("off"), "{line}");
+    assert!(!line.contains("aborts"), "{line}");
+    assert!(!line.contains("quit dialog"), "{line}");
+}
+
+/// F13. The table is the map's own census: every action round-trips through `[keys]`, and
+/// the count is stated so a verb added without a name, a default or a description is a
+/// failure here rather than a hole somebody finds later.
+#[test]
+fn every_action_round_trips_and_the_table_is_complete() {
+    for action in Action::ALL {
+        assert_eq!(Action::parse(action.name()), Some(action), "{}", action.name());
+        assert!(!action.describe().is_empty(), "{}", action.name());
+        assert!(
+            Spec::parse(action.default_spec()).is_ok(),
+            "{}",
+            action.name()
+        );
+    }
+
+    assert_eq!(Action::ALL.len(), 63, "an action arrived without a row here");
+}

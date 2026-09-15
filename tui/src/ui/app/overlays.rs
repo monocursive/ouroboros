@@ -672,7 +672,7 @@ pub enum Overlay {
         options: Vec<(String, Quit)>,
         choice: usize,
     },
-    /// Opened by an `approval_requested` event, or by `a` while one is outstanding.
+    /// Opened by an `approval_requested` event, or by `ctrl+x a` while one is outstanding.
     Approval {
         plane: Plane,
         id: String,
@@ -1993,6 +1993,13 @@ impl App {
         if !remembered {
             return;
         }
+
+        // This `Esc` had a job and did it, so it is not also the first half of `Esc Esc`.
+        // Leaving the arm set cost a third keystroke to leave a session that had text in
+        // it: press one banked the draft *and* armed, press two was eaten by the chord,
+        // and only press three left. A chord's first key keeps its own job — it does not
+        // get to keep somebody else's as well.
+        self.backtrack_arm = None;
 
         self.remember_composer_history();
 

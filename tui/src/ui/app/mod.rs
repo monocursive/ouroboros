@@ -154,6 +154,19 @@ impl Tab {
     }
 }
 
+/// The screen an armed `Action::Cancel` was armed on (`ui-parity` T1).
+///
+/// Three facts, and each of them is a thing the *middle* press of a three-press sequence
+/// could have been for: closing an overlay, moving to another tab, changing session. An
+/// arm that outlived any of them would make the next press quit on a screen nobody
+/// pressed `ctrl+c` twice on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelArm {
+    tab: Tab,
+    open: Option<(Plane, String)>,
+    over_an_overlay: bool,
+}
+
 /// Whether this client started the runtime it is attached to. It decides what the quit
 /// dialog may offer and whether the Logs tab has anything to show.
 #[derive(Debug, Clone)]
@@ -799,6 +812,21 @@ pub struct App {
     /// Set by `Action::Suspend`, drained by the driver, which is the only half of this
     /// that can leave the alternate screen and raise `SIGTSTP`.
     suspend_pending: bool,
+    /// Whether the next frame must draw every cell rather than a diff.
+    ///
+    /// Set by every detour that hands the terminal to something else — `$EDITOR`, the
+    /// transcript viewer, `ctrl+z` — because each of them comes back to a blank alternate
+    /// screen that this client's own buffer does not know is blank. Kept, not consumed,
+    /// when the driver cannot honour it yet: a repaint that is dropped once is a pane that
+    /// stays empty forever.
+    repaint_pending: bool,
+    /// What was on screen when `Action::Cancel` armed the quit window.
+    ///
+    /// The arm is only good for the screen it was made on. A `ctrl+c` whose *first* press
+    /// armed and whose second press closed an overlay that opened in between did
+    /// something with that second press, and letting the arm outlive it would make a
+    /// third press quit when nobody asked twice.
+    ctrl_c_arm_on: Option<CancelArm>,
     /// The armed first half of an `Esc Esc`, and the session it was pressed in.
     ///
     /// The session travels with the arm because the first Escape may have *left* it: on an
@@ -963,6 +991,8 @@ impl App {
             rail_hidden: false,
             // ui-parity T1
             suspend_pending: false,
+            repaint_pending: false,
+            ctrl_c_arm_on: None,
             backtrack_arm: None,
             context: None,
             shell_refusal: None,
@@ -2187,11 +2217,49 @@ impl App {
 
     /// Whether a second `Action::Cancel` inside the window will open the quit dialog.
     ///
-    /// Read by the footer, which is the only place the arm is visible: a key that quits
-    /// on its second press and says nothing about the first is a key that surprises
-    /// somebody once and then is never trusted again.
+    /// Read by the footer — `view::footer` draws `ctrl+c again to quit` from it — because
+    /// a key that quits on its second press and says nothing about the first is a key that
+    /// surprises somebody once and is then never trusted again.
+    ///
+    /// Two conditions, not one. The window is the obvious half; the *screen* is the half
+    /// that was missing. An arm made on an idle session, kept across an overlay opening
+    /// and a tab change, would turn a `ctrl+c` that closed something into the middle press
+    /// of a quit nobody asked for.
     pub fn quit_armed(&self) -> bool {
         self.ctrl_c_until.is_some_and(|until| self.ticks < until)
+            && self.ctrl_c_arm_on.as_ref() == Some(&self.cancel_arm())
+    }
+
+    /// The screen an arm belongs to. Anything here changing is a press that did something.
+    pub(super) fn cancel_arm(&self) -> CancelArm {
+        CancelArm {
+            tab: self.tab,
+            open: self.sessions.open.clone(),
+            over_an_overlay: self.overlay.is_some(),
+        }
+    }
+
+    /// Arms the quit window on the screen that is showing now.
+    pub(super) fn arm_quit(&mut self) {
+        self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
+        self.ctrl_c_arm_on = Some(self.cancel_arm());
+    }
+
+    /// Drops the arm, whatever state it was in.
+    pub(super) fn disarm_quit(&mut self) {
+        self.ctrl_c_until = None;
+        self.ctrl_c_arm_on = None;
+    }
+
+    /// Asks for the next frame to draw every cell. See [`super::force_full_redraw`].
+    pub fn request_repaint(&mut self) {
+        self.repaint_pending = true;
+    }
+
+    /// Whether the driver owes a full redraw, taken once. A caller that cannot honour it
+    /// asks again rather than dropping it.
+    pub fn take_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.repaint_pending)
     }
 
     /// `leader.rail`: hide or show the session rail.

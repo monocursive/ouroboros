@@ -1613,3 +1613,56 @@ fn ctrl_q_over_an_overlay_leaves_the_overlay_alone() {
         app.overlay
     );
 }
+
+/// M2, on the home screen: the grammar that keeps ordinary prose sendable is the same one.
+///
+/// The home is where a refusal is most expensive in both directions — a mistyped verb
+/// starts a session and a refused sentence cannot be started at all.
+#[test]
+fn the_home_screen_sends_prose_that_begins_with_a_slash_word() {
+    let mut app = harness(true);
+
+    type_text(&mut app, "/tmp is full on the build box");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.home_error.is_none(), "{:?}", app.home_error);
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.start"),
+        "an ordinary sentence was refused as a verb"
+    );
+}
+
+/// …and a leading space is the escape hatch for a word that is a verb.
+#[test]
+fn a_leading_space_sends_a_verb_from_the_home_screen_as_text() {
+    let mut app = harness(true);
+
+    type_text(&mut app, " /keys");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+}
+
+/// The refusal that remains names the nearest verbs *and* the way out.
+#[test]
+fn a_mistyped_verb_alone_on_the_home_screen_says_how_to_send_it_anyway() {
+    let mut app = harness(false);
+
+    type_text(&mut app, "/keyq");
+    app.apply(key(KeyCode::Enter));
+
+    let refusal = app.home_error.as_deref().expect("a refusal on the home");
+    assert!(refusal.contains("unknown command /keyq"), "{refusal}");
+    assert!(refusal.contains("/keys"), "{refusal}");
+    assert!(
+        refusal.contains("start the line with a space"),
+        "the refusal is a dead end without this: {refusal}"
+    );
+    assert_eq!(app.home_draft.text(), "/keyq");
+}

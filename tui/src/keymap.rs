@@ -439,7 +439,7 @@ impl Action {
             Self::Leader => "the leader; the verbs below follow it",
             Self::Help => "this page, when the prompt is empty",
             Self::Settings => "settings, when the prompt is empty",
-            Self::Quit => "quit dialog, when nothing is open over the screen",
+            Self::Quit => "quit dialog, when nothing is open; also gates the list tabs' q",
             Self::QuitEmpty => "quit dialog, on an empty prompt",
             Self::LeaderNew => "new session",
             Self::LeaderNewOptions => "session options",
