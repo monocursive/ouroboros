@@ -114,16 +114,20 @@ defmodule Ouroboros.Web.CommandsW3Test do
   # ------------------------------------------------------------------------------------
 
   describe "the session-state half" do
-    test "nothing session-shaped is offered with no session open" do
+    test "no W3 row at all is offered with no session open" do
       offered = ids(assigns(%{open: nil}))
 
-      for id <- all_w3() -- ["runtime.mcp"] do
+      for id <- all_w3() do
         refute id in offered, "#{id} is drawn with no session open"
       end
     end
 
-    test "MCP is the one row that needs no session, because the verb has none to ask about" do
-      assert "runtime.mcp" in ids(assigns(%{open: nil}))
+    test "MCP included, because the panel it opens is a session's" do
+      # W3 fix wave (M3), inverted. `mcp.list` is routed to the node the *session* runs on
+      # and narrowed by the workspace it names, and the panel's own state is keyed by the
+      # open conversation — so with nothing open the row ran and drew nothing at all.
+      refute "runtime.mcp" in ids(assigns(%{open: nil}))
+      assert "runtime.mcp" in ids(assigns())
     end
 
     test "an ended session takes no compaction, no handoff, no rewind and no command" do

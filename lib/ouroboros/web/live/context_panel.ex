@@ -258,7 +258,7 @@ defmodule Ouroboros.Web.Live.ContextPanel do
             </div>
             <div :if={@context.context_state} class="ouro-vital">
               <dt>Measurement</dt>
-              <dd class="ouro-mono">{@context.context_state}</dd>
+              <dd>{word(:context_state, @context.context_state)}</dd>
             </div>
             <div class="ouro-vital">
               <dt>Total tokens</dt>
@@ -270,7 +270,7 @@ defmodule Ouroboros.Web.Live.ContextPanel do
             </div>
             <div class="ouro-vital">
               <dt>Transport</dt>
-              <dd class="ouro-mono">{@context.transport || "not reported"}</dd>
+              <dd>{word(:transport, @context.transport)}</dd>
             </div>
             <div :if={@context.handed_off_from} class="ouro-vital">
               <dt>Handed off from</dt>
@@ -339,6 +339,27 @@ defmodule Ouroboros.Web.Live.ContextPanel do
     </dialog>
     """
   end
+
+  @doc """
+  One wire word as a sentence a reader owes nothing to the protocol to understand.
+
+  W3 fix wave (L8). `context_state` and `transport` reached the template as the runtime
+  spells them — `unmeasured`, `acp` — which is the rule the parity plan's ground rule 6
+  exists for: wire words never reach a template raw. An unknown word is kept verbatim
+  rather than folded into one this build happens to know, because a fifth state is still
+  a state and saying nothing about it would be worse than saying its name.
+  """
+  @spec word(:context_state | :transport, String.t() | nil) :: String.t()
+  def word(_key, nil), do: "not reported"
+
+  def word(:context_state, "unmeasured"),
+    do: "nothing measured yet — no request has been counted"
+
+  def word(:context_state, "measured"), do: "measured by the provider on the last request"
+  def word(:context_state, "compacted"), do: "reset by a compaction; nothing counted since"
+  def word(:transport, "native"), do: "native — this runtime holds the conversation"
+  def word(:transport, "managed"), do: "managed — the provider holds the conversation"
+  def word(_key, said), do: said
 
   @doc "The meter's own words: both halves, one half, or that nobody counted."
   @spec window_label(map()) :: String.t()

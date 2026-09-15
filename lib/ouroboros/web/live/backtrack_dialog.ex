@@ -136,20 +136,24 @@ defmodule Ouroboros.Web.Live.BacktrackDialog do
               >
                 Edit and resend
               </button>
-              <button
-                :if={@can_fork}
-                type="button"
-                class="ouro-quiet-button"
-                phx-click="w3-backtrack-fork"
-                phx-disable-with="Forking…"
-              >
-                Fork
-              </button>
             </span>
           </li>
         </ol>
 
+        <%!-- W3 fix wave (L6). **One** Fork control, because the verb takes a session and
+              no message: a button on every row would be this dialog implying it branches
+              at the row it sits beside, which is the one promise the paragraph above it
+              spends three lines refusing to make. The terminal client has one too. --%>
         <div class="ouro-session-dialog-actions">
+          <button
+            :if={@can_fork}
+            type="button"
+            class="ouro-button-quiet"
+            phx-click="w3-backtrack-fork"
+            phx-disable-with="Forking…"
+          >
+            Fork this session
+          </button>
           <button type="button" class="ouro-button" phx-click="w3-close">Close</button>
         </div>
       </div>

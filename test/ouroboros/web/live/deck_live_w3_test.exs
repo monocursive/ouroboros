@@ -1230,4 +1230,181 @@ defmodule Ouroboros.Web.Live.DeckLiveW3Test do
       refute html =~ ~s(id="ouro-details")
     end
   end
+
+  # ------------------------------------------------------------------------------------
+  # The W3 fix wave
+  # ------------------------------------------------------------------------------------
+
+  describe "the fix wave" do
+    test "M1: an unnamed BEAM is the session's owner machine, never this computer",
+         %{conn: conn} do
+      id = session_id()
+      _row = listed(id, workspace: "/srv/project")
+      _plane = plane(id: id, workspace: "/srv/project")
+
+      view = open_deck(conn, id)
+      html = view |> form("#composer", %{"message" => "!ls"}) |> render_change()
+
+      # The fixture BEAM is `nonode@nohost`, which `Presentation.node_label/2` answers
+      # "this computer" for — the one claim this band exists to deny.
+      refute html =~ "runs this on this computer"
+      assert html =~ "this session"
+      assert html =~ "/srv/project"
+    end
+
+    test "M4: the export dialog links rather than navigating", %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id)
+
+      view = open_deck(conn, id)
+      html = run(view, "conversation.export")
+
+      # A refusal carries no `content-disposition`, so a redirect would replace the deck
+      # with the failure. `download` never navigates and `target` keeps a refusal beside
+      # the page rather than over it.
+      assert html =~ ~s(href="/s/interactive/#{id}/export?format=text")
+      assert html =~ ~s(href="/s/interactive/#{id}/export?format=ndjson")
+      assert html =~ "download"
+      assert html =~ ~s(target="_blank")
+      assert html =~ ~s(rel="noopener")
+      refute html =~ ~s(phx-value-format)
+    end
+
+    test "M4: the palette row asks the browser to click one, and never redirects",
+         %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id)
+
+      view = open_deck(conn, id)
+      run(view, "conversation.export")
+      render_click(view, "w3-export", %{"format" => "text"})
+
+      assert_push_event(view, "ouro-open", %{url: url})
+      assert url == "/s/interactive/#{id}/export?format=text"
+      assert Process.alive?(view.pid)
+    end
+
+    test "L1/L3: the export dialog says which form claims completeness, and the ceiling",
+         %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id)
+
+      view = open_deck(conn, id)
+      html = run(view, "conversation.export")
+
+      # NDJSON deliberately ends with nothing, so "either form says so on its last line"
+      # was a claim about a file that makes none.
+      assert html =~ "The readable form says how"
+      assert html =~ "on its last line"
+      assert html =~ "x-ouroboros-export-extent"
+      assert html =~ "20,000 events"
+    end
+
+    test "L4: an unexpanded details panel carries no wire tree at all", %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id, backlog: Enum.map(1..40, &said(&1, "line #{&1}")))
+
+      view = open_deck(conn, id)
+      html = run(view, "conversation.details")
+
+      # Forty summary rows, and not one `Wire.to_json/1` walk: the tree is derived for the
+      # rows that are open, which on a freshly opened panel is none of them.
+      assert html =~ "line 40"
+      refute html =~ "ouro-details-json"
+      refute html =~ "_struct"
+
+      # And one open row has exactly one.
+      opened = render_click(view, "w3-details-toggle", %{"sequence" => "7"})
+      assert opened =~ "_struct"
+      assert opened |> String.split("ouro-details-json") |> length() == 2
+    end
+
+    test "L6: one Fork control on the backtrack dialog, not one per row", %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id, backlog: [asked(1, "one"), asked(3, "two"), asked(5, "three")])
+
+      view = open_deck(conn, id)
+      dialog = view |> run("conversation.backtrack") |> dialog_html("ouro-backtrack")
+
+      # Three rows, three "Edit and resend" buttons (and the paragraph that names it).
+      assert dialog |> String.split(~s(phx-click="w3-backtrack-edit")) |> length() == 4
+
+      # One Fork, wherever it sits, because the verb takes a session and no message.
+      assert dialog |> String.split(~s(phx-click="w3-backtrack-fork")) |> length() == 2
+    end
+
+    test "L8: the context panel says a wire word in words", %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+
+      _plane =
+        plane(
+          id: id,
+          answers: %{
+            context: [{:ok, %{source: :native, transport: :native, context_state: :unmeasured}}]
+          }
+        )
+
+      view = open_deck(conn, id)
+      html = run(view, "conversation.context")
+
+      assert html =~ "nothing measured yet"
+      assert html =~ "this runtime holds the conversation"
+    end
+
+    test "M3: the MCP row needs a session, because the panel it opens is a session's",
+         %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id)
+
+      {:ok, index, _html} = live(conn, "/")
+      refute "runtime.mcp" in offered_rows(render_hook(index, "palette-open", %{}))
+
+      view = open_deck(conn, id)
+      assert "runtime.mcp" in offered_rows(render_hook(view, "palette-open", %{}))
+    end
+
+    test "survivor #8: a `!` on an ended session sends nothing at operate scope",
+         %{conn: conn} do
+      id = session_id()
+      _row = listed(id, status: :closed)
+      _plane = plane(id: id, status: :closed)
+
+      view = open_deck(conn, id)
+      # The composer is not drawn at all, so this event could only have been hand-made.
+      refute render(view) =~ ~s(id="composer")
+
+      render_submit(view, "send", %{"message" => "!echo forged"})
+      refute_receive {:exec_planned, _command}, 300
+    end
+
+    test "survivor #23: a backtrack index outside the drawn list puts nothing in the draft",
+         %{conn: conn} do
+      id = session_id()
+      _row = listed(id)
+      _plane = plane(id: id, backlog: [asked(1, "the only message")])
+
+      view = open_deck(conn, id)
+      run(view, "conversation.backtrack")
+
+      # `phx-value-sequence` is browser input, and a sequence this dialog never drew is a
+      # message nobody was offered. Nothing lands in the box.
+      html = render_click(view, "w3-backtrack-edit", %{"sequence" => "9999"})
+      refute html =~ "Nothing earlier was removed"
+
+      html = render_click(view, "w3-backtrack-edit", %{"sequence" => "2"})
+      refute html =~ "Nothing earlier was removed"
+
+      # The one that was drawn still works.
+      html = render_click(view, "w3-backtrack-edit", %{"sequence" => "1"})
+      assert html =~ "the only message"
+      assert html =~ "Nothing earlier was removed"
+    end
+  end
 end

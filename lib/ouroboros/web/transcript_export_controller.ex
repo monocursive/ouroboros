@@ -15,6 +15,15 @@ defmodule Ouroboros.Web.TranscriptExportController do
   the answer, which is what gives it the same floor inference, the same dividers and the
   same projection the page draws from. One reading, two renderings.
 
+  ## Held in memory, and how much of it
+
+  W3 fix wave (L3). The whole body is built before a byte is sent — `send_resp/3`, not
+  `send_chunked/2` — so at the ceiling below this is roughly **ten megabytes** of iodata
+  in this connection's process, once. That is the trade this route makes on purpose: one
+  reading of the session produces both forms, the floor inference is the `Watch`'s own,
+  and nothing is written to disk. A session past the ceiling does not grow it; the export
+  stops and says it stopped.
+
   ## The bound, stated
 
   `interactive.replay` answers at most `Ouroboros.Gateway.Methods.Contract.replay_limit/0`
@@ -232,12 +241,23 @@ defmodule Ouroboros.Web.TranscriptExportController do
     ]
   end
 
+  # W3 fix wave (L2). **ASCII.** This is a header value, and a header is bytes: the
+  # interpunct and the en dash the text form uses are two- and three-byte UTF-8 sequences
+  # that a reader following RFC 9110's `field-value` grammar is entitled to refuse or
+  # mangle. The file's own prose keeps its typography; the header does not need it.
   defp extent(watch, truncated?) do
-    "#{Watch.size(watch)} event(s)#{range(watch)}" <>
+    "#{Watch.size(watch)} events#{ascii_range(watch)}" <>
       if(Watch.floor(watch) > 0,
         do: "; nothing at or below #{Watch.floor(watch)} is in the file",
         else: ""
       ) <> if(truncated?, do: "; cut at this page's own ceiling", else: "")
+  end
+
+  defp ascii_range(watch) do
+    case {Watch.floor(watch), Watch.newest(watch)} do
+      {_floor, 0} -> ""
+      {floor, newest} -> "; sequences #{floor + 1}-#{newest}"
+    end
   end
 
   defp range(watch) do

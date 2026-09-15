@@ -177,15 +177,18 @@ defmodule Ouroboros.Web.TranscriptExportControllerTest do
       assert get_resp_header(conn, "cache-control") == ["no-store"]
     end
 
-    test "and the extent travels in a header, for either form", %{conn: conn} do
+    test "and the extent travels in a header, for either form, in ASCII", %{conn: conn} do
       id = session_id()
       _plane = plane(id: id, events: [said(1, "hi"), said(2, "there")])
 
       for format <- ~w(text ndjson) do
         conn = export(conn, id, format)
         assert [extent] = get_resp_header(conn, "x-ouroboros-export-extent")
-        assert extent =~ "2 event(s)"
-        assert extent =~ "sequences 1–2"
+        assert extent == "2 events; sequences 1-2"
+
+        # W3 fix wave (L2). A header is bytes, and the typography the file's own prose
+        # uses is two- and three-byte UTF-8 a header reader may refuse or mangle.
+        assert extent == for(<<c <- extent>>, c < 128, into: "", do: <<c>>)
       end
     end
   end

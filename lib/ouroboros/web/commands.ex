@@ -249,10 +249,11 @@ defmodule Ouroboros.Web.Commands do
       command("runtime.status", nil, &serves?(&1, "runtime.status")),
       command("runtime.audit", nil, &serves?(&1, "audit.status")),
 
-      # ui-parity W3. No session state in the gate because the verb has none to ask
-      # about: with a session open it is routed to that session's node, and without one
-      # it answers for this runtime, which is the only other machine there is to mean.
-      command("runtime.mcp", nil, &serves?(&1, "mcp.list")),
+      # ui-parity W3. Routed to the node the *session* runs on and narrowed by the
+      # workspace it names, so the row asks for one — W3's fix wave found it drawn on the
+      # empty deck, where `Ouroboros.Web.Live.DeckLive`'s panel state has no subject and
+      # the row therefore ran and drew nothing.
+      command("runtime.mcp", nil, &(open?(&1) and serves?(&1, "mcp.list"))),
 
       # ------------------------------------------------------------------- Client
       command("client.settings", nil, fn _assigns -> true end),

@@ -321,6 +321,27 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp close_w3(socket), do: put_w3(socket, panel: nil, error: nil, notice: nil)
 
+  # W3 fix wave (M5). A confirmation is a question awaiting an answer and **nothing acts
+  # behind one** — the rule `open_w3/2` and `run_command/2` already hold, applied to the
+  # handlers a hand-made `phx-click` reaches directly. It is not only that a verb would
+  # run unseen: a handoff patches the page to the child, so the dialog underneath would be
+  # left asking about a session the operator is no longer looking at.
+  defp acting(%{assigns: %{session_action: action}} = socket, _fun) when not is_nil(action),
+    do: {:noreply, socket}
+
+  defp acting(socket, fun), do: {:noreply, fun.(socket)}
+
+  # W3 fix wave (L5). The meter follows the conversation: `context_used` moves with every
+  # turn, so a reading taken once and kept forever is a number that was true and is not.
+  # Only where a reading already exists — a page that never asked is not made to ask by a
+  # turn finishing — and only on the boundary, which is one call per turn rather than one
+  # per delta.
+  defp refresh_reading(socket, event) do
+    if Map.get(event, :type) == :turn_completed and not is_nil(w3(socket.assigns).reading),
+      do: read_context(socket, false),
+      else: socket
+  end
+
   # A `phx-value-sequence` arrives as a string and names an event position. Parsed here,
   # once, so no handler below has to decide what a browser meant by `"12abc"`.
   defp with_sequence(socket, sequence, fun) do
@@ -392,15 +413,25 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # ------------------------------------------------------------------ W3.2 Export
 
-  # A download is its own request, so this is a location rather than a call: the
-  # controller reads the session through the gateway under the same cookie. `external:`
-  # because the target is not a LiveView route; `content-disposition: attachment` is what
-  # keeps the browser on this page while it saves the file.
-  defp export_to(%{assigns: %{open: {plane, id}}} = socket, format)
-       when format in ~w(text ndjson),
-       do: redirect(socket, external: Route.session(plane, id) <> "/export?format=" <> format)
+  # A download is its own request, so this names a URL rather than calling anything.
+  #
+  # W3 fix wave (M4). **Not a redirect.** `redirect(external: …)` is `window.location`,
+  # and the one answer that carries no `content-disposition` is a refusal — a 404 for a
+  # session this node no longer holds, a 502 for a runtime that could not answer — so the
+  # operator was navigated out of the deck by the failure case and lost the page they were
+  # reading. The browser opens an anchor instead: `ouro-open` clicks one it made itself,
+  # `target="_blank"` so a refusal lands beside the deck rather than over it.
+  defp export_url(%{assigns: %{open: {plane, id}}}, format) when format in ~w(text ndjson),
+    do: Route.session(plane, id) <> "/export?format=" <> format
 
-  defp export_to(socket, _format), do: socket
+  defp export_url(_closed, _format), do: nil
+
+  defp export_to(socket, format) do
+    case export_url(socket, format) do
+      nil -> socket
+      url -> push_event(socket, "ouro-open", %{url: url})
+    end
+  end
 
   # ------------------------------------------------------- W3.3 Backtrack and fork
 
@@ -492,6 +523,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     with true <- Commands.available?(socket.assigns, "conversation.rewind"),
          true <- Call.available?(socket.assigns.scope, "interactive.rewind"),
+         # W3 fix wave. The points survive a close so reopening does not re-ask the
+         # runtime, but the *verb* belongs to the dialog that states the warning: a
+         # confirm with no dialog on screen is a confirmation nobody was ever shown.
+         true <- state.panel == :rewind,
          true <- state.screen == :confirm,
          point when not is_nil(point) <- Enum.at(state.points, state.choice),
          true <- RewindDialog.what?(state.what) do
@@ -584,14 +619,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
         {:ok, answer} ->
           opened_child(socket, answer, id, "handed off from")
 
-        # Not a failure. The ceiling fired and the child may well exist under the id this
-        # page minted, so it is opened and the line says the runtime did not confirm it.
-        {:error, _code, message, %{"outcome" => "unknown"}} ->
-          open_named_child(
-            socket,
-            child,
-            "#{message} — opening #{child}, which is the id this page asked for."
-          )
+        # W3 fix wave (H1). **The code decides, not the marker.** `outcome: "unknown"`
+        # travels on two different answers: a ceiling that fired *after* the call was
+        # dispatched, where the child may well exist under the id this page minted — and
+        # an `owner_unavailable`, where the owning machine was offline and nothing was
+        # dispatched at all (`gateway/methods/safe.ex:100-114`). Opening a minted child
+        # for the second is this page inventing a session. Only the timeout code opens
+        # it, which is the rule `tui/src/ui/app/answers.rs:781-790` reads.
+        {:error, code, message, %{"outcome" => "unknown"}} = refusal ->
+          if code == Methods.code(:upstream_timeout) do
+            open_named_child(
+              socket,
+              child,
+              "#{message} — opening #{child}, which is the id this page asked for."
+            )
+          else
+            w3_error(socket, refusal)
+          end
 
         refusal ->
           w3_error(socket, refusal)
@@ -715,12 +759,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
   workspace the agent is editing (`tui/src/ui/app/native.rs:548-562`). Where the runtime
   named neither, it says that rather than naming this browser's machine.
   """
+  # The words for a machine this runtime never named. Said rather than "this computer",
+  # which is what `Presentation.node_label/2` answers for an unnamed BEAM and the one
+  # thing a `!` band must not claim.
+  @owner_machine "this session's owner machine"
+
   @spec shell_where(term(), term(), list()) :: String.t()
   def shell_where(row, info, roster \\ []) do
+    # W3 fix wave (M1). `node_label/2` answers "this computer" for an unnamed BEAM, which
+    # is the whole of what this sentence exists to deny: `!` runs *there*, in the session's
+    # workspace, not in the browser. Treated as a sentinel and replaced with the terminal
+    # client's own fallback (`App::shell_where`, `tui/src/ui/app/native.rs:548-562`).
     node =
       case row do
-        %Rail.Row{node: node} when not is_nil(node) -> Presentation.node_label(node, roster)
-        _absent -> "this session's owner machine"
+        %Rail.Row{node: node} when not is_nil(node) -> owner_words(node, roster)
+        _absent -> @owner_machine
       end
 
     workspace =
@@ -781,6 +834,14 @@ defmodule Ouroboros.Web.Live.DeckLive do
     }
   end
 
+  defp owner_words(node, roster) do
+    said = Presentation.node_label(node, roster)
+
+    if said == Presentation.this_computer() or said == "not reported",
+      do: @owner_machine,
+      else: said
+  end
+
   defp elapsed_word(ms) when ms < 1_000, do: "#{ms}ms"
   defp elapsed_word(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
   defp elapsed_word(ms), do: "#{div(ms, 60_000)}m #{rem(div(ms, 1_000), 60)}s"
@@ -801,7 +862,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
         |> put_w3(shell: nil)
 
       detail ->
-        workspace = detail["workspace"] || session_workspace(socket)
+        # W3 fix wave (L7). The session's own workspace first and the payload's as the
+        # fallback, which is the order the terminal client reads them in
+        # (`tui/src/ui/app/native.rs:640-645`): the refusal describes an attempt, and the
+        # session is what the rule would be scoped to.
+        workspace = session_workspace(socket) || detail["workspace"]
 
         {rule, missing} =
           Transcript.suggested_rule(detail["suggested_rule"], socket.assigns.methods, workspace)
@@ -938,7 +1003,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
       # layer with nothing listening for its `cancel`, so `Esc` stops working. The palette,
       # the shortcut sheet and a confirmation all outrank these.
       blocked:
-        not is_nil(assigns.palette) or assigns.shortcuts? or not is_nil(assigns.session_action)
+        not is_nil(assigns.palette) or assigns.shortcuts? or not is_nil(assigns.session_action),
+      # W3 fix wave (M4). The dialog links rather than pushes: a refusal carries no
+      # `content-disposition`, and a redirect would have taken the deck with it.
+      text_url: export_url(%{assigns: assigns}, "text"),
+      ndjson_url: export_url(%{assigns: assigns}, "ndjson")
     }
   end
 
@@ -956,6 +1025,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :can_resend, :boolean, default: false
   attr :machines, :list, default: []
   attr :blocked, :boolean, default: false
+  attr :text_url, :any, default: nil
+  attr :ndjson_url, :any, default: nil
 
   def w3_panels(assigns) do
     ~H"""
@@ -1001,7 +1072,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
       <VerbDialogs.compact :if={not @blocked and @w3.panel == :compact} error={@w3.error} />
       <VerbDialogs.handoff :if={not @blocked and @w3.panel == :handoff} error={@w3.error} />
-      <VerbDialogs.export :if={not @blocked and @w3.panel == :export} />
+      <VerbDialogs.export
+        :if={not @blocked and @w3.panel == :export}
+        text_url={@text_url}
+        ndjson_url={@ndjson_url}
+      />
     </div>
     """
   end
@@ -1444,16 +1519,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # `phx-value-format` is browser input, and a row that navigated nowhere while dismissing
   # the dialog would look like a download that failed silently.
   def handle_event("w3-export", %{"format" => format}, socket) do
-    if format in ["text", "ndjson"] and
-         Commands.available?(socket.assigns, "conversation.export"),
-       do: {:noreply, socket |> close_w3() |> export_to(format)},
-       else: {:noreply, socket}
+    acting(socket, fn socket ->
+      if format in ["text", "ndjson"] and
+           Commands.available?(socket.assigns, "conversation.export"),
+         do: socket |> close_w3() |> export_to(format),
+         else: socket
+    end)
   end
 
   def handle_event("w3-backtrack-edit", %{"sequence" => sequence}, socket),
-    do: {:noreply, with_sequence(socket, sequence, &backtrack_edit/2)}
+    do: acting(socket, fn socket -> with_sequence(socket, sequence, &backtrack_edit/2) end)
 
-  def handle_event("w3-backtrack-fork", _params, socket), do: {:noreply, fork(socket)}
+  def handle_event("w3-backtrack-fork", _params, socket), do: acting(socket, &fork/1)
 
   def handle_event("w3-rewind-pick", %{"choice" => choice}, socket) do
     case Integer.parse(to_string(choice)) do
@@ -1481,16 +1558,16 @@ defmodule Ouroboros.Web.Live.DeckLive do
     do: {:noreply, put_w3(socket, screen: :choose, error: nil)}
 
   def handle_event("w3-rewind-confirm", _params, socket),
-    do: {:noreply, rewind_confirm(socket)}
+    do: acting(socket, &rewind_confirm/1)
 
   def handle_event("w3-compact", params, socket),
-    do: {:noreply, compact(socket, Map.get(params, "focus", ""))}
+    do: acting(socket, &compact(&1, Map.get(params, "focus", "")))
 
   def handle_event("w3-handoff", params, socket),
-    do: {:noreply, handoff(socket, Map.get(params, "prompt", ""))}
+    do: acting(socket, &handoff(&1, Map.get(params, "prompt", "")))
 
   def handle_event("w3-shell-remember", _params, socket),
-    do: {:noreply, remember_shell_rule(socket)}
+    do: acting(socket, &remember_shell_rule/1)
 
   def handle_event("w3-shell-dismiss", _params, socket),
     do: {:noreply, put_w3(socket, shell: nil)}
@@ -2209,6 +2286,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
     socket
     |> update(:watch, &Watch.absorb(&1, event))
     |> schedule_flush()
+    # ui-parity W3 fix wave (L5). One `interactive.context` per completed turn, and only
+    # where this page has already read one: a meter pinned to the reading taken twenty
+    # turns ago is a measurement presented as current.
+    |> refresh_reading(event)
   end
 
   # An event for a session this view is no longer reading. It arrives because unsubscribe

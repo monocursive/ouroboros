@@ -810,6 +810,28 @@
     if (target.focus) target.focus();
   });
 
+  // ui-parity W3 — a download the palette asked for.
+  //
+  // An anchor the browser makes and clicks, never `window.location`. The export route
+  // answers a refusal — a 404 for a session this node no longer holds, a 502 for a runtime
+  // that could not answer — with no `content-disposition` on it, and a navigation would
+  // then take the deck away and replace it with the failure. `download` keeps a successful
+  // export from navigating at all; `target="_blank"` puts a refusal in a tab of its own.
+  window.addEventListener("phx:ouro-open", function (event) {
+    var url = (event.detail || {}).url;
+    if (typeof url !== "string" || url === "" || url.charAt(0) !== "/") return;
+
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = "";
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  });
+
   // The two chrome toggles have no server state behind them, so a palette row for either
   // is a request to press the button that is already on the page.
   window.addEventListener("phx:ouro-chrome", function (event) {

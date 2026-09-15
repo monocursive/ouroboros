@@ -381,11 +381,12 @@ defmodule Ouroboros.Web.Live.Composer do
           </div>
         </form>
 
-        <%!-- ui-parity W3.10. The disclosure stands where *either* half of the pair does:
-              a transport may refuse every configuration change and still be re-pointed at
-              a model, and W2 already reads the two keys separately. --%>
+        <%!-- ui-parity W3.10. The disclosure stands where *any* of the three controls
+              under it does: a transport may refuse every configuration change and still be
+              re-pointed at a model, and the per-turn effort rides the send envelope and
+              needs neither capability (W3 fix wave, M6). --%>
         <details
-          :if={@can_configure or @can_model}
+          :if={@can_configure or @can_model or @can_send}
           class="ouro-composer-settings"
           data-ouro-disclosure={@draft_key}
         >
@@ -414,7 +415,11 @@ defmodule Ouroboros.Web.Live.Composer do
               warn={false}
             />
 
-            <.next_turn_effort current={@next_effort} choices={@efforts} />
+            <%!-- ui-parity W3 fix wave (M6). `reasoning_effort` inside `send_message`'s
+                  own envelope, not `interactive.configure`: the transport's configuration
+                  capabilities have nothing to say about it, and the one thing it does need
+                  is a send to ride on. --%>
+            <.next_turn_effort :if={@can_send} current={@next_effort} choices={@efforts} />
 
             <.model_picker
               :if={@can_model}

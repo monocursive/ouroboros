@@ -112,9 +112,17 @@ defmodule Ouroboros.Web.Live.VerbDialogs do
   @doc """
   Which of the two exports to download.
 
-  Two buttons rather than a picker, because there is no state to hold: the choice *is* the
-  action, and what each one contains differs enough to be worth a sentence each.
+  Two links rather than two buttons. W3 fix wave (M4): a `phx-click` that answered with
+  `redirect(external: …)` is `window.location`, and the one answer with no
+  `content-disposition` on it is a refusal — so the failure case navigated the operator
+  out of the deck they were reading. An `<a download>` never navigates, and
+  `target="_blank"` puts a refusal beside the page rather than over it.
+
+  `url` is `nil` where no session is open, and then there is nothing to link to.
   """
+  attr :text_url, :any, default: nil
+  attr :ndjson_url, :any, default: nil
+
   def export(assigns) do
     ~H"""
     <dialog
@@ -127,32 +135,46 @@ defmodule Ouroboros.Web.Live.VerbDialogs do
     >
       <div class="ouro-session-dialog-form">
         <h2 id="ouro-export-title">Export this transcript</h2>
+        <%!-- W3 fix wave (L1, L3). The text form ends with a line saying how complete it
+              is; the events form deliberately ends with nothing, because whether history
+              was pruned is a fact about the file rather than a record in it. The extent
+              travels in a response header either way, and the ceiling is stated because a
+              file cut at it is not the whole session. --%>
         <p>
-          Either form holds only what this runtime still retains, and the file says so on its
-          last line.
+          Either form holds only what this runtime still retains. The readable form says how
+          complete it is on its last line; for either, the response header
+          <span class="ouro-mono">x-ouroboros-export-extent</span>
+          says how much is in the file. At most 20,000 events, which is this page's own
+          ceiling and roughly ten megabytes.
         </p>
 
         <div class="ouro-export-choices">
-          <button
-            type="button"
+          <a
+            :if={@text_url}
             class="ouro-button"
-            phx-click="w3-export"
-            phx-value-format="text"
+            href={@text_url}
+            download
+            target="_blank"
+            rel="noopener"
+            phx-click="w3-close"
           >
             Readable text
-          </button>
+          </a>
           <p class="ouro-quiet">
             The conversation as it reads, with the screen's own folding and caps removed.
           </p>
 
-          <button
-            type="button"
+          <a
+            :if={@ndjson_url}
             class="ouro-button-quiet"
-            phx-click="w3-export"
-            phx-value-format="ndjson"
+            href={@ndjson_url}
+            download
+            target="_blank"
+            rel="noopener"
+            phx-click="w3-close"
           >
             The events (NDJSON)
-          </button>
+          </a>
           <p class="ouro-quiet">
             One event object per line, exactly as the runtime framed them — nothing added and
             nothing reshaped, wire markers included.

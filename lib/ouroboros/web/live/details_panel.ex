@@ -25,6 +25,14 @@ defmodule Ouroboros.Web.Live.DetailsPanel do
   event it absorbed, because the fetched copy is a fact about one reader's screen and not
   about the session's history (`tui/src/ui/details.rs:17-31`).
 
+  ## A row costs a line; only an open one costs a tree
+
+  W3 fix wave (L4). `Wire.to_json/1` walks a whole event and bounds every string leaf in
+  it, and a session holding two thousand of them paid that on **every render** — a poll
+  every three seconds, a keystroke in the palette — to draw a summary line for each and a
+  tree for none. The summary is cheap and is built for every row; the object is derived
+  only for the rows that are open, which is what `expanded` already said.
+
   ## Dividers are never hidden
 
   A floor, a gap, a note and the end-of-stream marker are part of the ledger: they say
@@ -45,7 +53,12 @@ defmodule Ouroboros.Web.Live.DetailsPanel do
   # (`tui/src/ui/details.rs:57`).
   @summary_cells 120
 
-  @typedoc "One drawn row: an event, or one of the transcript's own dividers."
+  @typedoc """
+  One drawn row: an event, or one of the transcript's own dividers.
+
+  `object` is `nil` on a collapsed row and the wire tree on an open one — see the
+  moduledoc for why it is not built for every row.
+  """
   @type row ::
           {:event,
            %{
@@ -55,7 +68,7 @@ defmodule Ouroboros.Web.Live.DetailsPanel do
              expanded: boolean(),
              fetched: boolean(),
              excerpted: boolean(),
-             object: term()
+             object: term() | nil
            }}
           | {:divider, String.t()}
 
@@ -84,7 +97,10 @@ defmodule Ouroboros.Web.Live.DetailsPanel do
     sequence = Map.get(event, :sequence)
     open? = MapSet.member?(expanded, sequence)
     detail = Map.get(fetched, sequence)
-    object = detail || Wire.to_json(event)
+
+    # Only an open row pays for its tree. A collapsed one is a sequence, a kind and a
+    # line, all of which come off the event as it already is.
+    object = if open?, do: detail || Wire.to_json(event)
 
     {:event,
      %{
@@ -93,7 +109,7 @@ defmodule Ouroboros.Web.Live.DetailsPanel do
        summary: event |> summary() |> one_line() |> truncate(@summary_cells),
        expanded: open?,
        fetched: not is_nil(detail),
-       excerpted: excerpted?(object),
+       excerpted: open? and excerpted?(object),
        object: object
      }}
   end
