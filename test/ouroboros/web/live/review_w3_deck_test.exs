@@ -477,7 +477,14 @@ defmodule Ouroboros.Web.Live.ReviewW3DeckTest do
       # computer" for a BEAM nobody named, which is exactly the claim this band exists to
       # deny, so an unnamed owner is said in the terminal client's own words instead.
       refute where_line(html) =~ "this computer"
-      assert where_line(html) =~ "this session"
+
+      if node() == :nonode@nohost do
+        assert where_line(html) =~ "this session"
+      else
+        # A named BEAM is the owner's own label, never the raw `name@host`.
+        refute where_line(html) =~ to_string(node())
+        assert where_line(html) =~ "runs this on"
+      end
     end
   end
 

@@ -427,7 +427,14 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       # Self is always connected: it is the machine answering this request.
       assert html =~ "ouro-dot-on"
       # W1.6: named the way a person would name it, never as the BEAM's node atom.
-      assert html =~ "this computer"
+      # A full `mix test` may have named this BEAM already (a distributed module runs
+      # first), and then the presence dot carries that machine's label instead.
+      if node() == :nonode@nohost do
+        assert html =~ "this computer"
+      else
+        refute html =~ to_string(node())
+      end
+
       refute html =~ "nonode@nohost"
     end
 

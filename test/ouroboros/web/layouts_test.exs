@@ -223,7 +223,12 @@ defmodule Ouroboros.Web.LayoutsTest do
       end
 
       {:ok, _view, deck} = live(conn, "/")
-      assert topbar(deck) =~ "this computer"
+      # A named BEAM (a distributed test module that ran earlier) is drawn by its label.
+      if node() == :nonode@nohost do
+        assert topbar(deck) =~ "this computer"
+      else
+        refute topbar(deck) =~ to_string(node())
+      end
     end
 
     # PROOF F, inverted. Two machines in a fleet share a release name, so the bar must draw

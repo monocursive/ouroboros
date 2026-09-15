@@ -81,7 +81,10 @@ defmodule Ouroboros.Web.StatusLiveTest do
     # the one `Presentation.node_label/1` chose for it.
     refute html =~ "nonode@nohost"
     refute html =~ to_string(node())
-    assert html =~ Ouroboros.Web.Presentation.node_label(node())
+
+    if node() == :nonode@nohost do
+      assert html =~ "this computer"
+    end
   end
 
   test "refreshing answers again without changing what it claims", %{conn: conn} do

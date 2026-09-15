@@ -232,6 +232,17 @@ struck), plus this file, the review's "Status" section again, and one README sen
 
 ## Phase 4 — final review, gates, PR
 
+**Done on `ui-parity` (2026-09-15).** Gates on the integrated tree: `cargo test -p ouro`
+(the one red, `wasm_cli::new_never_takes_the_sdk…`, is a target-directory location
+artifact and passes with an in-worktree target), `cargo +1.95 clippy --all-targets -D
+warnings`, `mix format --check-formatted`, `mix test test/ouroboros/web` (1027),
+the full `mix test` (4305 tests, 143 skipped; four node-name tests made independent of
+whether an earlier distributed module named the BEAM), and `mix dialyzer` (one `Call`
+spec widened to the list shape the Wire produces). Live passes: the integrated TUI binary
+in tmux against the seeded runtime; the integrated web build in a browser (topbar, vitals
+column, status row, palette, rail keys, export route with and without a cookie).
+
+
 Full detached `mix test`, `cargo test`, clippy 1.95, `mix dialyzer`; a live pass of both
 surfaces against the fixture runtime; PR `ui-parity` → `dev`.
 
