@@ -352,7 +352,7 @@ defmodule Ouroboros.Web.Live.Composer do
                 phx-click="interrupt"
                 data-ouro-interrupt
               >
-                Interrupt <kbd>esc</kbd>
+                Interrupt <kbd aria-hidden="true">esc</kbd>
               </button>
 
               <button
@@ -375,7 +375,7 @@ defmodule Ouroboros.Web.Live.Composer do
                 disabled={String.trim(@draft) == ""}
                 phx-disable-with="Sending…"
               >
-                {if @queues?, do: "Queue", else: "Send"} <kbd>⏎</kbd>
+                {if @queues?, do: "Queue", else: "Send"} <kbd aria-hidden="true">⏎</kbd>
               </button>
             </div>
           </div>

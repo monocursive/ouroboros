@@ -397,6 +397,18 @@
 
     mounted: function () {
       this.loadDraft();
+      this.handleEvent("draft-replace", function (event) {
+        if (event.key !== this.key || typeof event.text !== "string") return;
+        // Backtrack explicitly replaces the draft, including this hook's local copy.
+        // It is not a send acknowledgement and must survive the next LiveView patch.
+        this.draft = event.text;
+        this.el.value = this.draft;
+        this.saveDraft();
+        this.autosize();
+        this.syncSend();
+        this.el.focus();
+        this.el.setSelectionRange(this.draft.length, this.draft.length);
+      }.bind(this));
       this.handleEvent("draft-sent", function (event) {
         if (event.key !== this.key) return;
         // A slow acknowledgement must not clear words typed after the submitted draft.
@@ -531,6 +543,24 @@
 
     focusIfInvalid: function () {
       if (this.el.getAttribute("aria-invalid") === "true") this.el.focus();
+    }
+  };
+
+  // The server owns selection; the browser keeps that row visible without moving the
+  // caret out of the search box. The list's selected-id attribute also changes when
+  // filtering resets the selection, so both paths run this hook after the patch.
+  var PaletteSelection = {
+    mounted: function () {
+      this.revealSelection();
+    },
+
+    updated: function () {
+      this.revealSelection();
+    },
+
+    revealSelection: function () {
+      var selected = this.el.querySelector('[aria-selected="true"]');
+      if (selected) selected.scrollIntoView({ block: "nearest", inline: "nearest" });
     }
   };
 
@@ -892,6 +922,7 @@
       ElapsedTimer: ElapsedTimer,
       FocusInvalid: FocusInvalid,
       Modal: Modal,
+      PaletteSelection: PaletteSelection,
       // ui-parity W2
       Clipboard: Clipboard,
       Keys: Keys

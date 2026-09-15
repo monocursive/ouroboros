@@ -402,6 +402,9 @@ defmodule Ouroboros.Web.Live.DeckLiveW3Test do
 
       assert html =~ "the earlier message"
       assert html =~ "Nothing earlier was removed"
+      assert_push_event(view, "draft-replace", %{key: key, text: "the earlier message"})
+      assert is_binary(key) and key != ""
+      refute_push_event(view, "draft-sent", %{})
       refute_receive {:unexpected, _message}, 200
     end
 

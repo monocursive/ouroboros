@@ -216,13 +216,18 @@ impl App {
         }
     }
 
-    /// Whether `key` is the interrupt, and there is a turn for it to interrupt.
+    /// Whether `key` interrupts a turn in the visible session.
     ///
-    /// Two conditions, both necessary. The binding is what makes the map the authority;
-    /// the running turn is what keeps the other meanings of `Esc` — closing a completion
+    /// The binding is what makes the map the authority; the running turn is what keeps
+    /// the other meanings of `Esc` — closing a completion
     /// menu, arming `Esc Esc`, leaving an idle session — on `Esc` where they belong.
     fn interrupt_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        if !self.keymap.hits(Action::Interrupt, key) || !self.turn_running() {
+        // Runtime tabs retain the open session in the background. Their Escape belongs
+        // to navigation, not to the turn that happens to be running behind them.
+        if self.tab != Tab::Sessions
+            || !self.keymap.hits(Action::Interrupt, key)
+            || !self.turn_running()
+        {
             return false;
         }
 

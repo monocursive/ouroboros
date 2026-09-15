@@ -101,7 +101,11 @@ defmodule Ouroboros.Web.Live.Palette do
           class="ouro-palette-query"
           placeholder="Search commands"
           aria-label="Search commands"
+          role="combobox"
+          aria-expanded="true"
+          aria-autocomplete="list"
           aria-controls="ouro-palette-list"
+          aria-activedescendant={@selected && "ouro-palette-row-#{@selected}"}
           autocomplete="off"
           phx-debounce="120"
           autofocus
@@ -114,7 +118,14 @@ defmodule Ouroboros.Web.Live.Palette do
         Nothing here matches, and this list only offers what this runtime can actually run.
       </p>
 
-      <div id="ouro-palette-list" class="ouro-palette-list" role="listbox" aria-label="Commands">
+      <div
+        id="ouro-palette-list"
+        class="ouro-palette-list"
+        role="listbox"
+        aria-label="Commands"
+        phx-hook="PaletteSelection"
+        data-selected-id={@selected}
+      >
         <div :for={{group, rows} <- @grouped} class="ouro-palette-section">
           <p class="ouro-palette-group" role="presentation">{Commands.group_label(group)}</p>
           <button

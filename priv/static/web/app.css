@@ -4070,18 +4070,19 @@ body .ouro-gate {
   body .ouro-settings-managed {
     justify-self: start;
   }
-  .ouro-palette {
+  body .ouro-palette {
     inset: 4vh auto auto 50%;
     max-height: 88vh;
   }
 
-  .ouro-shortcut-row {
+  body .ouro-shortcut-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
   }
 
-  /* No hover on a touch screen, so the copy controls are simply there. */
-  .ouro-cell-actions {
+  /* No hover on a touch screen, so the copy controls are simply there. Qualify these
+     overrides to outrank the W2 component defaults declared later in the file. */
+  body .ouro-cell-actions {
     opacity: 1;
   }
 }
@@ -4125,7 +4126,7 @@ body .ouro-gate {
     animation: none;
   }
 
-  .ouro-cell-actions {
+  body .ouro-cell-actions {
     opacity: 1;
     transition: none;
   }

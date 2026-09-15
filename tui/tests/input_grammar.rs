@@ -1607,6 +1607,26 @@ fn the_default_interrupt_key_still_interrupts() {
     assert_eq!(interrupts(&mut app), 1);
 }
 
+#[test]
+fn escape_returns_from_runtime_tabs_without_interrupting_the_open_turn() {
+    use ouro::ui::app::Tab;
+
+    for (digit, tab) in [('1', Tab::Dashboard), ('3', Tab::Upgrade), ('4', Tab::Logs)] {
+        let mut app = opened("running", steering_capabilities(), Vec::new());
+        compose(&mut app);
+        type_text(&mut app, "a draft to keep");
+        leader(&mut app, digit);
+        assert_eq!(app.tab, tab);
+        app.drain();
+
+        app.apply(key(KeyCode::Esc));
+
+        assert_eq!(app.tab, Tab::Sessions, "Escape should leave {tab:?}");
+        assert_eq!(interrupts(&mut app), 0, "Escape interrupted from {tab:?}");
+        assert_eq!(draft(&app), "a draft to keep");
+    }
+}
+
 /// `esc`'s other meanings stay on `esc` when the interrupt moves away. The turn is
 /// running and the draft has text, so before T1.3 this key interrupted; now it is the
 /// draft's.

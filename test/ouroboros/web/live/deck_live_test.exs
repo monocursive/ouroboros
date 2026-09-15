@@ -3021,13 +3021,13 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       {:ok, view, html} = live(conn, "/s/interactive/#{id}")
 
-      assert html =~ "<kbd>⏎</kbd>"
+      assert has_element?(view, "[data-ouro-send] kbd[aria-hidden=true]", "⏎")
       assert html =~ "<kbd>⌘K</kbd>"
 
       FakePlane.emit(pid, event(1, :turn_started, %{}))
       working = flush(view)
 
-      assert working =~ "<kbd>esc</kbd>"
+      assert has_element?(view, "[data-ouro-interrupt] kbd[aria-hidden=true]", "esc")
       assert working =~ "data-ouro-interrupt"
     end
   end

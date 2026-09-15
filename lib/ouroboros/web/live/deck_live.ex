@@ -457,7 +457,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         if Commands.resendable?(socket.assigns) do
           socket
           |> put_draft(text)
-          |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: text})
+          |> push_event("draft-replace", %{key: socket.assigns.draft_key, text: text})
           |> put_w3(
             panel: nil,
             error: nil,
