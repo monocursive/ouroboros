@@ -4124,6 +4124,11 @@ body .ouro-gate {
   body .ouro-streaming .ouro-prose {
     animation: none;
   }
+
+  .ouro-cell-actions {
+    opacity: 1;
+    transition: none;
+  }
 }
 
 /* Evidence is untrusted text. Keep long fields inside their inspection panel. */
@@ -4451,13 +4456,6 @@ body .ouro-settings-grok-setup summary {
 .ouro-said-agent:hover .ouro-cell-actions,
 .ouro-cell-actions:focus-within {
   opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ouro-cell-actions {
-    opacity: 1;
-    transition: none;
-  }
 }
 
 .ouro-copy {
