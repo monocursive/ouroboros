@@ -1,5 +1,7 @@
 use super::*;
 
+use super::session::unknown_slash_refusal;
+
 impl App {
     // ----- harness home --------------------------------------------------------------
 
@@ -147,6 +149,16 @@ impl App {
             .is_some_and(|prompt| self.activate_slash_command(prompt))
         {
             self.home_draft.accept_submission();
+            return;
+        }
+
+        // A mistyped verb is refused here, before anything is started. This is where it
+        // was most expensive: `/ke` plus Enter used to become the first task of a brand
+        // new session and open a ChatGPT sign-in for it (R1 §2.3). The draft is kept, and
+        // the line is on the home screen where the operator is already looking.
+        if let Some(refusal) = prompt.as_deref().and_then(unknown_slash_refusal) {
+            self.home_error = Some(refusal.clone());
+            self.inform(refusal, NoticeKind::Warn);
             return;
         }
 

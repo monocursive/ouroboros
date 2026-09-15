@@ -795,6 +795,10 @@ pub struct App {
     pub help_scroll: usize,
     // ui-parity base: the session rail can be hidden (leader.rail); T1 flips it, T2 draws it.
     pub rail_hidden: bool,
+    // ui-parity T1
+    /// Set by `Action::Suspend`, drained by the driver, which is the only half of this
+    /// that can leave the alternate screen and raise `SIGTSTP`.
+    suspend_pending: bool,
     /// The armed first half of an `Esc Esc`, and the session it was pressed in.
     ///
     /// The session travels with the arm because the first Escape may have *left* it: on an
@@ -957,6 +961,8 @@ impl App {
             leader_until: None,
             help_scroll: 0,
             rail_hidden: false,
+            // ui-parity T1
+            suspend_pending: false,
             backtrack_arm: None,
             context: None,
             shell_refusal: None,
@@ -2158,13 +2164,57 @@ impl App {
         self.overlay = Some(Overlay::Theme { choice, previous });
     }
 
-    /// T1 replaces: the `ctrl+c` state machine and the footer hint that reads it.
+    // ui-parity T1
+
+    /// Whether the open session has a turn in flight.
     ///
-    /// `false` here because nothing in this tree arms it yet — the footer asks, and a
-    /// footer that drew `ctrl+c again to quit` from a flag nobody sets would be advertising
-    /// a state the client is not in. T1.2 adds the real one and this goes.
+    /// This is the condition that decides what `Action::Interrupt` *means*: the key that
+    /// interrupts is whatever the map says, and it only interrupts while there is
+    /// something to interrupt. The same predicate as `overlays::session_busy`, which is
+    /// private to that file; the two are one function after the slices merge.
+    pub fn turn_running(&self) -> bool {
+        if self.waiting_for_open_agent_reply() {
+            return true;
+        }
+
+        self.sessions.open_info().is_some_and(|session| {
+            matches!(
+                session.status.as_str(),
+                "running" | "starting" | "awaiting_approval"
+            )
+        })
+    }
+
+    /// Whether a second `Action::Cancel` inside the window will open the quit dialog.
+    ///
+    /// Read by the footer, which is the only place the arm is visible: a key that quits
+    /// on its second press and says nothing about the first is a key that surprises
+    /// somebody once and then is never trusted again.
     pub fn quit_armed(&self) -> bool {
-        false
+        self.ctrl_c_until.is_some_and(|until| self.ticks < until)
+    }
+
+    /// `leader.rail`: hide or show the session rail.
+    ///
+    /// Flips the flag and says nothing. The rail is drawn by `ui::sessions`, which this
+    /// slice does not own, so a notice claiming the rail had moved would be this client
+    /// describing a screen it had not changed.
+    pub(super) fn toggle_rail(&mut self) {
+        self.rail_hidden = !self.rail_hidden;
+    }
+
+    /// The draft the driver should suspend for, taken exactly once.
+    pub fn take_suspend(&mut self) -> bool {
+        std::mem::take(&mut self.suspend_pending)
+    }
+
+    /// `Action::Suspend`: asks the driver to hand the terminal back to the shell.
+    ///
+    /// Only the driver can do it — leaving raw mode and the alternate screen is I/O, and
+    /// this state machine has none — so the key sets a flag and the loop drains it beside
+    /// `$EDITOR`, which suspends and resumes through the same two functions.
+    pub(super) fn request_suspend(&mut self) {
+        self.suspend_pending = true;
     }
 }
 

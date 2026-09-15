@@ -90,6 +90,19 @@ fn apply_leader(app: &mut App, c: char) {
     app.apply(key(KeyCode::Char(c)));
 }
 
+/// Opens the steer composer.
+///
+/// `leader.steer` is `off` since the key map was realigned (`ui-parity` T1): `alt+enter`
+/// and `/steer` are the two ways to steer, and this is the one that opens a composer.
+fn steer_composer(app: &mut App) {
+    if app.sessions.composer.is_none() {
+        app.apply(key(KeyCode::Enter));
+    }
+
+    type_text(app, "/steer");
+    app.apply(key(KeyCode::Enter));
+}
+
 fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
         app.apply(key(KeyCode::Char(c)));
@@ -2570,7 +2583,7 @@ fn composer_history_survives_leaving_and_reopening_the_session() {
 fn steering_sends_only_the_non_idempotent_envelope() {
     let mut app = with_open_session();
 
-    apply_leader(&mut app, 's');
+    steer_composer(&mut app);
     type_text(&mut app, "stop and run the tests first");
     app.apply(key(KeyCode::Enter));
 
@@ -2596,7 +2609,7 @@ fn a_transport_loss_after_steer_restores_the_draft_as_unreconcilable() {
     let mut app = with_open_session();
     let input = "stop and inspect the failing test first";
 
-    apply_leader(&mut app, 's');
+    steer_composer(&mut app);
     type_text(&mut app, input);
     app.apply(key(KeyCode::Enter));
 
@@ -2648,7 +2661,7 @@ fn a_lost_steer_acknowledgement_preserves_a_newer_draft_without_claiming_restora
     let steer_input = "stop and inspect the failing test first";
     let newer_draft = "then explain the renderer";
 
-    apply_leader(&mut app, 's');
+    steer_composer(&mut app);
     type_text(&mut app, steer_input);
     app.apply(key(KeyCode::Enter));
     let steer = app
@@ -3013,7 +3026,7 @@ fn every_remote_session_verb_keeps_the_owner_node_from_the_reference() {
         .expect("a routed interrupt");
     assert_eq!(interrupt.params["node"], remote_node);
 
-    apply_leader(&mut app, 'x');
+    apply_leader(&mut app, 'k');
     let Some(Overlay::Confirm { options, .. }) = app.overlay.as_ref() else {
         panic!("a close confirmation")
     };
@@ -3843,7 +3856,7 @@ fn a_preview_answer_is_said_as_a_notice_not_as_user_text() {
 fn x_confirms_before_ending_a_session() {
     let mut app = with_open_session();
 
-    apply_leader(&mut app, 'x');
+    apply_leader(&mut app, 'k');
 
     let screen = render(&mut app, 120, 24);
     assert!(screen.contains("end session-"), "{}", screen.text());
@@ -3936,7 +3949,7 @@ fn x_on_a_lost_open_session_offers_remove_instead_of_kill() {
         }]),
     );
 
-    apply_leader(&mut app, 'x');
+    apply_leader(&mut app, 'k');
 
     let screen = render(&mut app, 120, 24);
     assert!(screen.contains("remove session-"), "{}", screen.text());

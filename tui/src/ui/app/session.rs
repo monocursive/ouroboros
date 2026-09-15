@@ -877,6 +877,64 @@ impl App {
         }
     }
 
+    /// `Action::Rename`: the composer, prefilled with the verb and the title it has now.
+    ///
+    /// The current title is in the draft rather than replaced by it, so the key is an
+    /// edit of what the session is called and not a blank field over a name nobody can
+    /// see. A session the runtime has not named yet gets the bare verb and a space.
+    pub(super) fn rename_prefill(&mut self) {
+        let title = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.title.clone())
+            .unwrap_or_default();
+
+        self.prefill_composer(&format!("/rename {title}"));
+    }
+
+    /// `/rename <title>`. The gateway holds the bound and the sanitising (`B6`), so this
+    /// sends what was typed and reports what came back.
+    pub(super) fn rename_session(&mut self, title: &str) {
+        let title = title.trim();
+
+        if title.is_empty() {
+            self.inform(
+                "name it: /rename what this session is about",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform("open a session before renaming it", NoticeKind::Info);
+            return;
+        };
+
+        if !self.hello.serves("interactive.rename") {
+            self.inform(
+                "this runtime does not serve interactive.rename",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        let params = self.routed_session_params(plane, &id, json!({ "id": id, "title": title }));
+
+        self.issue(Call::new(
+            Tag::Action {
+                label: "rename",
+                plane,
+                id: id.clone(),
+            },
+            plane.method("rename"),
+            params,
+        ));
+    }
+
     // ----- B5: Esc, Esc Esc, and going back ------------------------------------------
 
     /// Whether the backtrack menu may offer a fork.
@@ -1942,6 +2000,14 @@ impl App {
             return;
         }
 
+        // A verb this client does not have is refused, never sent. Before this an unknown
+        // `/verb` went to the model as a turn (R1 §2.3) — a typo became a paid request,
+        // and on the home screen it became a whole session.
+        if let Some(refusal) = unknown_slash_refusal(&input) {
+            self.inform(refusal, NoticeKind::Warn);
+            return;
+        }
+
         // B7. A draft that begins with `!` is the operator's own command, not a message to
         // the model. Claimed here, beside the slash verbs, because it is the same kind of
         // thing: a line the composer acts on itself rather than sending as a turn.
@@ -2278,6 +2344,11 @@ impl App {
             return true;
         }
 
+        if let Some(title) = slash_arg(trimmed, "/rename") {
+            self.rename_session(title);
+            return true;
+        }
+
         if let Some(name) = slash_arg(trimmed, "/preview") {
             self.preview_capability(name);
             return true;
@@ -2440,8 +2511,15 @@ impl App {
         true
     }
 
-    /// Ctrl-C: clear the prompt if it has text; otherwise interrupt a running turn;
-    /// a second press on an idle surface opens the quit dialog. Never a single-press quit.
+    /// Ctrl-C, in four steps, in this order: close what is open over the screen; clear a
+    /// draft that has text; interrupt a turn that is running; otherwise arm, and a second
+    /// press inside the window opens the quit dialog.
+    ///
+    /// The third step used to be "a session is open", which is not the same question and
+    /// is why this key could never reach the fourth one with a session open (R1 §2.4):
+    /// every press on an idle session issued an interrupt for a turn that was not there,
+    /// and somebody arriving from opencode, Claude Code or Codex — where `ctrl+c` exits —
+    /// had no exit key they would find. It reaches the fourth step now, from any tab.
     pub(super) fn ctrl_c(&mut self) {
         if self.overlay.is_some() {
             self.interrupt();
@@ -2460,31 +2538,43 @@ impl App {
             return;
         }
 
-        if self.sessions.open.is_some() {
+        if self.turn_running() {
             self.interrupt_turn();
             self.ctrl_c_until = None;
             return;
         }
 
-        if self.ctrl_c_until.is_some_and(|until| self.ticks < until) {
+        if self.quit_armed() {
             self.ctrl_c_until = None;
             self.open_quit();
             return;
         }
 
         self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
-        let (cancel, interrupt, quit) = (
-            self.keymap.label(Action::Cancel),
-            self.keymap.label(Action::Interrupt),
-            self.keymap.label(Action::Quit),
+
+        // Only keys that are actually bound are named. The footer says the same thing
+        // from `App::quit_armed` for as long as the window is open, which is the half a
+        // notice cannot do.
+        let mut line = format!(
+            "press {} again to quit",
+            self.keymap.label(Action::Cancel)
         );
-        self.inform(
-            format!(
-                "press {cancel} again to quit · {interrupt} aborts a running turn · \
-                 {quit} opens the quit dialog"
-            ),
-            NoticeKind::Info,
-        );
+
+        if self.bound(Action::Interrupt) {
+            line.push_str(&format!(
+                " · {} aborts a running turn",
+                self.keymap.label(Action::Interrupt)
+            ));
+        }
+
+        if self.bound(Action::Quit) {
+            line.push_str(&format!(
+                " · {} opens the quit dialog",
+                self.keymap.label(Action::Quit)
+            ));
+        }
+
+        self.inform(line, NoticeKind::Info);
     }
 
     /// Ctrl-C / Esc: the active turn, never this process.
@@ -2925,6 +3015,32 @@ impl App {
             .or_else(|| self.sessions.picker_key(0));
         self.overlay = Some(Overlay::SessionPicker { selected });
     }
+}
+
+/// The refusal for a line that begins with a `/verb` this client does not have, or `None`
+/// when the line is an ordinary message.
+///
+/// Called *after* `activate_slash_command` has had its turn, so every verb that exists
+/// has already run. What is left is a typo, and a typo must not become a paid turn: on a
+/// session it used to be sent to the model, and on the home screen it started a session
+/// and opened a sign-in for it (R1 §2.3). The draft is kept by the caller, because the
+/// fix is one keystroke away and throwing the line out would cost more than the mistake.
+pub(super) fn unknown_slash_refusal(input: &str) -> Option<String> {
+    let verb = crate::ui::editor::slash_verb(input)?;
+
+    // A verb this client *has* that still did not run is one whose argument could not be
+    // read — `/copy nonsense`. "Unknown" would be untrue there, and sending the line on
+    // to the model as a turn, which is what used to happen, is worse than either.
+    if crate::ui::editor::is_known_command(verb) {
+        return Some(format!("{verb} did not take that argument"));
+    }
+
+    let nearest = crate::ui::editor::nearest_commands(verb);
+
+    Some(match nearest.is_empty() {
+        true => format!("unknown command {verb}; /help lists the verbs this client takes"),
+        false => format!("unknown command {verb}; nearest: {}", nearest.join(", ")),
+    })
 }
 
 fn slash_arg<'a>(input: &'a str, command: &str) -> Option<&'a str> {

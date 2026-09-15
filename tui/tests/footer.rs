@@ -13,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::{json, Value};
 
 use ouro::config::{NotifyMode, NotifyWhen};
+use ouro::keymap::Action;
 use ouro::model::{ApprovalMode, Capability, Plane, ProviderEntry, SandboxMode, SessionInfo};
 use ouro::proto::Notification;
 use ouro::ui::app::{App, ComposerVerb, Msg, Overlay, Tag};
@@ -250,8 +251,10 @@ fn the_footer_snapshot_at_three_widths() {
 fn slash_completions(app: &mut App, prefix: &str) -> Vec<String> {
     // The tick is what refreshes the catalog from the open session's capabilities.
     app.apply(Msg::Tick);
-    app.apply(key(KeyCode::Char('i')));
-    assert!(app.sessions.composer.is_some(), "`i` opens the composer");
+    // Enter on an open session with no composer is what opens one; the single-letter
+    // `i` was removed with the rest of the dead list layer (`ui-parity` T1.6).
+    app.apply(key(KeyCode::Enter));
+    assert!(app.sessions.composer.is_some(), "enter opens the composer");
 
     for character in prefix.chars() {
         app.apply(key(KeyCode::Char(character)));
@@ -1020,8 +1023,10 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     assert!(native.steer_offered());
 
-    // The four places the verb is advertised: `/` completion in the composer, the command
-    // palette, the leader overlay, and the key itself.
+    // The three places the verb is advertised: `/` completion in the composer, the
+    // command palette, and the key itself. The leader was the fourth until the key map
+    // was realigned (`ui-parity` T1): `leader.steer` is `off` now, because `s` is status
+    // everywhere else in the field and `alt+enter` already steers.
     assert!(
         slash_completions(&mut native, "/steer")
             .iter()
@@ -1038,9 +1043,8 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     native.overlay = None;
 
-    native.apply(ctrl_x());
-    let screen = render(&mut native, 160, 30);
-    assert!(screen.contains("steer"), "{}", screen.text());
+    assert!(!native.bound(Action::LeaderSteer), "the leader dropped the verb");
+    assert!(native.bound(Action::Steer), "and the key that steers still has one");
 
     let mut managed = opened(
         "running",
@@ -1066,15 +1070,26 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     managed.overlay = None;
 
-    // And the key itself refuses, naming the transport, rather than sending a call the
-    // runtime answers `{:error, :unsupported}`.
-    managed.apply(key(KeyCode::Char('s')));
+    // And the verb itself refuses, naming the transport, rather than sending a call the
+    // runtime answers `{:error, :unsupported}`. Reached through `/steer`, which is
+    // dispatched even where completion hides it — the bare `s` of the old list layer is
+    // gone and `leader.steer` is `off`.
+    managed.apply(key(KeyCode::Enter));
+    for character in "/steer".chars() {
+        managed.apply(key(KeyCode::Char(character)));
+    }
+    managed.apply(key(KeyCode::Enter));
+
     let notice = managed.notice.as_ref().expect("a refusal");
     assert!(notice.text.contains("cannot be steered"), "{}", notice.text);
     assert!(notice.text.contains("managed"), "{}", notice.text);
     assert!(
-        managed.sessions.composer.is_none(),
-        "the composer must not open in a verb the session cannot take"
+        managed
+            .sessions
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.verb != ComposerVerb::Steer),
+        "the composer must not turn into a verb the session cannot take"
     );
     assert!(
         !managed
@@ -1095,6 +1110,8 @@ fn the_approval_key_says_why_a_managed_session_will_never_open_that_modal() {
     );
     assert!(!managed.approvals_offered());
 
+    // The approval verb is `leader.approval`; the bare `a` of the old list layer is gone.
+    managed.apply(ctrl('x'));
     managed.apply(key(KeyCode::Char('a')));
     let notice = managed.notice.as_ref().expect("a refusal");
     assert!(
@@ -1110,6 +1127,7 @@ fn the_approval_key_says_why_a_managed_session_will_never_open_that_modal() {
         Vec::new(),
     );
     assert!(native.approvals_offered());
+    native.apply(ctrl('x'));
     native.apply(key(KeyCode::Char('a')));
     assert!(native
         .notice

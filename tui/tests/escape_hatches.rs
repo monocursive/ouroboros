@@ -386,3 +386,51 @@ fn an_operator_who_has_already_seen_the_hint_never_sees_it_again() {
     assert!(app.notice.is_none(), "{:?}", app.notice);
     assert!(app.take_config_save().is_none());
 }
+
+// ---------------------------------------------------------------------------------------
+// ui-parity T1.5 — the third way out of the alternate screen
+// ---------------------------------------------------------------------------------------
+
+/// `ctrl+z` is the escape hatch the other two are named after: it hands the terminal back
+/// to the shell for as long as the operator wants it, rather than for the length of one
+/// command.
+///
+/// The signal itself is [`ouro::ui::run`]'s — `raise(SIGTSTP)` between the same
+/// `suspend`/`resume` pair `$EDITOR` uses — and a test that raised it would stop the test
+/// runner. What is pinned here is the half a state machine owns: the key asks, once, and
+/// asking is not confused with any of the other things the driver drains.
+#[test]
+fn ctrl_z_asks_the_driver_to_hand_the_terminal_back() {
+    let mut app = conversing();
+
+    assert!(!app.take_suspend(), "nothing asked for it yet");
+
+    app.apply(ctrl('z'));
+
+    assert!(app.take_suspend(), "ctrl+z asked for nothing");
+    assert!(
+        !app.take_suspend(),
+        "the request was not drained, so every frame would suspend again"
+    );
+
+    // And it is its own request: the editor and the two transcript hatches are untouched.
+    assert!(app.take_external_editor().is_none());
+    assert!(app.take_scrollback_dump().is_none());
+    assert!(app.take_transcript_view().is_none());
+}
+
+/// Not while something is open over the screen. Every other global chord carries this
+/// guard, and suspending out from under a confirmation would leave the operator returning
+/// to a dialog they had forgotten they were in.
+#[test]
+fn ctrl_z_is_not_claimed_over_an_overlay() {
+    let mut app = conversing();
+
+    app.apply(ctrl('p'));
+    assert!(matches!(app.overlay, Some(Overlay::Commands(_))));
+
+    app.apply(ctrl('z'));
+
+    assert!(!app.take_suspend());
+    assert!(matches!(app.overlay, Some(Overlay::Commands(_))));
+}

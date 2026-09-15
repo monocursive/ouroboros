@@ -1156,11 +1156,10 @@ fn the_help_panel_is_grouped_and_keeps_its_limits_in_view() {
     let screen = render(&mut app, 180, 72);
     let text = screen.text();
 
-    // T2.3: the headings are the parity plan's five groups, used by the palette, this
-    // panel and the which-key overlay alike. The claim is unchanged — the panel is grouped
-    // by the question someone is asking when they open it — only the taxonomy is now one
-    // taxonomy instead of three.
-    for heading in ["SESSION", "TURN", "CONVERSATION", "CLIENT"] {
+    // The five groups of the `ui-parity` plan, which the palette, the which-key overlay
+    // and the web's shortcut sheet all use as well. Every one of them is on the page,
+    // because `Action::group` puts every action in one of them.
+    for heading in ["SESSION", "TURN", "CONVERSATION", "RUNTIME", "CLIENT"] {
         assert!(text.contains(heading), "missing {heading}:\n{text}");
     }
 
@@ -1326,4 +1325,586 @@ fn clear_takes_the_chips_and_the_effort_with_the_words() {
         .and_then(|composer| composer.reasoning_effort)
         .is_none());
     assert_eq!(draft(&app), "");
+}
+
+// ---------------------------------------------------------------------------------------
+// (e) ui-parity T1 — the key layer
+// ---------------------------------------------------------------------------------------
+
+/// A resolved keymap with `[keys]` applied, for the rebinding halves below.
+fn rebound(app: &mut App, pairs: &[(&str, &str)]) {
+    for (name, spec) in pairs {
+        app.config
+            .keys
+            .bindings
+            .insert((*name).to_string(), toml::Value::String((*spec).to_string()));
+    }
+
+    app.reload_keymap();
+}
+
+/// `ctrl+x` and then a verb.
+fn leader(app: &mut App, verb: char) {
+    app.apply(modified(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    app.apply(key(KeyCode::Char(verb)));
+}
+
+fn interrupts(app: &mut App) -> usize {
+    app.drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.interrupt")
+        .count()
+}
+
+// ----- T1.1: Enter accepts the highlighted completion ------------------------------------
+
+/// Enter on an open menu selects, as it does in opencode, Claude Code and Codex. It used
+/// to submit, so `/ba` went to the model as a turn (R1 §2.3).
+#[test]
+fn enter_accepts_the_highlighted_completion_rather_than_sending_the_stub() {
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+
+    compose(&mut app);
+    type_text(&mut app, "/backtr");
+    assert!(
+        app.sessions
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.editor.completion().is_some()),
+        "the menu is open"
+    );
+
+    app.apply(key(KeyCode::Enter));
+
+    assert_eq!(
+        draft(&app),
+        "/backtrack",
+        "Enter completed the verb instead of sending the stub"
+    );
+    assert!(app.overlay.is_none(), "and nothing ran yet: {:?}", app.overlay);
+    assert!(
+        turn_calls(&app.drain()).is_empty(),
+        "the stub reached the model"
+    );
+
+    // A verb that takes no argument ends where it ends; the next Enter runs it.
+    app.apply(key(KeyCode::Enter));
+    assert!(overlay_is_backtrack(&app), "{:?}", app.overlay);
+}
+
+/// A verb that takes the rest of the line is left waiting for it, caret after a space.
+#[test]
+fn accepting_a_verb_that_takes_an_argument_leaves_the_space_it_needs() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/expo");
+    app.apply(key(KeyCode::Enter));
+
+    assert_eq!(draft(&app), "/export ");
+}
+
+/// Tab still completes, which is the key everybody already has in their fingers.
+#[test]
+fn tab_still_completes() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/backtr");
+    app.apply(key(KeyCode::Tab));
+
+    assert_eq!(draft(&app), "/backtrack");
+}
+
+/// A verb typed out in full is sent, not completed again. Without this a finished `/keys`
+/// would be answered with `/hotkeys`, which sorts first in its own menu, and every verb
+/// anyone ever typed whole would cost a second Enter.
+#[test]
+fn a_verb_typed_in_full_is_sent_rather_than_completed_into_a_different_one() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/keys");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Keys { .. })),
+        "{:?}",
+        app.overlay
+    );
+    assert_eq!(draft(&app), "");
+}
+
+/// The other half of T1.1, in a session: an unknown verb is refused by name, the draft is
+/// kept, and nothing is sent. It used to go to the model as a turn.
+#[test]
+fn an_unknown_verb_in_a_session_is_refused_and_the_draft_is_kept() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/keym");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        turn_calls(&app.drain()).is_empty(),
+        "an unknown verb was sent to the model"
+    );
+    assert_eq!(draft(&app), "/keym", "the draft was thrown away");
+
+    let notice = app.notice.as_ref().expect("a refusal");
+    assert!(
+        notice.text.contains("unknown command /keym"),
+        "{}",
+        notice.text
+    );
+    assert!(notice.text.contains("/keys"), "{}", notice.text);
+}
+
+// ----- T1.2: the ctrl+c state machine ----------------------------------------------------
+
+/// Four steps, in order, and the fourth one is reachable with a session open — which it
+/// was not: `ctrl+c` used to issue an interrupt for a turn that was not running and reset
+/// the arm every time, so this client had no exit key somebody arriving from opencode,
+/// Claude Code or Codex would find (R1 §2.4).
+#[test]
+fn ctrl_c_clears_then_interrupts_then_arms_and_the_second_press_quits() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    // (2) a draft with text in it is cleared, and the arm is not set by clearing.
+    compose(&mut app);
+    type_text(&mut app, "never mind");
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(draft(&app), "");
+    assert!(!app.quit_armed());
+
+    // (4) the empty, idle screen arms instead of interrupting nothing.
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(interrupts(&mut app), 0, "there was no turn to interrupt");
+    assert!(app.quit_armed(), "the footer has nothing to show");
+    assert!(app.overlay.is_none());
+
+    // and the second press inside the window quits, with a session open.
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(
+        matches!(app.overlay, Some(Overlay::Quit { .. })),
+        "{:?}",
+        app.overlay
+    );
+    assert!(!app.quit_armed());
+}
+
+/// Step three still comes first while there is a turn: `ctrl+c` interrupts and does not
+/// arm, so nobody quits by pressing it twice at a busy agent.
+#[test]
+fn ctrl_c_on_a_running_turn_interrupts_rather_than_arming() {
+    let mut app = opened("running", steering_capabilities(), Vec::new());
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert_eq!(interrupts(&mut app), 1);
+    assert!(!app.quit_armed());
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+}
+
+/// Step one: an overlay closes, and the arm is not what closed it.
+#[test]
+fn ctrl_c_closes_an_overlay_before_anything_else() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    app.apply(modified(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(matches!(app.overlay, Some(Overlay::Commands(_))));
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+    assert!(!app.quit_armed());
+}
+
+/// The arm is a window, not a latch: two presses a minute apart are two first presses.
+#[test]
+fn the_quit_arm_expires_with_its_window() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit_armed());
+
+    for _ in 0..40 {
+        app.apply(Msg::Tick);
+    }
+
+    assert!(!app.quit_armed(), "the window never closed");
+
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+    assert!(app.quit_armed(), "and the next press arms again");
+}
+
+// ----- T1.3: the interrupt follows its binding -------------------------------------------
+
+/// `esc` interrupts because `[keys] interrupt` says `esc`, not because a match arm says
+/// `KeyCode::Esc`.
+#[test]
+fn the_interrupt_is_whatever_the_map_says_it_is() {
+    let mut app = opened("running", steering_capabilities(), Vec::new());
+    rebound(&mut app, &[("interrupt", "ctrl+g")]);
+    compose(&mut app);
+
+    app.apply(modified(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert_eq!(
+        interrupts(&mut app),
+        1,
+        "the rebound key did not reach the interrupt"
+    );
+
+    // And `esc` no longer does. It keeps its own meanings — here, leaving an idle-looking
+    // composer — which is why this is checked after the key that does interrupt.
+    app.apply(key(KeyCode::Esc));
+    assert_eq!(
+        interrupts(&mut app),
+        0,
+        "esc interrupted a turn it is no longer bound to"
+    );
+}
+
+/// The other direction, with the default map: `esc` on a running turn interrupts.
+#[test]
+fn the_default_interrupt_key_still_interrupts() {
+    let mut app = opened("running", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    app.apply(key(KeyCode::Esc));
+
+    assert_eq!(interrupts(&mut app), 1);
+}
+
+/// `esc`'s other meanings stay on `esc` when the interrupt moves away. The turn is
+/// running and the draft has text, so before T1.3 this key interrupted; now it is the
+/// draft's.
+#[test]
+fn escape_keeps_its_other_meanings_when_the_interrupt_is_rebound() {
+    let mut app = opened("running", steering_capabilities(), Vec::new());
+    rebound(&mut app, &[("interrupt", "ctrl+g")]);
+
+    compose(&mut app);
+    type_text(&mut app, "a draft to keep");
+    app.apply(key(KeyCode::Esc));
+
+    assert_eq!(interrupts(&mut app), 0);
+    assert_eq!(draft(&app), "", "the draft was not cleared");
+
+    // And it is recoverable, which is the whole reason it is allowed to be cleared.
+    app.apply(key(KeyCode::Up));
+    assert_eq!(draft(&app), "a draft to keep");
+}
+
+/// Mid-turn, `esc` still closes a completion menu before it interrupts anything. A turn
+/// aborted because somebody wanted the `/` list to go away is neither keystroke's ask.
+#[test]
+fn escape_dismisses_a_completion_menu_before_it_interrupts() {
+    let mut app = opened("running", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/backtr");
+    app.apply(key(KeyCode::Esc));
+
+    assert_eq!(interrupts(&mut app), 0, "the menu should have gone first");
+    assert_eq!(draft(&app), "/backtr");
+    assert!(app
+        .sessions
+        .composer
+        .as_ref()
+        .is_some_and(|composer| composer.editor.completion().is_none()));
+
+    // The next one is the interrupt.
+    app.apply(key(KeyCode::Esc));
+    assert_eq!(interrupts(&mut app), 0, "there is still a draft to clear");
+    app.apply(key(KeyCode::Esc));
+    assert_eq!(interrupts(&mut app), 1);
+}
+
+// ----- T1.5: the new keys ----------------------------------------------------------------
+
+/// `ctrl+r` prefills the verb and the title the session has now, so the key edits a name
+/// rather than blanking one.
+#[test]
+fn ctrl_r_prefills_the_rename_verb_with_the_current_title() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    app.apply(modified(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+    assert_eq!(draft(&app), "/rename ");
+
+    // With a title the runtime has given it, the title is in the draft to be edited.
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "_struct": "Ouroboros.Interactive.State",
+            "id": "session-b3",
+            "title": "the CRLF fixture",
+            "status": "idle",
+            "provider": "native",
+            "workspace": "/Users/operator/code/ouroboros",
+            "updated_at": "2026-01-01T00:00:00.000000Z",
+            "options": { "capabilities": steering_capabilities() },
+        }]),
+    );
+
+    app.apply(modified(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    assert_eq!(draft(&app), "/rename the CRLF fixture");
+}
+
+/// `/rename <title>` calls the gateway's own verb through the call path every other
+/// session action uses.
+#[test]
+fn slash_rename_calls_interactive_rename() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "/rename the CRLF fixture");
+    app.apply(key(KeyCode::Enter));
+
+    let rename = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.rename")
+        .expect("a rename call");
+
+    assert_eq!(rename.params["id"], "session-b3");
+    assert_eq!(rename.params["title"], "the CRLF fixture");
+    assert_eq!(draft(&app), "", "the verb was accepted");
+}
+
+/// A gateway that does not serve the verb is said so, rather than called and refused.
+#[test]
+fn slash_rename_on_a_runtime_without_it_says_so_and_sends_nothing() {
+    let mut app = opened_without(
+        "idle",
+        steering_capabilities(),
+        Vec::new(),
+        &["interactive.rename"],
+    );
+
+    compose(&mut app);
+    type_text(&mut app, "/rename anything");
+    app.apply(key(KeyCode::Enter));
+
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "interactive.rename"));
+    assert!(
+        app.notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("interactive.rename")),
+        "{:?}",
+        app.notice
+    );
+}
+
+/// `ctrl+z` asks the driver to hand the terminal back. The signal itself belongs to
+/// [`ouro::ui::run`]; what a test can pin here is that the key reaches the request, once.
+#[test]
+fn ctrl_z_asks_the_driver_to_suspend() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    assert!(!app.take_suspend());
+
+    app.apply(modified(KeyCode::Char('z'), KeyModifiers::CONTROL));
+
+    assert!(app.take_suspend(), "ctrl+z asked for nothing");
+    assert!(!app.take_suspend(), "and it asked twice");
+}
+
+/// `home` and `end` are the transcript's ends on an empty draft, and the editor's line
+/// motions the moment there is text — which is what readline says they are.
+#[test]
+fn home_and_end_reach_the_transcript_only_while_the_draft_is_empty() {
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        (1..40)
+            .map(|sequence| {
+                event(
+                    sequence,
+                    "output_text_final",
+                    json!({ "text": format!("line {sequence}") }),
+                )
+            })
+            .collect(),
+    );
+
+    // A frame, because how far a transcript can scroll is what the last one measured.
+    let _ = screen(&mut app);
+    compose(&mut app);
+
+    app.apply(key(KeyCode::Home));
+    let watch = app.sessions.open_watch().expect("a watch");
+    assert!(watch.scroll > 0, "home did not reach the first row");
+    assert!(!watch.follow);
+
+    app.apply(key(KeyCode::End));
+    let watch = app.sessions.open_watch().expect("a watch");
+    assert_eq!(watch.scroll, 0, "end did not come back");
+    assert!(watch.follow);
+
+    // With text in the draft they are the editor's again: the caret moves, the transcript
+    // does not.
+    type_text(&mut app, "half a sentence");
+    app.apply(key(KeyCode::Home));
+    assert_eq!(
+        app.sessions
+            .open_watch()
+            .expect("a watch")
+            .scroll,
+        0,
+        "home scrolled the transcript out from under an edit"
+    );
+    type_text(&mut app, "> ");
+    assert_eq!(draft(&app), "> half a sentence");
+}
+
+/// The leader verbs this slice added, each running the code its `/` verb runs.
+#[test]
+fn the_new_leader_verbs_reach_the_same_code_their_slash_verbs_do() {
+    // `ctrl+x g` is backtrack, which `/backtrack` opens.
+    let mut app = opened(
+        "idle",
+        steering_capabilities(),
+        vec![user_turn(1, "first thing")],
+    );
+    leader(&mut app, 'g');
+    assert!(overlay_is_backtrack(&app), "{:?}", app.overlay);
+
+    // `ctrl+x m` prefills `/model `, which is what the palette's row does.
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    leader(&mut app, 'm');
+    assert_eq!(draft(&app), "/model ");
+
+    // `ctrl+x c` is the unfocused fold, which is bare `/compact` — and only a native
+    // session holds a conversation of its own to fold.
+    let mut native = steering_capabilities();
+    native["transport"] = json!("native");
+    let mut app = opened("idle", native, Vec::new());
+    leader(&mut app, 'c');
+    assert!(
+        app.drain()
+            .iter()
+            .any(|call| call.method == "interactive.compact"),
+        "ctrl+x c folded nothing"
+    );
+
+    // `ctrl+x x` is export, and `ctrl+x k` is what used to be on `x`.
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    leader(&mut app, 'x');
+    assert!(
+        app.take_export().is_some(),
+        "ctrl+x x did not export; it is not end-session any more"
+    );
+
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    leader(&mut app, 'k');
+    assert!(
+        matches!(app.overlay, Some(Overlay::Confirm { .. })),
+        "ctrl+x k is end or remove session: {:?}",
+        app.overlay
+    );
+
+    // `ctrl+x s` is the dashboard, and the four digits are the four tabs.
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    leader(&mut app, 's');
+    assert_eq!(app.tab, ouro::ui::app::Tab::Dashboard);
+
+    for (digit, tab) in [
+        ('1', ouro::ui::app::Tab::Dashboard),
+        ('2', ouro::ui::app::Tab::Sessions),
+        ('3', ouro::ui::app::Tab::Upgrade),
+        ('4', ouro::ui::app::Tab::Logs),
+    ] {
+        let mut app = opened("idle", steering_capabilities(), Vec::new());
+        leader(&mut app, digit);
+        assert_eq!(app.tab, tab, "ctrl+x {digit}");
+    }
+
+    // `ctrl+x b` flips the rail, and `ctrl+x ,` is where settings went.
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    assert!(!app.rail_hidden);
+    leader(&mut app, 'b');
+    assert!(app.rail_hidden);
+    leader(&mut app, 'b');
+    assert!(!app.rail_hidden);
+
+    leader(&mut app, ',');
+    assert!(
+        matches!(app.overlay, Some(Overlay::Settings(_))),
+        "{:?}",
+        app.overlay
+    );
+}
+
+/// The two chords the realignment took away, gone from the keys as well as from the map:
+/// a bare `,` is a comma a message may start with, and `ctrl+d` is delete-forward.
+#[test]
+fn the_keys_the_realignment_freed_are_free() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, ", then this");
+    assert_eq!(draft(&app), ", then this");
+    assert!(app.overlay.is_none(), "a comma opened settings");
+
+    // `ctrl+d` on an empty prompt is no longer the quit dialog. With text it deletes
+    // forward, which is its one remaining meaning.
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(draft(&app), "");
+    app.apply(modified(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(app.overlay.is_none(), "ctrl+d opened the quit dialog");
+
+    type_text(&mut app, "xy");
+    app.apply(key(KeyCode::Left));
+    app.apply(key(KeyCode::Left));
+    app.apply(modified(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_eq!(draft(&app), "y");
+}
+
+// ----- T1.7: esc with text on an idle session --------------------------------------------
+
+/// `docs/TUI.md` said this key kept the draft; the code dropped the keystroke and did
+/// nothing at all (R1 §2.1). The draft goes where `up` finds it, and one line says so.
+#[test]
+fn escape_with_text_on_an_idle_session_banks_the_draft() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+
+    compose(&mut app);
+    type_text(&mut app, "half a thought");
+    app.apply(key(KeyCode::Esc));
+
+    assert_eq!(draft(&app), "");
+    assert!(
+        app.sessions.open.is_some(),
+        "esc with text left the session as well as the draft"
+    );
+
+    let notice = app.notice.as_ref().expect("one line about the draft");
+    assert!(
+        notice.text.contains("draft cleared") && notice.text.contains("brings it back"),
+        "{}",
+        notice.text
+    );
+
+    app.apply(key(KeyCode::Up));
+    assert_eq!(draft(&app), "half a thought");
+
+    // And an empty draft still leaves the session, exactly as it did — after the `esc
+    // esc` window the first one armed has closed, or this would be the backtrack chord.
+    app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    for _ in 0..40 {
+        app.apply(Msg::Tick);
+    }
+    app.apply(key(KeyCode::Esc));
+    assert!(app.sessions.open.is_none(), "{:?}", app.overlay);
 }

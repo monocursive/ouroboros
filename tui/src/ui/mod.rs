@@ -731,6 +731,46 @@ impl Drop for Screen {
     }
 }
 
+/// Hands the terminal back to the shell and takes it again on `fg`.
+///
+/// Unix only, because `SIGTSTP` is: a terminal that cannot be suspended is told so rather
+/// than left with a key that silently does nothing. The `raise` is the whole of the
+/// unsafe surface — one signal, to this process, with no arguments to get wrong.
+#[cfg(unix)]
+fn suspend_to_shell(screen: &mut Screen, app: &mut App) {
+    screen.suspend();
+
+    // SAFETY: `raise` sends a signal to the calling process and touches nothing else.
+    // The default disposition of SIGTSTP stops this process until SIGCONT.
+    unsafe {
+        libc::raise(libc::SIGTSTP);
+    }
+
+    // `suspend` restored the terminal through the same path that empties the title on
+    // exit, and the alternate screen comes back blank — so Ratatui's diff would find
+    // nothing to repaint and the operator would return from `fg` to an empty screen.
+    let resumed = screen
+        .resume()
+        .and_then(|()| screen.terminal.clear().context("repainting after fg"));
+
+    app.forget_title();
+
+    if let Err(error) = resumed {
+        app.inform(
+            format!("the screen could not be taken back after fg: {error:#}"),
+            app::NoticeKind::Error,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn suspend_to_shell(_screen: &mut Screen, app: &mut App) {
+    app.inform(
+        "suspending is a unix signal; this terminal cannot be handed back",
+        app::NoticeKind::Warn,
+    );
+}
+
 fn restore() {
     // Popped before the screen is left, and exactly as many times as it was pushed — the
     // terminal keeps a stack, and a process that exited without unwinding its own entry
@@ -1533,6 +1573,15 @@ pub async fn run(
                     app::NoticeKind::Error,
                 ),
             }
+        }
+
+        // `Action::Suspend`. The same two functions `$EDITOR` uses, around the signal
+        // that hands this terminal back to the shell: the alternate screen is left and
+        // raw mode dropped first, or the shell inherits a terminal this process
+        // configured and never restored. Execution resumes on the line after `raise`
+        // once `fg` delivers SIGCONT.
+        if app.take_suspend() {
+            suspend_to_shell(&mut screen, &mut app);
         }
 
         if let Some(draft) = app.take_external_editor() {

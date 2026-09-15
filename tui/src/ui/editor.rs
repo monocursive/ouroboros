@@ -84,6 +84,119 @@ pub(crate) const COMMANDS: [(&str, &str); 45] = [
     ),
 ];
 
+/// The verbs that take the rest of the line, so accepting one from the menu leaves the
+/// caret after a space rather than at the end of a word.
+///
+/// Derived from the `slash_arg` arms of `App::activate_slash_command`, which is the only
+/// place a `/` verb reads an argument; a unit test below pins every entry to a row of
+/// [`COMMANDS`], so a verb that is renamed there cannot leave a ghost here. The table
+/// itself is one column wide and belongs to another slice, which is why this is a list
+/// beside it rather than a field in it.
+pub(crate) const COMMANDS_TAKING_AN_ARGUMENT: [&str; 13] = [
+    "/effort",
+    "/model",
+    "/rename",
+    "/preview",
+    "/admit",
+    "/export",
+    "/copy",
+    "/theme",
+    "/compact",
+    "/handoff",
+    "/plan",
+    "/auto-approve",
+    "/sandbox",
+];
+
+/// The `/verb` at the head of `input`, when the line begins with something that is
+/// *shaped* like one.
+///
+/// Deliberately narrow. `"/usr/bin/env is missing"` and `"/tmp/x.log"` are sentences a
+/// person may legitimately want to send, and they are not verbs: a verb is a single
+/// leading `/` followed by letters, digits, `-` or `_` and nothing else. Anything looser
+/// would turn this client's refusal into a refusal to send ordinary messages.
+pub(crate) fn slash_verb(input: &str) -> Option<&str> {
+    let verb = input.split_whitespace().next()?;
+    let name = verb.strip_prefix('/')?;
+
+    let named = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_');
+
+    named.then_some(verb)
+}
+
+/// Whether [`COMMANDS`] has a row for `verb`, spelled with its `/`.
+pub(crate) fn is_known_command(verb: &str) -> bool {
+    COMMANDS.iter().any(|(name, _detail)| {
+        name.eq_ignore_ascii_case(verb)
+    })
+}
+
+/// Up to three verbs a mistyped one might have meant, best first.
+///
+/// Three ranks, because three different mistakes produce three different misses: a verb
+/// typed short (`/ke`), a verb remembered by its middle (`/board`), and a verb typed
+/// wrong (`/comapct`). The distance bound is half the word, so a three-letter stub does
+/// not drag in every verb with three letters in common.
+pub(crate) fn nearest_commands(verb: &str) -> Vec<&'static str> {
+    let typed = verb.trim_start_matches('/').to_ascii_lowercase();
+
+    if typed.is_empty() {
+        return Vec::new();
+    }
+
+    let bound = (typed.chars().count() / 2).max(1);
+    let mut ranked: Vec<(usize, usize, &'static str)> = Vec::new();
+
+    for (index, (name, _detail)) in COMMANDS.iter().enumerate() {
+        let candidate = name.trim_start_matches('/').to_ascii_lowercase();
+
+        let rank = if candidate.starts_with(&typed) {
+            0
+        } else if candidate.contains(&typed) {
+            1
+        } else if edit_distance(&typed, &candidate) <= bound {
+            2
+        } else {
+            continue;
+        };
+
+        ranked.push((rank, index, *name));
+    }
+
+    ranked.sort_by_key(|(rank, index, _name)| (*rank, *index));
+    ranked
+        .into_iter()
+        .take(3)
+        .map(|(_rank, _index, name)| name)
+        .collect()
+}
+
+/// Levenshtein distance over characters, two rows at a time. Both inputs here are verb
+/// names, so the quadratic is over a dozen characters against forty rows.
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+
+    for (row, left_character) in left.chars().enumerate() {
+        current[0] = row + 1;
+
+        for (column, right_character) in right.iter().enumerate() {
+            let substitution = previous[column] + usize::from(left_character != *right_character);
+            current[column + 1] = substitution
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right.len()]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionKind {
     Command,
@@ -334,6 +447,12 @@ impl Editor {
             return EditorAction::None;
         }
 
+        // Whether this keystroke *consumed* a completion menu. An accepted value is
+        // final until the operator types again: refreshing here would re-derive a menu
+        // from the word just inserted — `/keys` matches `/keys` — and the next Enter
+        // would accept it all over again instead of sending.
+        let mut accepted_completion = false;
+
         let action = match key.code {
             KeyCode::Esc => {
                 if self.completion.take().is_some() {
@@ -356,6 +475,15 @@ impl Editor {
             }
             _newline if keymap.hits(Action::Newline, key) => {
                 self.insert("\n");
+                EditorAction::None
+            }
+            // A menu that is open is what Enter is answering. opencode, Claude Code and
+            // Codex all select on Enter, and this client used to submit instead: `/ke`
+            // plus Enter sent "/ke" as a turn, and on the home screen it started a
+            // session and opened a sign-in for it (R1 §2.3). Tab still completes, and
+            // Enter with no menu still sends.
+            _accept if keymap.hits(Action::Send, key) && self.accept_for_send() => {
+                accepted_completion = true;
                 EditorAction::None
             }
             _send if keymap.hits(Action::Send, key) => EditorAction::Submit,
@@ -499,7 +627,8 @@ impl Editor {
             _ => return EditorAction::None,
         };
 
-        if !matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc)
+        if !accepted_completion
+            && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc)
             && !matches!(
                 action,
                 EditorAction::Submit | EditorAction::Cancel | EditorAction::Scroll(_)
@@ -750,6 +879,30 @@ impl Editor {
             (menu.selected as isize + delta).rem_euclid(menu.items.len() as isize) as usize;
     }
 
+    /// Enter's half of the completion menu: accept the highlighted row, unless the word
+    /// under the caret is already one of the rows.
+    ///
+    /// The exception is the whole difference between helping and overruling. `/keys` is
+    /// a finished verb, and the menu it leaves open also holds `/hotkeys`, which sorts
+    /// first — so a rule that always accepted the highlighted row would answer a
+    /// completely typed `/keys` with somebody else's command. It would also charge a
+    /// second Enter for every verb anyone ever types out in full. A word that is already
+    /// on the menu is a word its author finished; Enter sends it.
+    fn accept_for_send(&mut self) -> bool {
+        let Some(menu) = self.completion.as_ref() else {
+            return false;
+        };
+
+        let token = &self.text[menu.start..menu.end];
+
+        if menu.items.iter().any(|item| item.value == token) {
+            self.completion = None;
+            return false;
+        }
+
+        self.apply_completion()
+    }
+
     fn apply_completion(&mut self) -> bool {
         let Some(menu) = self.completion.take() else {
             return false;
@@ -761,6 +914,17 @@ impl Editor {
         self.detach_history();
         self.text.replace_range(menu.start..menu.end, &item.value);
         self.cursor = menu.start + item.value.len();
+
+        // A verb that takes the rest of the line gets the space it is waiting for; one
+        // that is the whole command does not, so accepting it leaves a line that is
+        // already exactly what would be sent.
+        if item.kind == CompletionKind::Command
+            && COMMANDS_TAKING_AN_ARGUMENT.contains(&item.value.as_str())
+            && !self.text[self.cursor..].starts_with(' ')
+        {
+            self.text.insert(self.cursor, ' ');
+            self.cursor += 1;
+        }
 
         if item.kind == CompletionKind::File {
             self.text.insert(self.cursor, ' ');

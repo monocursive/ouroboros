@@ -72,6 +72,15 @@ pub enum Action {
     Cancel,
     Verbose,
     PlanPanel,
+    /// Prefill the composer with `/rename <current title>`, which is the one spelling of
+    /// the verb rather than a second surface for it.
+    Rename,
+    /// Hand the terminal back to the shell (`SIGTSTP`), and take it again on `fg`.
+    Suspend,
+    /// The transcript's first and last rows, on an empty draft. With text in the draft
+    /// these keys are the editor's line start and end, which is what readline says.
+    TranscriptTop,
+    TranscriptBottom,
     Palette,
     Leader,
     Help,
@@ -98,6 +107,25 @@ pub enum Action {
     LeaderShellRule,
     LeaderEnd,
     LeaderDetails,
+    /// The settings overlay. Under the leader rather than on a bare `,` so a message may
+    /// start with a comma.
+    LeaderSettings,
+    LeaderTheme,
+    LeaderExport,
+    LeaderCompact,
+    LeaderModel,
+    LeaderBacktrack,
+    /// The Dashboard tab, which is what "status" means here.
+    LeaderStatus,
+    /// Hide and show the session rail.
+    LeaderRail,
+    /// The four runtime tabs, reachable with a session open. Named `tab_*` because
+    /// [`Action::LeaderSessions`] is already the session *picker* and two verbs cannot
+    /// answer to one name in `[keys]`.
+    LeaderTabDashboard,
+    LeaderTabSessions,
+    LeaderTabUpgrade,
+    LeaderTabLogs,
     LeaderQuit,
     LeaderHelp,
     StarterExplore,
@@ -117,7 +145,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 47] = [
+    pub const ALL: [Action; 63] = [
         Self::ChooseLocation,
         Self::StarterExplore,
         Self::StarterReview,
@@ -133,6 +161,10 @@ impl Action {
         Self::Cancel,
         Self::Verbose,
         Self::PlanPanel,
+        Self::Rename,
+        Self::Suspend,
+        Self::TranscriptTop,
+        Self::TranscriptBottom,
         Self::Palette,
         Self::Leader,
         Self::Help,
@@ -154,6 +186,18 @@ impl Action {
         Self::LeaderShellRule,
         Self::LeaderEnd,
         Self::LeaderDetails,
+        Self::LeaderSettings,
+        Self::LeaderTheme,
+        Self::LeaderExport,
+        Self::LeaderCompact,
+        Self::LeaderModel,
+        Self::LeaderBacktrack,
+        Self::LeaderStatus,
+        Self::LeaderRail,
+        Self::LeaderTabDashboard,
+        Self::LeaderTabSessions,
+        Self::LeaderTabUpgrade,
+        Self::LeaderTabLogs,
         Self::LeaderQuit,
         Self::LeaderHelp,
         Self::EditorWordBack,
@@ -185,6 +229,10 @@ impl Action {
             Self::Cancel => "cancel",
             Self::Verbose => "verbose",
             Self::PlanPanel => "plan_panel",
+            Self::Rename => "rename",
+            Self::Suspend => "suspend",
+            Self::TranscriptTop => "transcript_top",
+            Self::TranscriptBottom => "transcript_bottom",
             Self::Palette => "palette",
             Self::Leader => "leader",
             Self::Help => "help",
@@ -206,6 +254,18 @@ impl Action {
             Self::LeaderShellRule => "leader.shell_rule",
             Self::LeaderEnd => "leader.end",
             Self::LeaderDetails => "leader.details",
+            Self::LeaderSettings => "leader.settings",
+            Self::LeaderTheme => "leader.theme",
+            Self::LeaderExport => "leader.export",
+            Self::LeaderCompact => "leader.compact",
+            Self::LeaderModel => "leader.model",
+            Self::LeaderBacktrack => "leader.backtrack",
+            Self::LeaderStatus => "leader.status",
+            Self::LeaderRail => "leader.rail",
+            Self::LeaderTabDashboard => "leader.tab_dashboard",
+            Self::LeaderTabSessions => "leader.tab_sessions",
+            Self::LeaderTabUpgrade => "leader.tab_upgrade",
+            Self::LeaderTabLogs => "leader.tab_logs",
             Self::LeaderQuit => "leader.quit",
             Self::LeaderHelp => "leader.help",
             Self::EditorWordBack => "editor.word_back",
@@ -244,6 +304,18 @@ impl Action {
             | Self::LeaderShellRule
             | Self::LeaderEnd
             | Self::LeaderDetails
+            | Self::LeaderSettings
+            | Self::LeaderTheme
+            | Self::LeaderExport
+            | Self::LeaderCompact
+            | Self::LeaderModel
+            | Self::LeaderBacktrack
+            | Self::LeaderStatus
+            | Self::LeaderRail
+            | Self::LeaderTabDashboard
+            | Self::LeaderTabSessions
+            | Self::LeaderTabUpgrade
+            | Self::LeaderTabLogs
             | Self::LeaderQuit
             | Self::LeaderHelp => Scope::Leader,
             Self::EditorWordBack
@@ -272,18 +344,30 @@ impl Action {
             Self::Newline => "ctrl+j",
             Self::QueueRetract => "up",
             Self::PasteImage => "ctrl+v",
-            Self::Editor => "ctrl+g",
+            // `ctrl+g` is *abort* in readline and in every shell, and taking it for the
+            // external editor cost more than it bought. The verb is `ctrl+x e` and
+            // `/editor`; the chord is free for anyone who wants it back.
+            Self::Editor => "off",
             Self::Interrupt => "esc",
             Self::Backtrack => "esc esc",
             Self::Cancel => "ctrl+c",
             Self::Verbose => "ctrl+o",
             Self::PlanPanel => "ctrl+t",
+            Self::Rename => "ctrl+r",
+            Self::Suspend => "ctrl+z",
+            Self::TranscriptTop => "home",
+            Self::TranscriptBottom => "end",
             Self::Palette => "ctrl+p",
             Self::Leader => "ctrl+x",
             Self::Help => "?",
-            Self::Settings => ",",
+            // A message may start with a comma. Settings are `ctrl+x ,` and `/settings`;
+            // the action is kept so a `[keys] settings` line written against an older
+            // build still parses and still binds.
+            Self::Settings => "off",
             Self::Quit => "ctrl+q",
-            Self::QuitEmpty => "ctrl+d",
+            // `ctrl+d` is delete-forward and nothing else. Two meanings on one key, one of
+            // which ends the process, is not a key anybody can hold confidently.
+            Self::QuitEmpty => "off",
             Self::LeaderNew => "n",
             Self::LeaderNewOptions => "N",
             Self::LeaderSessions => "l",
@@ -293,12 +377,28 @@ impl Action {
             Self::LeaderScrollback => "[",
             Self::LeaderEditorView => "v",
             Self::LeaderOpenImage => "i",
-            Self::LeaderSteer => "s",
+            // `alt+enter` and `/steer` are the two ways to steer, and `s` is status
+            // everywhere else in the field. The action keeps its name and is rebindable.
+            Self::LeaderSteer => "off",
             Self::LeaderApproval => "a",
             Self::LeaderAutoApprove => "A",
             Self::LeaderShellRule => "r",
-            Self::LeaderEnd => "x",
+            // Moved off `x`, which is export in every neighbour and was the most dangerous
+            // collision in this map: one key away from ending a session.
+            Self::LeaderEnd => "k",
             Self::LeaderDetails => "d",
+            Self::LeaderSettings => ",",
+            Self::LeaderTheme => "t",
+            Self::LeaderExport => "x",
+            Self::LeaderCompact => "c",
+            Self::LeaderModel => "m",
+            Self::LeaderBacktrack => "g",
+            Self::LeaderStatus => "s",
+            Self::LeaderRail => "b",
+            Self::LeaderTabDashboard => "1",
+            Self::LeaderTabSessions => "2",
+            Self::LeaderTabUpgrade => "3",
+            Self::LeaderTabLogs => "4",
             Self::LeaderQuit => "q",
             Self::LeaderHelp => "?",
             Self::EditorWordBack => "alt+b",
@@ -328,14 +428,18 @@ impl Action {
             Self::Editor => "edit the prompt in $VISUAL or $EDITOR",
             Self::Interrupt => "interrupt the turn; the queue is kept",
             Self::Backtrack => "go back to an earlier message",
-            Self::Cancel => "clear the prompt; empty + running interrupts; twice quits",
+            Self::Cancel => "close, clear the draft, interrupt; twice on an idle screen quits",
             Self::Verbose => "expand, and collapse again, every cell in the conversation",
             Self::PlanPanel => "plan and tasks panel, while a provider publishes one",
+            Self::Rename => "rename this session, through the composer",
+            Self::Suspend => "suspend to the shell; fg brings this screen back",
+            Self::TranscriptTop => "the first row of the transcript, on an empty draft",
+            Self::TranscriptBottom => "the newest row of the transcript, on an empty draft",
             Self::Palette => "command palette",
             Self::Leader => "the leader; the verbs below follow it",
             Self::Help => "this page, when the prompt is empty",
             Self::Settings => "settings, when the prompt is empty",
-            Self::Quit => "quit dialog",
+            Self::Quit => "quit dialog, when nothing is open over the screen",
             Self::QuitEmpty => "quit dialog, on an empty prompt",
             Self::LeaderNew => "new session",
             Self::LeaderNewOptions => "session options",
@@ -352,6 +456,18 @@ impl Action {
             Self::LeaderShellRule => "save the rule a refused ! command named",
             Self::LeaderEnd => "end or remove session",
             Self::LeaderDetails => "event details",
+            Self::LeaderSettings => "settings",
+            Self::LeaderTheme => "colour theme",
+            Self::LeaderExport => "write the transcript to a file",
+            Self::LeaderCompact => "fold this conversation now",
+            Self::LeaderModel => "change the model on this session",
+            Self::LeaderBacktrack => "go back to an earlier message",
+            Self::LeaderStatus => "runtime dashboard",
+            Self::LeaderRail => "hide or show the session rail",
+            Self::LeaderTabDashboard => "dashboard tab",
+            Self::LeaderTabSessions => "sessions tab",
+            Self::LeaderTabUpgrade => "upgrade tab",
+            Self::LeaderTabLogs => "logs tab",
             Self::LeaderQuit => "quit",
             Self::LeaderHelp => "keyboard help",
             Self::EditorWordBack => "move back one word",
@@ -366,31 +482,99 @@ impl Action {
         }
     }
 
-    /// The `?` panel's grouping, in the order a session is lived.
+    /// Which of the five groups this action belongs to.
+    ///
+    /// One vocabulary for the `?` panel, the which-key overlay, the command palette and
+    /// the web's shortcut sheet, so the same verb is filed under the same word wherever
+    /// it is drawn. The five are the review's: what you do to a *session*, what you do to
+    /// the *turn* you are composing or that is running, what you do to the
+    /// *conversation* that has accumulated, the *runtime* around it, and the *client*
+    /// itself.
+    ///
+    /// Grouping cuts across [`Scope`] on purpose. `ctrl+x y` and `ctrl+o` do the same
+    /// kind of thing to the same conversation, and filing one under "leader" because of
+    /// how it is typed is filing by keyboard rather than by question.
     pub fn group(self) -> &'static str {
-        match self.scope() {
-            Scope::Leader => "leader",
-            Scope::Editor => "composing",
-            Scope::Global => match self {
-                Self::StarterExplore
-                | Self::StarterReview
-                | Self::StarterPlan
-                | Self::ChooseLocation => "getting started",
-                Self::Send
-                | Self::Steer
-                | Self::Newline
-                | Self::QueueRetract
-                | Self::PasteImage
-                | Self::Editor => "composing",
-                Self::Interrupt
-                | Self::Backtrack
-                | Self::Cancel
-                | Self::Verbose
-                | Self::PlanPanel => "while the agent works",
-                _runtime => "runtime",
-            },
+        match self {
+            // Starting one, choosing where it runs, switching between them, ending one.
+            Self::ChooseLocation
+            | Self::Rename
+            | Self::LeaderNew
+            | Self::LeaderNewOptions
+            | Self::LeaderSessions
+            | Self::LeaderWritable
+            | Self::LeaderEnd => "session",
+
+            // Composing the next turn, sending it, and everything aimed at the turn that
+            // is running — including the composer motions, which are how a turn is typed.
+            Self::StarterExplore
+            | Self::StarterReview
+            | Self::StarterPlan
+            | Self::Send
+            | Self::Steer
+            | Self::Newline
+            | Self::QueueRetract
+            | Self::PasteImage
+            | Self::Editor
+            | Self::Interrupt
+            | Self::LeaderEditor
+            | Self::LeaderSteer
+            | Self::LeaderApproval
+            | Self::LeaderAutoApprove
+            | Self::LeaderShellRule
+            | Self::LeaderModel
+            | Self::EditorWordBack
+            | Self::EditorWordForward
+            | Self::EditorKillWordBack
+            | Self::EditorKillWordForward
+            | Self::EditorKillLine
+            | Self::EditorKillToStart
+            | Self::EditorYank
+            | Self::EditorLineStart
+            | Self::EditorLineEnd => "turn",
+
+            // What has already been said, and what can be done to it.
+            Self::Backtrack
+            | Self::Verbose
+            | Self::PlanPanel
+            | Self::TranscriptTop
+            | Self::TranscriptBottom
+            | Self::LeaderCopy
+            | Self::LeaderScrollback
+            | Self::LeaderEditorView
+            | Self::LeaderOpenImage
+            | Self::LeaderDetails
+            | Self::LeaderExport
+            | Self::LeaderCompact
+            | Self::LeaderBacktrack => "conversation",
+
+            // The machines and the tabs that describe them.
+            Self::LeaderStatus
+            | Self::LeaderTabDashboard
+            | Self::LeaderTabSessions
+            | Self::LeaderTabUpgrade
+            | Self::LeaderTabLogs => "runtime",
+
+            // This program: how it looks, what it binds, and how it ends.
+            Self::Cancel
+            | Self::Suspend
+            | Self::Palette
+            | Self::Leader
+            | Self::Help
+            | Self::Settings
+            | Self::Quit
+            | Self::QuitEmpty
+            | Self::LeaderSettings
+            | Self::LeaderTheme
+            | Self::LeaderRail
+            | Self::LeaderQuit
+            | Self::LeaderHelp => "client",
         }
     }
+
+    /// The five groups, in the order every surface lists them.
+    pub const GROUPS: [&'static str; 5] =
+        ["session", "turn", "conversation", "runtime", "client"];
 }
 
 /// One key press: a code and the modifiers that must be held with it.
@@ -904,6 +1088,60 @@ mod tests {
     fn every_action_name_round_trips() {
         for action in Action::ALL {
             assert_eq!(Action::parse(action.name()), Some(action));
+        }
+    }
+
+    /// Every action is filed under one of the five groups every surface draws. A sixth
+    /// word here would be a heading the `?` panel, the palette and the web sheet do not
+    /// have a column for.
+    #[test]
+    fn every_action_is_in_one_of_the_five_groups() {
+        for action in Action::ALL {
+            assert!(
+                Action::GROUPS.contains(&action.group()),
+                "{} is in {:?}, which is not one of {:?}",
+                action.name(),
+                action.group(),
+                Action::GROUPS
+            );
+        }
+
+        // And all five are used: a group nothing is in is a heading nobody ever sees.
+        for group in Action::GROUPS {
+            assert!(
+                Action::ALL.into_iter().any(|action| action.group() == group),
+                "nothing is in {group:?}"
+            );
+        }
+    }
+
+    /// Two built-in defaults on one key inside one scope would be a chord whose meaning
+    /// depends on which handler is checked first. `Keymap::resolve` refuses that in a
+    /// file; nothing but this refuses it in the table itself.
+    #[test]
+    fn no_two_built_in_defaults_claim_the_same_key_in_one_scope() {
+        let map = Keymap::builtin();
+
+        for action in Action::ALL {
+            let spec = map.spec(action);
+
+            if spec.is_off() {
+                continue;
+            }
+
+            for other in Action::ALL {
+                if other == action || other.scope() != action.scope() {
+                    continue;
+                }
+
+                assert_ne!(
+                    map.spec(other),
+                    spec,
+                    "{} and {} both default to {spec}",
+                    action.name(),
+                    other.name()
+                );
+            }
         }
     }
 

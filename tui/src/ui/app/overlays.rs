@@ -1893,15 +1893,55 @@ impl App {
         })
     }
 
+    /// `Esc` in the composer, after the interrupt has had its chance at the key.
+    ///
+    /// Interrupting is no longer decided here. `App::interrupt_key` claims the key bound
+    /// to `Action::Interrupt` while a turn is running, so this runs only when there is
+    /// nothing to interrupt — or when the operator moved the interrupt somewhere else,
+    /// in which case `Esc` genuinely no longer interrupts and must not pretend to.
+    ///
+    /// The two meanings that are left are the two `Esc` has always had on an idle
+    /// session, and the first of them used to do nothing at all: `docs/TUI.md` said a
+    /// draft was kept and the code dropped the keystroke (R1 §2.1). The draft goes where
+    /// `up` finds it rather than into a modal nobody asked for.
     pub(super) fn escape_from_prompt(&mut self) {
-        if self.session_busy() {
-            self.interrupt_turn();
+        if self.focused_prompt_empty() {
+            self.leave_session();
             return;
         }
 
-        if self.focused_prompt_empty() {
-            self.leave_session();
+        let remembered = self
+            .sessions
+            .composer
+            .as_mut()
+            .and_then(|composer| {
+                let remembered = composer.editor.accept_submission();
+                composer.user_changed_draft();
+                remembered
+            })
+            .is_some();
+
+        if !remembered {
+            return;
         }
+
+        self.remember_composer_history();
+
+        let mut note = format!(
+            "draft cleared; {} brings it back",
+            self.keymap.label(Action::QueueRetract)
+        );
+
+        // This key only gets here mid-turn when the interrupt lives somewhere else, and
+        // whoever pressed it out of habit is owed the key that is one.
+        if self.session_busy() && self.bound(Action::Interrupt) {
+            note.push_str(&format!(
+                " · {} interrupts the turn",
+                self.keymap.label(Action::Interrupt)
+            ));
+        }
+
+        self.inform(note, NoticeKind::Info);
     }
 
     fn leave_session(&mut self) {

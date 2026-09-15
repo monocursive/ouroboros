@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use ouro::keymap::{Action, Keymap, Scope, Source, Spec};
 use ouro::model::Plane;
-use ouro::ui::app::{App, Msg, Tag};
+use ouro::ui::app::{App, Msg, Overlay, Tab, Tag};
 
 use support::{app, full_hello, render, Screen};
 
@@ -136,10 +136,15 @@ fn screen(app: &mut App) -> Screen {
     render(app, 120, 40)
 }
 
-/// `/keys` lists forty actions and needs the rows for them; a short terminal scrolls, which
-/// its own assertion below covers.
+/// `/keys` lists every action and needs the rows for them; a short terminal scrolls, which
+/// its own assertion below covers. Sized off the table so the page cannot outgrow it
+/// silently the way it did when the `ui-parity` realignment added fifteen verbs.
 fn tall(app: &mut App) -> Screen {
-    render(app, 120, 60)
+    // Sized off the table rather than typed, so the page cannot outgrow the terminal
+    // silently the way it did when the `ui-parity` realignment added fifteen verbs. Wide
+    // as well as tall: the popup is a percentage of the terminal and its rows wrap, and a
+    // wrapped row costs a line the page's own scroll arithmetic did not count.
+    render(app, 200, Action::ALL.len() as u16 + 24)
 }
 
 /// Typed into the composer and submitted, which is how an operator reaches a `/` verb.
@@ -404,8 +409,9 @@ fn the_backtrack_setting_that_predates_the_map_still_means_what_it_meant() {
 /// a regression an operator finds.
 ///
 /// This is the table B8's acceptance names: "the default map equals today's bindings
-/// exactly". The right-hand column is what this client bound before `[keys]` covered more
-/// than one chord.
+/// exactly". The right-hand column moved once, at the `ui-parity` realignment (T1.4/T1.5):
+/// `editor`, `settings`, `quit_empty` and `leader.steer` gave their keys up, `leader.end`
+/// moved off `x` so export could have it, and fifteen verbs arrived.
 #[test]
 fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
     let expected: &[(Action, &str)] = &[
@@ -418,18 +424,22 @@ fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
         (Action::Newline, "ctrl+j"),
         (Action::QueueRetract, "up"),
         (Action::PasteImage, "ctrl+v"),
-        (Action::Editor, "ctrl+g"),
+        (Action::Editor, "off"),
         (Action::Interrupt, "esc"),
         (Action::Backtrack, "esc esc"),
         (Action::Cancel, "ctrl+c"),
         (Action::Verbose, "ctrl+o"),
         (Action::PlanPanel, "ctrl+t"),
+        (Action::Rename, "ctrl+r"),
+        (Action::Suspend, "ctrl+z"),
+        (Action::TranscriptTop, "home"),
+        (Action::TranscriptBottom, "end"),
         (Action::Palette, "ctrl+p"),
         (Action::Leader, "ctrl+x"),
         (Action::Help, "?"),
-        (Action::Settings, ","),
+        (Action::Settings, "off"),
         (Action::Quit, "ctrl+q"),
-        (Action::QuitEmpty, "ctrl+d"),
+        (Action::QuitEmpty, "off"),
         (Action::LeaderNew, "n"),
         (Action::LeaderNewOptions, "N"),
         (Action::LeaderSessions, "l"),
@@ -439,12 +449,24 @@ fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
         (Action::LeaderScrollback, "["),
         (Action::LeaderEditorView, "v"),
         (Action::LeaderOpenImage, "i"),
-        (Action::LeaderSteer, "s"),
+        (Action::LeaderSteer, "off"),
         (Action::LeaderApproval, "a"),
         (Action::LeaderAutoApprove, "A"),
         (Action::LeaderShellRule, "r"),
-        (Action::LeaderEnd, "x"),
+        (Action::LeaderEnd, "k"),
         (Action::LeaderDetails, "d"),
+        (Action::LeaderSettings, ","),
+        (Action::LeaderTheme, "t"),
+        (Action::LeaderExport, "x"),
+        (Action::LeaderCompact, "c"),
+        (Action::LeaderModel, "m"),
+        (Action::LeaderBacktrack, "g"),
+        (Action::LeaderStatus, "s"),
+        (Action::LeaderRail, "b"),
+        (Action::LeaderTabDashboard, "1"),
+        (Action::LeaderTabSessions, "2"),
+        (Action::LeaderTabUpgrade, "3"),
+        (Action::LeaderTabLogs, "4"),
         (Action::LeaderQuit, "q"),
         (Action::LeaderHelp, "?"),
         (Action::EditorWordBack, "alt+b"),
@@ -606,7 +628,7 @@ fn a_key_turned_off_is_not_advertised_anywhere() {
     slash(&mut app, "/quit");
     assert!(matches!(
         app.overlay,
-        Some(ouro::ui::app::Overlay::Quit { .. })
+        Some(Overlay::Quit { .. })
     ));
 }
 
@@ -638,7 +660,9 @@ fn slash_keys_shows_the_effective_map_and_where_each_row_came_from() {
         text.contains("every line of [keys] was used"),
         "a clean file says so\n{text}"
     );
-    assert!(text.contains("GLOBAL") && text.contains("LEADER") && text.contains("COMPOSER"));
+    for heading in ["GLOBAL", "LEADER", "COMPOSER"] {
+        assert!(text.contains(heading), "missing {heading}\n{text}");
+    }
 }
 
 /// A `[keys]` line this build could not act on is named on the page, not only at startup.
@@ -726,4 +750,164 @@ fn a_rebound_composer_motion_moves_with_its_key() {
         &map,
     );
     assert_eq!(untouched.text(), "hello world");
+}
+
+// ---------------------------------------------------------------------------------------
+// (6) ui-parity T1 — the layer under the composer, and the two chords that changed shape
+// ---------------------------------------------------------------------------------------
+
+/// T1.6. The single-letter layer of the three list tabs, with the dead arms gone.
+///
+/// `i`, `s`, `a` and `,` were unreachable by construction: every one of their handlers
+/// returns unless `tab == Sessions`, and this match is only reached when the composer is
+/// not claiming the keyboard — which on the Sessions tab it always is (R1 §2.1). They
+/// were not documentation of a state that existed; they were four keys that did nothing.
+#[test]
+fn the_list_layer_keeps_the_keys_that_work_and_has_dropped_the_ones_that_never_did() {
+    // On a list tab, which is the only place this layer is reached: the Sessions tab's
+    // composer owns every printable key, which is the whole finding.
+    let mut app = configured(&[]);
+    app.tab = Tab::Dashboard;
+
+    for dead in ['i', 's', 'a', ','] {
+        let before = app.tab;
+        app.apply(key(KeyCode::Char(dead)));
+        assert!(
+            app.overlay.is_none(),
+            "{dead:?} opened something: {:?}",
+            app.overlay
+        );
+        assert_eq!(app.tab, before, "{dead:?} moved the tab");
+        assert!(app.sessions.composer.is_none(), "{dead:?} opened a composer");
+    }
+
+    // `x` with no session open used to open the picker and say "press x to end or remove
+    // it" — advice that was wrong the moment `leader.end` moved to `k`.
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!([{
+            "_struct": "Ouroboros.Interactive.State",
+            "id": "session-a7",
+            "status": "idle",
+            "provider": "native",
+            "workspace": "/w",
+            "updated_at": "2026-01-01T00:00:00.000000Z",
+            "options": { "capabilities": { "transport": "app_server" } },
+        }]),
+    );
+    assert!(app.sessions.open.is_none());
+    app.apply(key(KeyCode::Char('x')));
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+
+    // The keys that do work still do.
+    app.apply(key(KeyCode::Char('r')));
+    app.apply(key(KeyCode::Tab));
+    assert_eq!(app.tab, Tab::Sessions);
+    app.apply(key(KeyCode::BackTab));
+    assert_eq!(app.tab, Tab::Dashboard);
+    app.apply(key(KeyCode::Char('q')));
+    assert!(
+        matches!(app.overlay, Some(Overlay::Quit { .. })),
+        "{:?}",
+        app.overlay
+    );
+}
+
+/// A digit past the last tab falls through instead of being claimed and dropped. `5`, `6`
+/// and `7` used to be swallowed by a literal range that agreed with `Tab::ALL` by
+/// accident, so a build with fewer tabs kept eating them.
+#[test]
+fn a_digit_past_the_last_tab_is_not_claimed() {
+    let mut app = configured(&[]);
+
+    for digit in '1'..='9' {
+        // From a list tab every time: landing on Sessions hands the keyboard to the
+        // composer, which is the state this whole layer is unreachable from.
+        app.tab = Tab::Upgrade;
+        app.apply(key(KeyCode::Char(digit)));
+
+        let index = digit.to_digit(10).expect("a digit") as usize - 1;
+
+        match Tab::ALL.get(index) {
+            Some(tab) => assert_eq!(app.tab, *tab, "{digit} is {tab:?}"),
+            None => assert_eq!(
+                app.tab,
+                Tab::Upgrade,
+                "{digit} is past the last tab and moved somewhere"
+            ),
+        }
+    }
+}
+
+/// `q` on a list is the field's convention and stays a letter — but `[keys] quit = off`
+/// turns it off too, so "off" means off wherever quitting is offered.
+#[test]
+fn the_lists_bare_q_is_silenced_by_turning_quit_off() {
+    let mut app = configured(&[("quit", "off")]);
+    app.tab = Tab::Dashboard;
+    app.apply(key(KeyCode::Char('q')));
+
+    assert!(app.overlay.is_none(), "{:?}", app.overlay);
+}
+
+/// T1.4. The `?` chord carried a `!shift` guard the map's own `Chord::hit` deliberately
+/// does not have, so on every terminal that reports `?` with the modifier — which is most
+/// of them, since `?` *is* shift-`/` — the help panel was unreachable.
+#[test]
+fn the_help_chord_is_reachable_on_a_terminal_that_reports_the_shift() {
+    // On the home screen, where the chord is the only thing that can answer: the list
+    // tabs carry a literal `?` arm as well, and it would hide the guard rather than
+    // prove it gone.
+    let mut app = configured(&[]);
+
+    app.apply(modified(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Help)),
+        "{:?}",
+        app.overlay
+    );
+    assert!(
+        app.home_draft.is_empty(),
+        "the chord was typed into the draft instead: {:?}",
+        app.home_draft.text()
+    );
+}
+
+/// T1.5. Every action added by the realignment is nameable from `[keys]`, rebindable, and
+/// listed by `/keys` — which is the whole of what "rebindable" is worth.
+#[test]
+fn the_new_actions_are_rebindable_and_listed() {
+    let added = [
+        Action::Rename,
+        Action::Suspend,
+        Action::TranscriptTop,
+        Action::TranscriptBottom,
+        Action::LeaderSettings,
+        Action::LeaderTheme,
+        Action::LeaderExport,
+        Action::LeaderCompact,
+        Action::LeaderModel,
+        Action::LeaderBacktrack,
+        Action::LeaderStatus,
+        Action::LeaderRail,
+        Action::LeaderTabDashboard,
+        Action::LeaderTabSessions,
+        Action::LeaderTabUpgrade,
+        Action::LeaderTabLogs,
+    ];
+
+    let mut app = opened(&[("rename", "ctrl+b"), ("leader.rail", "B")]);
+    slash(&mut app, "/keys");
+    let text = tall(&mut app).text();
+
+    for action in added {
+        assert!(text.contains(action.name()), "{} has no row\n{text}", action.name());
+        assert!(!action.describe().is_empty(), "{}", action.name());
+    }
+
+    assert_eq!(app.keymap.label(Action::Rename), "ctrl+b");
+    assert_eq!(app.keymap.label(Action::LeaderRail), "ctrl+x B");
+    assert!(app.keymap.problems().is_empty(), "{:?}", app.keymap.problems());
 }
