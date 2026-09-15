@@ -104,12 +104,14 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Web.Call
+  alias Ouroboros.Web.Commands
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Layouts
   alias Ouroboros.Web.Live.ApprovalCard
   alias Ouroboros.Web.Live.Cells
   alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Live.LoadingState
+  alias Ouroboros.Web.Live.Palette
   alias Ouroboros.Web.Live.Rail
   alias Ouroboros.Web.Presentation
   alias Ouroboros.Web.Route
@@ -125,6 +127,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # A turn state nothing has been read from yet, so the composer has something to draw
   # before a session is open.
   @quiet_turn %{running?: false, spoke?: false, failed?: false, turn_id: nil, queued: 0}
+
+  # ui-parity W2. The composer's own state that is not a draft: the model catalogue (never
+  # fetched on the poll), the search over it, and a per-turn effort armed for exactly one
+  # send. Held as one map so the palette's query, which changes on every keystroke, does
+  # not re-render the transcript's column with it.
+  @composer_extras %{models: nil, model_query: "", next_effort: nil}
 
   # ------------------------------------------------------------------------------------
   # Lifecycle
@@ -163,6 +171,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:methods, Methods.names())
       # Every needs-you key this view has already rung for. See `announce_needs_you/1`.
       |> assign(:announced, MapSet.new())
+      # ui-parity W2
+      |> assign(%{palette: nil, shortcuts?: false, composer_extras: @composer_extras})
       |> reset_session_state()
       |> stream(:cells, [])
 
@@ -213,9 +223,425 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # Events from the browser
   # ------------------------------------------------------------------------------------
 
+  # ui-parity W2
+  #
+  # The command palette, the shortcut sheet, and the four verbs this slice added to the
+  # composer. Two rules hold across all of them:
+  #
+  #   * **the palette runs the page's own events.** A row that "interrupts" forwards to
+  #     the same `handle_event("interrupt", …)` clause the button reaches, through
+  #     `forward/3`. Nothing is reimplemented beside a control, so the two cannot drift —
+  #     and every gate, refusal and re-read the control already had applies unchanged.
+  #   * **a row is checked twice.** `Ouroboros.Web.Commands.available/1` decides what is
+  #     drawn, and `run_command/2` asks the same question again before doing anything: a
+  #     modal left open while a turn completed must not run a verb that stopped being
+  #     possible while nobody was looking.
+  #
+  # The helpers come first only because Elixir wants every `handle_event/3` clause in one
+  # run, and this slice's clauses sit immediately above the ones that were already here.
+
+  # ---------------------------------------------------------------------- The palette
+
+  defp open_palette(socket),
+    do:
+      assign(socket, :palette, %{query: "", selected: 0, rows: Commands.available(socket.assigns)})
+
+  defp close_palette(socket), do: assign(socket, :palette, nil)
+
+  defp filter_palette(%{assigns: %{palette: nil}} = socket, _query), do: socket
+
+  defp filter_palette(socket, query) do
+    query = String.slice(query, 0, 120)
+    rows = socket.assigns |> Commands.available() |> Commands.search(query)
+
+    assign(socket, :palette, %{query: query, selected: 0, rows: rows})
+  end
+
+  defp move_palette(%{assigns: %{palette: nil}} = socket, _direction), do: socket
+
+  defp move_palette(%{assigns: %{palette: palette}} = socket, direction) do
+    last = max(length(palette.rows) - 1, 0)
+
+    selected =
+      if direction == "next",
+        do: min(palette.selected + 1, last),
+        else: max(palette.selected - 1, 0)
+
+    assign(socket, :palette, %{palette | selected: selected})
+  end
+
+  # The second gate. See the block comment above.
+  defp run_command(socket, id) do
+    if Commands.available?(socket.assigns, id), do: command(socket, id), else: socket
+  end
+
+  # One `handle_event` clause, called rather than copied. `forward/3` is what makes a
+  # palette row and the control beside it the same code path.
+  defp forward(socket, event, params \\ %{}) do
+    {:noreply, socket} = handle_event(event, params, socket)
+    socket
+  end
+
+  defp command(socket, "session.new"), do: push_navigate(socket, to: "/new")
+  defp command(socket, "session.switch"), do: reveal(socket, ".ouro-rail-search input")
+  defp command(socket, "session.rename"), do: session_action(socket, "rename")
+  defp command(socket, "session.end"), do: session_action(socket, "close")
+  defp command(socket, "session.delete"), do: session_action(socket, "delete")
+
+  defp command(socket, id) when id in ["turn.send", "turn.queue"],
+    do: forward(socket, "send", draft_params(socket))
+
+  defp command(socket, "turn.steer"),
+    do: forward(socket, "send", Map.put(draft_params(socket), "verb", "steer"))
+
+  defp command(socket, "turn.interrupt"), do: forward(socket, "interrupt")
+  defp command(socket, "turn.retry"), do: forward(socket, "retry")
+  defp command(socket, "turn.auto_approve"), do: forward(socket, "auto_approve")
+  defp command(socket, "turn.plan"), do: configure_plan(socket)
+
+  defp command(socket, "turn.effort"),
+    do: reveal(socket, ~s([phx-click="configure"][phx-value-field="reasoning_effort"]))
+
+  defp command(socket, "turn.sandbox"),
+    do: reveal(socket, ~s([phx-click="configure"][phx-value-field="sandbox_mode"]))
+
+  defp command(socket, "turn.model"), do: socket |> fetch_models() |> reveal(".ouro-model-select")
+  defp command(socket, "turn.approval"), do: reveal(socket, ".ouro-approval")
+  defp command(socket, "conversation.copy"), do: copy_last(socket, :rendered)
+  defp command(socket, "conversation.copy_source"), do: copy_last(socket, :source)
+
+  defp command(%{assigns: %{open: {plane, id}}} = socket, "conversation.history"),
+    do: forward(socket, "load-history", %{"session" => "#{plane}:#{id}"})
+
+  defp command(socket, "runtime.status"), do: push_navigate(socket, to: "/status")
+  defp command(socket, "runtime.audit"), do: push_navigate(socket, to: "/audit")
+  defp command(socket, "runtime.settings"), do: push_navigate(socket, to: "/settings")
+  defp command(socket, "client.theme"), do: push_event(socket, "ouro-chrome", %{control: "theme"})
+  defp command(socket, "client.shortcuts"), do: assign(socket, :shortcuts?, true)
+
+  defp command(socket, "client.notifications"),
+    do: push_event(socket, "ouro-chrome", %{control: "bell"})
+
+  defp command(socket, _unrunnable), do: socket
+
+  defp draft_params(socket),
+    do: %{"message" => socket.assigns.draft, "session_key" => socket.assigns.draft_key}
+
+  defp session_action(%{assigns: %{open: {plane, id}}} = socket, action),
+    do:
+      forward(socket, "session-action", %{
+        "action" => action,
+        "plane" => to_string(plane),
+        "id" => id
+      })
+
+  defp session_action(socket, _action), do: socket
+
+  # A control the palette can only lead to, because it takes an argument this list has no
+  # way to carry. The browser opens whatever disclosure it is inside and focuses it.
+  defp reveal(socket, selector), do: push_event(socket, "ouro-reveal", %{selector: selector})
+
+  # Two different strings, and only the one that was asked for is sent. The Markdown is
+  # this process's — it is what the model wrote. The rendered words are the browser's, and
+  # are read back out of the prose it already drew rather than re-derived here, because a
+  # second renderer would be a second answer to what the message says.
+  defp copy_last(socket, which) do
+    case Commands.last_agent_message(socket.assigns) do
+      nil ->
+        socket
+
+      {dom_id, source} ->
+        case which do
+          :source -> push_event(socket, "ouro-copy", %{text: source})
+          :rendered -> push_event(socket, "ouro-copy", %{selector: "##{dom_id} .ouro-prose"})
+        end
+    end
+  end
+
+  # The rail in drawn order: triaged, filtered by the search box, then group by group —
+  # the same three steps `render/1` and `rail/1` take, so `]` lands on the row underneath.
+  defp move_rail(socket, direction) do
+    ordered =
+      socket.assigns.rows
+      |> Rail.triaged(pending(socket.assigns))
+      |> filter_sessions(socket.assigns.session_query)
+      |> then(fn triaged ->
+        for group <- Rail.groups(),
+            entry <- triaged,
+            entry.group == group,
+            do: {entry.row.plane, entry.row.id}
+      end)
+
+    case rail_target(ordered, socket.assigns.open, direction) do
+      nil -> socket
+      {plane, id} -> push_patch(socket, to: Route.session(plane, id))
+    end
+  end
+
+  defp rail_target([], _open, _direction), do: nil
+
+  defp rail_target(ordered, open, direction) do
+    case {Enum.find_index(ordered, &(&1 == open)), direction} do
+      {nil, "next"} -> List.first(ordered)
+      {nil, "prev"} -> List.last(ordered)
+      {at, "next"} -> Enum.at(ordered, min(at + 1, length(ordered) - 1))
+      {at, "prev"} -> Enum.at(ordered, max(at - 1, 0))
+    end
+  end
+
+  # ------------------------------------------------------------------- Steer and plan
+
+  defp steer(%{assigns: %{open: {:interactive, _id}}} = socket, "") do
+    assign(socket, :composer_error, "Write something before steering the turn.")
+  end
+
+  defp steer(%{assigns: %{open: {:interactive, id}}} = socket, text) do
+    if steer_offered?(socket.assigns) do
+      params =
+        socket
+        |> session_params(:interactive, id)
+        |> Map.put("input", turn_input(socket, text))
+
+      case call(socket, "interactive.steer", params) do
+        # No caller-owned id and no `last_send`: a steer is an injection into a call that
+        # is already running, and the gateway's own table says it has no idempotency
+        # (`methods/contract.ex:727-734`). So it is never adopted and never retried here.
+        {:ok, _accepted} ->
+          socket
+          |> put_draft("", false)
+          |> clear_next_effort()
+          |> assign(:composer_error, nil)
+          |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: text})
+
+        refusal ->
+          refused(socket, text, refusal_message(refusal))
+      end
+    else
+      socket
+    end
+  end
+
+  defp steer(socket, _text), do: socket
+
+  # Offered on silence, hidden only on a declared `false` — `Capability::offered`,
+  # `tui/src/model.rs:626`.
+  defp steer_offered?(assigns) do
+    assigns.scope == :operate and Call.available?(:operate, "interactive.steer") and
+      Commands.capability_offered?(assigns, :steer)
+  end
+
+  defp configure_plan(%{assigns: %{open: {:interactive, id}}} = socket) do
+    if Call.available?(socket.assigns.scope, "interactive.configure") do
+      want = not planning?(socket.assigns)
+      params = socket |> session_params(:interactive, id) |> Map.put("plan", want)
+
+      case call(socket, "interactive.configure", params) do
+        {:ok, _configured} -> socket |> assign(:composer_error, nil) |> refresh_info()
+        refusal -> assign(socket, :composer_error, refusal_message(refusal))
+      end
+    else
+      socket
+    end
+  end
+
+  defp configure_plan(socket), do: socket
+
+  defp planning?(assigns), do: assigns |> Commands.options() |> Map.get(:plan) == true
+
+  # ----------------------------------------------------------------- The model picker
+
+  # A `<select>`'s value is browser input, exactly as a `phx-value-choice` is, so it is
+  # matched against the rows this page actually drew rather than passed through to a
+  # closed envelope.
+  defp configure_model(%{assigns: %{open: {:interactive, id}}} = socket, model) do
+    model = String.trim(model)
+
+    if offered_model?(socket.assigns, model) and
+         Call.available?(socket.assigns.scope, "interactive.configure") do
+      params = socket |> session_params(:interactive, id) |> Map.put("model", model)
+
+      case call(socket, "interactive.configure", params) do
+        # Nothing assigned optimistically: the label moves when the next read says it
+        # moved, which is the rule the sandbox and thinking pickers already follow.
+        {:ok, _configured} -> socket |> assign(:composer_error, nil) |> refresh_info()
+        refusal -> assign(socket, :composer_error, refusal_message(refusal))
+      end
+    else
+      socket
+    end
+  end
+
+  defp configure_model(socket, _model), do: socket
+
+  defp offered_model?(assigns, model) do
+    case assigns.composer_extras.models do
+      rows when is_list(rows) -> Enum.any?(rows, &(&1.id == model))
+      _unfetched_or_refused -> false
+    end
+  end
+
+  defp fetch_models(%{assigns: %{composer_extras: %{models: nil}}} = socket) do
+    if Call.available?(socket.assigns.scope, "runtime.models") do
+      case call(socket, "runtime.models", %{}) do
+        {:ok, catalogue} -> put_extra(socket, :models, Composer.model_rows(catalogue))
+        refusal -> put_extra(socket, :models, {:error, refusal_message(refusal)})
+      end
+    else
+      put_extra(
+        socket,
+        :models,
+        {:error, "this build does not serve runtime.models, so there is no catalogue to list"}
+      )
+    end
+  end
+
+  defp fetch_models(socket), do: socket
+
+  # ---------------------------------------------------------------- The per-turn effort
+
+  defp arm_effort(socket, "session"), do: clear_next_effort(socket)
+
+  defp arm_effort(socket, choice) do
+    if choice in reasoning_efforts(socket.assigns) and is_binary(socket.assigns.draft_key),
+      do: put_extra(socket, :next_effort, {socket.assigns.draft_key, choice}),
+      else: socket
+  end
+
+  defp clear_next_effort(socket), do: put_extra(socket, :next_effort, nil)
+
+  # Keyed by the conversation it was armed for. A per-turn effort is a decision about the
+  # next thing said *here*; carrying it into whatever session is opened next would be this
+  # page applying a setting to a conversation nobody chose it for — and nothing clears
+  # this view's per-session state on a switch except the key it is held under.
+  defp armed_effort(assigns),
+    do: armed_for(assigns.composer_extras, assigns.draft_key)
+
+  defp armed_for(%{next_effort: {key, effort}}, key), do: effort
+  defp armed_for(_extras, _key), do: nil
+
+  # B4. The bare string for a plain prompt, the gateway's object form the moment there is
+  # something in it a string could not carry — `TurnInput::to_value`,
+  # `tui/src/model.rs:2789-2815`. Sending the object for every turn would rewrite the wire
+  # for nothing.
+  defp turn_input(socket, text) do
+    case armed_effort(socket.assigns) do
+      nil -> text
+      effort -> %{"prompt" => text, "reasoning_effort" => effort}
+    end
+  end
+
+  defp put_extra(socket, key, value),
+    do: update(socket, :composer_extras, &Map.put(&1, key, value))
+
+  @impl true
+  def handle_event("palette-toggle", _params, socket) do
+    {:noreply, if(socket.assigns.palette, do: close_palette(socket), else: open_palette(socket))}
+  end
+
+  def handle_event("palette-open", _params, socket), do: {:noreply, open_palette(socket)}
+  def handle_event("palette-close", _params, socket), do: {:noreply, close_palette(socket)}
+
+  def handle_event("palette-filter", %{"query" => query}, socket) when is_binary(query),
+    do: {:noreply, filter_palette(socket, query)}
+
+  def handle_event("palette-filter", _params, socket), do: {:noreply, socket}
+
+  def handle_event("palette-move", %{"direction" => direction}, socket)
+      when direction in ["next", "prev"],
+      do: {:noreply, move_palette(socket, direction)}
+
+  def handle_event("palette-move", _params, socket), do: {:noreply, socket}
+
+  # A click names its row; `Enter` runs whatever `↑↓` left selected.
+  def handle_event("palette-run", %{"id" => id}, socket) when is_binary(id),
+    do: {:noreply, socket |> close_palette() |> run_command(id)}
+
+  def handle_event(
+        "palette-run",
+        _params,
+        %{assigns: %{palette: %{rows: rows, selected: at}}} = socket
+      ) do
+    case Enum.at(rows, at) do
+      nil -> {:noreply, close_palette(socket)}
+      command -> {:noreply, socket |> close_palette() |> run_command(command.id)}
+    end
+  end
+
+  def handle_event("palette-run", _params, socket), do: {:noreply, socket}
+
+  def handle_event("shortcuts-open", _params, socket),
+    do: {:noreply, assign(socket, :shortcuts?, true)}
+
+  def handle_event("shortcuts-close", _params, socket),
+    do: {:noreply, assign(socket, :shortcuts?, false)}
+
+  # `[` and `]` walk the rail in the order it is drawn — triaged, filtered by the search
+  # box, group by group. A patch rather than a navigation, exactly as clicking the row is.
+  def handle_event("rail-move", %{"direction" => direction}, socket)
+      when direction in ["next", "prev"],
+      do: {:noreply, move_rail(socket, direction)}
+
+  def handle_event("rail-move", _params, socket), do: {:noreply, socket}
+
+  # B3. Steer is the composer's second submit button, so the draft rides the form rather
+  # than the debounced copy this process happens to be holding. Placed above the ordinary
+  # `send` clause and matched on the verb the button carries: a form submitted without it
+  # is an ordinary send and falls through untouched.
+  def handle_event("send", %{"verb" => "steer", "message" => text} = params, socket)
+      when is_binary(text) do
+    socket =
+      if current_composer?(socket, params),
+        do: steer(socket, String.trim_trailing(text)),
+        else: socket
+
+    {:noreply, socket}
+  end
+
+  # B2. Plan mode is not a Harness configuration key, and which transports can enter it
+  # mid-life is the runtime's to say. Nothing is predicted here: the answer is read back
+  # and a refusal is rendered in the runtime's own words, which is what the terminal
+  # client does (`tui/src/ui/app/session.rs:1236-1318`).
+  def handle_event("configure-plan", _params, socket), do: {:noreply, configure_plan(socket)}
+
+  def handle_event("configure-model", %{"model" => model}, socket) when is_binary(model),
+    do: {:noreply, configure_model(socket, model)}
+
+  def handle_event("configure-model", _params, socket), do: {:noreply, socket}
+
+  def handle_event("model-search", %{"query" => query}, socket) when is_binary(query),
+    do: {:noreply, put_extra(socket, :model_query, String.slice(query, 0, 120))}
+
+  def handle_event("model-search", _params, socket), do: {:noreply, socket}
+
+  # The catalogue is fetched when the disclosure is opened and never again, and never on
+  # the three-second cadence — `/new`'s own rule for the same list.
+  def handle_event("composer-settings", _params, socket), do: {:noreply, fetch_models(socket)}
+
+  # B4. An effort for the next send and only that one, after which the session's own
+  # picker is back in charge.
+  def handle_event("effort-next-turn", %{"choice" => choice}, socket) when is_binary(choice),
+    do: {:noreply, arm_effort(socket, choice)}
+
+  def handle_event("effort-next-turn", _params, socket), do: {:noreply, socket}
+
+  # The Markdown one agent message was written in. Only a cell this view is actually
+  # holding — `phx-value-cell` is browser input, and a cell nobody drew is a message
+  # nobody was shown. The rendered half never comes through here: the browser reads that
+  # off the prose it already drew.
+  def handle_event("copy-source", %{"cell" => id}, socket) when is_binary(id) do
+    case Map.get(socket.assigns.cells, id) do
+      %{cell: %Cell.Message{speaker: :agent, text: text}} ->
+        {:noreply, push_event(socket, "ouro-copy", %{text: text})}
+
+      _undrawn_or_not_a_message ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("copy-source", _params, socket), do: {:noreply, socket}
+
   # A fold changes what every cell renders as, not what any cell *is*, so the whole stream
   # is rewritten rather than diffed: the projection did not move, the drawing did.
-  @impl true
   def handle_event("expand", %{"block" => block}, socket),
     do: {:noreply, socket |> update(:expanded, &MapSet.put(&1, block)) |> redraw(:reset)}
 
@@ -888,7 +1314,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
     params =
       socket
       |> session_params(:interactive, id)
-      |> Map.merge(%{"input" => text, "turn_id" => turn_id})
+      # ui-parity W2: `turn_input/2` is the bare prompt unless a per-turn effort is armed.
+      |> Map.merge(%{"input" => turn_input(socket, text), "turn_id" => turn_id})
 
     socket = assign(socket, :last_send, {text, turn_id})
     method = Composer.verb(socket.assigns.turn, session_status(socket))
@@ -928,6 +1355,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     socket
     |> put_draft("", false)
+    # ui-parity W2: a per-turn effort rode this send and is spent.
+    |> clear_next_effort()
     |> assign(:composer_error, nil)
     |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: text})
   end
@@ -1422,6 +1851,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
     ]}>
       <Layouts.topbar current={:sessions} machines={@machines} today={@today} />
 
+      <%!-- ui-parity W2 --%>
+      <Palette.overlays palette={@palette} sheet={@shortcuts?} />
+
       <button
         :if={@open}
         type="button"
@@ -1472,6 +1904,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             efforts={@reasoning_efforts}
             scope={@scope}
             ended={@ended?}
+            extras={@composer_extras}
           />
           <.nothing_open
             :if={is_nil(@open)}
@@ -1914,6 +2347,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :scope, :atom, required: true
   attr :ended, :boolean, required: true
   attr :draft_key, :string, required: true
+  # ui-parity W2. The composer state that is not the draft, in one attr: this component
+  # only carries it through.
+  attr :extras, :map, default: %{models: nil, model_query: "", next_effort: nil}
 
   def focused(assigns) do
     {plane, id} = assigns.open
@@ -1950,6 +2386,14 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:agent_loading?, agent_loading?)
       |> assign(:loading_id, loading_id(plane, id))
       |> assign(:node, node_of(assigns.row))
+      # ui-parity W2
+      |> assign(
+        :can_steer,
+        plane == :interactive and operate? and Call.available?(:operate, "interactive.steer") and
+          Commands.capability_offered?(assigns, :steer)
+      )
+      |> assign(:planning?, Commands.options(assigns) |> Map.get(:plan) == true)
+      |> assign(:next_effort, armed_for(assigns.extras, assigns.draft_key))
 
     ~H"""
     <header class="ouro-focus-head">
@@ -2031,6 +2475,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
       can_configure={@can_configure}
       ended={@ended}
       can_retry={@can_retry}
+      can_steer={@can_steer}
+      plan={@planning?}
+      next_effort={@next_effort}
+      model={@info && Map.get(Map.get(@info, :options) || %{}, :model)}
+      models={@extras.models}
+      model_query={@extras.model_query}
     />
 
     <%!-- The status row the TUI's footer has had all along: the two standing postures a

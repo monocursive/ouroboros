@@ -477,8 +477,12 @@
 
     syncSend: function () {
       var form = this.el.form;
-      var button = form && form.querySelector("[data-ouro-send]");
-      if (button) button.disabled = this.el.value.trim() === "";
+      if (!form) return;
+      // ui-parity W2. Steer submits the same form under a different verb, so it follows
+      // the same rule: a turn with nothing in it is not a turn.
+      var buttons = form.querySelectorAll("[data-ouro-send], [data-ouro-steer]");
+      var empty = this.el.value.trim() === "";
+      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = empty;
     }
   };
 
@@ -550,6 +554,237 @@
     }
   };
 
+  // ------------------------------------------------------------------------------------
+  // ui-parity W2 — the clipboard, and the keys that are not a character
+  // ------------------------------------------------------------------------------------
+
+  // `navigator.clipboard` is unavailable on an insecure origin and rejects when the
+  // browser decides the write was not user-initiated. Neither is an error worth throwing
+  // at somebody: the fallback puts the text somewhere they can copy it by hand, and the
+  // button says which of the two happened. Nothing here ever claims a copy it did not do.
+  function writeClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        var written = navigator.clipboard.writeText(text);
+        if (written && typeof written.then === "function") return written;
+      } catch (error) {
+        // Fall through to the selection path.
+      }
+    }
+    return Promise.reject(new Error("no async clipboard"));
+  }
+
+  // The old path: an off-screen textarea, selected, and `execCommand`. Returns whether the
+  // copy actually happened, because a button that said "Copied" on a browser that refused
+  // would be the one lie this whole surface is written to avoid.
+  function selectAndCopy(text, visible) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+
+    var copied = false;
+    try {
+      area.select();
+      copied = document.execCommand && document.execCommand("copy");
+    } catch (error) {
+      copied = false;
+    }
+    document.body.removeChild(area);
+
+    // Still nothing. Leave the words the person asked for selected on the page so the
+    // browser's own copy key finishes the job.
+    if (!copied && visible && window.getSelection) {
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(visible);
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch (error) {
+        // A selection that cannot be made changes nothing about the answer below.
+      }
+    }
+
+    return copied;
+  }
+
+  function copy(text, visible, settle) {
+    if (typeof text !== "string" || text === "") {
+      settle(false);
+      return;
+    }
+
+    writeClipboard(text).then(
+      function () {
+        settle(true);
+      },
+      function () {
+        settle(selectAndCopy(text, visible));
+      }
+    );
+  }
+
+  // Where a copy announces itself when it did not come from a button of its own — the
+  // palette's "copy the last message". `phx-update="ignore"`, so a transcript patch does
+  // not wipe the word mid-flash.
+  function announceCopy(copied) {
+    var status = document.getElementById("ouro-copy-status");
+    if (!status) return;
+
+    status.textContent = copied ? "Copied" : "Could not copy — press ⌘C";
+    window.clearTimeout(status.ouroTimer);
+    status.ouroTimer = window.setTimeout(function () {
+      status.textContent = "";
+    }, 1500);
+  }
+
+  // "Copy" on an agent message: the *rendered* words, read back out of the prose the
+  // browser has already drawn. That is the only place the rendered text exists — this
+  // side does not render Markdown, and a second renderer here would be a second answer to
+  // what the message says.
+  //
+  // "Copy source" is not handled here at all. It is a `phx-click`, because the Markdown a
+  // provider sent is untrusted prose and belongs in a socket payload rather than in a
+  // `data-` attribute on the page.
+  var Clipboard = {
+    mounted: function () {
+      this.onClick = function (event) {
+        var button = event.target.closest && event.target.closest("[data-ouro-copy]");
+        if (!button || !this.el.contains(button)) return;
+
+        event.preventDefault();
+
+        var prose = this.el.parentElement && this.el.parentElement.querySelector(".ouro-prose");
+        var label = button.ouroLabel || button.textContent;
+        button.ouroLabel = label;
+
+        copy((prose && prose.innerText) || "", prose, function (copied) {
+          button.textContent = copied ? "Copied" : "Press ⌘C";
+          window.clearTimeout(button.ouroTimer);
+          button.ouroTimer = window.setTimeout(function () {
+            button.textContent = label;
+          }, 1500);
+        });
+      }.bind(this);
+
+      this.el.addEventListener("click", this.onClick);
+    },
+
+    destroyed: function () {
+      this.el.removeEventListener("click", this.onClick);
+    }
+  };
+
+  function editable(element) {
+    return !!(
+      element &&
+      element.matches &&
+      element.matches("input, textarea, select, [contenteditable='true']")
+    );
+  }
+
+  // The document-level keys, on an element inside the LiveView so they have somewhere to
+  // push to. Everything here is a *shortcut*: the server owns what each one does, gates it
+  // exactly as it gates the palette row of the same name, and may answer by doing nothing.
+  //
+  // ⌘N and ⌘. are deliberately not bound. They are the browser's and the operating
+  // system's, and a page that stole them would be taking a window away from somebody to
+  // save them one keystroke.
+  var Keys = {
+    mounted: function () {
+      this.onKeyDown = function (event) {
+        if (event.defaultPrevented || !event.key) return;
+
+        // The palette, from anywhere at all — including from inside the composer, which
+        // is where a person is most likely to want it.
+        if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          this.pushEvent("palette-toggle", {});
+          return;
+        }
+
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+        // Esc in the composer stops a running turn, and only where there is a control on
+        // screen saying one is running. Anywhere else Esc keeps its existing meanings.
+        if (event.key === "Escape") {
+          if (event.target && event.target.id === "ouro-composer-input") {
+            if (document.querySelector("[data-ouro-interrupt]")) {
+              event.preventDefault();
+              this.pushEvent("interrupt", {});
+            }
+          }
+          return;
+        }
+
+        if (editable(document.activeElement)) return;
+        // A modal owns the keyboard while it is open; `?` behind a confirmation dialog
+        // would put a second sheet over a question nobody has answered.
+        if (document.querySelector("dialog[open]")) return;
+
+        if (event.key === "?") {
+          event.preventDefault();
+          this.pushEvent("shortcuts-open", {});
+        } else if (event.key === "n") {
+          event.preventDefault();
+          this.pushEvent("palette-run", { id: "session.new" });
+        } else if (event.key === "[") {
+          event.preventDefault();
+          this.pushEvent("rail-move", { direction: "prev" });
+        } else if (event.key === "]") {
+          event.preventDefault();
+          this.pushEvent("rail-move", { direction: "next" });
+        }
+      }.bind(this);
+
+      document.addEventListener("keydown", this.onKeyDown);
+    },
+
+    destroyed: function () {
+      document.removeEventListener("keydown", this.onKeyDown);
+    }
+  };
+
+  // The palette's own copy rows: the server names either the text it holds (the Markdown)
+  // or the element whose rendered words to read. It never sends both, because they are
+  // not the same string and only one of them is what was asked for.
+  window.addEventListener("phx:ouro-copy", function (event) {
+    var detail = event.detail || {};
+    var visible = detail.selector && document.querySelector(detail.selector);
+    var text = typeof detail.text === "string" ? detail.text : (visible && visible.innerText) || "";
+
+    copy(text, visible, announceCopy);
+  });
+
+  // A palette row that leads to a control rather than running one: open whatever
+  // disclosure the control is inside, then put the keyboard on it.
+  window.addEventListener("phx:ouro-reveal", function (event) {
+    var detail = event.detail || {};
+    var target = detail.selector && document.querySelector(detail.selector);
+    if (!target) return;
+
+    var parent = target.parentElement;
+    while (parent) {
+      if (parent.tagName === "DETAILS") parent.open = true;
+      parent = parent.parentElement;
+    }
+
+    if (target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
+    if (target.focus) target.focus();
+  });
+
+  // The two chrome toggles have no server state behind them, so a palette row for either
+  // is a request to press the button that is already on the page.
+  window.addEventListener("phx:ouro-chrome", function (event) {
+    var detail = event.detail || {};
+    if (detail.control === "theme") toggleTheme();
+    else if (detail.control === "bell") toggleBell();
+  });
+
   var sessionMenuFocus = new WeakMap();
 
   var liveSocket = new LiveSocket("/live", Socket, {
@@ -601,7 +836,10 @@
       Composer: Composer,
       ElapsedTimer: ElapsedTimer,
       FocusInvalid: FocusInvalid,
-      Modal: Modal
+      Modal: Modal,
+      // ui-parity W2
+      Clipboard: Clipboard,
+      Keys: Keys
     }
   });
 

@@ -41,6 +41,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   alias Ouroboros.Interactive.Event
   alias Ouroboros.Interactive.State
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Transcript
   alias Ouroboros.Web.Transcript.Cell
 
@@ -164,6 +165,14 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     def handle_call({:configure, changes}, _from, state) do
       send(state.test, {:configured, changes})
       answer(state, :configure, {:ok, %{changed: changes}})
+    end
+
+    # ui-parity W2. A steer carries no `turn_id`: the gateway's table says so
+    # (`methods/contract.ex` `interactive.steer`), and an assertion that one never
+    # arrives here is an assertion the envelope was built the way the contract describes.
+    def handle_call({:steer, input, opts}, _from, state) do
+      send(state.test, {:steered, input, opts})
+      answer(state, :steer, {:ok, %{accepted: true}})
     end
 
     def handle_call(:close, _from, state) do
@@ -345,6 +354,29 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
   defp type(view, text) do
     view |> form("#composer", %{"message" => text}) |> render_change()
+  end
+
+  # ui-parity W2. The order the rail actually drew, and which session the focus column
+  # is actually showing — both read off the page rather than recomputed here, so a test of
+  # `[`/`]` is a test of what an operator would see move.
+  defp drawn_rail(html) do
+    ~r/id="session-row-interactive-([^"]+)"/
+    |> Regex.scan(html)
+    |> Enum.map(fn [_whole, id] -> id end)
+  end
+
+  defp open_session(html) do
+    case Regex.run(~r/data-session="interactive:([^"]+)"/, html) do
+      [_whole, id] -> id
+      nil -> nil
+    end
+  end
+
+  defp palette_selection(html) do
+    case Regex.run(~r/id="ouro-palette-row-([^"]+)"[^>]*aria-selected="true"/, html) do
+      [_whole, id] -> id
+      nil -> nil
+    end
   end
 
   defp occurrences(haystack, needle),
@@ -2256,6 +2288,526 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       assert rule.pattern == "Capability(vet)"
       assert rule.workspace == ""
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W2 — the palette, the keyboard, copy, steer, model, per-turn effort, plan
+  # ------------------------------------------------------------------------------------
+
+  describe "the command palette" do
+    test "lists the five groups once each, in the parity plan's order", %{conn: conn} do
+      id = session_id()
+      # A session with something in it, so every one of the five groups has a row: the
+      # Conversation group exists only where there is a message to copy.
+      _plane = plane(id: id, status: :idle, backlogs: [{:ok, [said(1, "the answer")]}])
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+
+      # Closed until asked for: nothing of the palette is in the first paint.
+      refute html =~ ~s(id="ouro-palette")
+
+      html = view |> element("button[phx-click='palette-open']") |> render_click()
+
+      assert html =~ ~s(id="ouro-palette")
+
+      headings =
+        Regex.scan(~r{<p class="ouro-palette-group"[^>]*>([^<]+)</p>}, html)
+        |> Enum.map(fn [_whole, label] -> String.trim(label) end)
+
+      assert headings == ["Session", "Turn", "Conversation", "Runtime", "Client"]
+
+      # Every heading exactly once, which is the collision the TUI palette review named.
+      assert headings == Enum.uniq(headings)
+    end
+
+    test "draws the slash spelling and the shortcut beside each row", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html = view |> render_hook("palette-open", %{})
+
+      assert html =~ ~s(<span class="ouro-palette-label">New session</span>)
+      assert html =~ ~s(<span class="ouro-palette-slash ouro-mono">/new</span>)
+      assert html =~ "<kbd>n</kbd>"
+      assert html =~ ~s(<span class="ouro-palette-slash ouro-mono">/status</span>)
+    end
+
+    test "toggles: a second ctrl+k closes what the first opened", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      assert render_hook(view, "palette-toggle", %{}) =~ ~s(id="ouro-palette")
+      refute render_hook(view, "palette-toggle", %{}) =~ ~s(id="ouro-palette")
+    end
+
+    test "Esc closes it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "palette-open", %{})
+      refute render_hook(view, "palette-close", %{}) =~ ~s(id="ouro-palette")
+    end
+
+    test "filters in this process, keeping group order", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+      render_hook(view, "palette-open", %{})
+
+      html =
+        view
+        |> form("#ouro-palette form", %{"query" => "theme"})
+        |> render_change()
+
+      assert html =~ "Switch theme"
+      assert html =~ ">Client</p>"
+      refute html =~ ~s(phx-value-id="session.new")
+      refute html =~ ">Session</p>"
+    end
+
+    test "the arrows move the selection and Enter runs what they left on it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "palette-open", %{})
+
+      # "New session" is the first row of the first group, so it is selected on open.
+      assert palette_selection(render(view)) == "session.new"
+
+      moved = palette_selection(render_hook(view, "palette-move", %{"direction" => "next"}))
+      assert moved != nil and moved != "session.new"
+
+      assert palette_selection(render_hook(view, "palette-move", %{"direction" => "prev"})) ==
+               "session.new"
+
+      # The top does not wrap round to the bottom: a held arrow key stops at the end.
+      render_hook(view, "palette-move", %{"direction" => "prev"})
+      assert palette_selection(render(view)) == "session.new"
+
+      # Enter on the selected row: `/new` is a navigation, and this is the whole of
+      # "each command maps to an existing event or a push_navigate".
+      assert {:error, {:live_redirect, %{to: "/new"}}} =
+               view |> form("#ouro-palette form", %{"query" => ""}) |> render_submit()
+    end
+
+    test "a row that went stale while the modal was open runs nothing", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, status: :running, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+      flush(view)
+
+      html = render_hook(view, "palette-open", %{})
+      assert html =~ "Interrupt the running turn"
+
+      # The turn settles under the open palette. The second gate in `run_command/2` is
+      # the only thing between a stale row and a call the runtime would have refused.
+      FakePlane.emit(pid, event(2, :turn_completed, %{}))
+      flush(view)
+
+      render_hook(view, "palette-run", %{"id" => "turn.interrupt"})
+      refute_receive {:interrupted, _turn}, 100
+    end
+
+    test "the shortcut sheet lists only keys this page binds", %{conn: conn} do
+      {:ok, view, html} = live(conn, "/")
+
+      refute html =~ ~s(id="ouro-shortcuts")
+
+      html = render_hook(view, "shortcuts-open", %{})
+
+      assert html =~ ~s(id="ouro-shortcuts")
+      assert html =~ "<kbd>⌘K</kbd>"
+      assert html =~ "<kbd>[</kbd>"
+      # The two keys docs/WEB.md used to claim and nothing ever bound.
+      refute html =~ "⌘N"
+      refute html =~ "⌘."
+
+      refute render_hook(view, "shortcuts-close", %{}) =~ ~s(id="ouro-shortcuts")
+    end
+
+    test "the keyboard hook is mounted so the document keys have somewhere to push",
+         %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="ouro-keys")
+      assert html =~ ~s(phx-hook="Keys")
+    end
+  end
+
+  describe "[ and ] on the rail" do
+    test "walk the rail in the order it drew, one row per press", %{conn: conn} do
+      listed(session_id(), title: "Alpha", status: :running)
+      listed(session_id(), title: "Beta", status: :running)
+
+      # Read the order off the very view that will do the moving. The list is refreshed
+      # on the poll, so a second view mounted a moment later is a second list.
+      {:ok, view, html} = live(conn, "/")
+      [first, second | _rest] = drawn_rail(html)
+
+      render_hook(view, "rail-move", %{"direction" => "next"})
+      assert assert_patch(view) == "/s/interactive/#{first}"
+      assert open_session(render(view)) == first
+
+      render_hook(view, "rail-move", %{"direction" => "next"})
+      assert assert_patch(view) == "/s/interactive/#{second}"
+      assert open_session(render(view)) == second
+
+      render_hook(view, "rail-move", %{"direction" => "prev"})
+      assert assert_patch(view) == "/s/interactive/#{first}"
+      assert open_session(render(view)) == first
+    end
+
+    test "stop at the ends rather than wrapping round", %{conn: conn} do
+      listed(session_id(), title: "Alpha", status: :running)
+      listed(session_id(), title: "Beta", status: :running)
+
+      {:ok, view, html} = live(conn, "/")
+      last = html |> drawn_rail() |> List.last()
+
+      render_hook(view, "rail-move", %{"direction" => "prev"})
+      assert assert_patch(view) == "/s/interactive/#{last}"
+
+      render_hook(view, "rail-move", %{"direction" => "next"})
+      assert open_session(render(view)) == last
+    end
+  end
+
+  describe "copying a message" do
+    test "every settled agent message wears both controls", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, [said(1, "The answer is 42.")]}])
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ ~s(phx-hook="Clipboard")
+      assert html =~ ~s(data-ouro-copy="rendered")
+      assert html =~ ~s(phx-click="copy-source")
+    end
+
+    test "copy source sends the Markdown the model wrote, not the rendered words",
+         %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, [said(1, "# Heading\n\nand **bold**.")]}])
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+
+      # The page shows the rendered heading, and the raw Markdown is nowhere in the DOM.
+      assert html =~ "<h1>Heading</h1>"
+      refute html =~ "# Heading"
+
+      [_whole, cell] = Regex.run(~r{phx-value-cell="([^"]+)"}, html)
+
+      render_click(view, "copy-source", %{"cell" => cell})
+      assert_push_event(view, "ouro-copy", %{text: "# Heading\n\nand **bold**."})
+    end
+
+    test "a cell id this view never drew copies nothing", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, [said(1, "hello")]}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      render_click(view, "copy-source", %{"cell" => "event-9999-0"})
+      refute_push_event(view, "ouro-copy", _nothing)
+    end
+
+    test "the palette copies the last message two ways, and neither is the other",
+         %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, [said(1, "first"), said(2, "**last**")]}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      render_hook(view, "palette-run", %{"id" => "conversation.copy_source"})
+      assert_push_event(view, "ouro-copy", %{text: "**last**"})
+
+      # The rendered half is read out of the prose the browser already drew: this process
+      # holds Markdown, and a second renderer here would be a second answer.
+      render_hook(view, "palette-run", %{"id" => "conversation.copy"})
+      assert_push_event(view, "ouro-copy", %{selector: selector})
+      assert selector =~ ".ouro-prose"
+    end
+  end
+
+  describe "steer" do
+    test "offers the button while a turn runs and sends the steer envelope", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+      refute html =~ ~s(data-ouro-steer)
+
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+      assert flush(view) =~ ~s(data-ouro-steer)
+
+      view
+      |> form("#composer", %{"message" => "use the smaller fixture"})
+      |> render_submit(%{"verb" => "steer"})
+
+      # `interactive.steer`'s closed envelope is `{id, input, node}` and carries no
+      # `turn_id` — the harness mints the request id inside its own worker, so there is
+      # no caller-keyed idempotency to manufacture.
+      assert_receive {:steered, "use the smaller fixture", []}
+      refute_receive {:sent, _mode, _turn, _input, _opts}, 100
+    end
+
+    test "is absent where the session declared it cannot be steered", %{conn: conn} do
+      id = session_id()
+
+      pid =
+        plane(
+          id: id,
+          status: :idle,
+          backlogs: [{:ok, []}],
+          options: %{capabilities: %{steer: false}}
+        )
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+
+      assert flush(view) =~ "Interrupt"
+      refute flush(view) =~ ~s(data-ouro-steer)
+    end
+
+    test "is offered where the runtime said nothing at all about steering", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, status: :idle, backlogs: [{:ok, []}], options: %{capabilities: %{}})
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+
+      # Silence is an older gateway, not a refusal.
+      assert flush(view) =~ ~s(data-ouro-steer)
+    end
+
+    test "renders a refusal in the composer's own slot, keeping the draft", %{conn: conn} do
+      id = session_id()
+
+      pid =
+        plane(
+          id: id,
+          status: :idle,
+          backlogs: [{:ok, []}],
+          answers: %{steer: [{:error, {:unavailable, "this turn is past the point of steering"}}]}
+        )
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+      flush(view)
+
+      html =
+        view
+        |> form("#composer", %{"message" => "too late"})
+        |> render_submit(%{"verb" => "steer"})
+
+      assert html =~ "ouro-composer-refusal"
+      assert html =~ "this turn is past the point of steering"
+      assert html =~ "too late"
+    end
+  end
+
+  describe "changing the model mid-session" do
+    test "fetches the catalogue when the row opens and never on the poll", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{model: "openai_codex:gpt-5.6-sol"})
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+
+      # Nothing is listed before the disclosure is opened.
+      refute html =~ "ouro-model-select"
+      assert html =~ "Model · openai_codex:gpt-5.6-sol"
+
+      html = render_click(view, "composer-settings", %{})
+
+      assert html =~ "ouro-model-select"
+      assert html =~ "<option"
+    end
+
+    test "configures through the closed envelope and does not move the label itself",
+         %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{model: "already-running"})
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      render_click(view, "composer-settings", %{})
+
+      %{id: offered} = hd(Composer.model_rows(Ouroboros.Models.list()))
+
+      html =
+        view
+        |> element("form[phx-change='configure-model']")
+        |> render_change(%{"model" => offered})
+
+      assert_receive {:configured, %{model: ^offered}}
+
+      # The session still reports what it reported. The label follows the re-read.
+      assert html =~ "Model · already-running"
+    end
+
+    test "a model this page never offered is not sent", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{model: "already-running"})
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      render_click(view, "composer-settings", %{})
+
+      # A `<select>`'s value is browser input, exactly as a `phx-value-choice` is.
+      render_change(view, "configure-model", %{"model" => "not-in-the-catalogue"})
+      refute_receive {:configured, _changes}, 100
+    end
+
+    test "the search narrows the rows and always keeps the running model", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{})
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      render_click(view, "composer-settings", %{})
+
+      before = render(view) |> occurrences("<option")
+
+      html =
+        view
+        |> form(".ouro-model-search", %{"query" => "zzzz-no-such-model"})
+        |> render_change()
+
+      assert occurrences(html, "<option") < before
+    end
+  end
+
+  describe "the per-turn effort" do
+    test "rides the structured envelope for one send, then forgets", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, status: :idle, backlogs: [{:ok, []}], options: %{})
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+      refute html =~ "next turn:"
+
+      html =
+        view
+        |> element(~s(button[phx-click="effort-next-turn"][phx-value-choice="high"]))
+        |> render_click()
+
+      assert html =~ "next turn: high"
+
+      submit(view, "think about this")
+
+      # `TurnInput::to_value`: the object form the moment there is something in it a
+      # string could not carry, and the prompt beside it rather than instead of it.
+      assert_receive {:sent, :message, _turn,
+                      %{prompt: "think about this", reasoning_effort: :high}, []}
+
+      # Spent. The next send is the bare string again, which is what the overwhelmingly
+      # common turn has always put on the wire.
+      refute render(view) =~ "next turn:"
+
+      submit(view, "and this")
+      assert_receive {:sent, :message, _turn, "and this", []}
+    end
+
+    test "a plain send with nothing armed stays a plain string", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      submit(view, "ship it")
+
+      assert_receive {:sent, :message, _turn, "ship it", []}
+    end
+
+    test "Session default clears it without sending anything", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      view
+      |> element(~s(button[phx-click="effort-next-turn"][phx-value-choice="low"]))
+      |> render_click()
+
+      html = render_click(view, "effort-next-turn", %{"choice" => "session"})
+
+      refute html =~ "next turn:"
+      refute_receive {:configured, _changes}, 100
+    end
+
+    test "an effort this model does not advertise is never armed", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      html = render_click(view, "effort-next-turn", %{"choice" => "ludicrous"})
+      refute html =~ "next turn:"
+
+      submit(view, "ship it")
+      assert_receive {:sent, :message, _turn, "ship it", []}
+    end
+  end
+
+  describe "plan mode" do
+    test "toggles through interactive.configure and says Planning while it is on",
+         %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{plan: true})
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ ">Planning<" or html =~ "Planning"
+      assert html =~ ~s(phx-click="configure-plan" aria-pressed="true")
+
+      render_click(view, "configure-plan", %{})
+
+      # Off, because the session reported it was on: the toggle acts on what the operator
+      # can see rather than on a posture this page assumed.
+      assert_receive {:configured, %{plan: false}}
+    end
+
+    test "enters plan mode from a session that reported it was not planning", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{})
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+      refute html =~ ">Planning<"
+
+      view |> element(~s(button[phx-click="configure-plan"])) |> render_click()
+      assert_receive {:configured, %{plan: true}}
+    end
+
+    test "renders the runtime's refusal verbatim rather than guessing", %{conn: conn} do
+      id = session_id()
+
+      _plane =
+        plane(
+          id: id,
+          backlogs: [{:ok, []}],
+          answers: %{
+            configure: [
+              {:error, {:unavailable, "this transport carries the plan posture on every launch"}}
+            ]
+          }
+        )
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      html = render_click(view, "configure-plan", %{})
+
+      assert html =~ "this transport carries the plan posture on every launch"
+    end
+  end
+
+  describe "the composer's key hints" do
+    test "names the send key and the stop key on the controls themselves", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ "<kbd>⏎</kbd>"
+      assert html =~ "<kbd>⌘K</kbd>"
+
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+      working = flush(view)
+
+      assert working =~ "<kbd>esc</kbd>"
+      assert working =~ "data-ouro-interrupt"
     end
   end
 end

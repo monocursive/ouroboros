@@ -18,15 +18,48 @@ defmodule Ouroboros.Web.Live.Composer do
   `turn_started` is below the floor — it says so with `spoke?: false` and the caller falls
   back to the polled session status, which is the only other evidence there is.
 
-  ## The turn envelope is a plain string
+  ## The turn envelope is a plain string until it cannot be
 
   `input` is sent as the bare prompt, which is the common case of the closed envelope
-  (`docs/PROTOCOL.md` `interactive.send_message`). Attachments and a per-turn
-  `reasoning_effort` are the object form and are **not** built here: attachments must name
-  files inside the leased workspace, which a browser cannot enumerate until
-  `workspace.browse` lands, and a per-turn effort is a different control from the
-  session-wide picker in this footer. Both are named in the slice report rather than
-  half-built.
+  (`docs/PROTOCOL.md` `interactive.send_message`). The object form
+  `{prompt, attachments, reasoning_effort}` appears only where there is something in it a
+  string could not carry — which, on this surface, means a per-turn effort and nothing
+  else. That is the terminal client's own rule, not a second one invented here
+  (`TurnInput::to_value`, `tui/src/model.rs:2789-2815`): sending the object for every turn
+  would rewrite the wire for nothing.
+
+  Attachments are still not built here: they must name files inside the leased workspace,
+  which a browser cannot enumerate until `workspace.browse` lands.
+
+  ## Steer is the form's second submit button
+
+  It submits `#composer` under `verb=steer`, so the words that travel are the ones in the
+  box rather than the debounced copy the LiveView happens to be holding — a steer typed and
+  sent inside the 400ms debounce would otherwise inject the *previous* draft into a running
+  turn, which is the one mistake this verb must not make.
+
+  It is written before the Send button because that is where it belongs on screen, and
+  being first would make it the form's implicit submitter — except that this form has no
+  path to implicit submission: its only field is a `<textarea>`, where `Enter` inserts a
+  newline, and the `Composer` hook intercepts `Enter` and calls `requestSubmit()` with no
+  submitter. **Adding a text `<input>` to this form would give `Enter` to Steer**; put the
+  Send button first if that ever happens.
+
+  ## Steer is offered on silence and hidden only on a refusal
+
+  The Steer button appears while a turn is running, where the runtime serves
+  `interactive.steer`, and where `options.capabilities.steer` is anything but an explicit
+  `false`. An older gateway that never declared the key keeps the control, because hiding
+  a working verb on silence would be this surface inventing a ceiling — the reading
+  `Capability::offered` takes (`tui/src/model.rs:626`).
+
+  ## The model picker is a `<select>`, and its *label* still is not
+
+  The sandbox and thinking pickers are marked buttons for the reason below. A 113-row
+  catalogue is not a button group, so the model control is a searchable `<select>` — but
+  the sentence that says which model this session is running is drawn from the session's
+  own re-read, exactly like the other two. The widget may move the instant somebody picks;
+  the claim does not.
 
   ## The pickers are absent when the runtime said nothing
 
@@ -198,6 +231,13 @@ defmodule Ouroboros.Web.Live.Composer do
   attr :can_configure, :boolean, required: true
   attr :ended, :boolean, default: false
   attr :can_retry, :boolean, default: false
+  # ui-parity W2
+  attr :can_steer, :boolean, default: false
+  attr :plan, :boolean, default: false
+  attr :next_effort, :any, default: nil
+  attr :model, :any, default: nil
+  attr :models, :any, default: nil
+  attr :model_query, :string, default: ""
 
   def composer(assigns) do
     assigns =
@@ -207,6 +247,28 @@ defmodule Ouroboros.Web.Live.Composer do
 
     ~H"""
     <div class="ouro-composer">
+      <div class="ouro-composer-bar">
+        <button
+          type="button"
+          class="ouro-quiet-button ouro-palette-trigger"
+          phx-click="palette-open"
+          aria-haspopup="dialog"
+        >
+          Commands <kbd>⌘K</kbd>
+        </button>
+        <span :if={@plan} class="ouro-chip ouro-plan-chip" role="status">Planning</span>
+        <span :if={@next_effort} class="ouro-chip ouro-mono" role="status">
+          next turn: {word(@next_effort)}
+        </span>
+        <span
+          id="ouro-copy-status"
+          class="ouro-quiet"
+          phx-update="ignore"
+          role="status"
+          aria-live="polite"
+        ></span>
+      </div>
+
       <p :if={@error} class="ouro-refusal ouro-composer-refusal" role="alert">{@error}</p>
       <div :if={@turn.failed?} class="ouro-composer-retry" role="status">
         <span>The agent stopped before completing the last message.</span>
@@ -249,12 +311,41 @@ defmodule Ouroboros.Web.Live.Composer do
               <span :if={@turn.queued > 0} class="ouro-chip ouro-mono">{@turn.queued} queued</span>
 
               <button
+                :if={@can_configure}
+                type="button"
+                class={["ouro-quiet-button", @plan && "ouro-toggle-on"]}
+                phx-click="configure-plan"
+                aria-pressed={to_string(@plan)}
+                title={
+                  if @plan,
+                    do: "Leave plan mode",
+                    else: "Ask this session to plan rather than edit"
+                }
+              >
+                {if @plan, do: "Planning", else: "Plan"}
+              </button>
+
+              <button
                 :if={@working? and @can_interrupt}
                 type="button"
                 class="ouro-quiet-button"
                 phx-click="interrupt"
+                data-ouro-interrupt
               >
-                Interrupt
+                Interrupt <kbd>esc</kbd>
+              </button>
+
+              <button
+                :if={@working? and @can_steer}
+                type="submit"
+                name="verb"
+                value="steer"
+                class="ouro-quiet-button ouro-steer"
+                data-ouro-steer
+                disabled={String.trim(@draft) == ""}
+                phx-disable-with="Steering…"
+              >
+                Steer
               </button>
 
               <button
@@ -264,15 +355,17 @@ defmodule Ouroboros.Web.Live.Composer do
                 disabled={String.trim(@draft) == ""}
                 phx-disable-with="Sending…"
               >
-                {if @queues?, do: "Queue", else: "Send"}
+                {if @queues?, do: "Queue", else: "Send"} <kbd>⏎</kbd>
               </button>
             </div>
           </div>
         </form>
 
         <details :if={@can_configure} class="ouro-composer-settings" data-ouro-disclosure={@draft_key}>
-          <summary>
-            {if @sandbox, do: word(@sandbox), else: "File access not reported"} · {word(@effort)} thinking
+          <summary phx-click="composer-settings">
+            {if @sandbox, do: word(@sandbox), else: "File access not reported"} · {word(@effort)} thinking<span :if={
+              @plan
+            }>&nbsp;· Planning</span>
             <span>Change</span>
           </summary>
           <div class="ouro-composer-footer">
@@ -292,6 +385,10 @@ defmodule Ouroboros.Web.Live.Composer do
               field="reasoning_effort"
               warn={false}
             />
+
+            <.next_turn_effort current={@next_effort} choices={@efforts} />
+
+            <.model_picker current={@model} models={@models} query={@model_query} />
           </div>
         </details>
       </div>
@@ -329,4 +426,169 @@ defmodule Ouroboros.Web.Live.Composer do
     </div>
     """
   end
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W2
+  # ------------------------------------------------------------------------------------
+
+  @doc """
+  The per-turn effort: `reasoning_effort` on the **next** send and only that one.
+
+  A different control from the picker above it, and deliberately drawn as one. The picker
+  above changes the session; this changes one turn and then forgets, which is the terminal
+  client's `/effort` (`tui/src/ui/app/session.rs:1163-1223`) and the same envelope key at
+  a different scope. `Session default` is the off position rather than a value — there is
+  no `default` effort to send, only a word for not overriding.
+  """
+  attr :current, :any, required: true
+  attr :choices, :list, required: true
+
+  def next_turn_effort(assigns) do
+    ~H"""
+    <div class="ouro-picker">
+      <span class="ouro-picker-label">Next turn only · {word(@current)}</span>
+      <button
+        type="button"
+        class={["ouro-picker-option", is_nil(@current) && "ouro-picker-on"]}
+        aria-pressed={to_string(is_nil(@current))}
+        phx-click="effort-next-turn"
+        phx-value-choice="session"
+      >
+        Session default
+      </button>
+      <button
+        :for={choice <- @choices}
+        type="button"
+        class={["ouro-picker-option", to_string(@current) == choice && "ouro-picker-on"]}
+        aria-pressed={to_string(to_string(@current) == choice)}
+        phx-click="effort-next-turn"
+        phx-value-choice={choice}
+      >
+        {word(choice)}
+      </button>
+    </div>
+    """
+  end
+
+  @doc """
+  The model this session is running, and the catalogue it can be changed to.
+
+  `models` is `nil` until the disclosure is opened — `runtime.models` is fetched then and
+  never on the three-second cadence, which is `/new`'s own rule. A refusal is drawn as the
+  runtime's sentence and the control is simply absent: a picker with no rows would be this
+  page claiming the runtime knows of no models.
+  """
+  attr :current, :any, required: true
+  attr :models, :any, required: true
+  attr :query, :string, default: ""
+
+  def model_picker(%{models: {:error, _message}} = assigns) do
+    assigns = assign(assigns, :message, elem(assigns.models, 1))
+
+    ~H"""
+    <div class="ouro-picker ouro-model-picker">
+      <span class="ouro-picker-label">Model · {present_model(@current)}</span>
+      <p class="ouro-quiet">{@message}</p>
+    </div>
+    """
+  end
+
+  def model_picker(%{models: models} = assigns) when is_list(models) do
+    assigns = assign(assigns, :rows, search_models(models, assigns.query, assigns.current))
+
+    ~H"""
+    <div class="ouro-picker ouro-model-picker">
+      <span class="ouro-picker-label">Model · {present_model(@current)}</span>
+
+      <form class="ouro-model-search" phx-change="model-search">
+        <input
+          type="search"
+          name="query"
+          value={@query}
+          placeholder="Search models"
+          aria-label="Search models"
+          autocomplete="off"
+          phx-debounce="150"
+        />
+      </form>
+
+      <form phx-change="configure-model">
+        <select name="model" size="6" aria-label="Model" class="ouro-model-select">
+          <option :for={row <- @rows} value={row.id} selected={row.id == to_string(@current)}>
+            {row.label}
+          </option>
+        </select>
+      </form>
+
+      <p :if={@rows == []} class="ouro-quiet">No model in this runtime's list matches.</p>
+    </div>
+    """
+  end
+
+  # Not fetched yet, or fetched and unreadable. Neither is a list to draw.
+  def model_picker(assigns) do
+    ~H"""
+    <div class="ouro-picker ouro-model-picker">
+      <span class="ouro-picker-label">Model · {present_model(@current)}</span>
+    </div>
+    """
+  end
+
+  @doc """
+  The rows of `runtime.models` this surface can offer, flattened across providers.
+
+  Pure, so the filtering a person types is testable without a runtime. The **current**
+  model always survives its own search: a `<select>` whose selected value is not among its
+  options draws some other row, which is the one disagreement between widget and state
+  worth ruling out.
+  """
+  @spec search_models([map()], String.t() | nil, term()) :: [map()]
+  def search_models(rows, query, current) when is_list(rows) do
+    current = current && to_string(current)
+
+    case query |> to_string() |> String.trim() |> String.downcase() do
+      "" ->
+        rows
+
+      needle ->
+        Enum.filter(rows, fn row ->
+          row.id == current or String.contains?(String.downcase(row.label), needle) or
+            String.contains?(String.downcase(row.id), needle)
+        end)
+    end
+  end
+
+  @doc """
+  `runtime.models`' answer, as `[%{id, label}]`.
+
+  Every provider's rows, in the order the runtime listed them, with the id kept verbatim —
+  it is what `interactive.configure` takes. Anything this build cannot read is dropped
+  rather than drawn as a row that would configure nothing.
+  """
+  @spec model_rows(term()) :: [map()]
+  def model_rows(%{providers: providers}) when is_list(providers) do
+    Enum.flat_map(providers, fn provider ->
+      provider
+      |> Map.get(:models)
+      |> List.wrap()
+      |> Enum.flat_map(fn model ->
+        case model |> Map.get(:id) |> to_string() do
+          "" -> []
+          id -> [%{id: id, label: model_label(id, model)}]
+        end
+      end)
+    end)
+  end
+
+  def model_rows(_unreadable), do: []
+
+  defp model_label(id, model) do
+    case model |> Map.get(:name) |> to_string() |> String.trim() do
+      "" -> id
+      name -> "#{name} · #{id}"
+    end
+  end
+
+  defp present_model(nil), do: "not reported"
+  defp present_model(model), do: to_string(model)
 end

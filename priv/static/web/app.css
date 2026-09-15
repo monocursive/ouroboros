@@ -4312,3 +4312,342 @@ body .ouro-settings-grok-setup summary {
     grid-column: 2;
   }
 }
+
+/* ui-parity W2 */
+
+/* ==========================================================================
+ * ui-parity W2
+ *
+ * The command palette, the shortcut sheet, the copy controls on a message, and the
+ * three verbs this slice added to the composer. Appended rather than woven in: W1 is
+ * editing the rules above this line in a worktree of its own.
+ *
+ * No new colour is introduced. `--attention-green` stays where it was — a selected
+ * palette row is *ink on a lifted surface*, not an attention signal, because nothing here
+ * is a person being needed.
+ * ========================================================================== */
+
+/* -------------------------------------------------------------- Keyboard hints */
+
+/* The search box already showed a key this way (`.ouro-rail-search kbd`). These are the
+   same object in the same clothes, everywhere else a key is worth naming. */
+.ouro-composer kbd,
+.ouro-palette kbd,
+.ouro-shortcuts kbd {
+  min-width: 1.4rem;
+  height: 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.3rem;
+  color: var(--tertiary);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: 0.7rem var(--font-mono);
+}
+
+/* On the one filled control the hint has to read against the button's own ink. */
+.ouro-composer .ouro-button kbd {
+  color: var(--button-bg);
+  background: transparent;
+  border-color: currentColor;
+  opacity: 0.55;
+}
+
+/* ------------------------------------------------------ The composer status row */
+
+.ouro-composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+
+.ouro-palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Planning is a posture, not a warning: the session is doing less, not something risky. */
+.ouro-plan-chip {
+  color: var(--secondary);
+  border-color: var(--border-strong);
+}
+
+.ouro-toggle-on {
+  color: var(--ink);
+  border-color: var(--secondary);
+}
+
+.ouro-composer-actions .ouro-steer {
+  white-space: nowrap;
+}
+
+.ouro-composer-actions .ouro-button,
+.ouro-composer-actions .ouro-quiet-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* ------------------------------------------------------ Copying one message */
+
+/* The cell is the positioning context so the two controls can sit under the prose
+   without taking a row of their own from every message in the transcript. */
+.ouro-said-agent {
+  position: relative;
+}
+
+.ouro-cell-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+/* Revealed by the pointer, by the keyboard, and to anybody who has asked their system to
+   stop moving things. A control that only a mouse can find is a control some readers do
+   not have. */
+.ouro-said-agent:hover .ouro-cell-actions,
+.ouro-cell-actions:focus-within {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ouro-cell-actions {
+    opacity: 1;
+    transition: none;
+  }
+}
+
+.ouro-copy {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  background: transparent;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+}
+
+.ouro-copy:hover {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-copy:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------ The palette */
+
+.ouro-palette::backdrop {
+  background: var(--backdrop);
+}
+
+.ouro-palette {
+  position: fixed;
+  inset: 12vh auto auto 50%;
+  transform: translateX(-50%);
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: 70vh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  z-index: 30;
+}
+
+.ouro-palette-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--hairline-2);
+}
+
+.ouro-palette-query {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  padding: 0.2rem 0;
+}
+
+/* The ring goes round the whole head rather than the bare input, exactly as the rail's
+   search box does it — the box is the control, the input is only where the text lands. */
+.ouro-palette-head:focus-within {
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+}
+
+.ouro-palette-query:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 0;
+}
+
+.ouro-palette-query::placeholder {
+  color: var(--tertiary);
+}
+
+.ouro-palette-list {
+  overflow-y: auto;
+  padding: 0.35rem 0 0.6rem;
+}
+
+.ouro-palette-group {
+  margin: 0.6rem 0 0.2rem;
+  padding: 0 0.9rem;
+  font: 0.68rem var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tertiary);
+}
+
+.ouro-palette-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.45rem 0.9rem;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 0.88rem;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+
+.ouro-palette-row:hover {
+  background: var(--card);
+}
+
+/* The selection is a lifted surface and a rule down its edge. Deliberately not the
+   accent and never the green: a highlighted row is where the keyboard is, not a place
+   somebody is needed. */
+.ouro-palette-on {
+  background: var(--inset);
+  border-left-color: var(--secondary);
+}
+
+.ouro-palette-row:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+}
+
+/* A label long enough to reach the slash column is cut rather than allowed to collide
+   with it — the same rule the TUI palette follows. */
+.ouro-palette-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-palette-slash {
+  font-size: 0.75rem;
+  color: var(--tertiary);
+}
+
+.ouro-palette-key {
+  min-width: 1.4rem;
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.ouro-palette-empty {
+  margin: 0;
+  padding: 0.9rem;
+  color: var(--secondary);
+  font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------- The shortcut sheet */
+
+.ouro-shortcut-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ouro-shortcut-row {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.ouro-shortcut-row dt {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.ouro-shortcut-row dd {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--secondary);
+}
+
+/* ------------------------------------------------------- The model picker */
+
+.ouro-model-picker {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+
+.ouro-model-search input {
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.5rem;
+}
+
+.ouro-model-select {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.2rem;
+}
+
+@media (max-width: 520px) {
+  .ouro-palette {
+    inset: 4vh auto auto 50%;
+    max-height: 88vh;
+  }
+
+  .ouro-shortcut-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+  }
+
+  /* No hover on a touch screen, so the copy controls are simply there. */
+  .ouro-cell-actions {
+    opacity: 1;
+  }
+}

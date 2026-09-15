@@ -102,11 +102,38 @@ defmodule Ouroboros.Web.Live.Cells do
   end
 
   defp message(assigns) do
-    assigns = assign(assigns, :html, Markdown.to_html(assigns.cell.text))
+    assigns =
+      assigns
+      |> assign(:html, Markdown.to_html(assigns.cell.text))
+      # ui-parity W2. Two different strings, fetched from the two places each of them
+      # actually exists: the rendered words come back out of the prose the browser just
+      # drew, and the Markdown comes from the projection over the socket.
+      #
+      # The source is deliberately **not** a `data-` attribute. A message is untrusted
+      # prose, and `Ouroboros.Web.Live.MarkdownTest` refuses to let a rendered agent
+      # message carry `javascript:` anywhere in the document — an escaped attribute would
+      # put the raw bytes back into the page for no reason a reader can see.
+      |> assign(:cell_id, identity(assigns))
 
     ~H"""
     <div class={["ouro-cell", "ouro-said", "ouro-said-agent", @cell.streaming && "ouro-streaming"]}>
       <div class="ouro-prose">{@html}</div>
+      <div
+        :if={not @cell.streaming}
+        id={"copy-#{@cell_id}"}
+        class="ouro-cell-actions"
+        phx-hook="Clipboard"
+      >
+        <button type="button" class="ouro-copy" data-ouro-copy="rendered">Copy</button>
+        <button
+          type="button"
+          class="ouro-copy"
+          phx-click="copy-source"
+          phx-value-cell={@cell_id}
+        >
+          Copy source
+        </button>
+      </div>
     </div>
     """
   end
