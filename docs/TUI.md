@@ -2938,11 +2938,12 @@ things it now does:
   question `ctrl+x a` asks before it opens anything.
 
 The shortcut column is the resolved keymap wherever a command has an action, and the verb's
-own slash spelling where it has none ([`shortcut_of`](../tui/src/ui/app/overlays.rs)).
-Honest limit: a command whose action is `off` shows the word `off` in that column, which is
-true of the action and unhelpful for the two commands that have a working key under another
-action — Steer reads `off` although `alt+enter` steers, and "Edit prompt in `$EDITOR`"
-reads `off` although `ctrl+x e` opens it. The row still runs.
+own slash spelling where it has none ([`shortcut_of`](../tui/src/ui/app/overlays.rs)). Each
+row names **the action that reaches it**, which is not always the one sharing its name:
+`Command::Steer` points at `Action::Steer` (`alt+enter`) and "Edit prompt in `$EDITOR`" at
+`Action::LeaderEditor` (`ctrl+x e`), because `leader.steer` and `editor` default to `off`
+since T1 and a column reading `off` would say the verb has no key at all. An action an
+operator sets to `off` themselves still reads `off`, which is what `off` means there.
 
 **The `?` panel** draws every live action exactly once under the same five headings, in
 `Action::ALL` order inside each ([`view::help_keys`](../tui/src/ui/view.rs)). `live` is the

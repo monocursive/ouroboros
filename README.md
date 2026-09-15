@@ -127,6 +127,11 @@ To use the browser interface:
 ./tui/target/release/ouro web
 ```
 
+On a session page, `⌘K` (`ctrl+K` elsewhere) opens the command palette — every verb this
+surface can run, and only the ones it can run right now — and `?` lists the keys. A
+transcript downloads as text or NDJSON from the palette's "Export this transcript"
+([docs/WEB.md](docs/WEB.md)).
+
 Model access is a ChatGPT sign-in by default. An API key selects a direct lane instead:
 `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or `anthropic:<model>` /
 `xai:<model>` with the vendor's key, or the key saved from the web new-session page.

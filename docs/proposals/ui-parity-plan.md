@@ -182,6 +182,10 @@ Event details (`interactive.event_detail` tree), transcript export (text / NDJSO
 route), backtrack + fork, rewind (two screens), compact, handoff, context overlay, `!cmd`
 via `workspace.exec`, MCP list, logs page — each as a palette entry in its group.
 
+**Done** — `24da22f9`, and `8587abf4` before it closed the four TUI gaps T3a could not call
+finished. No logs page: the gateway's method table serves no log-reading verb, so there was
+nothing to draw one from; `docs/WEB.md` §4 records that as unserved rather than deferred.
+
 ### S1 — shared command catalogue
 `priv/ui/commands.json`: id, label, group, slash, tui_action, web_event, scope
 (`both` / `tui` / `web`). `tui/src/ui/app/overlays.rs` and `lib/ouroboros/web/commands.ex`
@@ -194,7 +198,13 @@ does not name.
 (parity map rewritten from §4 of the review; drop ⌘./⌘N), `README.md` key hints.
 
 **T3a done** — `docs/TUI.md`, `README.md`, the review's "Status" section and this file.
-T3b (`docs/WEB.md`) is pending and waits on W3; W3 and S1 are pending.
+
+**T3b done** — `docs/WEB.md` §4 rewritten from the review's matrix as W3 left it (the
+keyboard, the palette and its catalogue, the top bar, the presentation module, the
+composer's status row, the capability gates, and the D10 list with three of its entries
+struck), plus this file, the review's "Status" section again, and one README sentence.
+
+S1 is in flight.
 
 ## Phase 4 — final review, gates, PR
 
