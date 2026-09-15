@@ -2,9 +2,23 @@ defmodule Ouroboros.Web.Commands do
   @moduledoc """
   Every verb this surface can run, as one list.
 
-  The palette, the shortcut sheet and (in a later slice) a shared `priv/ui/commands.json`
-  all read this rather than each keeping a list of their own. A verb added to the web is
-  added here or it exists nowhere a reader can find it.
+  The palette and the shortcut sheet read this rather than each keeping a list of their
+  own. A verb added to the web is added here or it exists nowhere a reader can find it.
+
+  ## S1: the wording comes from `priv/ui/commands.json`
+
+  The heading, the label and the slash spelling of every row below are read out of that
+  file at compile time, by id, and the terminal client's palette reads the same bytes
+  (`tui/src/ui/app/overlays.rs`). What stays here is the *gate*, and the list itself —
+  which verbs this surface has, and in what order it draws them. A row whose `web` block
+  in the file is `null` is a verb the terminal client has and this one does not; a row
+  named here that the file does not carry fails to compile.
+
+  Where the two surfaces genuinely spell one verb differently — this deck's `session.end`
+  ends but does not remove, its `conversation.details` opens one event rather than
+  toggling a level, `/status` is a page here and a tab there, and `/keys` opens the only
+  sheet this surface has — the file carries the terminal client's spelling and this one's
+  beside it, with a `note` saying why. Everything else is written once.
 
   ## A gate is a question about the runtime, not a preference
 
@@ -77,6 +91,44 @@ defmodule Ouroboros.Web.Commands do
     client: "Client"
   }
 
+  # S1. The shared catalogue, read at compile time.
+  #
+  # The *source* path, not `:code.priv_dir/1`: this is read while the module is being
+  # compiled, when there is no built application to ask for a priv directory, and
+  # `@external_resource` on the same path is what makes `mix` recompile this module when
+  # the file changes. The bytes end up in the beam, so a release cannot ship a catalogue
+  # that disagrees with the code that reads it.
+  @catalogue_path Path.expand("../../../priv/ui/commands.json", __DIR__)
+  @external_resource @catalogue_path
+
+  # Not `String.to_existing_atom/1`: a group the file invents should stop the build with
+  # the name it invented, rather than either minting an atom or failing in a way that
+  # points at the reader instead of at the row.
+  @group_atoms %{
+    "session" => :session,
+    "turn" => :turn,
+    "conversation" => :conversation,
+    "runtime" => :runtime,
+    "client" => :client
+  }
+
+  # The web's half of every row that has one: the heading, the wording and the slash
+  # spelling this surface draws. A row whose `web` block is `null` is a verb the terminal
+  # client has and this one does not, and it is absent here for that reason. Gates stay in
+  # `all/0` below, because whether a verb can run is a question about this runtime rather
+  # than a fact about a catalogue.
+  @catalogue (for %{"id" => id, "web" => web} = entry <-
+                    @catalogue_path |> File.read!() |> Jason.decode!(),
+                  is_map(web),
+                  into: %{} do
+                {id,
+                 %{
+                   label: web["label"] || entry["label"],
+                   group: Map.fetch!(@group_atoms, entry["group"]),
+                   slash: web["slash"] || entry["slash"]
+                 }}
+              end)
+
   @doc "The five groups, in the order every surface draws them."
   @spec groups() :: [group()]
   def groups, do: @groups
@@ -95,323 +147,130 @@ defmodule Ouroboros.Web.Commands do
   def all do
     [
       # ------------------------------------------------------------------ Session
-      %{
-        id: "session.new",
-        label: "New session",
-        group: :session,
-        slash: "/new",
-        shortcut: "n",
-        gate: &serves?(&1, "interactive.start")
-      },
-      %{
-        id: "session.switch",
-        label: "Switch session",
-        group: :session,
-        slash: "/switch",
-        shortcut: "/",
-        gate: fn _assigns -> true end
-      },
-      %{
-        id: "session.rename",
-        label: "Rename this session",
-        group: :session,
-        slash: "/rename",
-        shortcut: nil,
-        gate: &(open?(&1) and serves?(&1, "interactive.rename"))
-      },
-      %{
-        id: "session.end",
-        label: "End this session",
-        group: :session,
-        slash: "/end",
-        shortcut: nil,
-        gate: &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.close"))
-      },
-      %{
-        id: "session.delete",
-        label: "Delete this session",
-        group: :session,
-        slash: "/delete",
-        shortcut: nil,
-        gate: &(open?(&1) and ended?(&1) and serves?(&1, "interactive.delete"))
-      },
+      command("session.new", "n", &serves?(&1, "interactive.start")),
+      command("session.switch", "/", fn _assigns -> true end),
+      command("session.rename", nil, &(open?(&1) and serves?(&1, "interactive.rename"))),
+      command(
+        "session.end",
+        nil,
+        &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.close"))
+      ),
+      command(
+        "session.delete",
+        nil,
+        &(open?(&1) and ended?(&1) and serves?(&1, "interactive.delete"))
+      ),
 
       # ui-parity W3
-      %{
-        id: "session.fork",
-        label: "Fork this session",
-        group: :session,
-        slash: "/fork",
-        shortcut: nil,
-        gate: &forkable?/1
-      },
-      %{
-        id: "session.handoff",
-        label: "Hand off to a new session",
-        group: :session,
-        slash: "/handoff",
-        shortcut: nil,
-        gate:
-          &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.handoff") and
-              native_transport?(&1))
-      },
+      command("session.fork", nil, &forkable?/1),
+      command(
+        "session.handoff",
+        nil,
+        &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.handoff") and
+            native_transport?(&1))
+      ),
 
       # --------------------------------------------------------------------- Turn
-      %{
-        id: "turn.send",
-        label: "Send the draft",
-        group: :turn,
-        slash: "/send",
-        shortcut: "⏎",
-        gate: &(drafted?(&1) and not queueing?(&1) and serves?(&1, "interactive.send_message"))
-      },
-      %{
-        id: "turn.queue",
-        label: "Queue the draft",
-        group: :turn,
-        slash: "/queue",
-        shortcut: "⏎",
-        gate: &(drafted?(&1) and queueing?(&1) and serves?(&1, "interactive.follow_up"))
-      },
-      %{
-        id: "turn.steer",
-        label: "Steer the running turn",
-        group: :turn,
-        slash: "/steer",
-        shortcut: nil,
-        # Not `drafted?`: this row leads to the Steer button rather than pressing it, and
-        # the words a steer carries must come from the form. See `command/2`.
-        gate: &steerable?/1
-      },
-      %{
-        id: "turn.interrupt",
-        label: "Interrupt the running turn",
-        group: :turn,
-        slash: "/interrupt",
-        shortcut: "esc",
-        gate: &(working?(&1) and serves?(&1, "interactive.interrupt"))
-      },
-      %{
-        id: "turn.retry",
-        label: "Retry the last message",
-        group: :turn,
-        slash: "/retry",
-        shortcut: nil,
-        gate: &(retryable?(&1) and serves?(&1, "interactive.retry_turn"))
-      },
-      %{
-        id: "turn.effort",
-        label: "Thinking effort",
-        group: :turn,
-        slash: "/effort",
-        shortcut: nil,
-        gate: &reconfigurable?/1
-      },
-      %{
-        id: "turn.model",
-        label: "Change the model",
-        group: :turn,
-        slash: "/model",
-        shortcut: nil,
-        gate: &remodelable?/1
-      },
-      %{
-        id: "turn.plan",
-        label: "Plan mode",
-        group: :turn,
-        slash: "/plan",
-        shortcut: nil,
-        gate: &reconfigurable?/1
-      },
-      %{
-        id: "turn.sandbox",
-        label: "File access",
-        group: :turn,
-        slash: "/sandbox",
-        shortcut: nil,
-        gate: &(reconfigurable?(&1) and not is_nil(reported(&1, :sandbox_mode)))
-      },
-      %{
-        id: "turn.auto_approve",
-        label: "Automatic approvals for routine actions",
-        group: :turn,
-        slash: "/auto-approve",
-        shortcut: nil,
-        gate: &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.respond_approval"))
-      },
-      %{
-        id: "turn.approval",
-        label: "Answer the waiting request",
-        group: :turn,
-        slash: "/approve",
-        shortcut: nil,
-        gate: &(waiting?(&1) and serves?(&1, "interactive.respond_approval"))
-      },
+      command(
+        "turn.send",
+        "⏎",
+        &(drafted?(&1) and not queueing?(&1) and serves?(&1, "interactive.send_message"))
+      ),
+      command(
+        "turn.queue",
+        "⏎",
+        &(drafted?(&1) and queueing?(&1) and serves?(&1, "interactive.follow_up"))
+      ),
+      # Not `drafted?`: this row leads to the Steer button rather than pressing it, and
+      # the words a steer carries must come from the form. See `command/2`.
+      command("turn.steer", nil, &steerable?/1),
+      command("turn.interrupt", "esc", &(working?(&1) and serves?(&1, "interactive.interrupt"))),
+      command("turn.retry", nil, &(retryable?(&1) and serves?(&1, "interactive.retry_turn"))),
+      command("turn.effort", nil, &reconfigurable?/1),
+      command("turn.model", nil, &remodelable?/1),
+      command("turn.plan", nil, &reconfigurable?/1),
+      command(
+        "turn.sandbox",
+        nil,
+        &(reconfigurable?(&1) and not is_nil(reported(&1, :sandbox_mode)))
+      ),
+      command(
+        "turn.auto_approve",
+        nil,
+        &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.respond_approval"))
+      ),
+      command(
+        "turn.approval",
+        nil,
+        &(waiting?(&1) and serves?(&1, "interactive.respond_approval"))
+      ),
 
       # ui-parity W3. `!` is a turn verb that is never a turn: the composer claims the
       # draft and `workspace.exec` runs it. Operate-scope by the method table, so a
       # read-scope endpoint never lists it.
-      %{
-        id: "turn.shell",
-        label: "Run a command in the workspace",
-        group: :turn,
-        slash: "!",
-        shortcut: nil,
-        gate: &shell_offered?/1
-      },
+      command("turn.shell", nil, &shell_offered?/1),
 
       # ------------------------------------------------------------- Conversation
-      %{
-        id: "conversation.copy",
-        label: "Copy the last message",
-        group: :conversation,
-        slash: "/copy",
-        shortcut: nil,
-        gate: &(not is_nil(last_agent_message(&1)))
-      },
-      %{
-        id: "conversation.copy_source",
-        label: "Copy the last message's Markdown",
-        group: :conversation,
-        slash: "/copy source",
-        shortcut: nil,
-        gate: &(not is_nil(last_agent_message(&1)))
-      },
-      %{
-        id: "conversation.history",
-        label: "Load earlier messages",
-        group: :conversation,
-        slash: "/history",
-        shortcut: nil,
-        gate: &(Map.get(&1, :truncated, 0) > 0)
-      },
+      command("conversation.copy", nil, &(not is_nil(last_agent_message(&1)))),
+      command("conversation.copy_source", nil, &(not is_nil(last_agent_message(&1)))),
+      command("conversation.history", nil, &(Map.get(&1, :truncated, 0) > 0)),
 
       # ui-parity W3
-      %{
-        id: "conversation.details",
-        label: "Event details",
-        group: :conversation,
-        slash: "/details",
-        shortcut: nil,
-        gate: &(open?(&1) and serves?(&1, "interactive.event_detail"))
-      },
-      %{
-        id: "conversation.export",
-        label: "Export this transcript",
-        group: :conversation,
-        slash: "/export",
-        shortcut: nil,
-        gate: &(open?(&1) and serves?(&1, "interactive.replay"))
-      },
-      %{
-        id: "conversation.backtrack",
-        label: "Go back to an earlier message",
-        group: :conversation,
-        slash: "/backtrack",
-        shortcut: nil,
-        # Two verbs behind one row, and the row stands where either can run: a fork, or
-        # putting an earlier message back in the composer. A dialog that could offer
-        # neither is a list with nothing under it.
-        gate: &(open?(&1) and (forkable?(&1) or resendable?(&1)))
-      },
-      %{
-        id: "conversation.rewind",
-        label: "Rewind to an earlier turn",
-        group: :conversation,
-        slash: "/rewind",
-        shortcut: nil,
-        # Both verbs, because the row leads to a flow whose only act is the second one:
-        # `interactive.rewind_points` is read-scope and `interactive.rewind` is not, so a
-        # read-scope endpoint could otherwise draw two screens ending in a refusal.
-        gate:
-          &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.rewind_points") and
-              serves?(&1, "interactive.rewind") and native_transport?(&1))
-      },
-      %{
-        id: "conversation.compact",
-        label: "Compact this conversation",
-        group: :conversation,
-        slash: "/compact",
-        shortcut: nil,
-        gate:
-          &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.compact") and
-              native_transport?(&1))
-      },
-      %{
-        id: "conversation.context",
-        label: "Context",
-        group: :conversation,
-        slash: "/context",
-        shortcut: nil,
-        # Every transport answers this one, with different amounts of truth, so it is
-        # gated on the method alone (`tui/src/ui/app/native.rs:92-95`).
-        gate: &(open?(&1) and serves?(&1, "interactive.context"))
-      },
+      command(
+        "conversation.details",
+        nil,
+        &(open?(&1) and serves?(&1, "interactive.event_detail"))
+      ),
+      command("conversation.export", nil, &(open?(&1) and serves?(&1, "interactive.replay"))),
+      # Two verbs behind one row, and the row stands where either can run: a fork, or
+      # putting an earlier message back in the composer. A dialog that could offer
+      # neither is a list with nothing under it.
+      command("conversation.backtrack", nil, &(open?(&1) and (forkable?(&1) or resendable?(&1)))),
+      # Both verbs, because the row leads to a flow whose only act is the second one:
+      # `interactive.rewind_points` is read-scope and `interactive.rewind` is not, so a
+      # read-scope endpoint could otherwise draw two screens ending in a refusal.
+      command(
+        "conversation.rewind",
+        nil,
+        &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.rewind_points") and
+            serves?(&1, "interactive.rewind") and native_transport?(&1))
+      ),
+      command(
+        "conversation.compact",
+        nil,
+        &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.compact") and
+            native_transport?(&1))
+      ),
+      # Every transport answers this one, with different amounts of truth, so it is
+      # gated on the method alone (`tui/src/ui/app/native.rs:92-95`).
+      command("conversation.context", nil, &(open?(&1) and serves?(&1, "interactive.context"))),
 
       # ------------------------------------------------------------------ Runtime
-      %{
-        id: "runtime.status",
-        label: "Runtime status",
-        group: :runtime,
-        slash: "/status",
-        shortcut: nil,
-        gate: &serves?(&1, "runtime.status")
-      },
-      %{
-        id: "runtime.audit",
-        label: "Audit",
-        group: :runtime,
-        slash: "/audit",
-        shortcut: nil,
-        gate: &serves?(&1, "audit.status")
-      },
+      command("runtime.status", nil, &serves?(&1, "runtime.status")),
+      command("runtime.audit", nil, &serves?(&1, "audit.status")),
 
       # ui-parity W3. No session state in the gate because the verb has none to ask
       # about: with a session open it is routed to that session's node, and without one
       # it answers for this runtime, which is the only other machine there is to mean.
-      %{
-        id: "runtime.mcp",
-        label: "MCP servers",
-        group: :runtime,
-        slash: "/mcp",
-        shortcut: nil,
-        gate: &serves?(&1, "mcp.list")
-      },
+      command("runtime.mcp", nil, &serves?(&1, "mcp.list")),
 
       # ------------------------------------------------------------------- Client
-      %{
-        id: "client.settings",
-        label: "Settings",
-        group: :client,
-        slash: "/settings",
-        shortcut: nil,
-        gate: fn _assigns -> true end
-      },
-      %{
-        id: "client.theme",
-        label: "Switch theme",
-        group: :client,
-        slash: "/theme",
-        shortcut: nil,
-        gate: fn _assigns -> true end
-      },
-      %{
-        id: "client.shortcuts",
-        label: "Keyboard shortcuts",
-        group: :client,
-        slash: "/keys",
-        shortcut: "?",
-        gate: fn _assigns -> true end
-      },
-      %{
-        id: "client.notifications",
-        label: "Notify me when a session needs me",
-        group: :client,
-        slash: "/notify",
-        shortcut: nil,
-        gate: fn _assigns -> true end
-      }
+      command("client.settings", nil, fn _assigns -> true end),
+      command("client.theme", nil, fn _assigns -> true end),
+      command("client.shortcuts", "?", fn _assigns -> true end),
+      command("client.notifications", nil, fn _assigns -> true end)
     ]
+  end
+
+  # One row: the gate written above, joined to the heading, the wording and the slash
+  # spelling `priv/ui/commands.json` gives the same id. An id the file does not carry —
+  # or carries with no `web` block — raises here, and `catalogue_test.exs` reaches it
+  # first.
+  @spec command(String.t(), String.t() | nil, (map() -> boolean())) :: t()
+  defp command(id, shortcut, gate) do
+    %{label: label, group: group, slash: slash} = Map.fetch!(@catalogue, id)
+
+    %{id: id, label: label, group: group, slash: slash, shortcut: shortcut, gate: gate}
   end
 
   @doc """

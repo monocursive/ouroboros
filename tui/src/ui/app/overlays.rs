@@ -142,6 +142,61 @@ impl Group {
     }
 }
 
+/// S1. The verbs both surfaces draw, as one file.
+///
+/// `priv/ui/commands.json` is the list; this client and `Ouroboros.Web.Commands` read the
+/// same bytes, so a verb's heading, its wording and its typed spelling are written once.
+/// What stays in code on each side is *behaviour*: the [`Command`] enum, [`Command::action`]
+/// and every gate in [`App::palette_commands`], because whether a verb can run here is a
+/// question about this runtime and not a fact about a catalogue.
+///
+/// The file is `include_str!`d, so a release cannot ship a bad one — a malformed file is a
+/// panic at the first lookup, which the tests in `tui/tests/catalogue.rs` reach first.
+const CATALOGUE_JSON: &str = include_str!("../../../../priv/ui/commands.json");
+
+/// One row of the file, in the shape this client reads it.
+///
+/// `label` and `slash` are the spelling both surfaces share. Where a surface genuinely
+/// spells a verb differently — because one of them splits it in two, or because only one
+/// of them parses a draft — that surface carries its own inside its own block, and the
+/// row's `note` says why. A side that is `null` is a verb the other surface does not have.
+///
+/// The row's other keys — `tui.command`, `tui.action`, the whole `web` block and `note` —
+/// are deliberately absent here: serde ignores what it is not asked for, and asking for a
+/// field this crate never reads would only mean a struct that lies about who uses it.
+/// `tui/tests/catalogue.rs` parses the same bytes for itself and checks every one of them,
+/// which is also what makes it an independent reader rather than a second opinion from
+/// this parse.
+#[derive(Debug, serde::Deserialize)]
+pub struct CatalogueEntry {
+    pub id: String,
+    pub label: String,
+    pub group: String,
+    pub slash: Option<String>,
+    pub tui: Option<CatalogueTui>,
+}
+
+/// The terminal client's half of a row: only the spellings it may keep for itself.
+#[derive(Debug, serde::Deserialize)]
+pub struct CatalogueTui {
+    pub label: Option<String>,
+    pub slash: Option<String>,
+}
+
+/// The file, parsed once, in the order it is written.
+pub static CATALOGUE: std::sync::LazyLock<Vec<CatalogueEntry>> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(CATALOGUE_JSON).expect("priv/ui/commands.json is not a valid catalogue")
+});
+
+/// The same rows, by id, because every lookup here starts from [`Command::id`].
+static BY_ID: std::sync::LazyLock<HashMap<&'static str, &'static CatalogueEntry>> =
+    std::sync::LazyLock::new(|| {
+        CATALOGUE
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect()
+    });
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     NewSession,
@@ -268,6 +323,73 @@ impl Command {
         Self::Approval,
     ];
 
+    /// S1. This command's row in `priv/ui/commands.json`.
+    ///
+    /// The web's dotted ids, because that catalogue had them first and a verb the two
+    /// surfaces share should be looked up under one name. The `match` is total, so a
+    /// variant added without an id here does not compile; a row whose `tui` block names no
+    /// variant is what `tui/tests/catalogue.rs` refuses.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::NewSession => "session.new",
+            Self::SwitchSession => "session.switch",
+            Self::SessionDetails => "conversation.details",
+            Self::ShowDiff => "conversation.diff",
+            Self::RawMode => "conversation.raw",
+            Self::CopyLast => "conversation.copy",
+            Self::CopyRawLast => "conversation.copy_source",
+            Self::Export => "conversation.export",
+            Self::DumpScrollback => "conversation.scrollback",
+            Self::ViewTranscript => "conversation.view",
+            Self::Interrupt => "turn.interrupt",
+            Self::Steer => "turn.steer",
+            Self::ExternalEditor => "turn.editor",
+            Self::CloseSession => "session.end",
+            Self::NewSessionOptions => "session.options",
+            Self::WriteAccess => "session.writable",
+            Self::ConnectChatGpt => "runtime.connect",
+            Self::Runtime => "runtime.status",
+            Self::Upgrades => "runtime.upgrades",
+            Self::Logs => "runtime.logs",
+            Self::Settings => "client.settings",
+            Self::Help => "client.help",
+            Self::ListCapabilities => "runtime.capabilities",
+            Self::PreviewCapability => "runtime.capability_preview",
+            Self::AdmitCapability => "runtime.capability_admit",
+            Self::Backtrack => "conversation.backtrack",
+            Self::Fork => "session.fork",
+            Self::Model => "turn.model",
+            Self::Effort => "turn.effort",
+            Self::Cost => "conversation.cost",
+            Self::Keys => "client.shortcuts",
+            Self::Compact => "conversation.compact",
+            Self::Handoff => "session.handoff",
+            Self::Context => "conversation.context",
+            Self::Rewind => "conversation.rewind",
+            Self::Theme => "client.theme",
+            Self::Plan => "turn.plan",
+            Self::AutoApprove => "turn.auto_approve",
+            Self::Sandbox => "turn.sandbox",
+            Self::Mcp => "runtime.mcp",
+            Self::Rename => "session.rename",
+            Self::Quit => "client.quit",
+            Self::Approval => "turn.approval",
+        }
+    }
+
+    /// This command's row in the shared file.
+    ///
+    /// Panics when the file does not carry it. That is the loud failure S1 asked for: the
+    /// bytes are `include_str!`d, so a build that runs at all has a file, and a file
+    /// missing a row is a mistake for a test to catch rather than a palette drawing a row
+    /// with no wording in it.
+    fn entry(self) -> &'static CatalogueEntry {
+        BY_ID
+            .get(self.id())
+            .copied()
+            .unwrap_or_else(|| panic!("priv/ui/commands.json has no row for {}", self.id()))
+    }
+
     /// T2.1. The five groups of the parity plan, and nothing else.
     ///
     /// Two groups of thirty-five and six were a split that told a reader nothing: a
@@ -277,153 +399,65 @@ impl Command {
     /// document*, what is the runtime around it, and what is this client — and they are
     /// the same five the `?` panel, the which-key overlay and the web palette use, so a
     /// verb learned on one surface is found in the same place on the next.
-    pub fn group(self) -> Group {
-        match self {
-            Self::NewSession
-            | Self::NewSessionOptions
-            | Self::WriteAccess
-            | Self::SwitchSession
-            | Self::CloseSession
-            | Self::Fork
-            | Self::Rename
-            | Self::Handoff => Group::Session,
-
-            Self::Interrupt
-            | Self::Steer
-            | Self::Effort
-            | Self::Model
-            | Self::Plan
-            | Self::Sandbox
-            | Self::AutoApprove
-            | Self::Approval
-            | Self::ExternalEditor => Group::Turn,
-
-            Self::SessionDetails
-            | Self::CopyLast
-            | Self::CopyRawLast
-            | Self::Export
-            | Self::DumpScrollback
-            | Self::ViewTranscript
-            | Self::ShowDiff
-            | Self::RawMode
-            | Self::Backtrack
-            | Self::Rewind
-            | Self::Compact
-            | Self::Context
-            | Self::Cost => Group::Conversation,
-
-            Self::ConnectChatGpt
-            | Self::Runtime
-            | Self::Upgrades
-            | Self::ListCapabilities
-            | Self::PreviewCapability
-            | Self::AdmitCapability
-            | Self::Logs
-            | Self::Mcp => Group::Runtime,
-
-            Self::Settings | Self::Theme | Self::Keys | Self::Help | Self::Quit => Group::Client,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::NewSession => "New session",
-            Self::NewSessionOptions => "New session options",
-            Self::WriteAccess => "Start a session that can edit files",
-            Self::SwitchSession => "Switch session",
-            Self::SessionDetails => "Toggle event details",
-            Self::CopyLast => "Copy last agent message",
-            Self::CopyRawLast => "Copy last agent message as source Markdown",
-            Self::Export => "Export the transcript to a file",
-            Self::DumpScrollback => "Print transcript into terminal scrollback",
-            Self::ViewTranscript => "Open transcript in $EDITOR",
-            Self::Interrupt => "Interrupt the running turn",
-            Self::Steer => "Steer the running turn",
-            Self::ExternalEditor => "Edit prompt in $EDITOR",
-            Self::CloseSession => "End or remove session",
-            Self::ConnectChatGpt => "Connect ChatGPT",
-            Self::Runtime => "Runtime & distribution",
-            Self::Upgrades => "Upgrades",
-            Self::ListCapabilities => "List capability proposals",
-            Self::PreviewCapability => "Preview a capability",
-            Self::AdmitCapability => "Admit a capability",
-            Self::Logs => "Logs",
-            Self::Settings => "Settings",
-            Self::Help => "Keyboard shortcuts",
-            Self::ShowDiff => "Show changed files",
-            Self::RawMode => "Toggle raw copy mode",
-            Self::Backtrack => "Go back to an earlier message",
-            Self::Fork => "Fork this session",
-            Self::Model => "Change the model",
-            Self::Effort => "Reasoning effort for the next turn",
-            Self::Keys => "Show the effective key map",
-            Self::Cost => "Show tokens and cost for this session",
-            Self::Compact => "Compact this conversation now",
-            Self::Handoff => "Hand this session's work to a fresh one",
-            Self::Context => "Show what fills the context window",
-            Self::Rewind => "Rewind to an earlier turn",
-            Self::Theme => "Change the colour theme",
-            Self::Plan => "Plan without editing anything",
-            Self::AutoApprove => "Auto-approve everything this session asks",
-            Self::Sandbox => "Change file access (OS sandbox)",
-            Self::Mcp => "Show this node's MCP servers",
-            Self::Rename => "Rename this session",
-            Self::Quit => "Quit",
-            Self::Approval => "Answer the pending approval",
-        }
-    }
-
-    /// The chord or verb this command answers to, as a *literal*.
     ///
-    /// Only for the commands whose spelling is a slash verb rather than a key. Anything
-    /// with a key goes through [`Command::action`] and the resolved keymap instead, so a
-    /// rebound chord is what the palette shows (D14, B8) — see [`App::command_shortcut`].
-    fn slash(self) -> &'static str {
-        match self {
-            Self::NewSession => "ctrl+x n",
-            Self::NewSessionOptions => "ctrl+x N",
-            Self::WriteAccess => "/write",
-            Self::SwitchSession => "ctrl+x l",
-            Self::SessionDetails => "ctrl+x d",
-            Self::CopyLast => "ctrl+x y",
-            Self::CopyRawLast => "/copy raw",
-            Self::Export => "/export",
-            Self::DumpScrollback => "ctrl+x [",
-            Self::ViewTranscript => "ctrl+x v",
-            Self::Interrupt => "esc",
-            Self::Steer => "alt+enter",
-            Self::ExternalEditor => "ctrl+x e",
-            Self::CloseSession => "ctrl+x k",
-            Self::ConnectChatGpt => "/connect",
-            Self::Runtime => "/runtime",
-            Self::Upgrades => "/upgrades",
-            Self::ListCapabilities => "/capabilities",
-            Self::PreviewCapability => "/preview",
-            Self::AdmitCapability => "/admit",
-            Self::Logs => "/logs",
-            Self::Settings => "/settings",
-            Self::Help => "?",
-            Self::ShowDiff => "/diff",
-            Self::RawMode => "/raw",
-            Self::Backtrack => "esc esc",
-            Self::Fork => "/fork",
-            Self::Model => "/model",
-            Self::Effort => "/effort",
-            Self::Keys => "/keys",
-            Self::Cost => "/cost",
-            Self::Compact => "/compact",
-            Self::Handoff => "/handoff",
-            Self::Context => "/context",
-            Self::Rewind => "/rewind",
-            Self::Theme => "/theme",
-            Self::Plan => "/plan",
-            Self::AutoApprove => "/auto-approve",
-            Self::Sandbox => "/sandbox",
-            Self::Mcp => "/mcp",
-            Self::Rename => "/rename",
-            Self::Quit => "/quit",
-            Self::Approval => "ctrl+x a",
-        }
+    /// S1: the heading is read from the shared file rather than from a table here, so the
+    /// two palettes cannot file one verb under two headings. [`Group::parse`] is the same
+    /// function a typed query goes through, which is why the file spells a group the way
+    /// an operator would type it.
+    pub fn group(self) -> Group {
+        let group = &self.entry().group;
+
+        Group::parse(group).unwrap_or_else(|| {
+            panic!(
+                "{} is filed under {group:?}, which is not one of the five",
+                self.id()
+            )
+        })
+    }
+
+    /// The wording both palettes draw, from the shared file.
+    ///
+    /// A `tui` block may carry a `label` of its own, and five rows do — where the two
+    /// surfaces mean measurably different things by one verb (this client's `session.end`
+    /// dialog also removes; its `conversation.details` toggles a level rather than opening
+    /// one event; `runtime.status` is a tab here and a page there; `client.shortcuts` is
+    /// the map in force here and the only sheet there) or where converging would rename a
+    /// row that `docs/TUI.md` and the tests already name. The row's `note` says which.
+    pub fn label(self) -> &'static str {
+        let entry = self.entry();
+
+        entry
+            .tui
+            .as_ref()
+            .and_then(|tui| tui.label.as_deref())
+            .unwrap_or(entry.label.as_str())
+    }
+
+    /// The typed spelling this command answers to, as a *literal*.
+    ///
+    /// Only reached for the commands with no [`Action`]. Anything with a key goes through
+    /// [`Command::action`] and the resolved keymap instead, so a rebound chord is what the
+    /// palette shows (D14, B8) — see [`App::command_shortcut`]. Which is why S1 could put
+    /// the `/verb` here for the rows that *do* have a key: the default chord this table
+    /// used to hold beside them was never read, and the catalogue wants the spelling the
+    /// web prints next to the same verb.
+    ///
+    /// Empty for the three commands that have a key and no verb at all —
+    /// `conversation.scrollback`, `conversation.view` and `turn.approval` — and
+    /// `tui/tests/catalogue.rs` holds the line that every *keyless* command has one.
+    ///
+    /// Public for that test and for no other caller: the spelling is a fact about the
+    /// shared file, and a drift test that could not read it would only be checking the
+    /// rows that happen to reach the screen.
+    pub fn slash(self) -> &'static str {
+        let entry = self.entry();
+
+        entry
+            .tui
+            .as_ref()
+            .and_then(|tui| tui.slash.as_deref())
+            .or(entry.slash.as_deref())
+            .unwrap_or_default()
     }
 
     /// The keymap action this command is also reachable by, where there is one.

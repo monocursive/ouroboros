@@ -187,11 +187,35 @@ finished. No logs page: the gateway's method table serves no log-reading verb, s
 nothing to draw one from; `docs/WEB.md` §4 records that as unserved rather than deferred.
 
 ### S1 — shared command catalogue
-`priv/ui/commands.json`: id, label, group, slash, tui_action, web_event, scope
-(`both` / `tui` / `web`). `tui/src/ui/app/overlays.rs` and `lib/ouroboros/web/commands.ex`
-read it at compile time; a Rust test and an ExUnit test assert each palette equals the
-catalogue filtered by scope, and a drift test fails when either side adds a verb the file
-does not name.
+
+**Done** on `ui-parity-S1` (one commit, `7c6e1e13`, cherry-picked onto `ui-parity`).
+
+`priv/ui/commands.json` is the one list: `id` (the web's dotted ids, and every terminal-only
+verb given one in the same style), `label`, `group`, `slash`, a `tui` block naming the
+`Command` variant and the keymap action, a `web` block naming the id the palette runs, and a
+`note` wherever a verb is one-sided or the two surfaces spell it two ways. Scope is not a
+column: a side that is `null` *is* the scope, and it cannot disagree with itself.
+
+`tui/src/ui/app/overlays.rs` `include_str!`s the file and `lib/ouroboros/web/commands.ex`
+reads it under `@external_resource`, both at compile time, so a release cannot ship a
+catalogue that disagrees with the code. `Command::label/group/slash` and the web's `all/0`
+take their wording from it by id; the `Command` enum, `Command::action` and **every gate on
+both sides** stay in code, because whether a verb can run here is a question about the
+runtime and not a fact about a list.
+
+**51 verbs: 27 on both surfaces, 16 only in the terminal, 8 only on the web.** The
+one-sided ids and the seventeen rows the two surfaces still word differently are pinned by
+name in `test/ouroboros/web/catalogue_test.exs`, so the next one-sided verb — or the next
+label to drift — has to be declared. `tui/tests/catalogue.rs` holds the terminal half:
+every variant has a row, every row names a variant this build has, and the palette draws
+the file's heading, wording and spelling.
+
+Terminal-only: `session.options`, `session.writable`, `turn.editor`, `conversation.diff`,
+`conversation.raw`, `conversation.scrollback`, `conversation.view`, `conversation.cost`,
+`runtime.logs`, `runtime.connect`, `runtime.upgrades`, `runtime.capabilities`,
+`runtime.capability_preview`, `runtime.capability_admit`, `client.help`, `client.quit`.
+Web-only: `session.delete`, `turn.send`, `turn.queue`, `turn.retry`, `turn.shell`,
+`conversation.history`, `runtime.audit`, `client.notifications`.
 
 ### T3 — docs
 `docs/TUI.md` (§2.1 and §2.4 corrections, new key map, five groups), `docs/WEB.md`
@@ -204,7 +228,7 @@ keyboard, the palette and its catalogue, the top bar, the presentation module, t
 composer's status row, the capability gates, and the D10 list with three of its entries
 struck), plus this file, the review's "Status" section again, and one README sentence.
 
-S1 is in flight.
+**S1 done** — cherry-picked from `7c6e1e13` on `ui-parity-S1`: `priv/ui/commands.json` is the one list both palettes read, with a drift test on each side (51 rows: 27 shared, 16 TUI-only, 8 web-only, each one-sided or differently-spelled row carrying its reason).
 
 ## Phase 4 — final review, gates, PR
 
