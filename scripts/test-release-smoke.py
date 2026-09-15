@@ -77,10 +77,11 @@ class Harness:
             publication.write_text(json.dumps({"pid": 123}))
             (data / "runtime.owner").write_text("live fixture owner")
             release = self.state / "cache/ouroboros/releases/fixture"
-            for name in ("bin/ouroboros", "lib/ouroboros-fixture/priv/wasm/ouro-wasm"):
+            for name in ("bin/ouroboros", "lib/ouroboros-fixture/priv/wasm/ouro-wasm", "lib/ouroboros-fixture/priv/media/ouro-media"):
                 artifact = release / name
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.touch()
+                artifact.chmod(0o755)
             if self.fail_start:
                 publication.unlink()
                 return "startup failed after claiming ownership", 1

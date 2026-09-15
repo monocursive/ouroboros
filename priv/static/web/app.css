@@ -4988,3 +4988,19 @@ body .ouro-settings-grok-setup summary {
   gap: 0.5rem;
   margin-top: 0.4rem;
 }
+
+/* The same image cards appear in drafts and durable messages. */
+.ouro-image-draft { padding: .5rem .75rem; }
+.ouro-image-tray { display: flex; gap: .5rem; flex-wrap: wrap; margin: .25rem 0; }
+.ouro-image-card { display: flex; flex-direction: column; gap: .35rem; padding: .5rem; border: 1px solid currentColor; border-radius: .6rem; max-width: 12rem; overflow-wrap: anywhere; font: inherit; color: inherit; background: transparent; }
+.ouro-image-card img { width: 9rem; height: 6rem; object-fit: contain; }
+.ouro-image-card button { font: inherit; color: inherit; cursor: pointer; }
+.ouro-image-hint { display: inline-block; font-size: .8rem; margin: .3rem; }
+.ouro-image-preview { max-width: 95vw; max-height: 95vh; padding: 1rem; }
+.ouro-image-preview img { display: block; max-width: 88vw; max-height: 80vh; object-fit: contain; }
+.ouro-image-preview::backdrop { background: var(--backdrop); }
+
+/* Images and text each need the full composing width on every breakpoint. */
+body .ouro-composer-box { flex-direction: column; align-items: stretch; }
+body .ouro-composer-box .ouro-composer-input { flex: none; width: 100%; }
+body .ouro-composer-box .ouro-composer-actions { align-self: flex-end; }

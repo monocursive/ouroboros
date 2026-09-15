@@ -284,7 +284,17 @@ defmodule Ouroboros.Web.TranscriptExportController do
     |> Kernel.++(["\n"])
   end
 
-  defp block(%Cell.Message{speaker: :you, text: text}), do: [label("you"), paragraph(text)]
+  defp block(%Cell.Message{speaker: :you, text: text, images: images}) do
+    [
+      label("you"),
+      paragraph(text),
+      Enum.map(images, fn image ->
+        paragraph(
+          "[Image: #{image["display_name"] || "image"} · #{image["width"]} × #{image["height"]} · #{image["id"]}]"
+        )
+      end)
+    ]
+  end
 
   defp block(%Cell.Message{speaker: :agent, text: text, streaming: streaming}),
     do: [label(if(streaming, do: "agent · still writing", else: "agent")), paragraph(text)]

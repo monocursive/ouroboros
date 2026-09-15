@@ -338,7 +338,16 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, `runtime_exposure`, `worktree`, `plan`, plus fleet `machine`/`node`). `worktree` (D7) is a boolean on **both** planes: both already carried `worktree_requested` durably and provision a `git worktree` under the data directory *before* the lease is taken, so the lease and every containment check apply to the worktree rather than the repository — only the wire could not ask for one, which is what `ouro new --worktree` needed. It is deliberately not in `interactive.configure`'s set: a workspace that has been admitted and leased cannot be moved underneath a running session. The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.preview_native` `{provider_session_id, node?}` | Operate-scoped, read-only preview of one known native checkpoint ID. It resolves only the provider ID under the selected node's durable native root, verifies checkpoint version and content digest, and reports digest, retained message count, omitted-prefix offset, rewind floor, and an advisory current logical owner. It neither scans nor creates paths. Actual import rechecks ownership atomically; preview is not an ownership lease. `ouro preview-native` feature-gates on this exact method. |
 | `interactive.import_native` `{provider_session_id, expected_digest, id?, workspace, acknowledge_partial_tail?, start opts}` | Digest-bound, non-destructive import into a new logical ID and a new native ID. Commit means the target checkpoint and logical record are durable; `ready` and `error` separately report ordinary coordinator/workspace admission. A committed but not-ready terminal record remains inspectable and removable through ordinary session removal after repair, then the source can be explicitly imported under a new ID. The source messages are context only; the new public stream begins with `native_checkpoint_imported` and does not synthesize old events, approvals, effects, outcome, cursor, timestamps, or ancestry. Nonzero offset requires explicit acknowledgement. The operator action is effect-ledger-gated; exact retries converge and changed logical/source/digest/start fingerprints conflict. The source checkpoint and sibling records are never changed. The 120s timeout has unknown outcome; `ouro import-native` retries once with its same pre-minted logical ID. |
-| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before native dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
+| `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, image_attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before native dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
+| `attachment.limits` `{node?}` | Owner image capability, source/message limits, safe chunk size, client persistence policy, and stable `client_recovery_namespace`. |
+| `attachment.begin` `{client_id,draft_id,client_attachment_id,attempt_id,byte_size,session_id?,display_name?,source?,node?}` | Idempotently reserves a private upload on the selected runtime. |
+| `attachment.append` `{upload_id,offset,data,node?}` | Bounded base64 chunk; exact duplicate offsets are idempotent, conflicting bytes are refused. |
+| `attachment.finish` `{upload_id,sha256,node?}` | Verify source digest and start contained image preparation. Poll status until ready. |
+| `attachment.status` `{upload_id?,attachment_id?,session_id?,node?}` | Upload progress, failure, or canonical ready manifest. |
+| `attachment.bind_draft` `{draft_id,session_id,node?}` | Bind a new-session draft to its created session before the first send. |
+| `attachment.touch_draft` `{draft_id,node?}` | Renew unused ready images while an active client holds the draft. |
+| `attachment.discard` `{upload_id?,attachment_id?,node?}` | Remove unused images; accepted turn references remain retained. |
+| `attachment.read` `{attachment_id,variant,offset?,length?,session_id?,node?}` | Authorized, bounded content or thumbnail chunk with integrity metadata. |
 | `interactive.retry_turn` `{id, source_turn_id, node?}` | Retries the latest failed turn from its private checkpoint, preserving attachments and reasoning effort. Operate scope only; a stable retry id per source deduplicates repeated calls. Refuses a new retry while busy or after newer work; the original request is never reconstructed from redacted transcript text. Bounded `last_turn` outcomes in session rows keep failures visible between turns. |
 | `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Attachment paths pass the same canonical workspace-containment gate as `send_message` before the runtime sees them, whichever public API spelling supplied them. Steering injects into the running turn and is not durably keyed by the plane: the coordinator mints the runtime request ID, so it has no idempotency, and a lost acknowledgement is unreconcilable — the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. What *is* durable since the steer-text enrichment: the session coordinator remembers the prompt keyed by that request id and writes it, redacted, into the projected `input_accepted(kind=steer)` event, so the transcript quotes every accepted steer in replay exactly once. |
 | `interactive.configure` `{id, approval_mode?, sandbox_mode?, model?, reasoning_effort?}` | `InteractiveSession.configure/2` — moves an open session's posture instead of making the operator start a second one. Exactly four fields, a strict subset of `interactive.start`'s: everything else there is immutable start intent. Validated against what the transport declares (`Ouroboros.Provider.session_configuration/1`): the option list a start is held to, and the adapter's `normalized_values` allowlists. The reply is `{options, applies, changed}`, and `applies` is `"now"`: the one transport carries the change to a live session process rather than to the next re-execution of a CLI. The field stays on the wire because a footer has to be able to state when a change lands rather than imply it. Refusals: `["unconfigurable_session", {reason, …}]` with `reason` one of `option_not_configurable`, `value_not_accepted`, `unknown_provider`; and `["invalid_configuration", {reason, …}]` for `no_changes` and `unknown_field`. The change is durable in `State` (so a resume rebuilds the request from the options the session is actually running with) and is a runtime-native `status` event with `kind: "configured"`, the changed keys, and `applies`. **`plan` is deliberately not a fifth field** and takes its own path: it is an explicit owned session setting, so the native session is told through `Ouroboros.Session.plan_mode/2` (`applies: now`) through a live process call, and a session that has not opened its transport is refused as `["native_transport_unavailable", {verb: "plan", …}]`. A plan exit the session applies is folded back into the record, so `interactive.info` reports the posture the session runs under. |
@@ -2140,7 +2149,7 @@ disabled by queued state, which is Claude Code #16905 exactly.
 ### Structured input: attachments, images, effort (B4)
 
 `params.input` may be a bare string **or** the object
-`{prompt, attachments[≤32], reasoning_effort}` (`structured_turn_input`,
+`{prompt, attachments[≤32], image_attachments:[{id}], reasoning_effort}` (`structured_turn_input`,
 `gateway/methods.ex`). This client sends both, and which one is a fact about the turn:
 a plain prompt stays a bare string — byte for byte what it was before B4 — and the
 object appears the moment there is something in it a string could not carry. Golden
@@ -2156,15 +2165,34 @@ fixtures and `tests/input_grammar.rs` pin both shapes.
   path itself — the workspace may be on another machine — and a refusal that names an
   attachment is rendered on the composer that produced it, beside the chips, rather than
   only in a notice that scrolls away in eight seconds.
-- **`Ctrl+V`** reads the clipboard through whichever tool this machine actually has,
-  probed with `command -v` and never assumed: `pngpaste` then `osascript` on macOS,
-  `wl-paste` then `xclip` on Linux, or the one command named by
-  `OURO_CLIPBOARD_IMAGE_COMMAND`. An image is written `0600` as
-  `.ouroboros/images/image-<id>.png` **under the session workspace** — the only place
-  the runtime will take an attachment from — and attached as a chip. A clipboard holding
-  text falls through to an ordinary paste. A machine with none of the tools is told once,
-  and told what to install. Bounded: 16 MiB, a 5 s tool timeout, PNG signature checked
-  before anything is written under a `.png` name.
+- **`Ctrl+V`** or **`/paste-image`** reads an image from the clipboard of the machine
+  running the TUI, using `pngpaste`/`osascript` on macOS or `wl-paste`/`xclip` on
+  Linux (or `OURO_CLIPBOARD_IMAGE_COMMAND`). Text-only clipboard contents remain text.
+  Terminal bracketed paste itself carries text; a remote TUI does not read the local
+  laptop's clipboard. Use `/attach` on the TUI host or the web file picker in that case.
+- **`/attach "local path.png"`** reads one explicitly selected local file, with spaces
+  supported and no shell evaluation. Source images are bounded to 20 MiB and uploaded
+  in chunks to the conversation's owner. The workspace is never used as a clipboard
+  staging directory. `/remove-image N` removes the Nth attachment; Backspace on an
+  empty draft removes the newest one.
+- A pending or failed image blocks sending the whole draft. Ready images may be sent
+  with an empty text prompt, including the first message of a new session. Send/Queue
+  carry managed image IDs; Steer and shell commands refuse image attachments.
+- Ready drafts, local queues, and uncertain send IDs are saved in a private client
+  recovery file when the owner permits private persistence and supplies a stable
+  recovery namespace. That namespace identifies the attachment store and authenticated
+  principal, so restarting the runtime with a rotated gateway token still recovers the
+  same drafts. Older runtimes without this namespace and owners configured for
+  operational content encryption use memory-only client image drafts. Source files
+  are always held in memory; interrupted source acquisition requires attaching again.
+  Accepted images remain in the runtime's durable storage under its encryption policy.
+  Each new session gets a fresh initial image draft; a retry of an unresolved initial
+  message keeps its original draft and turn identities.
+- **`/view-image N`** opens a ready draft image locally; `/view-image att_…` opens an
+  authorized history image. Bytes are downloaded with size and integrity checks to a
+  private temporary file, then passed to the configured desktop opener. At most four
+  preview files are kept, and normal client shutdown removes them. Headless terminals
+  retain filename/dimension labels; inline terminal graphics are not placed by this UI.
 - **`/effort low|medium|high`** sets `reasoning_effort` on the next turn and clears
   itself after the send. It is per turn, not a mode; `/effort none` clears it early, and
   a value outside the gateway's enum is refused here rather than as a `-32602`.
@@ -2182,9 +2210,10 @@ with a refused turn. A same-id reconciliation replays the whole envelope, becaus
 that replayed the prompt without its attachments would present a different fingerprint
 and come back `:turn_id_conflict`.
 
-The whole path is capability-gated. Where the runtime declared `multimodal: false` there
-is no chip and no image: the `@` still completes as text, `Ctrl+V` still pastes text, and
-both refusals name the transport.
+Managed images are gated by `attachment.limits` and the selected model's image-input
+support. A known text-only model refuses before dispatch; an unknown model may report
+a provider refusal, preserving the full draft. Legacy `@` attachments retain their
+existing workspace and transport capability rules.
 
 ### Images in the transcript (A11)
 
@@ -3722,3 +3751,9 @@ public gateway does not expose — a lost acknowledgement still means the
 provider may have received the same text twice); a keyboard path back to the advanced `n` session
 dialog from the coding home (the composer owns `n` there, so the dialog is
 reachable only with a session open — pinned behavior, chosen by nobody).
+
+
+Managed image uploads require the `attachment.*` methods and a usable, contained
+`ouro-media` helper on the owner runtime. Build it with `make media` for a source
+runtime; release packaging includes the matching native binary. Limits and static
+formats match the web client; see [Image attachments](WEB.md#image-attachments).

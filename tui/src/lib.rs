@@ -14,6 +14,7 @@ pub mod clipboard;
 pub mod config;
 pub mod continuation;
 pub mod fleet;
+pub mod image_upload;
 pub mod images;
 pub mod keymap;
 pub mod ledger_cli;

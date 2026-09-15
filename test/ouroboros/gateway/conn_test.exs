@@ -106,6 +106,31 @@ defmodule Ouroboros.Gateway.ConnTest do
 
   defp error_code(frame), do: frame["error"]["code"]
 
+  test "attachment chunks adapt to a small authenticated gateway frame", %{client: client} do
+    hello(client)
+
+    send_frame(client, %{
+      "jsonrpc" => "2.0",
+      "id" => "images",
+      "method" => "attachment.limits",
+      "params" => %{}
+    })
+
+    result = recv_frame(client)["result"]
+    assert result["chunk_bytes"] == 192
+    assert result["max_source_bytes"] == 192 * 4096
+    assert result["max_image_bytes"] == 20 * 1024 * 1024
+
+    send_frame(client, %{
+      "jsonrpc" => "2.0",
+      "id" => "begin",
+      "method" => "attachment.begin",
+      "params" => %{}
+    })
+
+    assert error_code(recv_frame(client)) == -32003
+  end
+
   describe "the handshake" do
     test "a valid hello reports what this build actually serves", %{client: client} do
       response = hello(client)

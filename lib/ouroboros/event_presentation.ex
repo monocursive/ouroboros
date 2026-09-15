@@ -358,8 +358,8 @@ defmodule Ouroboros.EventPresentation.SubagentEvent do
 end
 
 defmodule Ouroboros.EventPresentation.UserMessage do
-  @moduledoc "An accepted input this ledger holds the words of."
-  defstruct [:text]
+  @moduledoc "An accepted input, including its immutable image manifest."
+  defstruct [:text, images: []]
   @type t :: %__MODULE__{text: String.t()}
 end
 
@@ -741,6 +741,7 @@ defmodule Ouroboros.EventPresentation do
     end
   end
 
+  defp semantic_value(%UserMessage{images: []} = value), do: %{"text" => value.text}
   defp semantic_value(%_{} = value), do: value |> Map.from_struct() |> semantic_value()
 
   defp semantic_value(value) when is_map(value),
@@ -972,10 +973,22 @@ defmodule Ouroboros.EventPresentation do
 
     steered = text(payload, ["kind"]) == "steer"
 
-    case {steered, words} do
-      {true, words} -> %UserSteer{text: words}
-      {false, nil} -> %UnrecordedInput{}
-      {false, words} -> %UserMessage{text: words}
+    images =
+      case Map.get(payload, "image_attachments", []) do
+        values when is_list(values) ->
+          Enum.filter(Enum.take(values, 32), fn value ->
+            is_map(value) and is_binary(value["id"]) and
+              Regex.match?(~r/^att_[A-Za-z0-9_-]{32}$/, value["id"])
+          end)
+
+        _ ->
+          []
+      end
+
+    case {steered, words, images} do
+      {true, words, _} -> %UserSteer{text: words}
+      {false, nil, []} -> %UnrecordedInput{}
+      {false, words, images} -> %UserMessage{text: words || "", images: images}
     end
   end
 

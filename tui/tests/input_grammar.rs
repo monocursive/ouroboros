@@ -719,10 +719,9 @@ fn an_attachment_refused_by_the_runtime_is_rendered_on_the_composer() {
         .contains("attachment_outside_workspace"));
 }
 
-/// `Ctrl+V` asks the driver for the clipboard, naming the session's workspace — because an
-/// attachment has to live inside it for `authorize_turn_attachments` to accept the turn.
+/// Clipboard uploads target the session owner without requiring a shared workspace.
 #[test]
-fn ctrl_v_asks_the_driver_to_read_the_clipboard_into_the_session_workspace() {
+fn ctrl_v_targets_the_session_owner_without_a_workspace_write() {
     let mut app = opened("idle", steering_capabilities(), Vec::new());
     compose(&mut app);
 
@@ -731,7 +730,11 @@ fn ctrl_v_asks_the_driver_to_read_the_clipboard_into_the_session_workspace() {
     let request = app
         .take_clipboard_request()
         .expect("ctrl+v asks for a clipboard read");
-    assert_eq!(request.workspace, "/Users/operator/code/ouroboros");
+    assert!(request.workspace.is_empty());
+    assert_eq!(
+        request.target.as_ref().map(|(plane, _)| *plane),
+        Some(Plane::Interactive)
+    );
     assert!(!request.id.is_empty(), "the file is named by this client");
 }
 
@@ -776,15 +779,21 @@ fn a_machine_with_no_clipboard_tool_is_told_once() {
 /// D14 again: `Ctrl+V` on a transport that takes no images says so instead of writing a
 /// file the runtime would refuse.
 #[test]
-fn ctrl_v_is_refused_by_transport_name_where_multimodal_is_false() {
+fn ctrl_v_keeps_plain_text_paste_available_when_multimodal_is_false() {
     let mut app = opened("idle", managed_capabilities(), Vec::new());
     compose(&mut app);
 
     app.apply(modified(KeyCode::Char('v'), KeyModifiers::CONTROL));
 
-    assert!(app.take_clipboard_request().is_none());
-    let text = screen(&mut app).text();
-    assert!(text.contains("managed takes no images"), "{text}");
+    let request = app
+        .take_clipboard_request()
+        .expect("clipboard text remains readable");
+    app.apply(Msg::ImageUpload {
+        request,
+        outcome: ClipboardOutcome::Text("ordinary paste".into()),
+    });
+    assert_eq!(draft(&app), "ordinary paste");
+    assert!(chips(&app).is_empty());
 }
 
 /// `/model` is `interactive.configure`, gated on `hello.methods` like every other verb.
@@ -2387,4 +2396,134 @@ fn a_leading_space_sends_a_bang_line_as_text() {
     let sent = turn_calls(&calls);
     assert_eq!(sent.len(), 1, "the line was not sent: {:?}", app.notice);
     assert_eq!(sent[0].1["input"].as_str().map(str::trim), Some("!ls -la"));
+}
+
+const MANAGED_IMAGE: &str = "att_abcdefghijklmnopqrstuvwx12345678";
+fn uploaded_image(app: &mut App) {
+    app.apply(modified(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    let request = app.take_clipboard_request().expect("clipboard request");
+    app.apply(Msg::ImageUpload {request, outcome: ClipboardOutcome::Uploaded(json!({
+        "id": MANAGED_IMAGE, "state": "ready", "byte_size": 72, "source_size": 72,
+        "width": 2, "height": 1, "display_name": "screen.png", "sha256": "abc", "client_ephemeral": false
+    }))});
+}
+
+#[test]
+fn image_only_send_contains_a_managed_id_and_unknown_outcome_recovers_the_same_turn() {
+    let mut app = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut app);
+    uploaded_image(&mut app);
+    app.drain();
+    app.apply(key(KeyCode::Enter));
+    let calls = app.drain();
+    let call = calls
+        .iter()
+        .find(|c| c.method == "interactive.send_message")
+        .expect("image-only send");
+    assert_eq!(call.params["input"]["prompt"], "");
+    assert_eq!(
+        call.params["input"]["image_attachments"],
+        json!([{"id": MANAGED_IMAGE}])
+    );
+    assert!(call.params["input"].get("attachments").is_none());
+    let turn = call.params["turn_id"].clone();
+    let snapshot = app.image_draft_snapshot();
+    assert_eq!(snapshot["pending"][0]["turn_id"], turn);
+    let mut recovered = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut recovered);
+    recovered.restore_image_drafts(snapshot);
+    recovered.drain();
+    recovered.apply(key(KeyCode::Enter));
+    let retry = recovered
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.send_message")
+        .expect("same-id reconciliation");
+    assert_eq!(retry.params["turn_id"], turn);
+    assert_eq!(retry.params["input"], call.params["input"]);
+}
+
+#[test]
+fn image_draft_recovers_into_an_already_open_empty_composer_and_previews_by_position() {
+    let mut app = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut app);
+    uploaded_image(&mut app);
+    type_text(&mut app, "inspect");
+    let snapshot = app.image_draft_snapshot();
+    let mut recovered = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut recovered);
+    recovered.restore_image_drafts(snapshot);
+    assert_eq!(draft(&recovered), "inspect");
+    assert_eq!(chips(&recovered)[0].path, MANAGED_IMAGE);
+    recovered
+        .sessions
+        .composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .clear_text();
+    send(&mut recovered, "/view-image 1");
+    assert_eq!(
+        recovered
+            .image_preview_pending
+            .as_ref()
+            .map(|v| v.0.as_str()),
+        Some(MANAGED_IMAGE)
+    );
+}
+
+#[test]
+fn pending_images_block_send_and_late_completion_cannot_restore_a_removed_image() {
+    let mut app = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut app);
+    app.apply(modified(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    let request = app.take_clipboard_request().unwrap();
+    let calls = send(&mut app, "keep this text");
+    assert!(turn_calls(&calls).is_empty());
+    app.sessions.composer.as_mut().unwrap().attachments.clear();
+    app.apply(Msg::ImageUpload {
+        request,
+        outcome: ClipboardOutcome::Uploaded(json!({"id": MANAGED_IMAGE, "byte_size":72})),
+    });
+    assert!(chips(&app).is_empty());
+    assert_eq!(draft(&app), "keep this text");
+}
+
+#[test]
+fn encrypted_owner_drafts_never_enter_the_plaintext_client_snapshot() {
+    let mut app = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut app);
+    uploaded_image(&mut app);
+    type_text(&mut app, "private message");
+    app.sessions.composer.as_mut().unwrap().attachments[0].ephemeral = true;
+    let snapshot = app.image_draft_snapshot().to_string();
+    assert!(!snapshot.contains("private message"));
+    assert!(!snapshot.contains(MANAGED_IMAGE));
+}
+
+#[test]
+fn an_interrupted_private_upload_preserves_text_and_recovers_as_a_failed_entry() {
+    let mut app = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut app);
+    type_text(&mut app, "retain while uploading");
+    app.apply(modified(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    let request = app.take_clipboard_request().unwrap();
+    app.apply(Msg::ImageProgress {request, value: json!({"upload_id":MANAGED_IMAGE, "state":"preparing",
+        "received":72, "source_size":72, "client_ephemeral":false, "display_name":"screenshot.png"})});
+    let saved = app.image_draft_snapshot();
+    let mut recovered = opened("idle", steering_capabilities(), vec![]);
+    compose(&mut recovered);
+    recovered.restore_image_drafts(saved);
+    assert_eq!(draft(&recovered), "retain while uploading");
+    assert_eq!(chips(&recovered)[0].kind, AttachmentKind::FailedImage);
+    recovered
+        .sessions
+        .composer
+        .as_mut()
+        .unwrap()
+        .editor
+        .clear_text();
+    send(&mut recovered, "/remove-image 1");
+    assert_eq!(recovered.image_discards[0].0, MANAGED_IMAGE);
+    assert!(chips(&recovered).is_empty());
 }

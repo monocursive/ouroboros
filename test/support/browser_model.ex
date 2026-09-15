@@ -8,10 +8,17 @@ defmodule Ouroboros.Test.BrowserModel do
     prompt =
       request.messages |> Enum.reverse() |> Enum.find(&(&1.role == :user)) |> Map.fetch!(:content)
 
+    image_count =
+      if is_list(prompt), do: Enum.count(prompt, &(Map.get(&1, :type) == :image)), else: 0
+
     prompt = if is_binary(prompt), do: prompt, else: inspect(prompt)
     after_tool? = List.last(request.messages).role == :tool
 
     cond do
+      image_count > 0 ->
+        {:ok,
+         [{:text, "Received #{image_count} image(s); model=#{request.model}."}, {:finish, :stop}]}
+
       String.contains?(prompt, "browser private failure") ->
         {:ok,
          Stream.map([:text, :fail], fn phase ->

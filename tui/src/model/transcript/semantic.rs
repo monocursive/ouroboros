@@ -38,6 +38,8 @@ enum Semantic {
     },
     UserMessage {
         text: String,
+        #[serde(default)]
+        images: Vec<Value>,
     },
     UserSteer {
         text: Option<String>,
@@ -101,7 +103,13 @@ pub(super) fn decode(event: &Event) -> Option<PresentationEvent> {
             outcome,
             detail,
         },
-        Semantic::UserMessage { text } => PresentationEvent::UserMessage(text),
+        Semantic::UserMessage { text, images } => {
+            if images.is_empty() {
+                PresentationEvent::UserMessage(text)
+            } else {
+                PresentationEvent::UserImages { text, images }
+            }
+        }
         Semantic::UserSteer { text } => PresentationEvent::UserSteer(text),
         Semantic::CommandOutput { text } => PresentationEvent::CommandOutput(text),
         Semantic::Failure { detail } => PresentationEvent::Failure(detail),

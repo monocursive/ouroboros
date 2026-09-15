@@ -112,6 +112,8 @@ defmodule Ouroboros.Web.Layouts do
         </script>
         <script defer src="/web/phoenix_live_view.min.js">
         </script>
+        <script defer src="/web/image-attachments.js">
+        </script>
         <script defer src="/web/app.js">
         </script>
       </head>

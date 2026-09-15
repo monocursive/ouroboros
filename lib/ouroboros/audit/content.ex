@@ -129,6 +129,10 @@ defmodule Ouroboros.Audit.Content do
       "native/*/compaction/*.json",
       "native/*/blobs/*",
       "native/*/attachments/*",
+      "attachments/att_*/manifest",
+      "attachments/att_*/content",
+      "attachments/att_*/thumbnail",
+      "attachments/att_*/chunk-*",
       "native/*/output/*"
     ]
 

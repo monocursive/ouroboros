@@ -3,7 +3,19 @@ defmodule Ouroboros.Gateway.GoldenTest do
 
   alias Mix.Tasks.Ouroboros.Gateway.Golden
   alias Ouroboros.Gateway.Wire
-  @compatibility_additive_methods ["interactive.safe_status"]
+
+  @compatibility_additive_methods [
+    "attachment.append",
+    "attachment.begin",
+    "attachment.bind_draft",
+    "attachment.discard",
+    "attachment.finish",
+    "attachment.limits",
+    "attachment.read",
+    "attachment.status",
+    "attachment.touch_draft",
+    "interactive.safe_status"
+  ]
   @compatibility_hello Path.expand(
                          "../../support/gateway_compatibility/hello_before_safe_status.json",
                          __DIR__

@@ -1666,3 +1666,118 @@ fn a_mistyped_verb_alone_on_the_home_screen_says_how_to_send_it_anyway() {
     );
     assert_eq!(app.home_draft.text(), "/keyq");
 }
+
+#[test]
+fn image_only_first_message_recovery_reuses_the_created_session_and_binds_before_send() {
+    use ouro::model::{Attachment, AttachmentKind};
+    let mut app = harness(true);
+    let id = "att_abcdefghijklmnopqrstuvwx12345678";
+    let mut image = Attachment::image(id);
+    image.kind = AttachmentKind::ManagedImage;
+    image.ephemeral = false;
+    image.byte_size = 72;
+    app.home_images.push(image);
+    app.drain();
+    app.apply(key(KeyCode::Enter));
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.start")
+        .expect("image-only start");
+    let snapshot = app.image_draft_snapshot();
+    let original_image_draft = snapshot["home_draft_id"].as_str().unwrap().to_string();
+    let mut recovered = harness(true);
+    recovered.restore_image_drafts(snapshot);
+    assert!(recovered.home_reconciling());
+    recovered.drain();
+    recovered.apply(key(KeyCode::Enter));
+    let retry = recovered
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.start")
+        .expect("same start");
+    assert_eq!(retry.params, start.params);
+    answer(
+        &mut recovered,
+        retry.tag,
+        json!({"_struct":"Ouroboros.Interactive.Ref", "id":start.params["id"]}),
+    );
+    assert!(!recovered
+        .drain()
+        .iter()
+        .any(|c| c.method == "interactive.send_message"));
+    let (session, _, bound_draft, input) = recovered
+        .image_bind_pending
+        .take()
+        .expect("bind on selected owner");
+    assert!(bound_draft.starts_with(&original_image_draft));
+    assert_eq!(input.attachments[0].path, id);
+    recovered.apply(Msg::ImagesBound {
+        id: session,
+        input,
+        error: None,
+    });
+    let sent = recovered
+        .drain()
+        .into_iter()
+        .find(|c| c.method == "interactive.send_message")
+        .expect("send after bind");
+    assert_eq!(sent.params["input"]["prompt"], "");
+    assert_eq!(
+        sent.params["input"]["image_attachments"],
+        json!([{"id":id}])
+    );
+}
+
+#[test]
+fn consecutive_image_first_messages_use_distinct_home_drafts() {
+    use ouro::ui::ClipboardOutcome;
+    let mut app = harness(true);
+    let mut drafts = Vec::new();
+    for id in [
+        "att_abcdefghijklmnopqrstuvwx12345678",
+        "att_abcdefghijklmnopqrstuvwx12345679",
+    ] {
+        app.apply(ctrl('v'));
+        let upload = app
+            .take_clipboard_request()
+            .expect("home image acquisition");
+        drafts.push(upload.draft_id.clone());
+        app.apply(Msg::ImageUpload {
+            request: upload,
+            outcome: ClipboardOutcome::Uploaded(json!({
+                "id":id, "byte_size":72, "source_size":72, "client_ephemeral":false
+            })),
+        });
+        app.drain();
+        app.apply(key(KeyCode::Enter));
+        let start = app
+            .drain()
+            .into_iter()
+            .find(|c| c.method == "interactive.start")
+            .expect("image-only start");
+        answer(
+            &mut app,
+            start.tag,
+            json!({"_struct":"Ouroboros.Interactive.Ref", "id":start.params["id"]}),
+        );
+        let (session, _, draft, input) = app
+            .image_bind_pending
+            .take()
+            .expect("original bind request");
+        assert_eq!(&draft, drafts.last().unwrap());
+        app.apply(Msg::ImagesBound {
+            id: session,
+            input,
+            error: None,
+        });
+        assert!(app
+            .drain()
+            .iter()
+            .any(|c| c.method == "interactive.send_message"));
+        app.apply(ctrl('x'));
+        app.apply(key(KeyCode::Char('n')));
+        assert!(app.sessions.open.is_none());
+    }
+    assert_ne!(drafts[0], drafts[1]);
+}

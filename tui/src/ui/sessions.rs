@@ -1094,7 +1094,8 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
     let composer_height = COMPOSER_CHROME
         + editor_rows(Some(&app.home_draft), width)
         + completion_rows(Some(&app.home_draft))
-        + home_error_rows(app, width);
+        + home_error_rows(app, width)
+        + app.home_images.len().min(4) as u16;
     let examples = app.home_draft.is_empty() && !app.home_pending && app.home_error.is_none();
     let example_rows = if examples && area.height >= composer_height + 12 {
         4
@@ -2039,8 +2040,20 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         Constraint::Length(completion_rows(Some(&app.home_draft))),
         Constraint::Length(home_error_rows(app, area.width)),
         Constraint::Length(1),
+        Constraint::Length(app.home_images.len().min(4) as u16),
     ])
     .split(inner);
+    frame.render_widget(
+        Paragraph::new(
+            app.home_images
+                .iter()
+                .enumerate()
+                .take(4)
+                .map(|(i, image)| Line::from(format!("{}. ▣ {}", i + 1, image.label())))
+                .collect::<Vec<_>>(),
+        ),
+        rows[4],
+    );
     if app.home_pending {
         frame.render_widget(
             Paragraph::new(theme::working(app.ticks, "Starting your task…")),
@@ -2228,7 +2241,7 @@ fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(
                 format!(
                     " {}{} ",
-                    if attachment.kind == AttachmentKind::Image {
+                    if attachment.kind != AttachmentKind::Path {
                         "▣ "
                     } else {
                         "@"

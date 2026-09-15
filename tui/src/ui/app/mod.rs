@@ -54,6 +54,7 @@ mod cluster;
 mod details;
 mod footer;
 mod home;
+mod image_drafts;
 mod keys;
 mod location;
 pub mod native;
@@ -472,6 +473,20 @@ pub enum Msg {
     StatusLine(Result<String, String>),
     /// What the driver found on the clipboard after a `Ctrl+V` (B4).
     Clipboard(ClipboardOutcome),
+    ImageProgress {
+        request: ClipboardRequest,
+        value: Value,
+    },
+    ImageUpload {
+        request: ClipboardRequest,
+        outcome: ClipboardOutcome,
+    },
+    ImagePreview(Result<crate::image_upload::PreviewFile, String>),
+    ImagesBound {
+        id: String,
+        input: TurnInput,
+        error: Option<String>,
+    },
 }
 
 /// A `Ctrl+V` the driver should service.
@@ -481,10 +496,11 @@ pub enum Msg {
 /// exactly as `$EDITOR` and `pbcopy` already do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardRequest {
-    /// The **session's** workspace, as the runtime reported it. An attachment has to live
-    /// inside it or `authorize_turn_attachments` refuses the turn, so this is where the
-    /// image goes — and a fleet session's workspace is a path on another machine, which
-    /// the driver discovers by failing to find the directory and says so.
+    pub target: Option<(Plane, String)>,
+    pub node: Option<String>,
+    pub draft_id: String,
+    pub path: Option<String>,
+    /// Retained for old clipboard adapters; managed images never use a workspace path.
     pub workspace: String,
     /// The id the file is named after, minted here so the state machine stays the thing
     /// that decides names.
@@ -496,6 +512,7 @@ pub struct ClipboardRequest {
 pub enum ClipboardOutcome {
     /// A PNG was written; the path is relative to the session workspace.
     Image(String),
+    Uploaded(Value),
     /// No image. This is the ordinary text paste, performed unchanged.
     Text(String),
     /// Tools exist and the clipboard held nothing either of them could read.
@@ -896,6 +913,15 @@ pub struct App {
     statusline: StatusLine,
     /// A `Ctrl+V` the driver should service (B4).
     clipboard_pending: Option<ClipboardRequest>,
+    pub home_images: Vec<Attachment>,
+    pub home_image_node: String,
+    pub image_discards: Vec<(String, Option<String>)>,
+    image_last_edit: u64,
+    pub image_preview_pending: Option<(String, Option<String>, Option<String>)>,
+    image_previews: std::collections::VecDeque<crate::image_upload::PreviewFile>,
+    pub image_bind_pending: Option<(String, Option<String>, String, TurnInput)>,
+    image_draft_id: String,
+    home_image_draft_id: String,
     /// Whether "this machine has no clipboard tool" has been said. Once per run: the
     /// thing it explains does not change between keystrokes.
     clipboard_tool_reported: bool,
@@ -1015,6 +1041,15 @@ impl App {
             notify_pending: Vec::new(),
             statusline: StatusLine::default(),
             clipboard_pending: None,
+            home_images: Vec::new(),
+            home_image_node: String::new(),
+            image_discards: Vec::new(),
+            image_last_edit: 0,
+            image_preview_pending: None,
+            image_previews: std::collections::VecDeque::new(),
+            image_bind_pending: None,
+            image_draft_id: new_turn_id(),
+            home_image_draft_id: new_turn_id(),
             clipboard_tool_reported: false,
             budget_warned: HashSet::new(),
         }
@@ -1842,8 +1877,14 @@ impl App {
 
     pub fn apply(&mut self, message: Msg) {
         match message {
-            Msg::Key(key) => self.key(key),
-            Msg::Paste(text) => self.paste(&text),
+            Msg::Key(key) => {
+                self.image_last_edit = self.ticks;
+                self.key(key)
+            }
+            Msg::Paste(text) => {
+                self.image_last_edit = self.ticks;
+                self.paste(&text)
+            }
             Msg::WorkspaceFiles(files) => {
                 self.completion_catalog.set_files(files);
                 self.home_draft.update_completions(&self.completion_catalog);
@@ -1917,6 +1958,22 @@ impl App {
                 }
             }
             Msg::Clipboard(outcome) => self.clipboard_read(outcome),
+            Msg::ImageProgress { request, value } => self.image_progress(request, value),
+            Msg::ImageUpload { request, outcome } => self.image_uploaded(request, outcome),
+            Msg::ImagePreview(result) => match result {
+                Ok(file) => {
+                    self.open_path_pending = Some(file.path().to_path_buf());
+                    self.image_previews.push_back(file);
+                    while self.image_previews.len() > 4 {
+                        self.image_previews.pop_front();
+                    }
+                }
+                Err(error) => self.inform(
+                    format!("Image could not be opened: {error}"),
+                    NoticeKind::Warn,
+                ),
+            },
+            Msg::ImagesBound { id, input, error } => self.images_bound(id, input, error),
             Msg::Answer { tag, result } => {
                 self.answer(tag, result);
                 // The acknowledgement that was blocking the queue may have just landed.

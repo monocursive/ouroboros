@@ -438,10 +438,10 @@ defmodule Ouroboros.Web.Transcript do
   # The per-presentation arms
   # ------------------------------------------------------------------------------------
 
-  defp project_event(state, %UserMessage{text: text}) do
+  defp project_event(state, %UserMessage{text: text, images: images}) do
     state
     |> flush_agent(false)
-    |> push!(%Cell.Message{speaker: :you, text: text, streaming: false})
+    |> push!(%Cell.Message{speaker: :you, text: text, streaming: false, images: images})
   end
 
   defp project_event(state, %UserSteer{text: text}) do

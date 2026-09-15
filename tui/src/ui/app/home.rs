@@ -70,6 +70,27 @@ impl App {
             return;
         }
 
+        if self.keymap.hits(Action::PasteImage, key) {
+            self.request_clipboard_paste();
+            return;
+        }
+        if key.code == crossterm::event::KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self.home_draft.is_empty()
+            && !self.home_images.is_empty()
+        {
+            self.submit_home();
+            return;
+        }
+        if key.code == crossterm::event::KeyCode::Backspace
+            && self.home_draft.is_empty()
+            && !self.home_images.is_empty()
+        {
+            if let Some(image) = self.home_images.pop() {
+                self.discard_image(&image);
+            }
+            return;
+        }
         if self.home_draft.is_empty() {
             for (action, _, prompt) in Self::home_examples() {
                 if self.keymap.hits(action, key) {
@@ -140,7 +161,10 @@ impl App {
     }
 
     fn submit_home(&mut self) {
-        let prompt = self.home_draft.submission();
+        let prompt = self
+            .home_draft
+            .submission()
+            .or_else(|| (!self.home_images.is_empty()).then(String::new));
         // The draft as typed, not as trimmed: the grammar reads leading whitespace.
         let raw = self.home_draft.text().to_string();
 
@@ -173,6 +197,14 @@ impl App {
             Line::Message => {}
         }
 
+        if self
+            .home_images
+            .iter()
+            .any(|a| a.kind != crate::model::AttachmentKind::ManagedImage)
+        {
+            self.home_error = Some("Finish or remove pending images before starting".into());
+            return;
+        }
         // Check the ability to start before sending someone through authentication.
         if let Some(reason) = self.home_start_blocker() {
             self.home_error = Some(reason);
@@ -198,6 +230,12 @@ impl App {
     }
 
     pub fn home_start_blocker(&self) -> Option<String> {
+        if !self.home_images.is_empty() && self.home_image_node != self.config.location.machine {
+            return Some(
+                "Images are on the previous computer. Return to it or remove them before starting."
+                    .into(),
+            );
+        }
         if !matches!(self.connection, Connection::Live) {
             Some(
                 "Connection lost. Your draft is here; wait for reconnection, then press Enter."

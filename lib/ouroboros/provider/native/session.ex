@@ -2056,8 +2056,15 @@ defmodule Ouroboros.Provider.Native.Session do
 
     with {:ok, state} <- maybe_compact(state),
          {:ok, state} <- ensure_context(state),
+         {:ok, turn_context} <- image_turn_context(state, request),
          {:ok, user_message} <-
-           Attachments.message(text, request.attachments, state.session_dir) do
+           Attachments.message(
+             text,
+             request.attachments,
+             Map.get(request, :image_attachments, []),
+             state.logical_id,
+             state.session_dir
+           ) do
       owner = self()
 
       loop = %Loop{
@@ -2072,17 +2079,17 @@ defmodule Ouroboros.Provider.Native.Session do
           GenServer.call(owner, {:checkpoint, turn_id, snapshot}, @checkpoint_timeout)
         end,
         model_module: state.model_module,
-        model_spec: state.model_spec,
-        system: state.prompt_context.system,
-        tool_specs: state.prompt_context.tools,
-        context_window: state.prompt_context.context_window,
-        prefix_fingerprint: state.prompt_context.fingerprint,
-        fleet_snapshot: state.prompt_context.fleet_snapshot,
+        model_spec: turn_context.model_spec,
+        system: turn_context.prompt_context.system,
+        tool_specs: turn_context.prompt_context.tools,
+        context_window: turn_context.prompt_context.context_window,
+        prefix_fingerprint: turn_context.prompt_context.fingerprint,
+        fleet_snapshot: turn_context.prompt_context.fleet_snapshot,
         # R1. The loop is the journal's writer for the length of the turn; it syncs the
         # handle at the top of `run_turn/2` because this process may have advanced the file
         # since the handle was built.
         journal: state.journal,
-        rules: Context.rules(state.prompt_context),
+        rules: Context.rules(turn_context.prompt_context),
         rules_loaded: state.rules_loaded,
         scope: state.scope,
         session_dir: state.session_dir,
@@ -2136,6 +2143,17 @@ defmodule Ouroboros.Provider.Native.Session do
            turn_plan: nil,
            turn_text: nil
        }}
+    end
+  end
+
+  defp image_turn_context(state, request) do
+    model = Map.get(request.metadata || %{}, "ouroboros_image_model")
+
+    if Map.get(request, :image_attachments, []) != [] and is_binary(model) and
+         model != state.model_spec do
+      build_context(%{state | model_spec: model})
+    else
+      {:ok, state}
     end
   end
 
@@ -2261,6 +2279,16 @@ defmodule Ouroboros.Provider.Native.Session do
     }
   end
 
+  defp image_payload(request) do
+    case Map.get(request, :image_attachments, []) do
+      [] ->
+        %{}
+
+      refs ->
+        %{"image_attachments" => refs, "attachment_summary" => "#{length(refs)} images attached"}
+    end
+  end
+
   defp accept_turn(state, turn_id, mode, request, digest) do
     Output.register_turn(
       state.output,
@@ -2277,7 +2305,7 @@ defmodule Ouroboros.Provider.Native.Session do
           submissions: Map.put(state.submissions, turn_id, digest)
       }
 
-      emit(state, %{type: :turn_queued, turn_id: turn_id, payload: %{}})
+      emit(state, %{type: :turn_queued, turn_id: turn_id, payload: image_payload(request)})
       emit_queue(state)
       if is_nil(state.active_turn_id), do: Kernel.send(self(), :start_next)
       {:reply, {:ok, turn_id}, state}
@@ -2298,7 +2326,12 @@ defmodule Ouroboros.Provider.Native.Session do
       {:ok, state} ->
         cancel_timer(state.session_idle_timer)
         state = %{state | active_turn_id: turn_id, status: :running, session_idle_timer: nil}
-        emit(state, %{type: :input_accepted, turn_id: turn_id, payload: %{"kind" => "message"}})
+
+        emit(state, %{
+          type: :input_accepted,
+          turn_id: turn_id,
+          payload: Map.put(image_payload(request), "kind", "message")
+        })
 
         emit(state, %{
           type: :turn_started,
@@ -2468,7 +2501,24 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp validate_turn(state, request) do
+    images = Map.get(request, :image_attachments, [])
+    model = Map.get(request.metadata || %{}, "ouroboros_image_model", state.model_spec)
+
+    image_check =
+      if images == [],
+        do: {:ok, []},
+        else: Ouroboros.Attachments.content(state.logical_id, images)
+
     cond do
+      images != [] and Ouroboros.Models.image_support(model) == :unsupported ->
+        {:error, Ouroboros.Session.Error.validation("image_model_unsupported")}
+
+      match?({:error, _}, image_check) ->
+        {:error,
+         Ouroboros.Session.Error.validation("image_attachment_unavailable",
+           details: %{reason: elem(image_check, 1)}
+         )}
+
       :erlang.external_size(request) > @max_input_bytes ->
         {:error, Ouroboros.Session.Error.validation("turn input exceeds 8 MiB limit")}
 

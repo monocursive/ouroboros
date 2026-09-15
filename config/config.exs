@@ -2,7 +2,7 @@ import Config
 
 # LiveView logs event parameters at debug level. Credential forms therefore use names
 # containing `api_key`, and Phoenix must redact those values before any logger sees them.
-config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key"]
+config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key", "image_data"]
 
 # Native streams are admitted globally by `Provider.Native.Model.Admission`, eight at a
 # time. Keep Finch as one pool with more connections than admitted streams: this removes

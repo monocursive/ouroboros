@@ -175,7 +175,7 @@ pub(super) enum PendingReconciliationKind {
     Composer(ComposerVerb),
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct PendingFirstMessage {
     pub(super) input: String,
     pub(super) turn_id: String,
@@ -819,6 +819,18 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Enter
+            && key.modifiers.is_empty()
+            && self
+                .sessions
+                .composer
+                .as_ref()
+                .is_some_and(|c| c.editor.is_empty() && !c.attachments.is_empty())
+        {
+            self.submit_composer();
+            return;
+        }
+
         if key.code == KeyCode::Backspace && key.modifiers.is_empty() && self.detach_newest() {
             return;
         }
@@ -1250,6 +1262,7 @@ impl App {
         };
 
         composer.attachment_refusal = None;
+        self.discard_image(&removed);
         self.remember_composer_history();
         self.inform(
             format!("removed the attachment {}", removed.path),
@@ -1697,56 +1710,320 @@ impl App {
         );
     }
 
+    pub(super) fn discard_image(&mut self, image: &Attachment) {
+        let id = image
+            .upload_id
+            .clone()
+            .or_else(|| crate::image_upload::valid_id(&image.path).then(|| image.path.clone()));
+        if let Some(id) = id {
+            let node = self
+                .sessions
+                .open
+                .as_ref()
+                .and_then(|(plane, id)| self.sessions.owner_node(*plane, id).map(str::to_string))
+                .or_else(|| {
+                    (!self.home_image_node.is_empty()).then(|| self.home_image_node.clone())
+                });
+            self.image_discards.push((id, node));
+        }
+    }
+
+    pub fn image_draft_leases(&self) -> Vec<Value> {
+        if self.ticks.saturating_sub(self.image_last_edit) as u128 * TICK.as_millis() > 90_000 {
+            return Vec::new();
+        }
+        let active = if let Some((plane, id)) = &self.sessions.open {
+            self.sessions
+                .composer
+                .as_ref()
+                .filter(|c| {
+                    c.attachments
+                        .iter()
+                        .any(|a| a.kind == crate::model::AttachmentKind::ManagedImage)
+                })
+                .map(|_| {
+                    (
+                        Some((*plane, id.clone())),
+                        self.sessions.owner_node(*plane, id).map(str::to_string),
+                    )
+                })
+        } else if !self.home_images.is_empty() {
+            Some((
+                None,
+                (!self.home_image_node.is_empty()).then(|| self.home_image_node.clone()),
+            ))
+        } else {
+            None
+        };
+        active
+            .into_iter()
+            .map(|(target, node)| {
+                let mut params =
+                    json!({"draft_id": self.image_draft_for(target.as_ref(), node.as_deref())});
+                if let Some(node) = node {
+                    params["node"] = json!(node);
+                }
+                params
+            })
+            .collect()
+    }
+
     /// `Ctrl+V`: the clipboard, as an image where it holds one.
-    fn request_clipboard_paste(&mut self) {
-        let Some((plane, id)) = self.sessions.open.clone() else {
+    pub(super) fn image_draft_for(
+        &self,
+        target: Option<&(Plane, String)>,
+        node: Option<&str>,
+    ) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}-{:x}",
+            if target.is_none() {
+                &self.home_image_draft_id
+            } else {
+                &self.image_draft_id
+            },
+            Sha256::digest(format!("{target:?}/{node:?}"))
+        )
+    }
+
+    pub(super) fn request_clipboard_paste(&mut self) {
+        self.request_image(None);
+    }
+
+    pub(super) fn request_image(&mut self, path: Option<String>) {
+        if self.clipboard_pending.is_some() {
+            return;
+        }
+        let target = self.sessions.open.clone();
+        if target
+            .as_ref()
+            .is_some_and(|(plane, _)| *plane != Plane::Interactive)
+        {
+            return;
+        }
+        let node = match &target {
+            Some((plane, id)) => self.sessions.owner_node(*plane, id).map(str::to_string),
+            None => (!self.config.location.machine.is_empty())
+                .then(|| self.config.location.machine.clone()),
+        };
+        if target.is_none() {
+            if !self.home_images.is_empty() && self.home_image_node != self.config.location.machine
+            {
+                self.inform("These images belong to the previously selected computer. Return to it or remove the images first.", NoticeKind::Warn);
+                return;
+            }
+            self.home_image_node = self.config.location.machine.clone();
+        }
+        let request = ClipboardRequest {
+            workspace: String::new(),
+            id: new_turn_id(),
+            target: target.clone(),
+            node: node.clone(),
+            draft_id: self.image_draft_for(target.as_ref(), node.as_deref()),
+            path: path.clone(),
+        };
+        let mut attachment = Attachment::image(request.id.clone());
+        attachment.kind = crate::model::AttachmentKind::PendingImage;
+        attachment.name = Some(format!(
+            "{} · uploading",
+            path.as_deref().unwrap_or("Clipboard image")
+        ));
+        let attachments = if target.is_none() {
+            &mut self.home_images
+        } else if let Some(composer) = self.sessions.composer.as_mut() {
+            &mut composer.attachments
+        } else {
             return;
         };
-
-        if plane != Plane::Interactive {
+        if attachments.len() >= TurnInput::ATTACHMENT_LIMIT {
+            self.inform("At most 32 attachments fit in a message", NoticeKind::Warn);
             return;
         }
+        attachments.push(attachment);
+        self.clipboard_pending = Some(request);
+    }
 
-        if !self.multimodal_offered() {
-            let capabilities = self.open_capabilities();
-            let transport = capabilities
-                .transport
-                .as_deref()
-                .map(|transport| transport.to_string())
-                .unwrap_or_else(|| "this transport".to_string());
-
-            self.inform(
-                format!("{transport} takes no images, so ctrl+v pastes text only here"),
-                NoticeKind::Info,
-            );
-            return;
+    pub(super) fn image_progress(&mut self, request: ClipboardRequest, value: Value) {
+        let entries = if request.target.is_none() {
+            Some(&mut self.home_images)
+        } else if self.sessions.open == request.target {
+            self.sessions.composer.as_mut().map(|c| &mut c.attachments)
+        } else {
+            request
+                .target
+                .as_ref()
+                .and_then(|key| self.sessions.composer_drafts.get_mut(key))
+                .map(|d| &mut d.attachments)
+        };
+        if let Some(image) = entries.and_then(|entries| {
+            entries.iter_mut().find(|a| {
+                a.path == request.id && a.kind == crate::model::AttachmentKind::PendingImage
+            })
+        }) {
+            image.ephemeral = value["client_ephemeral"] != false;
+            image.upload_id = value["upload_id"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| image.upload_id.clone());
+            let progress = value["received"].as_u64().unwrap_or(0) * 100
+                / value["source_size"].as_u64().unwrap_or(1).max(1);
+            image.name = Some(format!(
+                "{} · {} {}%",
+                value["display_name"].as_str().unwrap_or("Image"),
+                value["state"].as_str().unwrap_or("uploading"),
+                progress
+            ));
         }
+        self.remember_composer_history();
+    }
 
-        let Some(workspace) = self
-            .sessions
-            .open_info()
-            .and_then(|session| session.workspace.clone())
-            .filter(|workspace| !workspace.trim().is_empty())
-        else {
+    pub(super) fn image_uploaded(&mut self, request: ClipboardRequest, outcome: ClipboardOutcome) {
+        // The placeholder, not whichever editor is open now, owns this completion.
+        let entries = if request.target.is_none() {
+            Some(&mut self.home_images)
+        } else if self.sessions.open == request.target {
+            self.sessions.composer.as_mut().map(|c| &mut c.attachments)
+        } else {
+            request
+                .target
+                .as_ref()
+                .and_then(|key| self.sessions.composer_drafts.get_mut(key))
+                .map(|h| &mut h.attachments)
+        };
+        let Some(entries) = entries else {
+            if let ClipboardOutcome::Uploaded(value) = &outcome {
+                if let Some(id) = value["id"].as_str() {
+                    self.image_discards.push((id.into(), request.node.clone()));
+                }
+            }
+            return;
+        };
+        let Some(index) = entries.iter().position(|a| a.path == request.id) else {
+            if let ClipboardOutcome::Uploaded(value) = &outcome {
+                if let Some(id) = value["id"].as_str() {
+                    self.image_discards.push((id.into(), request.node.clone()));
+                }
+            }
+            return;
+        };
+        match outcome {
+            ClipboardOutcome::Uploaded(value) => {
+                let id = value["id"].as_str().unwrap_or("");
+                let size = value["byte_size"].as_u64().unwrap_or(0);
+                let source_size = value["source_size"].as_u64().unwrap_or(0);
+                let digest = value["sha256"].as_str().map(str::to_string);
+                if digest.is_some()
+                    && entries.iter().enumerate().any(|(i, a)| {
+                        i != index
+                            && a.kind == crate::model::AttachmentKind::ManagedImage
+                            && a.sha256 == digest
+                    })
+                {
+                    entries.remove(index);
+                    self.image_discards.push((id.into(), request.node.clone()));
+                    self.inform("Image already attached", NoticeKind::Info);
+                    self.remember_composer_history();
+                    return;
+                }
+                if id.is_empty()
+                    || entries.iter().map(|a| a.byte_size).sum::<u64>() + size.max(source_size)
+                        > 64 * 1024 * 1024
+                {
+                    self.image_discards.push((id.into(), request.node.clone()));
+                    entries[index].kind = crate::model::AttachmentKind::FailedImage;
+                    entries[index].name =
+                        Some("Image exceeds this message's 64 MiB limit · remove it".into());
+                } else {
+                    entries[index].path = id.to_string();
+                    entries[index].kind = crate::model::AttachmentKind::ManagedImage;
+                    entries[index].byte_size = size.max(source_size);
+                    entries[index].sha256 = digest;
+                    entries[index].ephemeral = value["client_ephemeral"] != false;
+                    entries[index].name = Some(format!(
+                        "{} · {} × {} · ready",
+                        value["display_name"].as_str().unwrap_or("Image"),
+                        value["width"],
+                        value["height"]
+                    ));
+                }
+            }
+            ClipboardOutcome::Failed(error) => {
+                entries[index].kind = crate::model::AttachmentKind::FailedImage;
+                entries[index].name =
+                    Some(format!("Image failed: {error} · remove and attach again"));
+            }
+            other => {
+                entries.remove(index);
+                if self.sessions.open == request.target {
+                    self.clipboard_read(other);
+                } else if request.target.is_none() {
+                    if let ClipboardOutcome::Text(text) = other {
+                        self.home_draft.paste(&text, &self.completion_catalog);
+                    }
+                }
+            }
+        }
+        self.remember_composer_history();
+    }
+
+    pub(super) fn images_bound(&mut self, id: String, input: TurnInput, error: Option<String>) {
+        if let Some(error) = error {
+            if self
+                .sessions
+                .open
+                .as_ref()
+                .is_some_and(|(_, open)| open == &id)
+            {
+                if let Some(composer) = self.sessions.composer.as_mut() {
+                    composer.attachment_refusal = Some(error.clone());
+                    for image in &mut composer.attachments {
+                        if input.attachments.iter().any(|sent| sent.path == image.path) {
+                            image.kind = crate::model::AttachmentKind::FailedImage;
+                            image.name =
+                                Some("Image binding failed · remove and attach again".into());
+                        }
+                    }
+                }
+            }
+            self.remember_composer_history();
             self.inform(
                 format!(
-                    "{id} reported no workspace, and an attachment has to live inside one for \
-                     the runtime to accept it"
+                    "Could not bind the first message's images: {error}. The draft is retained."
                 ),
                 NoticeKind::Warn,
             );
             return;
-        };
-
-        self.clipboard_pending = Some(ClipboardRequest {
-            workspace,
-            id: new_turn_id(),
-        });
+        }
+        if self.sessions.open == Some((Plane::Interactive, id.clone())) {
+            if let Some(composer) = self.sessions.composer.as_mut() {
+                composer
+                    .attachments
+                    .retain(|a| !input.attachments.iter().any(|sent| sent.path == a.path));
+                if composer.editor.text() == input.prompt {
+                    composer.editor.accept_submission();
+                }
+            }
+            self.remember_composer_history();
+        }
+        if let Some(saved) = self
+            .sessions
+            .composer_drafts
+            .get_mut(&(Plane::Interactive, id.clone()))
+        {
+            saved
+                .attachments
+                .retain(|a| !input.attachments.iter().any(|sent| sent.path == a.path));
+            if saved.input == input.prompt {
+                saved.input.clear();
+            }
+        }
+        self.dispatch_composer_turn(Plane::Interactive, &id, ComposerVerb::Message, input);
     }
 
     /// What the driver found on the clipboard.
     pub(super) fn clipboard_read(&mut self, outcome: ClipboardOutcome) {
         match outcome {
+            ClipboardOutcome::Uploaded(_) => {}
             ClipboardOutcome::Image(path) => {
                 let attachment = Attachment::image(path.clone());
 
@@ -2026,7 +2303,13 @@ impl App {
             return;
         };
 
-        let Some(input) = composer.editor.submission() else {
+        let Some(input) = composer.editor.submission().or_else(|| {
+            composer
+                .attachments
+                .iter()
+                .any(|a| a.kind == crate::model::AttachmentKind::ManagedImage)
+                .then(String::new)
+        }) else {
             return;
         };
         // The draft exactly as it was typed. `submission()` trims, and the grammar below
@@ -2058,6 +2341,34 @@ impl App {
                 return;
             }
             Line::Message => {}
+        }
+
+        if self.sessions.composer.as_ref().is_some_and(|c| {
+            c.attachments.iter().any(|a| {
+                matches!(
+                    a.kind,
+                    crate::model::AttachmentKind::PendingImage
+                        | crate::model::AttachmentKind::FailedImage
+                )
+            })
+        }) {
+            self.inform(
+                "Finish or remove pending images before sending",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+        if self.sessions.composer.as_ref().is_some_and(|c| {
+            c.attachments
+                .iter()
+                .any(|a| a.kind == crate::model::AttachmentKind::ManagedImage)
+        }) && (verb == ComposerVerb::Steer || raw.starts_with('!'))
+        {
+            self.inform(
+                "Use Send or Queue for images; shell commands and steering accept text only",
+                NoticeKind::Warn,
+            );
+            return;
         }
 
         // B7. A draft that begins with `!` is the operator's own command, not a message to
@@ -2181,7 +2492,7 @@ impl App {
 
     /// Issues one turn. The single place a composer submission, a queued draft, and a
     /// retried steer all become a call, so the three cannot drift apart.
-    fn dispatch_composer_turn(
+    pub(super) fn dispatch_composer_turn(
         &mut self,
         plane: Plane,
         id: &str,
@@ -2390,6 +2701,76 @@ impl App {
 
     pub(super) fn activate_slash_command(&mut self, input: &str) -> bool {
         let trimmed = input.trim();
+        if let Some(reference) = slash_arg(trimmed, "/view-image") {
+            let entries = if self.sessions.open.is_none() {
+                Some(&self.home_images)
+            } else {
+                self.sessions.composer.as_ref().map(|c| &c.attachments)
+            };
+            let id = reference
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|index| entries.and_then(|images| images.get(index)))
+                .filter(|image| image.kind == crate::model::AttachmentKind::ManagedImage)
+                .map(|image| image.path.clone())
+                .unwrap_or_else(|| reference.into());
+            if !crate::image_upload::valid_id(&id) {
+                self.inform(
+                    "Use /view-image with a ready draft position or an attachment ID from history",
+                    NoticeKind::Warn,
+                );
+                return true;
+            }
+            let node = self
+                .sessions
+                .open
+                .as_ref()
+                .and_then(|(plane, id)| self.sessions.owner_node(*plane, id).map(str::to_string))
+                .or_else(|| {
+                    (!self.home_image_node.is_empty()).then(|| self.home_image_node.clone())
+                });
+            let session = self.sessions.open.as_ref().map(|(_, id)| id.clone());
+            self.image_preview_pending = Some((id, node, session));
+            self.inform("Opening the image on this computer…", NoticeKind::Info);
+            return true;
+        }
+        if trimmed == "/paste-image" {
+            self.request_clipboard_paste();
+            return true;
+        }
+        if let Some(path) = slash_arg(trimmed, "/attach").filter(|p| !p.is_empty()) {
+            let paths = match crate::image_upload::local_paths(path) {
+                Ok(paths) => paths,
+                Err(_) => return false,
+            };
+            if paths.len() != 1 {
+                self.inform(
+                    "Use /attach with one quoted local image path",
+                    NoticeKind::Warn,
+                );
+                return true;
+            }
+            self.request_image(paths.first().cloned());
+            return true;
+        }
+        if let Some(index) =
+            slash_arg(trimmed, "/remove-image").and_then(|s| s.parse::<usize>().ok())
+        {
+            let entries = if self.sessions.open.is_none() {
+                Some(&mut self.home_images)
+            } else {
+                self.sessions.composer.as_mut().map(|c| &mut c.attachments)
+            };
+            if let Some(entries) = entries {
+                if index > 0 && index <= entries.len() {
+                    let removed = entries.remove(index - 1);
+                    self.discard_image(&removed);
+                }
+            }
+            self.remember_composer_history();
+            return true;
+        }
 
         if let Some(level) = slash_arg(trimmed, "/effort") {
             self.set_reasoning_effort(level);

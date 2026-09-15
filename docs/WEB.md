@@ -365,7 +365,8 @@ is a client-side or presentation fact and says so.
 | Cost / usage | `/cost` overlay, the footer | the vitals column and the per-turn cells | `interactive.info` |
 | Changed files (`/diff`), raw copy mode (`/raw`) | two overlays | inline diffs only | n/a — presentation, see D10 |
 | Verbose expand-all, plan panel | `ctrl+o`, `ctrl+t` | per-cell disclosure; the plan is an inline cell | n/a |
-| `@` file completion, image paste | yes | — attachments are still not built here | `multimodal` capability |
+| Image paste, file picker, drop | yes; clipboard and `/attach` | yes; composer and first message | `attachment.*` and model image support |
+| `@` file completion | yes | — | workspace index |
 | Budget warning | the footer's `WARN` past `[budget] max_cost_usd` | — | client-side, and `[budget]` is the terminal client's file |
 | Capabilities preview / admit | palette + `/capabilities`, `/preview`, `/admit` | — | `capabilities.list`, `.preview`, `.admit` (served, unexposed) |
 | Dashboard / nodes | the Dashboard tab | `/status`, linked from the top bar on every page | `runtime.status` |
@@ -965,3 +966,57 @@ packages and gained nothing; no surviving crate moved versions.
   the defaulted posture should eventually serve the web on the tailnet automatically once
   a `tailscale serve` handshake exists (out of scope here); server-side fleet-add (its
   own spec, if wanted).
+
+
+## Image attachments
+
+Paste a screenshot into the composer, drop image files, or use **Attach images**.
+Images appear in order with preparation status, a thumbnail, preview, and removal.
+Send a message with text, images, or both; attaching alone never invokes a model.
+An unfinished or failed image blocks the entire submission until it is ready or
+removed. Image-bearing messages use Send or Queue; mid-turn Steer and shell commands
+cannot carry images. The same flow works for the initial message on `/new`.
+
+Uploads go to the selected runtime before Send. PNG, JPEG, static WebP, and static
+GIF are decoded by `ouro-media` inside the runtime's OS sandbox, oriented and
+converted to PNG with metadata removed. Animated inputs are refused. Limits are
+20 MiB per source and normalized image, 64 MiB per message, 32 total attachments,
+16,384 pixels per dimension, and 40 million pixels per image. Images are never
+written into the project directory. A runtime without the packaged normalizer or
+read/network containment reports image uploads unavailable.
+
+The browser retains upload IDs and metadata in tab session storage, while original
+files stay in memory across LiveView conversation switches. Returning to a draft
+resumes its unfinished uploads. The page retains at most 64 unfinished sources and
+64 MiB across drafts; finish or remove images before adding beyond this limit.
+Reload recovers ready uploads and completed preparation; an incomplete upload whose
+source was lost must be selected again. Retry resumes interrupted transfers with the
+same upload identity, while a terminal preparation failure starts a fresh attempt
+from the retained source. Each successfully sent initial message rotates its image
+draft so another new session cannot inherit the previous session's images. Unsent
+ready images expire after 24 hours without a draft heartbeat. Accepted images live with the
+conversation and appear after reload or in another authorized client. A pinned
+first-message retry keeps its original text and images while account setup is repaired.
+
+History thumbnails and previews use authenticated, non-cacheable requests; image
+bytes never appear in gateway event notifications. Remote owners receive bounded
+chunks through the existing authenticated gateway. The browser upload uses WebCrypto
+and therefore requires HTTPS or a localhost browser connection. Clipboard image
+availability depends on the browser and OS; the file picker is always the explicit
+fallback when uploads are available.
+
+For source development, build the native decoder with `make media` before starting
+the runtime. `make dev` and release packaging include it. See
+[the detailed design](proposals/chat-image-attachments.md) and the generated
+[protocol reference](PROTOCOL.md) for storage, limits, and wire behavior.
+
+Storage defaults reserve 256 MiB of unused uploads per identity, 1 GiB of runtime
+staging, 2 GiB per conversation, and 10 GiB per runtime. Operators can set
+`config :ouroboros, :attachment_quotas, client_bytes: ..., staging_bytes: ...,
+session_bytes: ..., runtime_bytes: ...` before starting the runtime. Reservations
+include bounded preparation overhead; accepted-image retention follows conversations.
+
+Connections configured with small gateway frames advertise a smaller source-file
+limit so an upload stays within 4,096 chunks. Clients use the negotiated chunk size;
+the runtime also rejects excessive fragmentation. This bounds upload metadata as
+well as the image bytes themselves.

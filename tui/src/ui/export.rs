@@ -162,7 +162,7 @@ fn user_message_stamps(entries: &[Entry<'_>]) -> Vec<String> {
         .filter_map(|entry| match entry {
             Entry::Event(event) => matches!(
                 PresentationEvent::from_event(event),
-                PresentationEvent::UserMessage(_)
+                PresentationEvent::UserMessage(_) | PresentationEvent::UserImages { .. }
             )
             .then(|| event.timestamp.clone()),
             _ => None,
