@@ -4072,6 +4072,20 @@ body .ouro-gate {
   body .ouro-settings-managed {
     justify-self: start;
   }
+  .ouro-palette {
+    inset: 4vh auto auto 50%;
+    max-height: 88vh;
+  }
+
+  .ouro-shortcut-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+  }
+
+  /* No hover on a touch screen, so the copy controls are simply there. */
+  .ouro-cell-actions {
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4633,21 +4647,4 @@ body .ouro-settings-grok-setup summary {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 0.2rem;
-}
-
-@media (max-width: 520px) {
-  .ouro-palette {
-    inset: 4vh auto auto 50%;
-    max-height: 88vh;
-  }
-
-  .ouro-shortcut-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.15rem;
-  }
-
-  /* No hover on a touch screen, so the copy controls are simply there. */
-  .ouro-cell-actions {
-    opacity: 1;
-  }
 }
