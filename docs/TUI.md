@@ -2389,10 +2389,9 @@ carries no window at all.
 A draft beginning with `!` is claimed by the composer, beside the slash verbs, and sent
 to `workspace.exec {id, command}`. It is never a turn. The slash grammar above runs first
 and reads `!ls` as a message — `!` is not a verb shape — so the `!` arm is reached with the
-line intact ([session.rs:2038-2076](../tui/src/ui/app/session.rs)). Honest asymmetry: the
-leading-space escape hatch is the *slash* grammar's, and `!` does not have one. That arm
-reads the **trimmed** submission, so ` !ls` is still the operator's own command; only the
-verb grammar reads the draft exactly as it was typed.
+line intact ([session.rs:2038-2076](../tui/src/ui/app/session.rs)). The leading-space
+escape is shared: a draft that starts with whitespace is prose for `!` exactly as it is for
+`/`, so ` !ls` is sent as a message and only an unindented `!` runs a command.
 
 **The composer says where it will run before Enter is pressed**, every time: not here,
 but on the session's owner node, in the workspace the agent is editing. That is the one

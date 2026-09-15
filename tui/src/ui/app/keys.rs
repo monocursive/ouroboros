@@ -621,20 +621,12 @@ impl App {
         }
     }
 
+    /// `Esc` on a list tab returns to the conversation. On the Sessions tab the composer
+    /// owns `Esc` (`escape_from_prompt`), so this is never reached there: the branch that
+    /// used to close a composer here served a state the client cannot be in.
     fn escape(&mut self) {
         if self.tab != Tab::Sessions {
             self.select_tab(Tab::Sessions);
-            return;
-        }
-
-        if self.tab == Tab::Sessions {
-            if self.sessions.composer.is_some() {
-                self.remember_composer_history();
-                self.sessions.composer = None;
-                return;
-            }
-
-            self.sessions.open = None;
         }
     }
 }

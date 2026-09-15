@@ -1506,3 +1506,15 @@ fn the_home_action_says_enter_accepts_while_a_menu_is_open() {
         screen.text()
     );
 }
+
+/// The palette's shortcut column names the key that reaches a verb, never `off`: `Steer`
+/// is `alt+enter` and the editor is `ctrl+x e` now that `leader.steer` and `editor` are
+/// off by default, and ending a session moved to `ctrl+x k`.
+#[test]
+fn the_steer_and_editor_rows_name_the_keys_that_work() {
+    let app = shell();
+
+    assert_eq!(app.command_shortcut(Command::Steer), "alt+enter");
+    assert_eq!(app.command_shortcut(Command::ExternalEditor), "ctrl+x e");
+    assert_eq!(app.command_shortcut(Command::CloseSession), "ctrl+x k");
+}

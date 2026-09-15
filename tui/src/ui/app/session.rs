@@ -2063,7 +2063,12 @@ impl App {
         // B7. A draft that begins with `!` is the operator's own command, not a message to
         // the model. Claimed here, beside the slash verbs, because it is the same kind of
         // thing: a line the composer acts on itself rather than sending as a turn.
-        if let Some(command) = input.strip_prefix('!') {
+        // The same escape the slash grammar has: a line that starts with whitespace is
+        // prose, whatever its first printable character.
+        if let Some(command) = input
+            .strip_prefix('!')
+            .filter(|_command| !raw.starts_with(char::is_whitespace))
+        {
             self.run_operator_shell(command);
 
             if let Some(composer) = self.sessions.composer.as_mut() {

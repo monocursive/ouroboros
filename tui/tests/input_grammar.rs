@@ -2324,3 +2324,22 @@ fn the_help_panel_draws_each_group_heading_exactly_once() {
         assert_eq!(seen, 1, "{heading} appears {seen} times:\n{text}");
     }
 }
+
+/// (c) holds for `!` as well as `/`: a line that starts with a space is prose, so ` !ls`
+/// is sent as a message rather than run as the operator's own command.
+#[test]
+fn a_leading_space_sends_a_bang_line_as_text() {
+    let mut app = opened("idle", steering_capabilities(), Vec::new());
+    compose(&mut app);
+    type_text(&mut app, " !ls -la");
+    app.apply(key(KeyCode::Enter));
+
+    let calls = app.drain();
+    assert!(
+        calls.iter().all(|call| call.method != "workspace.exec"),
+        "the line ran as a command"
+    );
+    let sent = turn_calls(&calls);
+    assert_eq!(sent.len(), 1, "the line was not sent: {:?}", app.notice);
+    assert_eq!(sent[0].1["input"].as_str().map(str::trim), Some("!ls -la"));
+}
