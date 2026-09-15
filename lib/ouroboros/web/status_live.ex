@@ -17,12 +17,17 @@ defmodule Ouroboros.Web.StatusLive do
 
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
+  alias Ouroboros.Web.Layouts
+  alias Ouroboros.Web.Presentation
 
   @method "runtime.status"
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(:page_title, "Advanced · Runtime") |> load()}
+    # "Advanced · Runtime" named a section of a settings page this surface does not have.
+    # The page is called what its heading calls it, and the top bar now links to it by that
+    # name (review §3.1: `grep href="/status"` used to come back empty).
+    {:ok, socket |> assign(:page_title, "Runtime status") |> load()}
   end
 
   @impl true
@@ -31,23 +36,34 @@ defmodule Ouroboros.Web.StatusLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <main class="ouro-page">
-      <header class="ouro-header">
-        <p class="ouro-subhead">Advanced</p>
-        <h1>Runtime status</h1>
-        <p class="ouro-subhead"><a href="/">Sessions</a></p>
-      </header>
+    <div>
+      <Layouts.topbar current={:status} />
 
-      <section class="ouro-panel">
-        <div class="ouro-panel-head">
-          <h2>Runtime</h2>
-          <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
-        </div>
+      <main class="ouro-page">
+        <header class="ouro-header">
+          <p class="ouro-subhead"><a href="/">Sessions</a> · Runtime status</p>
+          <h1>Runtime status</h1>
+          <p>What this node is, right now, read through one call.</p>
+        </header>
 
-        <.status :if={@status} status={@status} />
-        <.failure :if={@error} error={@error} />
-      </section>
-    </main>
+        <section class="ouro-panel">
+          <div class="ouro-panel-head">
+            <h2>Runtime</h2>
+            <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
+          </div>
+
+          <.status :if={@status} status={@status} />
+          <.failure :if={@error} error={@error} />
+
+          <%!-- The boot-owned half of the same picture — web scope, listening address,
+                data directory, model catalogue — belongs to Settings, and this is the page
+                that says so rather than restating it. --%>
+          <p class="ouro-subhead">
+            <a href="/settings#runtime">How this installation is configured →</a>
+          </p>
+        </section>
+      </main>
+    </div>
     """
   end
 
@@ -94,14 +110,19 @@ defmodule Ouroboros.Web.StatusLive do
         |> assign(:status, summarise(status))
         |> assign(:error, nil)
 
-      {:error, _code, message} ->
-        refused(socket, scope, message)
+      {:error, code, message} ->
+        refused(socket, scope, Presentation.refusal({:error, code, message}))
 
-      {:error, _code, message, %{"outcome" => "unknown"}} ->
-        refused(socket, scope, message <> " (outcome unknown)")
+      {:error, code, message, %{"outcome" => "unknown"}} ->
+        refused(
+          socket,
+          scope,
+          Presentation.refusal({:error, code, message}) <>
+            " Whether it happened and went unreported is not something this runtime said."
+        )
 
-      {:error, _code, message, _data} ->
-        refused(socket, scope, message)
+      {:error, code, message, data} ->
+        refused(socket, scope, Presentation.refusal({:error, code, message, data}))
     end
   end
 
@@ -120,17 +141,34 @@ defmodule Ouroboros.Web.StatusLive do
   # W0 has nowhere to render a session and a page that dumped every one of them would be
   # the first thing to break on a busy node.
   defp summarise(status) do
+    machines = fleet_machines(status)
+
     %{
-      node: to_string(Map.get(status, :node, node())),
+      # Erlang node names never reach a template raw — the parity plan's sixth ground
+      # rule, and the reason `nonode@nohost` used to be the first fact on this page.
+      node: Presentation.node_label(Map.get(status, :node, node()), machines),
       role: to_string(Map.get(status, :role, :unknown)),
-      connected_nodes: describe_nodes(Map.get(status, :connected_nodes, [])),
+      connected_nodes: describe_nodes(Map.get(status, :connected_nodes, []), machines),
       interactive_sessions: count(Map.get(status, :interactive_sessions))
     }
   end
 
-  defp describe_nodes([]), do: "none"
-  defp describe_nodes(nodes) when is_list(nodes), do: Enum.map_join(nodes, ", ", &to_string/1)
-  defp describe_nodes(_other), do: "unknown"
+  # The cluster's own directory, where the status carries one: it is the only place a
+  # machine has a name somebody chose rather than a name the BEAM assembled.
+  defp fleet_machines(status) do
+    status
+    |> Map.get(:cluster, %{})
+    |> then(&if(is_map(&1), do: Map.get(&1, :fleet, %{}), else: %{}))
+    |> then(&if(is_map(&1), do: Map.get(&1, :machines, []), else: []))
+    |> List.wrap()
+  end
+
+  defp describe_nodes([], _machines), do: "none"
+
+  defp describe_nodes(nodes, machines) when is_list(nodes),
+    do: Enum.map_join(nodes, ", ", &Presentation.node_label(&1, machines))
+
+  defp describe_nodes(_other, _machines), do: "unknown"
 
   defp count(list) when is_list(list), do: list |> length() |> Integer.to_string()
   defp count(_other), do: "unknown"

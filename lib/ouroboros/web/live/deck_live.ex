@@ -111,6 +111,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Live.LoadingState
   alias Ouroboros.Web.Live.Rail
+  alias Ouroboros.Web.Presentation
   alias Ouroboros.Web.Route
   alias Ouroboros.Web.Transcript
   alias Ouroboros.Web.Transcript.Approval
@@ -1419,7 +1420,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       @open && "ouro-session-open",
       @sessions_visible? && "ouro-sessions-visible"
     ]}>
-      <.top_bar machines={@machines} today={@today} />
+      <Layouts.topbar current={:sessions} machines={@machines} today={@today} />
 
       <button
         :if={@open}
@@ -1472,64 +1473,27 @@ defmodule Ouroboros.Web.Live.DeckLive do
             scope={@scope}
             ended={@ended?}
           />
-          <.nothing_open :if={is_nil(@open)} counts={Rail.counts(@triaged)} />
+          <.nothing_open
+            :if={is_nil(@open)}
+            counts={Rail.counts(@triaged)}
+            query={@session_query}
+          />
         </main>
+
+        <%!-- The third column the moduledoc and seven `.ouro-columns > .ouro-vitals` rules
+              have always described (review §3.2). It is a child of `.ouro-columns` so those
+              rules apply; below 1100px the same stylesheet hides it and shows the
+              disclosure `focused/1` draws under the composer instead. --%>
+        <.vitals
+          :if={@open}
+          info={@info}
+          row={@open_row}
+          session_id={@open |> elem(1)}
+        />
       </div>
 
       <.session_action_dialog action={@session_action} error={@session_action_error} />
     </div>
-    """
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The top bar
-  # ------------------------------------------------------------------------------------
-
-  attr :machines, :list, required: true
-  attr :today, :map, required: true
-
-  def top_bar(assigns) do
-    connected = Enum.count(assigns.machines, & &1.connected?)
-
-    assigns =
-      assign(
-        assigns,
-        :machines_label,
-        "Machines — #{connected} connected of #{length(assigns.machines)}"
-      )
-
-    ~H"""
-    <header class="ouro-topbar">
-      <span class="ouro-wordmark">Ouroboros</span>
-
-      <span class="ouro-presence" role="img" aria-label={@machines_label}>
-        <span class="ouro-presence-label">Machines</span>
-        <span
-          :for={machine <- @machines}
-          class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
-          title={"#{machine.name} — #{if machine.connected?, do: "connected", else: "not connected"}"}
-        >
-          <span class="ouro-visually-hidden">{machine.name}</span>
-        </span>
-      </span>
-
-      <div class="ouro-topbar-right">
-        <span :if={@today.tokens} class="ouro-today ouro-mono" title="sessions updated today, UTC">
-          {@today.tokens} tokens<span :if={@today.cost}> · ${@today.cost}</span>
-        </span>
-        <span class="ouro-pill" role="status" aria-live="polite" aria-atomic="true">
-          <span class="ouro-pill-on">Connected</span>
-          <span class="ouro-pill-off">Reconnecting</span>
-        </span>
-        <Layouts.bell_toggle />
-        <Layouts.theme_toggle />
-        <a class="ouro-topbar-link" href="/settings">Settings</a>
-        <a class="ouro-topbar-link" href="/audit">Audit</a>
-        <a class="ouro-button" href="/new">
-          New session
-        </a>
-      </div>
-    </header>
     """
   end
 
@@ -1547,7 +1511,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :query, :string, default: ""
 
   def rail(assigns) do
-    assigns = assign(assigns, :counts, Rail.counts(assigns.triaged))
+    counts = Rail.counts(assigns.triaged)
+
+    assigns =
+      assigns
+      |> assign(:counts, counts)
+      # Three headings over three "nothing here" lines is three times the furniture for one
+      # fact (review §3.1). Where any group has rows the per-group line still earns its
+      # place — it says which of the three is empty, which is information.
+      |> assign(:empty?, Enum.all?(Map.values(counts), &(&1 == 0)))
 
     ~H"""
     <nav id="session-rail" class="ouro-rail" aria-label="sessions">
@@ -1576,13 +1548,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
       <p :if={@error} class="ouro-refusal">{@error}</p>
 
-      <section :for={group <- Rail.groups()} class={"ouro-group ouro-group-#{group}"}>
-        <h2 class="ouro-group-head">
+      <p :if={@empty?} class="ouro-group-empty ouro-rail-empty">
+        {if @query in [nil, ""], do: "No sessions yet", else: "No sessions match"}
+      </p>
+
+      <section
+        :for={group <- Rail.groups()}
+        :if={not @empty?}
+        class={"ouro-group ouro-group-#{group}"}
+      >
+        <%!-- An `h3`, under the rail's own `h2`: these are subsections of "Sessions", and
+              one heading style per rank (W1.8) is only true if the ranks are right. --%>
+        <h3 class="ouro-group-head">
           {Rail.label(group)}
           <span :if={group == :needs_you and @counts[group] > 0} class="ouro-count">
             {@counts[group]}
           </span>
-        </h2>
+        </h3>
 
         <p :if={@counts[group] == 0} class="ouro-group-empty">
           {if @query == "", do: "nothing here", else: "no matches"}
@@ -2050,11 +2032,55 @@ defmodule Ouroboros.Web.Live.DeckLive do
       ended={@ended}
       can_retry={@can_retry}
     />
+
+    <%!-- The status row the TUI's footer has had all along: the two standing postures a
+          reader has to be able to see without opening anything (review §3.2, §5.4.3). It
+          is a sibling of the composer rather than a child because `composer.ex` belongs to
+          W2; `.ouro-composer-status` is styled to read as the card's own bottom edge. --%>
+    <.composer_status_row
+      :if={@plane == :interactive}
+      sandbox={@sandbox}
+      unrestricted={@unrestricted?}
+      auto_approve={@auto_approve}
+      can_answer={@can_answer}
+    />
+
     <details class="ouro-vitals-mobile" data-ouro-disclosure={"details:#{@session_id}"}>
-      <summary>Session details{if @auto_approve, do: " · automatic approvals on", else: ""}</summary>
-      <.auto_approve_toggle :if={@can_answer} on={@auto_approve} />
-      <.vitals info={@info} row={@row} />
+      <summary>Session details</summary>
+      <.vitals info={@info} row={@row} session_id={@session_id} />
     </details>
+    """
+  end
+
+  @doc """
+  The composer's bottom edge: what this session is allowed to do, and who is answering.
+
+  Both facts were one click behind "Session details" on every viewport until W1
+  (`docs/design-qa/ui-review-2026-09-15.md` §3.2). They are the two standing risks the
+  terminal client keeps permanently in its footer, and neither is a thing a person should
+  have to remember to go and check.
+
+  The file-access posture says "not reported" where the session reported none, because a
+  posture defaulted for the sake of having something to draw is the one lie a security
+  readout must never tell.
+  """
+  attr :sandbox, :any, required: true
+  attr :unrestricted, :boolean, required: true
+  attr :auto_approve, :boolean, required: true
+  attr :can_answer, :boolean, required: true
+
+  def composer_status_row(assigns) do
+    ~H"""
+    <div class="ouro-composer-status">
+      <span class="ouro-composer-status-fact">
+        <span class="ouro-composer-status-label">File access</span>
+        <span class={["ouro-mono", @unrestricted && "ouro-tag-full"]}>
+          {if @sandbox, do: Composer.word(@sandbox), else: "Not reported"}
+        </span>
+      </span>
+
+      <.auto_approve_toggle :if={@can_answer} on={@auto_approve} />
+    </div>
     """
   end
 
@@ -2117,13 +2143,28 @@ defmodule Ouroboros.Web.Live.DeckLive do
   end
 
   attr :counts, :map, required: true
+  attr :query, :string, default: ""
 
   def nothing_open(assigns) do
-    assigns = assign(assigns, :total, assigns.counts |> Map.values() |> Enum.sum())
+    total = assigns.counts |> Map.values() |> Enum.sum()
+    searching? = assigns.query not in [nil, ""]
+
+    # The eyebrow was "A little direction. A lot of possibility." on a console that
+    # otherwise refuses to say anything unmeasured (review §3.1). What it says now is a
+    # count this page already holds.
+    eyebrow =
+      cond do
+        searching? and total == 0 -> "No sessions match"
+        searching? -> "#{total} #{if total == 1, do: "session", else: "sessions"} match"
+        total == 0 -> "No sessions on this runtime"
+        true -> "#{total} #{if total == 1, do: "session", else: "sessions"} on this runtime"
+      end
+
+    assigns = assigns |> assign(:total, total) |> assign(:eyebrow, eyebrow)
 
     ~H"""
     <div class="ouro-empty">
-      <span class="ouro-empty-eyebrow">A little direction. A lot of possibility.</span>
+      <span class="ouro-empty-eyebrow">{@eyebrow}</span>
       <h1 class="ouro-empty-head">What would you like to make?</h1>
       <p :if={@counts[:needs_you] > 0}>
         {@counts[:needs_you]} {if @counts[:needs_you] == 1, do: "session needs", else: "sessions need"} you.
@@ -2150,6 +2191,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   attr :info, :any, required: true
   attr :row, :any, required: true
+  attr :session_id, :string, default: nil
 
   def vitals(assigns) do
     usage = (assigns.info && Map.get(assigns.info, :usage)) || %{}
@@ -2191,10 +2233,28 @@ defmodule Ouroboros.Web.Live.DeckLive do
         </dd>
       </div>
 
-      <.vital label="Machine" value={@row && @row.node} />
+      <.vital label="Machine" value={Presentation.node_label(@row && @row.node)} />
       <.vital label="Provider" value={@row && @row.provider} />
       <.vital label="Replay" value={replay_word(@options)} />
       <.vital label="Workspace" value={@row && @row.workspace} />
+
+      <%!-- `rail.ex:165-166` has always said the session's stable id is "in session
+            details"; until W1 it was nowhere but the URL (review §3.2). A readonly input
+            rather than a copy button: the clipboard is `app.js`, which is W2's file, and
+            a control that did nothing would be worse than a field a reader can select.
+            W2 integrator line: replace this with the clipboard hook's copy button. --%>
+      <div :if={@session_id} class="ouro-vital">
+        <dt>Session id</dt>
+        <dd>
+          <input
+            class="ouro-mono ouro-vital-id"
+            type="text"
+            readonly
+            value={@session_id}
+            aria-label="Session id"
+          />
+        </dd>
+      </div>
     </aside>
     """
   end
@@ -2362,8 +2422,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # The newest cell that says what is happening: a tool call, or a loud status line. Read
   # off the projection rather than off the raw ledger so the words are the ones the
   # transcript is showing, and nothing here mints a phrase the corpus does not pin.
-  defp activity(%{open: {plane, id}, cells: cells}) when is_list(cells) do
-    case Enum.reverse(cells) |> Enum.find_value(&activity_of/1) do
+  # `:cells` is a **map** from cell id to `%{id:, cell:, index:}` — assigned `%{}` at mount
+  # and `Map.new/2` on every redraw. The `when is_list(cells)` guard this carried until W1
+  # could therefore never match, so every rail row fell back to `provider · machine` and
+  # nothing on the rail distinguished a session doing work from one sitting still
+  # (`docs/design-qa/ui-review-2026-09-15.md` §3.2). Newest first, by the index the redraw
+  # assigned, and the `Cell` struct is unwrapped because `activity_of/1` reads cells rather
+  # than the envelopes they are held in.
+  defp activity(%{open: {plane, id}, cells: cells}) when is_map(cells) do
+    line =
+      cells
+      |> Map.values()
+      |> Enum.sort_by(& &1.index, :desc)
+      |> Enum.find_value(&activity_of(&1.cell))
+
+    case line do
       nil -> %{}
       line -> %{{plane, id} => line}
     end
@@ -2385,8 +2458,13 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp activity_of(%Cell.Status{label: label}) when label != "", do: label
   defp activity_of(_cell), do: nil
 
+  # "provider · machine", where the machine is what a person would call it rather than the
+  # BEAM's node atom — ground rule 6, and the reason `nonode@nohost` used to sit on every
+  # unwatched row. A row with no node at all still says nothing about one.
   defp provider_line(row) do
-    [row.provider, row.node]
+    machine = row.node && Presentation.node_label(row.node)
+
+    [row.provider, machine]
     |> Enum.reject(&is_nil/1)
     |> Enum.map_join(" · ", &to_string/1)
   end

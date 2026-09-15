@@ -230,6 +230,77 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     refute html =~ "google-settings-canary"
   end
 
+  # W1.1 / W1.5 / W1.6 — navigation, the split with `/status`, and internals as words.
+  test "carries the one top bar, and keeps its own breadcrumb under it", %{conn: conn} do
+    {:ok, _view, html} = live(conn, "/settings")
+
+    assert html =~ ~s(class="ouro-topbar")
+
+    for href <- ["/", "/new", "/settings", "/audit", "/status"] do
+      assert html =~ ~s(href="#{href}"), "the settings top bar does not link to #{href}"
+    end
+
+    # Under it, not instead of it.
+    assert html =~ "← Sessions"
+
+    breadcrumb = :binary.match(html, "← Sessions") |> elem(0)
+    bar = :binary.match(html, ~s(class="ouro-topbar")) |> elem(0)
+    assert bar < breadcrumb, "the breadcrumb is above the top bar"
+  end
+
+  test "runtime facts name the computer and point at the page that owns the rest",
+       %{conn: conn} do
+    # §3.5: `/settings` showed `nonode@nohost`. §3.1: it duplicated half of `/status`.
+    # W1.5's call is to keep the node here (it is the installation this page describes) and
+    # to send node role, connected machines and the live session count to `/status` rather
+    # than ask the same runtime the same question twice.
+    {:ok, _view, html} = live(conn, "/settings")
+
+    refute html =~ "nonode@nohost"
+    assert html =~ "Runtime node"
+    assert html =~ "this computer"
+    refute html =~ "Node role"
+    assert html =~ ~s(href="/status")
+  end
+
+  # W1.4. `/new` builds the model control with `NewSession.model_field/2`, which keeps the
+  # current choice as a row of its own when the catalogue snapshot does not list it; this
+  # page used `/1` in three places (`settings_live.ex:363`, `:378`, and its render), so a
+  # remembered model outside the snapshot was drawn as free text and — once it had been
+  # promoted to a catalogue choice — reset to the runtime default by any other edit
+  # (review §3.5).
+  test "a remembered model the catalogue does not list survives an edit to another field",
+       %{conn: conn, data_dir: dir} do
+    :ok = Prefs.write(dir, %{"model" => "vendor:unlisted-model-9"})
+
+    {:ok, view, html} = live(conn, "/settings")
+
+    # Drawn as its own row, with the runtime's own caveat on it, rather than as a
+    # "Custom model…" box that says nothing about where the id came from.
+    assert html =~ "vendor:unlisted-model-9"
+
+    assert html =~ "Current choice; catalogue metadata unavailable",
+           "the remembered model is not offered as a row of its own"
+
+    assert has_element?(
+             view,
+             ~s(#session-defaults option[value="catalog:vendor:unlisted-model-9"])
+           )
+
+    # And touching a different field leaves it alone.
+    after_edit =
+      view |> form("#session-defaults", %{"workspace" => dir}) |> render_change()
+
+    assert after_edit =~ "Using vendor:unlisted-model-9"
+
+    refute after_edit =~ "Ouroboros will choose the recommended model",
+           "an edit to the workspace reset the remembered model to the runtime default"
+
+    # The writer agrees with the control: saving keeps the model it is drawing.
+    view |> form("#session-defaults", %{"workspace" => dir}) |> render_submit()
+    assert Prefs.read(dir)["model"] == "vendor:unlisted-model-9"
+  end
+
   defp write_grok(path, expires) do
     credential = %{
       "key" => "grok-settings-secret-canary",

@@ -379,6 +379,11 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   describe "the deck" do
     test "renders the three groups, the wordmark and a presence dot for this machine",
          %{conn: conn} do
+      # A row, because W1.7 collapses the three headings into one line on a rail that holds
+      # nothing at all — the headings are only worth their space once one of them is
+      # telling a reader which group is empty.
+      _listed = listed(session_id(), status: :running)
+
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Ouroboros"
@@ -388,7 +393,27 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert html =~ "ouro-dot"
       # Self is always connected: it is the machine answering this request.
       assert html =~ "ouro-dot-on"
-      assert html =~ to_string(node())
+      # W1.6: named the way a person would name it, never as the BEAM's node atom.
+      assert html =~ "this computer"
+      refute html =~ "nonode@nohost"
+    end
+
+    test "carries the one top bar, with the connection pill on it", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(class="ouro-topbar")
+
+      for href <- ["/", "/new", "/settings", "/audit", "/status"] do
+        assert html =~ ~s(href="#{href}"), "the deck's top bar does not link to #{href}"
+      end
+
+      # The pill the CSS swaps between "Connected" and "Reconnecting" is still the deck's,
+      # with the classes and the live-region attributes `app.css` and a screen reader both
+      # read it by.
+      assert html =~ ~s(class="ouro-pill")
+      assert html =~ ~s(role="status")
+      assert html =~ ~s(aria-live="polite")
+      assert html =~ "Reconnecting"
     end
 
     test "says what it cannot do yet instead of pretending", %{conn: conn} do
@@ -412,6 +437,39 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "ouro-transcript"
       # No vitals column either: a panel with nothing in it is worse than no panel.
       refute html =~ "ouro-vitals"
+    end
+
+    # W1.7. "A little direction. A lot of possibility." was marketing copy on a console
+    # that otherwise refuses to say anything unmeasured
+    # (`docs/design-qa/ui-review-2026-09-15.md` §3.1). What stands there now is a count this
+    # page already holds — the eyebrow is the only line that changed, so the rest of the
+    # empty state is still the same page.
+    test "the empty deck states a count rather than a slogan", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      refute html =~ "A little direction"
+      refute html =~ "A lot of possibility"
+
+      assert Regex.run(
+               ~r/ouro-empty-eyebrow">\s*(No sessions|\d+ sessions?) on this runtime/,
+               html
+             ),
+             "the empty deck's eyebrow does not state how many sessions this runtime has"
+    end
+
+    test "a search that matches nothing says so in the eyebrow", %{conn: conn} do
+      _listed = listed(session_id(), status: :running)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        view
+        |> form("#session-search", %{"query" => "no-session-is-called-this-xyzzy"})
+        |> render_change()
+
+      assert html =~ "No sessions match"
+      # And the rail collapses with it: one line rather than three empty headings.
+      refute html =~ "nothing here"
     end
 
     test "filters the rail without changing session order or closing the focused pane",
@@ -619,6 +677,141 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert html =~ "hello from the agent"
       assert html =~ "ouro-transcript"
       assert html =~ "ouro-prose"
+    end
+
+    # W1.2. `activity/1` guarded `when is_list(cells)` while `:cells` has been a map since
+    # the stream landed, so the clause could never match and every row on the rail fell
+    # back to "provider · machine" — nothing distinguished a session doing work from one
+    # sitting still (`docs/design-qa/ui-review-2026-09-15.md` §3.2).
+    test "the rail row for the open session says what it is doing", %{conn: conn} do
+      id = session_id()
+      _listed = listed(id, status: :running)
+
+      # A shell call rather than a read: `Tools.explores?/1` folds reads, greps, globs and
+      # listings into one `Exploration` cell, and the row this test is about is the one a
+      # single tool produces.
+      tool =
+        event(1, :tool_call, %{
+          "call_id" => "c1",
+          "name" => "bash",
+          "input" => %{"command" => "mix test"}
+        })
+
+      _plane = plane(id: id, backlogs: [{:ok, [tool]}])
+
+      # The expected words are the projection's own, read through the same two functions
+      # the rail reads them through: nothing here mints a phrase the corpus does not pin.
+      expected =
+        [tool]
+        |> projected()
+        |> Enum.find_value(fn
+          %Cell.Tool{} = cell ->
+            cell |> Transcript.Tools.summarise() |> Transcript.ToolSummary.line()
+
+          _other ->
+            nil
+        end)
+
+      assert is_binary(expected) and expected != ""
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      assert has_element?(view, ".ouro-row-line", expected),
+             "the rail row does not say what the open session is doing"
+
+      # And not the fallback it used to be stuck on.
+      refute has_element?(view, ".ouro-row-line", "native ·")
+    end
+
+    test "the newest cell wins the rail row's line", %{conn: conn} do
+      # Newest first, by the index the redraw assigned — a rail that reported the *first*
+      # tool of a long turn would be reporting history.
+      id = session_id()
+      _listed = listed(id, status: :running)
+
+      first =
+        event(1, :tool_call, %{
+          "call_id" => "c1",
+          "name" => "bash",
+          "input" => %{"command" => "mix compile"}
+        })
+
+      second =
+        event(2, :tool_call, %{
+          "call_id" => "c2",
+          "name" => "bash",
+          "input" => %{"command" => "mix format"}
+        })
+
+      _plane = plane(id: id, backlogs: [{:ok, [first, second]}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      assert has_element?(view, ".ouro-row-line", "mix format")
+      refute has_element?(view, ".ouro-row-line", "mix compile")
+    end
+
+    # W1.3. Both of these were one click behind "Session details" on every viewport
+    # (review §3.2). They are the two standing postures the terminal client keeps
+    # permanently in its footer.
+    test "auto-approve and the file-access posture sit on the composer, not in a disclosure",
+         %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{sandbox_mode: :workspace_write})
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      assert has_element?(
+               view,
+               ~s(.ouro-composer-status button[phx-click="auto_approve"])
+             ),
+             "the auto-approve toggle is not on the composer's status row"
+
+      refute has_element?(view, ~s(details button[phx-click="auto_approve"])),
+             "the auto-approve toggle is still behind a disclosure"
+
+      assert has_element?(view, ".ouro-composer-status", "File access")
+      assert has_element?(view, ".ouro-composer-status", "Project files")
+    end
+
+    test "a session that reported no posture says so on the status row", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      assert has_element?(view, ".ouro-composer-status", "Not reported")
+    end
+
+    test "the vitals are a column of `.ouro-columns`, and carry the session id",
+         %{conn: conn} do
+      # Seven `.ouro-columns > .ouro-vitals` rules in `app.css` and the moduledoc's own
+      # "three columns" described a panel that was only ever rendered inside a `<details>`
+      # under the composer. The disclosure stays for narrow viewports; the column is what
+      # those rules were written for.
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}])
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert has_element?(view, ".ouro-columns > .ouro-vitals"),
+             "the vitals are not a column of the deck's grid"
+
+      assert has_element?(view, ~s(.ouro-vitals input[aria-label="Session id"])),
+             "the vitals do not carry the session id"
+
+      assert html =~ id
+    end
+
+    # W1.6. Ground rule 6, at the one vital that names a machine.
+    test "the machine vital names the computer rather than the Erlang node", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}])
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ ~r/Machine<\/dt>\s*<dd[^>]*>\s*this computer/
+      refute html =~ "nonode@nohost"
     end
 
     test "shows the vitals column and the session's meta line", %{conn: conn} do

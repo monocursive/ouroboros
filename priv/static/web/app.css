@@ -181,11 +181,6 @@ a:where(:hover) {
 
 .ouro-gate h1,
 .ouro-header h1 {
-  font-family: var(--font-display);
-  font-variant-caps: small-caps;
-  letter-spacing: 0.06em;
-  font-weight: 500;
-  font-size: 1.75rem;
   margin: 0 0 0.75rem;
   color: var(--ink);
 }
@@ -283,13 +278,33 @@ a:where(:hover) {
   margin-bottom: 1rem;
 }
 
+/* W1.8 — one face per heading rank.
+ *
+ * `/status` and `/audit` wore small-caps EB Garamond card titles while `/settings` and the
+ * rail wore the sans one, so the same rank read as two different ranks depending on which
+ * page a reader was on (review §3.1). The *face* of a section heading is declared here,
+ * once, for every section head this surface draws. Size and spacing stay with the
+ * component below, because a rail head and a settings section are the same rank at
+ * different scales — that is a layout decision, not a typographic one. */
+.ouro-panel-head h2,
+.ouro-panel > h2,
+.ouro-rail-head h2,
+.ouro-settings-section-head h2 {
+  font-family: var(--font-ui);
+  font-variant-caps: normal;
+  letter-spacing: normal;
+}
+
 .ouro-panel-head h2 {
-  font-family: var(--font-display);
-  font-variant-caps: small-caps;
-  letter-spacing: 0.06em;
-  font-weight: 500;
+  font-weight: 600;
   font-size: 1.15rem;
   margin: 0;
+}
+
+.ouro-panel > h2 {
+  font-weight: 600;
+  font-size: 1.15rem;
+  margin: 0 0 0.75rem;
 }
 
 /* Rule 3: one of these per view. Sometimes an `<a>` — "New session" is a navigation — so
@@ -475,6 +490,8 @@ body.phx-loading {
   flex: 0 0 auto;
 }
 
+/* The wordmark is the way home, so it is an anchor — but it is still a wordmark, which is
+   why it declines the underline every other link wears. */
 .ouro-wordmark {
   font-family: var(--font-display);
   font-variant-caps: small-caps;
@@ -482,6 +499,39 @@ body.phx-loading {
   font-size: 1.05rem;
   font-weight: 500;
   color: var(--ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* The one navigation, on every page. Quiet by construction: rule 3 keeps the filled
+   button for "New session" alone, so these are plain text until a pointer finds them or
+   one of them is the page being read. */
+.ouro-topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ouro-topbar-link {
+  color: var(--secondary);
+  font-size: 0.88rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* Where you already are. Ink rather than the attention green: rule 1 reserves the green
+   for a session that needs a person, and "this is the page you are on" is not that. */
+.ouro-topbar-link[aria-current="page"],
+.ouro-wordmark[aria-current="page"] {
+  color: var(--ink);
+}
+
+.ouro-topbar-link[aria-current="page"] {
+  text-decoration: underline;
+  text-underline-offset: 6px;
+  text-decoration-color: var(--border-strong);
 }
 
 /* A row of presence dots with a label, read out as one image. It is a span: there is no
@@ -648,6 +698,12 @@ body.phx-loading {
   padding: 0 var(--gutter);
   color: var(--tertiary);
   font-size: 0.8rem;
+}
+
+/* One line instead of three headings over three "nothing here"s, for the rail that has
+   nothing in any group at all (review §3.1). */
+.ouro-rail-empty {
+  padding-block: 0.75rem;
 }
 
 .ouro-row {
@@ -891,6 +947,19 @@ body.phx-loading {
   margin: 0;
   font-size: 0.85rem;
   overflow-wrap: anywhere;
+}
+
+/* The session's stable id, as a field a reader can select rather than a label they cannot.
+   Readonly and borderless so it reads as the value it is; a copy button lands with W2's
+   clipboard hook. */
+.ouro-vital-id {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 0.85rem;
 }
 
 /* A bar, not a ring: a ring reads as a dial with a target, and a context window has no
@@ -1623,6 +1692,38 @@ body.phx-loading {
   border-color: var(--warn-amber);
 }
 
+/* The composer's bottom edge: the two standing postures the TUI keeps in its footer, and
+   the reason neither is behind a disclosure any more (review §3.2). It is a sibling of
+   `.ouro-composer` rather than a child — `composer.ex` is W2's file — so it draws its own
+   top hairline and the composer's `.ouro-auto` drops the one it used to carry here. */
+.ouro-composer-status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 0.4rem var(--gutter) 0.55rem;
+  border-top: 1px solid var(--hairline-1);
+  font-size: 0.76rem;
+  color: var(--tertiary);
+}
+
+.ouro-composer-status-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.ouro-composer-status-label {
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+.ouro-composer-status .ouro-auto {
+  padding: 0;
+  border-top: 0;
+}
+
 /* ----------------------------------------------------------------------- Approvals */
 
 .ouro-approval {
@@ -1778,128 +1879,6 @@ body.phx-loading {
 }
 
 /* -------------------------------------------------------------------- Narrow view */
-
-@media (max-width: 1100px) {
-  .ouro-deck {
-    height: 100dvh;
-    min-height: 0;
-  }
-
-  .ouro-columns,
-  .ouro-columns:has(> .ouro-vitals) {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(8rem, 28vh) minmax(0, 1fr);
-    overflow: hidden;
-  }
-
-  .ouro-rail {
-    border: 0;
-    border-bottom: 1px solid var(--hairline-2);
-    min-height: 0;
-  }
-
-  .ouro-columns > .ouro-vitals {
-    display: none;
-  }
-
-  .ouro-vitals-mobile {
-    display: block;
-    flex: 0 0 auto;
-    border-top: 1px solid var(--hairline-1);
-    background: var(--workspace);
-  }
-
-  .ouro-vitals-mobile > summary {
-    min-height: 2.75rem;
-    padding: 0 var(--gutter);
-    display: flex;
-    align-items: center;
-    color: var(--secondary);
-    cursor: pointer;
-  }
-
-  .ouro-vitals-mobile .ouro-vitals {
-    border: 0;
-    max-height: 45vh;
-  }
-
-  .ouro-focus {
-    overflow: hidden;
-  }
-
-  .ouro-composer {
-    position: sticky;
-    bottom: 0;
-    z-index: 5;
-  }
-}
-
-@media (max-width: 520px) {
-  body .ouro-columns,
-  body .ouro-columns:has(> .ouro-vitals) {
-    grid-template-rows: minmax(9rem, 26vh) minmax(0, 1fr);
-  }
-
-  .ouro-topbar {
-    height: auto;
-    min-height: var(--topbar-height);
-    padding: 0.55rem var(--gutter);
-    gap: 0.65rem;
-    flex-wrap: wrap;
-  }
-
-  .ouro-topbar-right {
-    width: 100%;
-    margin-left: 0;
-    gap: 0.65rem;
-  }
-
-  .ouro-today {
-    display: none;
-  }
-
-  .ouro-topbar-right .ouro-button {
-    margin-left: auto;
-    white-space: nowrap;
-  }
-  .ouro-row-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .ouro-row-action {
-    min-height: 2.75rem;
-    padding-inline: 0.55rem;
-  }
-
-  .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
-    padding-right: 10.5rem;
-  }
-
-  .ouro-composer-box {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .ouro-composer-actions {
-    justify-content: flex-end;
-  }
-
-  body .ouro-new {
-    padding-inline: 0.75rem;
-  }
-
-  body .ouro-new-advanced > summary,
-  body .ouro-new-label-row,
-  body .ouro-gate-form {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  body .ouro-new-advanced-summary {
-    text-align: left;
-  }
-}
 
 .ouro-session-dialog::backdrop {
   background: var(--backdrop);
@@ -2620,7 +2599,6 @@ body .ouro-rail-head {
 body .ouro-rail-head h2 {
   margin: 0.05rem 0 0;
   color: var(--ink);
-  font-family: var(--font-ui);
   font-size: 0.95rem;
   font-weight: 600;
   letter-spacing: 0;
@@ -3096,12 +3074,6 @@ body .ouro-new-form {
   overflow: hidden;
 }
 
-body .ouro-new-title {
-  font-family: var(--font-ui);
-  font-size: 1.35rem;
-  font-weight: 600;
-}
-
 body .ouro-new-field {
   padding: 1.25rem 1.4rem;
 }
@@ -3194,10 +3166,6 @@ body .ouro-settings-head .ouro-top-row {
 
 body .ouro-settings-head h1 {
   margin: 0;
-  font-family: var(--font-ui);
-  font-size: clamp(2rem, 5vw, 3.4rem);
-  font-weight: 600;
-  letter-spacing: -0.055em;
   line-height: 1;
 }
 
@@ -3585,9 +3553,22 @@ body .ouro-vitals-mobile .ouro-vitals {
   border: 0;
   padding: 0.5rem 0;
 }
-body .ouro-vitals-mobile .ouro-auto {
-  width: 100%;
-  margin: 0.5rem 0;
+/* The composer's status row owns the auto-approve control now, so the card treatment
+   `body .ouro-auto` gives it in the transcript lane is unwound inside this row. */
+body .ouro-composer-status {
+  width: calc(100% - 2.5rem);
+  max-width: var(--lane-width);
+  margin-inline: auto;
+  border-top: 1px solid var(--border);
+}
+
+body .ouro-composer-status .ouro-auto {
+  width: auto;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 body .ouro-composer {
   flex: 0 0 auto;
@@ -3700,7 +3681,12 @@ body .ouro-starters span {
   line-height: 1.4;
   margin-top: 0.4rem;
 }
-body .ouro-settings-head h1, body .ouro-gate h1 {
+/* W1.8 — the page title, on every page that has one. `/new` wore `--font-ui` at this rank
+ * and `/status` and `/audit` wore small caps; one rank is one treatment. */
+body .ouro-settings-head h1,
+body .ouro-gate h1,
+body .ouro-header h1,
+body .ouro-new-title {
   font-family: var(--font-display);
   font-size: 2.4rem;
   font-variant-caps: normal;
@@ -3718,28 +3704,69 @@ body .ouro-gate {
   padding: 2rem;
   background: var(--workspace);
 }
-@media (max-width: 520px) {
-  body .ouro-empty {
-    padding: 1.5rem 1rem;
-  }
-  body .ouro-starters {
-    grid-template-columns: 1fr;
-    gap: 0.5rem;
-    margin-top: 1.25rem;
-  }
-  body .ouro-starters a {
-    padding: 0.75rem;
-  }
-  body .ouro-starters span {
-    margin-top: 0.15rem;
-  }
-  body .ouro-vitals-mobile {
-    padding-inline: 0.75rem;
-  }
-}
-
 @media (max-width: 1100px) {
-  body .ouro-columns {
+  /* W1.9 — one declaration of this breakpoint. The rules above this comment were a
+     second `@media (max-width: 1100px)` block earlier in the file; they are first here so
+     the qualified overrides below still win, which is the order the cascade already had. */
+
+  .ouro-deck {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .ouro-columns,
+  .ouro-columns:has(> .ouro-vitals) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(8rem, 28vh) minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .ouro-rail {
+    border: 0;
+    border-bottom: 1px solid var(--hairline-2);
+    min-height: 0;
+  }
+
+  .ouro-columns > .ouro-vitals {
+    display: none;
+  }
+
+  .ouro-vitals-mobile {
+    display: block;
+    flex: 0 0 auto;
+    border-top: 1px solid var(--hairline-1);
+    background: var(--workspace);
+  }
+
+  .ouro-vitals-mobile > summary {
+    min-height: 2.75rem;
+    padding: 0 var(--gutter);
+    display: flex;
+    align-items: center;
+    color: var(--secondary);
+    cursor: pointer;
+  }
+
+  .ouro-vitals-mobile .ouro-vitals {
+    border: 0;
+    max-height: 45vh;
+  }
+
+  .ouro-focus {
+    overflow: hidden;
+  }
+
+  .ouro-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+  }
+  /* Both selectors, because W1.3 made `:has(> .ouro-vitals)` reachable for the first time
+     and `.ouro-columns:has(> .ouro-vitals)` outranks a bare `body .ouro-columns`. Without
+     the twin, a session open on a narrow viewport would keep the two-row template the
+     stacked layout is drawn over. */
+  body .ouro-columns,
+  body .ouro-columns:has(> .ouro-vitals) {
     grid-template-rows: minmax(0, 1fr);
   }
   body .ouro-session-nav {
@@ -3845,6 +3872,86 @@ body .ouro-gate {
 }
 
 @media (max-width: 520px) {
+  /* W1.9 — one declaration of this breakpoint, merged from the three the file used to
+     carry, in their original order so the last one still wins. */
+
+  .ouro-topbar {
+    height: auto;
+    min-height: var(--topbar-height);
+    padding: 0.55rem var(--gutter);
+    gap: 0.65rem;
+    flex-wrap: wrap;
+  }
+
+  .ouro-topbar-right {
+    width: 100%;
+    margin-left: 0;
+    gap: 0.65rem;
+  }
+
+  .ouro-today {
+    display: none;
+  }
+
+  .ouro-topbar-right .ouro-button {
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .ouro-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .ouro-row-action {
+    min-height: 2.75rem;
+    padding-inline: 0.55rem;
+  }
+
+  .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
+    padding-right: 10.5rem;
+  }
+
+  .ouro-composer-box {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ouro-composer-actions {
+    justify-content: flex-end;
+  }
+
+  body .ouro-new {
+    padding-inline: 0.75rem;
+  }
+
+  body .ouro-new-advanced > summary,
+  body .ouro-new-label-row,
+  body .ouro-gate-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  body .ouro-new-advanced-summary {
+    text-align: left;
+  }
+
+  body .ouro-empty {
+    padding: 1.5rem 1rem;
+  }
+  body .ouro-starters {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+  }
+  body .ouro-starters a {
+    padding: 0.75rem;
+  }
+  body .ouro-starters span {
+    margin-top: 0.15rem;
+  }
+  body .ouro-vitals-mobile {
+    padding-inline: 0.75rem;
+  }
   body .ouro-topbar {
     padding: 0.4rem 0.75rem;
     gap: 0.5rem;

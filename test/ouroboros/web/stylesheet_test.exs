@@ -85,9 +85,21 @@ defmodule Ouroboros.Web.StylesheetTest do
       # first leaves one undifferentiated section in which nothing can collide. (Which is
       # exactly what the first version of this test did, and it passed against a stylesheet
       # with the collision put back on purpose.)
+      #
+      # The `@media` blocks are lifted out first. What this test protects is where a
+      # component is *defined*; a responsive override is not a definition, and since W1.9
+      # every breakpoint is declared exactly once (see "the breakpoints" below) it
+      # necessarily restates classes belonging to several component sections. That is one
+      # author doing responsive work — the case this test's own docstring already exempts
+      # for the narrow-view block — not two authors who did not know about each other.
+      #
+      # **Not covered by this test:** a collision between two rules that are both inside
+      # `@media` blocks. Nor was it before W1.9, except by the accident of both rules
+      # happening to sit in the same section.
       claimed =
         @css
         |> String.split(~r/\n(?=\/\* =+)/)
+        |> Enum.map(&without_media_blocks/1)
         |> Enum.with_index()
         |> Enum.flat_map(fn {section, index} ->
           ~r/(?:^|\n)\s*(\.[a-z][a-z0-9_-]*)\s*\{/
@@ -103,6 +115,99 @@ defmodule Ouroboros.Web.StylesheetTest do
              "these classes are claimed by more than one section of the stylesheet, so the " <>
                "later section silently restyles the earlier one's component: " <>
                inspect(claimed)
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # Type scale (W1.8)
+  # ------------------------------------------------------------------------------------
+
+  describe "the type scale" do
+    test "every section heading is the one sans face, declared in one rule" do
+      # §3.1: EB Garamond display headings on `/settings`, `/status`, `/audit` and the deck
+      # hero; a sans heading for the same rank on `/new`; small-caps serif card titles on
+      # `/status` and `/audit` only. One rank has to be one treatment, or the rank means
+      # nothing.
+      declaring = rules_declaring("h2", "font-family")
+
+      assert length(declaring) == 1,
+             "#{length(declaring)} rules set a font-family for an h2; a rank with two " <>
+               "faces is two ranks: #{inspect(Enum.map(declaring, &elem(&1, 0)))}"
+
+      {selector, body} = hd(declaring)
+
+      assert body =~ "var(--font-ui)",
+             "the shared section-heading rule is not the sans face"
+
+      for named <- [
+            ".ouro-panel-head h2",
+            ".ouro-panel > h2",
+            ".ouro-rail-head h2",
+            ".ouro-settings-section-head h2"
+          ] do
+        assert selector =~ named,
+               "the shared section-heading rule does not cover #{named}, so that page's " <>
+                 "sections keep whatever face they inherit"
+      end
+    end
+
+    test "no section heading is ever the display face" do
+      for {selector, body} <- rules_declaring("h2", "font-family") do
+        refute body =~ "var(--font-display)", "#{selector} puts a section heading in serif"
+      end
+
+      # And the small-caps treatment goes with it: it was the `/status` and `/audit` card
+      # title and nothing else wore it at this rank.
+      for {selector, body} <- rules_declaring("h2", "font-variant-caps") do
+        refute body =~ "small-caps", "#{selector} keeps the small-caps card title"
+      end
+    end
+
+    test "every page title is the display face, on every page" do
+      declaring =
+        rules_declaring("h1", "font-family") ++
+          rules_declaring(".ouro-new-title", "font-family")
+
+      assert declaring != [], "nothing in app.css sets a face for a page title"
+
+      for {selector, body} <- declaring do
+        assert body =~ "var(--font-display)",
+               "#{selector} draws a page title in something other than EB Garamond"
+      end
+
+      # `/new`'s title is an `h1` with a class of its own, and it is the one that was sans.
+      assert Enum.any?(declaring, fn {selector, _body} -> selector =~ ".ouro-new-title" end),
+             "app.css states no face for `/new`'s page title"
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # Breakpoints (W1.9)
+  # ------------------------------------------------------------------------------------
+
+  describe "the breakpoints" do
+    test "each one is declared exactly once" do
+      # §3.5: the same breakpoints were declared three times with later blocks overriding
+      # earlier ones, so reading what a viewport gets meant reading the whole file in
+      # order. One block per breakpoint is the only form in which that question has a
+      # local answer.
+      counts =
+        ~r/@media \(max-width: (\d+)px\)/
+        |> Regex.scan(strip_comments(@css), capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.frequencies()
+
+      repeated = Enum.filter(counts, fn {_width, count} -> count > 1 end)
+
+      assert repeated == [],
+             "these breakpoints are declared more than once, so what a viewport gets " <>
+               "depends on which block comes last: #{inspect(repeated)}"
+    end
+
+    test "the two the deck lives at are still there" do
+      # A merge that lost one would pass the test above and take the mobile layout with it.
+      assert @css =~ "@media (max-width: 1100px)"
+      assert @css =~ "@media (max-width: 520px)"
     end
   end
 
@@ -334,6 +439,48 @@ defmodule Ouroboros.Web.StylesheetTest do
   end
 
   defp strip_comments(css), do: Regex.replace(~r|/\*.*?\*/|s, css, "")
+
+  # Every rule whose selector list mentions `needle` and whose body declares `property`,
+  # as `{selector, body}`.
+  defp rules_declaring(needle, property) do
+    ~r/([^{}]+)\{([^{}]*)\}/
+    |> Regex.scan(strip_comments(@css), capture: :all_but_first)
+    |> Enum.map(fn [selector, body] -> {String.trim(selector), body} end)
+    |> Enum.filter(fn {selector, body} ->
+      mentions?(selector, needle) and body =~ ~r/(?:^|;)\s*#{Regex.escape(property)}\s*:/
+    end)
+  end
+
+  # `h2` must be a whole token, or `h2` would match nothing and `.ouro-new-title` would
+  # also match `.ouro-new-title-x`.
+  defp mentions?(selector, needle),
+    do: selector =~ ~r/(?<![\w-])#{Regex.escape(needle)}(?![\w-])/
+
+  # Everything except the top-level `@media` blocks.
+  defp without_media_blocks(css),
+    do: Enum.reduce(media_block_bodies(css), css, &String.replace(&2, &1, "", global: false))
+
+  defp media_block_bodies(css) do
+    css
+    |> String.split("\n@media ")
+    |> Enum.drop(1)
+    |> Enum.map(&close_at_depth_zero("@media " <> &1))
+  end
+
+  # One `@media` block, from its `@media` up to the `}` that closes it.
+  defp close_at_depth_zero(text) do
+    text
+    |> String.graphemes()
+    |> Enum.reduce_while({[], 0, false}, fn
+      "{", {taken, depth, _opened} -> {:cont, {["{" | taken], depth + 1, true}}
+      "}", {taken, 1, true} -> {:halt, {["}" | taken], 0, true}}
+      "}", {taken, depth, opened} -> {:cont, {["}" | taken], depth - 1, opened}}
+      char, {taken, depth, opened} -> {:cont, {[char | taken], depth, opened}}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+    |> Enum.join()
+  end
 
   # The two `:root` blocks and the two `[data-theme="light"]` blocks are where literal
   # colours are supposed to be.

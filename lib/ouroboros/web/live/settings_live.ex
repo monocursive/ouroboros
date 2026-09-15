@@ -23,6 +23,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   alias Ouroboros.Web.Live.NewSession
   alias Ouroboros.Web.Live.NewSessionLive
   alias Ouroboros.Web.Prefs
+  alias Ouroboros.Web.Presentation
 
   @account_poll 1_000
 
@@ -359,8 +360,14 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     }
   end
 
+  # A model chosen before the catalogue arrived — or remembered in `web.prefs.json` from a
+  # snapshot that no longer lists it — is not necessarily a row in the current one, so the
+  # field is built *with the form* (`model_field/2`) and keeps the current choice as a row
+  # of its own. Reconciling against `model_field/1` is what reset a remembered model to the
+  # runtime default the moment any other field was touched (review §3.5); `/new` has always
+  # used `/2` and these two pages share the form, the control and the writer.
   defp reconcile(form, socket) do
-    field = NewSession.model_field(socket.assigns.catalogue)
+    field = NewSession.model_field(socket.assigns.catalogue, form)
 
     form =
       if NewSession.offers?(field, form.model_choice),
@@ -375,7 +382,8 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp model_choice(%{"model_choice" => value}, _form), do: NewSession.choice(value)
   defp model_choice(_params, form), do: form.model_choice
 
-  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue)
+  defp field(socket),
+    do: NewSession.model_field(socket.assigns.catalogue, socket.assigns.form)
 
   defp credential(rows, provider, env) when is_list(rows) do
     rows
@@ -458,7 +466,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   @impl true
   def render(assigns) do
-    field = NewSession.model_field(assigns.catalogue)
+    field = NewSession.model_field(assigns.catalogue, assigns.form)
 
     assigns =
       assigns
@@ -489,255 +497,269 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       |> assign(:can_set_xai?, Call.available?(assigns.scope, "credentials.xai.set"))
 
     ~H"""
-    <main class="ouro-settings">
-      <header class="ouro-settings-head">
-        <div class="ouro-top-row">
-          <a class="ouro-new-back" href="/">← Sessions</a>
-          <Layouts.theme_toggle />
-        </div>
-        <p class="ouro-settings-eyebrow">Ouroboros preferences</p>
-        <h1>Settings</h1>
-        <p>Your models, connected accounts, and preferences. All in one place.</p>
-      </header>
+    <div>
+      <Layouts.topbar current={:settings} />
 
-      <div class="ouro-settings-shell">
-        <nav class="ouro-settings-nav" aria-label="Settings sections">
-          <a href="#connections">AI connections</a>
-          <a href="#defaults">Session defaults</a>
-          <a href="#providers">Providers & models</a>
-          <a href="#runtime">Runtime & security</a>
-        </nav>
+      <main class="ouro-settings">
+        <header class="ouro-settings-head">
+          <div class="ouro-top-row">
+            <a class="ouro-new-back" href="/">← Sessions</a>
+          </div>
+          <p class="ouro-settings-eyebrow">Ouroboros preferences</p>
+          <h1>Settings</h1>
+          <p>Your models, connected accounts, and preferences. All in one place.</p>
+        </header>
 
-        <div class="ouro-settings-content">
-          <section id="connections" class="ouro-settings-section" aria-labelledby="connections-title">
-            <.section_head
-              eyebrow="Accounts & billing"
-              title="AI connections"
-              id="connections-title"
-              copy="Choose a subscription or use your own API keys. Secrets stay on the runtime; their values are never shown here."
-            />
+        <div class="ouro-settings-shell">
+          <nav class="ouro-settings-nav" aria-label="Settings sections">
+            <a href="#connections">AI connections</a>
+            <a href="#defaults">Session defaults</a>
+            <a href="#providers">Providers & models</a>
+            <a href="#runtime">Runtime & security</a>
+          </nav>
 
-            <div class="ouro-settings-connections-summary" aria-live="polite">
-              <p :if={@providers_error}>Connection status unavailable</p>
-              <p :if={is_nil(@providers) and is_nil(@providers_error)}>Reading connection status…</p>
-              <p :if={not is_nil(@providers) and is_nil(@providers_error)}>
-                <strong>{connection_count(@account_card, @providers)}</strong>
-                {if connection_count(@account_card, @providers) == 1,
-                  do: "connection",
-                  else: "connections"} configured on this runtime
-              </p>
-              <button
-                type="button"
-                class="ouro-new-secondary"
-                phx-click="refresh-connections"
-                phx-disable-with="Refreshing…"
-              >Refresh status</button>
-            </div>
-            <p :if={@providers_error} class="ouro-refusal" role="alert">
-              Connection status could not be refreshed. {@providers_error}
-            </p>
-            <p class="ouro-settings-verification-note">
-              Status reflects local credentials. Provider acceptance and model access are not verified.
-            </p>
+          <div class="ouro-settings-content">
+            <section
+              id="connections"
+              class="ouro-settings-section"
+              aria-labelledby="connections-title"
+            >
+              <.section_head
+                eyebrow="Accounts & billing"
+                title="AI connections"
+                id="connections-title"
+                copy="Choose a subscription or use your own API keys. Secrets stay on the runtime; their values are never shown here."
+              />
 
-            <div class="ouro-settings-group">
-              <div class="ouro-settings-group-head">
-                <h3>Subscriptions</h3>
-                <p>First-party account connections for eligible models.</p>
-              </div>
-              <div class="ouro-settings-connection-grid">
-                <.subscription_card
-                  service="ChatGPT"
-                  detail="OpenAI Codex models"
-                  card={@account_card}
-                  connect="connect-chatgpt"
-                  cancel="cancel-chatgpt"
-                  can_connect={Call.available?(@scope, "account.login.start")}
-                />
-                <.grok_subscription_card credential={@grok} />
-              </div>
-            </div>
-
-            <div class="ouro-settings-group">
-              <div class="ouro-settings-group-head">
-                <h3>API credentials</h3>
-                <p>
-                  Direct usage billed by each provider. Stored keys can be replaced, never revealed.
+              <div class="ouro-settings-connections-summary" aria-live="polite">
+                <p :if={@providers_error}>Connection status unavailable</p>
+                <p :if={is_nil(@providers) and is_nil(@providers_error)}>
+                  Reading connection status…
                 </p>
+                <p :if={not is_nil(@providers) and is_nil(@providers_error)}>
+                  <strong>{connection_count(@account_card, @providers)}</strong>
+                  {if connection_count(@account_card, @providers) == 1,
+                    do: "connection",
+                    else: "connections"} configured on this runtime
+                </p>
+                <button
+                  type="button"
+                  class="ouro-new-secondary"
+                  phx-click="refresh-connections"
+                  phx-disable-with="Refreshing…"
+                >Refresh status</button>
               </div>
-              <div class="ouro-settings-connection-list">
-                <.credential_card
-                  provider="OpenAI"
-                  logo="openai"
-                  env="OPENAI_API_KEY"
-                  credential={@openai}
-                  managed={false}
-                  read_only={@scope == :read}
-                />
-                <.credential_card
-                  provider="Anthropic"
-                  logo="anthropic"
-                  env="ANTHROPIC_API_KEY"
-                  credential={@anthropic}
-                  managed={stored_credential_managed?(@can_set_anthropic?, @anthropic)}
-                  event="open-anthropic-key"
-                  read_only={@scope == :read}
-                  workspace
-                />
-                <.credential_card
-                  provider="xAI"
-                  logo="xai"
-                  env="XAI_API_KEY"
-                  credential={@xai}
-                  managed={stored_credential_managed?(@can_set_xai?, @xai)}
-                  event="open-xai-key"
-                  read_only={@scope == :read}
-                />
-                <.credential_card
-                  :for={credential <- @additional_credentials}
-                  provider={provider_name(credential.provider)}
-                  env={credential.env}
-                  credential={credential}
-                  managed={false}
-                  read_only={@scope == :read}
-                />
+              <p :if={@providers_error} class="ouro-refusal" role="alert">
+                Connection status could not be refreshed. {@providers_error}
+              </p>
+              <p class="ouro-settings-verification-note">
+                Status reflects local credentials. Provider acceptance and model access are not verified.
+              </p>
+
+              <div class="ouro-settings-group">
+                <div class="ouro-settings-group-head">
+                  <h3>Subscriptions</h3>
+                  <p>First-party account connections for eligible models.</p>
+                </div>
+                <div class="ouro-settings-connection-grid">
+                  <.subscription_card
+                    service="ChatGPT"
+                    detail="OpenAI Codex models"
+                    card={@account_card}
+                    connect="connect-chatgpt"
+                    cancel="cancel-chatgpt"
+                    can_connect={Call.available?(@scope, "account.login.start")}
+                  />
+                  <.grok_subscription_card credential={@grok} />
+                </div>
               </div>
-            </div>
-            <details
-              :if={@other_credentials != []}
-              class="ouro-settings-other"
-              data-ouro-disclosure
-              id="other-provider-credentials"
-            >
-              <summary>
-                Other API providers <span>{length(@other_credentials)} available to configure</span>
-              </summary>
-              <div class="ouro-settings-connection-list">
-                <.credential_card
-                  :for={credential <- @other_credentials}
-                  provider={provider_name(credential.provider)}
-                  env={credential.env}
-                  credential={credential}
-                  managed={false}
-                  read_only={@scope == :read}
-                />
-              </div>
-            </details>
-          </section>
 
-          <section id="defaults" class="ouro-settings-section" aria-labelledby="defaults-title">
-            <.section_head
-              eyebrow="Everyday"
-              title="Session defaults"
-              id="defaults-title"
-              copy="These choices prefill every new session. You can still change them before starting."
-            />
-
-            <form
-              id="session-defaults"
-              class="ouro-settings-card ouro-settings-form"
-              phx-change="change-defaults"
-              phx-submit="save-defaults"
-            >
-              <NewSessionLive.model_field
-                field={@field}
-                visible={@visible}
-                form={@form}
-                intent={@intent}
-                error={@catalogue_error}
-              />
-              <NewSessionLive.thinking_field effort={@form.effort} choices={@efforts} />
-              <NewSessionLive.sandbox_field sandbox={@form.sandbox} />
-              <NewSessionLive.workspace_field
-                workspace={@form.workspace}
-                can_browse={@can_browse?}
-                open={@browse_open?}
-                listing={@browse}
-                refusal={@browse_refusal}
-              />
-
-              <div class="ouro-settings-form-foot">
-                <p>Stored privately on this runtime host.</p>
-                <button class="ouro-button" type="submit" disabled={not @can_save?}>
-                  Save defaults
-                </button>
-              </div>
-            </form>
-          </section>
-
-          <section id="providers" class="ouro-settings-section" aria-labelledby="providers-title">
-            <.section_head
-              eyebrow="Model catalogue"
-              title="Providers & models"
-              id="providers-title"
-              copy="What this computer can run right now. Unavailable adapters remain visible so setup gaps are inspectable."
-            />
-
-            <div class="ouro-settings-card ouro-settings-provider-list">
-              <div :for={provider <- @provider_summaries} class="ouro-settings-provider-row">
-                <span
-                  class={["ouro-settings-status", provider.available? && "is-ready"]}
-                  aria-hidden="true"
-                ></span>
-                <div>
-                  <strong>{provider.name}</strong>
-                  <p :if={provider.available?}>
-                    {model_count(provider.models)}{if provider.default,
-                      do: " · default #{provider.default}"}
-                  </p>
-                  <p :if={not provider.available?}>
-                    {provider.note || "Unavailable on this computer"}
+              <div class="ouro-settings-group">
+                <div class="ouro-settings-group-head">
+                  <h3>API credentials</h3>
+                  <p>
+                    Direct usage billed by each provider. Stored keys can be replaced, never revealed.
                   </p>
                 </div>
-                <span class="ouro-settings-state">
-                  {if provider.available?, do: "Available", else: "Unavailable"}
-                </span>
+                <div class="ouro-settings-connection-list">
+                  <.credential_card
+                    provider="OpenAI"
+                    logo="openai"
+                    env="OPENAI_API_KEY"
+                    credential={@openai}
+                    managed={false}
+                    read_only={@scope == :read}
+                  />
+                  <.credential_card
+                    provider="Anthropic"
+                    logo="anthropic"
+                    env="ANTHROPIC_API_KEY"
+                    credential={@anthropic}
+                    managed={stored_credential_managed?(@can_set_anthropic?, @anthropic)}
+                    event="open-anthropic-key"
+                    read_only={@scope == :read}
+                    workspace
+                  />
+                  <.credential_card
+                    provider="xAI"
+                    logo="xai"
+                    env="XAI_API_KEY"
+                    credential={@xai}
+                    managed={stored_credential_managed?(@can_set_xai?, @xai)}
+                    event="open-xai-key"
+                    read_only={@scope == :read}
+                  />
+                  <.credential_card
+                    :for={credential <- @additional_credentials}
+                    provider={provider_name(credential.provider)}
+                    env={credential.env}
+                    credential={credential}
+                    managed={false}
+                    read_only={@scope == :read}
+                  />
+                </div>
               </div>
-              <p :if={@provider_summaries == []} class="ouro-settings-empty">
-                {if @providers_error, do: @providers_error, else: "Finding providers…"}
+              <details
+                :if={@other_credentials != []}
+                class="ouro-settings-other"
+                data-ouro-disclosure
+                id="other-provider-credentials"
+              >
+                <summary>
+                  Other API providers <span>{length(@other_credentials)} available to configure</span>
+                </summary>
+                <div class="ouro-settings-connection-list">
+                  <.credential_card
+                    :for={credential <- @other_credentials}
+                    provider={provider_name(credential.provider)}
+                    env={credential.env}
+                    credential={credential}
+                    managed={false}
+                    read_only={@scope == :read}
+                  />
+                </div>
+              </details>
+            </section>
+
+            <section id="defaults" class="ouro-settings-section" aria-labelledby="defaults-title">
+              <.section_head
+                eyebrow="Everyday"
+                title="Session defaults"
+                id="defaults-title"
+                copy="These choices prefill every new session. You can still change them before starting."
+              />
+
+              <form
+                id="session-defaults"
+                class="ouro-settings-card ouro-settings-form"
+                phx-change="change-defaults"
+                phx-submit="save-defaults"
+              >
+                <NewSessionLive.model_field
+                  field={@field}
+                  visible={@visible}
+                  form={@form}
+                  intent={@intent}
+                  error={@catalogue_error}
+                />
+                <NewSessionLive.thinking_field effort={@form.effort} choices={@efforts} />
+                <NewSessionLive.sandbox_field sandbox={@form.sandbox} />
+                <NewSessionLive.workspace_field
+                  workspace={@form.workspace}
+                  can_browse={@can_browse?}
+                  open={@browse_open?}
+                  listing={@browse}
+                  refusal={@browse_refusal}
+                />
+
+                <div class="ouro-settings-form-foot">
+                  <p>Stored privately on this runtime host.</p>
+                  <button class="ouro-button" type="submit" disabled={not @can_save?}>
+                    Save defaults
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section id="providers" class="ouro-settings-section" aria-labelledby="providers-title">
+              <.section_head
+                eyebrow="Model catalogue"
+                title="Providers & models"
+                id="providers-title"
+                copy="What this computer can run right now. Unavailable adapters remain visible so setup gaps are inspectable."
+              />
+
+              <div class="ouro-settings-card ouro-settings-provider-list">
+                <div :for={provider <- @provider_summaries} class="ouro-settings-provider-row">
+                  <span
+                    class={["ouro-settings-status", provider.available? && "is-ready"]}
+                    aria-hidden="true"
+                  ></span>
+                  <div>
+                    <strong>{provider.name}</strong>
+                    <p :if={provider.available?}>
+                      {model_count(provider.models)}{if provider.default,
+                        do: " · default #{provider.default}"}
+                    </p>
+                    <p :if={not provider.available?}>
+                      {provider.note || "Unavailable on this computer"}
+                    </p>
+                  </div>
+                  <span class="ouro-settings-state">
+                    {if provider.available?, do: "Available", else: "Unavailable"}
+                  </span>
+                </div>
+                <p :if={@provider_summaries == []} class="ouro-settings-empty">
+                  {if @providers_error, do: @providers_error, else: "Finding providers…"}
+                </p>
+              </div>
+            </section>
+
+            <section id="runtime" class="ouro-settings-section" aria-labelledby="runtime-title">
+              <.section_head
+                eyebrow="This installation"
+                title="Runtime & security"
+                id="runtime-title"
+                copy="Boot-owned values are shown for diagnosis. Change them in the service environment, then restart Ouroboros."
+              />
+
+              <dl class="ouro-settings-card ouro-settings-facts">
+                <.fact term="Runtime node" value={runtime_node(@runtime)} />
+                <.fact term="Web access" value={scope_label(@scope)} />
+                <.fact term="Listening on" value={endpoint_label(@web_config)} mono />
+                <.fact term="Data directory" value={@data_dir} mono />
+                <.fact term="Model catalogue" value={catalogue_label(@catalogue)} />
+              </dl>
+              <%!-- Node role, connected machines and the live session count are the same
+                  runtime asked the same question a second later, so they are named once,
+                  on the page whose whole job is to answer it. --%>
+              <p class="ouro-settings-section-foot">
+                <a href="/status">Runtime status — role, connected machines, live sessions →</a>
               </p>
-            </div>
-          </section>
+              <p :if={@runtime_error} class="ouro-refusal ouro-settings-inline-error">
+                Runtime details could not be loaded: {@runtime_error}
+              </p>
+            </section>
 
-          <section id="runtime" class="ouro-settings-section" aria-labelledby="runtime-title">
-            <.section_head
-              eyebrow="This installation"
-              title="Runtime & security"
-              id="runtime-title"
-              copy="Boot-owned values are shown for diagnosis. Change them in the service environment, then restart Ouroboros."
-            />
-
-            <dl class="ouro-settings-card ouro-settings-facts">
-              <.fact term="Runtime node" value={runtime_value(@runtime, :node)} mono />
-              <.fact term="Node role" value={runtime_value(@runtime, :role)} />
-              <.fact term="Web access" value={scope_label(@scope)} />
-              <.fact term="Listening on" value={endpoint_label(@web_config)} mono />
-              <.fact term="Data directory" value={@data_dir} mono />
-              <.fact term="Model catalogue" value={catalogue_label(@catalogue)} />
-            </dl>
-            <p :if={@runtime_error} class="ouro-refusal ouro-settings-inline-error">
-              Runtime details could not be loaded: {@runtime_error}
+            <p :if={@notice} class="ouro-settings-toast" role="status">{@notice}</p>
+            <p :if={@refusal} class="ouro-refusal ouro-settings-toast" role="alert">
+              {@refusal.message}
+              <span :if={@refusal.detail}>{@refusal.detail}</span>
             </p>
-          </section>
-
-          <p :if={@notice} class="ouro-settings-toast" role="status">{@notice}</p>
-          <p :if={@refusal} class="ouro-refusal ouro-settings-toast" role="alert">
-            {@refusal.message}
-            <span :if={@refusal.detail}>{@refusal.detail}</span>
-          </p>
+          </div>
         </div>
-      </div>
 
-      <NewSessionLive.anthropic_key_dialog
-        :if={@credential_dialog == :anthropic}
-        error={@credential_error}
-        card={anthropic_dialog_card(@anthropic)}
-      />
-      <NewSessionLive.xai_key_dialog
-        :if={@credential_dialog == :xai}
-        error={@credential_error}
-      />
-    </main>
+        <NewSessionLive.anthropic_key_dialog
+          :if={@credential_dialog == :anthropic}
+          error={@credential_error}
+          card={anthropic_dialog_card(@anthropic)}
+        />
+        <NewSessionLive.xai_key_dialog
+          :if={@credential_dialog == :xai}
+          error={@credential_error}
+        />
+      </main>
+    </div>
     """
   end
 
@@ -1044,14 +1066,13 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp model_count(1), do: "1 model"
   defp model_count(count) when is_integer(count), do: "#{count} models"
 
-  defp runtime_value(runtime, key) when is_map(runtime) do
-    case runtime[key] do
-      nil -> "Unavailable"
-      value -> to_string(value)
-    end
-  end
+  # The node, as a label rather than as the BEAM's own name for it. Node *role*, connected
+  # machines and the live session count moved to `/status` with W1.5 rather than being
+  # asked for twice.
+  defp runtime_node(runtime) when is_map(runtime),
+    do: Presentation.node_label(Map.get(runtime, :node))
 
-  defp runtime_value(_runtime, _key), do: "Loading…"
+  defp runtime_node(_runtime), do: "Loading…"
 
   defp scope_label(:operate), do: "Operate · settings and sessions enabled"
   defp scope_label(:read), do: "Read only · changes disabled"
