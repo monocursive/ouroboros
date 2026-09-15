@@ -181,11 +181,6 @@ a:where(:hover) {
 
 .ouro-gate h1,
 .ouro-header h1 {
-  font-family: var(--font-display);
-  font-variant-caps: small-caps;
-  letter-spacing: 0.06em;
-  font-weight: 500;
-  font-size: 1.75rem;
   margin: 0 0 0.75rem;
   color: var(--ink);
 }
@@ -283,13 +278,33 @@ a:where(:hover) {
   margin-bottom: 1rem;
 }
 
+/* W1.8 — one face per heading rank.
+ *
+ * `/status` and `/audit` wore small-caps EB Garamond card titles while `/settings` and the
+ * rail wore the sans one, so the same rank read as two different ranks depending on which
+ * page a reader was on (review §3.1). The *face* of a section heading is declared here,
+ * once, for every section head this surface draws. Size and spacing stay with the
+ * component below, because a rail head and a settings section are the same rank at
+ * different scales — that is a layout decision, not a typographic one. */
+.ouro-panel-head h2,
+.ouro-panel > h2,
+.ouro-rail-head h2,
+.ouro-settings-section-head h2 {
+  font-family: var(--font-ui);
+  font-variant-caps: normal;
+  letter-spacing: normal;
+}
+
 .ouro-panel-head h2 {
-  font-family: var(--font-display);
-  font-variant-caps: small-caps;
-  letter-spacing: 0.06em;
-  font-weight: 500;
+  font-weight: 600;
   font-size: 1.15rem;
   margin: 0;
+}
+
+.ouro-panel > h2 {
+  font-weight: 600;
+  font-size: 1.15rem;
+  margin: 0 0 0.75rem;
 }
 
 /* Rule 3: one of these per view. Sometimes an `<a>` — "New session" is a navigation — so
@@ -475,6 +490,8 @@ body.phx-loading {
   flex: 0 0 auto;
 }
 
+/* The wordmark is the way home, so it is an anchor — but it is still a wordmark, which is
+   why it declines the underline every other link wears. */
 .ouro-wordmark {
   font-family: var(--font-display);
   font-variant-caps: small-caps;
@@ -482,6 +499,38 @@ body.phx-loading {
   font-size: 1.05rem;
   font-weight: 500;
   color: var(--ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* The one navigation, on every page. Quiet by construction: rule 3 keeps the filled
+   button for "New session" alone, so these are plain text until a pointer finds them or
+   one of them is the page being read. */
+.ouro-topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ouro-topbar-link {
+  color: var(--secondary);
+  font-size: 0.88rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* Where you already are. Ink rather than the attention green: rule 1 reserves the green
+   for a session that needs a person, and "this is the page you are on" is not that. */
+.ouro-topbar-link[aria-current="page"] {
+  color: var(--ink);
+}
+
+.ouro-topbar-link[aria-current="page"] {
+  text-decoration: underline;
+  text-underline-offset: 6px;
+  text-decoration-color: var(--border-strong);
 }
 
 /* A row of presence dots with a label, read out as one image. It is a span: there is no
@@ -648,6 +697,12 @@ body.phx-loading {
   padding: 0 var(--gutter);
   color: var(--tertiary);
   font-size: 0.8rem;
+}
+
+/* One line instead of three headings over three "nothing here"s, for the rail that has
+   nothing in any group at all (review §3.1). */
+.ouro-rail-empty {
+  padding-block: 0.75rem;
 }
 
 .ouro-row {
@@ -893,6 +948,18 @@ body.phx-loading {
   overflow-wrap: anywhere;
 }
 
+/* The session's stable id, whole. A fixed-width `<input>` truncated it, and an id a reader
+   cannot see all of is not an id; `user-select: all` makes one click take the lot, which is
+   the part a copy button would otherwise be for. */
+.ouro-vital-id {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
 /* A bar, not a ring: a ring reads as a dial with a target, and a context window has no
    target — it has a ceiling you would rather not reach. Ink on track. */
 .ouro-meter {
@@ -1091,29 +1158,6 @@ body.phx-loading {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ouro-streaming .ouro-prose,
-  .ouro-loader-cell-active,
-  .ouro-loading-label {
-    animation: none;
-  }
-
-  .ouro-loader-cell-active {
-    opacity: 0.15;
-    transform: none;
-  }
-
-  .ouro-loading-label {
-    background: none;
-    -webkit-text-fill-color: currentColor;
-  }
-
-  .ouro-streaming .ouro-prose {
-    border-left: 2px solid var(--hairline-2);
-    padding-left: 0.6rem;
-  }
 }
 
 @media (forced-colors: active) {
@@ -1623,6 +1667,49 @@ body.phx-loading {
   border-color: var(--warn-amber);
 }
 
+/* The composer's bottom edge: the two standing postures the TUI keeps in its footer, and
+   the reason neither is behind a disclosure any more (review §3.2). It is a sibling of
+   `.ouro-composer` rather than a child — `composer.ex` is W2's file — so it draws its own
+   top hairline and the composer's `.ouro-auto` drops the one it used to carry here. */
+.ouro-composer-status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 0.4rem var(--gutter) 0.55rem;
+  border-top: 1px solid var(--hairline-1);
+  font-size: 0.76rem;
+  color: var(--tertiary);
+}
+
+.ouro-composer-status-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.ouro-composer-status-label {
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+}
+
+/* The toggle and its caption are one control, and the caption is the half that says how
+   long the grant lasts. It has to be able to wrap: at 375px `flex: 0 0 auto` (which
+   `.ouro-auto` carries for its old home under the composer) clipped "Only for this" at the
+   viewport edge. */
+.ouro-composer-status .ouro-auto {
+  padding: 0;
+  border-top: 0;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ouro-composer-status .ouro-auto > span {
+  min-width: 0;
+}
+
 /* ----------------------------------------------------------------------- Approvals */
 
 .ouro-approval {
@@ -1778,128 +1865,6 @@ body.phx-loading {
 }
 
 /* -------------------------------------------------------------------- Narrow view */
-
-@media (max-width: 1100px) {
-  .ouro-deck {
-    height: 100dvh;
-    min-height: 0;
-  }
-
-  .ouro-columns,
-  .ouro-columns:has(> .ouro-vitals) {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(8rem, 28vh) minmax(0, 1fr);
-    overflow: hidden;
-  }
-
-  .ouro-rail {
-    border: 0;
-    border-bottom: 1px solid var(--hairline-2);
-    min-height: 0;
-  }
-
-  .ouro-columns > .ouro-vitals {
-    display: none;
-  }
-
-  .ouro-vitals-mobile {
-    display: block;
-    flex: 0 0 auto;
-    border-top: 1px solid var(--hairline-1);
-    background: var(--workspace);
-  }
-
-  .ouro-vitals-mobile > summary {
-    min-height: 2.75rem;
-    padding: 0 var(--gutter);
-    display: flex;
-    align-items: center;
-    color: var(--secondary);
-    cursor: pointer;
-  }
-
-  .ouro-vitals-mobile .ouro-vitals {
-    border: 0;
-    max-height: 45vh;
-  }
-
-  .ouro-focus {
-    overflow: hidden;
-  }
-
-  .ouro-composer {
-    position: sticky;
-    bottom: 0;
-    z-index: 5;
-  }
-}
-
-@media (max-width: 520px) {
-  body .ouro-columns,
-  body .ouro-columns:has(> .ouro-vitals) {
-    grid-template-rows: minmax(9rem, 26vh) minmax(0, 1fr);
-  }
-
-  .ouro-topbar {
-    height: auto;
-    min-height: var(--topbar-height);
-    padding: 0.55rem var(--gutter);
-    gap: 0.65rem;
-    flex-wrap: wrap;
-  }
-
-  .ouro-topbar-right {
-    width: 100%;
-    margin-left: 0;
-    gap: 0.65rem;
-  }
-
-  .ouro-today {
-    display: none;
-  }
-
-  .ouro-topbar-right .ouro-button {
-    margin-left: auto;
-    white-space: nowrap;
-  }
-  .ouro-row-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .ouro-row-action {
-    min-height: 2.75rem;
-    padding-inline: 0.55rem;
-  }
-
-  .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
-    padding-right: 10.5rem;
-  }
-
-  .ouro-composer-box {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .ouro-composer-actions {
-    justify-content: flex-end;
-  }
-
-  body .ouro-new {
-    padding-inline: 0.75rem;
-  }
-
-  body .ouro-new-advanced > summary,
-  body .ouro-new-label-row,
-  body .ouro-gate-form {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  body .ouro-new-advanced-summary {
-    text-align: left;
-  }
-}
 
 .ouro-session-dialog::backdrop {
   background: var(--backdrop);
@@ -2620,7 +2585,6 @@ body .ouro-rail-head {
 body .ouro-rail-head h2 {
   margin: 0.05rem 0 0;
   color: var(--ink);
-  font-family: var(--font-ui);
   font-size: 0.95rem;
   font-weight: 600;
   letter-spacing: 0;
@@ -3096,12 +3060,6 @@ body .ouro-new-form {
   overflow: hidden;
 }
 
-body .ouro-new-title {
-  font-family: var(--font-ui);
-  font-size: 1.35rem;
-  font-weight: 600;
-}
-
 body .ouro-new-field {
   padding: 1.25rem 1.4rem;
 }
@@ -3194,10 +3152,6 @@ body .ouro-settings-head .ouro-top-row {
 
 body .ouro-settings-head h1 {
   margin: 0;
-  font-family: var(--font-ui);
-  font-size: clamp(2rem, 5vw, 3.4rem);
-  font-weight: 600;
-  letter-spacing: -0.055em;
   line-height: 1;
 }
 
@@ -3564,14 +3518,6 @@ body .ouro-row-action {
   border: 0;
   font-size: 0.85rem;
 }
-body .ouro-vitals-mobile {
-  display: block;
-  flex: 0 0 auto;
-  max-height: 35dvh;
-  overflow: auto;
-  padding: 0 1.25rem 0.65rem;
-  border: 0;
-}
 body .ouro-vitals-mobile > summary {
   color: var(--secondary);
   font-size: 0.78rem;
@@ -3585,9 +3531,22 @@ body .ouro-vitals-mobile .ouro-vitals {
   border: 0;
   padding: 0.5rem 0;
 }
-body .ouro-vitals-mobile .ouro-auto {
-  width: 100%;
-  margin: 0.5rem 0;
+/* The composer's status row owns the auto-approve control now, so the card treatment
+   `body .ouro-auto` gives it in the transcript lane is unwound inside this row. */
+body .ouro-composer-status {
+  width: calc(100% - 2.5rem);
+  max-width: var(--lane-width);
+  margin-inline: auto;
+  border-top: 1px solid var(--border);
+}
+
+body .ouro-composer-status .ouro-auto {
+  width: auto;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 body .ouro-composer {
   flex: 0 0 auto;
@@ -3700,7 +3659,12 @@ body .ouro-starters span {
   line-height: 1.4;
   margin-top: 0.4rem;
 }
-body .ouro-settings-head h1, body .ouro-gate h1 {
+/* W1.8 — the page title, on every page that has one. `/new` wore `--font-ui` at this rank
+ * and `/status` and `/audit` wore small caps; one rank is one treatment. */
+body .ouro-settings-head h1,
+body .ouro-gate h1,
+body .ouro-header h1,
+body .ouro-new-title {
   font-family: var(--font-display);
   font-size: 2.4rem;
   font-variant-caps: normal;
@@ -3718,28 +3682,82 @@ body .ouro-gate {
   padding: 2rem;
   background: var(--workspace);
 }
-@media (max-width: 520px) {
-  body .ouro-empty {
-    padding: 1.5rem 1rem;
-  }
-  body .ouro-starters {
-    grid-template-columns: 1fr;
-    gap: 0.5rem;
-    margin-top: 1.25rem;
-  }
-  body .ouro-starters a {
-    padding: 0.75rem;
-  }
-  body .ouro-starters span {
-    margin-top: 0.15rem;
-  }
-  body .ouro-vitals-mobile {
-    padding-inline: 0.75rem;
-  }
-}
-
 @media (max-width: 1100px) {
-  body .ouro-columns {
+  /* W1.9 — one declaration of this breakpoint. The rules above this comment were a
+     second `@media (max-width: 1100px)` block earlier in the file; they are first here so
+     the qualified overrides below still win, which is the order the cascade already had. */
+
+  .ouro-deck {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .ouro-columns,
+  .ouro-columns:has(> .ouro-vitals) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(8rem, 28vh) minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .ouro-rail {
+    border: 0;
+    border-bottom: 1px solid var(--hairline-2);
+    min-height: 0;
+  }
+
+  .ouro-columns > .ouro-vitals {
+    display: none;
+  }
+
+  .ouro-vitals-mobile {
+    display: block;
+    flex: 0 0 auto;
+    border-top: 1px solid var(--hairline-1);
+    background: var(--workspace);
+  }
+
+  .ouro-vitals-mobile > summary {
+    min-height: 2.75rem;
+    padding: 0 var(--gutter);
+    display: flex;
+    align-items: center;
+    color: var(--secondary);
+    cursor: pointer;
+  }
+
+  .ouro-vitals-mobile .ouro-vitals {
+    border: 0;
+    max-height: 45vh;
+  }
+
+  /* The disclosure is the narrow-viewport home of the vitals, and only that. Unscoped
+     (which it was until this fix) it outranks `.ouro-vitals-mobile { display: none }` at
+     every width, so a desktop deck drew the vitals twice: once as the third column and
+     once again under the composer. */
+  body .ouro-vitals-mobile {
+    display: block;
+    flex: 0 0 auto;
+    max-height: 35dvh;
+    overflow: auto;
+    padding: 0 1.25rem 0.65rem;
+    border: 0;
+  }
+
+  .ouro-focus {
+    overflow: hidden;
+  }
+
+  .ouro-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+  }
+  /* Both selectors, because W1.3 made `:has(> .ouro-vitals)` reachable for the first time
+     and `.ouro-columns:has(> .ouro-vitals)` outranks a bare `body .ouro-columns`. Without
+     the twin, a session open on a narrow viewport would keep the two-row template the
+     stacked layout is drawn over. */
+  body .ouro-columns,
+  body .ouro-columns:has(> .ouro-vitals) {
     grid-template-rows: minmax(0, 1fr);
   }
   body .ouro-session-nav {
@@ -3845,6 +3863,86 @@ body .ouro-gate {
 }
 
 @media (max-width: 520px) {
+  /* W1.9 — one declaration of this breakpoint, merged from the three the file used to
+     carry, in their original order so the last one still wins. */
+
+  .ouro-topbar {
+    height: auto;
+    min-height: var(--topbar-height);
+    padding: 0.55rem var(--gutter);
+    gap: 0.65rem;
+    flex-wrap: wrap;
+  }
+
+  .ouro-topbar-right {
+    width: 100%;
+    margin-left: 0;
+    gap: 0.65rem;
+  }
+
+  .ouro-today {
+    display: none;
+  }
+
+  .ouro-topbar-right .ouro-button {
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .ouro-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .ouro-row-action {
+    min-height: 2.75rem;
+    padding-inline: 0.55rem;
+  }
+
+  .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
+    padding-right: 10.5rem;
+  }
+
+  .ouro-composer-box {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ouro-composer-actions {
+    justify-content: flex-end;
+  }
+
+  body .ouro-new {
+    padding-inline: 0.75rem;
+  }
+
+  body .ouro-new-advanced > summary,
+  body .ouro-new-label-row,
+  body .ouro-gate-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  body .ouro-new-advanced-summary {
+    text-align: left;
+  }
+
+  body .ouro-empty {
+    padding: 1.5rem 1rem;
+  }
+  body .ouro-starters {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+  }
+  body .ouro-starters a {
+    padding: 0.75rem;
+  }
+  body .ouro-starters span {
+    margin-top: 0.15rem;
+  }
+  body .ouro-vitals-mobile {
+    padding-inline: 0.75rem;
+  }
   body .ouro-topbar {
     padding: 0.4rem 0.75rem;
     gap: 0.5rem;
@@ -3931,6 +4029,13 @@ body .ouro-gate {
     -webkit-line-clamp: 2;
   }
 
+  /* F6: below 520px the caption gets the whole width rather than whatever is left beside
+     the button, which is how "Only for this session while it is open…" ended up clipped
+     at the viewport edge. */
+  .ouro-composer-status .ouro-auto > span {
+    flex-basis: 100%;
+  }
+
   body .ouro-composer-footer {
     flex-wrap: wrap;
   }
@@ -3965,9 +4070,48 @@ body .ouro-gate {
   body .ouro-settings-managed {
     justify-self: start;
   }
+  body .ouro-palette {
+    inset: 4vh auto auto 50%;
+    max-height: 88vh;
+  }
+
+  body .ouro-shortcut-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+  }
+
+  /* No hover on a touch screen, so the copy controls are simply there. Qualify these
+     overrides to outrank the W2 component defaults declared later in the file. */
+  body .ouro-cell-actions {
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* W1.9/F14 — one declaration of this query. The rules above this comment were a second
+     `prefers-reduced-motion` block earlier in the file; they are first here so the
+     qualified overrides below still win, which is the order the cascade already had. */
+
+  .ouro-streaming .ouro-prose,
+  .ouro-loader-cell-active,
+  .ouro-loading-label {
+    animation: none;
+  }
+
+  .ouro-loader-cell-active {
+    opacity: 0.15;
+    transform: none;
+  }
+
+  .ouro-loading-label {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .ouro-streaming .ouro-prose {
+    border-left: 2px solid var(--hairline-2);
+    padding-left: 0.6rem;
+  }
   body button,
   body input,
   body textarea,
@@ -3980,6 +4124,11 @@ body .ouro-gate {
   body .ouro-tool-running .ouro-tool-mark,
   body .ouro-streaming .ouro-prose {
     animation: none;
+  }
+
+  body .ouro-cell-actions {
+    opacity: 1;
+    transition: none;
   }
 }
 
@@ -4204,4 +4353,638 @@ body .ouro-settings-grok-setup summary {
   body .ouro-settings-connection-title > .ouro-settings-state {
     grid-column: 2;
   }
+}
+
+/* ui-parity W2 */
+
+/* ==========================================================================
+ * ui-parity W2
+ *
+ * The command palette, the shortcut sheet, the copy controls on a message, and the
+ * three verbs this slice added to the composer. Appended rather than woven in: W1 is
+ * editing the rules above this line in a worktree of its own.
+ *
+ * No new colour is introduced. `--attention-green` stays where it was — a selected
+ * palette row is *ink on a lifted surface*, not an attention signal, because nothing here
+ * is a person being needed.
+ * ========================================================================== */
+
+/* -------------------------------------------------------------- Keyboard hints */
+
+/* The search box already showed a key this way (`.ouro-rail-search kbd`). These are the
+   same object in the same clothes, everywhere else a key is worth naming. */
+.ouro-composer kbd,
+.ouro-palette kbd,
+.ouro-shortcuts kbd {
+  min-width: 1.4rem;
+  height: 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.3rem;
+  color: var(--tertiary);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: 0.7rem var(--font-mono);
+}
+
+/* On the one filled control the hint has to read against the button's own ink. */
+.ouro-composer .ouro-button kbd {
+  color: var(--button-bg);
+  background: transparent;
+  border-color: currentColor;
+  opacity: 0.55;
+}
+
+/* ------------------------------------------------------ The composer status row */
+
+.ouro-composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+
+.ouro-palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Planning is a posture, not a warning: the session is doing less, not something risky. */
+.ouro-plan-chip {
+  color: var(--secondary);
+  border-color: var(--border-strong);
+}
+
+.ouro-toggle-on {
+  color: var(--ink);
+  border-color: var(--secondary);
+}
+
+.ouro-composer-actions .ouro-steer {
+  white-space: nowrap;
+}
+
+.ouro-composer-actions .ouro-button,
+.ouro-composer-actions .ouro-quiet-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* ------------------------------------------------------ Copying one message */
+
+/* The cell is the positioning context so the two controls can sit under the prose
+   without taking a row of their own from every message in the transcript. */
+.ouro-said-agent {
+  position: relative;
+}
+
+.ouro-cell-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.25rem;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+/* Revealed by the pointer, by the keyboard, and to anybody who has asked their system to
+   stop moving things. A control that only a mouse can find is a control some readers do
+   not have. */
+.ouro-said-agent:hover .ouro-cell-actions,
+.ouro-cell-actions:focus-within {
+  opacity: 1;
+}
+
+.ouro-copy {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  color: var(--tertiary);
+  background: transparent;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+}
+
+.ouro-copy:hover {
+  color: var(--ink);
+  border-color: var(--border-strong);
+}
+
+.ouro-copy:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------ The palette */
+
+.ouro-palette::backdrop {
+  background: var(--backdrop);
+}
+
+.ouro-palette {
+  position: fixed;
+  inset: 12vh auto auto 50%;
+  transform: translateX(-50%);
+  width: min(34rem, calc(100vw - 2rem));
+  max-height: 70vh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  z-index: 30;
+}
+
+.ouro-palette-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--hairline-2);
+}
+
+.ouro-palette-query {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: 0.95rem;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  padding: 0.2rem 0;
+}
+
+/* The ring goes round the whole head rather than the bare input, exactly as the rail's
+   search box does it — the box is the control, the input is only where the text lands. */
+.ouro-palette-head:focus-within {
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+}
+
+.ouro-palette-query:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 0;
+}
+
+.ouro-palette-query::placeholder {
+  color: var(--tertiary);
+}
+
+.ouro-palette-list {
+  overflow-y: auto;
+  padding: 0.35rem 0 0.6rem;
+}
+
+.ouro-palette-group {
+  margin: 0.6rem 0 0.2rem;
+  padding: 0 0.9rem;
+  font: 0.68rem var(--font-ui);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tertiary);
+}
+
+.ouro-palette-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.45rem 0.9rem;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 0.88rem;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+
+.ouro-palette-row:hover {
+  background: var(--card);
+}
+
+/* The selection is a lifted surface and a rule down its edge. Deliberately not the
+   accent and never the green: a highlighted row is where the keyboard is, not a place
+   somebody is needed. */
+.ouro-palette-on {
+  background: var(--inset);
+  border-left-color: var(--secondary);
+}
+
+.ouro-palette-row:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: -2px;
+}
+
+/* A label long enough to reach the slash column is cut rather than allowed to collide
+   with it — the same rule the TUI palette follows. */
+.ouro-palette-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-palette-slash {
+  font-size: 0.75rem;
+  color: var(--tertiary);
+}
+
+.ouro-palette-key {
+  min-width: 1.4rem;
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.ouro-palette-empty {
+  margin: 0;
+  padding: 0.9rem;
+  color: var(--secondary);
+  font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------- The shortcut sheet */
+
+.ouro-shortcut-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ouro-shortcut-row {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.ouro-shortcut-row dt {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.ouro-shortcut-row dd {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--secondary);
+}
+
+/* ------------------------------------------------------- The model picker */
+
+.ouro-model-picker {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+
+.ouro-model-search input {
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.5rem;
+}
+
+.ouro-model-select {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--ink);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.2rem;
+}
+
+/* ==========================================================================
+ * ui-parity W3
+ *
+ * The remaining verbs' panels: the event ledger, backtrack, rewind, context, MCP, the
+ * three one-question dialogs, and the `!` composer band. Appended under one banner so
+ * the stylesheet's "one section owns a component" rule holds, and no class below is
+ * defined anywhere above it.
+ *
+ * No breakpoint is opened here. Everything is fluid — `min()` widths, `flex-wrap`, and
+ * `overflow: auto` on the two panes that can hold a long line — so the existing three
+ * `@media` blocks stay the only declarations of their queries (W1.9).
+ *
+ * No new colour token. A warning is `--warning`, a refusal is `.ouro-refusal`, and
+ * `--attention-green` is untouched: none of these panels is a person being needed.
+ * ========================================================================== */
+
+/* ------------------------------------------------- Panels that hold a list */
+
+.ouro-details,
+.ouro-backtrack,
+.ouro-rewind,
+.ouro-context,
+.ouro-mcp {
+  width: min(56rem, calc(100vw - 2rem));
+  max-height: min(84vh, 60rem);
+  overflow: auto;
+}
+
+.ouro-w3-notice {
+  margin: 0.75rem auto;
+  max-width: 62rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--secondary);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+
+/* --------------------------------------------------------- W3.1 Event details */
+
+.ouro-details-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ouro-details-item {
+  margin: 0;
+}
+
+/* A hole in the ledger is part of the ledger, and it reads as a rule rather than a row. */
+.ouro-details-divider {
+  margin: 0.4rem 0;
+  padding: 0.2rem 0.5rem;
+  color: var(--tertiary);
+  background: var(--inset);
+  border-left: 2px solid var(--border-strong);
+  font-size: 0.78rem;
+}
+
+.ouro-details-event {
+  border-bottom: 1px solid var(--border);
+}
+
+.ouro-details-head {
+  display: grid;
+  grid-template-columns: 4rem minmax(6rem, 12rem) minmax(0, 1fr);
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.3rem 0.2rem;
+  text-align: left;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  min-height: 2.25rem;
+}
+
+.ouro-details-head:hover {
+  background: var(--inset);
+}
+
+.ouro-details-seq {
+  color: var(--tertiary);
+}
+
+.ouro-details-kind {
+  color: var(--secondary);
+}
+
+.ouro-details-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tertiary);
+}
+
+.ouro-details-json {
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.6rem;
+  max-height: 24rem;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+/* -------------------------------------------------- W3.3 Backtrack and fork */
+
+.ouro-backtrack-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ouro-backtrack-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ouro-backtrack-seq {
+  color: var(--tertiary);
+  font-size: 0.75rem;
+}
+
+.ouro-backtrack-text {
+  flex: 1 1 18rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-backtrack-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* ------------------------------------------------------------- W3.4 Rewind */
+
+.ouro-rewind-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ouro-rewind-row {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3rem;
+}
+
+.ouro-rewind-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.4rem 0.2rem;
+  text-align: left;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 0.82rem;
+  min-height: 2.5rem;
+}
+
+.ouro-rewind-pick:hover {
+  background: var(--inset);
+}
+
+/* What a rewind cannot put back, said before the choice and again on the screen where
+   the choice is made. */
+.ouro-rewind-warning {
+  margin: 0.2rem 0 0.4rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--warn-amber);
+  border-left: 2px solid var(--warn-amber);
+  font-size: 0.78rem;
+}
+
+.ouro-rewind-block {
+  margin-top: 0.75rem;
+}
+
+.ouro-rewind-block ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+}
+
+/* The second list is the one that has to be acted on, so it is never the same weight as
+   the first. */
+.ouro-rewind-unrestorable {
+  color: var(--warn-amber);
+}
+
+/* ------------------------------------------------------------ W3.7 Context */
+
+.ouro-context-source {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.25rem;
+}
+
+.ouro-context-facts,
+.ouro-context-native {
+  margin: 0.6rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ouro-context-native ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+/* ----------------------------------------------------------- W3.9 MCP list */
+
+.ouro-mcp-list,
+.ouro-mcp-refusals {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ouro-mcp-row,
+.ouro-mcp-refusals li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.ouro-mcp-name {
+  font-weight: 600;
+}
+
+.ouro-mcp-broken {
+  color: var(--warn-amber);
+}
+
+/* ------------------------------------------------------------ W3.2 Export */
+
+.ouro-export-choices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+/* ---------------------------------------------------- W3.8 The `!` composer */
+
+/* Where the command will run, said before Enter is pressed. A statement rather than a
+   warning: `!` is an ordinary thing to do, it just does not happen here. */
+.ouro-shell-where {
+  margin: 0 0 0.4rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--secondary);
+  background: var(--inset);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+}
+
+/* The refusal and the offer to fix it stay together, on the composer, because a line
+   that expires is not somewhere to put an action. */
+.ouro-shell-refusal {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--inset);
+  border: 1px solid var(--warn-amber);
+  border-radius: var(--radius);
+}
+
+.ouro-shell-refusal p {
+  margin: 0 0 0.25rem;
+  font-size: 0.82rem;
+}
+
+.ouro-shell-refusal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
 }

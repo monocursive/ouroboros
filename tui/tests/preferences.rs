@@ -53,6 +53,16 @@ fn key(code: KeyCode) -> Msg {
     })
 }
 
+/// Opens the settings overlay the way an operator does.
+///
+/// `settings` is `off` as a bare chord since the key map was realigned (`ui-parity` T1):
+/// a message may start with a comma, so the verb is `leader.settings` (`ctrl+x ,`) and
+/// `/settings`.
+fn open_settings(app: &mut App) {
+    app.apply(ctrl('x'));
+    app.apply(key(KeyCode::Char(',')));
+}
+
 fn ctrl(c: char) -> Msg {
     Msg::Key(KeyEvent {
         code: KeyCode::Char(c),
@@ -148,7 +158,7 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
         let mut app = with_providers(Defaults::default());
 
         app.apply(key(KeyCode::Char(tab)));
-        app.apply(key(KeyCode::Char(',')));
+        open_settings(&mut app);
         app.apply(key(KeyCode::F(2)));
 
         assert!(
@@ -167,7 +177,7 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
     assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
 
     let mut app = with_providers(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
 
     let screen = render(&mut app, 120, 34);
@@ -190,7 +200,13 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("ouroboros@golden"), "{}", screen.text());
+    // T2.8: the runtime's own name for itself, made readable.
+    assert!(screen.contains("ouroboros"), "{}", screen.text());
+    assert!(
+        !screen.text().contains("ouroboros@golden"),
+        "the raw node name reached the settings overlay:\n{}",
+        screen.text()
+    );
     assert!(screen.contains("127.0.0.1:4560"), "{}", screen.text());
 }
 
@@ -202,7 +218,7 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
     let mut app = with_providers(Defaults::default());
     app.config_path = Some(path.clone());
 
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
 
     // Nothing has been touched, so there is nothing to write — a default is something an
@@ -283,7 +299,7 @@ fn esc_closes_settings_without_writing_anything() {
     let mut app = with_providers(Defaults::default());
     app.config_path = Some(path.clone());
 
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
@@ -308,7 +324,7 @@ fn a_save_with_nowhere_to_write_says_so_instead_of_claiming_success() {
     let mut app = with_providers(Defaults::default());
     app.config_path = None;
 
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
@@ -333,7 +349,7 @@ fn a_save_with_nowhere_to_write_says_so_instead_of_claiming_success() {
 fn enter_on_a_field_row_moves_rather_than_saving() {
     let mut app = with_providers(Defaults::default());
 
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
     app.apply(key(KeyCode::Enter));
 
@@ -352,7 +368,7 @@ fn settings_open_on_whatever_the_file_already_said() {
         ..Defaults::default()
     });
 
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
 
     let screen = render(&mut app, 130, 34);
@@ -598,7 +614,7 @@ fn connection_providers(grok: &str, xai_source: Option<&str>) -> serde_json::Val
 #[test]
 fn connections_show_sources_refresh_and_never_retain_secret_fields() {
     let mut app = connected(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     answer(
         &mut app,
         Tag::Providers,
@@ -636,7 +652,7 @@ fn connections_show_sources_refresh_and_never_retain_secret_fields() {
 #[test]
 fn key_editor_masks_paste_submits_only_on_save_and_refreshes() {
     let mut app = connected(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     answer(
         &mut app,
         Tag::Providers,
@@ -691,7 +707,7 @@ fn environment_and_read_scope_block_stored_key_edits() {
         if !environment {
             app.hello.scope = "read".into();
         }
-        app.apply(key(KeyCode::Char(',')));
+        open_settings(&mut app);
         answer(
             &mut app,
             Tag::Providers,
@@ -713,7 +729,7 @@ fn environment_and_read_scope_block_stored_key_edits() {
 #[test]
 fn account_dialog_returns_to_settings_without_losing_defaults() {
     let mut app = connected(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
     type_text(&mut app, "/unsaved");
     app.apply(key(KeyCode::F(1)));
@@ -733,7 +749,7 @@ fn account_logout_returns_to_settings_and_consumes_the_return_state() {
         Tag::Account,
         json!({"credentialState": "present", "account": {"type": "chatgpt"}}),
     );
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     app.apply(key(KeyCode::F(2)));
     type_text(&mut app, "/unsaved");
     app.apply(key(KeyCode::F(1)));
@@ -780,7 +796,7 @@ fn optional_credential_details_cannot_remove_a_usable_runtime_provider() {
 #[test]
 fn absent_probe_details_are_unavailable_instead_of_zero_configured() {
     let mut app = with_providers(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     answer(&mut app, Tag::Providers, providers());
     let screen = render(&mut app, 120, 34);
     assert!(
@@ -794,7 +810,7 @@ fn absent_probe_details_are_unavailable_instead_of_zero_configured() {
 #[test]
 fn refreshed_selection_and_setup_target_the_same_connection() {
     let mut app = connected(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     let mut report = connection_providers("absent", None);
     answer(&mut app, Tag::Providers, report.clone());
     for _ in 0..5 {
@@ -819,7 +835,7 @@ fn saving_a_key_during_a_probe_requests_a_fresh_report_after_that_probe() {
         Tag::Providers,
         connection_providers("absent", None),
     );
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     assert!(app.providers.pending);
     for _ in 0..4 {
         app.apply(key(KeyCode::Down));
@@ -858,7 +874,7 @@ fn saving_a_key_during_a_probe_requests_a_fresh_report_after_that_probe() {
 #[test]
 fn compact_key_editor_keeps_save_and_failure_visible_with_long_workspace_id() {
     let mut app = connected(Defaults::default());
-    app.apply(key(KeyCode::Char(',')));
+    open_settings(&mut app);
     answer(
         &mut app,
         Tag::Providers,

@@ -160,4 +160,72 @@ defmodule Ouroboros.Web.Live.ComposerTest do
       assert Composer.word("unrestricted") == "Full computer access"
     end
   end
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W2
+  # ------------------------------------------------------------------------------------
+
+  describe "model_rows/1" do
+    test "flattens runtime.models into id-and-label rows, keeping the runtime's order" do
+      catalogue = %{
+        providers: [
+          %{provider: :native, models: [%{id: "a:one", name: "One"}, %{id: "b:two", name: nil}]}
+        ]
+      }
+
+      assert Composer.model_rows(catalogue) == [
+               %{id: "a:one", label: "One · a:one"},
+               # No name is not a blank label: the id is what `interactive.configure`
+               # takes, and it is the honest thing to show for a row with nothing else.
+               %{id: "b:two", label: "b:two"}
+             ]
+    end
+
+    test "a row with no id configures nothing, so it is not a row" do
+      assert Composer.model_rows(%{providers: [%{models: [%{id: ""}, %{name: "no id"}]}]}) == []
+    end
+
+    test "an answer this build cannot read is no catalogue rather than a broken one" do
+      assert Composer.model_rows(nil) == []
+      assert Composer.model_rows(%{}) == []
+      assert Composer.model_rows(%{providers: "unexpected"}) == []
+    end
+
+    test "reads this runtime's own answer" do
+      rows = Composer.model_rows(Ouroboros.Models.list())
+
+      assert rows != []
+      assert Enum.all?(rows, &(is_binary(&1.id) and &1.id != ""))
+    end
+  end
+
+  describe "search_models/3" do
+    @rows [
+      %{id: "openai_codex:gpt-5.6-sol", label: "Sol · openai_codex:gpt-5.6-sol"},
+      %{id: "grok:grok-4.6", label: "Grok 4.6 · grok:grok-4.6"}
+    ]
+
+    test "an empty query is every row" do
+      assert Composer.search_models(@rows, "", nil) == @rows
+      assert Composer.search_models(@rows, "   ", nil) == @rows
+      assert Composer.search_models(@rows, nil, nil) == @rows
+    end
+
+    test "matches the label and the id, case-insensitively" do
+      assert Composer.search_models(@rows, "SOL", nil) == [hd(@rows)]
+      assert Composer.search_models(@rows, "grok-4", nil) == [List.last(@rows)]
+    end
+
+    test "the running model always survives its own search" do
+      # A `<select>` whose selected value is not among its options draws some other row,
+      # which would be the widget disagreeing with the session about what is running.
+      kept = Composer.search_models(@rows, "grok", "openai_codex:gpt-5.6-sol")
+
+      assert Enum.map(kept, & &1.id) == ["openai_codex:gpt-5.6-sol", "grok:grok-4.6"]
+    end
+
+    test "a query nothing matches is no rows, not every row" do
+      assert Composer.search_models(@rows, "zzzz", nil) == []
+    end
+  end
 end

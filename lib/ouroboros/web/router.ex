@@ -49,5 +49,10 @@ defmodule Ouroboros.Web.Router do
     # Not a LiveView: it answers bytes, and it is inside the authenticated scope like
     # everything else, so the cookie that opened the deck is the only thing that opens it.
     get "/audit-bundle/:id", AuditBundleController, :show
+
+    # ui-parity W3. One session's transcript as a file, for the same reason and under the
+    # same cookie. Three path segments after `/s`, so it never shadows the deck's own
+    # two-segment `live_patch` target above.
+    get "/s/:plane/:id/export", TranscriptExportController, :show
   end
 end

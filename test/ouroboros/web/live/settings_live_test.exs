@@ -230,6 +230,129 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     refute html =~ "google-settings-canary"
   end
 
+  # W1.1 / W1.5 / W1.6 — navigation, the split with `/status`, and internals as words.
+  test "carries the one top bar, and keeps its own breadcrumb under it", %{conn: conn} do
+    {:ok, _view, html} = live(conn, "/settings")
+
+    assert html =~ ~s(class="ouro-topbar")
+
+    for href <- ["/", "/new", "/settings", "/audit", "/status"] do
+      assert html =~ ~s(href="#{href}"), "the settings top bar does not link to #{href}"
+    end
+
+    # Under it, not instead of it.
+    assert html =~ "← Sessions"
+
+    breadcrumb = :binary.match(html, "← Sessions") |> elem(0)
+    bar = :binary.match(html, ~s(class="ouro-topbar")) |> elem(0)
+    assert bar < breadcrumb, "the breadcrumb is above the top bar"
+  end
+
+  test "runtime facts name the computer and point at the page that owns the rest",
+       %{conn: conn} do
+    # §3.5: `/settings` showed `nonode@nohost`. §3.1: it duplicated half of `/status`.
+    # W1.5's call is to keep the node here (it is the installation this page describes) and
+    # to send node role, connected machines and the live session count to `/status` rather
+    # than ask the same runtime the same question twice.
+    {:ok, _view, html} = live(conn, "/settings")
+
+    refute html =~ "nonode@nohost"
+    assert html =~ "Runtime node"
+    assert html =~ "this computer"
+    refute html =~ "Node role"
+    assert html =~ ~s(href="/status")
+  end
+
+  # W1.4. `/new` builds the model control with `NewSession.model_field/2`, which keeps the
+  # current choice as a row of its own when the catalogue snapshot does not list it; this
+  # page used `/1` in three places (`settings_live.ex:363`, `:378`, and its render), so a
+  # remembered model outside the snapshot was drawn as free text and — once it had been
+  # promoted to a catalogue choice — reset to the runtime default by any other edit
+  # (review §3.5).
+  test "a remembered model the catalogue does not list survives an edit to another field",
+       %{conn: conn, data_dir: dir} do
+    :ok = Prefs.write(dir, %{"model" => "vendor:unlisted-model-9"})
+
+    {:ok, view, html} = live(conn, "/settings")
+
+    # Drawn as its own row, with the runtime's own caveat on it, rather than as a
+    # "Custom model…" box that says nothing about where the id came from.
+    assert html =~ "vendor:unlisted-model-9"
+
+    assert html =~ "Current choice; catalogue metadata unavailable",
+           "the remembered model is not offered as a row of its own"
+
+    assert has_element?(
+             view,
+             ~s(#session-defaults option[value="catalog:vendor:unlisted-model-9"])
+           )
+
+    # And touching a different field leaves it alone.
+    after_edit =
+      view |> form("#session-defaults", %{"workspace" => dir}) |> render_change()
+
+    assert after_edit =~ "Using vendor:unlisted-model-9"
+
+    refute after_edit =~ "Ouroboros will choose the recommended model",
+           "an edit to the workspace reset the remembered model to the runtime default"
+
+    # The writer agrees with the control: saving keeps the model it is drawing.
+    view |> form("#session-defaults", %{"workspace" => dir}) |> render_submit()
+    assert Prefs.read(dir)["model"] == "vendor:unlisted-model-9"
+  end
+
+  # The reviewer's CONTROL, adopted: the two arities really do differ on the case W1.4 is
+  # about. Without it, a test that only drives the page could pass against a `/1` that had
+  # quietly started keeping the row.
+  test "model_field/1 loses the remembered id that /2 keeps" do
+    {:ok, catalogue} = Ouroboros.Web.Call.call(:read, "runtime.models", %{})
+
+    form = %Ouroboros.Web.Live.NewSession{
+      Ouroboros.Web.Live.NewSession.new()
+      | model_choice: Ouroboros.Web.Live.NewSession.choice("catalog:vendor:unlisted-model-9")
+    }
+
+    one = Ouroboros.Web.Live.NewSession.model_field(catalogue)
+    two = Ouroboros.Web.Live.NewSession.model_field(catalogue, form)
+
+    refute Ouroboros.Web.Live.NewSession.offers?(one, form.model_choice),
+           "model_field/1 already offers the remembered model, so W1.4 changed nothing"
+
+    assert Ouroboros.Web.Live.NewSession.offers?(two, form.model_choice),
+           "model_field/2 does not keep the remembered model"
+  end
+
+  # `field/1` is the second call site, and this is the test that holds it: `save-defaults`
+  # builds `start_params/2` from it, so a field without the remembered row writes no model
+  # at all — even though the page was drawing one a moment earlier.
+  test "a sandbox change then Save keeps the remembered model byte for byte",
+       %{conn: conn, data_dir: dir} do
+    :ok = Prefs.write(dir, %{"model" => "vendor:unlisted-model-9"})
+
+    {:ok, view, html} = live(conn, "/settings")
+    assert html =~ "vendor:unlisted-model-9"
+
+    render_click(view, "pick-sandbox", %{"mode" => "unrestricted"})
+    view |> form("#session-defaults", %{}) |> render_submit()
+
+    prefs = Prefs.read(dir)
+    assert prefs["model"] == "vendor:unlisted-model-9"
+    assert prefs["sandbox_mode"] == "unrestricted"
+  end
+
+  # F12. Three different facts, three different words. A status that answered without a
+  # `:node` key did not report one; a status that answered `nonode@nohost` reported that it
+  # has no name; and no status at all is still loading. Spelling the first as "this
+  # computer" would be the page claiming something nothing said.
+  test "a runtime node is loading, unreported, or a machine — and they read differently" do
+    alias Ouroboros.Web.Live.SettingsLive
+
+    assert SettingsLive.runtime_node(nil) == "Loading…"
+    assert SettingsLive.runtime_node(%{role: :standalone}) == "Not reported"
+    assert SettingsLive.runtime_node(%{node: :nonode@nohost}) == "this computer"
+    assert SettingsLive.runtime_node(%{node: :ouro@alpha}) == "alpha"
+  end
+
   defp write_grok(path, expires) do
     credential = %{
       "key" => "grok-settings-secret-canary",

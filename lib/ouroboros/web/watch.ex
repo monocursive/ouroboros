@@ -67,6 +67,10 @@ defmodule Ouroboros.Web.Watch do
   # Interruption markers are cheap and a session that reconnected two hundred times does
   # not need two hundred dividers.
   @max_notes 64
+  # W3 fix wave (M2). How many notes one anchor holds. An anchor is a *sequence*, and two
+  # operator verbs run inside one event-free window share it: a rewind and the compaction
+  # after it are two acts and two blocks, and keeping one note per anchor silently
+  # replaced the first with the second.
 
   defstruct events: %{},
             retain_history: false,
@@ -76,11 +80,13 @@ defmodule Ouroboros.Web.Watch do
             ended: nil,
             undecodable: 0
 
+  @notes_per_anchor 32
+
   @type note :: Entry.Note.note()
   @type t :: %__MODULE__{
           events: %{optional(non_neg_integer()) => map()},
           retain_history: boolean(),
-          notes: %{optional(non_neg_integer()) => note()},
+          notes: %{optional(non_neg_integer()) => [note()]},
           floor: non_neg_integer(),
           cursor: non_neg_integer(),
           ended: String.t() | nil,
@@ -226,18 +232,39 @@ defmodule Ouroboros.Web.Watch do
   end
 
   @doc """
-  Anchors a stream interruption at the newest sequence known.
+  Anchors a note at the newest sequence known.
 
   Which is where a reader looking at the transcript would otherwise see an unexplained
   jump: the note belongs at the edge of what is held, not at the top of the pane.
+
+  ## One anchor holds a list, and the two kinds of note are kept differently
+
+  A **stream marker** — a lag, a drop, a reconnect — is a fact about one interruption, and
+  recording the same one twice at one anchor is still one interruption, so it is
+  idempotent exactly as it was.
+
+  A **local block** (`{:local, …}`) is one of the operator's own verbs answering, and two
+  of them inside one event-free window are two acts. Keeping one note per sequence made
+  the second silently replace the first — a compaction run after a rewind erased the
+  rewind's own record of what it could not restore — so an anchor holds a list, oldest
+  first, bounded at #{@notes_per_anchor}.
   """
   @spec note(t(), note(), non_neg_integer()) :: t()
   def note(%__MODULE__{} = watch, note, at \\ 0) when is_integer(at) do
     at = max(at, newest(watch))
+    held = Map.get(watch.notes, at, [])
 
-    %{watch | notes: Map.put(watch.notes, at, note)}
+    kept =
+      if local?(note) or note not in held,
+        do: Enum.take(held ++ [note], @notes_per_anchor),
+        else: held
+
+    %{watch | notes: Map.put(watch.notes, at, kept)}
     |> trim_notes()
   end
+
+  defp local?({:local, _block}), do: true
+  defp local?(_marker), do: false
 
   @doc """
   Records the terminal status, which is what turns the stream's end into a divider.

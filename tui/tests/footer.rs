@@ -13,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::{json, Value};
 
 use ouro::config::{NotifyMode, NotifyWhen};
+use ouro::keymap::Action;
 use ouro::model::{ApprovalMode, Capability, Plane, ProviderEntry, SandboxMode, SessionInfo};
 use ouro::proto::Notification;
 use ouro::ui::app::{App, ComposerVerb, Msg, Overlay, Tag};
@@ -250,8 +251,10 @@ fn the_footer_snapshot_at_three_widths() {
 fn slash_completions(app: &mut App, prefix: &str) -> Vec<String> {
     // The tick is what refreshes the catalog from the open session's capabilities.
     app.apply(Msg::Tick);
-    app.apply(key(KeyCode::Char('i')));
-    assert!(app.sessions.composer.is_some(), "`i` opens the composer");
+    // Enter on an open session with no composer is what opens one; the single-letter
+    // `i` was removed with the rest of the dead list layer (`ui-parity` T1.6).
+    app.apply(key(KeyCode::Enter));
+    assert!(app.sessions.composer.is_some(), "enter opens the composer");
 
     for character in prefix.chars() {
         app.apply(key(KeyCode::Char(character)));
@@ -1020,8 +1023,10 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     assert!(native.steer_offered());
 
-    // The four places the verb is advertised: `/` completion in the composer, the command
-    // palette, the leader overlay, and the key itself.
+    // The three places the verb is advertised: `/` completion in the composer, the
+    // command palette, and the key itself. The leader was the fourth until the key map
+    // was realigned (`ui-parity` T1): `leader.steer` is `off` now, because `s` is status
+    // everywhere else in the field and `alt+enter` already steers.
     assert!(
         slash_completions(&mut native, "/steer")
             .iter()
@@ -1038,9 +1043,37 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     native.overlay = None;
 
+    assert!(
+        !native.bound(Action::LeaderSteer),
+        "the leader dropped the verb"
+    );
+    assert!(
+        native.bound(Action::Steer),
+        "and the key that steers still has one"
+    );
+
+    // The which-key overlay, asked the only way it can be asked once `leader.steer` is
+    // `off` by default: bind it, and read the frame. `bound()` says what the map holds;
+    // this says what the operator is shown, which is the guarantee that matters.
+    native
+        .config
+        .keys
+        .bindings
+        .insert("leader.steer".into(), toml::Value::String("S".into()));
+    native.reload_keymap();
+    assert!(
+        native.keymap.problems().is_empty(),
+        "{:?}",
+        native.keymap.problems()
+    );
     native.apply(ctrl_x());
-    let screen = render(&mut native, 160, 30);
-    assert!(screen.contains("steer"), "{}", screen.text());
+    let screen = render(&mut native, 160, 60);
+    assert!(
+        screen.contains("S   steer"),
+        "the overlay drops a verb this transport declares:\n{}",
+        screen.text()
+    );
+    native.apply(key(KeyCode::Esc));
 
     let mut managed = opened(
         "running",
@@ -1066,15 +1099,59 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     managed.overlay = None;
 
-    // And the key itself refuses, naming the transport, rather than sending a call the
-    // runtime answers `{:error, :unsupported}`.
-    managed.apply(key(KeyCode::Char('s')));
+    // …and the which-key overlay omits it on the transport that cannot, with the verb
+    // bound. A row drawn here is how an operator learns a key by being refused by it.
+    managed
+        .config
+        .keys
+        .bindings
+        .insert("leader.steer".into(), toml::Value::String("S".into()));
+    managed.reload_keymap();
+    managed.apply(ctrl_x());
+    let screen = render(&mut managed, 160, 60);
+    assert!(
+        !screen.contains("S   steer"),
+        "the overlay offered a verb this transport refuses:\n{}",
+        screen.text()
+    );
+    managed.apply(key(KeyCode::Esc));
+
+    // And the verb itself refuses, naming the transport, rather than sending a call the
+    // runtime answers `{:error, :unsupported}`. Reached through `/steer`, which is
+    // dispatched even where completion hides it — the bare `s` of the old list layer is
+    // gone and `leader.steer` is `off`.
+    managed.apply(key(KeyCode::Enter));
+    let verb_before = managed
+        .sessions
+        .composer
+        .as_ref()
+        .map(|composer| composer.verb);
+
+    for character in "/steer".chars() {
+        managed.apply(key(KeyCode::Char(character)));
+    }
+    managed.apply(key(KeyCode::Enter));
+
     let notice = managed.notice.as_ref().expect("a refusal");
     assert!(notice.text.contains("cannot be steered"), "{}", notice.text);
     assert!(notice.text.contains("managed"), "{}", notice.text);
+    assert_eq!(
+        managed
+            .sessions
+            .composer
+            .as_ref()
+            .map(|composer| composer.verb),
+        verb_before,
+        "the composer changed verb over one the session cannot honour"
+    );
+    assert_ne!(verb_before, Some(ComposerVerb::Steer));
     assert!(
-        managed.sessions.composer.is_none(),
-        "the composer must not open in a verb the session cannot take"
+        managed
+            .sessions
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.editor.text().is_empty()),
+        "and it kept the refused verb in the draft"
     );
     assert!(
         !managed
@@ -1095,6 +1172,8 @@ fn the_approval_key_says_why_a_managed_session_will_never_open_that_modal() {
     );
     assert!(!managed.approvals_offered());
 
+    // The approval verb is `leader.approval`; the bare `a` of the old list layer is gone.
+    managed.apply(ctrl('x'));
     managed.apply(key(KeyCode::Char('a')));
     let notice = managed.notice.as_ref().expect("a refusal");
     assert!(
@@ -1110,6 +1189,7 @@ fn the_approval_key_says_why_a_managed_session_will_never_open_that_modal() {
         Vec::new(),
     );
     assert!(native.approvals_offered());
+    native.apply(ctrl('x'));
     native.apply(key(KeyCode::Char('a')));
     assert!(native
         .notice
@@ -1539,3 +1619,78 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// gating above is about.
 #[allow(dead_code)]
 const STEER: ComposerVerb = ComposerVerb::Steer;
+
+// ---------------------------------------------------------------------------------------
+// ui-parity T1 fix wave — M1: the armed quit window is on the footer, not only in a notice
+// ---------------------------------------------------------------------------------------
+
+/// A key that quits on its second press has to say so between the two, and a notice will
+/// not do it: notices expire, and the window is what the operator is inside of.
+///
+/// The claim was made before anything drew it. This is the render.
+#[test]
+fn the_footer_says_ctrl_c_again_to_quit_while_the_window_is_open() {
+    let mut app = opened("idle", options(native_capabilities()), usage(), Vec::new());
+
+    // The bottom row is the notice row while a notice is live, and arming writes one. The
+    // claim here is about the *hints*, which is the half that lasts as long as the window
+    // does — so the notice is taken out of the way rather than asserted through.
+    let footer = |app: &mut App| {
+        app.notice = None;
+        render(app, 160, 30)
+            .rows
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    assert!(
+        !footer(&mut app).contains("again to quit"),
+        "the hint is on an idle footer"
+    );
+
+    app.apply(ctrl('c'));
+    assert!(app.quit_armed(), "the first press did not arm");
+
+    assert!(
+        footer(&mut app).contains("ctrl+c again to quit"),
+        "the armed window is invisible: {}",
+        footer(&mut app)
+    );
+
+    // And it goes when the window does, rather than staying until something redraws.
+    for _ in 0..40 {
+        app.apply(Msg::Tick);
+    }
+    assert!(!app.quit_armed());
+    assert!(
+        !footer(&mut app).contains("again to quit"),
+        "{}",
+        footer(&mut app)
+    );
+}
+
+/// The chord comes out of the keymap like every other hint, so a rebound cancel is the
+/// one the footer names.
+#[test]
+fn the_armed_hint_names_a_rebound_cancel() {
+    let mut app = opened("idle", options(native_capabilities()), usage(), Vec::new());
+    app.config
+        .keys
+        .bindings
+        .insert("cancel".into(), toml::Value::String("ctrl+b".into()));
+    app.reload_keymap();
+
+    app.apply(ctrl('b'));
+    assert!(app.quit_armed());
+
+    app.notice = None;
+    let footer = render(&mut app, 160, 30)
+        .rows
+        .last()
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(footer.contains("ctrl+b again to quit"), "{footer}");
+    assert!(!footer.contains("ctrl+c again"), "{footer}");
+}

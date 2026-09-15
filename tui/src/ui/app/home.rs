@@ -1,5 +1,7 @@
 use super::*;
 
+use super::session::{classify_line, verb_argument_refusal, Line};
+
 impl App {
     // ----- harness home --------------------------------------------------------------
 
@@ -139,15 +141,36 @@ impl App {
 
     fn submit_home(&mut self) {
         let prompt = self.home_draft.submission();
+        // The draft as typed, not as trimmed: the grammar reads leading whitespace.
+        let raw = self.home_draft.text().to_string();
 
-        // Navigation and account commands remain usable before direct OAuth completes. The
-        // draft survives the login overlay and can be submitted unchanged afterwards.
-        if prompt
-            .as_deref()
-            .is_some_and(|prompt| self.activate_slash_command(prompt))
-        {
-            self.home_draft.accept_submission();
-            return;
+        match classify_line(&raw) {
+            // Navigation and account commands remain usable before direct OAuth completes.
+            // The draft survives the login overlay and can be submitted unchanged after.
+            Line::Verb => {
+                if prompt
+                    .as_deref()
+                    .is_some_and(|prompt| self.activate_slash_command(prompt))
+                {
+                    self.home_draft.accept_submission();
+                    return;
+                }
+
+                let refusal = verb_argument_refusal(&raw);
+                self.home_error = Some(refusal.clone());
+                self.inform(refusal, NoticeKind::Warn);
+                return;
+            }
+            // A mistyped verb is refused here, before anything is started. This is where
+            // it was most expensive: `/ke` plus Enter used to become the first task of a
+            // brand new session and open a ChatGPT sign-in for it (R1 §2.3). The draft is
+            // kept, and the line is on the home screen where the eye already is.
+            Line::Refused(refusal) => {
+                self.home_error = Some(refusal.clone());
+                self.inform(refusal, NoticeKind::Warn);
+                return;
+            }
+            Line::Message => {}
         }
 
         // Check the ability to start before sending someone through authentication.

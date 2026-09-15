@@ -261,7 +261,15 @@ fn the_rail_draws_the_groups_in_order_with_their_counts() {
 
     // The node each row is on, because the rail lists every machine's sessions — and
     // dropped whole rather than clipped where a card is too narrow to hold it.
+    //
+    // T2.8: through `App::machine_label`, which asks *which computer* rather than *which
+    // runtime* — the fleet's roster name where there is one, and the host half otherwise,
+    // because a fleet's nodes differ in their host and share their name.
     assert!(text.contains("RUNNING · native · alpha"), "{text}");
+    assert!(
+        !text.contains("@alpha"),
+        "the raw node reached a card: {text}"
+    );
 }
 
 #[test]
@@ -376,7 +384,10 @@ fn the_picker_labels_every_row_with_its_group_and_its_node() {
     assert!(text.contains("2 working"), "{text}");
     assert!(text.contains("1 done"), "{text}");
     assert!(text.contains("needs input"), "{text}");
-    assert!(text.contains("ouroboros@beta"), "{text}");
+    // T2.8: the machine, not the Erlang node. A picker column of `nonode@nohost` on a
+    // single-machine client taught nothing and cost twelve cells of the id beside it.
+    assert!(text.contains("beta"), "{text}");
+    assert!(!text.contains("ouroboros@beta"), "{text}");
     assert!(text.contains("space peek · r reply"), "{text}");
 }
 

@@ -53,13 +53,16 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
 
     match &app.status.value {
         Some(status) => {
-            lines.push(field("node", &blank(&status.node)));
+            // T2.8. The node as a person would name it: `nonode@nohost` is what an unnamed
+            // BEAM calls itself, and this pane is where an operator comes to find out what
+            // they are attached to.
+            lines.push(field("node", &super::panels::node_label(&status.node)));
             lines.push(field("role", &blank(&status.role)));
             lines.push(field("cluster", &status.cluster_summary()));
             lines.push(field("forge", &status.forge_summary()));
         }
         None => {
-            lines.push(field("node", &blank(&app.hello.node)));
+            lines.push(field("node", &super::panels::node_label(&app.hello.node)));
             lines.push(field("role", &blank(&app.hello.role)));
             lines.push(Line::from(Span::styled(
                 "waiting for runtime.status",
@@ -94,7 +97,9 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut lines = vec![
         field("mode", &summary.mode),
-        field("local", &summary.machine),
+        // T2.8. `machine_summary` has already split the name half off the node, so an
+        // unnamed BEAM arrives here as the bare atom `nonode`; the label knows both forms.
+        field("local", &super::panels::node_label(&summary.machine)),
         Line::from(format!(
             "Expected {expected} · Connected {} · Offline {offline}",
             summary.connected
@@ -107,7 +112,12 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
             status
                 .connected_nodes
                 .iter()
-                .map(|node| Line::from(format!("connected  {node}"))),
+                // F6. `machine_label`, not `node_label`: this is the one list on the
+                // Dashboard whose whole job is to tell machines apart, and a fleet's nodes
+                // share their name and differ in their host — `ouro@alpha` and
+                // `ouro@beta` both read `ouro` through the runtime-naming label. The
+                // picker and the session cards already ask the same question this way.
+                .map(|node| Line::from(format!("connected  {}", app.machine_label(node)))),
         ),
         Some(_) if summary.mode == "Standalone" => lines.push(Line::from(Span::styled(
             // Kept as a reassuring state, not an error: a laptop daemon is standalone by

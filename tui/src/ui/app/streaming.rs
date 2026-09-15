@@ -476,14 +476,29 @@ impl App {
                     None => {
                         watch.resync_again = false;
                         self.sessions.rounds.remove(&key);
-                        self.inform(format!("replaying {id} failed: {rpc}"), NoticeKind::Error);
+                        // F10. The word, not the wire's number: this row is read by
+                        // whoever just watched a transcript stop, and `-32006` is the one
+                        // part of it they cannot act on.
+                        self.inform(
+                            format!(
+                                "replaying {id} failed: {}",
+                                crate::ui::panels::refusal_text(&rpc.to_string())
+                            ),
+                            NoticeKind::Error,
+                        );
                     }
                 }
             }
             Err(other) => {
                 watch.resync_again = false;
                 self.sessions.rounds.remove(&key);
-                self.inform(format!("replaying {id} failed: {other}"), NoticeKind::Error);
+                self.inform(
+                    format!(
+                        "replaying {id} failed: {}",
+                        crate::ui::panels::refusal_text(&other.to_string())
+                    ),
+                    NoticeKind::Error,
+                );
             }
         }
     }

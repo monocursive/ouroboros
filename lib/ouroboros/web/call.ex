@@ -50,10 +50,14 @@ defmodule Ouroboros.Web.Call do
   alias Ouroboros.Gateway.Wire
 
   @type scope :: :read | :operate
+  # The fourth element is the gateway's own `data`, passed through untouched: a map for
+  # most refusals, and a list where `Ouroboros.Gateway.Wire` encoded a tagged tuple
+  # (`["shell_refused", detail]` from `workspace.exec`, the shape the shell path in
+  # `DeckLive` matches on).
   @type result ::
           {:ok, term()}
           | {:error, integer(), String.t()}
-          | {:error, integer(), String.t(), map()}
+          | {:error, integer(), String.t(), map() | list()}
 
   @doc """
   Runs one gateway method on behalf of an authenticated browser session.

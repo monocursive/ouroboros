@@ -869,12 +869,110 @@ impl App {
 
         self.compose(ComposerVerb::Message);
 
+        // Whatever was in the draft goes where `up` finds it, exactly as `Esc` banks one.
+        // This used to be a bare `clear_text`, which is not a bank: `ctrl+r` and `ctrl+x m`
+        // ate fifty typed characters with no way back, and the notice that says `up`
+        // brings a draft back was true of one key and not of these two.
+        let banked = self
+            .sessions
+            .composer
+            .as_mut()
+            .and_then(|composer| {
+                let banked = composer.editor.accept_submission();
+                composer.user_changed_draft();
+                banked
+            })
+            .is_some();
+
+        if banked {
+            self.remember_composer_history();
+        }
+
         let catalog = self.completion_catalog.clone();
         if let Some(composer) = self.sessions.composer.as_mut() {
             composer.editor.clear_text();
             composer.editor.paste(text, &catalog);
             composer.user_changed_draft();
         }
+
+        if banked {
+            self.inform(
+                format!(
+                    "draft cleared; {} brings it back",
+                    self.keymap.label(Action::QueueRetract)
+                ),
+                NoticeKind::Info,
+            );
+        }
+    }
+
+    /// `Action::Rename`: the composer, prefilled with the verb and the title it has now.
+    ///
+    /// The current title is in the draft rather than replaced by it, so the key is an
+    /// edit of what the session is called and not a blank field over a name nobody can
+    /// see. A session the runtime has not named yet gets the bare verb and a space.
+    pub(super) fn rename_prefill(&mut self) {
+        // Its own refusal rather than `prefill_composer`'s, which talks about a next turn
+        // this key has nothing to do with.
+        if self.sessions.open.is_none() {
+            self.inform("open a session to rename it", NoticeKind::Info);
+            return;
+        }
+
+        let title = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.title.clone())
+            .unwrap_or_default();
+
+        self.prefill_composer(&format!("/rename {title}"));
+    }
+
+    /// `/rename <title>`. The gateway holds the bound and the sanitising (`B6`), so this
+    /// sends what was typed and reports what came back.
+    pub(super) fn rename_session(&mut self, title: &str) {
+        let title = title.trim();
+
+        if title.is_empty() {
+            self.inform(
+                "name it: /rename what this session is about",
+                NoticeKind::Info,
+            );
+            return;
+        }
+
+        let Some((plane, id)) = self.sessions.open.clone() else {
+            self.inform("open a session before renaming it", NoticeKind::Info);
+            return;
+        };
+
+        // Belt as well as braces: a gateway without the method answers `-32601`, so the
+        // call would be refused anyway. The gate is here for the *message* — "this runtime
+        // does not serve interactive.rename" is a fact about the far side that an operator
+        // can act on, and a raw JSON-RPC code is not.
+        if !self.hello.serves("interactive.rename") {
+            self.inform(
+                "this runtime does not serve interactive.rename",
+                NoticeKind::Warn,
+            );
+            return;
+        }
+
+        if self.refuse_owner_conflict(plane, &id) {
+            return;
+        }
+
+        let params = self.routed_session_params(plane, &id, json!({ "id": id, "title": title }));
+
+        self.issue(Call::new(
+            Tag::Action {
+                label: "rename",
+                plane,
+                id: id.clone(),
+            },
+            plane.method("rename"),
+            params,
+        ));
     }
 
     // ----- B5: Esc, Esc Esc, and going back ------------------------------------------
@@ -1931,21 +2029,46 @@ impl App {
         let Some(input) = composer.editor.submission() else {
             return;
         };
+        // The draft exactly as it was typed. `submission()` trims, and the grammar below
+        // reads leading whitespace as an instruction, so the trimmed form cannot be what
+        // decides whether this line is a verb.
+        let raw = composer.editor.text().to_string();
         let verb = composer.verb;
 
-        if self.activate_slash_command(&input) {
-            if let Some(composer) = self.sessions.composer.as_mut() {
-                composer.editor.accept_submission();
-                composer.user_changed_draft();
+        match classify_line(&raw) {
+            Line::Verb => {
+                if self.activate_slash_command(&input) {
+                    if let Some(composer) = self.sessions.composer.as_mut() {
+                        composer.editor.accept_submission();
+                        composer.user_changed_draft();
+                    }
+                    self.remember_composer_history();
+                    return;
+                }
+
+                // A verb this client has, with an argument it could not read.
+                self.inform(verb_argument_refusal(&raw), NoticeKind::Warn);
+                return;
             }
-            self.remember_composer_history();
-            return;
+            // A verb this client does not have, alone on its line. Before this it went to
+            // the model as a turn (R1 §2.3) — a typo became a paid request, and on the
+            // home screen it became a whole session.
+            Line::Refused(refusal) => {
+                self.inform(refusal, NoticeKind::Warn);
+                return;
+            }
+            Line::Message => {}
         }
 
         // B7. A draft that begins with `!` is the operator's own command, not a message to
         // the model. Claimed here, beside the slash verbs, because it is the same kind of
         // thing: a line the composer acts on itself rather than sending as a turn.
-        if let Some(command) = input.strip_prefix('!') {
+        // The same escape the slash grammar has: a line that starts with whitespace is
+        // prose, whatever its first printable character.
+        if let Some(command) = input
+            .strip_prefix('!')
+            .filter(|_command| !raw.starts_with(char::is_whitespace))
+        {
             self.run_operator_shell(command);
 
             if let Some(composer) = self.sessions.composer.as_mut() {
@@ -2278,6 +2401,11 @@ impl App {
             return true;
         }
 
+        if let Some(title) = slash_arg(trimmed, "/rename") {
+            self.rename_session(title);
+            return true;
+        }
+
         if let Some(name) = slash_arg(trimmed, "/preview") {
             self.preview_capability(name);
             return true;
@@ -2300,11 +2428,12 @@ impl App {
             return true;
         }
 
-        // A10. Bare `/theme` cycles; `/theme <name>` goes straight to one. Both take effect
-        // on the next frame, which is the preview: there is nothing to preview a palette
-        // *in* but the screen already showing the conversation.
+        // A10/T2.9. Bare `/theme` opens the list; `/theme <name>` goes straight to one and
+        // is immediate, because naming a palette is already the choice. Both take effect on
+        // the screen already showing the conversation — there is nothing else to preview a
+        // palette in — but only the picker's `Enter` writes the file.
         if trimmed == "/theme" {
-            self.cycle_theme();
+            self.open_theme_picker();
             return true;
         }
 
@@ -2439,10 +2568,20 @@ impl App {
         true
     }
 
-    /// Ctrl-C: clear the prompt if it has text; otherwise interrupt a running turn;
-    /// a second press on an idle surface opens the quit dialog. Never a single-press quit.
+    /// Ctrl-C, in four steps, in this order: close what is open over the screen; clear a
+    /// draft that has text; interrupt a turn that is running; otherwise arm, and a second
+    /// press inside the window opens the quit dialog.
+    ///
+    /// The third step used to be "a session is open", which is not the same question and
+    /// is why this key could never reach the fourth one with a session open (R1 §2.4):
+    /// every press on an idle session issued an interrupt for a turn that was not there,
+    /// and somebody arriving from opencode, Claude Code or Codex — where `ctrl+c` exits —
+    /// had no exit key they would find. It reaches the fourth step now, from any tab.
     pub(super) fn ctrl_c(&mut self) {
+        // Each of the first three steps *did* something, so none of them may leave an
+        // arm behind: the press that closed an overlay is not half of a quit.
         if self.overlay.is_some() {
+            self.disarm_quit();
             self.interrupt();
             return;
         }
@@ -2455,35 +2594,44 @@ impl App {
             } else if let Some(editor) = self.focused_editor_mut() {
                 editor.clear_text();
             }
-            self.ctrl_c_until = None;
+            self.disarm_quit();
             return;
         }
 
-        if self.sessions.open.is_some() {
+        if self.turn_running() {
             self.interrupt_turn();
-            self.ctrl_c_until = None;
+            self.disarm_quit();
             return;
         }
 
-        if self.ctrl_c_until.is_some_and(|until| self.ticks < until) {
-            self.ctrl_c_until = None;
+        if self.quit_armed() {
+            self.disarm_quit();
             self.open_quit();
             return;
         }
 
-        self.ctrl_c_until = Some(self.ticks + CTRL_C_QUIT_TICKS);
-        let (cancel, interrupt, quit) = (
-            self.keymap.label(Action::Cancel),
-            self.keymap.label(Action::Interrupt),
-            self.keymap.label(Action::Quit),
-        );
-        self.inform(
-            format!(
-                "press {cancel} again to quit · {interrupt} aborts a running turn · \
-                 {quit} opens the quit dialog"
-            ),
-            NoticeKind::Info,
-        );
+        self.arm_quit();
+
+        // Only keys that are actually bound are named. The footer says the same thing
+        // from `App::quit_armed` for as long as the window is open, which is the half a
+        // notice cannot do.
+        let mut line = format!("press {} again to quit", self.keymap.label(Action::Cancel));
+
+        if self.bound(Action::Interrupt) {
+            line.push_str(&format!(
+                " · {} aborts a running turn",
+                self.keymap.label(Action::Interrupt)
+            ));
+        }
+
+        if self.bound(Action::Quit) {
+            line.push_str(&format!(
+                " · {} opens the quit dialog",
+                self.keymap.label(Action::Quit)
+            ));
+        }
+
+        self.inform(line, NoticeKind::Info);
     }
 
     /// Ctrl-C / Esc: the active turn, never this process.
@@ -2923,6 +3071,103 @@ impl App {
             .clone()
             .or_else(|| self.sessions.picker_key(0));
         self.overlay = Some(Overlay::SessionPicker { selected });
+    }
+}
+
+/// The refusal for a line that begins with a `/verb` this client does not have, or `None`
+/// when the line is an ordinary message.
+///
+/// Called *after* `activate_slash_command` has had its turn, so every verb that exists
+/// has already run. What is left is a typo, and a typo must not become a paid turn: on a
+/// session it used to be sent to the model, and on the home screen it started a session
+/// and opened a sign-in for it (R1 §2.3). The draft is kept by the caller, because the
+/// fix is one keystroke away and throwing the line out would cost more than the mistake.
+/// What a submitted draft *is*.
+///
+/// One grammar, read off the draft exactly as it was typed, used by the session composer
+/// and by the home screen. The first cut of this read only a trimmed first token and was
+/// far too eager: `/tmp is full` and `/usr is read-only on this box` are ordinary
+/// sentences, and a client that cannot send them is a client you cannot talk to about
+/// your filesystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Line {
+    /// Hand it to `activate_slash_command`.
+    Verb,
+    /// Send it to the model.
+    Message,
+    /// Refuse it, with this reason. The draft stays where it is.
+    Refused(String),
+}
+
+/// Reads `raw` — the editor's text, *untrimmed* — as one of the three.
+///
+/// The rules, and the sentence each of them exists to protect:
+///
+/// 1. **Anything that starts with whitespace is a message.** That is the escape hatch: a
+///    leading space sends `/keys` as the four characters rather than as the verb, and it
+///    is the answer to "how do I talk about a command". It also settles a draft whose
+///    first line is blank, which is otherwise a question nobody has a good answer to.
+/// 2. **A first token that is not verb-shaped is a message.** `/usr/bin/env` has two
+///    slashes; `!ls` is the operator shell's.
+/// 3. **A known verb runs only when the rest of the draft is blank.** `/context` followed
+///    by a paragraph is a paragraph — somebody wrote it to be read, not to be eaten by a
+///    verb on line one.
+/// 4. **An unknown verb with more words after it is a message.** `/tmp is full`. This is
+///    the rule that costs something: `/exprot the log` is a typo that goes to the model.
+///    It is the cheaper mistake — the other direction refuses sentences forever.
+/// 5. **An unknown verb alone on one line is refused**, which is the `/ke` case the whole
+///    refusal was built for, and the notice says how to send it as text anyway.
+pub(super) fn classify_line(raw: &str) -> Line {
+    if raw.starts_with(char::is_whitespace) {
+        return Line::Message;
+    }
+
+    let Some(verb) = crate::ui::editor::slash_verb(raw) else {
+        return Line::Message;
+    };
+
+    let (first_line, rest) = match raw.split_once('\n') {
+        Some((first_line, rest)) => (first_line, rest),
+        None => (raw, ""),
+    };
+
+    let alone = rest.trim().is_empty();
+
+    if crate::ui::editor::is_known_command(verb) {
+        // A verb with a paragraph under it was never a verb.
+        return match alone {
+            true => Line::Verb,
+            false => Line::Message,
+        };
+    }
+
+    let more_words = first_line.split_whitespace().nth(1).is_some();
+
+    if more_words || !alone {
+        return Line::Message;
+    }
+
+    let nearest = crate::ui::editor::nearest_commands(verb);
+    let hint = match nearest.is_empty() {
+        true => "/help lists the verbs this client takes".to_string(),
+        false => format!("nearest: {}", nearest.join(", ")),
+    };
+
+    Line::Refused(format!(
+        "unknown command {verb}; {hint} · start the line with a space to send it as text"
+    ))
+}
+
+/// The refusal for a known verb whose argument this client could not read.
+///
+/// Reached only after `activate_slash_command` has said no about a line
+/// [`classify_line`] called a [`Line::Verb`] — so the verb exists and the argument is what
+/// was wrong. "Unknown" would be untrue, and sending the line on to the model as a turn,
+/// which is what used to happen, is worse than either.
+pub(super) fn verb_argument_refusal(raw: &str) -> String {
+    match crate::ui::editor::slash_verb(raw) {
+        Some(verb) => format!("{verb} did not take that argument"),
+        None => "that verb did not take that argument".to_string(),
     }
 }
 
