@@ -790,6 +790,8 @@ pub struct App {
     /// How far the `?` panel is scrolled. Reset when it opens: a help panel that
     /// remembered where the last reader left it would open on the middle of a table.
     pub help_scroll: usize,
+    // ui-parity base: the session rail can be hidden (leader.rail); T1 flips it, T2 draws it.
+    pub rail_hidden: bool,
     /// The armed first half of an `Esc Esc`, and the session it was pressed in.
     ///
     /// The session travels with the arm because the first Escape may have *left* it: on an
@@ -951,6 +953,7 @@ impl App {
             open_url_pending: None,
             leader_until: None,
             help_scroll: 0,
+            rail_hidden: false,
             backtrack_arm: None,
             context: None,
             shell_refusal: None,
