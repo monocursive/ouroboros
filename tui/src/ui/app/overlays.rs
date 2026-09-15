@@ -420,7 +420,8 @@ impl Command {
             Self::Steer => Action::LeaderSteer,
             Self::ExternalEditor => Action::Editor,
             Self::CloseSession => Action::LeaderEnd,
-            Self::Settings => Action::Settings,
+            Self::Settings => Action::LeaderSettings,
+            Self::Theme => Action::LeaderTheme,
             Self::Help => Action::Help,
             Self::Backtrack => Action::Backtrack,
             Self::AutoApprove => Action::LeaderAutoApprove,
@@ -1880,17 +1881,10 @@ impl App {
         None
     }
 
+    /// One predicate with `App::turn_running`, which the interrupt key and the `ctrl+c`
+    /// state machine read; the palette gates on the same fact.
     fn session_busy(&self) -> bool {
-        if self.waiting_for_open_agent_reply() {
-            return true;
-        }
-
-        self.sessions.open_info().is_some_and(|session| {
-            matches!(
-                session.status.as_str(),
-                "running" | "starting" | "awaiting_approval"
-            )
-        })
+        self.turn_running()
     }
 
     /// `Esc` in the composer, after the interrupt has had its chance at the key.

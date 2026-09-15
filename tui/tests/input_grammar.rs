@@ -1446,18 +1446,18 @@ fn an_unknown_verb_in_a_session_is_refused_and_the_draft_is_kept() {
     let mut app = opened("idle", steering_capabilities(), Vec::new());
 
     compose(&mut app);
-    type_text(&mut app, "/keym");
+    type_text(&mut app, "/keyq");
     app.apply(key(KeyCode::Enter));
 
     assert!(
         turn_calls(&app.drain()).is_empty(),
         "an unknown verb was sent to the model"
     );
-    assert_eq!(draft(&app), "/keym", "the draft was thrown away");
+    assert_eq!(draft(&app), "/keyq", "the draft was thrown away");
 
     let notice = app.notice.as_ref().expect("a refusal");
     assert!(
-        notice.text.contains("unknown command /keym"),
+        notice.text.contains("unknown command /keyq"),
         "{}",
         notice.text
     );

@@ -5006,7 +5006,8 @@ fn the_help_overlay_states_the_honest_limits() {
     app.hello.scope = "read".into();
 
     app.apply(key(KeyCode::Char('?')));
-    let screen = render(&mut app, 130, 30);
+    // Tall enough for every row: the panel lists every live action since T2.3.
+    let screen = render(&mut app, 130, 100);
 
     assert!(screen.contains("ctrl+c"), "{}", screen.text());
     assert!(screen.contains("one gateway view of the fleet"));

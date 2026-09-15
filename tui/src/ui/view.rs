@@ -119,12 +119,12 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
                 // T2.12. A hidden rail is a state, and the header is the one surface that
                 // is drawn whether or not the rail is. Without this the two screens differ
                 // by two missing panels and nothing says which key put them away.
-                // T1: `leader.rail` becomes an action, and this reads its key out of the
-                // keymap — `app.keymap.label(Action::LeaderRail)` — so a rebound toggle is
-                // the one named. A literal until then, because the chord does not exist in
-                // this tree to be resolved.
+                // The key comes out of the keymap, so a rebound toggle is the one named.
                 if app.rail_hidden {
-                    format!("{session}  ·  rail hidden · ctrl+x b")
+                    format!(
+                        "{session}  ·  rail hidden · {}",
+                        app.keymap.label(Action::LeaderRail)
+                    )
                 } else {
                     session
                 }
@@ -319,7 +319,12 @@ fn header_second_row(frame: &mut Frame, area: Rect, context: &str, workspace: &s
 /// and `Tab::ALL` plus its hint is the more useful of the two — the subtitle's only unique
 /// fact is the tab's own title, which the highlighted cell already carries.
 fn tab_strip(app: &App) -> Line<'static> {
-    let hint = "ctrl+x 1-4";
+    let hint_owned = format!(
+        "{}-{}",
+        app.keymap.label(Action::LeaderTabDashboard),
+        app.keymap.spec(Action::LeaderTabLogs)
+    );
+    let hint = hint_owned.as_str();
 
     // Screen-reader mode: a list, in words, with the current one said rather than shown.
     // A REVERSED cell is not a fact a screen reader can read out.
@@ -3699,75 +3704,15 @@ fn backtrack(
 /// The rows that are not chords — `@ path`, the tab digits, the wheel, the `/` verbs — are
 /// spelled here because they are not rebindable, and the "keys are data" row below says so
 /// rather than leaving a reader to infer it.
-/// T2.3. Which of the plan's five groups an action belongs to.
-///
-/// The single mapping function for the panel, deliberately: `Action::group()` still
-/// returns this client's original five names ("composing", "while the agent works",
-/// "leader", "runtime", "getting started"), and fifteen of the seventeen leader verbs
-/// would land under one heading called "leader" — which says where the key is, not what
-/// the verb does. T1 changes `Action::group()` to return these names directly; when it
-/// does, the body of this function becomes `action.group()` and nothing else in the panel
-/// moves.
+/// T2.3. Which of the plan's five groups an action belongs to: `Action::group()`'s own
+/// answer, capitalised the way the headings are drawn. One taxonomy for the palette, this
+/// panel and the which-key overlay.
 fn plan_group(action: Action) -> &'static str {
     use crate::ui::app::Group;
 
-    match action {
-        // What this conversation is.
-        Action::ChooseLocation
-        | Action::LeaderNew
-        | Action::LeaderNewOptions
-        | Action::LeaderSessions
-        | Action::LeaderWritable
-        | Action::LeaderEnd => Group::Session,
-
-        // What the turn in front of you is doing — and the draft that becomes the next one.
-        Action::Send
-        | Action::Steer
-        | Action::Newline
-        | Action::QueueRetract
-        | Action::PasteImage
-        | Action::Editor
-        | Action::Interrupt
-        | Action::Cancel
-        | Action::StarterExplore
-        | Action::StarterReview
-        | Action::StarterPlan
-        | Action::LeaderEditor
-        | Action::LeaderSteer
-        | Action::LeaderApproval
-        | Action::LeaderAutoApprove
-        | Action::LeaderShellRule
-        | Action::EditorWordBack
-        | Action::EditorWordForward
-        | Action::EditorKillWordBack
-        | Action::EditorKillWordForward
-        | Action::EditorKillLine
-        | Action::EditorKillToStart
-        | Action::EditorYank
-        | Action::EditorLineStart
-        | Action::EditorLineEnd => Group::Turn,
-
-        // The conversation as a document.
-        Action::Backtrack
-        | Action::Verbose
-        | Action::PlanPanel
-        | Action::LeaderCopy
-        | Action::LeaderScrollback
-        | Action::LeaderEditorView
-        | Action::LeaderOpenImage
-        | Action::LeaderDetails => Group::Conversation,
-
-        // This client.
-        Action::Palette
-        | Action::Leader
-        | Action::Help
-        | Action::Settings
-        | Action::Quit
-        | Action::QuitEmpty
-        | Action::LeaderQuit
-        | Action::LeaderHelp => Group::Client,
-    }
-    .as_str()
+    Group::parse(action.group())
+        .unwrap_or(Group::Client)
+        .as_str()
 }
 
 /// Rows drawn as one although they are several actions: each is one idea, and a reader
@@ -3792,7 +3737,7 @@ const HELP_MERGED: [(&[Action], &str); 2] = [
 ///
 /// The "keys are data" line under the table says which of the two a reader is looking at,
 /// rather than leaving them to infer it from a row that never changes.
-const HELP_LITERAL: [(&str, &str, &str); 4] = [
+const HELP_LITERAL: [(&str, &str, &str); 3] = [
     (
         "Turn",
         "@ path",
@@ -3803,10 +3748,6 @@ const HELP_LITERAL: [(&str, &str, &str); 4] = [
         "backspace",
         "on an empty draft, removes the newest attachment",
     ),
-    // T1: `leader.dashboard` / `.sessions` / `.upgrade` / `.logs` become real actions on
-    // `ctrl+x 1`–`4`, and this row is then drawn from the keymap like every other chord.
-    // Until then it is a literal, because the digits are matched literally.
-    ("Runtime", "ctrl+x 1-4", "the four runtime tabs"),
     (
         "Client",
         "wheel",

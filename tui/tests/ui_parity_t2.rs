@@ -423,7 +423,11 @@ fn the_help_panel_names_the_four_runtime_tabs_and_not_seven() {
         !keys.contains(&"1-7 / Tab"),
         "the panel still advertises three tabs that do not exist"
     );
-    assert!(keys.contains(&"ctrl+x 1-4"), "the four tabs are not named");
+    // T1 made each tab a leader verb, so the panel draws four keymap rows rather than one
+    // literal.
+    for tab in ["ctrl+x 1", "ctrl+x 2", "ctrl+x 3", "ctrl+x 4"] {
+        assert!(keys.contains(&tab), "the four tabs are not named: {tab} is missing");
+    }
 }
 
 /// A verb the operator turned `off` is not drawn. `?` answers "what can I press here",
@@ -800,6 +804,8 @@ fn every_provider_row_is_named_rather_than_spelled_as_a_wire_id() {
 fn the_settings_overlay_has_a_client_section_that_writes_through_the_save_path() {
     let mut app = shell();
     app.config_path = Some(std::path::PathBuf::from("/tmp/config.toml"));
+    // `settings` is `off` since T1; the overlay opens from `leader.settings`.
+    app.apply(ctrl('x'));
     app.apply(key(KeyCode::Char(',')));
 
     let tabs = render(&mut app, 120, 34);
@@ -857,6 +863,7 @@ fn the_settings_overlay_has_a_client_section_that_writes_through_the_save_path()
 #[test]
 fn an_unreadable_budget_is_refused_rather_than_saved_as_nothing() {
     let mut app = shell();
+    app.apply(ctrl('x'));
     app.apply(key(KeyCode::Char(',')));
     app.apply(key(KeyCode::F(4)));
 

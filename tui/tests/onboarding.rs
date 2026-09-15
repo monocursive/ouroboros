@@ -1509,7 +1509,7 @@ fn closing_a_connected_account_does_not_claim_sign_in_was_cancelled() {
 fn a_mistyped_verb_on_the_home_screen_starts_nothing() {
     let mut app = harness(false);
 
-    type_text(&mut app, "/keym");
+    type_text(&mut app, "/keyq");
     app.apply(key(KeyCode::Enter));
 
     assert!(
@@ -1520,10 +1520,10 @@ fn a_mistyped_verb_on_the_home_screen_starts_nothing() {
         "a verb this client does not have started something"
     );
     assert!(app.overlay.is_none(), "{:?}", app.overlay);
-    assert_eq!(app.home_draft.text(), "/keym", "the draft was thrown away");
+    assert_eq!(app.home_draft.text(), "/keyq", "the draft was thrown away");
 
     let refusal = app.home_error.as_deref().expect("a refusal on the home");
-    assert!(refusal.contains("unknown command /keym"), "{refusal}");
+    assert!(refusal.contains("unknown command /keyq"), "{refusal}");
     assert!(
         refusal.contains("/keys"),
         "the nearest verb is named: {refusal}"
