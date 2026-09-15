@@ -301,6 +301,58 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     assert Prefs.read(dir)["model"] == "vendor:unlisted-model-9"
   end
 
+  # The reviewer's CONTROL, adopted: the two arities really do differ on the case W1.4 is
+  # about. Without it, a test that only drives the page could pass against a `/1` that had
+  # quietly started keeping the row.
+  test "model_field/1 loses the remembered id that /2 keeps" do
+    {:ok, catalogue} = Ouroboros.Web.Call.call(:read, "runtime.models", %{})
+
+    form = %Ouroboros.Web.Live.NewSession{
+      Ouroboros.Web.Live.NewSession.new()
+      | model_choice: Ouroboros.Web.Live.NewSession.choice("catalog:vendor:unlisted-model-9")
+    }
+
+    one = Ouroboros.Web.Live.NewSession.model_field(catalogue)
+    two = Ouroboros.Web.Live.NewSession.model_field(catalogue, form)
+
+    refute Ouroboros.Web.Live.NewSession.offers?(one, form.model_choice),
+           "model_field/1 already offers the remembered model, so W1.4 changed nothing"
+
+    assert Ouroboros.Web.Live.NewSession.offers?(two, form.model_choice),
+           "model_field/2 does not keep the remembered model"
+  end
+
+  # `field/1` is the second call site, and this is the test that holds it: `save-defaults`
+  # builds `start_params/2` from it, so a field without the remembered row writes no model
+  # at all — even though the page was drawing one a moment earlier.
+  test "a sandbox change then Save keeps the remembered model byte for byte",
+       %{conn: conn, data_dir: dir} do
+    :ok = Prefs.write(dir, %{"model" => "vendor:unlisted-model-9"})
+
+    {:ok, view, html} = live(conn, "/settings")
+    assert html =~ "vendor:unlisted-model-9"
+
+    render_click(view, "pick-sandbox", %{"mode" => "unrestricted"})
+    view |> form("#session-defaults", %{}) |> render_submit()
+
+    prefs = Prefs.read(dir)
+    assert prefs["model"] == "vendor:unlisted-model-9"
+    assert prefs["sandbox_mode"] == "unrestricted"
+  end
+
+  # F12. Three different facts, three different words. A status that answered without a
+  # `:node` key did not report one; a status that answered `nonode@nohost` reported that it
+  # has no name; and no status at all is still loading. Spelling the first as "this
+  # computer" would be the page claiming something nothing said.
+  test "a runtime node is loading, unreported, or a machine — and they read differently" do
+    alias Ouroboros.Web.Live.SettingsLive
+
+    assert SettingsLive.runtime_node(nil) == "Loading…"
+    assert SettingsLive.runtime_node(%{role: :standalone}) == "Not reported"
+    assert SettingsLive.runtime_node(%{node: :nonode@nohost}) == "this computer"
+    assert SettingsLive.runtime_node(%{node: :ouro@alpha}) == "alpha"
+  end
+
   defp write_grok(path, expires) do
     credential = %{
       "key" => "grok-settings-secret-canary",

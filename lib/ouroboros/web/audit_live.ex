@@ -1,6 +1,12 @@
 defmodule Ouroboros.Web.AuditLive do
   @moduledoc "Read-only investigation of canonical evidence with explicit coverage."
   use Phoenix.LiveView
+
+  # The needs-you bell is in the one top bar, so it is on this page too. This is what makes
+  # that honest: the same edge computation and the same three-second `interactive.list`
+  # poll the deck runs, so a bell switched on here rings rather than sitting quiet
+  # (`Ouroboros.Web.NeedsYou`).
+  on_mount {Ouroboros.Web.NeedsYou, :bell}
   alias Ouroboros.Web.{Call, Config, Layouts, Presentation}
 
   @impl true

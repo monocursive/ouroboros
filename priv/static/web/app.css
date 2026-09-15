@@ -523,8 +523,7 @@ body.phx-loading {
 
 /* Where you already are. Ink rather than the attention green: rule 1 reserves the green
    for a session that needs a person, and "this is the page you are on" is not that. */
-.ouro-topbar-link[aria-current="page"],
-.ouro-wordmark[aria-current="page"] {
+.ouro-topbar-link[aria-current="page"] {
   color: var(--ink);
 }
 
@@ -949,17 +948,16 @@ body.phx-loading {
   overflow-wrap: anywhere;
 }
 
-/* The session's stable id, as a field a reader can select rather than a label they cannot.
-   Readonly and borderless so it reads as the value it is; a copy button lands with W2's
-   clipboard hook. */
+/* The session's stable id, whole. A fixed-width `<input>` truncated it, and an id a reader
+   cannot see all of is not an id; `user-select: all` makes one click take the lot, which is
+   the part a copy button would otherwise be for. */
 .ouro-vital-id {
-  width: 100%;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
+  display: inline-block;
+  max-width: 100%;
   font-size: 0.85rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
 }
 
 /* A bar, not a ring: a ring reads as a dial with a target, and a context window has no
@@ -1160,29 +1158,6 @@ body.phx-loading {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ouro-streaming .ouro-prose,
-  .ouro-loader-cell-active,
-  .ouro-loading-label {
-    animation: none;
-  }
-
-  .ouro-loader-cell-active {
-    opacity: 0.15;
-    transform: none;
-  }
-
-  .ouro-loading-label {
-    background: none;
-    -webkit-text-fill-color: currentColor;
-  }
-
-  .ouro-streaming .ouro-prose {
-    border-left: 2px solid var(--hairline-2);
-    padding-left: 0.6rem;
-  }
 }
 
 @media (forced-colors: active) {
@@ -1719,9 +1694,20 @@ body.phx-loading {
   letter-spacing: 0.06em;
 }
 
+/* The toggle and its caption are one control, and the caption is the half that says how
+   long the grant lasts. It has to be able to wrap: at 375px `flex: 0 0 auto` (which
+   `.ouro-auto` carries for its old home under the composer) clipped "Only for this" at the
+   viewport edge. */
 .ouro-composer-status .ouro-auto {
   padding: 0;
   border-top: 0;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ouro-composer-status .ouro-auto > span {
+  min-width: 0;
 }
 
 /* ----------------------------------------------------------------------- Approvals */
@@ -3532,14 +3518,6 @@ body .ouro-row-action {
   border: 0;
   font-size: 0.85rem;
 }
-body .ouro-vitals-mobile {
-  display: block;
-  flex: 0 0 auto;
-  max-height: 35dvh;
-  overflow: auto;
-  padding: 0 1.25rem 0.65rem;
-  border: 0;
-}
 body .ouro-vitals-mobile > summary {
   color: var(--secondary);
   font-size: 0.78rem;
@@ -3750,6 +3728,19 @@ body .ouro-gate {
   .ouro-vitals-mobile .ouro-vitals {
     border: 0;
     max-height: 45vh;
+  }
+
+  /* The disclosure is the narrow-viewport home of the vitals, and only that. Unscoped
+     (which it was until this fix) it outranks `.ouro-vitals-mobile { display: none }` at
+     every width, so a desktop deck drew the vitals twice: once as the third column and
+     once again under the composer. */
+  body .ouro-vitals-mobile {
+    display: block;
+    flex: 0 0 auto;
+    max-height: 35dvh;
+    overflow: auto;
+    padding: 0 1.25rem 0.65rem;
+    border: 0;
   }
 
   .ouro-focus {
@@ -4038,6 +4029,13 @@ body .ouro-gate {
     -webkit-line-clamp: 2;
   }
 
+  /* F6: below 520px the caption gets the whole width rather than whatever is left beside
+     the button, which is how "Only for this session while it is open…" ended up clipped
+     at the viewport edge. */
+  .ouro-composer-status .ouro-auto > span {
+    flex-basis: 100%;
+  }
+
   body .ouro-composer-footer {
     flex-wrap: wrap;
   }
@@ -4089,6 +4087,30 @@ body .ouro-gate {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* W1.9/F14 — one declaration of this query. The rules above this comment were a second
+     `prefers-reduced-motion` block earlier in the file; they are first here so the
+     qualified overrides below still win, which is the order the cascade already had. */
+
+  .ouro-streaming .ouro-prose,
+  .ouro-loader-cell-active,
+  .ouro-loading-label {
+    animation: none;
+  }
+
+  .ouro-loader-cell-active {
+    opacity: 0.15;
+    transform: none;
+  }
+
+  .ouro-loading-label {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .ouro-streaming .ouro-prose {
+    border-left: 2px solid var(--hairline-2);
+    padding-left: 0.6rem;
+  }
   body button,
   body input,
   body textarea,

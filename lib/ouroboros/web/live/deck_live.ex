@@ -113,6 +113,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Web.Live.LoadingState
   alias Ouroboros.Web.Live.Palette
   alias Ouroboros.Web.Live.Rail
+  alias Ouroboros.Web.NeedsYou
   alias Ouroboros.Web.Presentation
   alias Ouroboros.Web.Route
   alias Ouroboros.Web.Transcript
@@ -929,9 +930,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # Turning it on flushes what is already waiting; turning it off answers nothing and
   # un-answers nothing. Both directions are idempotent because the answered set is.
-  def handle_event("auto_approve", _params, socket) do
-    socket = update(socket, :auto_approve?, &(not &1))
-    {:noreply, auto_answer(socket)}
+  #
+  # The gate is recomputed here rather than read off an assign, because an assign is a
+  # record of what was *drawn* and this event does not have to have come from anything
+  # drawn. A browser can send any `phx-click` on any socket: at read scope the toggle is
+  # never rendered, and without this a forged click flipped the flag and ran `auto_answer/1`
+  # on behalf of a scope that may not answer an approval at all. The `session` param is
+  # checked for the same reason — a click carrying some other session's id is not a click
+  # on this page's control.
+  def handle_event("auto_approve", params, socket) do
+    if auto_approve_allowed?(socket, params) do
+      socket = update(socket, :auto_approve?, &(not &1))
+      {:noreply, auto_answer(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   # A `phx-value-*` this page never drew. Every clause above matches on the values it
@@ -941,6 +954,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def handle_event(event, _params, socket)
       when event in ["send", "respond", "respond_option", "plan_choice", "remember"],
       do: {:noreply, socket}
+
+  # The same two facts the toggle is drawn from: this endpoint's scope may answer an
+  # approval, and this session is the one the page has open.
+  defp auto_approve_allowed?(%{assigns: %{open: {plane, _id}}} = socket, params) do
+    socket.assigns.scope == :operate and
+      Call.available?(:operate, "#{plane}.respond_approval") and
+      current_session?(socket, params)
+  end
+
+  defp auto_approve_allowed?(_closed, _params), do: false
+
+  defp current_session?(%{assigns: %{open: {plane, id}}}, %{"session" => session}),
+    do: session == "#{plane}:#{id}" or session == id
+
+  defp current_session?(_socket, _params), do: true
 
   # ------------------------------------------------------------------------------------
   # Messages
@@ -1606,21 +1634,19 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # rings again. A key that is still pending is never re-pushed. `app.js` keeps its own
   # permanent set on top of this, because a LiveView remount re-seeds these assigns and a
   # repair is not a new request.
-  defp seed_needs_you(socket), do: assign(socket, :announced, needs_you(socket) |> keys())
+  defp seed_needs_you(socket),
+    do: assign(socket, :announced, socket |> needs_you() |> NeedsYou.keys())
 
   defp announce_needs_you(socket) do
     current = needs_you(socket)
-    keys = keys(current)
-    fresh = Enum.reject(current, &MapSet.member?(socket.assigns.announced, &1.key))
+    fresh = NeedsYou.fresh(current, socket.assigns.announced)
 
-    socket = assign(socket, :announced, keys)
+    socket = assign(socket, :announced, NeedsYou.keys(current))
 
     if connected?(socket) and fresh != [],
       do: push_event(socket, "needs-you", %{sessions: fresh}),
       else: socket
   end
-
-  defp keys(sessions), do: MapSet.new(sessions, & &1.key)
 
   # One entry per session in the needs-you group, keyed by the thing that identifies the
   # *ask* wherever one is actually known.
@@ -1634,37 +1660,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # notification, not two, and closing that would take a list verb that answered request
   # ids.
   defp needs_you(%{assigns: assigns}) do
-    # A request this view has answered is one nobody needs to be told about, whether the
-    # answer came from a person's click or from automation. `:answered` is written *before*
-    # the call goes out (`send_response/6`), which is why this holds even though the
-    # request stays in `:approvals` until the plane's resolution event arrives.
-    answered = Map.get(assigns, :answered, MapSet.new())
-    approvals = Map.get(assigns, :approvals, [])
-    open = Map.get(assigns, :open)
-
-    assigns.rows
-    |> Rail.triaged(pending(assigns))
-    |> Enum.filter(&(&1.group == :needs_you))
-    |> Enum.flat_map(fn %{row: row} ->
-      title = Rail.title(row)
-
-      # `group` is the session; `key` is the ask. They are different jobs. The key is what
-      # must never ring twice, so it is the finest identity available. The group is what a
-      # banner is *about*, and it is what `app.js` hands the browser as the notification's
-      # tag — so three approvals landing on one session replace each other into one banner
-      # naming it once, rather than stacking three that all say the same words.
-      group = "#{row.plane}:#{row.id}"
-
-      case {open, approvals} do
-        {{plane, id}, [_first | _rest]} when {plane, id} == {row.plane, row.id} ->
-          approvals
-          |> Enum.reject(&MapSet.member?(answered, &1.request_id))
-          |> Enum.map(&%{key: &1.request_id, group: group, title: title})
-
-        _not_the_open_session ->
-          [%{key: group, group: group, title: title}]
-      end
-    end)
+    # `:answered` is written *before* the call goes out (`send_response/6`), which is why
+    # a request auto-approve handled is already excluded here even though it stays in
+    # `:approvals` until the plane's resolution event arrives.
+    NeedsYou.sessions(assigns.rows,
+      pending: pending(assigns),
+      approvals: Map.get(assigns, :approvals, []),
+      answered: Map.get(assigns, :answered, MapSet.new()),
+      open: Map.get(assigns, :open)
+    )
   end
 
   # ------------------------------------------------------------------------ Remembering
@@ -1879,6 +1883,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       assigns
       |> assign(:triaged, filter_sessions(triaged, assigns.session_query))
       |> assign(:machines, machines(assigns.status))
+      |> assign(:roster, fleet_roster(assigns.status))
       |> assign(:today, today(assigns.rows))
       |> assign(:activity, activity(assigns))
       |> assign(:open_row, open_row)
@@ -1930,6 +1935,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           answerable={@scope == :operate}
           scope={@scope}
           query={@session_query}
+          roster={@roster}
         />
 
         <main class="ouro-focus">
@@ -1960,6 +1966,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             scope={@scope}
             ended={@ended?}
             extras={@composer_extras}
+            roster={@roster}
           />
           <.nothing_open
             :if={is_nil(@open)}
@@ -1977,6 +1984,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           info={@info}
           row={@open_row}
           session_id={@open |> elem(1)}
+          roster={@roster}
         />
       </div>
 
@@ -1997,6 +2005,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :answerable, :boolean, default: false
   attr :scope, :atom, default: :read
   attr :query, :string, default: ""
+  attr :roster, :list, default: []
 
   def rail(assigns) do
     counts = Rail.counts(assigns.triaged)
@@ -2066,6 +2075,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           approvals={@approvals}
           answerable={@answerable}
           scope={@scope}
+          roster={@roster}
         />
       </section>
     </nav>
@@ -2105,6 +2115,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :approvals, :list, default: []
   attr :answerable, :boolean, default: false
   attr :scope, :atom, default: :read
+  attr :roster, :list, default: []
 
   def rail_row(assigns) do
     row = assigns.entry.row
@@ -2117,7 +2128,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:href, Route.session(row.plane, row.id))
       |> assign(
         :line,
-        line(assigns.entry.group, row, Map.get(assigns.activity, {row.plane, row.id}))
+        line(
+          assigns.entry.group,
+          row,
+          Map.get(assigns.activity, {row.plane, row.id}),
+          assigns.roster
+        )
       )
       |> assign(:age_in_line?, age_in_line?(assigns.entry.group, row))
       |> assign(:answers, inline_answers(assigns, selected?))
@@ -2137,9 +2153,13 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     ~H"""
     <div id={"session-row-#{@row.plane}-#{@row.id}"} class="ouro-row-wrap">
+      <%!-- `true` rather than `page`: the page being read is named once, by the top bar's
+            Sessions link. This row is the current item *within* the rail, which is what
+            `aria-current="true"` says; two elements claiming to be the current page tells
+            a screen-reader user there are two. --%>
       <.link
         patch={@href}
-        aria-current={@selected? && "page"}
+        aria-current={@selected? && "true"}
         class={[
           "ouro-row",
           "ouro-row-#{@entry.group}",
@@ -2405,6 +2425,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # ui-parity W2. The composer state that is not the draft, in one attr: this component
   # only carries it through.
   attr :extras, :map, default: %{models: nil, model_query: "", next_effort: nil}
+  attr :roster, :list, default: []
 
   def focused(assigns) do
     {plane, id} = assigns.open
@@ -2566,7 +2587,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     <details class="ouro-vitals-mobile" data-ouro-disclosure={"details:#{@session_id}"}>
       <summary>Session details</summary>
-      <.vitals info={@info} row={@row} session_id={@session_id} />
+      <.vitals info={@info} row={@row} session_id={@session_id} roster={@roster} />
     </details>
     """
   end
@@ -2579,9 +2600,14 @@ defmodule Ouroboros.Web.Live.DeckLive do
   terminal client keeps permanently in its footer, and neither is a thing a person should
   have to remember to go and check.
 
-  The file-access posture says "not reported" where the session reported none, because a
-  posture defaulted for the sake of having something to draw is the one lie a security
-  readout must never tell.
+  ## Why the posture is usually not spelled here
+
+  The composer's own "Change" summary already states the file-access posture one line
+  above, and the vitals state it a third time. Three statements of one fact in one band is
+  noise, and at 375px it pushed the toggle's caption off the edge. So the row carries the
+  toggle, and names the posture only when it is `unrestricted` — the one posture that is a
+  standing risk rather than a setting, and the one the amber tag exists for. Everything
+  else is already on screen.
   """
   attr :sandbox, :any, required: true
   attr :unrestricted, :boolean, required: true
@@ -2591,11 +2617,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def composer_status_row(assigns) do
     ~H"""
     <div class="ouro-composer-status">
-      <span class="ouro-composer-status-fact">
+      <span :if={@unrestricted} class="ouro-composer-status-fact">
         <span class="ouro-composer-status-label">File access</span>
-        <span class={["ouro-mono", @unrestricted && "ouro-tag-full"]}>
-          {if @sandbox, do: Composer.word(@sandbox), else: "Not reported"}
-        </span>
+        <span class="ouro-mono ouro-tag-full">{Composer.word(@sandbox)}</span>
       </span>
 
       <.auto_approve_toggle :if={@can_answer} on={@auto_approve} />
@@ -2711,6 +2735,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :info, :any, required: true
   attr :row, :any, required: true
   attr :session_id, :string, default: nil
+  attr :roster, :list, default: []
 
   def vitals(assigns) do
     usage = (assigns.info && Map.get(assigns.info, :usage)) || %{}
@@ -2752,27 +2777,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
         </dd>
       </div>
 
-      <.vital label="Machine" value={Presentation.node_label(@row && @row.node)} />
+      <.vital label="Machine" value={Presentation.node_label(@row && @row.node, @roster)} />
       <.vital label="Provider" value={@row && @row.provider} />
       <.vital label="Replay" value={replay_word(@options)} />
       <.vital label="Workspace" value={@row && @row.workspace} />
 
       <%!-- `rail.ex:165-166` has always said the session's stable id is "in session
-            details"; until W1 it was nowhere but the URL (review §3.2). A readonly input
-            rather than a copy button: the clipboard is `app.js`, which is W2's file, and
-            a control that did nothing would be worse than a field a reader can select.
-            W2 integrator line: replace this with the clipboard hook's copy button. --%>
+            details"; until W1 it was nowhere but the URL (review §3.2). A `<code>` rather
+            than an `<input>`: a fixed-width field truncated the id
+            (`browser-history-replay-desk…`), and an id a reader cannot see whole is not
+            the id. `user-select: all` makes one click select the lot.
+
+            Integrator line: the clipboard belongs to `app.js`, so the copy *button* lands
+            with the shared clipboard hook in a later slice; a control that did nothing
+            would be worse than a value a reader can select. --%>
       <div :if={@session_id} class="ouro-vital">
         <dt>Session id</dt>
-        <dd>
-          <input
-            class="ouro-mono ouro-vital-id"
-            type="text"
-            readonly
-            value={@session_id}
-            aria-label="Session id"
-          />
-        </dd>
+        <dd><code class="ouro-mono ouro-vital-id">{@session_id}</code></dd>
       </div>
     </aside>
     """
@@ -2847,18 +2868,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # `connected_nodes` by construction lists only machines that are up, so a deck standing
   # on it alone could never draw a hollow dot. Before a first status there are no dots at
   # all rather than dots claiming everything is down — unknown is not offline.
-  defp machines(nil), do: []
+  @doc false
+  # Public only so the roster half can be asserted: `runtime.status` answers this node's
+  # real cluster, and there is no way to give it a two-machine fleet from a test.
+  def machines(nil), do: []
 
-  defp machines(status) do
+  def machines(status) do
     self_node = to_string(Map.get(status, :node, node()))
     connected = status |> Map.get(:connected_nodes, []) |> List.wrap() |> Enum.map(&to_string/1)
+    roster = fleet_roster(status)
 
     known =
-      status
-      |> Map.get(:cluster, %{})
-      |> Map.get(:fleet, %{})
-      |> Map.get(:machines, [])
-      |> List.wrap()
+      roster
       |> Enum.map(&to_string(Map.get(&1, :node, "")))
       |> Enum.reject(&(&1 == ""))
 
@@ -2866,9 +2887,29 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.map(fn name ->
-      %{name: name, connected?: name == self_node or name in connected}
+      # The label is computed here, where the roster is, rather than in the bar: two
+      # machines in one fleet share a release name (`ouro@alpha`, `ouro@beta`), and a bar
+      # that shortened both to "ouro" would put the same word under two dots.
+      %{
+        name: name,
+        label: Presentation.node_label(name, roster),
+        connected?: name == self_node or name in connected
+      }
     end)
   end
+
+  # The cluster's own last-known directory, where the status carries one. It is also the
+  # only place a machine has a name somebody chose, which is why every node label on this
+  # page is resolved against it.
+  defp fleet_roster(status) when is_map(status) do
+    status
+    |> Map.get(:cluster, %{})
+    |> then(&if(is_map(&1), do: Map.get(&1, :fleet, %{}), else: %{}))
+    |> then(&if(is_map(&1), do: Map.get(&1, :machines, []), else: []))
+    |> List.wrap()
+  end
+
+  defp fleet_roster(_status), do: []
 
   # Today's totals, summed off rows this view already has. Cheap because it is arithmetic
   # over the list the rail is drawing anyway; UTC because that is what the runtime writes,
@@ -2905,36 +2946,36 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # already projected. Every other row falls back to provider · machine, because a rail
   # cannot know what an unwatched session is doing and a line that guessed would be the
   # one thing on this page a reader could not trust.
-  defp line(:needs_you, row, activity), do: activity || ask_line(row)
+  defp line(:needs_you, row, activity, roster), do: activity || ask_line(row, roster)
 
   # An idle row carries its age in the line rather than only in the right-hand column,
   # because "idle" alone says nothing a reader can act on — how long it has been idle is
   # the whole content of the row. The column is dropped for these rows so the age is not
   # printed twice; `age_in_line?/2` is the one place that decision is made.
-  defp line(:settled, %Rail.Row{status: :idle} = row, _activity) do
+  defp line(:settled, %Rail.Row{status: :idle} = row, _activity, _roster) do
     case age(row.updated_at) do
       "" -> Rail.outcome(row)
       age -> "#{Rail.outcome(row)} · #{age}"
     end
   end
 
-  defp line(:settled, row, _activity) do
+  defp line(:settled, row, _activity, _roster) do
     case row.error do
       nil -> Rail.outcome(row)
       error -> "#{Rail.outcome(row)} — #{brief(error)}"
     end
   end
 
-  defp line(_at_work, row, activity), do: activity || provider_line(row)
+  defp line(_at_work, row, activity, roster), do: activity || provider_line(row, roster)
 
   defp age_in_line?(:settled, %Rail.Row{status: :idle}), do: true
   defp age_in_line?(_group, _row), do: false
 
-  defp ask_line(row) do
+  defp ask_line(row, roster) do
     case row.status do
       :awaiting_approval -> "waiting on your answer"
       :idle -> "waiting for your next message"
-      _other -> provider_line(row)
+      _other -> provider_line(row, roster)
     end
   end
 
@@ -2963,14 +3004,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp activity(_assigns), do: %{}
 
-  defp activity_of(%Cell.Tool{} = tool) do
+  # Only a call that has **not** settled. `activity` is what the watched session is doing
+  # *this second*, so a tool that completed two turns ago is history: the rail would have
+  # said "Bash $ mix compile" in the present tense while a new turn streamed prose. A
+  # settled call falls through to the next-newest running thing, and from there to the
+  # projection's own status line or to `provider · machine`.
+  defp activity_of(%Cell.Tool{state: :running} = tool) do
     case tool |> Transcript.Tools.summarise() |> Transcript.ToolSummary.line() do
       "" -> nil
       line -> line
     end
   end
 
-  defp activity_of(%Cell.Exploration{} = cell) do
+  # `done` is set on every exploration group except the last one in the transcript
+  # (`Transcript.project/1`), so `done: false` is the group still being added to.
+  defp activity_of(%Cell.Exploration{done: false} = cell) do
     "exploring · #{Cell.Exploration.total(cell)} calls"
   end
 
@@ -2980,8 +3028,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # "provider · machine", where the machine is what a person would call it rather than the
   # BEAM's node atom — ground rule 6, and the reason `nonode@nohost` used to sit on every
   # unwatched row. A row with no node at all still says nothing about one.
-  defp provider_line(row) do
-    machine = row.node && Presentation.node_label(row.node)
+  defp provider_line(row, roster) do
+    machine = row.node && Presentation.node_label(row.node, roster)
 
     [row.provider, machine]
     |> Enum.reject(&is_nil/1)

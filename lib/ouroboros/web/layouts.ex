@@ -145,8 +145,12 @@ defmodule Ouroboros.Web.Layouts do
   nothing server-side: the pill is one element in both states and the stylesheet chooses
   which half of it is visible.
 
-  `current` marks the link for the page being read with `aria-current="page"`, which is
-  what makes this a navigation rather than six links that happen to sit together.
+  `current` marks the link for the page being read with `aria-current="page"` — **one**
+  element per page, which is what the attribute means. The wordmark goes to `/` too and
+  deliberately does not carry it: `aria-current` on two elements tells a screen-reader
+  user there are two current pages, and the section link is the one that names the
+  section. A spoke of a section is marked at its section (`/s/:plane/:id` marks Sessions,
+  `/audit/:stream` marks Audit), because that is where the reader is.
   """
   attr :current, :atom, default: nil
   attr :machines, :list, default: []
@@ -164,7 +168,7 @@ defmodule Ouroboros.Web.Layouts do
 
     ~H"""
     <header class="ouro-topbar">
-      <a class="ouro-wordmark" href="/" aria-current={@current == :sessions && "page"}>Ouroboros</a>
+      <a class="ouro-wordmark" href="/">Ouroboros</a>
 
       <nav class="ouro-topbar-nav" aria-label="Sections">
         <a class="ouro-topbar-link" href="/" aria-current={@current == :sessions && "page"}>
@@ -181,17 +185,18 @@ defmodule Ouroboros.Web.Layouts do
         </a>
       </nav>
 
-      <%!-- A machine is named the way `Ouroboros.Cluster` names it — the part of the node
-            before the `@` — rather than by the BEAM's whole node atom, which is how
-            `nonode@nohost` used to be the first word on the deck. --%>
+      <%!-- Each entry carries its own `:label`, resolved by the caller against the fleet
+            roster it holds. The bar deliberately does not re-derive one: two machines in a
+            fleet share a release name, so a bar that shortened `ouro@alpha` and
+            `ouro@beta` itself would put the same word under both dots. --%>
       <span :if={@machines != []} class="ouro-presence" role="img" aria-label={@machines_label}>
         <span class="ouro-presence-label">Machines</span>
         <span
           :for={machine <- @machines}
           class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
-          title={"#{Presentation.node_label(machine.name)} — #{if machine.connected?, do: "connected", else: "not connected"}"}
+          title={"#{label(machine)} — #{if machine.connected?, do: "connected", else: "not connected"}"}
         >
-          <span class="ouro-visually-hidden">{Presentation.node_label(machine.name)}</span>
+          <span class="ouro-visually-hidden">{label(machine)}</span>
         </span>
       </span>
 
@@ -209,13 +214,16 @@ defmodule Ouroboros.Web.Layouts do
         </span>
         <.bell_toggle />
         <.theme_toggle />
-        <a class="ouro-button" href="/new" aria-current={@current == :new && "page"}>
-          New session
-        </a>
+        <a class="ouro-button" href="/new" aria-current={@current == :new && "page"}>New session</a>
       </div>
     </header>
     """
   end
+
+  # The caller's own word for a machine. `node_label/1` is the fallback for a caller that
+  # has no roster to resolve against — never a second opinion about one that does.
+  defp label(machine),
+    do: Map.get(machine, :label) || Presentation.node_label(machine.name)
 
   @doc """
   The theme toggle: one quiet glyph, and no server state behind it.

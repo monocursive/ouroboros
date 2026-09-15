@@ -186,28 +186,80 @@ defmodule Ouroboros.Web.StylesheetTest do
   # ------------------------------------------------------------------------------------
 
   describe "the breakpoints" do
-    test "each one is declared exactly once" do
+    test "every @media query is declared exactly once" do
       # §3.5: the same breakpoints were declared three times with later blocks overriding
       # earlier ones, so reading what a viewport gets meant reading the whole file in
-      # order. One block per breakpoint is the only form in which that question has a
-      # local answer.
+      # order. One block per query is the only form in which that question has a local
+      # answer — and it is *every* query, not only the width ones: the first version of
+      # this test matched `max-width` alone and let two `prefers-reduced-motion` blocks
+      # stand.
       counts =
-        ~r/@media \(max-width: (\d+)px\)/
+        ~r/@media ([^{]+)\{/
         |> Regex.scan(strip_comments(@css), capture: :all_but_first)
         |> List.flatten()
+        |> Enum.map(&String.trim/1)
         |> Enum.frequencies()
 
-      repeated = Enum.filter(counts, fn {_width, count} -> count > 1 end)
+      repeated = Enum.filter(counts, fn {_query, count} -> count > 1 end)
 
       assert repeated == [],
-             "these breakpoints are declared more than once, so what a viewport gets " <>
+             "these media queries are declared more than once, so what a viewport gets " <>
                "depends on which block comes last: #{inspect(repeated)}"
     end
 
-    test "the two the deck lives at are still there" do
-      # A merge that lost one would pass the test above and take the mobile layout with it.
-      assert @css =~ "@media (max-width: 1100px)"
-      assert @css =~ "@media (max-width: 520px)"
+    test "the ones the surface actually lives at are still there" do
+      # A merge that lost one would pass the test above and take a whole layout with it.
+      for query <- [
+            "@media (max-width: 1100px)",
+            "@media (max-width: 520px)",
+            "@media (prefers-reduced-motion: reduce)"
+          ] do
+        assert @css =~ query, "#{query} is gone"
+      end
+    end
+
+    test "the narrow view is where the mobile vitals disclosure is turned on" do
+      # F1. `body .ouro-vitals-mobile { display: block }` outranks
+      # `.ouro-vitals-mobile { display: none }` at every width, so unscoped it drew the
+      # vitals twice on a desktop deck: once as the third column, once under the composer.
+      block = media_block("(max-width: 1100px)")
+
+      assert block =~ ~r/body \.ouro-vitals-mobile \{[^}]*display:\s*block/,
+             "the mobile disclosure is not turned on inside the 1100px block"
+
+      outside = String.replace(strip_comments(@css), block, "")
+
+      refute outside =~ ~r/body \.ouro-vitals-mobile \s*\{[^}]*display:\s*block/,
+             "something outside the narrow-view block turns the disclosure on at every width"
+    end
+
+    test "the narrow view neutralises `:has(> .ouro-vitals)` as well as the bare selector" do
+      # W1.3 made `:has(> .ouro-vitals)` reachable for the first time, and
+      # `.ouro-columns:has(> .ouro-vitals)` outranks a bare `body .ouro-columns`. Without
+      # the twin, a session open on a narrow viewport keeps the two-row template the
+      # stacked layout is drawn over.
+      block = media_block("(max-width: 1100px)")
+
+      assert block =~
+               ~r/body \.ouro-columns,\s*body \.ouro-columns:has\(> \.ouro-vitals\)\s*\{[^}]*grid-template-rows/,
+             "the narrow-view row template does not cover a grid that has a vitals column"
+    end
+
+    test "the composer's status row may wrap, so its caption is never clipped" do
+      # F6, at 375px: `.ouro-auto` carries `flex: 0 0 auto` for its old home under the
+      # composer, and in the status row that cut "Only for this session…" off at the
+      # viewport edge.
+      row = rule_for(".ouro-composer-status")
+      assert row =~ "flex-wrap: wrap"
+
+      auto = rule_for(".ouro-composer-status .ouro-auto")
+      assert auto, ".ouro-composer-status .ouro-auto has no rule"
+      assert auto =~ "flex-wrap: wrap"
+      assert auto =~ "min-width: 0"
+
+      assert media_block("(max-width: 520px)") =~
+               ~r/\.ouro-composer-status \.ouro-auto > span \{[^}]*flex-basis:\s*100%/,
+             "below 520px the caption does not get a line of its own"
     end
   end
 
@@ -455,6 +507,17 @@ defmodule Ouroboros.Web.StylesheetTest do
   # also match `.ouro-new-title-x`.
   defp mentions?(selector, needle),
     do: selector =~ ~r/(?<![\w-])#{Regex.escape(needle)}(?![\w-])/
+
+  # One top-level `@media` block, by its query, comments stripped.
+  defp media_block(query) do
+    strip_comments(@css)
+    |> media_block_bodies()
+    |> Enum.find(&String.starts_with?(&1, "@media " <> query <> " {"))
+    |> case do
+      nil -> flunk("app.css has no @media #{query} block")
+      block -> block
+    end
+  end
 
   # Everything except the top-level `@media` blocks.
   defp without_media_blocks(css),

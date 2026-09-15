@@ -78,10 +78,13 @@ defmodule Ouroboros.Web.AuditLiveTest do
     refute html =~ ":audit_disabled",
            "the page still prints the runtime's own atom at a reader"
 
-    refute html =~ "Audit operation failed"
-
     assert html =~ "Audit recording is disabled on this runtime",
            "the page does not say, in words, why there is nothing to search"
+
+    # The half the gateway wrote for a person ("Audit operation failed") is kept: it is
+    # what the runtime said, and only the inspected atom after it was never addressed to
+    # anybody. What must not survive is the atom.
+    assert html =~ "Audit operation failed: Audit recording is disabled on this runtime."
   end
 
   test "no numeric protocol code reaches the page", %{conn: conn} do

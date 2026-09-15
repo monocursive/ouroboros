@@ -17,6 +17,12 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   use Phoenix.LiveView
 
+  # The needs-you bell is in the one top bar, so it is on this page too. This is what makes
+  # that honest: the same edge computation and the same three-second `interactive.list`
+  # poll the deck runs, so a bell switched on here rings rather than sitting quiet
+  # (`Ouroboros.Web.NeedsYou`).
+  on_mount {Ouroboros.Web.NeedsYou, :bell}
+
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Layouts
@@ -382,6 +388,10 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp model_choice(%{"model_choice" => value}, _form), do: NewSession.choice(value)
   defp model_choice(_params, form), do: form.model_choice
 
+  # `/2` rather than `/1` here as well, and not only for symmetry: `promote_seed/1` runs
+  # this *before* the form has been promoted, so it is the call that turns a remembered
+  # model the catalogue does not list into a row of its own; and `save-defaults` reads it
+  # to build `start_params/2`, where a field missing that row would write no model at all.
   defp field(socket),
     do: NewSession.model_field(socket.assigns.catalogue, socket.assigns.form)
 
@@ -1069,10 +1079,21 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   # The node, as a label rather than as the BEAM's own name for it. Node *role*, connected
   # machines and the live session count moved to `/status` with W1.5 rather than being
   # asked for twice.
-  defp runtime_node(runtime) when is_map(runtime),
-    do: Presentation.node_label(Map.get(runtime, :node))
+  #
+  # A status that answered without a `:node` at all is a different fact from one that
+  # answered `nonode@nohost`: the first is a runtime that did not report, the second is a
+  # runtime that reported it has no name. Only the second reads as "this computer".
+  @doc false
+  # Public only so its three cases can be asserted directly: they differ by which key the
+  # status carried, and there is no way to make `runtime.status` omit one from a test.
+  def runtime_node(runtime) when is_map(runtime) do
+    case Map.fetch(runtime, :node) do
+      {:ok, node} -> Presentation.node_label(node)
+      :error -> "Not reported"
+    end
+  end
 
-  defp runtime_node(_runtime), do: "Loading…"
+  def runtime_node(_runtime), do: "Loading…"
 
   defp scope_label(:operate), do: "Operate · settings and sessions enabled"
   defp scope_label(:read), do: "Read only · changes disabled"

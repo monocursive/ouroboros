@@ -117,6 +117,7 @@ defmodule Ouroboros.Web.LayoutsTest do
   # Every route this surface serves, and the section each one is.
   @pages [
     {"/", :sessions},
+    {"/s/interactive/some-session", :sessions},
     {"/new", :new},
     {"/settings", :settings},
     {"/status", :status},
@@ -150,7 +151,10 @@ defmodule Ouroboros.Web.LayoutsTest do
       end
     end
 
-    test "marks the page being read, and marks only it", %{conn: conn} do
+    test "marks the page being read, and marks exactly one element", %{conn: conn} do
+      # `aria-current="page"` on two elements tells a screen-reader user there are two
+      # current pages. The wordmark goes to `/` and deliberately carries none; a spoke of
+      # a section is marked at its section, because that is where the reader is.
       for {path, section} <- @pages do
         {:ok, _view, html} = live(conn, path)
 
@@ -169,10 +173,13 @@ defmodule Ouroboros.Web.LayoutsTest do
                  Regex.run(~r/aria-current="page"[^>]*href="#{Regex.escape(href)}"/, top),
                "#{path} does not mark #{href} as the current page"
 
-        # The wordmark and the Sessions link are both `/`, so the deck marks two; every
-        # other page marks exactly one.
-        marks = length(String.split(top, ~s(aria-current="page"))) - 1
-        assert marks == if(section == :sessions, do: 2, else: 1), "#{path} marks #{marks} links"
+        marks = length(String.split(html, ~s(aria-current="page"))) - 1
+
+        assert marks == 1,
+               "#{path} marks #{marks} elements as the current page, not one"
+
+        refute Regex.run(~r/ouro-wordmark[^>]*aria-current/, html),
+               "#{path} marks the wordmark as the current page as well as the section"
       end
     end
 
@@ -217,6 +224,49 @@ defmodule Ouroboros.Web.LayoutsTest do
 
       {:ok, _view, deck} = live(conn, "/")
       assert topbar(deck) =~ "this computer"
+    end
+
+    # PROOF F, inverted. Two machines in a fleet share a release name, so the bar must draw
+    # the label its caller resolved rather than shorten the node itself.
+    test "draws the caller's own word for a machine, not a second opinion" do
+      html =
+        render_component(&Layouts.topbar/1, %{
+          machines: [
+            %{name: "ouro@alpha", label: "the build box", connected?: true},
+            %{name: "ouro@beta", label: "the spare", connected?: false}
+          ]
+        })
+
+      hidden =
+        ~r/class="ouro-visually-hidden">([^<]*)</
+        |> Regex.scan(html, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.map(&String.trim/1)
+
+      assert hidden == ["the build box", "the spare"]
+
+      assert html =~ "the build box — connected"
+      assert html =~ "the spare — not connected"
+      refute html =~ "ouro@alpha"
+    end
+
+    test "falls back to the node's own host where a caller has no roster" do
+      html =
+        render_component(&Layouts.topbar/1, %{
+          machines: [
+            %{name: "ouro@alpha", connected?: true},
+            %{name: "ouro@beta", connected?: false}
+          ]
+        })
+
+      hidden =
+        ~r/class="ouro-visually-hidden">([^<]*)</
+        |> Regex.scan(html, capture: :all_but_first)
+        |> List.flatten()
+        |> Enum.map(&String.trim/1)
+
+      # Two machines, two words — never "ouro" twice.
+      assert hidden == ["alpha", "beta"]
     end
 
     test "renders standalone with no machines and no totals" do
@@ -314,6 +364,20 @@ defmodule Ouroboros.Web.LayoutsTest do
 
         assert length(String.split(html, "data-ouro-bell")) == 2,
                "#{path} draws more than one needs-you bell"
+      end
+    end
+
+    # A bell that asked the browser for notification permission and then could never ring
+    # would be the page promising something it cannot do. That every spoke can actually
+    # ring is proven in `Ouroboros.Web.NeedsYouTest`, which drives the edge; what is
+    # asserted here is only that each page holds the state the hook installs.
+    test "every page that draws it has the machinery behind it", %{conn: conn} do
+      for path <- ["/new", "/settings", "/status", "/audit"] do
+        {:ok, view, _html} = live(conn, path)
+
+        assert :sys.get_state(view.pid).socket.assigns
+               |> Map.has_key?(:needs_you_announced),
+               "#{path} draws a bell but has not attached the needs-you hook"
       end
     end
 

@@ -15,6 +15,12 @@ defmodule Ouroboros.Web.StatusLive do
 
   use Phoenix.LiveView
 
+  # The needs-you bell is in the one top bar, so it is on this page too. This is what makes
+  # that honest: the same edge computation and the same three-second `interactive.list`
+  # poll the deck runs, so a bell switched on here rings rather than sitting quiet
+  # (`Ouroboros.Web.NeedsYou`).
+  on_mount {Ouroboros.Web.NeedsYou, :bell}
+
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Layouts
@@ -110,19 +116,14 @@ defmodule Ouroboros.Web.StatusLive do
         |> assign(:status, summarise(status))
         |> assign(:error, nil)
 
-      {:error, code, message} ->
-        refused(socket, scope, Presentation.refusal({:error, code, message}))
+      # Every refusal shape goes through the one translator, including the
+      # `outcome: unknown` marker `Ouroboros.Web.Call` carries for the verbs where "did
+      # not happen" and "happened and was not reported" are different answers.
+      {:error, _code, _message} = refusal ->
+        refused(socket, scope, Presentation.refusal(refusal))
 
-      {:error, code, message, %{"outcome" => "unknown"}} ->
-        refused(
-          socket,
-          scope,
-          Presentation.refusal({:error, code, message}) <>
-            " Whether it happened and went unreported is not something this runtime said."
-        )
-
-      {:error, code, message, data} ->
-        refused(socket, scope, Presentation.refusal({:error, code, message, data}))
+      {:error, _code, _message, _data} = refusal ->
+        refused(socket, scope, Presentation.refusal(refusal))
     end
   end
 

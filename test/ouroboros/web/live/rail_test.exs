@@ -305,11 +305,28 @@ defmodule Ouroboros.Web.Live.RailTest do
     test "an at-work row says provider and machine when nothing is watching it" do
       html = render_rail([interactive("w", status: :running)])
 
-      # The machine, not the BEAM's address for it: `core@one` is one machine called
-      # `core`, and ground rule 6 keeps the node atom off every template.
-      assert html =~ "native · core"
+      # The machine, not the BEAM's address for it. `core@one` is the release `core` on the
+      # machine `one`, and it is the host half that names the machine: every node in a
+      # fleet shares the release. Ground rule 6 keeps the node atom off every template.
+      assert html =~ "native · one"
       refute html =~ "core@one"
       assert html =~ "ouro-glyph-work"
+    end
+
+    test "a row names the machine the fleet roster calls it, where there is one" do
+      # F4. Every node in a fleet shares its release name, so the host half is the fallback
+      # and the cluster's own directory is the better answer where the status carried one.
+      html =
+        render_component(&DeckLive.rail/1,
+          triaged: Rail.triaged([interactive("w", status: :running)]),
+          open: nil,
+          error: nil,
+          activity: %{},
+          roster: [%{node: :core@one, machine: "the core box"}]
+        )
+
+      assert html =~ "native · the core box"
+      refute html =~ "core@one"
     end
 
     test "an at-work row says what the watched session is doing when one is" do
