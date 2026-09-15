@@ -1028,14 +1028,17 @@ fn a_busy_first_message_restores_the_prompt_as_a_fresh_queued_follow_up() {
 }
 
 #[test]
-fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
+fn ctrl_p_opens_a_searchable_palette_grouped_by_the_five_plan_groups() {
     let mut app = harness(true);
     app.apply(ctrl('p'));
 
+    // T2.1: the parity plan's five groups, in place of the two that put "New session" and
+    // "Change the model" under one heading called "Coding". The duplicate `Nodes` row —
+    // which ran `/runtime` exactly as "Runtime & distribution" did — is gone with them.
     let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("Coding"), "{}", screen.text());
-    assert!(screen.contains("Runtime & distribution"));
-    assert!(screen.contains("Nodes"));
+    assert!(screen.contains("Session"), "{}", screen.text());
+    assert!(screen.contains("Turn"), "{}", screen.text());
+    assert!(!screen.contains("Nodes"), "{}", screen.text());
 
     type_text(&mut app, "settings");
     let screen = render(&mut app, 120, 34);
@@ -1044,7 +1047,7 @@ fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
     app.apply(key(KeyCode::Esc));
     app.apply(ctrl('p'));
 
-    type_text(&mut app, "dist");
+    type_text(&mut app, "distribution");
     let screen = render(&mut app, 120, 34);
     assert!(screen.contains("Runtime & distribution"));
     assert!(

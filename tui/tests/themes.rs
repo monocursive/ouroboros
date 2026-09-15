@@ -18,7 +18,8 @@ mod support;
 use std::sync::{Mutex, MutexGuard};
 
 use ouro::config::{Config, ThemeConfig};
-use ouro::ui::app::{App, Msg};
+use ouro::ui::app::{App, Msg, Overlay};
+use crossterm::event::KeyCode;
 use ouro::ui::theme::{self, Palette, ThemeName};
 
 use support::{app, full_hello, render, Screen};
@@ -73,6 +74,13 @@ fn typed(app: &mut App, text: &str) {
 
 fn frame(app: &mut App) -> Screen {
     render(app, 100, 30)
+}
+
+fn press(app: &mut App, code: crossterm::event::KeyCode) {
+    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        code,
+        crossterm::event::KeyModifiers::NONE,
+    )));
 }
 
 #[test]
@@ -134,35 +142,78 @@ fn the_config_table_reads_its_own_name_and_falls_back_to_auto() {
     );
 }
 
+/// T2.9. Bare `/theme` opens the list instead of cycling *and writing* in one keystroke.
+///
+/// The review changed the reviewer's theme by reading the code that does it: the verb
+/// cycled one palette forward and saved `config.toml` on the spot, so "look at the next
+/// one" and "keep the next one" were the same press with no way back that did not write
+/// again. Delete the `previous` restore in `overlay_key` and this goes red.
 #[test]
-fn slash_theme_cycles_the_palette_live_and_remembers_where_it_stopped() {
+fn bare_slash_theme_opens_a_picker_that_previews_before_it_writes() {
     let _held = hold();
     theme::install(Palette::Dark);
 
     let mut app = opened(Config::default());
+    app.config.theme.name = Some("dark".into());
+    theme::install(theme::resolve(ThemeName::Dark, false, None));
+    ouro::ui::switch_theme(ThemeName::Dark);
+    let _ = app.take_config_save();
 
     typed(&mut app, "/theme");
-    assert_eq!(
-        theme::current().palette,
-        Palette::Dark,
-        "auto cycles to dark"
+    assert!(
+        matches!(app.overlay, Some(Overlay::Theme { .. })),
+        "bare /theme did not open the picker"
     );
+
+    let screen = frame(&mut app);
+    assert!(screen.contains("light-daltonized"), "{}", screen.text());
+    assert!(
+        screen.contains("esc puts back"),
+        "the picker never says what esc does: {}",
+        screen.text()
+    );
+
+    // Moving is a preview: the palette changes, the config does not, and nothing is
+    // queued for the driver to write.
+    press(&mut app, KeyCode::Down);
+    assert_eq!(theme::current().palette, Palette::Light, "moving previews");
     assert_eq!(app.config.theme.name.as_deref(), Some("dark"));
-    assert!(app.take_config_save().is_some(), "the choice was not saved");
+    assert!(
+        app.take_config_save().is_none(),
+        "a preview asked for a write"
+    );
+
+    // Esc puts back exactly what was drawing, and still writes nothing.
+    press(&mut app, KeyCode::Esc);
+    assert!(app.overlay.is_none());
+    assert_eq!(theme::current().palette, Palette::Dark, "esc did not restore");
+    assert_eq!(app.config.theme.name.as_deref(), Some("dark"));
+    assert!(app.take_config_save().is_none(), "esc wrote config.toml");
+}
+
+/// The other half of the same overlay: `Enter` is the press that keeps it.
+#[test]
+fn enter_in_the_theme_picker_saves_the_previewed_palette() {
+    let _held = hold();
+    theme::install(Palette::Dark);
+
+    let mut app = opened(Config::default());
+    ouro::ui::switch_theme(ThemeName::Dark);
+    app.config.theme.name = Some("dark".into());
+    let _ = app.take_config_save();
 
     typed(&mut app, "/theme");
-    assert_eq!(theme::current().palette, Palette::Light);
-    assert_eq!(app.config.theme.name.as_deref(), Some("light"));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
 
-    typed(&mut app, "/theme");
+    assert!(app.overlay.is_none());
     assert_eq!(theme::current().palette, Palette::Ansi);
-
-    // The preview is undoable by the same key that made it: keep pressing and it comes
-    // back round.
-    for _ in 0..ThemeName::CYCLE.len() {
-        typed(&mut app, "/theme");
-    }
-    assert_eq!(theme::current().palette, Palette::Ansi);
+    assert_eq!(app.config.theme.name.as_deref(), Some("ansi"));
+    assert!(
+        app.take_config_save().is_some(),
+        "enter did not ask for a write"
+    );
 }
 
 #[test]

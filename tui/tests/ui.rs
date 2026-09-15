@@ -611,7 +611,13 @@ fn the_dashboard_renders_the_golden_runtime_status() {
     let mut app = dashboard();
     let screen = render(&mut app, 120, 30);
 
-    assert!(screen.contains("ouroboros@golden"), "{}", screen.text());
+    // T2.8: the machine, named the way every surface names one.
+    assert!(screen.contains("node      ouroboros"), "{}", screen.text());
+    assert!(
+        !screen.text().contains("ouroboros@golden"),
+        "the raw node name reached the Dashboard:\n{}",
+        screen.text()
+    );
     assert!(screen.contains("core"));
     assert!(screen.contains("strategy=none"));
     assert!(screen.contains("distributed=false"));
@@ -969,9 +975,17 @@ fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
 
     let screen = render(&mut app, 160, 30);
 
+    // T2.8: the word, not the number. The claim the test is making — that a refusal is
+    // readable in the pane it would have filled — is unchanged; `-32003` was never the
+    // part a reader could act on, and the pane title is the narrowest place on screen.
     assert!(
-        screen.contains("scope_denied (-32003)"),
+        screen.contains("scope_denied:"),
         "the refusal has to be readable where the data would have been:\n{}",
+        screen.text()
+    );
+    assert!(
+        !screen.text().contains("-32003"),
+        "the JSON-RPC code reached a pane title:\n{}",
         screen.text()
     );
 }
@@ -4912,9 +4926,12 @@ fn every_tab_draws_without_any_data_at_all() {
 
         let screen = render(&mut app, 100, 24);
 
+        // T2.4: the tab strip is the shell's second row now, and at a hundred columns it
+        // is the half that survives — the subtitle's only unique fact was the current
+        // tab's title, which the highlighted cell in the strip already carries.
         assert!(
             screen.contains("OUROBOROS")
-                && (screen.contains("Runtime & distribution") || screen.contains("YOUR TASK")),
+                && (screen.contains("ctrl+x 1-4") || screen.contains("YOUR TASK")),
             "surface {digit} lost its shell:\n{}",
             screen.text()
         );

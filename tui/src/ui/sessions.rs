@@ -67,6 +67,17 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // T2.12. `leader.rail` (`ctrl+x b`) hides the rails; the transcript takes the width
+    // they were using. Both of them: the fleet card lives in the session rail and the
+    // context panels in the right-hand one, and "hide the sidebar" that left one of them
+    // behind would be a toggle that half worked. The header says the state and the key,
+    // because a rail that vanished with nothing on screen to bring it back is a terminal
+    // an operator has to restart.
+    if app.rail_hidden {
+        primary(frame, area, app, true);
+        return;
+    }
+
     match workspace_layout(area) {
         WorkspaceLayout::Focused => primary(frame, area, app, true),
         WorkspaceLayout::SessionRail => {
@@ -297,11 +308,14 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                     // `unavailable` mark stays where it always was — a dimmed title —
                     // because an offline owner is a fact about the observation, not about
                     // the session's own state.
+                    // T2.8. The machine, not the host half of an Erlang node name. The
+                    // card used to print `IDLE · native · nohost`, which names the one
+                    // thing about an unnamed BEAM nobody needs to know.
                     let node = session
                         .node
                         .as_deref()
-                        .map(|node| node.split('@').next_back().unwrap_or(node))
-                        .map(|host| format!(" · {}", super::tree::truncate(host, 12)));
+                        .map(|node| app.machine_label(node))
+                        .map(|node| format!(" · {}", super::tree::truncate(&node, 14)));
 
                     // I2. Only where the runtime reported one, and only where the whole
                     // cell fits: the footer's rule, because a half-drawn `42.5k · $0.4` is
@@ -392,7 +406,10 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(
             format!(
                 " FLEET / {} ",
-                super::tree::truncate(&summary.machine, inner.width.saturating_sub(11) as usize)
+                super::tree::truncate(
+                    &super::panels::node_label(&summary.machine),
+                    inner.width.saturating_sub(11) as usize
+                )
             ),
             theme::label(),
         ));
@@ -635,7 +652,13 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         theme::muted(),
         vec![
             context_panel_value("MODE", &summary.mode, panel_width, Style::default()),
-            context_panel_value("MACHINE", &summary.machine, panel_width, Style::default()),
+            // T2.8. `MACHINE nonode` was the rail's version of the same Erlang trivia.
+            context_panel_value(
+                "MACHINE",
+                &super::panels::node_label(&summary.machine),
+                panel_width,
+                Style::default(),
+            ),
             context_panel_value("ENDPOINT", &app.address, panel_width, Style::default()),
         ],
     );
@@ -1022,6 +1045,41 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
 
 /// One composed start surface: identity, workspace, task, then optional discovery.
 /// The task keeps its space first; ornament yields on short terminals.
+/// T2.11. Which of the two answers the home screen's folder is, where it is one of them.
+///
+/// Three states and only two of them are worth a suffix: a path that came from
+/// `config.toml` is the one that surprises people, and a path that is the launch directory
+/// is the one the README promised. A path the operator typed into the location dialog is
+/// neither, and saying nothing about it is the honest answer — this client did not choose
+/// it and has nothing to add.
+fn workspace_origin(app: &App, workspace: &str) -> &'static str {
+    if workspace.trim().is_empty() {
+        return "";
+    }
+
+    // The config default first: `default_workspace` prefers it over the launch directory,
+    // so when both name the same path the config is the one that decided.
+    if app
+        .config
+        .defaults
+        .workspace
+        .as_deref()
+        .is_some_and(|configured| configured == workspace)
+    {
+        return "  · from config.toml";
+    }
+
+    if app
+        .launch_dir
+        .as_deref()
+        .is_some_and(|launched| launched == workspace)
+    {
+        return "  · this directory";
+    }
+
+    ""
+}
+
 fn home(frame: &mut Frame, area: Rect, app: &App) {
     let width = area
         .width
@@ -1099,15 +1157,21 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
     }
     frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), hero);
 
+    // T2.11. Where the path came from, not only what it is. The README says to open
+    // `ouro` from the project you want to work on, and with `[defaults] workspace` set the
+    // home screen showed that stored path instead — with nothing on the line to say the
+    // directory the operator was standing in had been overridden. `f5` is named on the row
+    // below, so the line states the fact and the row below states the key that changes it.
     let workspace = app.home_workspace();
     let folder = format!(
-        "{} · Folder: {}",
+        "{} · Folder: {}{}",
         app.home_machine_label(),
         if workspace.is_empty() {
             "Choose a project"
         } else {
             &workspace
-        }
+        },
+        workspace_origin(app, &workspace)
     );
     frame.render_widget(
         Paragraph::new(vec![

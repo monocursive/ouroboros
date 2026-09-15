@@ -2300,11 +2300,12 @@ impl App {
             return true;
         }
 
-        // A10. Bare `/theme` cycles; `/theme <name>` goes straight to one. Both take effect
-        // on the next frame, which is the preview: there is nothing to preview a palette
-        // *in* but the screen already showing the conversation.
+        // A10/T2.9. Bare `/theme` opens the list; `/theme <name>` goes straight to one and
+        // is immediate, because naming a palette is already the choice. Both take effect on
+        // the screen already showing the conversation — there is nothing else to preview a
+        // palette in — but only the picker's `Enter` writes the file.
         if trimmed == "/theme" {
-            self.cycle_theme();
+            self.open_theme_picker();
             return true;
         }
 

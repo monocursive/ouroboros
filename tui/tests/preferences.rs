@@ -190,7 +190,13 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("ouroboros@golden"), "{}", screen.text());
+    // T2.8: the runtime's own name for itself, made readable.
+    assert!(screen.contains("ouroboros"), "{}", screen.text());
+    assert!(
+        !screen.text().contains("ouroboros@golden"),
+        "the raw node name reached the settings overlay:\n{}",
+        screen.text()
+    );
     assert!(screen.contains("127.0.0.1:4560"), "{}", screen.text());
 }
 

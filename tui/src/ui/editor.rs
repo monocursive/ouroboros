@@ -21,12 +21,19 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 39] = [
+pub(crate) const COMMANDS: [(&str, &str); 45] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
     ("/sessions", "switch sessions"),
     ("/details", "toggle normalized event details"),
+    // T2.2. Five verbs the dispatcher has always accepted and this table never named, so
+    // `/di` offered nothing and the `?` panel — which is derived from this table — could
+    // not advertise them either. `/rename` is the sixth and the only new one.
+    ("/diff", "the files this session changed, by turn"),
+    ("/changes", "the files this session changed, by turn"),
+    ("/raw", "cells with no frame or gutter, for a native copy"),
+    ("/rename", "rename this session (<title>)"),
     (
         "/export",
         "write the transcript to a file ([--json] [path])",
@@ -65,7 +72,9 @@ pub(crate) const COMMANDS: [(&str, &str); 39] = [
     ("/help", "show keyboard help"),
     ("/hotkeys", "show keyboard help"),
     ("/keys", "show the effective key map and where it came from"),
+    ("/keymap", "show the effective key map and where it came from"),
     ("/cost", "tokens and cost for this session"),
+    ("/usage", "tokens and cost for this session"),
     ("/quit", "detach, disconnect, or stop the runtime"),
     ("/clear", "clear this draft"),
     ("/close", "end or remove the selected session"),

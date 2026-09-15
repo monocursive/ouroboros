@@ -131,7 +131,9 @@ fn the_mcp_overlay_states_every_server_and_every_refusal() {
         let text = render(&mut app, width, 44).text();
 
         assert!(text.contains("mcp servers"), "{width}\n{text}");
-        assert!(text.contains("ouroboros@golden"), "{width}\n{text}");
+        // T2.8: which machine's servers these are, named the way every surface names one.
+        assert!(text.contains("ouroboros"), "{width}\n{text}");
+        assert!(!text.contains("ouroboros@golden"), "{width}\n{text}");
 
         // The three states, told apart.
         assert!(text.contains("fake"), "{width}\n{text}");

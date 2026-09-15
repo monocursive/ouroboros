@@ -42,6 +42,92 @@ use super::app::App;
 use super::theme;
 use super::view::{centered, money, tokens};
 
+pub use presentation::{node_label, refusal_label, refusal_text};
+
+/// T2.8. The one place an internal name is turned into something a person reads.
+///
+/// Erlang node names and JSON-RPC codes are the runtime's vocabulary, not the operator's.
+/// `nonode@nohost` is what a BEAM that was never given a name calls itself, and printing it
+/// on the Dashboard, in the picker, on a session card and in the help footer asked four
+/// screens to teach the same piece of Erlang trivia. A numeric `-32004` in a pane title is
+/// the same failure in the other direction: the code is the wire's way of saying
+/// `unavailable`, and the word is the part a reader can act on.
+///
+/// Presentation only. Nothing here decides anything, nothing here invents a fact the
+/// runtime did not report, and the *message* a refusal carried is passed through whole —
+/// only the number in front of it is dropped. A node this client was never told the name
+/// of reads as unknown rather than as a guess.
+pub mod presentation {
+    /// What a node name reads as on screen.
+    ///
+    /// Three inputs, because three different things arrive here: the raw `name@host` the
+    /// gateway reports, the bare `name` half a caller already split off, and nothing at
+    /// all. The unnamed BEAM — `nonode@nohost`, or the `nonode` some callers have already
+    /// reduced it to — is *this computer*: it is the single-machine case, which is the
+    /// common one, and "this computer" is what it is.
+    ///
+    /// A fleet name survives: `ouro@studio.test` is `ouro` here and `studio` wherever the
+    /// fleet reported a machine label, because a row that cannot say which machine it is
+    /// on is a row nobody can act on (G2).
+    pub fn node_label(node: &str) -> String {
+        let node = node.trim();
+
+        if node.is_empty() || node == "nonode@nohost" || node == "nonode" {
+            return "this computer".to_string();
+        }
+
+        match node.split_once('@') {
+            // `name@host`: the name is the half that identifies the machine in a fleet.
+            Some((name, host)) => match (name.trim(), host.trim()) {
+                ("" | "nonode", "" | "nohost") => "this computer".to_string(),
+                ("" | "nonode", host) => host.to_string(),
+                (name, _host) => name.to_string(),
+            },
+            _bare => node.to_string(),
+        }
+    }
+
+    /// What a refusal reads as on screen: the word, never the number.
+    ///
+    /// `-32004` is not a fact about the operator's situation; `unavailable` is, and the
+    /// message the runtime wrote is the rest of it. An unmapped code reads as `unknown`
+    /// rather than as its integer, for the same reason — a number nobody can look up is
+    /// noise in the place a reason should be.
+    pub fn refusal_label(code: i64, message: &str) -> String {
+        let name = crate::proto::ErrorCode::from_i64(code).name();
+        let message = message.trim();
+
+        if message.is_empty() {
+            return name.to_string();
+        }
+
+        format!("{name}: {message}")
+    }
+
+    /// The same, for the callers holding an already-formatted `ClientError`.
+    ///
+    /// Panels keep their last refusal as a `String` — `answers.rs` formats it the moment
+    /// the answer arrives — so the pane titles have no code to pass. This reads the one
+    /// shape [`crate::proto::ErrorCode`]'s own `Display` produces, `name (code): message`,
+    /// and routes it through [`refusal_label`]. Anything else is returned untouched: a
+    /// transport failure is already a sentence, and rewriting one this did not recognise
+    /// would be inventing a refusal that was never made.
+    pub fn refusal_text(raw: &str) -> String {
+        let Some((head, message)) = raw.split_once("): ") else {
+            return raw.to_string();
+        };
+
+        let Some((_name, code)) = head.rsplit_once(" (") else {
+            return raw.to_string();
+        };
+
+        match code.parse::<i64>() {
+            Ok(code) => refusal_label(code, message),
+            Err(_not_a_code) => raw.to_string(),
+        }
+    }
+}
+
 /// How wide these pages are, as a percentage of the frame. Narrower than `?` because both
 /// are two columns of short text rather than a table of sentences.
 const WIDTH: u16 = 76;
@@ -457,7 +543,15 @@ fn note(text: impl Into<String>) -> Line<'static> {
 const PEEK_LINES: usize = 12;
 
 /// G2. `Space` on a row: the last thing that session's agent said.
-pub fn peek(frame: &mut Frame, area: Rect, app: &App, title: &str, id: &str, text: Option<&str>) {
+pub fn peek(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    title: &str,
+    id: &str,
+    text: Option<&str>,
+    from_picker: bool,
+) {
     let mut lines = vec![
         Line::from(Span::styled(
             crate::ui::tree::truncate(title, 64),
@@ -485,17 +579,29 @@ pub fn peek(frame: &mut Frame, area: Rect, app: &App, title: &str, id: &str, tex
         // Two different silences, and only one of them is about the session. This client
         // holds no transcript for a row it never subscribed to, and saying "nothing was
         // said" there would be a claim about someone else's conversation.
-        None => lines.push(note(
-            "this client is not holding this session's transcript, so it has no last \
-             message to show — enter opens it",
-        )),
+        // Two short lines rather than one long one: this page's height is counted in
+        // `lines`, and a sentence that wraps at some widths and not others pushed the hint
+        // row below off the popup exactly when the hint was most needed.
+        None => {
+            lines.push(note(
+                "this client is not holding this session's transcript,",
+            ));
+            lines.push(note("so it has no last message to show"));
+        }
     }
 
     lines.push(Line::from(""));
-    lines.push(note(format!(
-        "r replies · enter opens · esc closes · {} lists them all",
-        app.keymap.label(Action::LeaderSessions)
-    )));
+    // T2.6. The hint names what each key does *here*. It used to say "enter opens" over an
+    // Enter that closed, which is the worst kind of hint: one that teaches the wrong key
+    // and is only discovered by pressing it.
+    lines.push(note(if from_picker {
+        "enter opens · r replies · space or esc returns to the list".to_string()
+    } else {
+        format!(
+            "enter opens · r replies · esc closes · {} lists them all",
+            app.keymap.label(Action::LeaderSessions)
+        )
+    }));
 
     page(frame, area, "peek", lines, 0);
 }
@@ -889,10 +995,11 @@ fn mcp_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
+    // T2.8. Same rule as every other surface that names a machine.
     let mut header = vec![node
         .or(list.node.as_deref())
-        .unwrap_or("this node")
-        .to_string()];
+        .map(node_label)
+        .unwrap_or_else(|| "this computer".to_string())];
 
     // `enabled: false` is a posture, not an error: the servers list is empty because
     // nothing was started, not because nothing was configured.

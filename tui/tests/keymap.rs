@@ -517,10 +517,12 @@ fn a_rebound_chord_is_what_the_help_footer_leader_and_palette_all_show() {
         ("leader.details", "ctrl+s o"),
     ];
 
-    // `?`, which is generated from the map.
+    // `?`, which is generated from the map. Rendered taller than the rest of this file:
+    // T2.3 put every live action on the panel, so the table is now longer than a
+    // forty-row terminal and `verbose` sits below the fold on one.
     let mut app = opened(rebound);
     app.apply(key(KeyCode::Char('?')));
-    let help = screen(&mut app).text();
+    let help = render(&mut app, 120, 70).text();
     assert!(
         help.contains("ctrl+b"),
         "the help panel names the new key\n{help}"

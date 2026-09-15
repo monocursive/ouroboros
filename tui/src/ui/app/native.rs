@@ -754,7 +754,22 @@ impl App {
     /// has subscribed to has no last message *here*, and saying so is the honest answer —
     /// a peek that quietly opened a subscription would make the cheap key expensive and
     /// would change what the runtime is streaming just because someone looked.
+    /// T2.6. Back to the session picker a peek was opened from, on the row it peeked.
+    ///
+    /// `None` closes instead, which is what a peek reached from anywhere else should do:
+    /// restoring a list nobody was looking at would be this client deciding where the
+    /// operator was.
+    pub(super) fn restore_picker(&mut self, selected: Option<(Plane, String)>) {
+        self.overlay = selected.map(|key| Overlay::SessionPicker {
+            selected: Some(key),
+        });
+    }
+
     pub(super) fn peek_session(&mut self, plane: Plane, id: String) {
+        // T2.6. Read before the overlay is replaced: the picker is the surface `Space`
+        // is pressed on, and whether it was there is the thing `Esc` has to put back.
+        let from_picker = matches!(self.overlay, Some(Overlay::SessionPicker { .. }));
+
         let text = self
             .sessions
             .watches
@@ -773,6 +788,7 @@ impl App {
             id,
             title,
             text,
+            from_picker,
         });
     }
 

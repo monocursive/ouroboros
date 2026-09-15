@@ -1150,10 +1150,17 @@ fn the_help_panel_is_grouped_and_keeps_its_limits_in_view() {
     app.sessions.composer = None;
     app.apply(key(KeyCode::Char('?')));
 
-    let screen = screen(&mut app);
+    // Taller than this file's usual frame: T2.3 put every live action on the panel, so the
+    // table is longer than a forty-four-row terminal and the last heading is below the fold
+    // on one. That the panel scrolls is the subject of the test below this one.
+    let screen = render(&mut app, 180, 72);
     let text = screen.text();
 
-    for heading in ["COMPOSING", "WHILE THE AGENT WORKS", "SESSION", "RUNTIME"] {
+    // T2.3: the headings are the parity plan's five groups, used by the palette, this
+    // panel and the which-key overlay alike. The claim is unchanged — the panel is grouped
+    // by the question someone is asking when they open it — only the taxonomy is now one
+    // taxonomy instead of three.
+    for heading in ["SESSION", "TURN", "CONVERSATION", "CLIENT"] {
         assert!(text.contains(heading), "missing {heading}:\n{text}");
     }
 

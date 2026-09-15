@@ -81,6 +81,9 @@ pub use overlays::{
 pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsConnection, SettingsField, SettingsSection};
 pub use start::{NewField, NewSession, DEFAULT_MODEL};
+// ui-parity T2
+pub use overlays::Group;
+pub use settings::{provider_name, ClientField};
 
 /// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
 /// cadences below are counted in these frames so wall-clock meaning stays put.
@@ -1173,17 +1176,6 @@ impl App {
         self.save_quiet = true;
     }
 
-    /// `/theme`: the next palette in the cycle, live, and remembered.
-    ///
-    /// The preview *is* the switch. There is nothing useful to preview a palette in but the
-    /// screen already showing the conversation, and a modal that painted swatches would be
-    /// showing the operator six rectangles instead of their own transcript. Cycling back
-    /// round is one more `/theme`, and what is written to the file is whatever they stopped
-    /// on — so the preview is undoable by the same key that made it.
-    pub(super) fn cycle_theme(&mut self) {
-        self.switch_theme(self.config.theme.name().next());
-    }
-
     /// `/theme <name>`.
     pub(super) fn choose_theme(&mut self, name: &str) {
         let Some(theme) = super::theme::ThemeName::parse(name) else {
@@ -2102,6 +2094,77 @@ impl App {
                 self.notice = None;
             }
         }
+    }
+
+    // ui-parity T2
+
+    /// T2.8. Which *computer* a row is on, for the surfaces that list several.
+    ///
+    /// Not the same question [`super::panels::node_label`] answers, and the difference
+    /// matters on exactly these screens. `node_label` names a runtime — it is what the
+    /// Dashboard, the settings header and the help footer want, where there is one node
+    /// and the question is "what am I attached to". The session rail, the session cards
+    /// and the picker ask a different question: *which of my machines*. A fleet's nodes
+    /// are `ouro@alpha` and `ouro@beta`, so the name half is the release and the host half
+    /// is the computer — a column of `ouro` on every row would be a column that
+    /// distinguishes nothing, which is the failure G2 put the node on these rows to avoid.
+    ///
+    /// Three answers, in the order they are trustworthy:
+    ///
+    /// 1. the fleet's own roster, where there is one — a `Member` carries the node *and*
+    ///    the machine name the operator gave it, and that name is the best of the three;
+    /// 2. the host half, which is what differs between machines when nobody has named
+    ///    them;
+    /// 3. `node_label`, which covers the unnamed BEAM (`this computer`) and anything that
+    ///    is not an `name@host` pair at all.
+    pub fn machine_label(&self, node: &str) -> String {
+        if let Some(profile) = &self.fleet_profile {
+            if let Some(member) = profile
+                .members
+                .iter()
+                .find(|member| member.node == node)
+                .filter(|member| !member.machine.trim().is_empty())
+            {
+                return member.machine.clone();
+            }
+        }
+
+        match node.split_once('@') {
+            Some((_name, host)) if !host.trim().is_empty() && host.trim() != "nohost" => {
+                host.trim().to_string()
+            }
+            _unnamed => super::panels::node_label(node),
+        }
+    }
+
+    /// T2.9. `/theme` with no argument, and `leader.theme`: the list, previewed live.
+    ///
+    /// Toggles, like `/keys` and `/cost`: pressing the verb twice is how someone checks
+    /// what this build has and gets back to what they were doing. Closing by the verb is
+    /// the same statement `Esc` makes — nothing was chosen — so it restores as well.
+    pub fn open_theme_picker(&mut self) {
+        if let Some(Overlay::Theme { previous, .. }) = self.overlay {
+            self.overlay = None;
+            super::switch_theme(previous);
+            return;
+        }
+
+        let previous = super::theme_request();
+        let choice = super::theme::ThemeName::ALL
+            .iter()
+            .position(|name| *name == self.config.theme.name())
+            .unwrap_or(0);
+
+        self.overlay = Some(Overlay::Theme { choice, previous });
+    }
+
+    /// T1 replaces: the `ctrl+c` state machine and the footer hint that reads it.
+    ///
+    /// `false` here because nothing in this tree arms it yet — the footer asks, and a
+    /// footer that drew `ctrl+c again to quit` from a flag nobody sets would be advertising
+    /// a state the client is not in. T1.2 adds the real one and this goes.
+    pub fn quit_armed(&self) -> bool {
+        false
     }
 }
 
