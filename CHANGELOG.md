@@ -8,6 +8,8 @@ requirements and upgrade instructions are in the
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-15
+
 ### Added
 
 - Paste, drop, or choose images in web chat, or use Ctrl+V, `/paste-image`, and
@@ -16,13 +18,40 @@ requirements and upgrade instructions are in the
 - Image uploads support progress, removal, retries, and remote conversation
   owners. Browser drafts survive conversation switches, and private TUI draft
   recovery survives runtime restarts and gateway token rotation.
+- Web chat gains a searchable command palette, keyboard shortcuts, message copy
+  and transcript export, plus controls for steering, model changes, per-turn
+  thinking effort, and plan mode.
+- Web conversation tools now include backtrack, fork, rewind, compaction,
+  handoff, context inspection, operator shell commands, and an MCP server panel.
+
+### Changed
+
+- Web and TUI command palettes share one catalogue and consistent wording.
+  TUI help, shortcut hints, and command discovery follow the configured key map.
+- Web navigation shares one top bar, with working session activity, notifications,
+  and a separate vitals panel. Palette selection and message-copy controls remain
+  usable on compact screens and with reduced motion.
+
+### Fixed
+
+- Palette Send and Queue submit the current browser form, preserving images and
+  refusing pending or failed uploads. Image-only TUI sends respect disabled or
+  rebound Send keys.
+- Repeated web submissions reuse the original turn ID and thinking-effort input;
+  deliberate draft or effort edits still create a new turn.
+- Backtrack restores and saves the chosen browser draft without sending it.
+  Session keyboard shortcuts and modal guards no longer act on the wrong surface.
+- Fleet machines retain operator-assigned names, including offline roster
+  members. Unnamed machines use their hostname so shared release names do not
+  make different computers appear identical.
 
 ### Upgrade notes
 
+- Run `ouro update` from an official standalone installation. Finish active work,
+  then run `ouro stop` and `ouro` to activate the new runtime. Reload open web views.
 - Source builds require `make media` for the image decoder; `make dev` and release
   packaging include it. Image uploads require working runtime OS containment.
-- After upgrading, finish active work, restart the runtime, and reload web views
-  to use image attachments. Encrypted owners keep client image drafts in memory.
+- Encrypted owners keep client image drafts in memory.
 
 ## [0.1.7] - 2026-09-14
 
@@ -168,7 +197,8 @@ requirements and upgrade instructions are in the
 
 Earlier `v0.1.0` and `v0.1.1` tags have no published release assets.
 
-[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.7...dev
+[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.8...dev
+[0.1.8]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.8
 [0.1.7]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.7
 [0.1.6]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.6
 [0.1.5]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.5
