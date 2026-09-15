@@ -49,6 +49,16 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     :service_tier,
     :verbosity
   ]
+  # The Anthropic lane's prompt-cache switches. `ReqLLM` writes no `cache_control` unless
+  # asked (`ReqLLM.Providers.Anthropic.has_prompt_caching?/1`), so `put_transport_options/2`
+  # asks on every Anthropic request; these keys exist so an operator can lengthen the TTL
+  # or switch the breakpoints off, never so that caching depends on a node remembering to
+  # switch it on.
+  @anthropic_option_keys [
+    :anthropic_prompt_cache,
+    :anthropic_prompt_cache_ttl,
+    :anthropic_cache_messages
+  ]
   @provider_metadata_keys [:request_id, :response_id, :service_tier]
 
   @impl true
@@ -613,7 +623,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
          :ok <- validate_option_keys(options, @generation_option_keys),
          {:ok, provider_options} <-
            keyword_options(Keyword.get(options, :provider_options, [])),
-         :ok <- validate_option_keys(provider_options, @codex_option_keys) do
+         :ok <-
+           validate_option_keys(provider_options, @codex_option_keys ++ @anthropic_option_keys) do
       {:ok,
        @generation_defaults
        |> Keyword.merge(options)
@@ -641,6 +652,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     provider_options =
       options
       |> Keyword.get(:provider_options, [])
+      |> Keyword.drop(@anthropic_option_keys)
       |> Keyword.put_new(:openai_stream_transport, :sse)
       |> Keyword.put_new(:codex_originator, "ouroboros")
       |> Keyword.put(:session_id, request.provider_session_id)
@@ -656,12 +668,32 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   # environment-first `AnthropicKey` boundary supplies the credential only to this
   # transient request. Identity-linked keys also contribute their workspace header; the
   # auth mode is likewise forced here.
+  #
+  # Every Anthropic request also asks for the prompt cache. `Ouroboros.Provider.Native.Context`
+  # lays the request out so the prefix is stable — system prompt, tools in a fixed order,
+  # then the conversation — and that layout earns nothing until a request carries a
+  # `cache_control` breakpoint, because the API caches only what it is asked to. ReqLLM
+  # places three: on the last tool, on the system block, and on the newest message, so each
+  # call reads everything the previous one wrote and pays the write premium only on what
+  # this call appended. The default five-minute TTL is the right one for a tool loop whose
+  # calls are seconds apart; `anthropic_prompt_cache_ttl: "1h"` in `native_model_options`
+  # buys longer idle gaps at twice the write price. Whether it is working is not assumed:
+  # the provider's `cache_read_tokens` ride on every `usage` event, and
+  # `test/provider/native/direct_sse_test.exs` asserts the breakpoints are on the wire.
   defp put_transport_options(options, %{model: "anthropic:" <> _}) do
+    provider_options =
+      options
+      |> Keyword.get(:provider_options, [])
+      |> Keyword.take(@anthropic_option_keys)
+      |> Keyword.put_new(:anthropic_prompt_cache, true)
+      |> Keyword.put_new(:anthropic_cache_messages, true)
+      |> Keyword.put(:auth_mode, :api_key)
+
     options =
       options
       |> Keyword.delete(:auth_file)
       |> Keyword.delete(:oauth_file)
-      |> Keyword.put(:provider_options, auth_mode: :api_key)
+      |> Keyword.put(:provider_options, provider_options)
 
     case AnthropicKey.fetch_credentials() do
       {:ok, credentials, _source} ->

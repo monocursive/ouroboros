@@ -3634,9 +3634,23 @@ defmodule Ouroboros.Provider.Native.Session do
   defp archive(state, messages),
     do: Archive.write(state.session_dir, messages, event_limit: state.checkpoint_limit)
 
-  # The summariser is one more call on the same model module the turn uses, with no
-  # tools. It is deliberately not the loop: a summary that could call `bash` would be a
-  # second agent nobody asked for.
+  # The summariser is one more call on the same model module the turn uses, and it sends
+  # the turn's own prefix — the same system prompt, the same tool list, the same reasoning
+  # effort — with the instruction appended as the newest user message. Not for the model's
+  # sake: the folded history is the largest request this session ever makes, and a fork
+  # that rebuilds any of those three can read nothing the turn's calls left in the prompt
+  # cache (R3 §5: a fork must reuse the parent's exact prefix). The same prefix makes a
+  # hit possible; whether one happened is in this call's own `model_result` usage
+  # (`cache_read_tokens`), and is not assumed anywhere. The tools are advertised for prefix
+  # identity only. `collect/4` keeps text and drops any tool call, so a summary that asked
+  # for `bash` gets no `bash`; it is deliberately not the loop, because a summariser that
+  # executed tools would be a second agent nobody asked for.
+  #
+  # A `/compact` before this session's first turn — a resumed conversation, or one just
+  # reconfigured — finds no prefix built yet. That is the case with the most to re-read,
+  # so the summariser builds the prefix the next turn would rather than send a bare
+  # instruction over the whole history; only a prefix that cannot be built at all falls
+  # back to the instruction alone, and the next turn would refuse on the same reason.
   #
   # R1 §4.2 makes it a *gated* model call all the same: it spends tokens on the operator's
   # key, so it gets an `:inference` entry before the request leaves and a `model_call` /
@@ -3647,16 +3661,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
   defp summariser(state, turn_id) do
     fn %{messages: messages, instruction: instruction} ->
-      request = %{
-        model: state.model_spec,
-        system: instruction,
-        messages: messages ++ [%{role: :user, content: instruction}],
-        tools: [],
-        provider_session_id: state.provider_session_id,
-        turn_id: turn_id,
-        reasoning_effort: nil,
-        max_tokens: nil
-      }
+      request = summary_request(state, messages, instruction, turn_id)
 
       case run_summariser(state, request, turn_id) do
         {:ok, text, _seq} -> {:ok, text}
@@ -3664,6 +3669,44 @@ defmodule Ouroboros.Provider.Native.Session do
       end
     end
   end
+
+  defp summary_request(state, messages, instruction, turn_id) do
+    base = %{
+      model: state.model_spec,
+      messages: messages ++ [%{role: :user, content: instruction}],
+      provider_session_id: state.provider_session_id,
+      turn_id: turn_id,
+      max_tokens: nil
+    }
+
+    case prefix(state) do
+      %Context{system: system, tools: tools} ->
+        Map.merge(base, %{
+          system: system,
+          tools: tools,
+          reasoning_effort: state.reasoning_effort
+        })
+
+      nil ->
+        Map.merge(base, %{system: instruction, tools: [], reasoning_effort: nil})
+    end
+  end
+
+  # The prefix the loop sends, or — before a turn has built one — the prefix it would
+  # send, built the same way `ensure_context/1` builds it and from the same state. Not
+  # stored: the async `compact_start` path runs on a snapshot, and the next turn builds
+  # its own from the same inputs.
+  defp prefix(%{prompt_context: %Context{} = context}), do: context
+
+  defp prefix(state) do
+    case Context.build(context_options(state)) do
+      {:ok, context} -> context
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp tools_digest(tools) when is_list(tools),
+    do: Journal.digest(Enum.map(tools, &Map.take(&1, [:name, :description, :parameters])))
 
   # Returns the `model_result` journal sequence alongside the text, so the `compaction`
   # record can point at the call that produced its summary. A pointer rather than an
@@ -3706,7 +3749,7 @@ defmodule Ouroboros.Provider.Native.Session do
         "request_sha256" => prompt_sha256,
         "system_sha256" => text_digest(request.system),
         "message_count" => length(request.messages),
-        "tools_sha256" => Journal.digest([]),
+        "tools_sha256" => tools_digest(request.tools),
         "request" =>
           if(Ouroboros.Audit.enabled?(), do: Model.project(state.model_module, request)),
         "model" => request.model,

@@ -540,9 +540,16 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert second.tools != []
       assert third.tools == []
 
-      # And it is not kept: the conversation the turn leaves behind has no countdowns.
+      # And it is kept. The conversation is append-only: every request extends the one
+      # before it rather than rewriting it, which is what a prompt cache reads and what
+      # a model that binds its thinking to the prefix before it checks. A countdown
+      # removed on the next call would be a history edit at the end of every request.
+      for [previous, next] <- Enum.chunk_every([first, second, third], 2, 1, :discard) do
+        assert Enum.take(next.messages, length(previous.messages)) == previous.messages
+      end
+
       assert_receive {:finished, {:ok, state}}, 1_000
-      refute Enum.any?(state.messages, &budget_message?/1)
+      assert Enum.count(state.messages, &budget_message?/1) == 3
     end
 
     test "a turn far from its budget carries no turn-budget message", context do
