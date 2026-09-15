@@ -73,3 +73,61 @@ test("a failed image blocks sending and can be removed without losing text", asy
   await page.getByRole("button", {name: "Remove corrupt.png"}).click();
   await expect(page.locator(".ouro-image-card")).toHaveCount(0);
 });
+
+test("palette Send preserves images and blocks pending or failed uploads", async ({ page }) => {
+  const root = path.resolve(__dirname, "../../_build/playwright-workspace");
+  const workspace = fs.mkdtempSync(path.join(root, "palette-images-"));
+  try {
+    await page.goto(`/auth?${new URLSearchParams({ token, workspace })}`);
+    await expect(page.locator("[data-attach]")).toBeEnabled();
+    await page.getByRole("button", { name: "Start session", exact: true }).click();
+    await expect(page).toHaveURL(/\/s\/interactive\//);
+    await expect(page.locator("[data-attach]")).toBeEnabled();
+    const composer = page.locator("#ouro-composer-input");
+    const tray = page.locator("#image-draft .ouro-image-tray");
+    const transcript = page.getByRole("log", { name: "Session transcript" });
+    async function paletteSend() {
+      await page.getByRole("button", { name: /Commands/ }).click();
+      await page.locator('[phx-value-id="turn.send"]').click();
+      await expect(page.locator("#ouro-palette")).toHaveCount(0);
+    }
+
+    // Hold real file acquisition so the pending state cannot race the palette click.
+    await page.evaluate(() => {
+      const read = File.prototype.arrayBuffer;
+      File.prototype.arrayBuffer = function () {
+        if (this.name !== "held.png") return read.call(this);
+        return new Promise(resolve => {
+          window.releaseImageRead = () => resolve(read.call(this));
+        });
+      };
+    });
+    await composer.fill("describe these pixels");
+    await page.locator("[data-image-picker]").setInputFiles({
+      name: "held.png", mimeType: "image/png", buffer: fs.readFileSync(image)
+    });
+    await expect(tray).toContainText("uploading");
+    await paletteSend();
+    await expect(composer).toHaveValue("describe these pixels");
+    await expect(transcript).not.toContainText("describe these pixels");
+
+    await page.evaluate(() => window.releaseImageRead());
+    await expect(tray).toContainText("2 × 1");
+    await paletteSend();
+    await expect(transcript).toContainText("Received 1 image(s)");
+    await expect(transcript).toContainText("describe these pixels");
+    await expect(transcript.locator("img")).toHaveCount(1);
+    await expect(tray.locator(".ouro-image-card")).toHaveCount(0);
+    await expect(composer).toHaveValue("");
+
+    await composer.fill("retain the failed draft");
+    await page.locator("[data-image-picker]").setInputFiles({
+      name: "corrupt.png", mimeType: "image/png", buffer: Buffer.from("invalid pixels")
+    });
+    await expect(tray).toContainText("failed");
+    await paletteSend();
+    await expect(composer).toHaveValue("retain the failed draft");
+    await expect(transcript).not.toContainText("retain the failed draft");
+    await expect(tray).toContainText("corrupt.png");
+  } finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+});

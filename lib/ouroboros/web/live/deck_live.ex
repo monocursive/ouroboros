@@ -1173,7 +1173,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp command(socket, "session.delete"), do: session_action(socket, "delete")
 
   defp command(socket, id) when id in ["turn.send", "turn.queue"],
-    do: forward(socket, "send", draft_params(socket))
+    do: push_event(socket, "composer-submit", %{key: socket.assigns.draft_key})
 
   # Deliberately a reveal rather than a send. A steer must carry the words in the box,
   # and what this process holds is the draft as of the last 400ms debounce — see
@@ -1228,9 +1228,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp command(socket, "turn.shell"), do: reveal(socket, "#ouro-composer-input")
 
   defp command(socket, _unrunnable), do: socket
-
-  defp draft_params(socket),
-    do: %{"message" => socket.assigns.draft, "session_key" => socket.assigns.draft_key}
 
   defp session_action(%{assigns: %{open: {plane, id}}} = socket, action),
     do:
@@ -1424,11 +1421,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # ---------------------------------------------------------------- The per-turn effort
 
-  defp arm_effort(socket, "session"), do: clear_next_effort(socket)
+  defp arm_effort(socket, "session"),
+    do: socket |> assign(:last_send, nil) |> clear_next_effort()
 
   defp arm_effort(socket, choice) do
     if choice in reasoning_efforts(socket.assigns) and is_binary(socket.assigns.draft_key),
-      do: put_extra(socket, :next_effort, {socket.assigns.draft_key, choice}),
+      do:
+        socket
+        |> assign(:last_send, nil)
+        |> put_extra(:next_effort, {socket.assigns.draft_key, choice}),
       else: socket
   end
 
@@ -1707,7 +1708,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # costs one round trip per pause in typing, not one per keystroke.
   #
   # A change also forgets the last send, which is what makes a deliberate repeat of the
-  # same words a second turn while a double-click stays one — see `turn_id_for/2`.
+  # same words a second turn while a double-click stays one — see `submission_for/2`.
   def handle_event("image-action", params, socket) do
     id =
       case socket.assigns.open do
@@ -2429,18 +2430,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
   end
 
   defp dispatch_turn(%{assigns: %{open: {:interactive, id}}} = socket, text) do
-    turn_id = turn_id_for(socket, text)
+    {turn_id, input} = submission_for(socket, text)
 
     params =
       socket
       |> session_params(:interactive, id)
       # ui-parity W2: `turn_input/2` is the bare prompt unless a per-turn effort is armed.
-      |> Map.merge(%{"input" => turn_input(socket, text), "turn_id" => turn_id})
+      |> Map.merge(%{"input" => input, "turn_id" => turn_id})
 
     socket =
       socket
       |> assign(:last_send, {text, turn_id})
-      |> assign(:last_send_input, turn_input(socket, text))
+      |> assign(:last_send_input, input)
 
     method = Composer.verb(socket.assigns.turn, session_status(socket))
 
@@ -2522,16 +2523,20 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp refused(socket, text, message),
     do: socket |> put_draft(text, false) |> assign(:composer_error, message)
 
-  # A second click of the same words with no typing in between is the same turn; anything
-  # else is a new one. The runtime does the deduplicating — `{id, input, turn_id}` repeated
-  # returns the turn it already has — so this only has to decide when the id is the same.
-  defp turn_id_for(%{assigns: %{last_send: {text, turn_id}}} = socket, text) do
-    if Map.get(socket.assigns, :last_send_input, text) == turn_input(socket, text),
-      do: turn_id,
-      else: new_turn_id()
+  # Repeated submits without a draft or effort edit reuse the entire accepted envelope.
+  # A successful send spends the effort override, but a duplicate must still carry it:
+  # the runtime deduplicates by both input and turn_id. Images come from each form submit,
+  # so changing those also starts a new turn even if no text change event has arrived.
+  defp submission_for(%{assigns: %{last_send: {text, turn_id}}} = socket, text) do
+    input = Map.get(socket.assigns, :last_send_input, text)
+    previous_refs = if is_map(input), do: Map.get(input, "image_attachments", []), else: []
+
+    if previous_refs == Map.get(socket.assigns, :image_refs, []),
+      do: {turn_id, input},
+      else: {new_turn_id(), turn_input(socket, text)}
   end
 
-  defp turn_id_for(_socket, _text), do: new_turn_id()
+  defp submission_for(socket, text), do: {new_turn_id(), turn_input(socket, text)}
 
   defp new_turn_id do
     "web-" <>

@@ -74,8 +74,7 @@ impl App {
             self.request_clipboard_paste();
             return;
         }
-        if key.code == crossterm::event::KeyCode::Enter
-            && key.modifiers.is_empty()
+        if self.keymap.hits(Action::Send, key)
             && self.home_draft.is_empty()
             && !self.home_images.is_empty()
         {

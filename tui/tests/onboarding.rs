@@ -1668,6 +1668,41 @@ fn a_mistyped_verb_alone_on_the_home_screen_says_how_to_send_it_anyway() {
 }
 
 #[test]
+fn image_only_home_obeys_disabled_and_rebound_send_keys() {
+    use ouro::model::{Attachment, AttachmentKind};
+    for binding in ["off", "ctrl+enter"] {
+        let mut app = harness(true);
+        let mut image = Attachment::image("att_abcdefghijklmnopqrstuvwx12345678");
+        image.kind = AttachmentKind::ManagedImage;
+        image.ephemeral = false;
+        image.byte_size = 72;
+        app.home_images.push(image);
+        app.config
+            .keys
+            .bindings
+            .insert("send".into(), toml::Value::String(binding.into()));
+        app.reload_keymap();
+        app.drain();
+        app.apply(key(KeyCode::Enter));
+        assert!(!app.drain().iter().any(|c| c.method == "interactive.start"));
+        assert_eq!(app.home_images.len(), 1);
+
+        app.apply(Msg::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+        let calls = app.drain();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.method == "interactive.start")
+                .count(),
+            usize::from(binding != "off")
+        );
+    }
+}
+
+#[test]
 fn image_only_first_message_recovery_reuses_the_created_session_and_binds_before_send() {
     use ouro::model::{Attachment, AttachmentKind};
     let mut app = harness(true);

@@ -420,23 +420,17 @@
           this.syncSend();
         }
       }.bind(this));
+      // Read the current form, including managed images and upload state. The server's
+      // debounced draft can be older than the text the operator is submitting.
+      this.handleEvent("composer-submit", function (event) {
+        if (event.key === this.key) this.submit();
+      }.bind(this));
       this.onKeyDown = function (event) {
         if (event.key !== "Enter" || event.shiftKey || event.altKey || event.metaKey) return;
         // An IME composing a character sends Enter to commit it; that Enter is not a send.
         if (event.isComposing || event.keyCode === 229) return;
 
-        var form = this.el.form;
-        if (!form || form.classList.contains("phx-submit-loading")) return;
-        if (this.el.value.trim() === "" && form.dataset.imagesReady !== "true") return;
-        if (form.dataset.imagesPending === "true") return;
-
-        event.preventDefault();
-
-        if (typeof form.requestSubmit === "function") {
-          form.requestSubmit();
-        } else {
-          form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-        }
+        this.submit(event);
       }.bind(this);
 
       this.onInput = function () {
@@ -461,6 +455,19 @@
     destroyed: function () {
       this.el.removeEventListener("keydown", this.onKeyDown);
       this.el.removeEventListener("input", this.onInput);
+    },
+
+    submit: function (event) {
+      var form = this.el.form;
+      if (!form || form.classList.contains("phx-submit-loading")) return;
+      if (this.el.value.trim() === "" && form.dataset.imagesReady !== "true") return;
+      if (form.dataset.imagesPending === "true") return;
+      if (event) event.preventDefault();
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
     },
 
     loadDraft: function () {

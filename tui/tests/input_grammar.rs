@@ -2409,6 +2409,33 @@ fn uploaded_image(app: &mut App) {
 }
 
 #[test]
+fn image_only_send_obeys_disabled_and_rebound_send_keys() {
+    for binding in ["off", "ctrl+enter"] {
+        let mut app = opened("idle", steering_capabilities(), vec![]);
+        compose(&mut app);
+        uploaded_image(&mut app);
+        rebound(&mut app, &[("send", binding)]);
+        app.drain();
+        app.apply(key(KeyCode::Enter));
+        assert!(turn_calls(&app.drain()).is_empty(), "binding: {binding}");
+        assert_eq!(chips(&app).len(), 1);
+
+        app.apply(modified(KeyCode::Enter, KeyModifiers::CONTROL));
+        let calls = app.drain();
+        let sent = turn_calls(&calls);
+        if binding == "off" {
+            assert!(sent.is_empty());
+        } else {
+            assert_eq!(sent.len(), 1);
+            assert_eq!(
+                sent[0].1["input"]["image_attachments"],
+                json!([{"id": MANAGED_IMAGE}])
+            );
+        }
+    }
+}
+
+#[test]
 fn image_only_send_contains_a_managed_id_and_unknown_outcome_recovers_the_same_turn() {
     let mut app = opened("idle", steering_capabilities(), vec![]);
     compose(&mut app);

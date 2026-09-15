@@ -819,8 +819,7 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Enter
-            && key.modifiers.is_empty()
+        if self.keymap.hits(Action::Send, key)
             && self
                 .sessions
                 .composer
