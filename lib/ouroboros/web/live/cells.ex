@@ -124,12 +124,20 @@ defmodule Ouroboros.Web.Live.Cells do
         class="ouro-cell-actions"
         phx-hook="Clipboard"
       >
-        <button type="button" class="ouro-copy" data-ouro-copy="rendered">Copy</button>
+        <button
+          type="button"
+          class="ouro-copy"
+          data-ouro-copy="rendered"
+          aria-label={"Copy message #{@index + 1}"}
+        >
+          Copy
+        </button>
         <button
           type="button"
           class="ouro-copy"
           phx-click="copy-source"
           phx-value-cell={@cell_id}
+          aria-label={"Copy the Markdown of message #{@index + 1}"}
         >
           Copy source
         </button>

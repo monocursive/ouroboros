@@ -53,8 +53,11 @@ defmodule Ouroboros.Web.Live.Palette do
   def overlays(assigns) do
     ~H"""
     <div id="ouro-keys" phx-hook="Keys" data-palette-open={@palette && "true"}>
+      <%!-- One at a time, never both. A second `<dialog>` opened over the first leaves
+            the first in the top layer with nothing listening for its `cancel`, so `Esc`
+            stops working and focus lands on `<body>`. --%>
       <.palette :if={@palette} palette={@palette} />
-      <.shortcut_sheet :if={@sheet} />
+      <.shortcut_sheet :if={is_nil(@palette) and @sheet} />
     </div>
     """
   end
@@ -84,7 +87,12 @@ defmodule Ouroboros.Web.Live.Palette do
       <span hidden phx-window-keydown="palette-move" phx-key="ArrowDown" phx-value-direction="next"></span>
       <span hidden phx-window-keydown="palette-move" phx-key="ArrowUp" phx-value-direction="prev"></span>
 
-      <form class="ouro-palette-head" phx-change="palette-filter" phx-submit="palette-run">
+      <form
+        id="ouro-palette-form"
+        class="ouro-palette-head"
+        phx-change="palette-filter"
+        phx-submit="palette-run"
+      >
         <input
           id="ouro-palette-query"
           type="text"

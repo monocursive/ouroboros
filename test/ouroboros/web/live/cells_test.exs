@@ -601,6 +601,15 @@ defmodule Ouroboros.Web.Live.CellsTest do
       refute html =~ "data-ouro-source"
     end
 
+    test "each control names the message it is about, for a reader who cannot see it" do
+      # Twenty "Copy" buttons in a transcript are twenty identical announcements. The
+      # visible label stays short; the accessible name says which message.
+      html = paint(%Cell.Message{speaker: :agent, text: "the answer"}, index: 11)
+
+      assert html =~ ~s(aria-label="Copy message 12")
+      assert html =~ ~s(aria-label="Copy the Markdown of message 12")
+    end
+
     test "a message still streaming has nothing to copy yet" do
       streaming = paint(%Cell.Message{speaker: :agent, text: "half a th", streaming: true})
 

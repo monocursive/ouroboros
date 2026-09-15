@@ -79,6 +79,12 @@ defmodule Ouroboros.Web.CommandsTest do
       assert "copy" in by_group[:conversation]
       assert "copy_source" in by_group[:conversation]
       assert "status" in by_group[:runtime]
+      assert "audit" in by_group[:runtime]
+
+      # The parity plan's table puts settings, theme and help under **Client**, beside
+      # the other things that are this browser's rather than the runtime's.
+      assert "settings" in by_group[:client]
+      refute "settings" in by_group[:runtime]
       assert "theme" in by_group[:client]
       assert "shortcuts" in by_group[:client]
     end
@@ -146,7 +152,11 @@ defmodule Ouroboros.Web.CommandsTest do
 
       refute "turn.send" in empty
       refute "turn.queue" in empty
-      refute "turn.steer" in empty
+
+      # `turn.steer` is the exception and deliberately so: the row leads to the Steer
+      # button rather than pressing it, because a steer must carry the words in the box
+      # and not the draft this process last saw 400ms ago.
+      assert "turn.steer" in empty
     end
 
     test "ending and deleting are the two halves of a session's status, never both" do
@@ -202,7 +212,7 @@ defmodule Ouroboros.Web.CommandsTest do
     test "a gate that meets an assigns shape it does not know answers no, and does not raise" do
       # A palette that crashed the deck to draw a menu would turn a bug into an outage.
       assert Commands.available(%{}) |> Enum.map(& &1.id) |> Enum.sort() ==
-               ~w(client.notifications client.shortcuts client.theme runtime.settings
+               ~w(client.notifications client.settings client.shortcuts client.theme
                   session.switch)
     end
   end
@@ -261,6 +271,132 @@ defmodule Ouroboros.Web.CommandsTest do
         assigns(%{cells: %{"a" => %{id: "a", index: 0, cell: %Cell.Message{speaker: :you}}}})
 
       assert Commands.last_agent_message(only_mine) == nil
+    end
+  end
+
+  describe "capability_offered?/2" do
+    defp caps(map), do: %{info: %{options: %{capabilities: map}}}
+
+    test "only a boolean false hides a control" do
+      refute Commands.capability_offered?(caps(%{steer: false}), :steer)
+      refute Commands.capability_offered?(caps(%{dynamic_model: false}), :dynamic_model)
+    end
+
+    test "a string is a mechanism, not a verdict — even one spelt \"false\"" do
+      # `Capability::decode` (tui/src/model.rs:613) turns any nonempty string into
+      # `Yes(mechanism)`, and `offered/0` is `!matches!(self, Self::No)`. A transport
+      # whose mechanism is named "false" is offered there, so it is offered here.
+      assert Commands.capability_offered?(caps(%{steer: "native"}), :steer)
+      assert Commands.capability_offered?(caps(%{steer: "false"}), :steer)
+      assert Commands.capability_offered?(caps(%{steer: :native}), :steer)
+    end
+
+    test "silence in every shape it arrives in is offered" do
+      assert Commands.capability_offered?(caps(%{steer: nil}), :steer)
+      assert Commands.capability_offered?(caps(%{}), :steer)
+      assert Commands.capability_offered?(%{info: %{options: %{}}}, :steer)
+      assert Commands.capability_offered?(%{info: %{}}, :steer)
+      assert Commands.capability_offered?(%{}, :steer)
+      # A shape this build cannot read is not a refusal either.
+      assert Commands.capability_offered?(caps("unexpected"), :steer)
+    end
+
+    test "reads the map however it crossed the wire" do
+      # Atom keys in-process, string keys through JSON. A refusal spelt either way is a
+      # refusal; reading only one spelling would turn the other into silence.
+      refute Commands.capability_offered?(caps(%{"steer" => false}), :steer)
+      assert Commands.capability_offered?(caps(%{"steer" => "native"}), :steer)
+
+      refute Commands.capability_offered?(
+               %{info: %{options: %{"capabilities" => %{"dynamic_model" => false}}}},
+               :dynamic_model
+             )
+    end
+  end
+
+  describe "configurable?/2" do
+    test "splits the two halves the runtime declares separately" do
+      # `Ouroboros.Provider` @capability_keys carries `dynamic_model` and
+      # `dynamic_configuration` apart, and a transport can serve one and refuse the other.
+      no_model =
+        assigns(%{info: %{status: :idle, options: %{capabilities: %{dynamic_model: false}}}})
+
+      refute Commands.configurable?(no_model, :model)
+      assert Commands.configurable?(no_model, :configuration)
+
+      no_config =
+        assigns(%{
+          info: %{status: :idle, options: %{capabilities: %{dynamic_configuration: false}}}
+        })
+
+      assert Commands.configurable?(no_config, :model)
+      refute Commands.configurable?(no_config, :configuration)
+    end
+
+    test "a session that has ended is configurable in neither half" do
+      ended =
+        assigns(%{
+          info: %{status: :closed, options: %{}},
+          rows: [%Rail.Row{plane: :interactive, id: "s1", status: :closed}]
+        })
+
+      refute Commands.configurable?(ended, :model)
+      refute Commands.configurable?(ended, :configuration)
+    end
+
+    test "read scope is configurable in neither half" do
+      refute Commands.configurable?(assigns(%{scope: :read}), :model)
+      refute Commands.configurable?(assigns(%{scope: :read}), :configuration)
+    end
+  end
+
+  describe "steerable?/1" do
+    test "asks all four questions, so the handler and the row cannot disagree" do
+      running = assigns(%{turn: @running})
+
+      assert Commands.steerable?(running)
+
+      refute Commands.steerable?(assigns(%{turn: @idle, info: %{status: :idle, options: %{}}}))
+      refute Commands.steerable?(Map.put(running, :scope, :read))
+
+      refute Commands.steerable?(
+               assigns(%{
+                 turn: @running,
+                 info: %{status: :running, options: %{capabilities: %{steer: false}}}
+               })
+             )
+
+      refute Commands.steerable?(
+               assigns(%{
+                 turn: @running,
+                 info: %{status: :closed, options: %{}},
+                 rows: [%Rail.Row{plane: :interactive, id: "s1", status: :closed}]
+               })
+             )
+    end
+  end
+
+  describe "last_agent_message/1 and a message still being written" do
+    test "a streaming draft is not a message to copy" do
+      streaming =
+        assigns(%{
+          cells: %{
+            "a" => %{
+              id: "a",
+              index: 0,
+              cell: %Cell.Message{speaker: :agent, text: "whole", streaming: false}
+            },
+            "b" => %{
+              id: "b",
+              index: 1,
+              cell: %Cell.Message{speaker: :agent, text: "half a sen", streaming: true}
+            }
+          }
+        })
+
+      # `cells.ex` withholds the buttons from a streaming cell; the palette row has to
+      # agree, or the two disagree about what "the last message" is.
+      assert Commands.last_agent_message(streaming) == {"cells-a", "whole"}
     end
   end
 end

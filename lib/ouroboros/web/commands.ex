@@ -30,17 +30,27 @@ defmodule Ouroboros.Web.Commands do
 
   ## Capabilities: silence is not a refusal
 
-  `steer` is read off `info.options.capabilities`, which the runtime derives from the
-  provider spec. Only an explicit `false` hides the control — an absent key is an older
-  gateway that never spoke about it, and hiding a working verb on silence would be this
-  surface inventing a ceiling. That is exactly `Capability::offered` on the Rust side
-  (`tui/src/model.rs:626`).
+  Three keys of `info.options.capabilities` gate controls here — `steer`,
+  `dynamic_model` and `dynamic_configuration` — and all three are read the way
+  `Capability::decode`/`Capability::offered` read them (`tui/src/model.rs:606-628`):
+
+    * **boolean `false` is the only refusal.** It is the one value the runtime sends on
+      purpose to say a transport cannot do this.
+    * **a string is a mechanism, not a verdict.** `"native"`, `"managed"` — and, yes, a
+      mechanism whose name happens to be `"false"` — are all declarations that it *can*.
+    * **absence, `nil`, and a map this build cannot read are silence**, which keeps
+      whatever the client did before the declaration existed. Hiding a working verb on
+      silence would be this surface inventing a ceiling.
+
+  The map crosses `Ouroboros.Gateway.Wire` with atom keys in-process and string keys
+  through JSON, so both spellings are read. A missing map is silence for every key.
   """
 
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Live.Composer
   alias Ouroboros.Web.Live.Rail
   alias Ouroboros.Web.Transcript.Cell
+  alias Ouroboros.Web.Watch
 
   @type group :: :session | :turn | :conversation | :runtime | :client
 
@@ -141,11 +151,13 @@ defmodule Ouroboros.Web.Commands do
       },
       %{
         id: "turn.steer",
-        label: "Steer the running turn with the draft",
+        label: "Steer the running turn",
         group: :turn,
         slash: "/steer",
         shortcut: nil,
-        gate: &(drafted?(&1) and steerable?(&1))
+        # Not `drafted?`: this row leads to the Steer button rather than pressing it, and
+        # the words a steer carries must come from the form. See `command/2`.
+        gate: &steerable?/1
       },
       %{
         id: "turn.interrupt",
@@ -169,7 +181,7 @@ defmodule Ouroboros.Web.Commands do
         group: :turn,
         slash: "/effort",
         shortcut: nil,
-        gate: &configurable?/1
+        gate: &reconfigurable?/1
       },
       %{
         id: "turn.model",
@@ -177,7 +189,7 @@ defmodule Ouroboros.Web.Commands do
         group: :turn,
         slash: "/model",
         shortcut: nil,
-        gate: &configurable?/1
+        gate: &remodelable?/1
       },
       %{
         id: "turn.plan",
@@ -185,7 +197,7 @@ defmodule Ouroboros.Web.Commands do
         group: :turn,
         slash: "/plan",
         shortcut: nil,
-        gate: &configurable?/1
+        gate: &reconfigurable?/1
       },
       %{
         id: "turn.sandbox",
@@ -193,7 +205,7 @@ defmodule Ouroboros.Web.Commands do
         group: :turn,
         slash: "/sandbox",
         shortcut: nil,
-        gate: &(configurable?(&1) and not is_nil(reported(&1, :sandbox_mode)))
+        gate: &(reconfigurable?(&1) and not is_nil(reported(&1, :sandbox_mode)))
       },
       %{
         id: "turn.auto_approve",
@@ -201,7 +213,7 @@ defmodule Ouroboros.Web.Commands do
         group: :turn,
         slash: "/auto-approve",
         shortcut: nil,
-        gate: &(open?(&1) and serves?(&1, "interactive.respond_approval"))
+        gate: &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.respond_approval"))
       },
       %{
         id: "turn.approval",
@@ -255,16 +267,16 @@ defmodule Ouroboros.Web.Commands do
         shortcut: nil,
         gate: &serves?(&1, "audit.status")
       },
+
+      # ------------------------------------------------------------------- Client
       %{
-        id: "runtime.settings",
+        id: "client.settings",
         label: "Settings",
-        group: :runtime,
+        group: :client,
         slash: "/settings",
         shortcut: nil,
         gate: fn _assigns -> true end
       },
-
-      # ------------------------------------------------------------------- Client
       %{
         id: "client.theme",
         label: "Switch theme",
@@ -363,7 +375,9 @@ defmodule Ouroboros.Web.Commands do
       cells when is_map(cells) -> Map.values(cells)
       _absent -> []
     end
-    |> Enum.filter(&match?(%{cell: %Cell.Message{speaker: :agent}}, &1))
+    # `streaming: true` is a draft the model is still writing, which is why `cells.ex`
+    # withholds the buttons from it. Copying half a sentence is not copying the message.
+    |> Enum.filter(&match?(%{cell: %Cell.Message{speaker: :agent, streaming: false}}, &1))
     |> Enum.sort_by(& &1.index)
     |> List.last()
     |> case do
@@ -396,14 +410,45 @@ defmodule Ouroboros.Web.Commands do
 
   defp open?(assigns), do: match?({:interactive, _id}, Map.get(assigns, :open))
 
+  # Two sources, and the watch is the fresher one: a `session_closed` in the held ledger
+  # is three seconds ahead of the status poll, and for three seconds the palette would
+  # otherwise keep offering verbs into a conversation that has ended.
   defp ended?(assigns) do
-    case status(assigns) do
-      nil -> false
-      status -> Rail.terminal?(status)
-    end
+    watched =
+      case Map.get(assigns, :watch) do
+        %Watch{} = watch -> Watch.ended?(watch)
+        _absent -> false
+      end
+
+    watched or Rail.terminal?(status(assigns))
   end
 
-  defp configurable?(assigns), do: open?(assigns) and serves?(assigns, "interactive.configure")
+  # Three questions, not one. A session that has ended takes no configuration at all; a
+  # transport that declared `dynamic_configuration: false` (or `dynamic_model: false`)
+  # takes it for everything except the thing it named — which is exactly how the terminal
+  # client reads the pair (`tui/src/ui/app/session.rs:1576-1580`).
+  defp configurable?(assigns) do
+    open?(assigns) and not ended?(assigns) and serves?(assigns, "interactive.configure")
+  end
+
+  defp reconfigurable?(assigns), do: configurable?(assigns, :configuration)
+  defp remodelable?(assigns), do: configurable?(assigns, :model)
+
+  @doc """
+  Whether one half of `interactive.configure` can be used here, now.
+
+  `:configuration` covers plan, effort and sandbox; `:model` covers the model alone,
+  because the runtime declares `dynamic_model` and `dynamic_configuration` separately and
+  a transport can serve one and refuse the other. Public for the same reason
+  `steerable?/1` is: `Ouroboros.Web.Live.DeckLive` asks it again before it calls, so the
+  catalogue row and the handler cannot answer differently.
+  """
+  @spec configurable?(map(), :configuration | :model) :: boolean()
+  def configurable?(assigns, half) when is_map(assigns) and half in [:configuration, :model] do
+    key = if half == :model, do: :dynamic_model, else: :dynamic_configuration
+
+    configurable?(assigns) and capability_offered?(assigns, key)
+  end
 
   defp drafted?(assigns) do
     open?(assigns) and not ended?(assigns) and
@@ -422,23 +467,51 @@ defmodule Ouroboros.Web.Commands do
   defp queueing?(assigns),
     do: Composer.verb(turn(assigns), status(assigns)) == "interactive.follow_up"
 
-  # A steer is offered while a turn is running, where the runtime serves the verb, and
-  # where the session did not declare it cannot be steered. Silence is offered.
-  defp steerable?(assigns) do
-    working?(assigns) and serves?(assigns, "interactive.steer") and
-      capability_offered?(assigns, :steer)
+  @doc """
+  Whether a steer can happen here, now.
+
+  Public because the handler asks it too. A steer is an injection into a call that is
+  running *now*, so all four conditions are load-bearing: an open, unfinished session, a
+  turn in flight, a runtime that serves the verb at this scope, and a transport that did
+  not declare it cannot be steered. `Ouroboros.Web.Live.DeckLive` re-asks this before it
+  sends — a form field is browser input, and the button that draws it is not a gate.
+  """
+  @spec steerable?(map()) :: boolean()
+  def steerable?(assigns) when is_map(assigns) do
+    open?(assigns) and not ended?(assigns) and working?(assigns) and
+      serves?(assigns, "interactive.steer") and capability_offered?(assigns, :steer)
   end
 
-  @doc false
+  @doc """
+  Whether chrome depending on one declared capability stays on screen.
+
+  Everything but a boolean `false`. See the moduledoc: this is `Capability::offered`
+  (`tui/src/model.rs:626`) with the same reading of a string, of silence, and of a shape
+  this build does not recognise.
+  """
   @spec capability_offered?(map(), atom()) :: boolean()
   def capability_offered?(assigns, key) do
-    options(assigns)
-    |> Map.get(:capabilities)
-    |> case do
-      map when is_map(map) -> Map.get(map, key, :undeclared)
-      _absent -> :undeclared
+    assigns
+    |> options()
+    |> capabilities()
+    |> declared(key)
+    |> Kernel.!==(false)
+  end
+
+  defp capabilities(options) do
+    case Map.get(options, :capabilities) || Map.get(options, "capabilities") do
+      map when is_map(map) -> map
+      _absent_or_unreadable -> %{}
     end
-    |> then(&(&1 not in [false, "false"]))
+  end
+
+  # Atom keys in-process, string keys across JSON. Neither spelling is the canonical one
+  # and a key found under either is the runtime having spoken.
+  defp declared(capabilities, key) do
+    case Map.fetch(capabilities, key) do
+      {:ok, value} -> value
+      :error -> Map.get(capabilities, Atom.to_string(key))
+    end
   end
 
   defp retryable?(assigns) do

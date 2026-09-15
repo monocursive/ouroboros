@@ -242,11 +242,27 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # ---------------------------------------------------------------------- The palette
 
-  defp open_palette(socket),
-    do:
-      assign(socket, :palette, %{query: "", selected: 0, rows: Commands.available(socket.assigns)})
+  # A modal owns the screen while it is open, and this one refuses to appear over
+  # another. Two `<dialog>`s stacked is not a cosmetic problem: `palette-run` forwards
+  # `session-action`, which would rewrite the confirmation underneath into a different
+  # question about a different session with no click of the operator's in between. The
+  # browser half refuses the keystroke; this half refuses the event, because a hand-made
+  # `palette-open` must not be able to do what the key cannot.
+  defp open_palette(%{assigns: %{session_action: action}} = socket) when not is_nil(action),
+    do: socket
+
+  defp open_palette(socket) do
+    socket
+    |> assign(:shortcuts?, false)
+    |> assign(:palette, %{query: "", selected: 0, rows: Commands.available(socket.assigns)})
+  end
 
   defp close_palette(socket), do: assign(socket, :palette, nil)
+
+  defp open_shortcuts(%{assigns: %{session_action: action}} = socket) when not is_nil(action),
+    do: socket
+
+  defp open_shortcuts(socket), do: socket |> close_palette() |> assign(:shortcuts?, true)
 
   defp filter_palette(%{assigns: %{palette: nil}} = socket, _query), do: socket
 
@@ -270,7 +286,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
     assign(socket, :palette, %{palette | selected: selected})
   end
 
-  # The second gate. See the block comment above.
+  # The second gate, and a third one in front of it.
+  #
+  # A confirmation dialog is a question awaiting an answer, and the palette must not act
+  # behind one: every `session-action` row would rewrite the dialog underneath into a
+  # different question about a different session. The browser half already refuses the
+  # keys; a hand-made `palette-run` is refused here for the same reason.
+  defp run_command(%{assigns: %{session_action: action}} = socket, _id) when not is_nil(action),
+    do: socket
+
   defp run_command(socket, id) do
     if Commands.available?(socket.assigns, id), do: command(socket, id), else: socket
   end
@@ -291,8 +315,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp command(socket, id) when id in ["turn.send", "turn.queue"],
     do: forward(socket, "send", draft_params(socket))
 
-  defp command(socket, "turn.steer"),
-    do: forward(socket, "send", Map.put(draft_params(socket), "verb", "steer"))
+  # Deliberately a reveal rather than a send. A steer must carry the words in the box,
+  # and what this process holds is the draft as of the last 400ms debounce — see
+  # `Ouroboros.Web.Live.Composer`'s note on the second submit button. So the row focuses
+  # the control and the operator presses it.
+  defp command(socket, "turn.steer"), do: reveal(socket, "[data-ouro-steer]")
 
   defp command(socket, "turn.interrupt"), do: forward(socket, "interrupt")
   defp command(socket, "turn.retry"), do: forward(socket, "retry")
@@ -315,9 +342,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp command(socket, "runtime.status"), do: push_navigate(socket, to: "/status")
   defp command(socket, "runtime.audit"), do: push_navigate(socket, to: "/audit")
-  defp command(socket, "runtime.settings"), do: push_navigate(socket, to: "/settings")
+  defp command(socket, "client.settings"), do: push_navigate(socket, to: "/settings")
   defp command(socket, "client.theme"), do: push_event(socket, "ouro-chrome", %{control: "theme"})
-  defp command(socket, "client.shortcuts"), do: assign(socket, :shortcuts?, true)
+  defp command(socket, "client.shortcuts"), do: open_shortcuts(socket)
 
   defp command(socket, "client.notifications"),
     do: push_event(socket, "ouro-chrome", %{control: "bell"})
@@ -423,15 +450,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp steer(socket, _text), do: socket
 
-  # Offered on silence, hidden only on a declared `false` — `Capability::offered`,
-  # `tui/src/model.rs:626`.
-  defp steer_offered?(assigns) do
-    assigns.scope == :operate and Call.available?(:operate, "interactive.steer") and
-      Commands.capability_offered?(assigns, :steer)
-  end
+  # The same predicate the catalogue row is gated by, asked again here. A form field and
+  # a `phx-value-*` are both browser input: the Steer button appearing on screen is not
+  # what makes a steer legal, `Commands.steerable?/1` is — an open and unfinished
+  # session, a turn actually running, the verb served at this scope, and a transport that
+  # did not declare it cannot be steered.
+  defp steer_offered?(assigns), do: Commands.steerable?(assigns)
 
   defp configure_plan(%{assigns: %{open: {:interactive, id}}} = socket) do
-    if Call.available?(socket.assigns.scope, "interactive.configure") do
+    if reconfigurable?(socket.assigns) do
       want = not planning?(socket.assigns)
       params = socket |> session_params(:interactive, id) |> Map.put("plan", want)
 
@@ -448,6 +475,16 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp planning?(assigns), do: assigns |> Commands.options() |> Map.get(:plan) == true
 
+  # The two halves `interactive.configure` is gated by, and the reason they are two: the
+  # runtime declares `dynamic_model` and `dynamic_configuration` separately, and a
+  # transport that can be re-pointed at a model may still refuse every other change
+  # (`lib/ouroboros/provider.ex:16-27`; the terminal client reads the pair at
+  # `tui/src/ui/app/session.rs:1576-1580`). Silence is offered; only a declared `false`
+  # withholds. `ended?/2` is asked because a finished conversation takes no configuration
+  # at all and draws none of these controls.
+  defp reconfigurable?(assigns), do: Commands.configurable?(assigns, :configuration)
+  defp remodelable?(assigns), do: Commands.configurable?(assigns, :model)
+
   # ----------------------------------------------------------------- The model picker
 
   # A `<select>`'s value is browser input, exactly as a `phx-value-choice` is, so it is
@@ -456,8 +493,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp configure_model(%{assigns: %{open: {:interactive, id}}} = socket, model) do
     model = String.trim(model)
 
-    if offered_model?(socket.assigns, model) and
-         Call.available?(socket.assigns.scope, "interactive.configure") do
+    if offered_model?(socket.assigns, model) and remodelable?(socket.assigns) do
       params = socket |> session_params(:interactive, id) |> Map.put("model", model)
 
       case call(socket, "interactive.configure", params) do
@@ -480,7 +516,20 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  defp fetch_models(%{assigns: %{composer_extras: %{models: nil}}} = socket) do
+  # Re-fetched after a refusal as well as when nothing has been read: one transient
+  # `runtime.models` failure must not leave the picker dead for the life of the page. A
+  # successful read is kept for the session it was read in — `reset_session_state/1`
+  # drops it when a different conversation is opened, because a catalogue and the search
+  # typed into it are that conversation's, not this tab's.
+  defp fetch_models(%{assigns: %{composer_extras: %{models: nil}}} = socket),
+    do: read_models(socket)
+
+  defp fetch_models(%{assigns: %{composer_extras: %{models: {:error, _refused}}}} = socket),
+    do: read_models(socket)
+
+  defp fetch_models(socket), do: socket
+
+  defp read_models(socket) do
     if Call.available?(socket.assigns.scope, "runtime.models") do
       case call(socket, "runtime.models", %{}) do
         {:ok, catalogue} -> put_extra(socket, :models, Composer.model_rows(catalogue))
@@ -494,8 +543,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
       )
     end
   end
-
-  defp fetch_models(socket), do: socket
 
   # ---------------------------------------------------------------- The per-turn effort
 
@@ -570,7 +617,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def handle_event("palette-run", _params, socket), do: {:noreply, socket}
 
   def handle_event("shortcuts-open", _params, socket),
-    do: {:noreply, assign(socket, :shortcuts?, true)}
+    do: {:noreply, open_shortcuts(socket)}
 
   def handle_event("shortcuts-close", _params, socket),
     do: {:noreply, assign(socket, :shortcuts?, false)}
@@ -615,7 +662,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # The catalogue is fetched when the disclosure is opened and never again, and never on
   # the three-second cadence — `/new`'s own rule for the same list.
-  def handle_event("composer-settings", _params, socket), do: {:noreply, fetch_models(socket)}
+  def handle_event("composer-settings", _params, socket) do
+    if remodelable?(socket.assigns),
+      do: {:noreply, fetch_models(socket)},
+      else: {:noreply, socket}
+  end
 
   # B4. An effort for the next send and only that one, after which the session's own
   # picker is back in charge.
@@ -1277,6 +1328,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp reset_session_state(socket) do
     socket
+    # ui-parity W2: the catalogue, the search typed into it and an armed per-turn effort
+    # all belong to the conversation they were read or chosen in. Carrying them into the
+    # next one would be this page applying a decision to a session nobody made it for.
+    |> assign(:composer_extras, @composer_extras)
     |> assign(:draft, "")
     |> assign(:composer_error, nil)
     |> assign(:approval_notice, nil)
@@ -2393,6 +2448,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
           Commands.capability_offered?(assigns, :steer)
       )
       |> assign(:planning?, Commands.options(assigns) |> Map.get(:plan) == true)
+      |> assign(
+        :can_plan,
+        plane == :interactive and operate? and not assigns.ended and
+          Call.available?(:operate, "interactive.configure") and
+          Commands.capability_offered?(assigns, :dynamic_configuration)
+      )
+      |> assign(
+        :can_model,
+        plane == :interactive and operate? and not assigns.ended and
+          Call.available?(:operate, "interactive.configure") and
+          Commands.capability_offered?(assigns, :dynamic_model)
+      )
       |> assign(:next_effort, armed_for(assigns.extras, assigns.draft_key))
 
     ~H"""
@@ -2476,6 +2543,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
       ended={@ended}
       can_retry={@can_retry}
       can_steer={@can_steer}
+      can_plan={@can_plan}
+      can_model={@can_model}
       plan={@planning?}
       next_effort={@next_effort}
       model={@info && Map.get(Map.get(@info, :options) || %{}, :model)}

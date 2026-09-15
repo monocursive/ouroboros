@@ -506,6 +506,14 @@
 
     destroyed: function () {
       this.el.removeEventListener("cancel", this.onCancel);
+      // ui-parity W2. Removing an open `<dialog>` from the document leaves the top layer
+      // holding an element nothing listens to: `Escape` stops closing anything and focus
+      // falls to `<body>`. Close it first, while it is still ours.
+      try {
+        if (this.el.open && typeof this.el.close === "function") this.el.close();
+      } catch (error) {
+        // A dialog the browser already tore down is nothing left to close.
+      }
       if (this.previouslyFocused && this.previouslyFocused.isConnected) {
         this.previouslyFocused.focus();
       }
@@ -679,12 +687,31 @@
     }
   };
 
+  // Every shape a caret can be in. `contenteditable` with no value and
+  // `contenteditable="plaintext-only"` are both editable, and a widget wearing
+  // `role="textbox"` is one as far as the person typing into it is concerned.
   function editable(element) {
-    return !!(
-      element &&
-      element.matches &&
-      element.matches("input, textarea, select, [contenteditable='true']")
+    if (!element || !element.matches) return false;
+    if (element.isContentEditable) return true;
+
+    return element.matches(
+      "input, textarea, select, [contenteditable]:not([contenteditable='false'])," +
+        " [role='textbox'], [role='searchbox'], [role='combobox']"
     );
+  }
+
+  // A `<dialog>` owns the screen while it is open. Nothing bound here may open a second
+  // one over it: two stacked dialogs leave the lower one in the top layer with nothing
+  // listening for its `cancel`, and — far worse — a palette row forwarding
+  // `session-action` would rewrite the confirmation underneath into a different question
+  // about a different session, with no click of the operator's in between.
+  function blockingDialog(except) {
+    var open = document.querySelectorAll("dialog[open]");
+
+    for (var i = 0; i < open.length; i++) {
+      if (open[i].id !== except) return true;
+    }
+    return false;
   }
 
   // The document-level keys, on an element inside the LiveView so they have somewhere to
@@ -698,10 +725,16 @@
     mounted: function () {
       this.onKeyDown = function (event) {
         if (event.defaultPrevented || !event.key) return;
+        // An IME sends real keydowns while composing a character; none of them is a
+        // shortcut. Same guard the Composer hook uses for Enter.
+        if (event.isComposing || event.keyCode === 229) return;
 
         // The palette, from anywhere at all — including from inside the composer, which
-        // is where a person is most likely to want it.
+        // is where a person is most likely to want it and which is not a dialog. Its own
+        // dialog is excepted so ⌘K still closes what ⌘K opened; any *other* open dialog
+        // takes the key entirely.
         if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+          if (blockingDialog("ouro-palette")) return;
           event.preventDefault();
           this.pushEvent("palette-toggle", {});
           return;
@@ -724,7 +757,7 @@
         if (editable(document.activeElement)) return;
         // A modal owns the keyboard while it is open; `?` behind a confirmation dialog
         // would put a second sheet over a question nobody has answered.
-        if (document.querySelector("dialog[open]")) return;
+        if (blockingDialog(null)) return;
 
         if (event.key === "?") {
           event.preventDefault();

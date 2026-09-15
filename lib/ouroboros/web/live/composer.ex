@@ -233,6 +233,8 @@ defmodule Ouroboros.Web.Live.Composer do
   attr :can_retry, :boolean, default: false
   # ui-parity W2
   attr :can_steer, :boolean, default: false
+  attr :can_plan, :boolean, default: false
+  attr :can_model, :boolean, default: false
   attr :plan, :boolean, default: false
   attr :next_effort, :any, default: nil
   attr :model, :any, default: nil
@@ -311,7 +313,7 @@ defmodule Ouroboros.Web.Live.Composer do
               <span :if={@turn.queued > 0} class="ouro-chip ouro-mono">{@turn.queued} queued</span>
 
               <button
-                :if={@can_configure}
+                :if={@can_plan}
                 type="button"
                 class={["ouro-quiet-button", @plan && "ouro-toggle-on"]}
                 phx-click="configure-plan"
@@ -388,7 +390,12 @@ defmodule Ouroboros.Web.Live.Composer do
 
             <.next_turn_effort current={@next_effort} choices={@efforts} />
 
-            <.model_picker current={@model} models={@models} query={@model_query} />
+            <.model_picker
+              :if={@can_model}
+              current={@model}
+              models={@models}
+              query={@model_query}
+            />
           </div>
         </details>
       </div>
@@ -500,7 +507,7 @@ defmodule Ouroboros.Web.Live.Composer do
     <div class="ouro-picker ouro-model-picker">
       <span class="ouro-picker-label">Model · {present_model(@current)}</span>
 
-      <form class="ouro-model-search" phx-change="model-search">
+      <form id="ouro-model-search" class="ouro-model-search" phx-change="model-search">
         <input
           type="search"
           name="query"
@@ -512,7 +519,7 @@ defmodule Ouroboros.Web.Live.Composer do
         />
       </form>
 
-      <form phx-change="configure-model">
+      <form id="ouro-model-form" phx-change="configure-model">
         <select name="model" size="6" aria-label="Model" class="ouro-model-select">
           <option :for={row <- @rows} value={row.id} selected={row.id == to_string(@current)}>
             {row.label}
