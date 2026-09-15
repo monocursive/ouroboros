@@ -1043,8 +1043,14 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
     );
     native.overlay = None;
 
-    assert!(!native.bound(Action::LeaderSteer), "the leader dropped the verb");
-    assert!(native.bound(Action::Steer), "and the key that steers still has one");
+    assert!(
+        !native.bound(Action::LeaderSteer),
+        "the leader dropped the verb"
+    );
+    assert!(
+        native.bound(Action::Steer),
+        "and the key that steers still has one"
+    );
 
     // The which-key overlay, asked the only way it can be asked once `leader.steer` is
     // `off` by default: bind it, and read the frame. `bound()` says what the map holds;
@@ -1055,7 +1061,11 @@ fn steer_is_offered_where_the_transport_declares_it_and_nowhere_else() {
         .bindings
         .insert("leader.steer".into(), toml::Value::String("S".into()));
     native.reload_keymap();
-    assert!(native.keymap.problems().is_empty(), "{:?}", native.keymap.problems());
+    assert!(
+        native.keymap.problems().is_empty(),
+        "{:?}",
+        native.keymap.problems()
+    );
     native.apply(ctrl_x());
     let screen = render(&mut native, 160, 60);
     assert!(

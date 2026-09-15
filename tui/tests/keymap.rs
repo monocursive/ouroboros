@@ -631,10 +631,7 @@ fn a_key_turned_off_is_not_advertised_anywhere() {
     // The dialog is still one command away, which is what `off` promises.
     app.apply(key(KeyCode::Esc));
     slash(&mut app, "/quit");
-    assert!(matches!(
-        app.overlay,
-        Some(Overlay::Quit { .. })
-    ));
+    assert!(matches!(app.overlay, Some(Overlay::Quit { .. })));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -783,7 +780,10 @@ fn the_list_layer_keeps_the_keys_that_work_and_has_dropped_the_ones_that_never_d
             app.overlay
         );
         assert_eq!(app.tab, before, "{dead:?} moved the tab");
-        assert!(app.sessions.composer.is_none(), "{dead:?} opened a composer");
+        assert!(
+            app.sessions.composer.is_none(),
+            "{dead:?} opened a composer"
+        );
     }
 
     // `x` with no session open used to open the picker and say "press x to end or remove
@@ -908,13 +908,21 @@ fn the_new_actions_are_rebindable_and_listed() {
     let text = tall(&mut app).text();
 
     for action in added {
-        assert!(text.contains(action.name()), "{} has no row\n{text}", action.name());
+        assert!(
+            text.contains(action.name()),
+            "{} has no row\n{text}",
+            action.name()
+        );
         assert!(!action.describe().is_empty(), "{}", action.name());
     }
 
     assert_eq!(app.keymap.label(Action::Rename), "ctrl+b");
     assert_eq!(app.keymap.label(Action::LeaderRail), "ctrl+x B");
-    assert!(app.keymap.problems().is_empty(), "{:?}", app.keymap.problems());
+    assert!(
+        app.keymap.problems().is_empty(),
+        "{:?}",
+        app.keymap.problems()
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1036,7 +1044,10 @@ fn the_leader_does_not_arm_over_an_overlay() {
     app.apply(modified(KeyCode::Char('x'), KeyModifiers::CONTROL));
     app.apply(key(KeyCode::Char('1')));
 
-    assert_eq!(app.tab, before, "a leader digit moved the tab under the palette");
+    assert_eq!(
+        app.tab, before,
+        "a leader digit moved the tab under the palette"
+    );
 }
 
 /// F20. The arming notice names only keys that exist. It used to print `off`.
@@ -1058,7 +1069,12 @@ fn the_arming_notice_names_only_bound_keys() {
 #[test]
 fn every_action_round_trips_and_the_table_is_complete() {
     for action in Action::ALL {
-        assert_eq!(Action::parse(action.name()), Some(action), "{}", action.name());
+        assert_eq!(
+            Action::parse(action.name()),
+            Some(action),
+            "{}",
+            action.name()
+        );
         assert!(!action.describe().is_empty(), "{}", action.name());
         assert!(
             Spec::parse(action.default_spec()).is_ok(),
@@ -1067,5 +1083,9 @@ fn every_action_round_trips_and_the_table_is_complete() {
         );
     }
 
-    assert_eq!(Action::ALL.len(), 63, "an action arrived without a row here");
+    assert_eq!(
+        Action::ALL.len(),
+        63,
+        "an action arrived without a row here"
+    );
 }

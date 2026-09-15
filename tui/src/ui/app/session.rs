@@ -2615,10 +2615,7 @@ impl App {
         // Only keys that are actually bound are named. The footer says the same thing
         // from `App::quit_armed` for as long as the window is open, which is the half a
         // notice cannot do.
-        let mut line = format!(
-            "press {} again to quit",
-            self.keymap.label(Action::Cancel)
-        );
+        let mut line = format!("press {} again to quit", self.keymap.label(Action::Cancel));
 
         if self.bound(Action::Interrupt) {
             line.push_str(&format!(

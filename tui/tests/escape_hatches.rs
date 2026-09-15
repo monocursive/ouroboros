@@ -472,21 +472,36 @@ fn a_blanked_screen_comes_back_without_asking_the_terminal_anything() {
 
     frame(&mut terminal);
     assert!(
-        terminal.backend().buffer().content().iter().any(|cell| cell.symbol() == "t"),
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
         "the first frame drew nothing"
     );
 
     // `fg`: the alternate screen comes back empty, and nothing told this process.
     terminal.backend_mut().clear().expect("a blanked screen");
     assert!(
-        !terminal.backend().buffer().content().iter().any(|cell| cell.symbol() == "t"),
+        !terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
         "the backend was not blanked"
     );
 
     // Without the forced redraw the diff finds nothing and the pane stays empty.
     frame(&mut terminal);
     assert!(
-        !terminal.backend().buffer().content().iter().any(|cell| cell.symbol() == "t"),
+        !terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
         "this is the bug, and it is gone: the diff repainted on its own"
     );
 
@@ -494,7 +509,12 @@ fn a_blanked_screen_comes_back_without_asking_the_terminal_anything() {
     frame(&mut terminal);
 
     assert!(
-        terminal.backend().buffer().content().iter().any(|cell| cell.symbol() == "t"),
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "t"),
         "the screen did not come back:\n{:?}",
         terminal.backend().buffer()
     );

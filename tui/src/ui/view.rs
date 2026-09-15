@@ -292,8 +292,8 @@ fn header_second_row(frame: &mut Frame, area: Rect, context: &str, workspace: &s
         return;
     }
 
-    let columns =
-        Layout::horizontal([Constraint::Length(strip_width as u16), Constraint::Min(0)]).split(area);
+    let columns = Layout::horizontal([Constraint::Length(strip_width as u16), Constraint::Min(0)])
+        .split(area);
     frame.render_widget(Paragraph::new(strip), columns[0]);
     frame.render_widget(
         Paragraph::new(shell_subtitle(
@@ -1452,7 +1452,11 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
 /// behind it is the sample.
 fn theme_picker(frame: &mut Frame, area: Rect, choice: usize, previous: theme::ThemeName) {
     let names = theme::ThemeName::ALL;
-    let popup = centered(area, 44, (names.len() as u16).saturating_add(6).min(area.height));
+    let popup = centered(
+        area,
+        44,
+        (names.len() as u16).saturating_add(6).min(area.height),
+    );
 
     frame.render_widget(Clear, popup);
 
@@ -1847,7 +1851,10 @@ fn wrapped(lines: &[Line<'_>], inner: usize) -> u16 {
         return lines.len() as u16;
     }
 
-    lines.iter().map(|line| wrapped_rows(line, inner) as u16).sum()
+    lines
+        .iter()
+        .map(|line| wrapped_rows(line, inner) as u16)
+        .sum()
 }
 
 /// [`wrapped`] for one line, which is the unit a scrolling panel has to count in.
@@ -1887,7 +1894,11 @@ fn wrapped_prose(line: &Line<'_>, inner: usize) -> usize {
         return 1;
     }
 
-    let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
 
     if text.width() <= inner {
         return 1;
@@ -2134,11 +2145,20 @@ fn settings_connections(frame: &mut Frame, area: Rect, app: &App, settings: &Set
     let mut heading = if app.providers.error.is_some()
         || (app.providers.value.is_some() && rows.iter().all(|row| row.stale))
     {
-        format!("Connection status unavailable · {}", super::panels::node_label(&app.hello.node))
+        format!(
+            "Connection status unavailable · {}",
+            super::panels::node_label(&app.hello.node)
+        )
     } else if app.providers.value.is_none() {
-        format!("Checking connections · {}", super::panels::node_label(&app.hello.node))
+        format!(
+            "Checking connections · {}",
+            super::panels::node_label(&app.hello.node)
+        )
     } else {
-        format!("{ready} configured · {}", super::panels::node_label(&app.hello.node))
+        format!(
+            "{ready} configured · {}",
+            super::panels::node_label(&app.hello.node)
+        )
     };
     if app.providers.pending {
         heading.push_str(" · refreshing…");
@@ -2358,7 +2378,10 @@ fn settings_client(frame: &mut Frame, area: Rect, app: &App, settings: &Settings
         // find the same setting in the file.
         if field.section() != section && !field.section().is_empty() {
             section = field.section();
-            rows.push(Line::from(Span::styled(format!("  {section}"), theme::quiet())));
+            rows.push(Line::from(Span::styled(
+                format!("  {section}"),
+                theme::quiet(),
+            )));
         }
 
         let focused = field == settings.client;
@@ -3033,7 +3056,11 @@ fn approval(frame: &mut Frame, area: Rect, app: &App, modal: ApprovalModal<'_>) 
     body.push(Line::from(Span::styled(
         format!(
             "tab or r attach a reason · ctrl+o {} the diff · esc closes",
-            if modal.expanded { "collapses" } else { "expands" }
+            if modal.expanded {
+                "collapses"
+            } else {
+                "expands"
+            }
         ),
         theme::quiet(),
     )));
@@ -3965,7 +3992,11 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
     for group in crate::ui::app::Group::ALL.map(|group| group.as_str()) {
         for action in live.iter().copied() {
             if plan_group(action) == group {
-                chords.push((group, app.keymap.spec(action).to_string(), action.describe()));
+                chords.push((
+                    group,
+                    app.keymap.spec(action).to_string(),
+                    action.describe(),
+                ));
             }
         }
     }
@@ -4162,10 +4193,7 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
         let pad = " ".repeat(column.saturating_sub(key.width()));
 
         rows.push(Line::from(vec![
-            Span::styled(
-                format!("{key}{pad}"),
-                Style::default().fg(theme::accent()),
-            ),
+            Span::styled(format!("{key}{pad}"), Style::default().fg(theme::accent())),
             Span::raw(*description),
         ]));
     }

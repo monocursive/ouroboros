@@ -1060,11 +1060,7 @@ fn the_approval_hint_names_the_keys_that_move_and_the_digits_that_choose() {
         "the digits are not named, although they select: {hint}"
     );
     // On the line the hint wrapped onto at this width, which is still the same hint.
-    assert!(
-        screen.contains("esc closes"),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.contains("esc closes"), "{}", screen.text());
 }
 
 /// A10 numbered the rows and bound the digits only under screen-reader mode, so everybody
@@ -1129,7 +1125,10 @@ fn digits_type_into_the_approval_reason_rather_than_re_choosing() {
         "enter in the reason field submitted the approval"
     );
     assert!(
-        matches!(app.overlay.as_ref(), Some(ouro::ui::app::Overlay::Approval { .. })),
+        matches!(
+            app.overlay.as_ref(),
+            Some(ouro::ui::app::Overlay::Approval { .. })
+        ),
         "enter in the reason field did not return to the modal"
     );
 
@@ -1176,7 +1175,10 @@ fn escaping_the_reason_field_keeps_the_chosen_answer() {
     app.apply(key(KeyCode::Esc));
 
     assert!(
-        matches!(app.overlay.as_ref(), Some(ouro::ui::app::Overlay::Approval { .. })),
+        matches!(
+            app.overlay.as_ref(),
+            Some(ouro::ui::app::Overlay::Approval { .. })
+        ),
         "esc did not return to the modal"
     );
 

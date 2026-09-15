@@ -1171,7 +1171,10 @@ fn the_help_panel_is_grouped_and_keeps_its_limits_in_view() {
         .collect();
 
     for heading in ["Session", "Turn", "Conversation", "Runtime", "Client"] {
-        assert!(headings.contains(&heading), "missing {heading}: {headings:?}");
+        assert!(
+            headings.contains(&heading),
+            "missing {heading}: {headings:?}"
+        );
     }
 
     // The first of them is drawn as a heading on the frame itself.
@@ -1353,10 +1356,10 @@ fn clear_takes_the_chips_and_the_effort_with_the_words() {
 /// A resolved keymap with `[keys]` applied, for the rebinding halves below.
 fn rebound(app: &mut App, pairs: &[(&str, &str)]) {
     for (name, spec) in pairs {
-        app.config
-            .keys
-            .bindings
-            .insert((*name).to_string(), toml::Value::String((*spec).to_string()));
+        app.config.keys.bindings.insert(
+            (*name).to_string(),
+            toml::Value::String((*spec).to_string()),
+        );
     }
 
     app.reload_keymap();
@@ -1404,7 +1407,11 @@ fn enter_accepts_the_highlighted_completion_rather_than_sending_the_stub() {
         "/backtrack",
         "Enter completed the verb instead of sending the stub"
     );
-    assert!(app.overlay.is_none(), "and nothing ran yet: {:?}", app.overlay);
+    assert!(
+        app.overlay.is_none(),
+        "and nothing ran yet: {:?}",
+        app.overlay
+    );
     assert!(
         turn_calls(&app.drain()).is_empty(),
         "the stub reached the model"
@@ -1776,10 +1783,7 @@ fn home_and_end_reach_the_transcript_only_while_the_draft_is_empty() {
     type_text(&mut app, "half a sentence");
     app.apply(key(KeyCode::Home));
     assert_eq!(
-        app.sessions
-            .open_watch()
-            .expect("a watch")
-            .scroll,
+        app.sessions.open_watch().expect("a watch").scroll,
         0,
         "home scrolled the transcript out from under an edit"
     );
@@ -1963,7 +1967,11 @@ fn a_bare_slash_accepts_nothing_and_starts_nothing() {
     type_text(&mut app, "/");
     app.apply(key(KeyCode::Enter));
 
-    assert_ne!(draft(&app), "/new", "a lone slash became a verb nobody typed");
+    assert_ne!(
+        draft(&app),
+        "/new",
+        "a lone slash became a verb nobody typed"
+    );
 
     // Whatever it did, it did not start anything and did not open a dialog.
     app.apply(key(KeyCode::Enter));
@@ -1977,7 +1985,11 @@ fn a_bare_slash_accepts_nothing_and_starts_nothing() {
 /// The words it *does* continue into, including the two that share a stem.
 #[test]
 fn enter_completes_the_first_verb_in_table_order_that_the_word_continues_into() {
-    for (typed, expected) in [("/ke", "/keys"), ("/st", "/steer"), ("/backtr", "/backtrack")] {
+    for (typed, expected) in [
+        ("/ke", "/keys"),
+        ("/st", "/steer"),
+        ("/backtr", "/backtrack"),
+    ] {
         let mut app = opened("idle", steering_capabilities(), Vec::new());
         compose(&mut app);
         type_text(&mut app, typed);
@@ -2114,7 +2126,10 @@ fn a_prefill_banks_the_draft_it_replaces() {
     for prefill in ['r', 'm'] {
         let mut app = opened("idle", steering_capabilities(), Vec::new());
         compose(&mut app);
-        type_text(&mut app, "a long answer I have been writing for ten minutes");
+        type_text(
+            &mut app,
+            "a long answer I have been writing for ten minutes",
+        );
 
         match prefill {
             'r' => app.apply(modified(KeyCode::Char('r'), KeyModifiers::CONTROL)),
@@ -2167,7 +2182,11 @@ fn an_overlay_between_two_cancels_takes_the_arm_with_it() {
 
     app.sessions.composer = None;
     app.apply(key(KeyCode::Char('?')));
-    assert!(matches!(app.overlay, Some(Overlay::Help)), "{:?}", app.overlay);
+    assert!(
+        matches!(app.overlay, Some(Overlay::Help)),
+        "{:?}",
+        app.overlay
+    );
     assert!(!app.quit_armed(), "an overlay opened over the arm");
 
     app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -2190,13 +2209,19 @@ fn the_arm_does_not_survive_a_tab_change_or_a_session_change() {
     app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.quit_armed());
     leader(&mut app, '1');
-    assert!(!app.quit_armed(), "the arm followed the operator to another tab");
+    assert!(
+        !app.quit_armed(),
+        "the arm followed the operator to another tab"
+    );
 
     let mut app = opened("idle", steering_capabilities(), Vec::new());
     app.apply(modified(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.quit_armed());
     app.sessions.open = None;
-    assert!(!app.quit_armed(), "the arm outlived the session it was made on");
+    assert!(
+        !app.quit_armed(),
+        "the arm outlived the session it was made on"
+    );
 }
 
 // ----- L1: a path typed in full is still an attachment ------------------------------------
@@ -2218,7 +2243,10 @@ fn a_fully_typed_at_path_still_becomes_an_attachment() {
         "sent without the structured attachment: {}",
         sent[0].1
     );
-    assert_eq!(sent[0].1["input"]["prompt"], "@src/main.rs", "and without the words");
+    assert_eq!(
+        sent[0].1["input"]["prompt"], "@src/main.rs",
+        "and without the words"
+    );
 }
 
 // ----- L2: an Esc that banked a draft is not half of a chord -------------------------------
@@ -2316,10 +2344,7 @@ fn the_help_panel_draws_each_group_heading_exactly_once() {
     for heading in ["SESSION", "TURN", "CONVERSATION", "RUNTIME", "CLIENT"] {
         let seen = text
             .lines()
-            .filter(|line| {
-                line.split('\u{2502}')
-                    .any(|cell| cell.trim() == heading)
-            })
+            .filter(|line| line.split('\u{2502}').any(|cell| cell.trim() == heading))
             .count();
         assert_eq!(seen, 1, "{heading} appears {seen} times:\n{text}");
     }

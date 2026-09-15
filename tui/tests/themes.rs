@@ -17,9 +17,9 @@ mod support;
 
 use std::sync::{Mutex, MutexGuard};
 
+use crossterm::event::KeyCode;
 use ouro::config::{Config, ThemeConfig};
 use ouro::ui::app::{App, Msg, Overlay};
-use crossterm::event::KeyCode;
 use ouro::ui::theme::{self, Palette, ThemeName};
 
 use support::{app, full_hello, render, Screen};
@@ -186,7 +186,11 @@ fn bare_slash_theme_opens_a_picker_that_previews_before_it_writes() {
     // Esc puts back exactly what was drawing, and still writes nothing.
     press(&mut app, KeyCode::Esc);
     assert!(app.overlay.is_none());
-    assert_eq!(theme::current().palette, Palette::Dark, "esc did not restore");
+    assert_eq!(
+        theme::current().palette,
+        Palette::Dark,
+        "esc did not restore"
+    );
     assert_eq!(app.config.theme.name.as_deref(), Some("dark"));
     assert!(app.take_config_save().is_none(), "esc wrote config.toml");
 }
@@ -329,19 +333,29 @@ fn a_second_theme_verb_puts_the_previewed_palette_back() {
     typed(&mut app, "/theme");
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
-    assert_ne!(theme::current().palette, Palette::Dark, "moving did not preview");
+    assert_ne!(
+        theme::current().palette,
+        Palette::Dark,
+        "moving did not preview"
+    );
 
     // The verb's own entry point: the picker is a modal, so typing `/theme` again would
     // never reach the composer.
     app.open_theme_picker();
 
-    assert!(app.overlay.is_none(), "the second verb left an overlay open");
+    assert!(
+        app.overlay.is_none(),
+        "the second verb left an overlay open"
+    );
     assert_eq!(
         theme::current().palette,
         Palette::Dark,
         "the second verb kept the preview instead of putting back what was drawing"
     );
-    assert!(app.take_config_save().is_none(), "reopening wrote config.toml");
+    assert!(
+        app.take_config_save().is_none(),
+        "reopening wrote config.toml"
+    );
 }
 
 /// The picker opens on the theme that is configured, and lists every name this build has.
@@ -359,8 +373,16 @@ fn the_picker_opens_on_the_configured_theme_and_lists_them_all() {
 
     match app.overlay.as_ref() {
         Some(Overlay::Theme { choice, previous }) => {
-            assert_eq!(ThemeName::ALL[*choice], ThemeName::Ansi, "wrong starting row");
-            assert_eq!(*previous, ThemeName::Ansi, "previous is not what was drawing");
+            assert_eq!(
+                ThemeName::ALL[*choice],
+                ThemeName::Ansi,
+                "wrong starting row"
+            );
+            assert_eq!(
+                *previous,
+                ThemeName::Ansi,
+                "previous is not what was drawing"
+            );
         }
         other => panic!("no picker: {other:?}"),
     }
@@ -372,5 +394,9 @@ fn the_picker_opens_on_the_configured_theme_and_lists_them_all() {
         .filter(|name| !screen.contains(name))
         .collect();
 
-    assert!(missing.is_empty(), "names missing: {missing:?}\n{}", screen.text());
+    assert!(
+        missing.is_empty(),
+        "names missing: {missing:?}\n{}",
+        screen.text()
+    );
 }

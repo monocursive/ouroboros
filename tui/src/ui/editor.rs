@@ -72,7 +72,10 @@ pub(crate) const COMMANDS: [(&str, &str); 45] = [
     ("/help", "show keyboard help"),
     ("/hotkeys", "show keyboard help"),
     ("/keys", "show the effective key map and where it came from"),
-    ("/keymap", "show the effective key map and where it came from"),
+    (
+        "/keymap",
+        "show the effective key map and where it came from",
+    ),
     ("/cost", "tokens and cost for this session"),
     ("/usage", "tokens and cost for this session"),
     ("/quit", "detach, disconnect, or stop the runtime"),
@@ -120,18 +123,18 @@ pub(crate) fn slash_verb(input: &str) -> Option<&str> {
     let name = verb.strip_prefix('/')?;
 
     let named = !name.is_empty()
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_');
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        });
 
     named.then_some(verb)
 }
 
 /// Whether [`COMMANDS`] has a row for `verb`, spelled with its `/`.
 pub(crate) fn is_known_command(verb: &str) -> bool {
-    COMMANDS.iter().any(|(name, _detail)| {
-        name.eq_ignore_ascii_case(verb)
-    })
+    COMMANDS
+        .iter()
+        .any(|(name, _detail)| name.eq_ignore_ascii_case(verb))
 }
 
 /// Up to three verbs a mistyped one might have meant, best first.

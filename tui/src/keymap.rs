@@ -573,8 +573,7 @@ impl Action {
     }
 
     /// The five groups, in the order every surface lists them.
-    pub const GROUPS: [&'static str; 5] =
-        ["session", "turn", "conversation", "runtime", "client"];
+    pub const GROUPS: [&'static str; 5] = ["session", "turn", "conversation", "runtime", "client"];
 }
 
 /// One key press: a code and the modifiers that must be held with it.
@@ -1109,7 +1108,9 @@ mod tests {
         // And all five are used: a group nothing is in is a heading nobody ever sees.
         for group in Action::GROUPS {
             assert!(
-                Action::ALL.into_iter().any(|action| action.group() == group),
+                Action::ALL
+                    .into_iter()
+                    .any(|action| action.group() == group),
                 "nothing is in {group:?}"
             );
         }

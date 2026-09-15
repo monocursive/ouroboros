@@ -18,7 +18,9 @@ use serde_json::json;
 
 use ouro::keymap::{Action, Keymap};
 use ouro::model::Plane;
-use ouro::ui::app::{App, ClientField, Command, CommandPalette, Group, Mode, Msg, Overlay, Tab, Tag};
+use ouro::ui::app::{
+    App, ClientField, Command, CommandPalette, Group, Mode, Msg, Overlay, Tab, Tag,
+};
 use ouro::ui::panels::{node_label, refusal_label, refusal_text};
 use ouro::ui::view::help_keys;
 
@@ -253,7 +255,10 @@ fn a_query_that_names_a_group_filters_to_it_and_a_substring_does_not() {
     assert!(
         loose.iter().all(|command| {
             command.label().to_ascii_lowercase().contains("co")
-                || app.command_shortcut(*command).to_ascii_lowercase().contains("co")
+                || app
+                    .command_shortcut(*command)
+                    .to_ascii_lowercase()
+                    .contains("co")
         }),
         "a two-letter query matched something other than a label or a chord: {:?}",
         loose.iter().map(|c| c.label()).collect::<Vec<_>>()
@@ -313,9 +318,15 @@ fn the_completion_table_names_the_verbs_the_dispatcher_accepts() {
     // about the table, and a frame that clipped it would prove nothing either way.
     let text = render(&mut app, 200, 80).text();
 
-    assert!(text.contains("COMMANDS"), "the verb list never came into view:\n{text}");
+    assert!(
+        text.contains("COMMANDS"),
+        "the verb list never came into view:\n{text}"
+    );
     for verb in ["/diff", "/changes", "/raw", "/keymap", "/usage", "/rename"] {
-        assert!(text.contains(verb), "the ? panel never names {verb}:\n{text}");
+        assert!(
+            text.contains(verb),
+            "the ? panel never names {verb}:\n{text}"
+        );
     }
 }
 
@@ -426,7 +437,10 @@ fn the_help_panel_names_the_four_runtime_tabs_and_not_seven() {
     // T1 made each tab a leader verb, so the panel draws four keymap rows rather than one
     // literal.
     for tab in ["ctrl+x 1", "ctrl+x 2", "ctrl+x 3", "ctrl+x 4"] {
-        assert!(keys.contains(&tab), "the four tabs are not named: {tab} is missing");
+        assert!(
+            keys.contains(&tab),
+            "the four tabs are not named: {tab} is missing"
+        );
     }
 }
 
@@ -630,7 +644,10 @@ fn a_peek_with_no_picker_under_it_closes_rather_than_opening_one() {
     });
     app.apply(key(KeyCode::Esc));
 
-    assert!(app.overlay.is_none(), "esc opened a picker nobody asked for");
+    assert!(
+        app.overlay.is_none(),
+        "esc opened a picker nobody asked for"
+    );
 }
 
 // ----- T2.8: presentation of internals -------------------------------------------------
@@ -655,7 +672,10 @@ fn refusal_label_prints_the_word_and_never_the_number() {
         refusal_label(-32004, "no signing node is configured"),
         "unavailable: no signing node is configured"
     );
-    assert_eq!(refusal_label(-32003, "read scope"), "scope_denied: read scope");
+    assert_eq!(
+        refusal_label(-32003, "read scope"),
+        "scope_denied: read scope"
+    );
     // A code this build cannot name is still not printed as an integer.
     assert_eq!(refusal_label(-31000, "who knows"), "unknown: who knows");
     assert_eq!(refusal_label(-32004, "   "), "unavailable");
@@ -667,7 +687,10 @@ fn refusal_label_prints_the_word_and_never_the_number() {
     );
     // Anything that is not that shape is returned untouched: a transport failure is
     // already a sentence, and rewriting one would invent a refusal nobody made.
-    assert_eq!(refusal_text("the connection closed"), "the connection closed");
+    assert_eq!(
+        refusal_text("the connection closed"),
+        "the connection closed"
+    );
 }
 
 /// The screens the review caught printing `nonode@nohost`: the Dashboard, the picker, the
@@ -815,10 +838,21 @@ fn the_settings_overlay_has_a_client_section_that_writes_through_the_save_path()
     let screen = render(&mut app, 120, 34);
     let text = screen.text();
 
-    for row in ["mouse", "screen reader", "reduced motion", "notify", "max cost"] {
+    for row in [
+        "mouse",
+        "screen reader",
+        "reduced motion",
+        "notify",
+        "max cost",
+    ] {
         assert!(text.contains(row), "the {row} row is missing:\n{text}");
     }
-    for section in ["[terminal]", "[accessibility]", "[notifications]", "[budget]"] {
+    for section in [
+        "[terminal]",
+        "[accessibility]",
+        "[notifications]",
+        "[budget]",
+    ] {
         assert!(text.contains(section), "{section} is not named:\n{text}");
     }
     assert!(
@@ -832,7 +866,10 @@ fn the_settings_overlay_has_a_client_section_that_writes_through_the_save_path()
         render(&mut app, 120, 34).row("mouse").contains("off"),
         "the row did not change"
     );
-    assert!(app.take_config_save().is_none(), "a cycle wrote config.toml");
+    assert!(
+        app.take_config_save().is_none(),
+        "a cycle wrote config.toml"
+    );
     assert!(
         app.config.terminal.mouse,
         "the change reached the config before [ save ] was pressed"
@@ -895,7 +932,10 @@ fn an_unreadable_budget_is_refused_rather_than_saved_as_nothing() {
         "an unreadable budget was accepted"
     );
     assert_eq!(app.config.budget.max_cost_usd, None);
-    assert!(app.take_config_save().is_none(), "nothing should be written");
+    assert!(
+        app.take_config_save().is_none(),
+        "nothing should be written"
+    );
 
     let screen = render(&mut app, 120, 34);
     assert!(
@@ -1105,7 +1145,9 @@ fn a_digit_picks_a_theme_and_previews_it() {
     // A digit past the last row is not a row, so it is left alone.
     app.apply(key(KeyCode::Char('9')));
     match &app.overlay {
-        Some(Overlay::Theme { choice, .. }) => assert_eq!(*choice, 2, "a digit off the end moved the cursor"),
+        Some(Overlay::Theme { choice, .. }) => {
+            assert_eq!(*choice, 2, "a digit off the end moved the cursor")
+        }
         other => panic!("the picker closed: {other:?}"),
     }
 }
@@ -1148,7 +1190,10 @@ fn a_refused_budget_leaves_every_other_client_field_alone() {
         matches!(app.overlay, Some(Overlay::Settings(_))),
         "an unreadable budget was accepted"
     );
-    assert!(app.take_config_save().is_none(), "the refusal queued a write");
+    assert!(
+        app.take_config_save().is_none(),
+        "the refusal queued a write"
+    );
 
     assert_eq!(
         app.config.terminal.mouse, mouse_before,
@@ -1199,7 +1244,10 @@ fn the_budget_row_accepts_only_a_finite_number_of_dollars() {
                     "{typed:?} was refused and should have been taken"
                 );
                 assert_eq!(app.config.budget.max_cost_usd, limit, "{typed:?}");
-                assert!(app.take_config_save().is_some(), "{typed:?} was not written");
+                assert!(
+                    app.take_config_save().is_some(),
+                    "{typed:?} was not written"
+                );
             }
             None => {
                 assert!(
@@ -1330,7 +1378,12 @@ fn a_refused_replay_says_the_reason_and_not_the_code() {
     let replay = app
         .drain()
         .into_iter()
-        .find(|call| matches!(call.method.as_str(), "interactive.replay" | "interactive.subscribe"))
+        .find(|call| {
+            matches!(
+                call.method.as_str(),
+                "interactive.replay" | "interactive.subscribe"
+            )
+        })
         .expect("a replay or subscribe call");
 
     app.apply(Msg::Answer {
@@ -1348,7 +1401,10 @@ fn a_refused_replay_says_the_reason_and_not_the_code() {
         notice.contains("upstream_error: the provider went away"),
         "the reason is not named: {notice}"
     );
-    assert!(!notice.contains("-32006"), "the code reached the row: {notice}");
+    assert!(
+        !notice.contains("-32006"),
+        "the code reached the row: {notice}"
+    );
 }
 
 // ----- F9: the tab strip reads the keymap ------------------------------------------------
@@ -1359,7 +1415,9 @@ fn a_refused_replay_says_the_reason_and_not_the_code() {
 fn rebinding_a_tab_verb_changes_the_strips_hint() {
     let mut app = shell();
     assert!(
-        render(&mut app, 140, 30).row("Dashboard").contains("ctrl+x 1-4"),
+        render(&mut app, 140, 30)
+            .row("Dashboard")
+            .contains("ctrl+x 1-4"),
         "the default hint is not the default keys"
     );
 
@@ -1401,8 +1459,14 @@ fn the_three_new_palette_rows_are_gated_on_what_they_need() {
     // No session: no rename, no approval. Quit always works — it is the client's own.
     let home = shell();
     let offered = home.palette_commands(&palette);
-    assert!(!offered.contains(&Command::Rename), "rename with no session");
-    assert!(!offered.contains(&Command::Approval), "approval with no session");
+    assert!(
+        !offered.contains(&Command::Rename),
+        "rename with no session"
+    );
+    assert!(
+        !offered.contains(&Command::Approval),
+        "approval with no session"
+    );
     assert!(offered.contains(&Command::Quit), "quit is always reachable");
 
     // A session, and a gateway that serves `interactive.rename`.

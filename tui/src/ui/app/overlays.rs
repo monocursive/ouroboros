@@ -1199,8 +1199,7 @@ impl App {
                         if super::super::access::row_for_digit(digit)
                             .is_some_and(|row| row <= last) =>
                     {
-                        *choice =
-                            super::super::access::row_for_digit(digit).expect("a digit row");
+                        *choice = super::super::access::row_for_digit(digit).expect("a digit row");
                         true
                     }
                     _elsewhere => false,

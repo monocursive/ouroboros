@@ -266,7 +266,10 @@ fn the_rail_draws_the_groups_in_order_with_their_counts() {
     // runtime* — the fleet's roster name where there is one, and the host half otherwise,
     // because a fleet's nodes differ in their host and share their name.
     assert!(text.contains("RUNNING · native · alpha"), "{text}");
-    assert!(!text.contains("@alpha"), "the raw node reached a card: {text}");
+    assert!(
+        !text.contains("@alpha"),
+        "the raw node reached a card: {text}"
+    );
 }
 
 #[test]
