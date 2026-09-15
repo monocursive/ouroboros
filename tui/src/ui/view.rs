@@ -1100,6 +1100,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         } => approval(
             frame,
             area,
+            app,
             ApprovalModal {
                 id,
                 request_id,
@@ -1846,18 +1847,108 @@ fn wrapped(lines: &[Line<'_>], inner: usize) -> u16 {
         return lines.len() as u16;
     }
 
-    lines
-        .iter()
-        .map(|line| {
-            let width = line.width();
+    lines.iter().map(|line| wrapped_rows(line, inner) as u16).sum()
+}
 
-            if width <= inner {
-                1
-            } else {
-                width.div_ceil(inner) as u16 + 1
-            }
-        })
-        .sum()
+/// [`wrapped`] for one line, which is the unit a scrolling panel has to count in.
+///
+/// The same estimate, in one place: a panel that sized itself with one formula and scrolled
+/// with another would be a panel whose "N more rows" marker is off by however far the two
+/// disagreed.
+fn wrapped_rows(line: &Line<'_>, inner: usize) -> usize {
+    if inner == 0 {
+        return 1;
+    }
+
+    let width = line.width();
+
+    if width <= inner {
+        1
+    } else {
+        width.div_ceil(inner) + 1
+    }
+}
+
+/// How many rows `Wrap { trim: false }` really makes of one line of prose.
+///
+/// [`wrapped_rows`] deliberately errs long, which is right for a popup being *sized* — a
+/// row of blank space costs nothing and a clipped path costs the path. It is wrong for a
+/// panel being *scrolled*: every row it over-counts is a row of the table the reader
+/// cannot see and the marker does not account for, so a `?` panel measured that way shows
+/// three fewer rows per screen than it has room for.
+///
+/// Ratatui breaks on whitespace and keeps leading indentation, so this packs words the
+/// same way. A word longer than the width gets the rows it needs on its own, which is what
+/// ratatui does with an unbreakable token.
+fn wrapped_prose(line: &Line<'_>, inner: usize) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    if inner == 0 {
+        return 1;
+    }
+
+    let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+
+    if text.width() <= inner {
+        return 1;
+    }
+
+    let mut rows = 1;
+    let mut used = 0;
+
+    // Runs of spaces are measured, not collapsed. `trim: false` keeps them, and every row
+    // of this table is a key, a column of padding, and a description — collapsing that
+    // padding loses twenty-odd cells and under-counts the row, which is the one direction
+    // this must not be wrong in.
+    for token in wrap_tokens(&text) {
+        let width = token.width();
+
+        if used + width <= inner {
+            used += width;
+            continue;
+        }
+
+        // The break itself swallows the whitespace it broke on.
+        if token.trim().is_empty() {
+            rows += 1;
+            used = 0;
+            continue;
+        }
+
+        rows += 1;
+
+        // A word wider than the whole column takes as many rows as it needs, and what is
+        // left of the last one is where the next token starts.
+        if width > inner {
+            rows += (width - 1) / inner;
+            used = width % inner;
+        } else {
+            used = width;
+        }
+    }
+
+    rows
+}
+
+/// A line split into alternating runs of whitespace and non-whitespace, which is the unit
+/// a wrap actually moves.
+fn wrap_tokens(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+
+        let space = rest.starts_with(char::is_whitespace);
+        let end = rest
+            .find(|c: char| c.is_whitespace() != space)
+            .unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(end);
+        rest = tail;
+
+        Some(token)
+    })
 }
 
 /// Provider connections, client defaults, and runtime facts have separate categories.
@@ -2803,12 +2894,12 @@ const APPROVAL_DIFF_EXPANDED: usize = 400;
 ///
 /// Warp's rule for the diff — expanded while the approval is pending — is the default
 /// here, bounded by the rows the popup can spare; `ctrl+o` raises the ceiling in place.
-fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+fn approval(frame: &mut Frame, area: Rect, app: &App, modal: ApprovalModal<'_>) {
     // B2. A plan exit is a different question with different answers, so it gets its own
     // modal rather than a decorated version of this one: the four fixed rows would offer a
     // fourth answer the payload never named, and the plan itself has nowhere to go here.
     if modal.detail.plan.is_some() {
-        plan_exit(frame, area, modal);
+        plan_exit(frame, area, app, modal);
         return;
     }
 
@@ -2831,7 +2922,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         theme::quiet(),
     )));
 
-    if let Some(asker) = approval_asker(detail, modal.session_node, inner) {
+    if let Some(asker) = approval_asker(app, detail, modal.session_node, inner) {
         body.push(asker);
     }
 
@@ -3006,7 +3097,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 ///   would make the exit look better-founded than it is.
 /// * **The follow-up is optional and says so.** Answering with an empty one is the
 ///   ordinary path: the runtime emits the held terminal event and the turn is over.
-fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
+fn plan_exit(frame: &mut Frame, area: Rect, app: &App, modal: ApprovalModal<'_>) {
     let detail = modal.detail;
     let Some(plan) = detail.plan.as_ref() else {
         return;
@@ -3029,7 +3120,7 @@ fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
         theme::quiet(),
     )));
 
-    if let Some(asker) = approval_asker(detail, modal.session_node, inner) {
+    if let Some(asker) = approval_asker(app, detail, modal.session_node, inner) {
         body.push(asker);
     }
 
@@ -3290,6 +3381,7 @@ fn approval_answers(modal: &ApprovalModal<'_>) -> Vec<String> {
 /// the node the *child* runs on, so where that is not the session's own machine the node
 /// carries the modal's warning color rather than the quiet one.
 fn approval_asker(
+    app: &App,
     detail: &ApprovalDetail,
     session_node: Option<&str>,
     inner: usize,
@@ -3299,9 +3391,11 @@ fn approval_asker(
 
     Some(match subagent.remote_node(session_node) {
         Some(node) => {
-            // T2.8. The machine this answer authorizes work on, named the way every other
-            // surface names one.
-            let on = format!(" on {}", super::panels::node_label(node));
+            // T2.8/F7. The machine this answer authorizes work on, named the way the
+            // session cards and the picker name one — `machine_label`, because this is a
+            // claim about *which computer* and the reader has just seen that machine
+            // called `alpha` on the row they opened.
+            let on = format!(" on {}", app.machine_label(node));
             Line::from(vec![
                 Span::styled(
                     super::tree::truncate(&attribution, inner.saturating_sub(on.chars().count())),
@@ -3929,14 +4023,29 @@ fn leader_hint(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// How wide the `?` panel is, as a percentage of the frame. Named because the panel has to
+/// know its own content width *before* it is laid out, to count the rows a wrap will make.
+const HELP_WIDTH: u16 = 84;
+
 fn help(frame: &mut Frame, area: Rect, app: &App) {
     let (rows, limits) = help_sections(app);
 
+    // F1. Counted in *rendered* rows, not logical ones. The paragraph wraps, so at eighty
+    // columns nineteen table rows become twenty-two lines on screen: sizing and scrolling
+    // by `rows.len()` put the "N more rows" marker below the viewport and left thirty-five
+    // rows unreachable with nothing on screen saying so.
+    let content = inner_width(area, HELP_WIDTH).max(1);
+    let heights: Vec<usize> = rows.iter().map(|row| wrapped_prose(row, content)).collect();
+    let limits_height: u16 = limits
+        .iter()
+        .map(|limit| wrapped_prose(limit, content) as u16)
+        .sum();
+
     // The panel never reaches the last row: the notice line lives there, and a help panel
     // that covered it would hide the sentence explaining why a key did nothing.
-    let wanted = (rows.len() + limits.len()) as u16 + 2;
+    let wanted = heights.iter().sum::<usize>() as u16 + limits_height + 2;
     let ceiling = area.height.saturating_sub(2).max(6);
-    let popup = centered(area, 84, wanted.min(ceiling));
+    let popup = centered(area, HELP_WIDTH, wanted.min(ceiling));
 
     frame.render_widget(Clear, popup);
 
@@ -3950,31 +4059,70 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
 
     // The limits are pinned rather than scrolled. They are the part of this panel that
     // stops it being a brochure, and a reader who never pressed a key would not see them.
-    let split = Layout::vertical([Constraint::Min(1), Constraint::Length(limits.len() as u16)])
-        .split(inner);
+    // Their height is measured too: the `read`-scope line wraps at eighty columns, and a
+    // pane sized to `limits.len()` cut it off at the border.
+    let split =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(limits_height)]).split(inner);
 
-    let height = split[0].height as usize;
-    let hidden = rows.len().saturating_sub(height);
-    let scroll = app.help_scroll.min(hidden);
+    let budget = split[0].height as usize;
 
-    let mut visible = rows[scroll..].to_vec();
+    // The furthest the table can usefully scroll: the first row from which everything
+    // left fits on screen. Walked from the end, in rendered rows, so the last press of
+    // `j` lands on the real end of the table rather than on an index nobody can reach.
+    let mut used = 0;
+    let mut max_scroll = rows.len();
+    for (index, height) in heights.iter().enumerate().rev() {
+        if used + height > budget {
+            break;
+        }
+        used += height;
+        max_scroll = index;
+    }
 
-    if hidden > 0 {
-        // The last visible row says there is more, because a panel that silently ends is
-        // one whose remaining half nobody finds (R1 4d(8)).
-        let marker = Line::from(Span::styled(
+    let scroll = app.help_scroll.min(max_scroll);
+
+    // How many rows fit from here, in rendered rows.
+    let fits = |from: usize, budget: usize| {
+        let mut used = 0;
+        let mut count = 0;
+
+        for height in &heights[from..] {
+            if used + height > budget {
+                break;
+            }
+            used += height;
+            count += 1;
+        }
+
+        count
+    };
+
+    let shown = fits(scroll, budget);
+    let remaining = rows.len().saturating_sub(scroll + shown);
+
+    let mut visible: Vec<Line> = if remaining == 0 {
+        rows[scroll..scroll + shown].to_vec()
+    } else {
+        // One rendered row goes to the marker, so the count is taken again against the
+        // smaller budget — a panel that silently ends is one whose remaining half nobody
+        // finds (R1 4d(8)).
+        let shown = fits(scroll, budget.saturating_sub(1));
+        let remaining = rows.len().saturating_sub(scroll + shown);
+        let mut visible = rows[scroll..scroll + shown].to_vec();
+
+        visible.push(Line::from(Span::styled(
             format!(
-                "\u{2191}\u{2193} scrolls \u{b7} {} more row{}",
-                hidden - scroll,
-                if hidden - scroll == 1 { "" } else { "s" }
+                "\u{2191}\u{2193} scrolls \u{b7} {remaining} more row{}",
+                if remaining == 1 { "" } else { "s" }
             ),
             Style::default().fg(theme::accent()),
-        ));
+        )));
 
-        if hidden > scroll && visible.len() >= height && height > 0 {
-            visible[height - 1] = marker;
-        }
-    }
+        visible
+    };
+
+    // Whatever is left of the budget after the rows that fit: blank, not a half-drawn row.
+    visible.truncate(budget.max(1));
 
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), split[0]);
     frame.render_widget(Paragraph::new(limits).wrap(Wrap { trim: false }), split[1]);
@@ -4055,7 +4203,16 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
 
     if !app.hello.operates() {
         limits.push(Line::from(Span::styled(
-            "this listener runs at scope `read`: every mutating verb is refused with -32003",
+            // F4. The word the code stands for, through the same label every other refusal
+            // on screen goes through. A reader who is here because a key did nothing needs
+            // "scope_denied", not a number they would have to look up to learn the same.
+            format!(
+                "this listener runs at scope `read`: every mutating verb is refused, {}",
+                super::panels::refusal_label(
+                    crate::proto::ErrorCode::ScopeDenied.as_i64(),
+                    "this connection may only read"
+                )
+            ),
             Style::default().fg(theme::warn()),
         )));
     }

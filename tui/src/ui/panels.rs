@@ -117,14 +117,25 @@ pub mod presentation {
             return raw.to_string();
         };
 
-        let Some((_name, code)) = head.rsplit_once(" (") else {
+        let Some((name, code)) = head.rsplit_once(" (") else {
             return raw.to_string();
         };
 
-        match code.parse::<i64>() {
-            Ok(code) => refusal_label(code, message),
-            Err(_not_a_code) => raw.to_string(),
+        let Ok(code) = code.parse::<i64>() else {
+            return raw.to_string();
+        };
+
+        // F5. The head has to *be* the name the code prints as, not merely end in an
+        // integer in brackets. Without this check any runtime sentence carrying a number
+        // that way was rewritten and its beginning thrown away — `Connection to node (10):
+        // refused` came out as `unknown: refused`, which names a code nobody sent and
+        // drops the half that said what failed. The doc above promises anything
+        // unrecognised is returned untouched; this is what makes that true.
+        if crate::proto::ErrorCode::from_i64(code).name() != name {
+            return raw.to_string();
         }
+
+        refusal_label(code, message)
     }
 }
 

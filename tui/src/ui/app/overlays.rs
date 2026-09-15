@@ -207,10 +207,22 @@ pub enum Command {
     Sandbox,
     /// D4: the MCP servers this session's node runs, and the entries it refused.
     Mcp,
+    /// F12. Three verbs the parity plan's group table names and the palette did not carry.
+    /// A palette that is missing a verb the plan lists is a palette the plan's own table
+    /// cannot be checked against.
+    ///
+    /// `interactive.rename`, taught by prefilling the composer — it takes a title nobody
+    /// but the operator can write.
+    Rename,
+    /// The quit dialog, which had a key and a slash verb and no row.
+    Quit,
+    /// The approval waiting on an answer. `ctrl+x a` reopens it; this is the row for
+    /// anyone who has not learnt the chord.
+    Approval,
 }
 
 impl Command {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 43] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -251,6 +263,9 @@ impl Command {
         Self::AutoApprove,
         Self::Sandbox,
         Self::Mcp,
+        Self::Rename,
+        Self::Quit,
+        Self::Approval,
     ];
 
     /// T2.1. The five groups of the parity plan, and nothing else.
@@ -270,6 +285,7 @@ impl Command {
             | Self::SwitchSession
             | Self::CloseSession
             | Self::Fork
+            | Self::Rename
             | Self::Handoff => Group::Session,
 
             Self::Interrupt
@@ -279,6 +295,7 @@ impl Command {
             | Self::Plan
             | Self::Sandbox
             | Self::AutoApprove
+            | Self::Approval
             | Self::ExternalEditor => Group::Turn,
 
             Self::SessionDetails
@@ -304,7 +321,7 @@ impl Command {
             | Self::Logs
             | Self::Mcp => Group::Runtime,
 
-            Self::Settings | Self::Theme | Self::Keys | Self::Help => Group::Client,
+            Self::Settings | Self::Theme | Self::Keys | Self::Help | Self::Quit => Group::Client,
         }
     }
 
@@ -350,6 +367,9 @@ impl Command {
             Self::AutoApprove => "Auto-approve everything this session asks",
             Self::Sandbox => "Change file access (OS sandbox)",
             Self::Mcp => "Show this node's MCP servers",
+            Self::Rename => "Rename this session",
+            Self::Quit => "Quit",
+            Self::Approval => "Answer the pending approval",
         }
     }
 
@@ -400,6 +420,9 @@ impl Command {
             Self::AutoApprove => "/auto-approve",
             Self::Sandbox => "/sandbox",
             Self::Mcp => "/mcp",
+            Self::Rename => "/rename",
+            Self::Quit => "/quit",
+            Self::Approval => "ctrl+x a",
         }
     }
 
@@ -425,6 +448,8 @@ impl Command {
             Self::Help => Action::Help,
             Self::Backtrack => Action::Backtrack,
             Self::AutoApprove => Action::LeaderAutoApprove,
+            Self::Quit => Action::Quit,
+            Self::Approval => Action::LeaderApproval,
             _slash_only => return None,
         })
     }
@@ -520,6 +545,15 @@ impl App {
                     self.sessions.open.is_some() && self.hello.serves("interactive.configure")
                 }
                 Command::Mcp => self.hello.serves("mcp.list"),
+                // F12. The same two questions the verb itself asks: is there a session,
+                // and does this gateway serve the method that renames one.
+                Command::Rename => {
+                    self.sessions.open.is_some() && self.hello.serves("interactive.rename")
+                }
+                // The transport must have an approvals channel at all, *and* something
+                // must actually be waiting — a row that opens an empty modal is a row that
+                // does nothing, which is the failure the Interrupt gate exists to avoid.
+                Command::Approval => self.approvals_offered() && self.pending_approval(),
                 // D9/D6. Native only, and the gate is the same two questions the verb
                 // itself asks: a row that always refuses is a row that should not be
                 // drawn.
@@ -533,6 +567,19 @@ impl App {
             .collect::<Vec<_>>();
 
         palette.matching(&offered, &self.keymap)
+    }
+
+    /// F12. Whether the open session has an approval still waiting on an answer.
+    ///
+    /// The same question `reopen_approval` asks before it opens anything, so the palette
+    /// row and the key it duplicates cannot disagree about whether there is one.
+    fn pending_approval(&self) -> bool {
+        self.sessions
+            .open
+            .as_ref()
+            .and_then(|key| self.sessions.watches.get(key))
+            .and_then(Watch::next_approval)
+            .is_some()
     }
 
     /// What the palette prints in a command's shortcut column.
@@ -1105,6 +1152,20 @@ impl App {
                         *choice = choice.saturating_sub(1);
                         true
                     }
+                    // F2. The rows are drawn `1.` through `6.` for everyone, so the digits
+                    // select for everyone — the same rule T2.7 applied to the approval
+                    // modal, and for the same reason: nothing is being typed here, and a
+                    // number printed beside a row no key reaches is decoration claiming to
+                    // be a binding. Previewing, like the arrows, because that is what
+                    // landing on a row means in this overlay.
+                    KeyCode::Char(digit)
+                        if super::super::access::row_for_digit(digit)
+                            .is_some_and(|row| row <= last) =>
+                    {
+                        *choice =
+                            super::super::access::row_for_digit(digit).expect("a digit row");
+                        true
+                    }
                     _elsewhere => false,
                 };
 
@@ -1455,6 +1516,20 @@ impl App {
             Command::Mcp => {
                 self.overlay = None;
                 self.open_mcp();
+            }
+            // F12. A title is words the operator has to type, so the palette teaches the
+            // verb by prefilling it — the same thing `/model` and `/handoff` do.
+            Command::Rename => {
+                self.overlay = None;
+                self.prefill_composer("/rename ");
+            }
+            Command::Quit => {
+                self.overlay = None;
+                self.open_quit();
+            }
+            Command::Approval => {
+                self.overlay = None;
+                self.reopen_approval();
             }
             Command::ShowDiff => {
                 self.overlay = None;

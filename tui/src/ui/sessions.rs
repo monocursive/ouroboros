@@ -1923,6 +1923,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         _ => "sends",
     };
 
+    let escape = escape_cell(app);
     let pending_reconciliations = app.open_pending_reconciliation_count();
     let footer = if pending_reconciliations > 0 {
         format!(
@@ -1933,14 +1934,16 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
         .and_then(|composer| composer.editor.completion())
         .is_some()
     {
+        // T1 made Enter accept the highlighted row, so this is the one state where Enter
+        // does not send. Saying "sends" here is how somebody submits `/ke` as a task.
         key_footer(
             "↑↓ choose · Tab complete · Esc close",
             app.keyboard_enhanced,
-            "sends",
+            "accepts",
         )
     } else if area.width < 76 {
         format!(
-            "Esc abort · {} · Ctrl+J newline · Enter {verb_key}",
+            "{escape} · {} · Ctrl+J newline · Enter {verb_key}",
             if sandbox_writable {
                 "/ commands"
             } else {
@@ -1966,11 +1969,11 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
                     // B2. Supersedes both other hints: a planning session writes nothing
                     // whatever its sandbox allows, so "/write to edit" would be pointing at
                     // the wrong lever, and `/plan off` is the one that actually applies.
-                    "esc abort · planning: read-only until /plan off · / commands"
+                    format!("{escape} · planning: read-only until /plan off · / commands")
                 } else if sandbox_writable {
-                    "esc abort · shift+↑ scroll · / commands"
+                    format!("{escape} · shift+↑ scroll · / commands")
                 } else {
-                    "esc abort · /write to edit · / commands"
+                    format!("{escape} · /write to edit · / commands")
                 }
             ),
             app.keyboard_enhanced,
@@ -2069,6 +2072,12 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         " Starting… "
     } else if app.home_reconciling() {
         " Enter retries safely "
+    } else if app.home_draft.completion().is_some() {
+        // T1 made Enter accept the highlighted row, and this is the screen the review
+        // caught it on: typing `/ke` and pressing Enter submitted "/ke" as the first task
+        // and opened a device-code sign-in. The primary action has to say what the key
+        // does *now*, not what it does once the menu is gone.
+        " Enter accepts "
     } else if ready {
         " Enter starts "
     } else if !app.home_draft.is_empty() {
@@ -2101,6 +2110,39 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
         )),
         columns[1],
     );
+}
+
+/// What `Esc` does in the composer *right now*, named as it does it.
+///
+/// The composer said `esc abort` in every state, and after T1 that is wrong in two of the
+/// three: `Esc` interrupts only while a turn is running, and on an idle session it banks
+/// the draft where `up` finds it or — on an empty draft — leaves the session. A footer
+/// that names one of three meanings is a footer that is wrong twice as often as it is
+/// right.
+///
+/// The interrupting key comes out of the keymap, because after T1 it is `Action::Interrupt`
+/// and an operator may have moved it; the other two are `Esc` itself, which is not
+/// rebindable — the editor matches it literally.
+fn escape_cell(app: &App) -> String {
+    if app.turn_running() {
+        return match app.bound(Action::Interrupt) {
+            true => format!("{} interrupts", app.keymap.label(Action::Interrupt)),
+            // The operator turned the interrupt off. Saying nothing about `Esc` is the
+            // honest answer: it does not interrupt, and it has no other meaning mid-turn.
+            false => "shift+↑ scroll".to_string(),
+        };
+    }
+
+    let empty = app
+        .sessions
+        .composer
+        .as_ref()
+        .is_some_and(|composer| composer.editor.text().trim().is_empty());
+
+    match empty {
+        true => "esc leaves".to_string(),
+        false => "esc clears the draft".to_string(),
+    }
 }
 
 /// A composer footer, naming only the newline bindings this terminal actually has.

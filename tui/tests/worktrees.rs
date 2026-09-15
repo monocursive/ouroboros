@@ -227,7 +227,7 @@ fn a_session_without_a_worktree_draws_no_badge_at_all() {
 // ---------------------------------------------------------------------------------------
 
 #[test]
-fn the_theme_command_is_in_the_palette_and_cycles_from_there() {
+fn the_theme_command_is_in_the_palette_and_opens_the_picker_from_there() {
     let mut app = opened(json!([session_with_worktree(None)]));
 
     app.apply(modified(KeyCode::Char('p'), KeyModifiers::CONTROL));

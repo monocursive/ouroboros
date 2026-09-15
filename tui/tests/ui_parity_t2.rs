@@ -987,3 +987,522 @@ fn hiding_the_rail_gives_the_width_to_the_transcript_and_says_so() {
         hidden.text()
     );
 }
+
+// =======================================================================================
+// Review fixes. Each names the finding it closes and the enforcement that would lose it.
+// =======================================================================================
+
+// ----- F1: the `?` panel must never silently end ---------------------------------------
+
+/// The panel counted logical rows while the paragraph wrapped, so at eighty columns the
+/// "N more rows" marker was computed for a row index below the viewport and never drawn:
+/// nineteen rows on screen, thirty-five unreachable, and nothing saying so.
+///
+/// Replace `wrapped_prose` with `rows.len()` arithmetic in `help` and this goes red.
+#[test]
+fn the_help_panel_says_there_is_more_at_eighty_columns() {
+    let mut app = shell();
+    app.apply(key(KeyCode::Char('?')));
+
+    let screen = render(&mut app, 80, 24);
+
+    assert!(
+        screen.contains("more rows"),
+        "the panel ends in silence at 80x24:\n{}",
+        screen.text()
+    );
+
+    // The marker is the last row of the scrolling half, not a row lost under the limits.
+    let marker = screen
+        .rows
+        .iter()
+        .position(|row| row.contains("more rows"))
+        .expect("the marker");
+    let limits = screen
+        .rows
+        .iter()
+        .position(|row| row.contains("one gateway view"))
+        .expect("the pinned limits");
+
+    assert!(
+        marker < limits,
+        "the marker is drawn below the pinned limits:\n{}",
+        screen.text()
+    );
+}
+
+/// And the scroll reaches the real end: the last screen has no marker on it, because
+/// there is nothing left to say is missing.
+#[test]
+fn the_help_panel_scrolls_all_the_way_to_its_last_row() {
+    let mut app = shell();
+    app.apply(key(KeyCode::Char('?')));
+
+    for _ in 0..400 {
+        app.apply(key(KeyCode::Down));
+    }
+
+    let screen = render(&mut app, 80, 24);
+
+    assert!(
+        !screen.contains("more rows"),
+        "the table cannot be scrolled to its end:\n{}",
+        screen.text()
+    );
+    // The verb list is the foot of the table, so this is the end.
+    assert!(screen.contains("COMMANDS"), "{}", screen.text());
+}
+
+/// No row is drawn half-wrapped: what the panel shows, it shows whole.
+#[test]
+fn every_help_row_the_panel_draws_fits_the_rows_it_was_given() {
+    for width in [80u16, 100, 140] {
+        let mut app = shell();
+        app.apply(key(KeyCode::Char('?')));
+
+        let screen = render(&mut app, width, 24);
+        let text = screen.text();
+
+        // A clipped wrap loses the tail of a description; the marker or a heading is what
+        // the last content row must be.
+        assert!(
+            text.contains("more rows"),
+            "{width}: no marker although the table cannot fit:\n{text}"
+        );
+    }
+}
+
+// ----- F2: the theme picker's digits --------------------------------------------------
+
+/// The picker prints `1.`–`6.` for everyone and had no digit arm at all, so pressing `6`
+/// did nothing. The rule T2.7 applied to the approval modal: a number drawn beside a row
+/// no key reaches is decoration pretending to be a binding.
+///
+/// Delete the digit arm in `overlay_key` and this goes red.
+#[test]
+fn a_digit_picks_a_theme_and_previews_it() {
+    let mut app = shell();
+    app.open_theme_picker();
+
+    let rows = ouro::ui::theme::ThemeName::ALL;
+    app.apply(key(KeyCode::Char('3')));
+
+    match &app.overlay {
+        Some(Overlay::Theme { choice, .. }) => assert_eq!(
+            *choice, 2,
+            "the digit did not select row three: {:?}",
+            rows[*choice]
+        ),
+        other => panic!("the picker closed: {other:?}"),
+    }
+
+    // Landing on a row previews it, exactly as the arrows do — and still writes nothing.
+    assert!(
+        app.take_config_save().is_none(),
+        "a digit preview asked for a write"
+    );
+
+    // A digit past the last row is not a row, so it is left alone.
+    app.apply(key(KeyCode::Char('9')));
+    match &app.overlay {
+        Some(Overlay::Theme { choice, .. }) => assert_eq!(*choice, 2, "a digit off the end moved the cursor"),
+        other => panic!("the picker closed: {other:?}"),
+    }
+}
+
+// ----- F3 / F8: a refused save must change nothing --------------------------------------
+
+/// `save_settings` wrote the four other `F4` rows into `self.config` and refused the budget
+/// afterwards, so "nothing was saved" was false: reopening the section showed the flipped
+/// values and the next legitimate save persisted them.
+///
+/// Move the budget validation back below the writes and this goes red.
+#[test]
+fn a_refused_budget_leaves_every_other_client_field_alone() {
+    let mut app = shell();
+    // `settings` is `off` since T1; the overlay opens from `leader.settings`.
+    app.apply(ctrl('x'));
+    app.apply(key(KeyCode::Char(',')));
+    app.apply(key(KeyCode::F(4)));
+
+    let mouse_before = app.config.terminal.mouse;
+    let reader_before = app.config.accessibility.screen_reader;
+    let motion_before = app.config.accessibility.reduced_motion;
+    let notify_before = app.config.notifications.mode.clone();
+
+    match app.overlay.as_mut() {
+        Some(Overlay::Settings(settings)) => {
+            settings.mouse = !mouse_before;
+            settings.screen_reader = !reader_before;
+            settings.reduced_motion = !motion_before;
+            settings.notify_mode = 1;
+            settings.budget = "12.5o".into();
+            settings.client = ClientField::Save;
+        }
+        other => panic!("no settings overlay: {other:?}"),
+    }
+
+    app.apply(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.overlay, Some(Overlay::Settings(_))),
+        "an unreadable budget was accepted"
+    );
+    assert!(app.take_config_save().is_none(), "the refusal queued a write");
+
+    assert_eq!(
+        app.config.terminal.mouse, mouse_before,
+        "`mouse` moved although the save was refused"
+    );
+    assert_eq!(app.config.accessibility.screen_reader, reader_before);
+    assert_eq!(app.config.accessibility.reduced_motion, motion_before);
+    assert_eq!(app.config.notifications.mode, notify_before);
+    assert_eq!(app.config.budget.max_cost_usd, None);
+}
+
+/// F8. The guard itself, which had no test: what a budget row accepts and what it refuses.
+#[test]
+fn the_budget_row_accepts_only_a_finite_number_of_dollars() {
+    for (typed, expected) in [
+        ("12.5", Some(Some(12.5))),
+        ("0", Some(Some(0.0))),
+        (" 3 ", Some(Some(3.0))),
+        // Cleared: an empty box is "no ceiling", which is what an absent key means.
+        ("", Some(None)),
+        // Refused. `1e400` is the one that matters: it parses, to `inf`, and an infinite
+        // ceiling is a budget that can never warn — worse than no budget, because the row
+        // says there is one.
+        ("-1", None),
+        ("1e400", None),
+        ("abc", None),
+        ("12.5o", None),
+    ] {
+        let mut app = shell();
+        app.apply(ctrl('x'));
+        app.apply(key(KeyCode::Char(',')));
+        app.apply(key(KeyCode::F(4)));
+
+        match app.overlay.as_mut() {
+            Some(Overlay::Settings(settings)) => {
+                settings.budget = typed.into();
+                settings.client = ClientField::Save;
+            }
+            other => panic!("no settings overlay: {other:?}"),
+        }
+
+        app.apply(key(KeyCode::Enter));
+
+        match expected {
+            Some(limit) => {
+                assert!(
+                    app.overlay.is_none(),
+                    "{typed:?} was refused and should have been taken"
+                );
+                assert_eq!(app.config.budget.max_cost_usd, limit, "{typed:?}");
+                assert!(app.take_config_save().is_some(), "{typed:?} was not written");
+            }
+            None => {
+                assert!(
+                    matches!(app.overlay, Some(Overlay::Settings(_))),
+                    "{typed:?} was accepted"
+                );
+                assert_eq!(app.config.budget.max_cost_usd, None, "{typed:?}");
+                assert!(app.take_config_save().is_none(), "{typed:?} queued a write");
+            }
+        }
+    }
+}
+
+// ----- F5: `refusal_text` only rewrites what it recognises -------------------------------
+
+/// It rewrote any string holding ` (<int>): `, dropping everything before the bracket and
+/// labelling the number with a code nobody sent: `Connection to node (10): refused` came
+/// out as `unknown: refused`. The doc promises the unrecognised is returned untouched.
+///
+/// Delete the `ErrorCode::name()` check and this goes red.
+#[test]
+fn refusal_text_rewrites_only_a_refusal_it_recognises() {
+    // Recognised: the one shape `ErrorCode`'s own `Display` produces.
+    assert_eq!(
+        refusal_text("unavailable (-32004): x"),
+        "unavailable: x",
+        "a real refusal is still relabelled"
+    );
+    assert_eq!(refusal_text("unavailable (-32004): "), "unavailable");
+    // A message with its own bracketed clause keeps all of it.
+    assert_eq!(
+        refusal_text("unavailable (-32004): no node (yet): try later"),
+        "unavailable: no node (yet): try later"
+    );
+
+    // Not recognised — returned exactly as it arrived.
+    for untouched in [
+        "Connection to node (10): refused",
+        "foo (12): bar): baz",
+        "a (1): b): c): d",
+        "(-1): y",
+        "retry (attempt 2): giving up",
+        "the connection closed",
+        "",
+    ] {
+        assert_eq!(
+            refusal_text(untouched),
+            untouched,
+            "an unrecognised sentence was rewritten"
+        );
+    }
+}
+
+// ----- F6 / F7: which computer, on the surfaces that list several -------------------------
+
+/// The Dashboard's connected list is the one list on that tab whose whole job is telling
+/// machines apart, and it read every node through `node_label` — so `ouro@alpha` and
+/// `ouro@beta` both printed `connected  ouro`.
+///
+/// Put `node_label` back in `dashboard.rs` and this goes red.
+#[test]
+fn the_dashboard_connected_list_tells_two_machines_apart() {
+    let mut app = shell();
+
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "_struct": "Ouroboros.Status",
+            "node": "ouro@alpha",
+            "role": "core",
+            "availability": {},
+            "connected_nodes": ["ouro@alpha", "ouro@beta"],
+            "cluster": { "distributed": true, "formation": { "strategy": "gossip" } }
+        }),
+    );
+
+    let screen = render(&mut app, 140, 40);
+    let text = screen.text();
+
+    assert!(text.contains("connected  alpha"), "{text}");
+    assert!(text.contains("connected  beta"), "{text}");
+    assert!(
+        !text.contains("ouro@alpha"),
+        "the raw node reached the Dashboard:\n{text}"
+    );
+
+    // And the two surfaces agree about the same node.
+    assert_eq!(app.machine_label("ouro@alpha"), "alpha");
+    assert_eq!(app.machine_label("ouro@beta"), "beta");
+}
+
+/// F4. The `?` panel's own footer printed the wire's number for the refusal every mutating
+/// verb gets at `read` scope. It is read by somebody who is confused, which is the last
+/// place to put a code they would have to look up to learn the word.
+///
+/// Put `-32003` back in `help_sections` and this goes red.
+#[test]
+fn the_help_footer_names_the_scope_refusal_rather_than_its_code() {
+    let mut app = app(support::read_hello(&["interactive.list"]));
+    app.tab = Tab::Dashboard;
+    app.apply(key(KeyCode::Char('?')));
+
+    let screen = render(&mut app, 140, 44);
+    let text = screen.text();
+
+    assert!(
+        text.contains("scope_denied"),
+        "the refusal is not named:\n{text}"
+    );
+    assert!(
+        !text.contains("-32003"),
+        "the JSON-RPC code reached the ? panel:\n{text}"
+    );
+}
+
+/// F10. A replay that is refused puts its reason on the notice row, and it carried the
+/// code: `replaying … failed: upstream_error (-32006): …`.
+///
+/// Drop the `refusal_text` wrap in `streaming.rs` and this goes red.
+#[test]
+fn a_refused_replay_says_the_reason_and_not_the_code() {
+    let mut app = opened(unnamed_session("idle"));
+
+    // Re-opening the session issues the replay this test refuses.
+    app.open_session(Plane::Interactive, SESSION.to_string());
+
+    let replay = app
+        .drain()
+        .into_iter()
+        .find(|call| matches!(call.method.as_str(), "interactive.replay" | "interactive.subscribe"))
+        .expect("a replay or subscribe call");
+
+    app.apply(Msg::Answer {
+        tag: replay.tag,
+        result: Err(ouro::transport::ClientError::Rpc(ouro::proto::RpcError {
+            code: ouro::proto::ErrorCode::from_i64(-32006),
+            message: "the provider went away".into(),
+            data: None,
+        })),
+    });
+
+    let notice = app.notice.as_ref().expect("a notice").text.clone();
+
+    assert!(
+        notice.contains("upstream_error: the provider went away"),
+        "the reason is not named: {notice}"
+    );
+    assert!(!notice.contains("-32006"), "the code reached the row: {notice}");
+}
+
+// ----- F9: the tab strip reads the keymap ------------------------------------------------
+
+/// The strip's hint is `leader.tab_dashboard`–`leader.tab_logs` out of the resolved map, so
+/// an operator who moved those verbs sees the keys they moved them to.
+#[test]
+fn rebinding_a_tab_verb_changes_the_strips_hint() {
+    let mut app = shell();
+    assert!(
+        render(&mut app, 140, 30).row("Dashboard").contains("ctrl+x 1-4"),
+        "the default hint is not the default keys"
+    );
+
+    app.keymap = Keymap::resolve(&std::collections::BTreeMap::from([(
+        "leader.tab_dashboard".to_string(),
+        "7".to_string(),
+    )]));
+
+    let screen = render(&mut app, 140, 30);
+    let strip = screen.row("Dashboard");
+
+    assert!(
+        strip.contains("ctrl+x 7-"),
+        "the strip still advertises the default key: {strip}"
+    );
+}
+
+// ----- F12: the verbs the plan's table names ---------------------------------------------
+
+/// The plan's group table names `rename`, `quit` and `approval`; the palette carried none
+/// of them, so the palette could not be checked against the table it is drawn from.
+#[test]
+fn the_palette_carries_rename_quit_and_approval_in_their_groups() {
+    for (command, group) in [
+        (Command::Rename, Group::Session),
+        (Command::Quit, Group::Client),
+        (Command::Approval, Group::Turn),
+    ] {
+        assert!(Command::ALL.contains(&command), "{command:?} is not a row");
+        assert_eq!(command.group(), group, "{command:?}");
+    }
+}
+
+/// Each is gated on what it needs, so none of them is a row that does nothing.
+#[test]
+fn the_three_new_palette_rows_are_gated_on_what_they_need() {
+    let palette = CommandPalette::default();
+
+    // No session: no rename, no approval. Quit always works — it is the client's own.
+    let home = shell();
+    let offered = home.palette_commands(&palette);
+    assert!(!offered.contains(&Command::Rename), "rename with no session");
+    assert!(!offered.contains(&Command::Approval), "approval with no session");
+    assert!(offered.contains(&Command::Quit), "quit is always reachable");
+
+    // A session, and a gateway that serves `interactive.rename`.
+    let open = opened(unnamed_session("idle"));
+    let offered = open.palette_commands(&palette);
+    assert!(offered.contains(&Command::Rename), "rename is not offered");
+    assert!(
+        !offered.contains(&Command::Approval),
+        "an approval row with nothing waiting is a row that opens an empty modal"
+    );
+}
+
+/// The rename row teaches the verb by prefilling it, because a title is words only the
+/// operator can write.
+#[test]
+fn the_rename_row_prefills_the_verb() {
+    let mut app = opened(unnamed_session("idle"));
+
+    // Through the palette, which is the surface the row lives on.
+    app.apply(ctrl('p'));
+    typed(&mut app, "Rename this");
+    app.apply(key(KeyCode::Enter));
+
+    let draft = app
+        .sessions
+        .composer
+        .as_ref()
+        .expect("a composer")
+        .editor
+        .text()
+        .to_string();
+
+    assert_eq!(draft, "/rename ");
+    assert!(app.overlay.is_none());
+}
+
+// ----- the two footer items from the T1 review --------------------------------------------
+
+/// The composer said `esc abort` in every state. After T1 that is wrong in two of the
+/// three: `Esc` interrupts only while a turn is running, and on an idle session it banks
+/// the draft where `up` finds it or — on an empty draft — leaves the session.
+///
+/// Collapse `escape_cell` back to a literal and this goes red.
+#[test]
+fn the_composer_hint_says_what_escape_does_in_the_state_it_is_in() {
+    // Idle, empty: `Esc` leaves.
+    let mut app = opened(unnamed_session("idle"));
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.row("Enter").contains("esc leaves"),
+        "empty and idle: {}",
+        screen.row("Enter")
+    );
+
+    // Idle, with a draft: `Esc` banks it.
+    typed(&mut app, "half a thought");
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.row("Enter").contains("esc clears the draft"),
+        "idle with text: {}",
+        screen.row("Enter")
+    );
+
+    // Running: the key that interrupts, out of the keymap.
+    let mut app = opened(unnamed_session("running"));
+    let screen = render(&mut app, 120, 34);
+    let row = screen.row("Enter");
+    assert!(
+        row.contains("interrupts"),
+        "a running turn must name the interrupt: {row}"
+    );
+    assert!(!row.contains("esc abort"), "{row}");
+}
+
+/// The home screen's primary action said `Enter: connect & start` while a completion menu
+/// was open — the exact screen where typing `/ke` and pressing Enter submitted "/ke" as
+/// the first task. T1 made Enter accept the row; the footer has to say so.
+#[test]
+fn the_home_action_says_enter_accepts_while_a_menu_is_open() {
+    let mut app = shell();
+    app.tab = Tab::Sessions;
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        !screen.contains("Enter accepts"),
+        "nothing is being completed yet:\n{}",
+        screen.text()
+    );
+
+    typed(&mut app, "/ke");
+
+    let screen = render(&mut app, 120, 34);
+    assert!(
+        screen.contains("Enter accepts"),
+        "the action still claims Enter starts a session:\n{}",
+        screen.text()
+    );
+    assert!(
+        !screen.contains("connect & start"),
+        "both claims are on screen at once:\n{}",
+        screen.text()
+    );
+}

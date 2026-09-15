@@ -311,3 +311,66 @@ fn no_color_leaves_every_word_in_the_terminals_own_colour() {
         screen.text()
     );
 }
+
+/// Review: the verb is a toggle, so pressing it twice is how someone checks what this
+/// build has and gets back to what they were doing — and getting back must undo the
+/// preview, exactly as `Esc` does. A second `/theme` that left the previewed palette
+/// installed would be the write-on-look the picker exists to stop, one step removed.
+#[test]
+fn a_second_theme_verb_puts_the_previewed_palette_back() {
+    let _held = hold();
+    theme::install(Palette::Dark);
+
+    let mut app = opened(Config::default());
+    app.config.theme.name = Some("dark".into());
+    ouro::ui::switch_theme(ThemeName::Dark);
+    let _ = app.take_config_save();
+
+    typed(&mut app, "/theme");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    assert_ne!(theme::current().palette, Palette::Dark, "moving did not preview");
+
+    // The verb's own entry point: the picker is a modal, so typing `/theme` again would
+    // never reach the composer.
+    app.open_theme_picker();
+
+    assert!(app.overlay.is_none(), "the second verb left an overlay open");
+    assert_eq!(
+        theme::current().palette,
+        Palette::Dark,
+        "the second verb kept the preview instead of putting back what was drawing"
+    );
+    assert!(app.take_config_save().is_none(), "reopening wrote config.toml");
+}
+
+/// The picker opens on the theme that is configured, and lists every name this build has.
+#[test]
+fn the_picker_opens_on_the_configured_theme_and_lists_them_all() {
+    let _held = hold();
+    theme::install(Palette::Dark);
+
+    let mut app = opened(Config::default());
+    app.config.theme.name = Some("ansi".into());
+    ouro::ui::switch_theme(ThemeName::Ansi);
+    let _ = app.take_config_save();
+
+    typed(&mut app, "/theme");
+
+    match app.overlay.as_ref() {
+        Some(Overlay::Theme { choice, previous }) => {
+            assert_eq!(ThemeName::ALL[*choice], ThemeName::Ansi, "wrong starting row");
+            assert_eq!(*previous, ThemeName::Ansi, "previous is not what was drawing");
+        }
+        other => panic!("no picker: {other:?}"),
+    }
+
+    let screen = frame(&mut app);
+    let missing: Vec<&str> = ThemeName::ALL
+        .iter()
+        .map(|name| name.as_str())
+        .filter(|name| !screen.contains(name))
+        .collect();
+
+    assert!(missing.is_empty(), "names missing: {missing:?}\n{}", screen.text());
+}

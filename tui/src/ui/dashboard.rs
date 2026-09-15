@@ -112,9 +112,12 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
             status
                 .connected_nodes
                 .iter()
-                .map(|node| {
-                    Line::from(format!("connected  {}", super::panels::node_label(node)))
-                }),
+                // F6. `machine_label`, not `node_label`: this is the one list on the
+                // Dashboard whose whole job is to tell machines apart, and a fleet's nodes
+                // share their name and differ in their host — `ouro@alpha` and
+                // `ouro@beta` both read `ouro` through the runtime-naming label. The
+                // picker and the session cards already ask the same question this way.
+                .map(|node| Line::from(format!("connected  {}", app.machine_label(node)))),
         ),
         Some(_) if summary.mode == "Standalone" => lines.push(Line::from(Span::styled(
             // Kept as a reassuring state, not an error: a laptop daemon is standalone by

@@ -1150,26 +1150,45 @@ fn the_help_panel_is_grouped_and_keeps_its_limits_in_view() {
     app.sessions.composer = None;
     app.apply(key(KeyCode::Char('?')));
 
-    // Taller than this file's usual frame: T2.3 put every live action on the panel, so the
-    // table is longer than a forty-four-row terminal and the last heading is below the fold
-    // on one. That the panel scrolls is the subject of the test below this one.
-    let screen = render(&mut app, 180, 72);
+    // F1. An ordinary terminal. The panel is longer than any one screen, so the table is
+    // what the headings are checked against and the *frame* is checked for the marker that
+    // says the rest of it is reachable — which is the bug this size used to hide.
+    let screen = render(&mut app, 100, 30);
     let text = screen.text();
+
+    assert!(
+        text.contains("more rows"),
+        "a panel that does not fit must say so, or the rest of it is unreachable:\n{text}"
+    );
 
     // The five groups of the `ui-parity` plan, which the palette, the which-key overlay
     // and the web's shortcut sheet all use as well. Every one of them is on the page,
     // because `Action::group` puts every action in one of them.
-    for heading in ["SESSION", "TURN", "CONVERSATION", "RUNTIME", "CLIENT"] {
-        assert!(text.contains(heading), "missing {heading}:\n{text}");
+    let rows = ouro::ui::view::help_keys(&app);
+    let headings: Vec<&str> = rows
+        .iter()
+        .map(|(group, _key, _description)| *group)
+        .collect();
+
+    for heading in ["Session", "Turn", "Conversation", "Runtime", "Client"] {
+        assert!(headings.contains(&heading), "missing {heading}: {headings:?}");
     }
+
+    // The first of them is drawn as a heading on the frame itself.
+    assert!(text.contains("SESSION"), "{text}");
 
     assert!(text.contains("one gateway view of the fleet"), "{text}");
     assert!(text.contains("not a sandbox"), "{text}");
 
     // The keys this slice added are on it, in the group they belong to.
-    assert!(text.contains("alt+enter"), "{text}");
-    assert!(text.contains("esc esc"), "{text}");
-    assert!(text.contains("ctrl+v"), "{text}");
+    let keys: Vec<&str> = rows
+        .iter()
+        .flat_map(|(_group, key, _description)| key.split(" / "))
+        .collect();
+
+    for chord in ["alt+enter", "esc esc", "ctrl+v"] {
+        assert!(keys.contains(&chord), "{chord} is not on the ? panel");
+    }
 }
 
 /// It scrolls rather than silently ending, and it says how much is left.

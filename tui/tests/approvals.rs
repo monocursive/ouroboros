@@ -334,11 +334,11 @@ fn a_subagent_relayed_approval_names_the_asker_and_the_machine_it_runs_on() {
         "a relayed request names which child is asking:\n{}",
         screen.text()
     );
-    // T2.8: the machine, named the way every other surface names one. The fact the
-    // assertion is about — that the modal says *which* machine — is unchanged; the Erlang
-    // host half of the node name was never the part that carried it.
+    // T2.8/F7: the machine, named the way the session cards and the picker name one —
+    // `machine_label`, because the claim is about *which computer* and the reader has just
+    // seen that machine called `fleet` on the row they opened.
     assert!(
-        screen.contains("on ouro-2"),
+        screen.contains("on fleet"),
         "approving this authorizes a machine the approver is not looking at, and the \
          modal must say which:\n{}",
         screen.text()
@@ -1094,4 +1094,98 @@ fn a_digit_picks_an_approval_row_without_screen_reader_mode() {
 
     assert_eq!(call.params["response"]["decision"], "deny");
     assert_eq!(call.params["response"]["scope"], "once");
+}
+
+// ----- review: the digits must not reach a text field -------------------------------------
+
+/// T2.7 gave the modal's digits to everyone. The reason field is a *different* overlay —
+/// `Overlay::Prompt` — and digits there are characters, not choices. Proving it, because
+/// the two live one keypress apart: `3` chooses, `r` opens the field, `12` is a reason.
+#[test]
+fn digits_type_into_the_approval_reason_rather_than_re_choosing() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    // Choose `deny (once)` by its number, then open the reason field.
+    app.apply(key(KeyCode::Char('3')));
+    app.apply(key(KeyCode::Char('r')));
+
+    app.apply(key(KeyCode::Char('1')));
+    app.apply(key(KeyCode::Char('2')));
+
+    match app.overlay.as_ref() {
+        Some(ouro::ui::app::Overlay::Prompt { buffer, .. }) => {
+            assert_eq!(buffer, "12", "the digits did not reach the reason field")
+        }
+        other => panic!("not a text prompt: {other:?}"),
+    }
+
+    // Enter attaches the reason and returns to the modal; it does not answer.
+    app.apply(key(KeyCode::Enter));
+    assert!(
+        app.drain()
+            .into_iter()
+            .all(|call| call.method != "interactive.respond_approval"),
+        "enter in the reason field submitted the approval"
+    );
+    assert!(
+        matches!(app.overlay.as_ref(), Some(ouro::ui::app::Overlay::Approval { .. })),
+        "enter in the reason field did not return to the modal"
+    );
+
+    // …and the digit-chosen answer survived the detour, with the reason attached.
+    app.apply(key(KeyCode::Enter));
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the answer");
+
+    assert_eq!(call.params["response"]["decision"], "deny");
+    assert_eq!(call.params["response"]["scope"], "once");
+    assert_eq!(call.params["response"]["reason"], "12");
+}
+
+/// `Tab` opens the same field, so it answers the same way.
+#[test]
+fn digits_type_into_the_reason_field_opened_with_tab() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    app.apply(key(KeyCode::Char('2')));
+    app.apply(key(KeyCode::Tab));
+    app.apply(key(KeyCode::Char('4')));
+    app.apply(key(KeyCode::Char('5')));
+
+    match app.overlay.as_ref() {
+        Some(ouro::ui::app::Overlay::Prompt { buffer, .. }) => assert_eq!(buffer, "45"),
+        other => panic!("not a text prompt: {other:?}"),
+    }
+}
+
+/// `Esc` out of the reason field comes back to the modal with the digit-chosen answer
+/// intact — the answer is not lost by looking at the field and changing your mind.
+#[test]
+fn escaping_the_reason_field_keeps_the_chosen_answer() {
+    let mut app = opened(full_hello());
+    approve(&mut app, codex_sandbox_escalation());
+
+    app.apply(key(KeyCode::Char('3')));
+    app.apply(key(KeyCode::Char('r')));
+    app.apply(key(KeyCode::Char('x')));
+    app.apply(key(KeyCode::Esc));
+
+    assert!(
+        matches!(app.overlay.as_ref(), Some(ouro::ui::app::Overlay::Approval { .. })),
+        "esc did not return to the modal"
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let call = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.respond_approval")
+        .expect("the answer");
+
+    assert_eq!(call.params["response"]["decision"], "deny");
 }

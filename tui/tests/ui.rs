@@ -5034,7 +5034,10 @@ fn an_open_session_keeps_the_composer_focused_like_an_agent_tui() {
     // A7 gave the footer facts to state, and they outrank the hints that are also on `?`
     // and in the palette. `ctrl+p commands` is the one that is always there.
     assert!(screen.contains("ctrl+p commands"), "{}", screen.text());
-    assert!(screen.contains("esc abort"), "{}", screen.text());
+    // The composer hint names what `Esc` does in the state it is in. This session has a
+    // turn in flight, so the key that interrupts is the one worth naming — it used to say
+    // `esc abort` in every state, including the two where `Esc` does not abort anything.
+    assert!(screen.contains("esc interrupts"), "{}", screen.text());
     assert!(!screen.contains("Press i to write"), "{}", screen.text());
 }
 

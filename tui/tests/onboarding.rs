@@ -1047,9 +1047,16 @@ fn ctrl_p_opens_a_searchable_palette_grouped_by_the_five_plan_groups() {
     app.apply(key(KeyCode::Esc));
     app.apply(ctrl('p'));
 
-    type_text(&mut app, "distribution");
+    // F11. `dist` still filters correctly — the group-name rule only fires on a query that
+    // *is* a group name — and the assertion names the palette row rather than a string the
+    // header's own subtitle now also carries.
+    type_text(&mut app, "dist");
     let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("Runtime & distribution"));
+    let row = screen.row("/runtime");
+    assert!(
+        row.contains("Runtime & distribution"),
+        "the palette row is not the match: {row}"
+    );
     assert!(
         !screen.contains("New session"),
         "a query must filter the list, not only move the selection: {}",

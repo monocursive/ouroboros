@@ -539,12 +539,17 @@ fn a_rebound_chord_is_what_the_help_footer_leader_and_palette_all_show() {
         ("leader.details", "ctrl+s o"),
     ];
 
-    // `?`, which is generated from the map. Rendered taller than the rest of this file:
-    // T2.3 put every live action on the panel, so the table is now longer than a
-    // forty-row terminal and `verbose` sits below the fold on one.
+    // `?`, read as the table it is generated from rather than as one frame: the panel is
+    // longer than any terminal and scrolls, so a rendered assertion would be a claim about
+    // whichever rows happened to fit (F1). The frame's own job — saying that the rest is
+    // reachable — is asserted in `input_grammar.rs`.
     let mut app = opened(rebound);
     app.apply(key(KeyCode::Char('?')));
-    let help = render(&mut app, 120, 70).text();
+    let help = ouro::ui::view::help_keys(&app)
+        .into_iter()
+        .map(|(_group, key, description)| format!("{key}  {description}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         help.contains("ctrl+b"),
         "the help panel names the new key\n{help}"

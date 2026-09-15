@@ -809,6 +809,40 @@ impl App {
             return;
         };
 
+        // F3. Validated *before* anything reaches `self.config`. It used to write the four
+        // other `F4` rows first and refuse the budget afterwards, so "nothing was saved"
+        // was false twice over: reopening the section showed the flipped values, and the
+        // next legitimate save — from either section — persisted them. A refusal has to
+        // leave the config exactly as it found it, or it is not a refusal.
+        //
+        // An empty box is "no ceiling", which is what an absent key means. A number this
+        // build cannot read is refused rather than rounded: silently storing `0` for
+        // `12.5o` would turn a typo into a setting that reads as deliberate.
+        let typed_budget = settings.budget.trim().to_string();
+
+        let budget = match typed_budget.as_str() {
+            "" => None,
+            typed => match typed.parse::<f64>() {
+                // `is_finite` is the guard that matters: `1e400` parses to `inf`, and an
+                // infinite ceiling is one no spend can cross — a budget that silently
+                // never warns. Negative is refused for the same reason: it would warn on
+                // every turn, including the first.
+                Ok(limit) if limit.is_finite() && limit >= 0.0 => Some(limit),
+                _unreadable => {
+                    let mut settings = settings;
+                    settings.message = Some(format!(
+                        "{typed:?} is not a number of dollars; nothing was saved."
+                    ));
+                    settings.section = SettingsSection::Client;
+                    settings.client = ClientField::Budget;
+                    self.overlay = Some(Overlay::Settings(settings));
+                    return;
+                }
+            },
+        };
+
+        // Past here every field is readable, so the write is all of them or none.
+
         // A blank box is "no default", not `""`: the same statement an empty workspace
         // makes in the start dialog.
         let workspace = settings.workspace.trim();
@@ -836,30 +870,7 @@ impl App {
             .copied()
             .map(|when| when.as_str().to_string());
 
-        // An empty box is "no ceiling", which is what an absent key means. A number this
-        // build cannot read is *refused* rather than rounded: the row is put back and the
-        // overlay says so, because silently storing `0` for `12.5o` would turn a typo into
-        // a setting that reads as deliberate.
-        let budget = settings.budget.trim().to_string();
-
-        match budget.as_str() {
-            "" => self.config.budget.max_cost_usd = None,
-            typed => match typed.parse::<f64>() {
-                Ok(limit) if limit.is_finite() && limit >= 0.0 => {
-                    self.config.budget.max_cost_usd = Some(limit)
-                }
-                _unreadable => {
-                    let mut settings = settings;
-                    settings.message = Some(format!(
-                        "{typed:?} is not a number of dollars; nothing was saved."
-                    ));
-                    settings.section = SettingsSection::Client;
-                    settings.client = ClientField::Budget;
-                    self.overlay = Some(Overlay::Settings(settings));
-                    return;
-                }
-            },
-        }
+        self.config.budget.max_cost_usd = budget;
 
         self.save_pending = true;
     }
