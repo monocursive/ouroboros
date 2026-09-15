@@ -4668,3 +4668,322 @@ body .ouro-settings-grok-setup summary {
   border-radius: var(--radius);
   padding: 0.2rem;
 }
+
+/* ==========================================================================
+ * ui-parity W3
+ *
+ * The remaining verbs' panels: the event ledger, backtrack, rewind, context, MCP, the
+ * three one-question dialogs, and the `!` composer band. Appended under one banner so
+ * the stylesheet's "one section owns a component" rule holds, and no class below is
+ * defined anywhere above it.
+ *
+ * No breakpoint is opened here. Everything is fluid — `min()` widths, `flex-wrap`, and
+ * `overflow: auto` on the two panes that can hold a long line — so the existing three
+ * `@media` blocks stay the only declarations of their queries (W1.9).
+ *
+ * No new colour token. A warning is `--warning`, a refusal is `.ouro-refusal`, and
+ * `--attention-green` is untouched: none of these panels is a person being needed.
+ * ========================================================================== */
+
+/* ------------------------------------------------- Panels that hold a list */
+
+.ouro-details,
+.ouro-backtrack,
+.ouro-rewind,
+.ouro-context,
+.ouro-mcp {
+  width: min(56rem, calc(100vw - 2rem));
+  max-height: min(84vh, 60rem);
+  overflow: auto;
+}
+
+.ouro-w3-notice {
+  margin: 0.75rem auto;
+  max-width: 62rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--secondary);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+
+/* --------------------------------------------------------- W3.1 Event details */
+
+.ouro-details-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ouro-details-item {
+  margin: 0;
+}
+
+/* A hole in the ledger is part of the ledger, and it reads as a rule rather than a row. */
+.ouro-details-divider {
+  margin: 0.4rem 0;
+  padding: 0.2rem 0.5rem;
+  color: var(--tertiary);
+  background: var(--inset);
+  border-left: 2px solid var(--border-strong);
+  font-size: 0.78rem;
+}
+
+.ouro-details-event {
+  border-bottom: 1px solid var(--border);
+}
+
+.ouro-details-head {
+  display: grid;
+  grid-template-columns: 4rem minmax(6rem, 12rem) minmax(0, 1fr);
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.3rem 0.2rem;
+  text-align: left;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  min-height: 2.25rem;
+}
+
+.ouro-details-head:hover {
+  background: var(--inset);
+}
+
+.ouro-details-seq {
+  color: var(--tertiary);
+}
+
+.ouro-details-kind {
+  color: var(--secondary);
+}
+
+.ouro-details-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tertiary);
+}
+
+.ouro-details-json {
+  margin: 0.4rem 0 0.6rem;
+  padding: 0.6rem;
+  max-height: 24rem;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+/* -------------------------------------------------- W3.3 Backtrack and fork */
+
+.ouro-backtrack-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ouro-backtrack-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ouro-backtrack-seq {
+  color: var(--tertiary);
+  font-size: 0.75rem;
+}
+
+.ouro-backtrack-text {
+  flex: 1 1 18rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ouro-backtrack-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* ------------------------------------------------------------- W3.4 Rewind */
+
+.ouro-rewind-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ouro-rewind-row {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3rem;
+}
+
+.ouro-rewind-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.4rem 0.2rem;
+  text-align: left;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 0.82rem;
+  min-height: 2.5rem;
+}
+
+.ouro-rewind-pick:hover {
+  background: var(--inset);
+}
+
+/* What a rewind cannot put back, said before the choice and again on the screen where
+   the choice is made. */
+.ouro-rewind-warning {
+  margin: 0.2rem 0 0.4rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--warn-amber);
+  border-left: 2px solid var(--warn-amber);
+  font-size: 0.78rem;
+}
+
+.ouro-rewind-block {
+  margin-top: 0.75rem;
+}
+
+.ouro-rewind-block ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+}
+
+/* The second list is the one that has to be acted on, so it is never the same weight as
+   the first. */
+.ouro-rewind-unrestorable {
+  color: var(--warn-amber);
+}
+
+/* ------------------------------------------------------------ W3.7 Context */
+
+.ouro-context-source {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0 0 0.25rem;
+}
+
+.ouro-context-facts,
+.ouro-context-native {
+  margin: 0.6rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ouro-context-native ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+/* ----------------------------------------------------------- W3.9 MCP list */
+
+.ouro-mcp-list,
+.ouro-mcp-refusals {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ouro-mcp-row,
+.ouro-mcp-refusals li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.ouro-mcp-name {
+  font-weight: 600;
+}
+
+.ouro-mcp-broken {
+  color: var(--warn-amber);
+}
+
+/* ------------------------------------------------------------ W3.2 Export */
+
+.ouro-export-choices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+/* ---------------------------------------------------- W3.8 The `!` composer */
+
+/* Where the command will run, said before Enter is pressed. A statement rather than a
+   warning: `!` is an ordinary thing to do, it just does not happen here. */
+.ouro-shell-where {
+  margin: 0 0 0.4rem;
+  padding: 0.3rem 0.5rem;
+  color: var(--secondary);
+  background: var(--inset);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+}
+
+/* The refusal and the offer to fix it stay together, on the composer, because a line
+   that expires is not somewhere to put an action. */
+.ouro-shell-refusal {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--inset);
+  border: 1px solid var(--warn-amber);
+  border-radius: var(--radius);
+}
+
+.ouro-shell-refusal p {
+  margin: 0 0 0.25rem;
+  font-size: 0.82rem;
+}
+
+.ouro-shell-refusal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}

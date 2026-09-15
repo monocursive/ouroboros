@@ -30,8 +30,8 @@ defmodule Ouroboros.Web.Commands do
 
   ## Capabilities: silence is not a refusal
 
-  Three keys of `info.options.capabilities` gate controls here — `steer`,
-  `dynamic_model` and `dynamic_configuration` — and all three are read the way
+  Four keys of `info.options.capabilities` gate controls here — `steer`,
+  `dynamic_model`, `dynamic_configuration` and (W3) `fork` — and all four are read the way
   `Capability::decode`/`Capability::offered` read them (`tui/src/model.rs:606-628`):
 
     * **boolean `false` is the only refusal.** It is the one value the runtime sends on
@@ -44,6 +44,10 @@ defmodule Ouroboros.Web.Commands do
 
   The map crosses `Ouroboros.Gateway.Wire` with atom keys in-process and string keys
   through JSON, so both spellings are read. A missing map is silence for every key.
+
+  A fifth key, `transport`, is read differently and on purpose: it is a *label* rather
+  than a yes/no, so `native_transport?/1` compares it rather than asking whether it was
+  refused. See that function.
   """
 
   alias Ouroboros.Web.Call
@@ -130,6 +134,26 @@ defmodule Ouroboros.Web.Commands do
         slash: "/delete",
         shortcut: nil,
         gate: &(open?(&1) and ended?(&1) and serves?(&1, "interactive.delete"))
+      },
+
+      # ui-parity W3
+      %{
+        id: "session.fork",
+        label: "Fork this session",
+        group: :session,
+        slash: "/fork",
+        shortcut: nil,
+        gate: &forkable?/1
+      },
+      %{
+        id: "session.handoff",
+        label: "Hand off to a new session",
+        group: :session,
+        slash: "/handoff",
+        shortcut: nil,
+        gate:
+          &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.handoff") and
+              native_transport?(&1))
       },
 
       # --------------------------------------------------------------------- Turn
@@ -224,6 +248,18 @@ defmodule Ouroboros.Web.Commands do
         gate: &(waiting?(&1) and serves?(&1, "interactive.respond_approval"))
       },
 
+      # ui-parity W3. `!` is a turn verb that is never a turn: the composer claims the
+      # draft and `workspace.exec` runs it. Operate-scope by the method table, so a
+      # read-scope endpoint never lists it.
+      %{
+        id: "turn.shell",
+        label: "Run a command in the workspace",
+        group: :turn,
+        slash: "!",
+        shortcut: nil,
+        gate: &shell_offered?/1
+      },
+
       # ------------------------------------------------------------- Conversation
       %{
         id: "conversation.copy",
@@ -250,6 +286,68 @@ defmodule Ouroboros.Web.Commands do
         gate: &(Map.get(&1, :truncated, 0) > 0)
       },
 
+      # ui-parity W3
+      %{
+        id: "conversation.details",
+        label: "Event details",
+        group: :conversation,
+        slash: "/details",
+        shortcut: nil,
+        gate: &(open?(&1) and serves?(&1, "interactive.event_detail"))
+      },
+      %{
+        id: "conversation.export",
+        label: "Export this transcript",
+        group: :conversation,
+        slash: "/export",
+        shortcut: nil,
+        gate: &(open?(&1) and serves?(&1, "interactive.replay"))
+      },
+      %{
+        id: "conversation.backtrack",
+        label: "Go back to an earlier message",
+        group: :conversation,
+        slash: "/backtrack",
+        shortcut: nil,
+        # Two verbs behind one row, and the row stands where either can run: a fork, or
+        # putting an earlier message back in the composer. A dialog that could offer
+        # neither is a list with nothing under it.
+        gate: &(open?(&1) and (forkable?(&1) or resendable?(&1)))
+      },
+      %{
+        id: "conversation.rewind",
+        label: "Rewind to an earlier turn",
+        group: :conversation,
+        slash: "/rewind",
+        shortcut: nil,
+        # Both verbs, because the row leads to a flow whose only act is the second one:
+        # `interactive.rewind_points` is read-scope and `interactive.rewind` is not, so a
+        # read-scope endpoint could otherwise draw two screens ending in a refusal.
+        gate:
+          &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.rewind_points") and
+              serves?(&1, "interactive.rewind") and native_transport?(&1))
+      },
+      %{
+        id: "conversation.compact",
+        label: "Compact this conversation",
+        group: :conversation,
+        slash: "/compact",
+        shortcut: nil,
+        gate:
+          &(open?(&1) and not ended?(&1) and serves?(&1, "interactive.compact") and
+              native_transport?(&1))
+      },
+      %{
+        id: "conversation.context",
+        label: "Context",
+        group: :conversation,
+        slash: "/context",
+        shortcut: nil,
+        # Every transport answers this one, with different amounts of truth, so it is
+        # gated on the method alone (`tui/src/ui/app/native.rs:92-95`).
+        gate: &(open?(&1) and serves?(&1, "interactive.context"))
+      },
+
       # ------------------------------------------------------------------ Runtime
       %{
         id: "runtime.status",
@@ -266,6 +364,18 @@ defmodule Ouroboros.Web.Commands do
         slash: "/audit",
         shortcut: nil,
         gate: &serves?(&1, "audit.status")
+      },
+
+      # ui-parity W3. No session state in the gate because the verb has none to ask
+      # about: with a session open it is routed to that session's node, and without one
+      # it answers for this runtime, which is the only other machine there is to mean.
+      %{
+        id: "runtime.mcp",
+        label: "MCP servers",
+        group: :runtime,
+        slash: "/mcp",
+        shortcut: nil,
+        gate: &serves?(&1, "mcp.list")
       },
 
       # ------------------------------------------------------------------- Client
@@ -480,6 +590,72 @@ defmodule Ouroboros.Web.Commands do
   def steerable?(assigns) when is_map(assigns) do
     open?(assigns) and not ended?(assigns) and working?(assigns) and
       serves?(assigns, "interactive.steer") and capability_offered?(assigns, :steer)
+  end
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W3 — the gates the remaining verbs are asked through
+  # ------------------------------------------------------------------------------------
+
+  @doc """
+  Whether this conversation is one the runtime holds itself.
+
+  `options.capabilities.transport` is a **label**, not a yes/no, and this reads it exactly
+  as `App::native_verb_offered` does (`tui/src/ui/app/native.rs:56-74`): `native` can,
+  anything else named cannot, and **silence is offerable** — hiding a verb because a
+  gateway never spoke about transports would be this surface inventing a ceiling. The
+  atom `:native` and the string `"native"` are the same declaration, in-process and
+  across JSON.
+
+  Four verbs are gated on it — compact, handoff, rewind and the rewind's own points —
+  because only a native session hands this runtime the conversation to work on.
+  """
+  @spec native_transport?(map()) :: boolean()
+  def native_transport?(assigns) when is_map(assigns) do
+    case assigns |> options() |> capabilities() |> declared(:transport) do
+      nil -> true
+      transport -> to_string(transport) == "native"
+    end
+  end
+
+  @doc """
+  Whether a fork can happen here, now.
+
+  The backtrack dialog's second verb and the Session group's own row, asked the same way:
+  the gateway serves `interactive.fork`, and the transport did not declare `fork: false`
+  (`tui/src/ui/app/session.rs:946-948`). Not gated on the session having ended — branching
+  a finished conversation is a thing an operator may well want, and whether this provider
+  can is the runtime's answer rather than this surface's.
+  """
+  @spec forkable?(map()) :: boolean()
+  def forkable?(assigns) when is_map(assigns) do
+    open?(assigns) and serves?(assigns, "interactive.fork") and
+      capability_offered?(assigns, :fork)
+  end
+
+  @doc """
+  Whether an earlier message could be put back in the composer and sent again.
+
+  The backtrack dialog's first verb. It removes nothing, so the only question is whether
+  this conversation can still be spoken into at all.
+  """
+  @spec resendable?(map()) :: boolean()
+  def resendable?(assigns) when is_map(assigns) do
+    open?(assigns) and not ended?(assigns) and serves?(assigns, "interactive.send_message")
+  end
+
+  @doc """
+  Whether `!` is offered — an operator command in the session's own workspace.
+
+  `workspace.exec` is an operate-scope method, so a read-scope endpoint fails the first
+  half and the row is never drawn. The session's posture is deliberately *not* part of
+  this: a rule may permit the command and only the permission engine knows that, so the
+  control is offered and the runtime's refusal is what is shown
+  (`tui/src/ui/app/native.rs:96-101`).
+  """
+  @spec shell_offered?(map()) :: boolean()
+  def shell_offered?(assigns) when is_map(assigns) do
+    match?({:interactive, _id}, Map.get(assigns, :open)) and not ended?(assigns) and
+      serves?(assigns, "workspace.exec")
   end
 
   @doc """

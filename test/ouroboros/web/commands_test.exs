@@ -53,7 +53,10 @@ defmodule Ouroboros.Web.CommandsTest do
         assert is_binary(id) and id != ""
         assert is_binary(label) and label != ""
         assert group in Commands.groups()
-        assert is_binary(slash) and String.starts_with?(slash, "/")
+        # ui-parity W3: `!` is the one verb on either surface that is not a slash verb.
+        # The column states how a thing is actually invoked, so the operator shell states
+        # `!` rather than a `/shell` neither client has ever had.
+        assert is_binary(slash) and String.starts_with?(slash, ["/", "!"])
         assert is_function(gate, 1)
         assert Map.has_key?(command, :shortcut)
       end

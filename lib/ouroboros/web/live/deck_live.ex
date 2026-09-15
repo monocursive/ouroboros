@@ -113,6 +113,13 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Web.Live.LoadingState
   alias Ouroboros.Web.Live.Palette
   alias Ouroboros.Web.Live.Rail
+  # ui-parity W3
+  alias Ouroboros.Web.Live.BacktrackDialog
+  alias Ouroboros.Web.Live.ContextPanel
+  alias Ouroboros.Web.Live.DetailsPanel
+  alias Ouroboros.Web.Live.McpPanel
+  alias Ouroboros.Web.Live.RewindDialog
+  alias Ouroboros.Web.Live.VerbDialogs
   alias Ouroboros.Web.NeedsYou
   alias Ouroboros.Web.Presentation
   alias Ouroboros.Web.Route
@@ -134,6 +141,33 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # send. Held as one map so the palette's query, which changes on every keystroke, does
   # not re-render the transcript's column with it.
   @composer_extras %{models: nil, model_query: "", next_effort: nil}
+
+  # ui-parity W3. Everything this slice's panels hold, in one map carrying the
+  # `{plane, id}` it was read for — see the block above `# ui-parity W2` for why.
+  @w3 %{
+    subject: nil,
+    # Which panel owns the screen: `:details`, `:backtrack`, `:rewind`, `:context`,
+    # `:mcp`, `:compact`, `:handoff`, `:export`, or nothing.
+    panel: nil,
+    # The runtime's own words for whatever the open panel last asked, and a line for what
+    # one of these verbs did. Both are this conversation's, both are cleared with it.
+    error: nil,
+    notice: nil,
+    # W3.1. Which events are open, and which have been fetched whole *for this view*.
+    details: %{expanded: MapSet.new(), fetched: %{}},
+    # W3.4. Two screens, and the list the second one indexes into.
+    points: [],
+    choice: 0,
+    what: "both",
+    screen: :choose,
+    outcome: nil,
+    # W3.7. `interactive.context`'s answer, which the vitals meter reads too.
+    reading: nil,
+    # W3.9. `mcp.list`'s answer, read fresh on every open.
+    mcp: nil,
+    # W3.8. A refused `!`, held on the composer where the offer to fix it belongs.
+    shell: nil
+  }
 
   # ------------------------------------------------------------------------------------
   # Lifecycle
@@ -174,6 +208,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:announced, MapSet.new())
       # ui-parity W2
       |> assign(%{palette: nil, shortcuts?: false, composer_extras: @composer_extras})
+      # ui-parity W3. One map, carrying the conversation it was read for; see `w3/1`.
+      |> assign(:w3, @w3)
       |> reset_session_state()
       |> stream(:cells, [])
 
@@ -223,6 +259,752 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # ------------------------------------------------------------------------------------
   # Events from the browser
   # ------------------------------------------------------------------------------------
+
+  # ui-parity W3
+  #
+  # The verbs the parity matrix still had a dash under on the web side: the event ledger,
+  # the transcript export, backtrack and fork, rewind, compact, handoff, context, `!` and
+  # the MCP list. Four rules hold across all of them, and they are the same four W2's
+  # block states:
+  #
+  #   * **the catalogue decides what exists** and `run_command/2` asks it again before
+  #     doing anything, so a panel opened from a row that went stale cannot run.
+  #   * **every wire call is the terminal client's call**, parameter for parameter. Where
+  #     this file sends something the TUI does not, that is a defect, not a dialect.
+  #   * **a refusal is rendered in the runtime's own words.** Nothing here paraphrases one
+  #     and nothing here claims an outcome the runtime did not report — a handoff whose
+  #     ceiling expired says the outcome is unknown rather than that a child is ready.
+  #   * **what an operator's own verb answered is a note in the conversation**, pushed
+  #     through `Ouroboros.Web.Watch.note/3` as `{:local, block}` and deduped against the
+  #     runtime's durable record of the same act by the key it carries. That is the
+  #     projection's own mechanism (`Ouroboros.Web.Transcript.project_with_ids/1`), not a
+  #     second rendering path beside it.
+  #
+  # ## One assign, keyed by the conversation it is about
+  #
+  # Everything below lives in `:w3`, and the map carries the `{plane, id}` it was read
+  # for. `w3/1` hands back the default for any other session, so opening a second
+  # conversation cannot show it the first one's context reading, rewind points or open
+  # panel — and nothing had to be added to `reset_session_state/1` to make that true.
+
+  # ui-parity W3. `@w3` is declared above, beside `@composer_extras`: a module
+  # attribute has to exist before `mount/1` reads it.
+
+  # The state for the session that is actually open. A reading taken in one conversation
+  # is not a fact about the next one, so a stale subject answers the default rather than
+  # the previous session's panel.
+  defp w3(%{open: open, w3: %{subject: open} = state}) when not is_nil(open), do: state
+  defp w3(_stale_or_closed), do: @w3
+
+  defp put_w3(socket, changes) do
+    state =
+      socket.assigns
+      |> w3()
+      |> Map.merge(Map.new(changes))
+      |> Map.put(:subject, socket.assigns.open)
+
+    assign(socket, :w3, state)
+  end
+
+  # A modal owns the screen while it is open, and these refuse to appear over another for
+  # exactly the reason W2's palette does: a confirmation is a question awaiting an answer
+  # and nothing may act behind it.
+  defp open_w3(%{assigns: %{session_action: action}} = socket, _panel) when not is_nil(action),
+    do: socket
+
+  defp open_w3(socket, panel) do
+    socket
+    |> close_palette()
+    |> assign(:shortcuts?, false)
+    |> put_w3(panel: panel, error: nil, notice: nil)
+  end
+
+  defp close_w3(socket), do: put_w3(socket, panel: nil, error: nil, notice: nil)
+
+  # A `phx-value-sequence` arrives as a string and names an event position. Parsed here,
+  # once, so no handler below has to decide what a browser meant by `"12abc"`.
+  defp with_sequence(socket, sequence, fun) do
+    case Integer.parse(to_string(sequence)) do
+      {at, ""} when at > 0 -> fun.(socket, at)
+      _unreadable -> socket
+    end
+  end
+
+  defp w3_error(socket, refusal),
+    do: put_w3(socket, error: refusal_message(refusal))
+
+  # ---------------------------------------------------------------- W3.1 Event details
+
+  # The ledger this view is holding, as rows. Never filtered: a floor, a gap and a note
+  # say where history is missing, and a panel that dropped them would look complete.
+  defp details_rows(assigns) do
+    case assigns.watch do
+      %Watch{} = watch -> DetailsPanel.rows(Watch.entries(watch), w3(assigns).details)
+      _absent -> []
+    end
+  end
+
+  defp toggle_detail(socket, sequence) do
+    details = w3(socket.assigns).details
+
+    expanded =
+      if MapSet.member?(details.expanded, sequence),
+        do: MapSet.delete(details.expanded, sequence),
+        else: MapSet.put(details.expanded, sequence)
+
+    put_w3(socket, details: %{details | expanded: expanded})
+  end
+
+  # X6. `interactive.event_detail {id, sequence}` re-encodes one event under the larger
+  # `detail_leaf_bytes` cap. The answer replaces that event's tree **for this view only**:
+  # the transcript keeps projecting the capped event it absorbed, because the fetched copy
+  # is a fact about one reader's screen and not about the session's history
+  # (`tui/src/ui/details.rs:17-31`).
+  defp fetch_detail(%{assigns: %{open: {:interactive, id}}} = socket, sequence) do
+    if Commands.available?(socket.assigns, "conversation.details") do
+      params =
+        socket
+        |> session_params(:interactive, id)
+        |> Map.put("sequence", sequence)
+
+      case call(socket, "interactive.event_detail", params) do
+        {:ok, event} ->
+          details = w3(socket.assigns).details
+
+          put_w3(socket,
+            error: nil,
+            details: %{
+              details
+              | fetched: Map.put(details.fetched, sequence, event),
+                expanded: MapSet.put(details.expanded, sequence)
+            }
+          )
+
+        refusal ->
+          w3_error(socket, refusal)
+      end
+    else
+      socket
+    end
+  end
+
+  defp fetch_detail(socket, _sequence), do: socket
+
+  # ------------------------------------------------------------------ W3.2 Export
+
+  # A download is its own request, so this is a location rather than a call: the
+  # controller reads the session through the gateway under the same cookie. `external:`
+  # because the target is not a LiveView route; `content-disposition: attachment` is what
+  # keeps the browser on this page while it saves the file.
+  defp export_to(%{assigns: %{open: {plane, id}}} = socket, format)
+       when format in ~w(text ndjson),
+       do: redirect(socket, external: Route.session(plane, id) <> "/export?format=" <> format)
+
+  defp export_to(socket, _format), do: socket
+
+  # ------------------------------------------------------- W3.3 Backtrack and fork
+
+  defp backtrack_turns(assigns) do
+    case assigns.watch do
+      %Watch{} = watch ->
+        BacktrackDialog.recent_user_turns(Watch.entries(watch), BacktrackDialog.entries())
+
+      _absent ->
+        []
+    end
+  end
+
+  # "Edit and resend as a new turn": the chosen message's text goes into the composer and
+  # **nothing is removed**. Deliberately not called a rewind — the transcript is unchanged
+  # and the provider's context is unchanged, and a control that implied otherwise would be
+  # the rewind that silently under-delivers.
+  defp backtrack_edit(socket, sequence) do
+    turns = backtrack_turns(socket.assigns)
+
+    case Enum.find(turns, fn {at, _text} -> at == sequence end) do
+      {_at, text} ->
+        if Commands.resendable?(socket.assigns) do
+          socket
+          |> put_draft(text)
+          |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: text})
+          |> put_w3(
+            panel: nil,
+            error: nil,
+            notice: "That message is in the composer as a new turn. Nothing earlier was removed."
+          )
+        else
+          socket
+        end
+
+      nil ->
+        socket
+    end
+  end
+
+  # `interactive.fork {id, node}`, and the notice says the same thing the dialog does:
+  # the verb takes a session and no message, so where the branch starts is the transport's
+  # decision and this page does not claim to know it
+  # (`tui/src/ui/app/session.rs:1078-1115`).
+  defp fork(%{assigns: %{open: {:interactive, id}}} = socket) do
+    if Commands.forkable?(socket.assigns) do
+      case call(socket, "interactive.fork", session_params(socket, :interactive, id)) do
+        {:ok, child} -> opened_child(socket, child, id, "forked from")
+        refusal -> w3_error(socket, refusal)
+      end
+    else
+      socket
+    end
+  end
+
+  defp fork(socket), do: socket
+
+  # ------------------------------------------------------------------- W3.4 Rewind
+
+  defp open_rewind(%{assigns: %{open: {:interactive, id}}} = socket) do
+    case call(socket, "interactive.rewind_points", session_params(socket, :interactive, id)) do
+      {:ok, answer} ->
+        points = RewindDialog.points(answer)
+
+        socket
+        |> open_w3(:rewind)
+        |> put_w3(
+          points: points,
+          choice: max(length(points) - 1, 0),
+          what: "both",
+          screen: :choose,
+          outcome: nil
+        )
+
+      refusal ->
+        socket |> open_w3(:rewind) |> w3_error(refusal) |> put_w3(points: [], screen: :choose)
+    end
+  end
+
+  defp open_rewind(socket), do: socket
+
+  # **`to_turn` is the turn's 1-based position, not its id.** `interactive.rewind`'s
+  # parameter contract admits either, but `InteractiveSession.rewind/3` guards
+  # `is_integer`, so a turn id is refused as `invalid_rewind` before it reaches the
+  # session. The position is exactly what the dialog already knows, having just been
+  # handed the list it indexes into (`tui/src/ui/app/native.rs:423-486`).
+  defp rewind_confirm(%{assigns: %{open: {:interactive, id}}} = socket) do
+    state = w3(socket.assigns)
+
+    with true <- Commands.available?(socket.assigns, "conversation.rewind"),
+         true <- Call.available?(socket.assigns.scope, "interactive.rewind"),
+         true <- state.screen == :confirm,
+         point when not is_nil(point) <- Enum.at(state.points, state.choice),
+         true <- RewindDialog.what?(state.what) do
+      to_turn = state.choice + 1
+
+      params =
+        socket
+        |> session_params(:interactive, id)
+        |> Map.merge(%{"to_turn" => to_turn, "what" => state.what})
+
+      case call(socket, "interactive.rewind", params) do
+        {:ok, answer} ->
+          outcome = RewindDialog.outcome(answer)
+          label = point.turn_id || "turn #{to_turn}"
+
+          socket
+          |> push_local(%Cell.Runtime{
+            label: "Rewound to #{label} (#{state.what})",
+            detail: RewindDialog.describe(outcome),
+            tone: if(outcome.unrestorable == [], do: :muted, else: :warning)
+          })
+          |> put_w3(screen: :done, outcome: outcome, error: nil)
+          |> refresh()
+
+        refusal ->
+          w3_error(socket, refusal)
+      end
+    else
+      _ungated -> socket
+    end
+  end
+
+  defp rewind_confirm(socket), do: socket
+
+  # ------------------------------------------------------------------ W3.5 Compact
+
+  # `interactive.compact {id, focus?}`, then a fresh `interactive.context`: a fold resets
+  # `context_used` and rotates the prefix fingerprint, and a meter inferred from the
+  # report would be a number nobody measured (`docs/TUI.md:2196`).
+  defp compact(%{assigns: %{open: {:interactive, id}}} = socket, focus) do
+    if Commands.available?(socket.assigns, "conversation.compact") do
+      focus = String.trim(to_string(focus))
+
+      params =
+        socket
+        |> session_params(:interactive, id)
+        |> then(fn params ->
+          if focus == "", do: params, else: Map.put(params, "focus", focus)
+        end)
+
+      case call(socket, "interactive.compact", params) do
+        {:ok, report} ->
+          socket
+          |> push_local(Transcript.compaction_block(ContextPanel.compaction(report)))
+          |> put_w3(panel: nil, error: nil)
+          |> read_context(false)
+          |> refresh_info()
+
+        refusal ->
+          w3_error(socket, refusal)
+      end
+    else
+      socket
+    end
+  end
+
+  defp compact(socket, _focus), do: socket
+
+  # ------------------------------------------------------------------ W3.6 Handoff
+
+  # `interactive.handoff {id, prompt?, handoff_id}`. The child's id is caller-owned for
+  # the same reason a fork's would be: the verb's ceiling can fire after the child exists,
+  # and a client that had to mint a second id to find out would start a second session
+  # instead of finding the first. So the child is opened on either answer, and the line
+  # says which of the two happened (`tui/src/ui/app/native.rs:165-232`).
+  defp handoff(%{assigns: %{open: {:interactive, id}}} = socket, prompt) do
+    if Commands.available?(socket.assigns, "session.handoff") do
+      prompt = String.trim(to_string(prompt))
+      child = minted_id("handoff")
+
+      params =
+        socket
+        |> session_params(:interactive, id)
+        |> Map.put("handoff_id", child)
+        |> then(fn params ->
+          if prompt == "", do: params, else: Map.put(params, "prompt", prompt)
+        end)
+
+      case call(socket, "interactive.handoff", params) do
+        {:ok, answer} ->
+          opened_child(socket, answer, id, "handed off from")
+
+        # Not a failure. The ceiling fired and the child may well exist under the id this
+        # page minted, so it is opened and the line says the runtime did not confirm it.
+        {:error, _code, message, %{"outcome" => "unknown"}} ->
+          open_named_child(
+            socket,
+            child,
+            "#{message} — opening #{child}, which is the id this page asked for."
+          )
+
+        refusal ->
+          w3_error(socket, refusal)
+      end
+    else
+      socket
+    end
+  end
+
+  defp handoff(socket, _prompt), do: socket
+
+  # A caller-owned id for a child session: unguessable, this surface's own, and inside the
+  # 128 UTF-8 bytes the contract admits.
+  defp minted_id(kind),
+    do: "web-#{kind}-" <> (:crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower))
+
+  # Both a fork and a handoff answer in `interactive.start`'s shape. `ready` is read for
+  # what it is: `false` is a child that exists and is not up yet, which is worth opening
+  # and worth saying.
+  defp opened_child(socket, answer, parent, relation) when is_map(answer) do
+    child = Map.get(answer, "id") || Map.get(answer, :id)
+    ready? = Map.get(answer, "ready", Map.get(answer, :ready, true))
+
+    if is_binary(child) and child != "" do
+      said =
+        if ready? == false do
+          "#{relation} #{parent}: #{child} was accepted and is not ready yet; it is open and " <>
+            "will fill in."
+        else
+          "#{relation} #{parent}: this is the child, #{child}."
+        end
+
+      open_named_child(socket, child, said)
+    else
+      put_w3(socket,
+        panel: nil,
+        error:
+          "The runtime accepted that but named no child session, so there is nothing to open."
+      )
+    end
+  end
+
+  defp opened_child(socket, _unreadable, _parent, _relation),
+    do: put_w3(socket, error: "The runtime answered something this build cannot read.")
+
+  # The line is recorded against the *child*, because that is the page it belongs on and
+  # `w3/1` hands back the default for any other session.
+  defp open_named_child(socket, child, said) do
+    socket
+    |> refresh()
+    |> assign(:w3, %{@w3 | subject: {:interactive, child}, notice: said})
+    |> push_patch(to: Route.session(:interactive, child))
+  end
+
+  # ------------------------------------------------------------------ W3.7 Context
+
+  # `interactive.context {id}`. `show?` opens the panel when the answer lands; otherwise
+  # the numbers only refresh the meter, which is what a compaction asks for.
+  defp read_context(%{assigns: %{open: {:interactive, id}}} = socket, show?) do
+    if Call.available?(socket.assigns.scope, "interactive.context") do
+      case call(socket, "interactive.context", session_params(socket, :interactive, id)) do
+        {:ok, answer} ->
+          socket = put_w3(socket, reading: ContextPanel.read(answer), error: nil)
+          if show?, do: open_w3(socket, :context), else: socket
+
+        refusal ->
+          if show?, do: socket |> open_w3(:context) |> w3_error(refusal), else: socket
+      end
+    else
+      socket
+    end
+  end
+
+  defp read_context(socket, _show?), do: socket
+
+  # ------------------------------------------------------------ W3.8 Operator shell
+
+  # A draft beginning with `!` is claimed here and **never becomes a turn**. It is routed
+  # to `workspace.exec {id, command}`, which runs it through `/bin/sh -c` in the session's
+  # admitted workspace on its owner node — which is what the composer says before Enter is
+  # pressed, because it is the one thing about `!` a person cannot infer from the screen
+  # (`tui/src/ui/app/native.rs:492-546`).
+  defp operator_shell(%{assigns: %{open: {:interactive, id}}} = socket, command) do
+    command = String.trim(command)
+
+    cond do
+      not Commands.shell_offered?(socket.assigns) ->
+        socket
+
+      command == "" ->
+        assign(socket, :composer_error, "Type a command after the !.")
+
+      true ->
+        params =
+          socket
+          |> session_params(:interactive, id)
+          |> Map.put("command", command)
+
+        case call(socket, "workspace.exec", params) do
+          {:ok, result} ->
+            socket
+            |> push_local(shell_block(command, result))
+            |> put_draft("", false)
+            |> assign(:composer_error, nil)
+            |> put_w3(shell: nil)
+            |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: "!" <> command})
+
+          refusal ->
+            shell_refused(socket, command, refusal)
+        end
+    end
+  end
+
+  defp operator_shell(socket, _command), do: socket
+
+  @doc """
+  Which machine and which directory a `!` will run in, in the words the composer uses.
+
+  Said **before** Enter is pressed, every time, because it is the one thing about `!` a
+  person cannot infer from the screen: not here, but on the session's owner node, in the
+  workspace the agent is editing (`tui/src/ui/app/native.rs:548-562`). Where the runtime
+  named neither, it says that rather than naming this browser's machine.
+  """
+  @spec shell_where(term(), term(), list()) :: String.t()
+  def shell_where(row, info, roster \\ []) do
+    node =
+      case row do
+        %Rail.Row{node: node} when not is_nil(node) -> Presentation.node_label(node, roster)
+        _absent -> "this session's owner machine"
+      end
+
+    workspace =
+      (is_map(info) && Map.get(info, :workspace)) ||
+        case row do
+          %Rail.Row{workspace: workspace} -> workspace
+          _absent -> nil
+        end
+
+    case workspace do
+      path when is_binary(path) and path != "" -> "#{node}, in #{path}"
+      _unreported -> node
+    end
+  end
+
+  # How many characters of a command the block's label carries
+  # (`tui/src/ui/app/native.rs:43`).
+  @command_label 96
+
+  # The reply as the transcript's own runtime block. Keyed on the digest the runtime
+  # returned, so its durable `operator_shell` provider event is not drawn a second time in
+  # the thinner form the ledger keeps — the reply wins because it carries the elapsed
+  # time, the spill path and the command's own text, none of which the ledger records.
+  defp shell_block(command, result) when is_map(result) do
+    exit_status = Map.get(result, :exit_status, Map.get(result, "exit_status"))
+    timed_out = Map.get(result, :timed_out, Map.get(result, "timed_out")) == true
+    duration = Map.get(result, :duration_ms, Map.get(result, "duration_ms"))
+    bytes = Map.get(result, :output_bytes, Map.get(result, "output_bytes"))
+    output = Map.get(result, :output, Map.get(result, "output"))
+    spilled = Map.get(result, :spilled, Map.get(result, "spilled"))
+    spill_error = Map.get(result, :spill_error, Map.get(result, "spill_error"))
+    digest = Map.get(result, :command_digest, Map.get(result, "command_digest"))
+
+    facts =
+      [
+        case exit_status do
+          0 -> "exit 0"
+          status when is_integer(status) -> "exit #{status}"
+          _unreported -> "no exit status"
+        end,
+        if(timed_out, do: "timed out"),
+        if(is_integer(duration), do: elapsed_word(duration)),
+        if(is_integer(bytes), do: "#{bytes} bytes"),
+        if(is_binary(spilled), do: "full output at #{spilled}"),
+        if(is_binary(spill_error), do: "the rest could not be written: #{spill_error}")
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    %Cell.Runtime{
+      label: "$ " <> String.slice(command, 0, @command_label),
+      detail: Enum.join(facts, " · "),
+      body: if(is_binary(output), do: Transcript.body_rows(output), else: []),
+      # A non-zero exit is a *result*, not a fault: `grep` finding nothing is not a broken
+      # command. Only a timeout or a non-zero status is drawn as one, which is the
+      # distinction the terminal client keeps.
+      tone: if(timed_out or exit_status != 0, do: :warning, else: :muted),
+      key: if(is_binary(digest), do: digest)
+    }
+  end
+
+  defp elapsed_word(ms) when ms < 1_000, do: "#{ms}ms"
+  defp elapsed_word(ms) when ms < 60_000, do: "#{div(ms, 1_000)}s"
+  defp elapsed_word(ms), do: "#{div(ms, 60_000)}m #{rem(div(ms, 1_000), 60)}s"
+
+  # A refusal stays **on the composer**, not in a notice that expires: the refusal and the
+  # offer to fix it belong on screen together.
+  #
+  # `["shell_refused", detail]` is the one shape that grows a permissions offer. Every
+  # other refusal this verb can give — a closed session, a blank command, a ledger that
+  # could not record the attempt — reaches the ordinary composer error, because there is
+  # no rule to offer for it (`tui/src/ui/app/native.rs:600-663`).
+  defp shell_refused(socket, command, refusal) do
+    case shell_refusal_detail(refusal) do
+      nil ->
+        socket
+        |> put_draft("!" <> command, false)
+        |> assign(:composer_error, refusal_message(refusal))
+        |> put_w3(shell: nil)
+
+      detail ->
+        workspace = detail["workspace"] || session_workspace(socket)
+
+        {rule, missing} =
+          Transcript.suggested_rule(detail["suggested_rule"], socket.assigns.methods, workspace)
+
+        socket
+        |> put_draft("!" <> command, false)
+        |> assign(:composer_error, nil)
+        |> put_w3(
+          shell: %{
+            reason: detail["reason"],
+            # The runtime's own sentence, never this surface's paraphrase of it.
+            message: detail["message"] || refusal_message(refusal),
+            denied_by: denied_by(detail["denied_by"]),
+            suggested_rule: detail["suggested_rule"],
+            rule: rule,
+            missing: missing
+          }
+        )
+    end
+  end
+
+  # `Ouroboros.Gateway.Wire` encodes an Elixir tuple as a JSON array, so a tagged runtime
+  # refusal is always a two-element `[tag, detail]`. Matching on the tag rather than on
+  # the presence of `suggested_rule` is what keeps the offer from appearing beside a
+  # refusal that has nothing to do with permissions.
+  defp shell_refusal_detail({:error, _code, _message, ["shell_refused", detail]})
+       when is_map(detail),
+       do: detail
+
+  defp shell_refusal_detail(_other), do: nil
+
+  # The engine answers with a whole rule record; the pattern is the half worth naming, and
+  # its id is the fallback for a store that returned no pattern.
+  defp denied_by(rule) when is_map(rule), do: rule["pattern"] || rule["id"]
+  defp denied_by(rule) when is_binary(rule), do: rule
+  defp denied_by(_absent), do: nil
+
+  # The one-key answer to a refusal: write the rule the engine itself suggested, through
+  # exactly the code path the approval card's "Remember" uses — same `permissions.add`
+  # params, same workspace scoping, same notice.
+  defp remember_shell_rule(socket) do
+    case w3(socket.assigns).shell do
+      %{rule: %Approval.Rule{} = rule} ->
+        socket |> add_rule(rule) |> put_w3(shell: nil)
+
+      _no_offer ->
+        socket
+    end
+  end
+
+  # ------------------------------------------------------------------ W3.9 MCP list
+
+  # Routed to the node the *session* runs on, because a server runs where its session
+  # does, and narrowed by the workspace it names — without which the answer is only the
+  # servers already running, and the entries this node configured but never started, and
+  # every entry the loader refused, are missing (`tui/src/ui/app/native.rs:687-742`).
+  defp open_mcp(socket) do
+    params =
+      %{}
+      |> maybe_put("node", mcp_node(socket))
+      |> maybe_put("workspace", session_workspace(socket))
+
+    socket = open_w3(socket, :mcp)
+
+    case call(socket, "mcp.list", params) do
+      {:ok, answer} -> put_w3(socket, mcp: McpPanel.read(answer), error: nil)
+      refusal -> socket |> put_w3(mcp: nil) |> w3_error(refusal)
+    end
+  end
+
+  defp mcp_node(%{assigns: %{open: {plane, id}}} = socket) do
+    case owner(socket, plane, id) do
+      nil -> nil
+      owner -> Atom.to_string(owner)
+    end
+  end
+
+  defp mcp_node(_closed), do: nil
+
+  defp maybe_put(params, _key, nil), do: params
+  defp maybe_put(params, _key, ""), do: params
+  defp maybe_put(params, key, value), do: Map.put(params, key, to_string(value))
+
+  # ------------------------------------------------------------------------------------
+  # What an operator's own verb answered, recorded where they asked it
+  # ------------------------------------------------------------------------------------
+
+  # `Watch.note/3` anchors the block at the newest sequence held, which is where a reader
+  # looking at the transcript would otherwise see an unexplained jump. `redraw/2` is the
+  # projection's own entry point; nothing here draws a cell of its own.
+  defp push_local(%{assigns: %{watch: %Watch{}}} = socket, %Cell.Runtime{} = block) do
+    socket
+    |> update(:watch, &Watch.note(&1, {:local, block}))
+    |> redraw(:reset)
+  end
+
+  defp push_local(socket, _block), do: socket
+
+  # ------------------------------------------------------------------------------------
+  # W3.10 — the two gates the composer's own controls were missing
+  # ------------------------------------------------------------------------------------
+
+  # Whether a send may reach the runtime at all, asked of the same four facts the composer
+  # is drawn from. `focused/1` renders the form only where all of them hold, so an event
+  # arriving without them did not come from a control — and the honest answer to a click
+  # that did not happen is to do nothing.
+  defp sendable?(assigns) do
+    match?({:interactive, _id}, Map.get(assigns, :open)) and
+      Map.get(assigns, :scope) == :operate and
+      Call.available?(:operate, "interactive.send_message") and
+      not ended?(assigns, row(assigns.rows, assigns.open))
+  end
+
+  # ------------------------------------------------------------------------------------
+  # W3 — the one render insertion
+  # ------------------------------------------------------------------------------------
+
+  @doc false
+  @spec w3_panels_assigns(map()) :: map()
+  def w3_panels_assigns(assigns) do
+    state = w3(assigns)
+
+    %{
+      w3: state,
+      # Built only for the panel that is open. `Watch.entries/1` walks the whole held
+      # ledger, and doing it on every three-second poll to draw nothing would be the one
+      # cost this panel could impose on a page nobody opened it from.
+      rows: if(state.panel == :details, do: details_rows(assigns), else: []),
+      turns: if(state.panel == :backtrack, do: backtrack_turns(assigns), else: []),
+      can_fork: Commands.forkable?(assigns),
+      can_resend: Commands.resendable?(assigns),
+      machines: machines(assigns.status),
+      # A `<dialog>` owns the screen: two of them stacked leaves the lower one in the top
+      # layer with nothing listening for its `cancel`, so `Esc` stops working. The palette,
+      # the shortcut sheet and a confirmation all outrank these.
+      blocked:
+        not is_nil(assigns.palette) or assigns.shortcuts? or not is_nil(assigns.session_action)
+    }
+  end
+
+  @doc """
+  Every panel this slice draws, and the line one of its verbs left behind.
+
+  One element next to `Palette.overlays/1` for the same reason that one is there: a
+  `<dialog>` belongs at the top of the document rather than inside the column it is about,
+  and the browser owns the modality, the backdrop and the focus trap.
+  """
+  attr :w3, :map, required: true
+  attr :rows, :list, default: []
+  attr :turns, :list, default: []
+  attr :can_fork, :boolean, default: false
+  attr :can_resend, :boolean, default: false
+  attr :machines, :list, default: []
+  attr :blocked, :boolean, default: false
+
+  def w3_panels(assigns) do
+    ~H"""
+    <div id="ouro-w3">
+      <p :if={@w3.notice} class="ouro-w3-notice" role="status">{@w3.notice}</p>
+
+      <DetailsPanel.panel
+        :if={not @blocked and @w3.panel == :details}
+        rows={@rows}
+        error={@w3.error}
+      />
+
+      <BacktrackDialog.dialog
+        :if={not @blocked and @w3.panel == :backtrack}
+        turns={@turns}
+        can_fork={@can_fork}
+        can_resend={@can_resend}
+        error={@w3.error}
+      />
+
+      <RewindDialog.dialog
+        :if={not @blocked and @w3.panel == :rewind}
+        screen={@w3.screen}
+        points={@w3.points}
+        choice={@w3.choice}
+        what={@w3.what}
+        outcome={@w3.outcome}
+        error={@w3.error}
+      />
+
+      <ContextPanel.panel
+        :if={not @blocked and @w3.panel == :context}
+        context={@w3.reading}
+        error={@w3.error}
+      />
+
+      <McpPanel.panel
+        :if={not @blocked and @w3.panel == :mcp}
+        mcp={@w3.mcp}
+        machines={@machines}
+        error={@w3.error}
+      />
+
+      <VerbDialogs.compact :if={not @blocked and @w3.panel == :compact} error={@w3.error} />
+      <VerbDialogs.handoff :if={not @blocked and @w3.panel == :handoff} error={@w3.error} />
+      <VerbDialogs.export :if={not @blocked and @w3.panel == :export} />
+    </div>
+    """
+  end
 
   # ui-parity W2
   #
@@ -349,6 +1131,24 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp command(socket, "client.notifications"),
     do: push_event(socket, "ouro-chrome", %{control: "bell"})
+
+  # ui-parity W3. Every row here either opens one of this slice's panels or runs a verb
+  # whose only argument is the session — the ones that take words of their own (a
+  # compaction's focus, a handoff's prompt) open a dialog to be given them, for the same
+  # reason `turn.steer` reveals a control rather than pressing it.
+  defp command(socket, "conversation.details"), do: open_w3(socket, :details)
+  defp command(socket, "conversation.export"), do: open_w3(socket, :export)
+  defp command(socket, "conversation.backtrack"), do: open_w3(socket, :backtrack)
+  defp command(socket, "conversation.rewind"), do: open_rewind(socket)
+  defp command(socket, "conversation.compact"), do: open_w3(socket, :compact)
+  defp command(socket, "conversation.context"), do: read_context(socket, true)
+  defp command(socket, "session.fork"), do: fork(socket)
+  defp command(socket, "session.handoff"), do: open_w3(socket, :handoff)
+  defp command(socket, "runtime.mcp"), do: open_mcp(socket)
+
+  # `!` takes a command line, so the row leads to the box it is typed in. The composer
+  # says where it will run the moment the draft starts with one.
+  defp command(socket, "turn.shell"), do: reveal(socket, "#ouro-composer-input")
 
   defp command(socket, _unrunnable), do: socket
 
@@ -622,6 +1422,82 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   def handle_event("shortcuts-close", _params, socket),
     do: {:noreply, assign(socket, :shortcuts?, false)}
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W3
+  #
+  # Every clause below is reached from a control this slice drew, and every one of them
+  # re-asks the catalogue's own question before it calls anything: `phx-click` is browser
+  # input, and a panel left open while a turn completed must not run a verb that stopped
+  # being possible while nobody was looking.
+  # ------------------------------------------------------------------------------------
+
+  def handle_event("w3-close", _params, socket), do: {:noreply, close_w3(socket)}
+
+  def handle_event("w3-details-toggle", %{"sequence" => sequence}, socket),
+    do: {:noreply, with_sequence(socket, sequence, &toggle_detail/2)}
+
+  def handle_event("w3-details-fetch", %{"sequence" => sequence}, socket),
+    do: {:noreply, with_sequence(socket, sequence, &fetch_detail/2)}
+
+  # The format is matched against the two this dialog drew before anything closes: a
+  # `phx-value-format` is browser input, and a row that navigated nowhere while dismissing
+  # the dialog would look like a download that failed silently.
+  def handle_event("w3-export", %{"format" => format}, socket) do
+    if format in ["text", "ndjson"] and
+         Commands.available?(socket.assigns, "conversation.export"),
+       do: {:noreply, socket |> close_w3() |> export_to(format)},
+       else: {:noreply, socket}
+  end
+
+  def handle_event("w3-backtrack-edit", %{"sequence" => sequence}, socket),
+    do: {:noreply, with_sequence(socket, sequence, &backtrack_edit/2)}
+
+  def handle_event("w3-backtrack-fork", _params, socket), do: {:noreply, fork(socket)}
+
+  def handle_event("w3-rewind-pick", %{"choice" => choice}, socket) do
+    case Integer.parse(to_string(choice)) do
+      {at, ""} when at >= 0 ->
+        state = w3(socket.assigns)
+
+        if at < length(state.points),
+          do: {:noreply, put_w3(socket, choice: at, screen: :confirm, error: nil)},
+          else: {:noreply, socket}
+
+      _unreadable ->
+        {:noreply, socket}
+    end
+  end
+
+  # A `phx-value-what` is browser input and `interactive.rewind`'s `what` is a closed
+  # enum, so it is matched against the three this dialog drew rather than passed through.
+  def handle_event("w3-rewind-what", %{"what" => what}, socket) do
+    if RewindDialog.what?(what),
+      do: {:noreply, put_w3(socket, what: what)},
+      else: {:noreply, socket}
+  end
+
+  def handle_event("w3-rewind-back", _params, socket),
+    do: {:noreply, put_w3(socket, screen: :choose, error: nil)}
+
+  def handle_event("w3-rewind-confirm", _params, socket),
+    do: {:noreply, rewind_confirm(socket)}
+
+  def handle_event("w3-compact", params, socket),
+    do: {:noreply, compact(socket, Map.get(params, "focus", ""))}
+
+  def handle_event("w3-handoff", params, socket),
+    do: {:noreply, handoff(socket, Map.get(params, "prompt", ""))}
+
+  def handle_event("w3-shell-remember", _params, socket),
+    do: {:noreply, remember_shell_rule(socket)}
+
+  def handle_event("w3-shell-dismiss", _params, socket),
+    do: {:noreply, put_w3(socket, shell: nil)}
+
+  # A `phx-value-*` this slice never drew. Same answer the approval handlers give: do
+  # nothing, rather than crash a view and make an operator's transcript remount.
+  def handle_event("w3-" <> _unknown, _params, socket), do: {:noreply, socket}
 
   # `[` and `]` walk the rail in the order it is drawn — triaged, filtered by the search
   # box, group by group. A patch rather than a navigation, exactly as clicking the row is.
@@ -1387,11 +2263,39 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # ---------------------------------------------------------------------------- Sending
 
-  defp send_turn(%{assigns: %{open: {:interactive, _id}}} = socket, "") do
+  # ui-parity W3 (W3.8, W3.10). Two questions in front of the dispatch that was here:
+  #
+  #   * **a draft beginning with `!` is never a turn.** It is the operator's own command
+  #     and it goes to `workspace.exec`, which is what the composer has already said it
+  #     will do (`docs/TUI.md:2247-2252`). Asked first, so no gate below can turn one into
+  #     a message by accident.
+  #   * **a send is re-checked against the four facts the composer is drawn from.** The
+  #     form exists only where all of them hold, so a `send` arriving without them did not
+  #     come from a control — and until this, an undrawn event reached the runtime to be
+  #     refused there. W2's steer clause already re-asked its button's condition; this is
+  #     the same rule on the verb beside it.
+  defp send_turn(socket, text) when is_binary(text) do
+    cond do
+      String.starts_with?(text, "!") ->
+        operator_shell(socket, String.slice(text, 1..-1//1))
+
+      # A plane with no composer keeps the sentence it always had, below.
+      not match?({:interactive, _id}, socket.assigns.open) ->
+        dispatch_turn(socket, text)
+
+      sendable?(socket.assigns) ->
+        dispatch_turn(socket, text)
+
+      true ->
+        socket
+    end
+  end
+
+  defp dispatch_turn(%{assigns: %{open: {:interactive, _id}}} = socket, "") do
     assign(socket, :composer_error, "Write a message before sending.")
   end
 
-  defp send_turn(%{assigns: %{open: {:interactive, id}}} = socket, text) do
+  defp dispatch_turn(%{assigns: %{open: {:interactive, id}}} = socket, text) do
     turn_id = turn_id_for(socket, text)
 
     params =
@@ -1425,7 +2329,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  defp send_turn(socket, _text) do
+  defp dispatch_turn(socket, _text) do
     assign(
       socket,
       :composer_error,
@@ -1489,7 +2393,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # ------------------------------------------------------------------------ Configuring
 
   defp configure(%{assigns: %{open: {:interactive, id}}} = socket, field, choice) do
-    if allowed_choice?(socket.assigns, field, choice) do
+    # ui-parity W3.10. The same question the picker is drawn from, asked again: a
+    # `phx-value-field` is browser input, and a transport that declared
+    # `dynamic_configuration: false` draws no picker to have clicked.
+    if allowed_choice?(socket.assigns, field, choice) and reconfigurable?(socket.assigns) do
       params = socket |> session_params(:interactive, id) |> Map.put(field, choice)
 
       case call(socket, "interactive.configure", params) do
@@ -1902,6 +2809,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:effort, reported(assigns, :reasoning_effort))
       |> assign(:reasoning_efforts, reasoning_efforts(assigns))
       |> assign(:ended?, ended?(assigns, open_row))
+      # ui-parity W3
+      |> assign(:w3_panels, w3_panels_assigns(assigns))
+      |> assign(:reading, w3(assigns).reading)
+      |> assign(:shell_refusal, w3(assigns).shell)
 
     ~H"""
     <div class={[
@@ -1913,6 +2824,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
       <%!-- ui-parity W2 --%>
       <Palette.overlays palette={@palette} sheet={@shortcuts?} />
+
+      <%!-- ui-parity W3 --%>
+      <.w3_panels {@w3_panels} />
 
       <button
         :if={@open}
@@ -1967,6 +2881,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
             ended={@ended?}
             extras={@composer_extras}
             roster={@roster}
+            reading={@reading}
+            shell={@shell_refusal}
           />
           <.nothing_open
             :if={is_nil(@open)}
@@ -1985,6 +2901,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           row={@open_row}
           session_id={@open |> elem(1)}
           roster={@roster}
+          reading={@reading}
         />
       </div>
 
@@ -2426,6 +3343,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # only carries it through.
   attr :extras, :map, default: %{models: nil, model_query: "", next_effort: nil}
   attr :roster, :list, default: []
+  # ui-parity W3. `interactive.context`'s own answer, where one has been read, and a `!`
+  # the runtime refused. This component only carries them through.
+  attr :reading, :any, default: nil
+  attr :shell, :any, default: nil
 
   def focused(assigns) do
     {plane, id} = assigns.open
@@ -2452,8 +3373,14 @@ defmodule Ouroboros.Web.Live.DeckLive do
         plane == :interactive and operate? and Call.available?(:operate, "interactive.interrupt")
       )
       |> assign(
+        # ui-parity W3.10. The pair the runtime declares separately, read separately: a
+        # transport that said `dynamic_configuration: false` takes no sandbox and no
+        # thinking change, and W2 already withheld the palette rows for it. The pickers
+        # were still drawn, and a drawn control that always fails is worse than none.
         :can_configure,
-        plane == :interactive and operate? and Call.available?(:operate, "interactive.configure")
+        plane == :interactive and operate? and
+          Call.available?(:operate, "interactive.configure") and
+          Commands.capability_offered?(assigns, :dynamic_configuration)
       )
       |> assign(
         :can_retry,
@@ -2571,6 +3498,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
       model={@info && Map.get(Map.get(@info, :options) || %{}, :model)}
       models={@extras.models}
       model_query={@extras.model_query}
+      shell={@shell}
+      shell_where={shell_where(@row, @info, @roster)}
     />
 
     <%!-- The status row the TUI's footer has had all along: the two standing postures a
@@ -2587,7 +3516,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     <details class="ouro-vitals-mobile" data-ouro-disclosure={"details:#{@session_id}"}>
       <summary>Session details</summary>
-      <.vitals info={@info} row={@row} session_id={@session_id} roster={@roster} />
+      <.vitals info={@info} row={@row} session_id={@session_id} roster={@roster} reading={@reading} />
     </details>
     """
   end
@@ -2736,6 +3665,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :row, :any, required: true
   attr :session_id, :string, default: nil
   attr :roster, :list, default: []
+  # ui-parity W3.7. What `interactive.context` answered for this session, where it has
+  # been asked. The meter prefers it because it is the *measurement*: a list row's usage
+  # is reduced by the runtime to tokens and cost and carries no window at all.
+  attr :reading, :any, default: nil
 
   def vitals(assigns) do
     usage = (assigns.info && Map.get(assigns.info, :usage)) || %{}
@@ -2745,7 +3678,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       assigns
       |> assign(:usage, usage)
       |> assign(:options, options)
-      |> assign(:context, context(usage))
+      |> assign(:context, ContextPanel.meter(assigns.reading) || context(usage))
       |> assign(:unrestricted?, unrestricted?(assigns.row, assigns.info))
 
     ~H"""
@@ -2794,6 +3727,16 @@ defmodule Ouroboros.Web.Live.DeckLive do
       <div :if={@session_id} class="ouro-vital">
         <dt>Session id</dt>
         <dd><code class="ouro-mono ouro-vital-id">{@session_id}</code></dd>
+      </div>
+
+      <%!-- ui-parity W3. An ordinary link rather than a `phx-click`: the response carries
+            `content-disposition: attachment`, so the browser saves the file and stays on
+            this page. The palette's own row offers the events form beside this one. --%>
+      <div :if={@session_id} class="ouro-vital">
+        <dt>Transcript</dt>
+        <dd>
+          <a href={"/s/interactive/#{Route.segment(@session_id)}/export?format=text"}>Export</a>
+        </dd>
       </div>
     </aside>
     """

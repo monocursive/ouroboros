@@ -240,12 +240,20 @@ defmodule Ouroboros.Web.Live.Composer do
   attr :model, :any, default: nil
   attr :models, :any, default: nil
   attr :model_query, :string, default: ""
+  # ui-parity W3 (B7). A refused `!`, held here rather than in a notice, and the sentence
+  # naming where a `!` will run.
+  attr :shell, :any, default: nil
+  attr :shell_where, :string, default: "this session's owner machine"
 
   def composer(assigns) do
     assigns =
       assigns
       |> assign(:working?, working?(assigns.turn, assigns.status))
       |> assign(:queues?, verb(assigns.turn, assigns.status) == "interactive.follow_up")
+      # ui-parity W3. The draft is this process's as of the last debounce, which is enough
+      # to decide whether the box currently holds a command: the hint is a statement about
+      # where `!` runs, not a promise about what will be sent.
+      |> assign(:shell?, shell_draft?(assigns.draft))
 
     ~H"""
     <div class="ouro-composer">
@@ -291,6 +299,16 @@ defmodule Ouroboros.Web.Live.Composer do
       <p :if={not @ended and not @can_send} class="ouro-quiet" role="status">
         This endpoint was started at read scope, so it can show this session but not speak in it.
       </p>
+
+      <%!-- ui-parity W3 (B7). Said before Enter is pressed, every time: not here, but on
+            the session's owner machine, in the workspace the agent is editing. That is the
+            one thing about `!` a person cannot infer from the screen. --%>
+      <p :if={@shell? and not @ended} class="ouro-shell-where" role="status">
+        <span class="ouro-mono">!</span>
+        runs this on {@shell_where}. It is not a message to the agent.
+      </p>
+
+      <.shell_refusal :if={@shell} refusal={@shell} />
 
       <div :if={not @ended} class="ouro-composer-surface">
         <form :if={@can_send} id="composer" phx-submit="send" phx-change="draft">
@@ -363,7 +381,14 @@ defmodule Ouroboros.Web.Live.Composer do
           </div>
         </form>
 
-        <details :if={@can_configure} class="ouro-composer-settings" data-ouro-disclosure={@draft_key}>
+        <%!-- ui-parity W3.10. The disclosure stands where *either* half of the pair does:
+              a transport may refuse every configuration change and still be re-pointed at
+              a model, and W2 already reads the two keys separately. --%>
+        <details
+          :if={@can_configure or @can_model}
+          class="ouro-composer-settings"
+          data-ouro-disclosure={@draft_key}
+        >
           <summary phx-click="composer-settings">
             {if @sandbox, do: word(@sandbox), else: "File access not reported"} · {word(@effort)} thinking<span :if={
               @plan
@@ -372,7 +397,7 @@ defmodule Ouroboros.Web.Live.Composer do
           </summary>
           <div class="ouro-composer-footer">
             <.picker
-              :if={@sandbox}
+              :if={@can_configure and @sandbox}
               label="File access"
               current={@sandbox}
               choices={sandbox_modes()}
@@ -381,6 +406,7 @@ defmodule Ouroboros.Web.Live.Composer do
             />
 
             <.picker
+              :if={@can_configure}
               label="Thinking"
               current={@effort}
               choices={@efforts}
@@ -398,6 +424,69 @@ defmodule Ouroboros.Web.Live.Composer do
             />
           </div>
         </details>
+      </div>
+    </div>
+    """
+  end
+
+  # ------------------------------------------------------------------------------------
+  # ui-parity W3 — `!cmd`, the operator's own shell (B7)
+  # ------------------------------------------------------------------------------------
+
+  @doc """
+  Whether the draft currently in the box is a command rather than a message.
+
+  `!` at the very front and nothing else: a message that merely contains an exclamation
+  mark is a message, and a leading space means the operator wrote one on purpose.
+  """
+  @spec shell_draft?(String.t() | nil) :: boolean()
+  def shell_draft?(draft) when is_binary(draft), do: String.starts_with?(draft, "!")
+  def shell_draft?(_absent), do: false
+
+  @doc """
+  A `["shell_refused", …]`, and the rule that would have let it.
+
+  Kept on the composer rather than in a notice row: the refusal and the offer to fix it
+  belong on screen together, and a line that expires in four seconds is not somewhere to
+  put an action (`tui/src/ui/app/native.rs:600-663`).
+
+  The offer stands only where this page could actually honour it — the engine suggested a
+  rule, this runtime serves `permissions.add`, and the session names a workspace to scope
+  it to. Where one of those is missing the missing half is named instead, because an offer
+  that could not be kept would be worse than none.
+  """
+  attr :refusal, :map, required: true
+
+  def shell_refusal(assigns) do
+    ~H"""
+    <div class="ouro-shell-refusal" role="alert">
+      <p class="ouro-refusal">{@refusal.message}</p>
+
+      <p :if={@refusal.denied_by} class="ouro-quiet">
+        Denied by the rule <span class="ouro-mono">{@refusal.denied_by}</span>.
+      </p>
+      <p :if={is_nil(@refusal.denied_by) and @refusal.reason} class="ouro-quiet">
+        Reason: <span class="ouro-mono">{@refusal.reason}</span>.
+      </p>
+
+      <p :if={@refusal.suggested_rule} class="ouro-quiet">
+        The permission engine suggests <span class="ouro-mono">{@refusal.suggested_rule}</span>.
+      </p>
+
+      <div class="ouro-shell-refusal-actions">
+        <button
+          :if={@refusal.rule}
+          type="button"
+          class="ouro-quiet-button"
+          phx-click="w3-shell-remember"
+          phx-disable-with="Saving…"
+        >
+          Remember for this workspace
+        </button>
+        <span :if={@refusal.missing} class="ouro-quiet">{@refusal.missing}</span>
+        <button type="button" class="ouro-quiet-button" phx-click="w3-shell-dismiss">
+          Dismiss
+        </button>
       </div>
     </div>
     """

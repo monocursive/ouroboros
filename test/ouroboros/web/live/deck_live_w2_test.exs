@@ -1017,19 +1017,23 @@ defmodule Ouroboros.Web.Live.DeckLiveW2Test do
       refute_receive {:steered, _input, _opts}, 300
     end
 
-    test "the ordinary send clause is looser, and that is pre-existing rather than W2's",
+    test "and so is the ordinary send clause, which W3.10 closed",
          %{conn: conn} do
       id = session_id()
       _row = listed(id, title: "Closed", status: :closed)
       _plane = plane(id: id, status: :closed, backlogs: [{:ok, []}])
 
       {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+
+      # The composer is not drawn on an ended session at all, so this event could only
+      # have been hand-made.
+      refute render(view) =~ ~s(id="composer")
       render_submit(view, "send", %{"message" => "speak to the dead"})
 
-      # `send_turn/2` predates this slice and lets an undrawn event reach the runtime to
-      # be refused there. Recorded so the difference is deliberate and visible: W2's
-      # steer clause re-asks its button's condition, and this one does not re-ask its own.
-      assert_receive {:sent, _mode, _turn, "speak to the dead", _opts}, 500
+      # Inverted. Until W3.10, `send_turn/2` let an undrawn event reach the runtime to be
+      # refused there; it now re-asks the four facts the composer is drawn from, exactly
+      # as W2's steer clause re-asks its button's condition.
+      refute_receive {:sent, _mode, _turn, "speak to the dead", _opts}, 300
     end
   end
 
