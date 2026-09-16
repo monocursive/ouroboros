@@ -24,10 +24,22 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   the one correction that makes it safe either way: when the cached counts alone exceed
   `input_tokens`, the provider was reporting them separately and they are added. That
   never double-counts and never undercounts.
+
+  ## When "used" becomes a reason to compact
+
+  Two ceilings, and the lower one wins. `compact_at` is a fraction of the window, which is
+  the session option an operator tunes. `native_compact_tokens` is an absolute request
+  size, node configuration, defaulting to 200,000 tokens: a fraction alone scales with the
+  model, and at 0.85 of a million-token window a session would carry eight hundred
+  thousand tokens into every model call and pay for them on every call, long after the
+  conversation stopped gaining anything from what was above the fold. Two hundred thousand
+  is where the vendors' own automatic compaction triggers. `false` disables the absolute
+  ceiling; an unknown window is still never compacted on either number.
   """
 
   @default_compact_at 0.85
   @default_keep_recent_tokens 20_000
+  @default_compact_tokens 200_000
 
   # What one image or file part of a user message is charged when the estimate cannot see
   # it. Every vendor prices an image somewhere near a thousand tokens, and a part counted
@@ -86,17 +98,59 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   @doc """
   Whether a request of this size is past the compaction threshold.
 
-  Always `false` when the window is unknown. Compacting on a guess would throw away the
-  operator's conversation on the strength of a number nobody reported.
+  Always `false` when the window is unknown, and `false` when the request size is: a
+  session that has not been measured yet has nothing to compact on. Compacting on a guess
+  would throw away the operator's conversation on the strength of a number nobody
+  reported.
   """
-  @spec over_threshold?(non_neg_integer(), window(), float()) :: boolean()
-  def over_threshold?(_used, nil, _fraction), do: false
-
-  def over_threshold?(used, window, fraction)
-      when is_integer(window) and window > 0 and is_number(fraction),
-      do: used >= trunc(window * fraction)
+  @spec over_threshold?(non_neg_integer() | nil, window(), float()) :: boolean()
+  def over_threshold?(used, window, fraction) when is_integer(used) do
+    case threshold(window, fraction) do
+      nil -> false
+      limit -> used >= limit
+    end
+  end
 
   def over_threshold?(_used, _window, _fraction), do: false
+
+  @doc """
+  The request size at which a session with this window compacts, or `nil` when the window
+  is unknown.
+
+  The lower of the fraction of the window and the node's absolute budget
+  (`compact_tokens/0`).
+  """
+  @spec threshold(window(), float()) :: pos_integer() | nil
+  def threshold(window, fraction)
+      when is_integer(window) and window > 0 and is_number(fraction) do
+    scaled = trunc(window * fraction)
+
+    case compact_tokens() do
+      budget when is_integer(budget) -> min(scaled, budget)
+      _none -> scaled
+    end
+  end
+
+  def threshold(_window, _fraction), do: nil
+
+  @doc """
+  The node's absolute compaction budget, or `nil` when the node switched it off.
+
+  `config :ouroboros, :native_compact_tokens` — a positive integer, or `false` for none.
+  Anything else reads as the default.
+  """
+  @spec compact_tokens() :: pos_integer() | nil
+  def compact_tokens do
+    case Application.get_env(:ouroboros, :native_compact_tokens, @default_compact_tokens) do
+      value when is_integer(value) and value > 0 -> value
+      false -> nil
+      _other -> @default_compact_tokens
+    end
+  end
+
+  @doc "The default absolute compaction budget, in tokens."
+  @spec default_compact_tokens() :: pos_integer()
+  def default_compact_tokens, do: @default_compact_tokens
 
   @doc "The fraction of the window at which a session compacts itself."
   @spec compact_at(map() | keyword()) :: float()

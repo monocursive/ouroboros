@@ -200,7 +200,7 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
       model: "anthropic:claude-sonnet-5",
       system: "Be concise",
       messages: [%{role: :user, content: "say hello"}],
-      tools: [],
+      tools: Tools.specs(nil, nil),
       provider_session_id: "native-anthropic-test",
       turn_id: "turn-anthropic-test",
       reasoning_effort: :low,
@@ -223,11 +223,125 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
 
     payload = request_payload(raw)
     assert payload["model"] == "claude-sonnet-5"
-    assert payload["messages"] == [%{"role" => "user", "content" => "say hello"}]
     assert payload["thinking"] == %{"type" => "adaptive", "display" => "summarized"}
     assert payload["output_config"] == %{"effort" => "low"}
 
+    # The prompt cache is asked for on every Anthropic request, at the three stability
+    # boundaries the layout in `Ouroboros.Provider.Native.Context` exists to create: the
+    # tool list, the system prompt, and the newest message. Without these markers the
+    # stable prefix is a design the bill never sees.
+    ephemeral = %{"type" => "ephemeral"}
+
+    assert [%{"type" => "text", "text" => "Be concise", "cache_control" => ^ephemeral}] =
+             payload["system"]
+
+    assert Enum.map(payload["tools"], & &1["name"]) == Enum.map(Tools.specs(nil, nil), & &1.name)
+    assert %{"cache_control" => ^ephemeral} = List.last(payload["tools"])
+    refute Enum.any?(Enum.drop(payload["tools"], -1), &Map.has_key?(&1, "cache_control"))
+
+    assert [
+             %{
+               "role" => "user",
+               "content" => [
+                 %{"type" => "text", "text" => "say hello", "cache_control" => ^ephemeral}
+               ]
+             }
+           ] = payload["messages"]
+
     assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
+  end
+
+  test "an operator may lengthen the Anthropic cache TTL, and only through node options" do
+    # The TTL is the one cache setting worth an operator's attention — a session whose
+    # turns are more than five minutes apart pays the write premium again on each — so it
+    # is a `native_model_options` key. A request cannot carry it: the same validator that
+    # admits it here refuses anything it does not know.
+    assert {:error, {:invalid_native_model_option, :anthropic_beta}} =
+             with_model_options(
+               [provider_options: [anthropic_beta: ["x"]]],
+               fn -> DirectModel.stream(anthropic_request(), []) end
+             )
+
+    {port, server, monitor} = serve_anthropic_once(self())
+
+    assert {:ok, stream} =
+             with_model_options(
+               [
+                 base_url: "http://127.0.0.1:#{port}",
+                 receive_timeout: 5_000,
+                 stream_idle_timeout: 5_000,
+                 total_timeout: 10_000,
+                 max_retries: 0,
+                 provider_options: [anthropic_prompt_cache_ttl: "1h"]
+               ],
+               fn -> DirectModel.stream(anthropic_request(), []) end
+             )
+
+    assert {:text, "hello from claude"} in Enum.to_list(stream)
+    assert_receive {:anthropic_http_request, raw}, 5_000
+    payload = request_payload(raw)
+
+    one_hour = %{"type" => "ephemeral", "ttl" => "1h"}
+    assert [%{"cache_control" => ^one_hour}] = payload["system"]
+    assert %{"cache_control" => ^one_hour} = List.last(payload["tools"])
+    assert [%{"content" => [%{"cache_control" => ^one_hour}]}] = payload["messages"]
+
+    assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
+  end
+
+  defp anthropic_request do
+    %{
+      model: "anthropic:claude-sonnet-5",
+      system: "Be concise",
+      messages: [%{role: :user, content: "say hello"}],
+      tools: Tools.specs(nil, nil),
+      provider_session_id: "native-anthropic-ttl-test",
+      turn_id: "turn-anthropic-ttl-test",
+      reasoning_effort: :low,
+      max_tokens: nil
+    }
+  end
+
+  defp with_model_options(options, fun) do
+    Application.put_env(:ouroboros, :native_model_options, options)
+    fun.()
+  end
+
+  # One Anthropic Messages response over a raw socket, with the request it was sent
+  # reported to `parent` as `{:anthropic_http_request, raw}`.
+  defp serve_anthropic_once(parent) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw, reuseaddr: true])
+    {:ok, {_address, port}} = :inet.sockname(listener)
+
+    {:ok, server} =
+      Task.start(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        {:ok, request} = read_request(socket, "")
+        send(parent, {:anthropic_http_request, request})
+
+        body =
+          [
+            ~s(event: message_start\ndata: {"type":"message_start","message":{"id":"msg-direct-2","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}\n\n),
+            ~s(event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n),
+            ~s(event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello from claude"}}\n\n),
+            ~s(event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n),
+            ~s(event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}\n\n),
+            ~s(event: message_stop\ndata: {"type":"message_stop"}\n\n)
+          ]
+          |> IO.iodata_to_binary()
+
+        response =
+          "HTTP/1.1 200 OK\r\n" <>
+            "content-type: text/event-stream\r\n" <>
+            "content-length: #{byte_size(body)}\r\n" <>
+            "connection: close\r\n\r\n" <> body
+
+        :ok = :gen_tcp.send(socket, response)
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listener)
+      end)
+
+    {port, server, Process.monitor(server)}
   end
 
   test "streams an OpenAI Responses call directly over HTTP without a process adapter" do
