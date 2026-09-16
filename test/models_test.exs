@@ -57,6 +57,21 @@ defmodule Ouroboros.ModelsTest do
   end
 
   describe "the catalogue" do
+    test "lookup resolves every lane's prefix, and nothing it cannot vouch for" do
+      codex = Models.lookup("openai_codex:gpt-5.6-sol")
+      assert is_map(codex)
+      assert is_integer(get_in(codex, [Access.key(:limits), :context]))
+      assert is_map(Map.get(codex, :cost))
+
+      assert Models.lookup("grok:grok-4.3") == Models.lookup("xai:grok-4.3")
+      assert is_map(Models.lookup("xai:grok-4.3"))
+      assert is_map(Models.lookup("anthropic:claude-opus-5"))
+
+      assert is_nil(Models.lookup("not-a-provider:not-a-model"))
+      assert is_nil(Models.lookup(""))
+      assert is_nil(Models.lookup(nil))
+    end
+
     test "Astra is discoverable with metadata without being configured as the default" do
       native = provider_row(:native)
       id = "openai_codex:gpt-6-astra"

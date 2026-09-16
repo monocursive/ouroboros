@@ -99,6 +99,17 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       refute Map.has_key?(metered, "context_window")
     end
 
+    test "the codex and grok lanes resolve the window of the catalogue they draw on" do
+      Application.delete_env(:ouroboros, :native_context_window)
+
+      # Unknown until now: `llm_db` alone refuses `openai_codex:`, so the default lane
+      # had no denominator and never compacted on its own.
+      assert is_integer(Window.resolve("openai_codex:gpt-5.6-sol"))
+      assert Window.resolve("openai_codex:gpt-5.6-sol") > 0
+      assert Window.resolve("grok:grok-4.3") == Window.resolve("xai:grok-4.3")
+      assert is_integer(Window.resolve("grok:grok-4.3"))
+    end
+
     test "an unknown model resolves to no window at all" do
       assert Window.resolve("not-a-provider:not-a-model") == nil
       assert Window.resolve(nil) == nil

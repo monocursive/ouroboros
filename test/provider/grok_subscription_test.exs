@@ -123,6 +123,37 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
     end
   end
 
+  test "names the conversation to the proxy, and only with a value fit for a header", %{
+    path: path
+  } do
+    write_credential(path)
+
+    assert {:ok, _, opts} = GrokSubscription.transport("grok:grok-4.6", [], "native-abc123")
+    assert {"x-grok-conv-id", "native-abc123"} in opts[:req_http_options][:headers]
+
+    # Without one, none is invented: an empty or absent id sends no header at all.
+    for absent <- [nil, ""] do
+      assert {:ok, _, opts} = GrokSubscription.transport("grok:grok-4.6", [], absent)
+      refute Enum.any?(opts[:req_http_options][:headers], &match?({"x-grok-conv-id", _}, &1))
+    end
+
+    # And a value that could smuggle a second header line is dropped, not escaped.
+    assert {:ok, _, opts} = GrokSubscription.transport("grok:grok-4.6", [], "id\r\nx-evil: 1")
+    refute Enum.any?(opts[:req_http_options][:headers], &match?({"x-grok-conv-id", _}, &1))
+    refute inspect(opts) =~ "x-evil"
+
+    # The connection still owns every other header.
+    assert {:ok, _, opts} =
+             GrokSubscription.transport(
+               "grok:grok-4.6",
+               [req_http_options: [headers: [{"x-grok-conv-id", "theirs"}]]],
+               "ours"
+             )
+
+    assert Enum.count(opts[:req_http_options][:headers], &match?({"x-grok-conv-id", _}, &1)) == 1
+    assert {"x-grok-conv-id", "ours"} in opts[:req_http_options][:headers]
+  end
+
   test "rejects credentials that become expired while waiting for model capacity", %{path: path} do
     write_credential(path)
     parent = self()

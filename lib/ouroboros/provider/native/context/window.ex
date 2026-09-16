@@ -3,8 +3,9 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   How large this model's context is, how much of it the last request used, and when that
   becomes a reason to compact.
 
-  The window comes from `llm_db`'s `limits.context` for the resolved model spec. When
-  `llm_db` does not know the model, a node may state one with
+  The window is the catalogue entry's `limits.context` for the resolved model spec, read
+  through `Ouroboros.Models.lookup/1` — ReqLLM's view of `llm_db`, which also knows the
+  lanes' prefixes. When the catalogue does not know the model, a node may state one with
   `config :ouroboros, :native_context_window`. When neither answers, the window is
   **unknown** and stays unknown: the meter reports `nil` and the footer draws tokens
   without a percentage. A percentage divided by a number this runtime guessed would be a
@@ -53,11 +54,12 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   @doc """
   The context window for one model spec, or `nil` when this node cannot say.
 
-  Never raises and never guesses: `llm_db` first, node configuration second, `nil` third.
+  Never raises and never guesses: the catalogue first, node configuration second, `nil`
+  third.
   """
   @spec resolve(String.t() | nil) :: window()
   def resolve(model_spec) do
-    from_db(Ouroboros.Provider.GrokSubscription.api_model(model_spec)) || configured()
+    from_catalogue(model_spec) || configured()
   end
 
   @doc """
@@ -281,22 +283,19 @@ defmodule Ouroboros.Provider.Native.Context.Window do
 
   defp field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
-  defp from_db(model_spec) when is_binary(model_spec) and model_spec != "" do
-    with true <- Code.ensure_loaded?(LLMDB),
-         {:ok, model} <- LLMDB.model(model_spec),
+  # Through `Ouroboros.Models.lookup/1`, which is what knows the `openai_codex:` lane
+  # `llm_db` alone refuses. A window is a fact about the model on any connection, so a
+  # subscription lane gets its window here and no price from `Cost`; without one, the
+  # default lane was a session that never compacted and a meter with no denominator.
+  defp from_catalogue(model_spec) do
+    with model when is_map(model) <- Ouroboros.Models.lookup(model_spec),
          limits when is_map(limits) <- Map.get(model, :limits),
          context when is_integer(context) and context > 0 <- Map.get(limits, :context) do
       context
     else
       _unknown -> nil
     end
-  rescue
-    _error -> nil
-  catch
-    :exit, _reason -> nil
   end
-
-  defp from_db(_model_spec), do: nil
 
   defp configured do
     case Application.get_env(:ouroboros, :native_context_window) do

@@ -117,21 +117,31 @@ defmodule Ouroboros.Provider.GrokSubscription do
   def api_model("grok:" <> model), do: "xai:" <> model
   def api_model(model), do: model
 
-  @doc false
-  def transport("grok:" <> model, options) do
+  @doc """
+  Pins the subscription connection for a `grok:` model; any other spec passes through.
+
+  `conversation_id` names the conversation to the proxy as `x-grok-conv-id`, which xAI
+  documents as the way to route one conversation's requests to the server holding its
+  prompt-cache entries. It is the only caller-supplied header this connection carries,
+  and it names the conversation, never the destination; `nil` sends none.
+  """
+  def transport(model, options, conversation_id \\ nil)
+
+  def transport("grok:" <> model, options, conversation_id) do
     with true <- model != "" and not String.contains?(model, ["\r", "\n", "\0"]),
          {:ok, token} <- fetch() do
       version = Application.spec(:ouroboros, :vsn) |> to_string()
 
       # Endpoint and headers are owned by this connection. Generic endpoint overrides,
       # API keys, custom headers and redirects cannot change the token's destination.
-      headers = [
-        {"x-xai-token-auth", "xai-grok-cli"},
-        {"x-grok-model-override", model},
-        {"x-grok-client-identifier", "ouroboros"},
-        {"x-grok-client-version", @protocol_version},
-        {"user-agent", "ouroboros/" <> version}
-      ]
+      headers =
+        [
+          {"x-xai-token-auth", "xai-grok-cli"},
+          {"x-grok-model-override", model},
+          {"x-grok-client-identifier", "ouroboros"},
+          {"x-grok-client-version", @protocol_version},
+          {"user-agent", "ouroboros/" <> version}
+        ] ++ conversation_header(conversation_id)
 
       http =
         options
@@ -156,7 +166,14 @@ defmodule Ouroboros.Provider.GrokSubscription do
     end
   end
 
-  def transport(model, options), do: {:ok, model, options}
+  def transport(model, options, _conversation_id), do: {:ok, model, options}
+
+  # Visible ASCII only: nothing that could end the header line or start another.
+  defp conversation_header(id) when is_binary(id) and byte_size(id) in 1..256 do
+    if Regex.match?(~r/\A[\x21-\x7E]+\z/, id), do: [{"x-grok-conv-id", id}], else: []
+  end
+
+  defp conversation_header(_absent), do: []
 
   defp normalize_http_options(options) when is_map(options), do: Map.to_list(options)
   defp normalize_http_options(options), do: options

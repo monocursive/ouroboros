@@ -280,7 +280,14 @@ attach natively — all of which have landed.
   provider to cache it, so on the Anthropic lane `Model.ReqLLM` places `cache_control`
   breakpoints on every request — the tool list, the system prompt, the newest message —
   and `test/provider/native/direct_sse_test.exs` asserts they are on the wire; whether
-  they hit is reported, not assumed, as `cache_read_tokens` on every `usage` event. The
+  they hit is reported, not assumed, as `cache_read_tokens` on every `usage` event. OpenAI
+  and xAI cache prompts without being asked, so those lanes carry only the identity that
+  keeps one conversation's entries together: the session id as `prompt_cache_key` on the
+  OpenAI API-key lane, as `prompt_cache_key` plus the `session-id` header on the Codex
+  lane (both derived by ReqLLM from the `session_id` this runtime passes), and as the
+  `x-grok-conv-id` header on the xAI and Grok lanes. Each is asserted on the wire in
+  `test/provider/native/direct_sse_test.exs` or `test/provider/grok_subscription_test.exs`,
+  and the hit is reported the same way. The
   compaction and handoff summarisers send that same prefix with their instruction
   appended, so the cache can serve whatever of the folded history is still warm; a fork
   that rebuilt the prefix could be served nothing, and the summariser's own usage record

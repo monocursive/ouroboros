@@ -280,7 +280,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     # only in that tool result and is consumed before any retry approval is requested.
     retained_bash_attempt: nil,
     bash_retry_ttl_ms: @bash_retry_ttl_ms,
-    usage: %{input: 0, output: 0, cost: 0.0},
+    # `cost` starts unknown, not free: it becomes a number on the first priced usage
+    # payload and stays `nil` for a model nobody here can price — a subscription lane, or
+    # a scripted one — so the turn's `cost_usd` says "unknown" rather than `0.0`. The
+    # same rule `Ouroboros.Provider.Native.Cost` states for one payload, kept for the sum.
+    usage: %{input: 0, output: 0, cost: nil},
     max_iterations: @default_max_iterations,
     tool_timeout_ms: @default_tool_timeout_ms,
     approval_timeout_ms: :infinity
@@ -721,10 +725,18 @@ defmodule Ouroboros.Provider.Native.Loop do
       | usage: %{
           input: state.usage.input + Map.get(payload, "input_tokens", 0),
           output: state.usage.output + Map.get(payload, "output_tokens", 0),
-          cost: state.usage.cost + Map.get(payload, "cost_usd", 0.0)
+          cost: add_cost(state.usage.cost, Map.get(payload, "cost_usd"))
         }
     }
   end
+
+  defp add_cost(running, value) when is_number(value) and value >= 0,
+    do: (running || 0.0) + value
+
+  defp add_cost(running, _unpriced), do: running
+
+  defp rounded_cost(cost) when is_number(cost), do: Float.round(cost / 1, 6)
+  defp rounded_cost(_unknown), do: nil
 
   defp append_assistant(state, "", [], [], metadata) when metadata == %{}, do: state
 
@@ -3099,7 +3111,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       | usage: %{
           input: state.usage.input + summary.usage.input,
           output: state.usage.output + summary.usage.output,
-          cost: state.usage.cost + (summary.usage.cost || 0.0)
+          cost: add_cost(state.usage.cost, summary.usage.cost)
         }
     }
   end
@@ -3766,7 +3778,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           "iterations" => iterations,
           "input_tokens" => state.usage.input,
           "output_tokens" => state.usage.output,
-          "cost_usd" => Float.round(state.usage.cost, 6)
+          "cost_usd" => rounded_cost(state.usage.cost)
         })
 
         {:ok, state}

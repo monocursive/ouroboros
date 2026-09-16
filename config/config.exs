@@ -13,7 +13,13 @@ config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key", 
 config :req_llm,
   stream_pool_protocols: [:http1],
   stream_pool_size: 10,
-  stream_pool_count: 1
+  stream_pool_count: 1,
+  # Model ids are operator-configured and may postdate the packaged catalogue snapshot;
+  # `Ouroboros.Models` reports an unknown model as unknown (no window, no price) on the
+  # surfaces that matter. ReqLLM's own `IO.warn` for the same fact would otherwise be
+  # written to stderr on every context build, usage event and model call of such a
+  # session, over the terminal client.
+  warn_unverified_models: false
 
 # Erlexec's port manager refuses to start without SHELL even when every command is an
 # argv list. Service managers and coding harnesses legitimately omit it, so establish the

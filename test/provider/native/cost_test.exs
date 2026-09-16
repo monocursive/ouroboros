@@ -32,6 +32,19 @@ defmodule Ouroboros.Provider.Native.CostTest do
     assert Enum.all?(Map.values(payload), &(is_number(&1) or is_binary(&1)))
   end
 
+  test "a subscription lane stays unpriced although its catalogue entry is known" do
+    # The catalogue resolves both — `Ouroboros.Models.lookup/1` knows the prefixes
+    # `llm_db` alone does not — so this is a refusal, not a gap: a public API price on a
+    # ChatGPT or Grok sign-in would be a number that looks like a bill and is not one.
+    assert is_map(Ouroboros.Models.lookup("openai_codex:gpt-5.6-sol"))
+    assert is_nil(Cost.cost_usd("openai_codex:gpt-5.6-sol", 1_000_000, 0, 0, 0))
+    assert is_nil(Cost.cost_usd("grok:grok-4.3", 1_000_000, 0, 0, 0))
+
+    # The metered key to the same model is priced.
+    xai = Cost.cost_usd("xai:grok-4.3", 1_000_000, 0, 0, 0)
+    assert is_number(xai) and xai > 0
+  end
+
   test "omits cost_usd for a model this node cannot price, rather than reporting zero" do
     payload = Cost.payload(%{input_tokens: 10, output_tokens: 5}, "scripted:<0.1.0>")
     refute Map.has_key?(payload, "cost_usd")

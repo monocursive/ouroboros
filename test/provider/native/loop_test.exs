@@ -206,6 +206,11 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert completed.payload["status"] == "completed"
       assert completed.payload["iterations"] == 4
       assert completed.payload["input_tokens"] == 120
+
+      # A scripted model has no price, and the turn says so: `cost_usd` is unknown, not
+      # `0.0`. A zero here is the free turn `Ouroboros.Provider.Native.Cost` refuses to
+      # report for one payload, and a sum of unknowns is still unknown.
+      assert is_nil(completed.payload["cost_usd"])
     end
 
     test "carries the system prompt and the tool schemas into every model call", context do

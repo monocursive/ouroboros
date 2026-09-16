@@ -72,6 +72,65 @@ defmodule Ouroboros.Models do
   def catalog(:native), do: native_catalog(native_model_provider())
 
   @doc """
+  The catalogue entry for one native model spec, or `nil` when nothing here can vouch
+  for it.
+
+  The lanes are prefixes `llm_db` alone does not all know. `grok:` draws on the xAI
+  catalogue and is mapped here; `openai_codex:` draws on OpenAI's under a provider of
+  its own, which `ReqLLM.model/1` resolves and `LLMDB.model/1` refuses. Every caller that
+  needs a window or a price goes through this one seam, so the default lane cannot be
+  metered by one reader and unpriced by another. A spec nobody resolves is `nil`, never
+  a guess.
+  """
+  @spec lookup(String.t() | nil) :: map() | nil
+  def lookup(spec) when is_binary(spec) and spec != "" do
+    spec = Ouroboros.Provider.GrokSubscription.api_model(spec)
+
+    case req_llm_model(spec) do
+      {:ok, %{} = model} ->
+        model
+
+      _unresolved ->
+        case llm_db_model(spec) do
+          {:ok, %{} = model} -> model
+          _unknown -> nil
+        end
+    end
+  rescue
+    _error -> nil
+  catch
+    :exit, _reason -> nil
+  end
+
+  def lookup(_spec), do: nil
+
+  @doc """
+  Whether a model spec is served by a subscription sign-in rather than a metered key.
+
+  `grok:` is the Grok subscription connection and `openai_codex:` the ChatGPT one. What
+  either spends is an allowance nobody here can see, and a public API price applied to
+  it would be a number that looks like a bill and is not one. The catalogue entry is
+  still real — the window is the window on any connection — which is why `lookup/1`
+  answers for both and only the price is refused.
+  """
+  @spec subscription_lane?(String.t() | nil) :: boolean()
+  def subscription_lane?("grok:" <> _rest), do: true
+  def subscription_lane?("openai_codex:" <> _rest), do: true
+  def subscription_lane?(_spec), do: false
+
+  defp req_llm_model(spec) do
+    if Code.ensure_loaded?(ReqLLM) and function_exported?(ReqLLM, :model, 1),
+      do: ReqLLM.model(spec),
+      else: {:error, :req_llm_unavailable}
+  end
+
+  defp llm_db_model(spec) do
+    if Code.ensure_loaded?(LLMDB) and function_exported?(LLMDB, :model, 1),
+      do: LLMDB.model(spec),
+      else: {:error, :llm_db_unavailable}
+  end
+
+  @doc """
   Returns the model this node configures, or `nil`.
 
   Not a preference this module holds: a default nobody configured is `nil`, not a model

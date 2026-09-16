@@ -127,6 +127,10 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
              %{"role" => "user", "content" => "say hello"}
            ]
 
+    # xAI caches prompts on its own, per server; the conversation header is what routes
+    # every request of this session to the server that holds its entries.
+    assert String.downcase(raw) =~ "x-grok-conv-id: native-xai-test"
+
     assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
   end
 
@@ -289,6 +293,111 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
     assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
   end
 
+  test "names the session to the ChatGPT Codex backend as its prompt-cache identity" do
+    # OpenAI caches without being asked, so what the default lane can do is name the
+    # conversation: the session id as the body's `prompt_cache_key` and the `session-id`
+    # header, which is what the Codex CLI sends for its own sessions. Both are derived by
+    # ReqLLM from the one `session_id` this runtime passes, so this asserts them on the
+    # wire rather than trusting the option.
+    root =
+      Path.join(System.tmp_dir!(), "ouroboros-direct-codex-#{System.unique_integer([:positive])}")
+
+    Ouroboros.DataDir.ensure_private!(root)
+    oauth = Path.join(root, "oauth.json")
+
+    File.write!(
+      oauth,
+      Jason.encode!(%{
+        "openai-codex" => %{
+          "access" => "header.payload.signature",
+          "refresh" => "refresh-secret",
+          "expires" => System.system_time(:millisecond) + 3_600_000,
+          "accountId" => "account-1"
+        }
+      })
+    )
+
+    File.chmod!(oauth, 0o600)
+    previous_oauth = Application.get_env(:ouroboros, :oauth_file)
+    Application.put_env(:ouroboros, :oauth_file, oauth)
+
+    on_exit(fn ->
+      if previous_oauth,
+        do: Application.put_env(:ouroboros, :oauth_file, previous_oauth),
+        else: Application.delete_env(:ouroboros, :oauth_file)
+
+      File.rm_rf(root)
+    end)
+
+    parent = self()
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw, reuseaddr: true])
+    {:ok, {_address, port}} = :inet.sockname(listener)
+
+    {:ok, server} =
+      Task.start(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        {:ok, request} = read_request(socket, "")
+        send(parent, {:codex_http_request, request})
+
+        body =
+          [
+            ~s(data: {"type":"response.output_text.delta","delta":"hello from codex"}\n\n),
+            ~s(data: {"type":"response.completed","response":{"id":"resp-codex-1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n),
+            "data: [DONE]\n\n"
+          ]
+          |> IO.iodata_to_binary()
+
+        response =
+          "HTTP/1.1 200 OK\r\n" <>
+            "content-type: text/event-stream\r\n" <>
+            "content-length: #{byte_size(body)}\r\n" <>
+            "connection: close\r\n\r\n" <> body
+
+        :ok = :gen_tcp.send(socket, response)
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listener)
+      end)
+
+    monitor = Process.monitor(server)
+
+    Application.put_env(:ouroboros, :native_model_options,
+      base_url: "http://127.0.0.1:#{port}",
+      receive_timeout: 5_000,
+      stream_idle_timeout: 5_000,
+      total_timeout: 10_000,
+      max_retries: 0
+    )
+
+    request = %{
+      model: "openai_codex:gpt-5.6-sol",
+      system: "Be concise",
+      messages: [%{role: :user, content: "say hello"}],
+      tools: Tools.specs(nil, nil),
+      provider_session_id: "native-codex-test",
+      turn_id: "turn-codex-test",
+      reasoning_effort: :low,
+      max_tokens: nil
+    }
+
+    assert {:ok, stream} = DirectModel.stream(request, [])
+    chunks = Enum.to_list(stream)
+    assert {:text, "hello from codex"} in chunks
+
+    assert_receive {:codex_http_request, raw}, 5_000
+    assert raw =~ "POST /codex/responses HTTP/1.1"
+    assert String.downcase(raw) =~ "authorization: bearer header.payload.signature"
+    assert String.downcase(raw) =~ "chatgpt-account-id: account-1"
+    assert String.downcase(raw) =~ "session-id: native-codex-test"
+    refute raw =~ "refresh-secret"
+
+    payload = request_payload(raw)
+    assert payload["prompt_cache_key"] == "native-codex-test"
+    assert payload["store"] == false
+    assert "reasoning.encrypted_content" in payload["include"]
+
+    assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
+  end
+
   defp anthropic_request do
     %{
       model: "anthropic:claude-sonnet-5",
@@ -425,6 +534,10 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
 
     payload = request_payload(raw)
     assert Enum.map(payload["tools"], & &1["name"]) == Enum.map(Tools.specs(nil, nil), & &1.name)
+
+    # OpenAI caches prompts without being asked; the key is what keeps this session's
+    # entries together, and it is the session id, as OpenAI's own client sends it.
+    assert payload["prompt_cache_key"] == "native-direct-test"
 
     for tool <- payload["tools"] do
       assert tool["strict"]

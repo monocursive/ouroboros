@@ -81,7 +81,11 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         # Sign-in may expire or be renewed while this request waits for capacity.
         # Load it only after admission so the outgoing request uses current credentials.
         with {:ok, model, generation_opts} <-
-               GrokSubscription.transport(request.model, generation_opts) do
+               GrokSubscription.transport(
+                 request.model,
+                 generation_opts,
+                 conversation_id(request)
+               ) do
           case ReqLLM.stream_text(model, context, generation_opts) do
             {:ok, response} -> {:ok, normalize(response, request.tools)}
             {:error, reason} -> {:error, reason}
@@ -648,6 +652,12 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     end
   end
 
+  # OpenAI caches prompts without being asked, keyed on the rendered prefix. What a
+  # request can add is the identity that keeps one conversation's entries together, and
+  # `session_id` is it: ReqLLM 1.23 sends it as the `session-id` header and as the body's
+  # `prompt_cache_key`, which is exactly what the Codex CLI sets from its own session id.
+  # Whether the cache then hits is reported as `cached_tokens` on every `usage` event,
+  # never assumed.
   defp put_transport_options(options, %{model: "openai_codex:" <> _} = request) do
     provider_options =
       options
@@ -655,10 +665,23 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
       |> Keyword.drop(@anthropic_option_keys)
       |> Keyword.put_new(:openai_stream_transport, :sse)
       |> Keyword.put_new(:codex_originator, "ouroboros")
-      |> Keyword.put(:session_id, request.provider_session_id)
+      |> Keyword.delete(:session_id)
+      |> put_unless_nil(:session_id, conversation_id(request))
 
     options
     |> Keyword.put_new(:oauth_file, Ouroboros.Provider.OpenAIAuth.credential_path())
+    |> Keyword.put(:provider_options, provider_options)
+  end
+
+  # The OpenAI API-key lane, same cache identity as the Codex lane. The codex and
+  # anthropic keys are kept off it; nothing else in `provider_options` was ever admitted
+  # for this lane, so nothing else is carried.
+  defp put_transport_options(options, %{model: "openai:" <> _} = request) do
+    provider_options = put_prompt_cache_key([], conversation_id(request))
+
+    options
+    |> Keyword.delete(:auth_file)
+    |> Keyword.delete(:oauth_file)
     |> Keyword.put(:provider_options, provider_options)
   end
 
@@ -707,13 +730,17 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   # The xai: prefix always uses API keys. The separate grok: prefix selects subscription
-  # credentials and pins its endpoint in GrokSubscription.transport/2.
-  defp put_transport_options(options, %{model: "xai:" <> _}) do
+  # credentials and pins its endpoint in GrokSubscription.transport/3, which sets the
+  # same conversation header itself. xAI caches prompts on its own and keeps the cache
+  # per server; `x-grok-conv-id` is what routes one conversation's requests to the one
+  # server that holds its entries.
+  defp put_transport_options(options, %{model: "xai:" <> _} = request) do
     options =
       options
       |> Keyword.delete(:auth_file)
       |> Keyword.delete(:oauth_file)
       |> Keyword.delete(:provider_options)
+      |> put_request_header("x-grok-conv-id", conversation_id(request))
 
     case XAIKey.fetch() do
       {:ok, key, _source} -> Keyword.put(options, :api_key, key)
@@ -723,16 +750,49 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp put_transport_options(options, _request), do: Keyword.delete(options, :provider_options)
 
+  # The session id, as the value every lane's cache-identity hint takes: one token of
+  # visible ASCII, or nothing at all — a lane sent nothing invents no identity, while a
+  # lane sent a `nil` refuses the call. A `provider_session_id` is one of this runtime's
+  # own ids (`Ouroboros.Provider.Native.Paths.new_session_id/0`, url-safe base64 under
+  # forty bytes) and always passes; the guard is for a request built by hand.
+  @doc false
+  @spec conversation_id(map()) :: String.t() | nil
+  def conversation_id(%{provider_session_id: id}) when is_binary(id) do
+    if header_token?(id), do: id
+  end
+
+  def conversation_id(_request), do: nil
+
+  # Visible ASCII only, so a value can never carry a line break, a tab, an escape or a
+  # space into a header or a JSON string — the same rule `Ouroboros.Provider.GrokSubscription`
+  # applies to the header it owns.
+  @doc false
+  @spec header_token?(term()) :: boolean()
+  def header_token?(id) when is_binary(id) and byte_size(id) in 1..256,
+    do: Regex.match?(~r/\A[\x21-\x7E]+\z/, id)
+
+  def header_token?(_id), do: false
+
+  defp put_prompt_cache_key(provider_options, nil), do: provider_options
+
+  defp put_prompt_cache_key(provider_options, key),
+    do: Keyword.put(provider_options, :prompt_cache_key, key)
+
   defp put_anthropic_workspace(options, nil), do: options
 
-  defp put_anthropic_workspace(options, workspace_id) when is_binary(workspace_id) do
+  defp put_anthropic_workspace(options, workspace_id) when is_binary(workspace_id),
+    do: put_request_header(options, "anthropic-workspace-id", workspace_id)
+
+  defp put_request_header(options, _name, nil), do: options
+
+  defp put_request_header(options, name, value) when is_binary(value) do
     http_options = Keyword.get(options, :req_http_options, [])
 
     headers =
       http_options
       |> request_headers()
-      |> Enum.reject(&workspace_header?/1)
-      |> Kernel.++([{"anthropic-workspace-id", workspace_id}])
+      |> Enum.reject(&header_named?(&1, name))
+      |> Kernel.++([{name, value}])
 
     http_options =
       cond do
@@ -766,10 +826,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp normalize_headers(headers) when is_map(headers), do: Map.to_list(headers)
   defp normalize_headers(_headers), do: []
 
-  defp workspace_header?({name, _value}) when is_binary(name),
-    do: String.downcase(name) == "anthropic-workspace-id"
+  defp header_named?({header, _value}, name) when is_binary(header),
+    do: String.downcase(header) == String.downcase(name)
 
-  defp workspace_header?(_header), do: false
+  defp header_named?(_header, _name), do: false
 
   defp reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail), do: detail
 
