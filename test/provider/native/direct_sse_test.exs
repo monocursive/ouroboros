@@ -102,7 +102,11 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
     request = %{
       model: "xai:grok-4.5",
       system: "Be concise",
-      messages: [%{role: :user, content: "say hello"}],
+      messages: [
+        %{role: :user, content: "say hello"},
+        %{role: :assistant, content: "hello", thinking: "Greet briefly.", tool_calls: []},
+        %{role: :user, content: "and again"}
+      ],
       tools: [],
       provider_session_id: "native-xai-test",
       turn_id: "turn-xai-test",
@@ -122,10 +126,17 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
     payload = request_payload(raw)
     assert payload["model"] == "grok-4.5"
 
-    assert payload["messages"] == [
+    # The earlier turn's reasoning goes back as that message's `reasoning_content`,
+    # which xAI documents as what keeps its prompt cache warm on a reasoning model.
+    assert [
              %{"role" => "system", "content" => "Be concise"},
-             %{"role" => "user", "content" => "say hello"}
-           ]
+             %{"role" => "user", "content" => "say hello"},
+             %{"role" => "assistant"} = assistant,
+             %{"role" => "user", "content" => "and again"}
+           ] = payload["messages"]
+
+    assert assistant["content"] == "hello"
+    assert assistant["reasoning_content"] == "Greet briefly."
 
     # xAI caches prompts on its own, per server; the conversation header is what routes
     # every request of this session to the server that holds its entries.

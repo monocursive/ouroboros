@@ -179,6 +179,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   # read the denial and what led to it; not the whole spill file, which the tool result
   # already names a path for.
   @max_escalation_output_bytes 4 * 1024
+  @max_thinking_bytes 64 * 1024
   @bash_retry_ttl_ms 300_000
 
   defstruct [
@@ -433,14 +434,21 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       true ->
         case call_model(state, iteration) do
-          {:ok, state, text, calls, reasoning_details, provider_metadata} ->
+          {:ok, state, text, calls, reasoning_details, provider_metadata, thinking} ->
             state = drain_control(state)
 
             if state.interrupted? do
               interrupted(state)
             else
               state =
-                append_assistant(state, text, calls, reasoning_details, provider_metadata)
+                append_assistant(
+                  state,
+                  text,
+                  calls,
+                  reasoning_details,
+                  provider_metadata,
+                  thinking
+                )
 
               cond do
                 calls == [] ->
@@ -619,48 +627,55 @@ defmodule Ouroboros.Provider.Native.Loop do
   # thinking has ever had here. It is accumulated reversed and flipped once at the end,
   # because a turn can stream tens of thousands of deltas and `++` per chunk is quadratic.
   defp consume(state, stream, iteration, effect_id, started) do
-    {text, calls, usages, reasoning_details, provider_metadata, chunks} =
-      Enum.reduce(Stream.with_index(stream), {[], [], [], [], %{}, []}, fn {chunk, chunk_index},
-                                                                           {text, calls, usages,
-                                                                            details, metadata,
-                                                                            chunks} ->
-        _ =
-          audit_journal(state, "model_chunk", %{
-            "ledger_effect_id" => effect_id,
-            "iteration" => iteration,
-            "chunk_index" => chunk_index,
-            "chunk" => Journal.jsonable(chunk)
-          })
+    {text, thinking, calls, usages, reasoning_details, provider_metadata, chunks} =
+      Enum.reduce(
+        Stream.with_index(stream),
+        {[], [], [], [], [], %{}, []},
+        fn {chunk, chunk_index}, {text, thinking, calls, usages, details, metadata, chunks} ->
+          _ =
+            audit_journal(state, "model_chunk", %{
+              "ledger_effect_id" => effect_id,
+              "iteration" => iteration,
+              "chunk_index" => chunk_index,
+              "chunk" => Journal.jsonable(chunk)
+            })
 
-        chunks = [Journal.jsonable(chunk) | chunks]
+          chunks = [Journal.jsonable(chunk) | chunks]
 
-        case chunk do
-          {:text, delta} when is_binary(delta) and delta != "" ->
-            emit(state, :output_text_delta, %{"text" => delta})
-            {[text, delta], calls, usages, details, metadata, chunks}
+          case chunk do
+            {:text, delta} when is_binary(delta) and delta != "" ->
+              emit(state, :output_text_delta, %{"text" => delta})
+              {[text, delta], thinking, calls, usages, details, metadata, chunks}
 
-          {:thinking, delta} when is_binary(delta) and delta != "" ->
-            emit(state, :thinking_delta, %{"text" => delta})
-            {text, calls, usages, details, metadata, chunks}
+            {:thinking, delta} when is_binary(delta) and delta != "" ->
+              emit(state, :thinking_delta, %{"text" => delta})
+              {text, [thinking, delta], calls, usages, details, metadata, chunks}
 
-          {:tool_call, call} ->
-            {text, calls ++ [call], usages, details, metadata, chunks}
+            {:tool_call, call} ->
+              {text, thinking, calls ++ [call], usages, details, metadata, chunks}
 
-          {:reasoning_details, next} when is_list(next) ->
-            {text, calls, usages, next, metadata, chunks}
+            {:reasoning_details, next} when is_list(next) ->
+              {text, thinking, calls, usages, next, metadata, chunks}
 
-          {:provider_metadata, next} when is_map(next) ->
-            {text, calls, usages, details, Map.merge(metadata, next), chunks}
+            {:provider_metadata, next} when is_map(next) ->
+              {text, thinking, calls, usages, details, Map.merge(metadata, next), chunks}
 
-          {:usage, usage} ->
-            {text, calls, usages ++ [usage], details, metadata, chunks}
+            {:usage, usage} ->
+              {text, thinking, calls, usages ++ [usage], details, metadata, chunks}
 
-          _ignored ->
-            {text, calls, usages, details, metadata, chunks}
+            _ignored ->
+              {text, thinking, calls, usages, details, metadata, chunks}
+          end
         end
-      end)
+      )
 
     final = IO.iodata_to_binary(text)
+
+    thought =
+      if Model.replays_thinking?(state.model_module, state.model_spec),
+        do: thinking |> IO.iodata_to_binary() |> bound_thinking(),
+        else: ""
+
     if final != "", do: emit(state, :output_text_final, %{"text" => final})
 
     state = Enum.reduce(usages, state, &record_usage(&2, &1))
@@ -680,7 +695,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     settle_inference_effect(state, effect_id, :completed, started, journal_seq(state), usage)
 
-    {:ok, state, final, calls, reasoning_details, provider_metadata}
+    {:ok, state, final, calls, reasoning_details, provider_metadata, thought}
   rescue
     error in Ouroboros.Audit.Unavailable ->
       reraise error, __STACKTRACE__
@@ -738,9 +753,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp rounded_cost(cost) when is_number(cost), do: Float.round(cost / 1, 6)
   defp rounded_cost(_unknown), do: nil
 
-  defp append_assistant(state, "", [], [], metadata) when metadata == %{}, do: state
+  # A message with no text, no calls and no signed reasoning is dropped as before, its
+  # thinking with it: reasoning that produced nothing is nothing a later turn can use.
+  defp append_assistant(state, "", [], [], metadata, _thinking) when metadata == %{},
+    do: state
 
-  defp append_assistant(state, text, calls, reasoning_details, provider_metadata) do
+  defp append_assistant(state, text, calls, reasoning_details, provider_metadata, thinking) do
     message =
       %{
         role: :assistant,
@@ -749,8 +767,35 @@ defmodule Ouroboros.Provider.Native.Loop do
       }
       |> put_nonempty(:reasoning_details, reasoning_details)
       |> put_nonempty(:provider_metadata, provider_metadata)
+      |> put_thinking(thinking)
 
     %{state | messages: state.messages ++ [message]}
+  end
+
+  defp put_thinking(message, thinking) when is_binary(thinking) and thinking != "",
+    do: Map.put(message, :thinking, thinking)
+
+  defp put_thinking(message, _absent), do: message
+
+  # The model's reasoning as it streamed, kept on the message only for a lane that sends
+  # it back (`Ouroboros.Provider.Native.Model.replays_thinking?/2`) and bounded so a
+  # model that thinks at length cannot grow a checkpoint without limit. A checkpoint is
+  # JSON, so the text must be valid UTF-8 and the cut must land on a character boundary:
+  # text that is not valid is dropped rather than repaired, and a valid text is cut at
+  # most three bytes short of the bound, which is the longest a codepoint can be.
+  defp bound_thinking(text) do
+    cond do
+      not String.valid?(text) -> ""
+      byte_size(text) <= @max_thinking_bytes -> text
+      true -> utf8_prefix(text, @max_thinking_bytes)
+    end
+  end
+
+  defp utf8_prefix(text, limit) do
+    Enum.find_value(0..3, fn back ->
+      prefix = binary_part(text, 0, limit - back)
+      if String.valid?(prefix), do: prefix
+    end)
   end
 
   # The reserved final round already appended the assistant message, including any tool

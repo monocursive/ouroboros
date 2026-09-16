@@ -287,7 +287,11 @@ attach natively — all of which have landed.
   lane (both derived by ReqLLM from the `session_id` this runtime passes), and as the
   `x-grok-conv-id` header on the xAI and Grok lanes. Each is asserted on the wire in
   `test/provider/native/direct_sse_test.exs` or `test/provider/grok_subscription_test.exs`,
-  and the hit is reported the same way. The
+  and the hit is reported the same way. The xAI and Grok lanes also send the model's
+  earlier reasoning text back as each assistant message's `reasoning_content`, which
+  xAI documents as what keeps its cache warm on reasoning models; the loop keeps that
+  text on the message, bounded, only for a lane that sends it back, the checkpoint
+  carries it, and the compaction budget counts it. The
   compaction and handoff summarisers send that same prefix with their instruction
   appended, so the cache can serve whatever of the folded history is still warm; a fork
   that rebuilt the prefix could be served nothing, and the summariser's own usage record

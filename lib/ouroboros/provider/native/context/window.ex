@@ -221,9 +221,17 @@ defmodule Ouroboros.Provider.Native.Context.Window do
   """
   @spec message_tokens(map()) :: non_neg_integer()
   def message_tokens(message) when is_map(message),
-    do: estimate_tokens(message_text(message)) + opaque_tokens(message)
+    do: estimate_tokens(message_text(message)) + opaque_tokens(message) + thinking_tokens(message)
 
   def message_tokens(_message), do: 0
+
+  # The reasoning text a lane sends back beside the answer (`:thinking`, kept by the loop
+  # only where it is sent) weighs what the answer weighs, and a tail budget that could
+  # not see it would keep a tail several times the size it was asked to keep.
+  defp thinking_tokens(%{thinking: thinking}) when is_binary(thinking) and thinking != "",
+    do: estimate_tokens(thinking)
+
+  defp thinking_tokens(_message), do: 0
 
   @doc false
   @spec message_text(map()) :: String.t()

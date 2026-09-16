@@ -557,6 +557,57 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert Enum.count(state.messages, &budget_message?/1) == 3
     end
 
+    test "keeps the model's thinking on the assistant message it produced", context do
+      script = [
+        [
+          {:thinking, "Read first, "},
+          {:thinking, "then answer."},
+          {:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}
+        ],
+        [{:thinking, "Done thinking."}, {:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      assert Enum.map(all(events, :thinking_delta), & &1.payload["text"]) == [
+               "Read first, ",
+               "then answer.",
+               "Done thinking."
+             ]
+
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assistants = Enum.filter(state.messages, &(&1.role == :assistant))
+
+      assert Enum.map(assistants, & &1[:thinking]) == [
+               "Read first, then answer.",
+               "Done thinking."
+             ]
+
+      # And the second call was shown the first turn's thinking, so a lane that replays
+      # it has it to replay.
+      [_first, second] = NativeModelScript.requests(agent)
+      assistant = Enum.find(second.messages, &(&1.role == :assistant))
+      assert assistant.thinking == "Read first, then answer."
+    end
+
+    test "bounds the thinking it keeps, on a character boundary", context do
+      long = String.duplicate("é", 40_000)
+      script = [[{:thinking, long}, {:text, "done"}, {:finish, :stop}]]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      collect()
+
+      assert_receive {:finished, {:ok, state}}, 1_000
+      [assistant] = Enum.filter(state.messages, &(&1.role == :assistant))
+      assert byte_size(assistant.thinking) <= 64 * 1024
+      assert byte_size(assistant.thinking) >= 64 * 1024 - 3
+      assert String.valid?(assistant.thinking)
+      assert String.starts_with?(assistant.thinking, "éé")
+    end
+
     test "a turn far from its budget carries no turn-budget message", context do
       script = [
         [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],

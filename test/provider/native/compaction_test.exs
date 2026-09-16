@@ -146,6 +146,14 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       refute Window.over_threshold?(84, 100, 0.85)
     end
 
+    test "an assistant message's retained thinking counts toward what it costs the window" do
+      bare = %{role: :assistant, content: "done", tool_calls: []}
+      thought = Map.put(bare, :thinking, String.duplicate("reasoning ", 400))
+
+      assert Window.message_tokens(thought) > Window.message_tokens(bare) + 900
+      assert Window.message_text(thought) == Window.message_text(bare)
+    end
+
     test "the defaults are the documented ones" do
       assert Window.default_compact_at() == 0.85
       assert Window.default_keep_recent_tokens() == 20_000

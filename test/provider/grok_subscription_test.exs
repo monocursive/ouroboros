@@ -192,6 +192,7 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
           delta =
             if round == 1 do
               %{
+                "reasoning_content" => "Plan: read the file first.",
                 "tool_calls" => [
                   %{
                     "index" => 0,
@@ -255,6 +256,7 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
 
     assert {:tool_call, %{id: "call-1", name: "lookup", input: %{"path" => "README.md"}}} in chunks
 
+    assert {:thinking, "Plan: read the file first."} in chunks
     assert {:finish, :tool_calls} in chunks
     assert_receive {:outbound, sent}, 5_000
     assert sent.host == "cli-chat-proxy.grok.com"
@@ -263,7 +265,11 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
     headers = Enum.map(sent.headers, fn {k, v} -> {String.downcase(k), v} end)
     assert {"authorization", "Bearer renewed-access-canary"} in headers
     assert {"x-xai-token-auth", "xai-grok-cli"} in headers
+    assert {"x-grok-conv-id", "grok-fixture"} in headers
 
+    # The loop keeps the reasoning that streamed with the tool call on the assistant
+    # message; on this lane it goes back as the message's `reasoning_content`, which
+    # xAI names as what keeps its prompt cache warm across turns on a reasoning model.
     next =
       Map.update!(
         request(),
@@ -273,6 +279,7 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
               %{
                 role: :assistant,
                 content: nil,
+                thinking: "Plan: read the file first.",
                 tool_calls: [%{id: "call-1", name: "lookup", input: %{"path" => "README.md"}}]
               },
               %{
@@ -296,6 +303,11 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
     assert payload["model"] == "grok-4.6"
     assert List.last(payload["messages"])["content"] == "Fixture README contents"
     assert List.last(payload["messages"])["tool_call_id"] == "call-1"
+
+    assistant = Enum.find(payload["messages"], &(&1["role"] == "assistant"))
+    assert assistant["reasoning_content"] == "Plan: read the file first."
+    assert [%{"function" => %{"name" => "lookup"}}] = assistant["tool_calls"]
+    refute Enum.any?(List.wrap(assistant["content"]), &match?(%{"type" => "thinking"}, &1))
     Task.await(server, 5_000)
   end
 

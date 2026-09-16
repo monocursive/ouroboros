@@ -449,7 +449,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp to_messages(%{role: :system, content: content}, _model),
     do: [ReqLLM.Context.system(content)]
 
-  defp to_messages(%{role: :assistant} = message, _model) do
+  defp to_messages(%{role: :assistant} = message, model) do
     text = message[:content] || ""
     calls = message[:tool_calls] || []
     details = Enum.map(message[:reasoning_details] || [], &reasoning_detail/1)
@@ -459,7 +459,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
       tool_calls = Enum.map(calls, fn call -> {call.name, call.input, [id: call.id]} end)
 
       assistant =
-        ReqLLM.Context.assistant(text,
+        ReqLLM.Context.assistant(assistant_content(text, message[:thinking], model),
           tool_calls: tool_calls,
           metadata: metadata
         )
@@ -494,6 +494,28 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   defp to_messages(_other, _model), do: []
+
+  # The xAI lanes get the model's earlier reasoning back as a thinking part, which the
+  # chat encoder sends as the assistant message's `reasoning_content`: xAI names its
+  # absence as the first cause of prompt-cache misses on its reasoning models. Every
+  # other lane gets the text alone. Anthropic binds thinking to signed blocks that
+  # travel as `reasoning_details`, and an unsigned thinking part there is a refused
+  # request; the OpenAI lanes carry theirs as encrypted reasoning items the same way.
+  defp assistant_content(text, thinking, model) do
+    if replays_thinking?(model) and is_binary(thinking) and thinking != "" do
+      [ReqLLM.Message.ContentPart.thinking(thinking)] ++ text_parts(text)
+    else
+      text
+    end
+  end
+
+  defp text_parts(""), do: []
+  defp text_parts(text), do: [ReqLLM.Message.ContentPart.text(text)]
+
+  @impl true
+  def replays_thinking?("xai:" <> _rest), do: true
+  def replays_thinking?("grok:" <> _rest), do: true
+  def replays_thinking?(_model), do: false
 
   defp normalize(%ReqLLM.StreamResponse{stream: stream}, specs) do
     normalize(stream, specs)
@@ -733,13 +755,16 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   # credentials and pins its endpoint in GrokSubscription.transport/3, which sets the
   # same conversation header itself. xAI caches prompts on its own and keeps the cache
   # per server; `x-grok-conv-id` is what routes one conversation's requests to the one
-  # server that holds its entries.
+  # server that holds its entries. The lane is pinned to the chat API, as the grok: lane
+  # is: that is the encoder that sends a message's reasoning back as
+  # `reasoning_content`, and this runtime uses none of the built-in tools that would
+  # otherwise route a request to xAI's stateful Responses API.
   defp put_transport_options(options, %{model: "xai:" <> _} = request) do
     options =
       options
       |> Keyword.delete(:auth_file)
       |> Keyword.delete(:oauth_file)
-      |> Keyword.delete(:provider_options)
+      |> Keyword.put(:provider_options, xai_api: :chat)
       |> put_request_header("x-grok-conv-id", conversation_id(request))
 
     case XAIKey.fetch() do
