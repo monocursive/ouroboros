@@ -4,12 +4,6 @@ import '../styles/global.css';
 
 const repository = 'https://github.com/monocursive/ouroboros';
 const release = 'v0.1.8';
-const releaseHighlights = [
-  { title: 'Images in the conversation.', description: 'Paste, drop, or choose images in web chat, or attach them from the terminal. Send with or without text, recover unfinished uploads, and revisit accepted images in history.' },
-  { title: 'More controls in web chat.', description: 'Search the command palette, steer a running turn, change models, or set thinking effort. Backtrack, fork, rewind, compact, inspect context, and hand work to a new conversation.' },
-  { title: 'Consistent commands and keys.', description: 'Both palettes share one command catalogue. Terminal shortcuts follow your key map; browser palette navigation and copy controls work across desktop and compact screens.' },
-  { title: 'Safer sends. Clearer machine names.', description: 'Palette sends keep their images; pending or failed uploads block Send. Duplicate submissions keep the same turn identity. Fleet labels preserve the names you chose and distinguish unnamed hosts.' },
-];
 const docs = `${repository}/blob/main/docs`;
 const installCommand = 'curl -fsSL https://github.com/monocursive/ouroboros/releases/latest/download/install.sh | bash';
 const title = 'Ouroboros — A distributed runtime for AI coding agents';
@@ -75,7 +69,6 @@ const demos = [
         <nav aria-label="Main navigation">
           <a class="runtime-nav" href="#runtime">The runtime</a>
           <a class="models-nav" href="#models">Models &amp; access</a>
-          <a class="changelog-nav" href="#changelog">Changelog</a>
           <a href={`${repository}#documentation`}>Documentation</a>
           <a class="github-link" href={repository}>GitHub</a>
         </nav>
@@ -122,25 +115,6 @@ const demos = [
           <a href={`${docs}/RELEASING.md`}>Installation guide <span aria-hidden="true">↗︎</span></a>
         </div>
         <p id="copy-status" class="sr-only" role="status" aria-live="polite"></p>
-      </section>
-
-      <section class="release-notes" id="changelog" aria-labelledby="changelog-heading">
-        <div class="container">
-          <p class="eyebrow section-eyebrow">Changelog / <time datetime="2026-09-15">15 September 2026</time></p>
-          <div class="release-notes-heading">
-            <h2 id="changelog-heading">New in {release}.</h2>
-            <a class="text-link" href={`${repository}/blob/${release}/CHANGELOG.md#018---2026-09-15`}>Full changelog <span aria-hidden="true">↗</span></a>
-          </div>
-          <div class="release-highlights">
-            {releaseHighlights.map((item) => (
-              <article>
-                <h3>{item.title}</h3>
-                <p>{item.description}</p>
-              </article>
-            ))}
-          </div>
-          <p class="release-upgrade">Already installed? Run <code>ouro update</code>. Finish active work, then run <code>ouro stop</code> and <code>ouro</code> to activate the new runtime. Reload open web views. <a href={`${docs}/RELEASING.md#upgrade-older-versions-and-removal`}>Upgrade guide ↗</a></p>
-        </div>
       </section>
 
       <section class="demos" id="demos" aria-labelledby="demos-heading">

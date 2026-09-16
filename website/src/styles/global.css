@@ -89,16 +89,6 @@
   .install-notes code { color: var(--color-text); }
   .install-notes a { flex: none; padding-block: 7px; }
   #copy-status:not(.sr-only) { margin-top: 12px; font-size: 13px; color: var(--color-accent); }
-  .release-notes { border-top: 1px solid var(--color-line); padding-block: 60px 64px; }
-  .release-notes-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 24px; }
-  .release-notes h2 { font-size: clamp(32px, 3.2vw, 44px); line-height: 1.15; font-weight: 500; letter-spacing: -.04em; }
-  .release-highlights { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px 64px; margin-top: 36px; }
-  .release-highlights article { border-top: 1px solid var(--color-line); padding-top: 22px; }
-  .release-highlights h3 { font-size: 19px; line-height: 1.4; font-weight: 500; letter-spacing: -.025em; }
-  .release-highlights p { margin-top: 10px; color: var(--color-muted); font-size: 14px; }
-  .release-upgrade { margin-top: 32px; max-width: 880px; color: var(--color-muted); font-size: 12px; }
-  .release-upgrade code { color: var(--color-text); font-size: 11px; }
-  .release-upgrade a { text-decoration: underline; text-underline-offset: 4px; }
   .demos { border-top: 1px solid var(--color-line); padding-block: 60px 70px; }
   .demos-heading { display: flex; justify-content: space-between; align-items: end; gap: 32px; margin-bottom: 36px; }
   .demos-heading h2 { font-size: clamp(30px, 3.2vw, 44px); line-height: 1.15; font-weight: 500; letter-spacing: -.04em; }
@@ -165,9 +155,6 @@
     .install-notes p span { margin-left: 0; display: block; }
   }
   @media (max-width: 767px) {
-    .release-notes { padding-block: 44px; }
-    .release-notes-heading { flex-direction: column; align-items: flex-start; gap: 8px; }
-    .release-highlights { grid-template-columns: minmax(0, 1fr); gap: 24px; margin-top: 24px; }
     .demos { padding-block: 44px; }
     .demos-heading { display: block; }
     .demos-heading > p { margin-top: 20px; }
@@ -179,7 +166,7 @@
     .brand img { width: 30px; height: 30px; }
     nav { gap: 18px; }
     nav a { font-size: 12px; }
-    nav .runtime-nav, nav .models-nav, nav .changelog-nav { display: none; }
+    nav .runtime-nav, nav .models-nav { display: none; }
     .hero { grid-template-columns: 1fr; gap: 36px; min-height: auto; padding-block: 52px 40px; }
     .release { font-size: 11px; gap: 8px; letter-spacing: 0; }
     .release-divider { margin-inline: 3px; }
