@@ -5030,14 +5030,7 @@ body .ouro-composer-box .ouro-image-hint { grid-column: 1 / -1; }
 body .ouro-composer-box .ouro-image-attach-control { grid-column: 1; }
 body .ouro-composer-box .ouro-composer-actions { grid-column: 2; justify-content: flex-end; flex-wrap: wrap; gap: .35rem; padding: 0; min-width: 0; }
 body .ouro-composer-actions .ouro-button,
-body .ouro-composer-actions .ouro-quiet-button { min-height: 2.25rem; padding: .35rem .65rem; }
-body .ouro-composer-box .ouro-image-attach { width: 2.25rem; height: 2.25rem; }
-body .ouro-composer-bar .ouro-palette-trigger { min-height: 2rem; padding: .25rem .5rem; font-size: .75rem; }
+body .ouro-composer-actions .ouro-quiet-button { min-height: 44px; padding: .35rem .65rem; }
+body .ouro-composer-box .ouro-image-attach { width: 44px; height: 44px; }
+body .ouro-composer-bar .ouro-palette-trigger { min-height: 44px; padding: .25rem .5rem; font-size: .75rem; }
 body .ouro-composer-settings > summary { padding: .4rem .6rem; }
-
-@media (pointer: coarse) {
-  body .ouro-composer-actions .ouro-button,
-  body .ouro-composer-actions .ouro-quiet-button,
-  body .ouro-composer-bar .ouro-palette-trigger { min-height: 44px; }
-  body .ouro-composer-box .ouro-image-attach { width: 44px; height: 44px; }
-}
