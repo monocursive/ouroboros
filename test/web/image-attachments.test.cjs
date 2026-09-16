@@ -43,7 +43,7 @@ function harness(options = {}) {
     const events = new Map();
     const text = {addEventListener() {}, removeEventListener() {}}, picker = {}, tray = {}, hint = {append() {}}, attach = {};
     const form = {querySelector: () => text, addEventListener() {}, removeEventListener() {}};
-    const elements = {'[data-image-picker]': picker, '.ouro-image-tray': tray, '[role=status]': hint, '[data-attach]': attach};
+    const elements = {'[data-image-picker]': picker, '.ouro-image-tray': tray, '[role=status]': hint, '[role=tooltip]': {}, '[data-attach]': attach};
     const instance = Object.assign({}, sandbox.window.OuroImageAttachments, {
       el: {dataset: {draftKey: key, sessionId: session}, closest: () => form, querySelector: selector => elements[selector]},
       handleEvent: (name, fn) => events.set(name, fn), rpc,

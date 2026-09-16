@@ -4990,17 +4990,54 @@ body .ouro-settings-grok-setup summary {
 }
 
 /* The same image cards appear in drafts and durable messages. */
-.ouro-image-draft { padding: .5rem .75rem; }
+.ouro-image-draft { padding: .25rem 0; }
 .ouro-image-tray { display: flex; gap: .5rem; flex-wrap: wrap; margin: .25rem 0; }
+.ouro-image-tray:empty, .ouro-image-hint:empty { display: none; }
 .ouro-image-card { display: flex; flex-direction: column; gap: .35rem; padding: .5rem; border: 1px solid currentColor; border-radius: .6rem; max-width: 12rem; overflow-wrap: anywhere; font: inherit; color: inherit; background: transparent; }
 .ouro-image-card img { width: 9rem; height: 6rem; object-fit: contain; }
 .ouro-image-card button { font: inherit; color: inherit; cursor: pointer; }
-.ouro-image-hint { display: inline-block; font-size: .8rem; margin: .3rem; }
+.ouro-image-hint { display: block; font-size: .8rem; margin: .25rem .5rem; }
+.ouro-image-attach-control { position: relative; display: inline-flex; align-self: end; }
+.ouro-image-attach:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.ouro-image-tooltip {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + .35rem);
+  left: 0;
+  width: min(23rem, calc(100vw - 3rem));
+  padding: .65rem .8rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--secondary);
+  font-size: .75rem;
+  line-height: 1.5;
+  visibility: hidden;
+}
+.ouro-image-tooltip::after { content: ""; position: absolute; inset: 100% 0 auto; height: .4rem; }
+.ouro-image-attach-control:hover .ouro-image-tooltip,
+.ouro-image-attach-control:focus-within .ouro-image-tooltip { visibility: visible; }
 .ouro-image-preview { max-width: 95vw; max-height: 95vh; padding: 1rem; }
 .ouro-image-preview img { display: block; max-width: 88vw; max-height: 80vh; object-fit: contain; }
 .ouro-image-preview::backdrop { background: var(--backdrop); }
 
-/* Images and text each need the full composing width on every breakpoint. */
-body .ouro-composer-box { flex-direction: column; align-items: stretch; }
-body .ouro-composer-box .ouro-composer-input { flex: none; width: 100%; }
-body .ouro-composer-box .ouro-composer-actions { align-self: flex-end; }
+/* Text and previews use the full width; attachment and send controls share one row. */
+body .ouro-composer-box { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: end; gap: .2rem .4rem; }
+body .ouro-composer-box .ouro-composer-input { grid-column: 1 / -1; width: 100%; }
+body .ouro-composer-box .ouro-image-draft { display: contents; }
+body .ouro-composer-box .ouro-image-tray,
+body .ouro-composer-box .ouro-image-hint { grid-column: 1 / -1; }
+body .ouro-composer-box .ouro-image-attach-control { grid-column: 1; }
+body .ouro-composer-box .ouro-composer-actions { grid-column: 2; justify-content: flex-end; flex-wrap: wrap; gap: .35rem; padding: 0; min-width: 0; }
+body .ouro-composer-actions .ouro-button,
+body .ouro-composer-actions .ouro-quiet-button { min-height: 2.25rem; padding: .35rem .65rem; }
+body .ouro-composer-box .ouro-image-attach { width: 2.25rem; height: 2.25rem; }
+body .ouro-composer-bar .ouro-palette-trigger { min-height: 2rem; padding: .25rem .5rem; font-size: .75rem; }
+body .ouro-composer-settings > summary { padding: .4rem .6rem; }
+
+@media (pointer: coarse) {
+  body .ouro-composer-actions .ouro-button,
+  body .ouro-composer-actions .ouro-quiet-button,
+  body .ouro-composer-bar .ouro-palette-trigger { min-height: 44px; }
+  body .ouro-composer-box .ouro-image-attach { width: 44px; height: 44px; }
+}
