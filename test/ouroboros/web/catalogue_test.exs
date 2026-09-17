@@ -139,15 +139,20 @@ defmodule Ouroboros.Web.CatalogueTest do
   # ------------------------------------------------------------------------------------
 
   describe "parity" do
-    # Twenty-seven verbs on both surfaces, sixteen only in the terminal, eight only here.
+    # Twenty-eight verbs on both surfaces, sixteen only in the terminal, eight only here.
     # These numbers are the report: changing one means a reviewer is looking at a decision
     # about parity rather than at a diff that happens to add a row.
+    #
+    # The twenty-eighth is `runtime.devices`, added by the fleet onboarding proposal's
+    # slice 6. It is on both surfaces from the start and spelled the same way on both,
+    # which is why it needs no `note`: the web opens a page at `/devices` and the terminal
+    # client opens a Devices view, and neither is a different verb from the other.
     test "the count of one-sided verbs is what the plan says it is" do
       both = for row <- @rows, is_map(row["tui"]), is_map(row["web"]), do: row["id"]
       tui_only = for row <- @rows, is_map(row["tui"]), is_nil(row["web"]), do: row["id"]
       web_only = for row <- @rows, is_nil(row["tui"]), is_map(row["web"]), do: row["id"]
 
-      assert length(both) == 27
+      assert length(both) == 28
       assert length(tui_only) == 16
       assert length(web_only) == 8
 

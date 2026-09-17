@@ -185,22 +185,34 @@ defmodule Ouroboros.Web.Layouts do
         <a class="ouro-topbar-link" href="/status" aria-current={@current == :status && "page"}>
           Status
         </a>
+        <a class="ouro-topbar-link" href="/devices" aria-current={@current == :devices && "page"}>
+          Devices
+        </a>
       </nav>
 
       <%!-- Each entry carries its own `:label`, resolved by the caller against the fleet
             roster it holds. The bar deliberately does not re-derive one: two machines in a
             fleet share a release name, so a bar that shortened `ouro@alpha` and
             `ouro@beta` itself would put the same word under both dots. --%>
-      <span :if={@machines != []} class="ouro-presence" role="img" aria-label={@machines_label}>
+      <%!-- The machine labels are the link to Devices, which is the proposal's own
+            instruction: the row of dots is where an operator is already looking when they
+            want to know about a machine. It is an anchor rather than an image role now, so
+            the accessible name says both what it reads and where it goes. --%>
+      <a :if={@machines != []} class="ouro-presence" href="/devices" aria-label="Open Devices">
         <span class="ouro-presence-label">Machines</span>
-        <span
-          :for={machine <- @machines}
-          class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
-          title={"#{label(machine)} — #{if machine.connected?, do: "connected", else: "not connected"}"}
-        >
-          <span class="ouro-visually-hidden">{label(machine)}</span>
+        <%!-- The dots keep the image role and the readout they have always had; the anchor
+              around them is what makes the labels the route to Devices. `display: contents`
+              on this wrapper leaves the row's layout exactly as it was. --%>
+        <span class="ouro-presence-dots" role="img" aria-label={@machines_label}>
+          <span
+            :for={machine <- @machines}
+            class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
+            title={"#{label(machine)} — #{if machine.connected?, do: "connected", else: "not connected"}"}
+          >
+            <span class="ouro-visually-hidden">{label(machine)}</span>
+          </span>
         </span>
-      </span>
+      </a>
 
       <div class="ouro-topbar-right">
         <span

@@ -328,7 +328,7 @@
     "slash": "/devices",
     "tui": { "command": "Devices", "action": "leader.devices" },
     "web": { "event": "runtime.devices" },
-    "note": "W3-B added this row: the proposal's distinct Devices navigation action, registered once so the two palettes name one verb the same way. The terminal client gives it a rebindable Action, leader.devices, and its catalogue drift test pins this block's action against Command::action, so a surface with no shortcut for it leaves its own block's action null rather than this one's."
+    "note": "The proposal's distinct Devices navigation action. The web opens a page at /devices; the terminal client opens a Devices view under the rebindable action leader.devices, which its catalogue drift test pins against Command::action."
   },
   {
     "id": "runtime.audit",
