@@ -165,7 +165,7 @@ defmodule Ouroboros.MixProject do
       # Owned actions use keyword-schema validation without an agent framework.
       {:nimble_options, "~> 1.1"},
       # Ouroboros calls ReqLLM directly from the in-process provider.
-      {:req_llm, "~> 1.22"},
+      {:req_llm, "~> 1.24"},
       {:req, "~> 0.7"},
       # Optional at runtime: the audit journal works without an index. Ship SQLite in
       # the release so enabling local search needs no server or sqlite3 installation.
