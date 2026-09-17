@@ -34,8 +34,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, FleetCommand, FleetMembersCommand, FleetTagCommand, ForkArgs,
-    LedgerArgs, McpCommand, NativeImportArgs, NativePreviewArgs, ReplayArgs, RunArgs,
+    AcpArgs, Cli, Command, FleetCommand, FleetMembersCommand, FleetServiceCommand, FleetTagCommand,
+    ForkArgs, LedgerArgs, McpCommand, NativeImportArgs, NativePreviewArgs, ReplayArgs, RunArgs,
     SessionsCommand, WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
@@ -49,7 +49,9 @@ use ouro::transport::{
 };
 use ouro::ui::boot::{Boot, BootEvent, BootProgress, Progress};
 use ouro::ui::{self, App, Mode, Quit, Screen};
-use ouro::{fleet, fleet_network, fleet_protocol, proto, runtime, status, transport};
+use ouro::{
+    fleet, fleet_network, fleet_protocol, fleet_service, proto, runtime, status, transport,
+};
 
 /// How long a runtime is given to stop before it is killed. `System.stop/0` and a
 /// SIGTERM both run the same orderly shutdown, and a runtime with durable journals is
@@ -228,7 +230,7 @@ async fn run(cli: Cli) -> Result<()> {
         }) => attach_remote(&paths, cli.dev, addr, token_file, print, config).await,
         Some(Command::Mcp { command }) => mcp_command(&paths, command).await,
         Some(Command::Web { print }) => web(&paths, cli.dev, print).await,
-        Some(Command::Stop) => stop(&paths, cli.dev).await,
+        Some(Command::Stop { require_idle }) => stop(&paths, cli.dev, require_idle).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
         Some(Command::Policy(args)) => policy(&paths, args).await,
         Some(Command::Audit(args)) => audit(&paths, args).await,
@@ -1615,6 +1617,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 Ok(())
             }
         },
+        FleetCommand::Service { command } => fleet_service_command(paths, command),
         FleetCommand::Leave => {
             let fleet_exists = fleet::fleet_dir(&paths.data_dir)
                 .try_exists()
@@ -1689,6 +1692,35 @@ fn parse_forget_session_owner_result<'a>(
     Ok((result_machine, node, roster_revision))
 }
 
+/// The four verbs of `ouro fleet service`, over the one library the fleet worker also
+/// calls remotely through the setup helper's `service` op.
+///
+/// Each one prints what it did and what the manager said; `--json` prints the same facts
+/// with stable codes and `null` wherever the manager did not say. Nothing here starts a
+/// runtime, and nothing here reads or writes a session.
+fn fleet_service_command(paths: &Paths, command: FleetServiceCommand) -> Result<()> {
+    let plan = fleet_service::Plan::for_this_machine(&paths.data_dir)?;
+    let programs = fleet_service::Programs::from_env();
+    let (report, json) = match command {
+        FleetServiceCommand::Install { adopt, json } => {
+            (fleet_service::install(&plan, &programs, adopt)?, json)
+        }
+        FleetServiceCommand::Status { json } => (fleet_service::status(&plan, &programs)?, json),
+        FleetServiceCommand::Disable { json } => (fleet_service::disable(&plan, &programs)?, json),
+        FleetServiceCommand::Remove { json } => (fleet_service::remove(&plan, &programs)?, json),
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("encoding the service report")?
+        );
+    } else {
+        print!("{}", fleet_service::render(&report));
+    }
+    Ok(())
+}
+
 /// Foreground ownership bridge for launchd/systemd. The generated unit points here, not
 /// at `ouro daemon`: daemon intentionally detaches, which would make a service manager
 /// think it exited and start duplicates. This command lives as long as its BEAM child,
@@ -1722,6 +1754,35 @@ async fn service_run(paths: &Paths, dev: bool) -> Result<()> {
             _ = terminate.recv() => return Ok(()),
             interrupt = tokio::signal::ctrl_c() => {
                 interrupt.context("waiting for the service interrupt signal")?;
+                return Ok(());
+            }
+        }
+    }
+
+    // The interface this profile advertises has to exist before the BEAM is told to
+    // bind EPMD and the distribution listener to it. On a laptop that boots before its
+    // VPN, or a machine whose overlay address arrives seconds after login, launching
+    // now would fail and hand the service manager a restart loop with nothing useful in
+    // it. Waiting here is observable in this unit's own log, costs nothing when the
+    // address is already up, and is cancelled by the signal the manager stops us with.
+    // Losing the network *after* this point is not handled here: the runtime keeps its
+    // credentials and its work, and the existing dialer reconnects.
+    if let Some(profile) = fleet::load(&paths.data_dir)? {
+        tokio::select! {
+            () = fleet_service::wait_for_network(&profile.host) => {}
+            _ = terminate.recv() => {
+                eprintln!(
+                    "ouro service: asked to stop while waiting for `{}` to become bindable; no runtime was started and nothing was changed",
+                    profile.host
+                );
+                return Ok(());
+            }
+            interrupt = tokio::signal::ctrl_c() => {
+                interrupt.context("waiting for the service interrupt signal")?;
+                eprintln!(
+                    "ouro service: interrupted while waiting for `{}` to become bindable; no runtime was started and nothing was changed",
+                    profile.host
+                );
                 return Ok(());
             }
         }
@@ -3176,12 +3237,17 @@ async fn print_page(address: SocketAddr, attached: Connected) -> Result<()> {
 
 /// `ouro stop`: ask the authenticated runtime to exit without ever signalling a PID
 /// learned from a replaceable publication.
-async fn stop(paths: &Paths, dev: bool) -> Result<()> {
+async fn stop(paths: &Paths, dev: bool, require_idle: bool) -> Result<()> {
     paths.ensure_private_data_dir()?;
-    stop_with_locked_publication(paths, dev, || std::future::ready(())).await
+    stop_with_locked_publication(paths, dev, require_idle, || std::future::ready(())).await
 }
 
-async fn stop_with_locked_publication<F, Fut>(paths: &Paths, dev: bool, after_lock: F) -> Result<()>
+async fn stop_with_locked_publication<F, Fut>(
+    paths: &Paths,
+    dev: bool,
+    require_idle: bool,
+    after_lock: F,
+) -> Result<()>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
@@ -3242,12 +3308,35 @@ where
     }
 
     if attached.hello.serves("runtime.shutdown") && attached.hello.operates() {
-        match attached.client.call("runtime.shutdown", json!({})).await {
+        // Seam C2: without the parameter this is byte-for-byte the request `ouro stop`
+        // has always sent, and the runtime's behaviour is unchanged.
+        let params = if require_idle {
+            json!({ "require_idle": true })
+        } else {
+            json!({})
+        };
+        match attached.client.call("runtime.shutdown", params).await {
             Ok(_result) => println!("the runtime accepted runtime.shutdown"),
             // The runtime stopping is exactly what was asked for, and it may stop before
             // it can answer.
             Err(ClientError::ConnectionClosed) => {
                 println!("the runtime accepted runtime.shutdown and closed the connection")
+            }
+            Err(ClientError::Rpc(error))
+                if require_idle && fleet_service::stop_refusal(error.data.as_ref()).is_some() =>
+            {
+                let refusal = fleet_service::stop_refusal(error.data.as_ref())
+                    .expect("the refusal the guard just matched");
+                attached.client.stop().await;
+                eprintln!(
+                    "ouro stop --require-idle: {}\nThe runtime was not stopped and nothing was changed. `ouro fleet service disable` stops a managed supervisor from restarting it; a plain `ouro stop` still stops it unconditionally.",
+                    refusal.rendered
+                );
+                // The publication lock is released here and, whatever happens next, by
+                // the kernel when this process ends: it is an flock on an open file, not
+                // a file this process has to remember to remove.
+                drop(lock);
+                std::process::exit(refusal.exit_code.into());
             }
             Err(error) => bail!("runtime.shutdown failed: {error}"),
         }
@@ -4205,7 +4294,7 @@ mod tests {
         let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
 
         let stopper = tokio::spawn(async move {
-            stop_with_locked_publication(&worker_paths, false, || async move {
+            stop_with_locked_publication(&worker_paths, false, false, || async move {
                 let _ = locked_tx.send(());
                 let _ = release_rx.await;
             })

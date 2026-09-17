@@ -1061,7 +1061,14 @@ ouro mcp add NAME (--command PROGRAM | --url URL) [--arg ARG]... [--env K=V]...
                       there is no mcp.add on the wire, because a definition is
                       a command line that runs on somebody's machine
 ouro mcp remove NAME [--scope user|workspace] [--workspace PATH]
-ouro stop             graceful stop of the locally spawned daemon
+ouro stop [--require-idle]
+                      graceful stop of the locally spawned daemon. --require-idle
+                      sends runtime.shutdown {"require_idle": true} and refuses
+                      rather than stopping a runtime that says it is working, or
+                      one that could not establish what it is doing: exit 10 is
+                      runtime_busy, exit 11 is activity_unknown, and both print
+                      the activity summary field by field. Plain `ouro stop` is
+                      byte-for-byte the request it has always sent
 ouro ledger [--fleet] [--since N] [--json] [--limit N]
          [--addr HOST:PORT] [--token-file PATH]
                       print the durable effect ledger as a table or NDJSON;
@@ -1131,6 +1138,26 @@ ouro fleet doctor [--json] [--peer NAME|ADDRESS]
                       the network-client layer. --peer probes the route to one
                       visible device with a single overlay ping and reports only
                       the path it observed
+ouro fleet service install [--adopt] [--json]
+ouro fleet service status [--json]
+ouro fleet service disable [--json]
+ouro fleet service remove [--json]
+                      the one startup service Ouroboros manages for this data
+                      directory: a macOS LaunchAgent or a systemd user unit that
+                      runs the foreground `ouro service-run`, never the detaching
+                      `ouro daemon`. Every generated unit carries an ownership
+                      marker naming this data directory and a hash of its own
+                      body; anything else at that path is reported with its digest
+                      and left alone, and --adopt is the operator saying it may be
+                      replaced. `install` refuses without a cluster identity,
+                      because a unit installed first would only crash-loop.
+                      `status` reports installed/loaded/running/last exit with
+                      `unknown` wherever the manager did not say, and states the
+                      platform's real limit: a LaunchAgent starts at login and
+                      never before it, and a systemd user unit needs lingering to
+                      survive logout. `disable` is the first half of stopping a
+                      supervised runtime; `remove` disables and then deletes the
+                      one file this code wrote. See docs/FLEET.md
 ouro fleet leave      remove this stopped machine's cluster credentials safely,
                       including a directory whose profile.json never landed
 ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]

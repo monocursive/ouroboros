@@ -228,7 +228,19 @@ pub enum Command {
     },
 
     /// Stop the runtime this client started.
-    Stop,
+    Stop {
+        /// Refuse the stop unless the runtime says it is idle.
+        ///
+        /// Sends `runtime.shutdown {"require_idle": true}`: the runtime reads its own
+        /// running and queued turns, image transfers and preparation, and connected
+        /// operator clients, and refuses if any of that is non-zero — or if it could
+        /// not establish one of them, because unknown activity is not idleness. The
+        /// refusals have their own exit codes so a script can tell them apart: 10 for
+        /// a busy runtime, 11 for activity it could not read. Without this flag `ouro
+        /// stop` behaves exactly as it always has.
+        #[arg(long)]
+        require_idle: bool,
+    },
 
     /// Print the durable effect ledger: what an agent was allowed to do, and what came
     /// of it.
@@ -1596,6 +1608,17 @@ pub enum FleetCommand {
         command: SessionsCommand,
     },
 
+    /// Install, inspect, disable or remove the one startup service Ouroboros manages.
+    ///
+    /// Only ever this data directory's own unit: a macOS LaunchAgent or a systemd user
+    /// unit that runs the foreground `ouro service-run`. Every unit written here carries
+    /// an ownership marker naming this data directory, and anything else found in the
+    /// service manager's directory is reported and left exactly as it is.
+    Service {
+        #[command(subcommand)]
+        command: FleetServiceCommand,
+    },
+
     /// Remove this machine's cluster credentials after its runtime is stopped.
     Leave,
 
@@ -1607,6 +1630,58 @@ pub enum FleetCommand {
     /// and which paths are touched, arrives inside a frame and is validated as data.
     #[command(hide = true)]
     Helper,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetServiceCommand {
+    /// Generate this data directory's user service and hand it to the manager.
+    ///
+    /// Refuses without a cluster identity, because `service-run` refuses to start
+    /// without one and a unit installed first would only crash-loop. `--no-service` is
+    /// not here: it belongs to `ouro fleet setup`, which decides whether to call this
+    /// at all.
+    Install {
+        /// Replace a unit at this data directory's own unit path that this code did
+        /// not write, or that somebody has edited since it did. Both are described,
+        /// with the digest of what is there, before this flag will replace them.
+        #[arg(long)]
+        adopt: bool,
+
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Report this data directory's service: installed, loaded, running, last exit.
+    ///
+    /// Reads the unit file and asks the manager; anything the manager does not say is
+    /// reported as unknown rather than guessed. Changes nothing.
+    Status {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop the service and stop it respawning, keeping the unit file.
+    ///
+    /// Documented rather than hidden: it is the first half of taking a managed runtime
+    /// down. A stop that leaves the supervisor enabled is a stop the supervisor undoes
+    /// a second later, so `ouro stop` on a serviced machine is `disable` then `stop`.
+    Disable {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Disable the service and delete the one unit file this code wrote.
+    ///
+    /// Touches no other unit, no other data directory, and nothing in the data
+    /// directory itself: sessions, journals and credentials are left alone.
+    Remove {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1933,6 +2008,84 @@ mod tests {
         }
     }
 
+    /// The four service verbs, and the one flag that lets `install` replace a file it
+    /// did not write. There is deliberately no `start`: after `disable`, `install` is
+    /// what puts the service back, and a verb that only starts something is a verb that
+    /// hides whether the unit on disk is still the one this code wrote.
+    #[test]
+    fn fleet_service_takes_four_verbs_and_one_adoption_flag() {
+        let Some(Command::Fleet {
+            command: FleetCommand::Service { command },
+        }) = parse(&["fleet", "service", "install"]).command
+        else {
+            panic!("`ouro fleet service install` must parse");
+        };
+        assert!(matches!(
+            command,
+            FleetServiceCommand::Install {
+                adopt: false,
+                json: false
+            }
+        ));
+
+        let Some(Command::Fleet {
+            command: FleetCommand::Service { command },
+        }) = parse(&["fleet", "service", "install", "--adopt", "--json"]).command
+        else {
+            panic!("`ouro fleet service install --adopt --json` must parse");
+        };
+        assert!(matches!(
+            command,
+            FleetServiceCommand::Install {
+                adopt: true,
+                json: true
+            }
+        ));
+
+        for verb in ["status", "disable", "remove"] {
+            let Some(Command::Fleet {
+                command: FleetCommand::Service { command },
+            }) = parse(&["fleet", "service", verb, "--json"]).command
+            else {
+                panic!("`ouro fleet service {verb} --json` must parse");
+            };
+            assert!(match (verb, command) {
+                ("status", FleetServiceCommand::Status { json })
+                | ("disable", FleetServiceCommand::Disable { json })
+                | ("remove", FleetServiceCommand::Remove { json }) => json,
+                _ => false,
+            });
+        }
+
+        // `--no-service` belongs to the setup flow that decides whether to install at
+        // all; a service verb that took it would be asking to install nothing.
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "service", "install", "--no-service"]).is_err()
+        );
+        // Adoption is never implicit, and never available to the verbs that delete.
+        assert!(Cli::try_parse_from(["ouro", "fleet", "service", "remove", "--adopt"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "fleet", "service", "start"]).is_err());
+    }
+
+    /// `--require-idle` is opt-in, and the plain stop keeps its exact shape.
+    #[test]
+    fn stop_gains_an_idle_gate_and_nothing_else() {
+        assert!(matches!(
+            parse(&["stop"]).command,
+            Some(Command::Stop {
+                require_idle: false
+            })
+        ));
+        assert!(matches!(
+            parse(&["stop", "--require-idle"]).command,
+            Some(Command::Stop { require_idle: true })
+        ));
+        // There is no way to ask for the opposite: a stop that ignores a stated refusal
+        // would be the unconditional stop, which is what plain `ouro stop` already is.
+        assert!(Cli::try_parse_from(["ouro", "stop", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "stop", "--no-require-idle"]).is_err());
+    }
+
     /// There is no `--token` anywhere, and that is a property worth failing a build over.
     #[test]
     fn no_subcommand_accepts_a_token_on_the_command_line() {
@@ -1944,6 +2097,20 @@ mod tests {
             vec!["daemon", "--token", "secret"],
             vec!["fleet", "join", "invite", "--token", "secret"],
             vec!["fleet", "service", "install", "--token", "secret"],
+            // A generated unit is a file a service manager reads forever. Nothing that
+            // names one may take a secret, and no flag here may name a password for the
+            // account the unit runs as.
+            vec!["fleet", "service", "install", "--password", "secret"],
+            vec![
+                "fleet", "service", "install", "--adopt", "--token", "secret",
+            ],
+            vec!["fleet", "service", "status", "--token", "secret"],
+            vec!["fleet", "service", "disable", "--token", "secret"],
+            vec!["fleet", "service", "remove", "--token", "secret"],
+            // The idle-gated stop authenticates with the token file beside gateway.json,
+            // exactly as the plain stop does, and takes no token of its own.
+            vec!["stop", "--require-idle", "--token", "secret"],
+            vec!["stop", "--token", "secret"],
             vec!["fleet", "devices", "--token", "secret"],
             vec!["fleet", "devices", "--password", "secret"],
             vec![

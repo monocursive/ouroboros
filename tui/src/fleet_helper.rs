@@ -376,6 +376,8 @@ impl Helper {
             "install" => self.install(&data_dir, object),
             "roster" => self.roster(&data_dir, object),
             "receipt" => self.receipt(&data_dir, object),
+            // W2-C
+            "service" => self.service(&data_dir, object),
             _ => {
                 return (
                     refusal(
@@ -532,6 +534,57 @@ impl Helper {
             }
             Some(_) => anyhow::bail!("`append` must be an object"),
         }
+    }
+
+    // W2-C: the startup service, over the same library `ouro fleet service` calls. The
+    // action is a fixed word from a closed set; nothing in the request names a path, a
+    // program or a unit, and nothing in it is executed. The data directory is the one
+    // this helper was started with, so an issuer cannot point a remote machine's service
+    // at somewhere else on it.
+    fn service(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+        let action = required_str(object, "action")?;
+        let plan =
+            crate::fleet_service::Plan::for_this_machine(data_dir).map_err(service_refusal)?;
+        let programs = crate::fleet_service::Programs::from_env();
+        let report = match action.as_str() {
+            "install" => crate::fleet_service::install(&plan, &programs, false),
+            "status" => crate::fleet_service::status(&plan, &programs),
+            "remove" => crate::fleet_service::remove(&plan, &programs),
+            "disable" => crate::fleet_service::disable(&plan, &programs),
+            "start" => crate::fleet_service::start(&plan, &programs),
+            other => {
+                return Err(fleet::AdmissionError {
+                    reason: "unsupported_action",
+                    detail: format!(
+                        "`{other}` is not one of install, status, remove, disable or start"
+                    ),
+                    roster_revision: None,
+                }
+                .into())
+            }
+        }
+        .map_err(service_refusal)?;
+
+        Ok(json!({
+            "action": action,
+            "report": serde_json::to_value(&report)
+                .context("encoding the service report")?,
+        }))
+    }
+}
+
+/// Carry a service refusal's stable reason onto the wire unchanged. The helper's one
+/// refusal shape is `fleet::AdmissionError`; this is the translation, and a failure that
+/// declared no reason stays an ordinary `failed`.
+fn service_refusal(error: anyhow::Error) -> anyhow::Error {
+    match crate::fleet_service::service_error(&error) {
+        Some(declared) => fleet::AdmissionError {
+            reason: declared.reason,
+            detail: declared.detail.clone(),
+            roster_revision: None,
+        }
+        .into(),
+        None => error,
     }
 }
 

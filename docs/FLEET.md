@@ -286,6 +286,86 @@ computes from.
 Ports: allow the EPMD port and the distribution range between the private addresses only.
 The gateway port stays loopback-only.
 
+## Starting at login or at boot
+
+`ouro fleet service` manages one startup service per data directory, and nothing else on
+the machine. The unit it writes runs the foreground `ouro service-run` with an absolute
+path to this exact `ouro` and an explicit `OUROBOROS_DATA_DIR`, never the detaching
+`ouro daemon`: `daemon` hands the runtime off and exits, which a service manager reads as
+a crash and answers with a second runtime.
+
+```sh
+ouro fleet service install          # generate the unit and hand it to the manager
+ouro fleet service status [--json]  # installed / loaded / running / last exit
+ouro fleet service disable          # stop it and stop it respawning; keep the unit
+ouro fleet service remove           # disable, then delete the one file this wrote
+```
+
+| Platform | What the service does, and what it does not |
+|---|---|
+| Linux with a reachable `systemctl --user` | A user unit with `Restart=on-failure`, `RestartSec=5` and a `StartLimitIntervalSec=300`/`StartLimitBurst=5` ceiling, wanted by `default.target`. Surviving logout and starting at boot requires lingering: `status` reports `loginctl show-user <you> --property=Linger` and, when it is off, says outright that this is a login-scoped service and names `loginctl enable-linger` as the administrator's step. When `loginctl` cannot be asked, lingering is reported as unknown rather than assumed. |
+| macOS with a logged-in user session | A LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad`, `KeepAlive` restricted to unsuccessful exits, and a 30 second `ThrottleInterval`. It starts at login and stops with the login session; there is **no pre-login execution**, so the machine is not reachable between a reboot and the next login. |
+| Anything else | `install` refuses with the prerequisite named — log in to the desktop session, or provide a reachable systemd user manager — and installs nothing. Start the runtime with `ouro daemon` and supervise it yourself; nothing here claims persistent startup it cannot deliver. |
+
+**Only our own units.** Every generated unit begins with an ownership marker naming the
+data directory it serves and a SHA-256 of the rest of the file:
+
+```text
+# ouroboros-managed v1 data-dir=/home/you/.ouroboros content-sha256=<64 hex>
+```
+
+`status` and `remove` act only on a file carrying that marker for this data directory.
+Anything else at that path — somebody else's unit, or one of ours that has been edited
+since it was written — is reported with the digest of what is actually there and left
+untouched; `install --adopt` is the operator saying, explicitly and after seeing that
+digest, that it may be replaced. `remove` never adopts.
+
+The unit's environment is `HOME`, a fixed system `PATH` and `OUROBOROS_DATA_DIR`, and
+nothing else. The runtime's own environment — node name, cookie file, EPMD address,
+roster — is derived from the profile at every start, so adding a machine to the roster
+never leaves a stale unit behind, and an `OUROBOROS_*`, `ERL_*` or `RELEASE_*` variable
+exported in the shell that ran `install` reaches neither the unit nor the BEAM.
+
+Logs go to `<data dir>/service.out.log` and `service.err.log`, created 0600 before the
+manager can create them at its own umask.
+
+### Waiting for the private interface
+
+A laptop boots before its VPN, and an overlay address can arrive seconds after login.
+`ouro service-run` therefore proves the profile's advertised address is bindable before
+it launches the BEAM, retrying on a throttle of one second doubling to fifteen. It writes
+one `waiting for network` line to the service log when the first probe fails and one a
+minute after that, so the wait is visible in the unit's own log rather than looking like
+a hang. `SIGTERM` during the wait exits 0 with a line saying so: nothing was started and
+nothing was changed. Losing the network *after* the runtime is up is a different thing
+and is not handled here — credentials, membership and work are untouched, and the
+existing dialer reconnects.
+
+### Stopping a supervised runtime
+
+A supervisor that is still enabled will restart a runtime the moment it stops, so take it
+out of the supervisor's hands first:
+
+```sh
+ouro fleet service disable
+ouro stop --require-idle
+```
+
+`ouro stop --require-idle` sends `runtime.shutdown {"require_idle": true}`. The runtime
+reads its own running and queued turns, image transfers and preparation, and connected
+operator clients, and refuses if any of it is non-zero — or if it could not establish one
+of them, because unknown activity is not idleness. The two refusals have their own exit
+codes so a script can tell them apart:
+
+| Exit | Meaning |
+|---|---|
+| 0 | the runtime accepted the stop and the pid it published is gone |
+| 10 | `runtime_busy` — the activity summary is printed, field by field |
+| 11 | `activity_unknown` — the runtime could not read one or more counters, and they are named |
+
+Plain `ouro stop` is unchanged: it sends the same request it always has, with no
+parameter, and stops the runtime unconditionally.
+
 ## Facts, tags and placement
 
 `Ouroboros.Cluster.Facts` carries each node's posture: OS, CPU, hostname, operator tags,
