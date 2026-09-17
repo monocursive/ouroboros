@@ -138,29 +138,42 @@ fn parse(output: &Output) -> Value {
 }
 
 /// Gives the scratch data directory a fleet profile, on loopback ports no lab uses.
+///
+/// The ledger above never hands one port out twice, but a port is released before
+/// `fleet create` binds it, and another test's transient port-0 bind (a bindability
+/// probe, a fake client) can take it in that window. That is a harness race, not a
+/// property of the code under test, so an "already in use" refusal is retried with
+/// fresh ports a bounded number of times; any other refusal fails the test at once.
 fn create_fleet(scratch: &Scratch, machine: &str) {
-    let ports = ephemeral_ports();
-    let output = ouro(
-        scratch,
-        None,
-        &[
-            "fleet",
-            "create",
-            "--machine",
-            machine,
-            "--host",
-            "127.0.0.1",
-            "--gateway-port",
-            &ports.0.to_string(),
-            "--dist-port",
-            &ports.1.to_string(),
-        ],
-    );
-    assert!(
-        output.status.success(),
-        "`ouro fleet create` must succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let mut last = String::new();
+    for _attempt in 0..5 {
+        let ports = ephemeral_ports();
+        let output = ouro(
+            scratch,
+            None,
+            &[
+                "fleet",
+                "create",
+                "--machine",
+                machine,
+                "--host",
+                "127.0.0.1",
+                "--gateway-port",
+                &ports.0.to_string(),
+                "--dist-port",
+                &ports.1.to_string(),
+            ],
+        );
+        if output.status.success() {
+            return;
+        }
+        last = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            last.contains("already in use"),
+            "`ouro fleet create` must succeed: {last}"
+        );
+    }
+    panic!("`ouro fleet create` kept losing its ports to a concurrent bind: {last}");
 }
 
 /// Two distinct free loopback ports. Fleet tests never touch the production port spaces;
