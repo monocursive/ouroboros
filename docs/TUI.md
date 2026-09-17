@@ -2142,7 +2142,8 @@ session options · `l` switch session · `w` writable session · `k` end or remo
 scrollback · `v` transcript in `$EDITOR` · `i` the newest image in the system viewer ·
 `a` the approval modal · `A` auto-approve everything this session asks · `r` the rule a
 refused `!` named · `d` event details · `x` export · `c` compact · `m` prefill `/model ` ·
-`t` the theme picker · `g` backtrack · `s` the Dashboard tab · `b` hide or show the rail ·
+`t` the theme picker · `g` backtrack · `s` the Dashboard tab · `D` the Devices view ·
+`b` hide or show the rail ·
 `,` settings · `1`–`4` the four tabs · `q` quit · `?` help. `ctrl+x o` is kept as an alias
 of `ctrl+x d`; it is an alias rather than an action, so `/keys` does not print a second row
 for one verb. Each leader verb runs the same code its `/` verb runs, so there is one
@@ -2616,6 +2617,84 @@ command whose whole job is to answer "is anything waiting on me" must not answer
 creating something to wait on. Its counts can differ from the rail's by the approvals the
 rail is holding on an open stream, which `ouro agents` does not have.
 
+### Devices, and deploying to one (slice 6)
+
+`ctrl+x D` (`leader.devices`), `/devices`, the palette's **Devices** row and a `d` in
+Settings' **F3 Runtime** section all open one view: the machines this runtime can see,
+and the deployment of Ouroboros onto one of them
+([devices.rs](../tui/src/ui/app/devices.rs)). It is the terminal half of the proposal's
+"Devices UI and deployment experience"; the web page at `/devices` draws the same
+inventory, the same fields, the same confirmations, the same challenge kinds and the same
+progress states, and the row both surfaces are named from is `runtime.devices` in
+`priv/ui/commands.json`.
+
+**Nothing in the view does any work.** Discovery, SSH, artifact verification and roster
+writes run on the *deployment host* — the machine hosting the runtime this client is
+attached to, which for a connected TUI is no more this laptop than it is a browser's. The
+view issues eight methods (`fleet.devices`, `fleet.deployment.prepare|status|start|
+authenticate|confirm_host|cancel|resume`, and `fleet.status` as the non-administrator
+fallback) and draws what comes back. The permanent header `Deploying from <host> · local
+user <account>` is on every screen of the flow, because a credential typed into the wrong
+host's prompt is the failure the header exists to prevent.
+
+**The inventory** is two sections — *Fleet devices* and *Available on this network* —
+merged by `ouro fleet devices --json` on the deployment host and rendered here with the
+state in words rather than codes: `DeviceState::label()` is the one place those words
+live, and `a_state_code_maps_to_the_words_the_cli_prints` pins this view against it.
+`r` refetches, `/` searches by name or address, `f` cycles the fleet/available filter.
+Each way discovery can fail has its own empty state, in `Inventory::headline`'s wording.
+A device that adopts a roster machine's name is listed as itself with a note and is never
+merged into the member it is imitating. Every string a *device* supplies goes through
+`fleet_network::human`, the same bounding the CLI's row renderer applies, so a hostname
+carrying escapes, bidi overrides or a forged four-line row cannot draw one
+(`tests/fixtures/tailscale/hostile-names.json` is the capture that tries).
+
+**The deploy flow** is the proposal's five steps. Select and connect asks for the SSH
+username — required, and never inferred from the network client's owner — with port,
+identity and paths as advanced fields. Then the broker is the authority for every screen
+after it: `fleet.deployment.status` is polled about once a second, its `state` names the
+stage, and its open challenge names the question. `host_trust` shows the algorithm, the
+SHA256 fingerprint and the address, port and account it belongs to, with an explicit `t`
+and `n` and the line saying to verify the fingerprint independently; `Enter` is not an
+answer. `password` and `passphrase` are separate prompts labelled from their own
+metadata. `review` renders the plan with `Plan::render` — the same text the CLI and a dry
+run print — and `a` approves *that* digest under an idempotency key derived from the
+operation and the digest, so a lost answer replays rather than becoming a second
+intention.
+
+**Leaving never cancels.** `Esc` closes the view and stops nothing; the operation keeps
+running on the deployment host, the Devices row says a setup is open and names its owner,
+and its primary action becomes **Continue setup**. Reopening re-reads the operation by id.
+An operation whose worker is gone is resumed — and a resume of *another identity's*
+operation is refused `operation_not_yours` by the runtime, which this view turns into an
+explicit **Take over this setup?** naming the owner. `takeover: true` is sent from that
+answer and from nowhere else, because a resume attaches under the resuming identity and
+every later challenge binds to them: taking over a setup is taking over its credential
+prompts.
+
+**Where the secret is, and is not.** One field holds a typed secret: a `Zeroizing` buffer
+whose `Debug` prints a character count and no characters, which renders as one bullet per
+character, and which is cleared on submit, on cancel, on the challenge being replaced and
+on closing the view. It is never on a `Tag` — tags are cloned, hashed and `Debug`-printed
+— never in a notice and never in a log line. What leaves the view is one
+`fleet.deployment.authenticate` call, the one method whose parameters the gateway keeps
+out of its audit digest. `tests/devices_flow.rs` types a unique password and then looks
+for it in the frame, in the view's own `Debug` and in every queued request.
+
+**Read scope and non-administrator.** `fleet.devices` is a read-scope method that the
+identity rule reserves for administrators, so a `-32003` on it can only be the identity
+rule — and that is a different sentence from `hello.methods` not listing the method at
+all. Both fall back to `fleet.status`'s membership subset with a sentence saying which
+happened. A read-scope listener sees the inventory and is told it cannot start a
+deployment. A runtime whose `capabilities.deploy` is false explains the first reason in
+words (`no_ca_key`, `ouro_path_unknown`, `no_data_dir`, `cleartext_web_bind`) rather than
+drawing an action that would fail when pressed.
+
+**Screen-reader mode** numbers the rows and the menu answers, drops the box drawing, and
+rings the bell when the deployment stops for a person — once per question, through the
+existing `notify::Signal::NeedsInput` path, which resolves `auto` to the bell in this mode
+whether or not the terminal has focus.
+
 ### Names on screen, never wire words (T2.8)
 
 Erlang node names, JSON-RPC codes and atoms are facts about the encoding, not about the
@@ -2955,6 +3034,7 @@ filing by keyboard rather than by question.
 |  | `leader.model` | `m` | turn |
 |  | `leader.backtrack` | `g` | conversation |
 |  | `leader.status` | `s` | runtime |
+|  | `leader.devices` | `D` | runtime |
 |  | `leader.rail` | `b` | client |
 |  | `leader.tab_dashboard` | `1` | runtime |
 |  | `leader.tab_sessions` | `2` | runtime |

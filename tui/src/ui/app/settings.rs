@@ -457,8 +457,13 @@ impl App {
             return;
         }
         if settings.section == SettingsSection::Runtime {
-            if key.code == KeyCode::Esc {
-                self.overlay = None;
+            match key.code {
+                KeyCode::Esc => self.overlay = None,
+                // The proposal's Devices link, from the Runtime section it names. It
+                // replaces this overlay rather than stacking on it: two full pages over
+                // each other is a screen an operator cannot get out of predictably.
+                KeyCode::Char('d') if self.devices_offered() => self.open_devices(),
+                _other => {}
             }
             return;
         }

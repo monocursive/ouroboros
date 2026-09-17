@@ -383,6 +383,9 @@ impl App {
                 Ok(value) => self.shell_finished(plane, &id, &command, &value),
                 Err(error) => self.shell_refused(&error),
             },
+            // Every Devices answer is routed by the view, which is the only thing that
+            // knows what stage each one belongs to.
+            Tag::Devices(tag) => self.devices_answer(tag, result),
             Tag::Action {
                 label, plane, id, ..
             } => match result {

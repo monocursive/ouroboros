@@ -1058,6 +1058,9 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         // collides, and neither page needs anything from it but `centered`.
         Overlay::Keys { scroll } => super::panels::keymap(frame, area, app, *scroll),
         Overlay::Cost { scroll } => super::panels::cost(frame, area, app, *scroll),
+        // The Devices view draws itself, in the module that knows what an inventory row
+        // and a masked challenge field are.
+        Overlay::Devices => devices(frame, area, app),
         Overlay::Quit { options, choice } => chooser(
             frame,
             area,
@@ -2013,7 +2016,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         SettingsSection::Connections => settings_connections(frame, chunks[1], app, settings),
         SettingsSection::Defaults => settings_defaults(frame, chunks[1], app, settings),
         SettingsSection::Runtime => {
-            let facts = vec![
+            let mut facts = vec![
                 Line::styled("Runtime & security", theme::heading()),
                 Line::styled("as reported by the runtime — not editable here", theme::label()),
                 Line::from(""), field("address", &app.address),
@@ -2025,6 +2028,25 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
                 field("config", &app.config_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "nowhere to keep preferences".into())),
                 Line::from(""), Line::from("Provider credentials belong to the attached runtime computer. Client session defaults are saved separately."),
             ];
+
+            // The proposal asks that Devices be linked from the existing Runtime
+            // settings surface. Drawn only where the row is offered, so it never
+            // advertises a page this runtime cannot open.
+            if app.devices_offered() {
+                facts.push(Line::from(""));
+                facts.push(Line::styled("Devices", theme::heading()));
+                facts.push(field(
+                    "open",
+                    &format!(
+                        "d here, or {}",
+                        app.command_shortcut(super::app::Command::Devices)
+                    ),
+                ));
+                facts.push(Line::from(
+                    "The machines this runtime can see, and deploying Ouroboros onto one of them.",
+                ));
+            }
+
             frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), chunks[1]);
         }
         SettingsSection::Client => settings_client(frame, chunks[1], app, settings),
@@ -2039,7 +2061,9 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
             SettingsSection::Defaults => {
                 "Tab/↑↓ move · ←→ change · Enter on save writes · F4 client · Esc close"
             }
-            SettingsSection::Runtime => "F1 connections · F2 defaults · F4 client · Esc close",
+            SettingsSection::Runtime => {
+                "d devices · F1 connections · F2 defaults · F4 client · Esc close"
+            }
             SettingsSection::Client => {
                 "Tab/↑↓ move · ←→ or space change · Enter on save writes · Esc close"
             }
@@ -4265,6 +4289,53 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
 }
 
 /// A popup of `width` percent and an explicit height, clamped to the frame.
+/// The Devices view: the machines this runtime can see, and the deployment of Ouroboros
+/// onto one of them.
+///
+/// Nearly the whole screen, because it is a page rather than a dialog, and drawn from
+/// [`super::app::devices_lines`] so a test can read every row of it without a terminal.
+/// The list follows its own cursor; the longer screens page with `PageUp`/`PageDown`.
+fn devices(frame: &mut Frame, area: Rect, app: &App) {
+    let popup = centered(area, 92, area.height.saturating_sub(2).max(8));
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .title(Span::styled(" devices ", theme::heading()));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let lines = super::app::devices_lines(app);
+    let height = rows[0].height as usize;
+    let hidden = lines.len().saturating_sub(height);
+    let scroll = app.devices.scroll.min(hidden);
+    let visible = lines[scroll.min(lines.len())..].to_vec();
+
+    frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), rows[0]);
+
+    let hint = if hidden > scroll {
+        format!(
+            "{} · PageDown for {} more row{}",
+            super::app::devices_hint_line(app),
+            hidden - scroll,
+            if hidden - scroll == 1 { "" } else { "s" }
+        )
+    } else {
+        super::app::devices_hint_line(app)
+    };
+
+    frame.render_widget(
+        Paragraph::new(access::speakable(&hint)).style(theme::label()),
+        rows[1],
+    );
+}
+
 pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     let horizontal = Layout::horizontal([Constraint::Percentage(width_percent)])
         .flex(Flex::Center)

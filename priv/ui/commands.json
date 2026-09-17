@@ -322,6 +322,15 @@
     "note": "The terminal client's Dashboard tab and the web's /status page are the same subject on two differently shaped surfaces, and each is named after the thing it opens."
   },
   {
+    "id": "runtime.devices",
+    "label": "Devices",
+    "group": "runtime",
+    "slash": "/devices",
+    "tui": { "command": "Devices", "action": "leader.devices" },
+    "web": { "event": "runtime.devices" },
+    "note": "W3-B added this row: the proposal's distinct Devices navigation action, registered once so the two palettes name one verb the same way. The terminal client gives it a rebindable Action, leader.devices, and its catalogue drift test pins this block's action against Command::action, so a surface with no shortcut for it leaves its own block's action null rather than this one's."
+  },
+  {
     "id": "runtime.audit",
     "label": "Audit",
     "group": "runtime",

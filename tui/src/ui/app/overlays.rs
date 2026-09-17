@@ -274,10 +274,14 @@ pub enum Command {
     /// The approval waiting on an answer. `ctrl+x a` reopens it; this is the row for
     /// anyone who has not learnt the chord.
     Approval,
+    /// The machines this runtime can see, and the deployment of Ouroboros onto one of
+    /// them. The proposal's Devices navigation action, registered in
+    /// `priv/ui/commands.json` beside the web's row so one verb has one name.
+    Devices,
 }
 
 impl Command {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 44] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -321,6 +325,7 @@ impl Command {
         Self::Rename,
         Self::Quit,
         Self::Approval,
+        Self::Devices,
     ];
 
     /// S1. This command's row in `priv/ui/commands.json`.
@@ -374,6 +379,7 @@ impl Command {
             Self::Rename => "session.rename",
             Self::Quit => "client.quit",
             Self::Approval => "turn.approval",
+            Self::Devices => "runtime.devices",
         }
     }
 
@@ -489,6 +495,7 @@ impl Command {
             Self::AutoApprove => Action::LeaderAutoApprove,
             Self::Quit => Action::Quit,
             Self::Approval => Action::LeaderApproval,
+            Self::Devices => Action::LeaderDevices,
             _slash_only => return None,
         })
     }
@@ -584,6 +591,12 @@ impl App {
                     self.sessions.open.is_some() && self.hello.serves("interactive.configure")
                 }
                 Command::Mcp => self.hello.serves("mcp.list"),
+                // The proposal's rule for this row: gate it through the surface's actual
+                // method checks. A runtime serving neither the inventory nor the fleet
+                // membership has no Devices page worth opening — but one that serves
+                // `fleet.devices` and would refuse *this identity* does, because that is
+                // where the sentence explaining the refusal is written.
+                Command::Devices => self.devices_offered(),
                 // F12. The same two questions the verb itself asks: is there a session,
                 // and does this gateway serve the method that renames one.
                 Command::Rename => {
@@ -820,6 +833,11 @@ pub enum Overlay {
         /// thing that could disagree with it.
         from_picker: bool,
     },
+    /// The Devices view. A marker rather than a state bag: everything it draws lives on
+    /// `App::devices`, so closing it and opening it again is free, and an operation it
+    /// was following is still there — and still running on the deployment host — when it
+    /// comes back.
+    Devices,
 }
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
@@ -974,6 +992,13 @@ impl App {
             return;
         }
 
+        // A view with text fields and a masked field of its own, so it is dispatched
+        // before the choosers below can claim `j`, `k`, `t` or `n`.
+        if matches!(self.overlay, Some(Overlay::Devices)) {
+            self.devices_key(key);
+            return;
+        }
+
         let Some(overlay) = self.overlay.as_mut() else {
             return;
         };
@@ -993,6 +1018,8 @@ impl App {
                 KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(10),
                 _ => {}
             },
+            // Dispatched above, before the choosers below could claim its letters.
+            Overlay::Devices => {}
             // Two read-only pages with the same discipline as `?`: scroll, or leave.
             Overlay::Keys { scroll } | Overlay::Cost { scroll } => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
@@ -1495,6 +1522,10 @@ impl App {
             Command::Settings => {
                 self.overlay = None;
                 self.open_settings();
+            }
+            Command::Devices => {
+                self.overlay = None;
+                self.open_devices();
             }
             Command::Help => {
                 self.open_help();

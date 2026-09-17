@@ -462,6 +462,7 @@ fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
         (Action::LeaderModel, "m"),
         (Action::LeaderBacktrack, "g"),
         (Action::LeaderStatus, "s"),
+        (Action::LeaderDevices, "D"),
         (Action::LeaderRail, "b"),
         (Action::LeaderTabDashboard, "1"),
         (Action::LeaderTabSessions, "2"),
@@ -896,6 +897,7 @@ fn the_new_actions_are_rebindable_and_listed() {
         Action::LeaderModel,
         Action::LeaderBacktrack,
         Action::LeaderStatus,
+        Action::LeaderDevices,
         Action::LeaderRail,
         Action::LeaderTabDashboard,
         Action::LeaderTabSessions,
@@ -1085,7 +1087,7 @@ fn every_action_round_trips_and_the_table_is_complete() {
 
     assert_eq!(
         Action::ALL.len(),
-        63,
+        64,
         "an action arrived without a row here"
     );
 }

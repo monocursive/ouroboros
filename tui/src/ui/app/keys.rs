@@ -331,6 +331,7 @@ impl App {
             Some(Action::LeaderModel) => self.prefill_composer("/model "),
             Some(Action::LeaderBacktrack) => self.activate_command(Command::Backtrack),
             Some(Action::LeaderStatus) => self.select_tab(Tab::Dashboard),
+            Some(Action::LeaderDevices) => self.open_devices(),
             Some(Action::LeaderRail) => self.toggle_rail(),
             Some(Action::LeaderTabDashboard) => self.select_tab(Tab::Dashboard),
             Some(Action::LeaderTabSessions) => self.select_tab(Tab::Sessions),
