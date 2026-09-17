@@ -53,7 +53,10 @@ defmodule Ouroboros.Fleet.Deployment do
   # `ouro fleet devices --json` asks the local network client and returns; S10 fixes its
   # ceiling at ten seconds, which is above a slow client and well below the method's own.
   @devices_timeout 10_000
-  @spawn_timeout 10_000
+  # The worker's listen deadline is 20s (`LISTEN_DEADLINE` in the Rust worker). A 10s
+  # ceiling SIGKILL'd the parent while the grandchild was still starting, then deleted the
+  # request it was about to read. 25s is above that deadline with room for scheduling.
+  @spawn_timeout 25_000
   @call_timeout 20_000
 
   # An operation id names a Unix socket path, and `sun_path` is 104 bytes on this platform.
@@ -65,12 +68,6 @@ defmodule Ouroboros.Fleet.Deployment do
   # runtime, and how many recent attach failures are kept so `status` can explain one.
   @max_devices 4
   @max_failures 32
-
-  # How long `prepare` waits for the worker to publish its capability, and the backoff it
-  # waits with. Same shape as the client's connect retry, and the same reasoning.
-  @capability_budget 5_000
-  @first_backoff 25
-  @max_backoff 500
 
   # A journal state the operation cannot be continued from.
   @terminal ~w(completed cancelled)
@@ -258,6 +255,33 @@ defmodule Ouroboros.Fleet.Deployment do
   # to a listener and to a browser: this runtime publishes a cleartext operator surface, and
   # a credential must not be typed into this deployment host while it does.
   defp cleartext_web_bind? do
+    case running_endpoint_bind() do
+      {:ok, bind} -> not loopback_bind?(bind)
+      # The endpoint is up and this cannot read its bind: the honest answer to "may a
+      # credential be typed into this host" is no, not a guess from a stale app env.
+      :unreadable -> true
+      :absent -> app_env_cleartext?()
+    end
+  end
+
+  defp running_endpoint_bind do
+    if Process.whereis(Ouroboros.Web.Endpoint) do
+      try do
+        case Ouroboros.Web.Config.for_endpoint(Ouroboros.Web.Endpoint) do
+          %{bind: bind} -> {:ok, bind}
+          _missing -> :unreadable
+        end
+      rescue
+        _exception -> :unreadable
+      catch
+        _kind, _reason -> :unreadable
+      end
+    else
+      :absent
+    end
+  end
+
+  defp app_env_cleartext? do
     web = Application.get_env(:ouroboros, :web, [])
 
     if Keyword.get(web, :enabled, false),
@@ -379,10 +403,18 @@ defmodule Ouroboros.Fleet.Deployment do
 
       dir ->
         attached = attached_operations()
-        {summaries, total} = Journal.list(dir)
+        {summaries, total} = listed_journals(dir)
 
         {Enum.map(summaries, &Map.put(&1, "attached", &1["operation"] in attached)), total}
     end
+  end
+
+  defp listed_journals(dir) do
+    GenServer.call(__MODULE__, {:journals, dir}, @call_timeout)
+  catch
+    :exit, _reason ->
+      {summaries, total, _cache} = Journal.list(dir)
+      {summaries, total}
   end
 
   defp attached_operations do
@@ -476,11 +508,12 @@ defmodule Ouroboros.Fleet.Deployment do
   # Mutations
 
   @doc """
-  Starts inspection of one target: forks a worker, attaches to it, and answers its id.
+  Starts inspection of one target: mints an id, starts a client, and answers immediately.
 
-  Answers as soon as the worker is attached, which is the point of the worker existing:
-  inspection, host verification and authentication all happen behind the returned id rather
-  than inside this call.
+  The client forks the worker and attaches in its own process. This used to wait out that
+  handshake inside this call, which stalled every other verb on the named singleton for
+  as long as `ouro fleet worker start` took. The answer is now `spawning`; `status` is
+  what says when the handshake has caught up.
   """
   @spec prepare(map(), binding()) :: {:ok, map()} | {:error, term()}
   def prepare(request, binding) when is_map(request) and is_map(binding) do
@@ -700,9 +733,15 @@ defmodule Ouroboros.Fleet.Deployment do
        # operation whose handshake never completed — which since the handshake moved off the
        # broker's call is the only place that answer can come from.
        failures: %{},
-       failure_order: []
-     }}
+       failure_order: [],
+       # `{path, mtime, size} => summary`. `Journal.list/2` fills it; a file that has not
+       # changed is not parsed again.
+       journal_cache: %{}
+     }, {:continue, :retain}}
   end
+
+  @impl true
+  def handle_continue(:retain, state), do: {:noreply, retain(state)}
 
   @impl true
   def handle_call(:attached, _from, state), do: {:reply, Map.keys(state.operations), state}
@@ -746,6 +785,11 @@ defmodule Ouroboros.Fleet.Deployment do
         {:error, reason} -> {:reply, {:error, reason}, state}
       end
     end
+  end
+
+  def handle_call({:journals, dir}, _from, state) do
+    {summaries, total, cache} = Journal.list(dir, state.journal_cache)
+    {:reply, {summaries, total}, %{state | journal_cache: cache}}
   end
 
   # Read-only. Says what a start under this key would be without making it so.
@@ -818,7 +862,8 @@ defmodule Ouroboros.Fleet.Deployment do
         {:noreply,
          state
          |> Map.put(:operations, Map.delete(state.operations, operation))
-         |> remember_failure(operation, reason)}
+         |> remember_failure(operation, reason)
+         |> retain()}
     end
   end
 
@@ -855,234 +900,66 @@ defmodule Ouroboros.Fleet.Deployment do
 
   # ---------------------------------------------------------------------------
 
-  # Spawn, then read the capability file, then connect. In that order because the worker
-  # writes the capability file before its socket listens (S3): a capability that is not there
-  # yet means a worker that is not listening yet, and connecting first would only make that
-  # race harder to read.
+  # Mint, start the client, answer. The client forks and attaches in `handle_continue`, so
+  # this call does not wait out `ouro fleet worker start` and every other verb stays
+  # answerable. A spawn or handshake failure kills the client rather than this reply; the
+  # broker learns it from the monitor, which is also what `status` consults for
+  # `attach_failed`.
   defp open(state, operation, request, binding) do
     with {:ok, dir} <- resolve_data_dir(state),
-         {:ok, %{socket: socket, instance: instance}} <-
-           state.launcher.spawn_worker(operation, dir, request, @spawn_timeout) do
-      adopt(state, operation, dir, socket, instance, binding)
+         {:ok, pid} <- start_client(state, operation, binding, dir, request) do
+      entry = %{
+        pid: pid,
+        ref: Process.monitor(pid),
+        instance: nil,
+        key: nil,
+        result: nil
+      }
+
+      {:reply, {:ok, %{"operation_id" => operation, "state" => "spawning"}},
+       put_in(state.operations[operation], entry)}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  # Past this point a detached worker exists. Anything that fails from here has to *say so*
-  # to that worker, because nothing else will: it is in its own session, it outlives this
-  # runtime by design, and an operation the broker never recorded is an operation no verb can
-  # reach. Before this, a capability file with the wrong mode left a worker running with a
-  # socket nobody would ever connect to, waiting out its own idle timeout (review F8).
-  defp adopt(state, operation, dir, socket, instance, binding) do
-    case read_capability(dir, operation) do
-      {:ok, cap} ->
-        case start_client(state, operation, instance, socket, cap, binding) do
-          {:ok, pid} ->
-            entry = %{
-              pid: pid,
-              ref: Process.monitor(pid),
-              instance: instance,
-              key: nil,
-              result: nil
-            }
-
-            {:reply,
-             {:ok,
-              %{"operation_id" => operation, "instance" => instance, "state" => "attaching"}},
-             put_in(state.operations[operation], entry)}
-
-          {:error, reason} ->
-            # The capability is in hand, so the worker can be told to stop.
-            reap_worker(operation, socket, instance, cap)
-            {:reply, {:error, reason}, state}
-        end
-
-      {:error, reason} ->
-        case Journal.read(dir, operation) do
-          {:ok, document} ->
-            # The worker finished before this could attach — an operation that fails fast
-            # enough never publishes a capability at all, or removes it on the way out. It
-            # still *happened*, and its journal says what happened, so refusing here would
-            # throw away the only record of it and hand the caller no id to read it by.
-            #
-            # Found by driving the real worker: an `add` whose target refuses a host-key scan
-            # is done in well under a second.
-            {:reply,
-             {:ok,
-              %{
-                "operation_id" => operation,
-                "instance" => instance,
-                "state" => document["state"] || "unknown"
-              }}, state}
-
-          {:error, _no_journal} ->
-            # No capability and no journal: nothing to attach to and nothing to read. A
-            # capability this runtime refused to *use* is also one it must not present, so a
-            # worker that is somehow still running cannot be cancelled either — which is said
-            # out loud rather than left silent (review F8).
-            Logger.warning(
-              "fleet deployment could not adopt the worker for #{operation} and it left no " <>
-                "journal: #{inspect(reason)}"
-            )
-
-            {:reply, {:error, reason}, state}
-        end
-    end
-  end
-
-  # Best effort, and said plainly: this connects with the capability if it can still read
-  # one, attaches, asks the worker to cancel, and gives up quietly otherwise. A capability
-  # this runtime could not use is one it may not be able to present either — in which case
-  # the worker's own bounded idle timeout is what ends it, and the log line is the only thing
-  # this can honestly offer.
-  defp reap_worker(operation, socket, instance, cap) do
-    _ = spawn(fn -> reap_over_socket(operation, socket, instance, cap) end)
-    :ok
-  end
-
-  defp await_attached(pid) do
-    Enum.reduce_while(1..100, :timeout, fn _attempt, _acc ->
-      case Client.snapshot(pid) do
-        {:ok, %{"attached" => true}} -> {:halt, :ok}
-        {:error, _reason} -> {:halt, :gone}
-        _not_yet -> tick()
-      end
-    end)
-  end
-
-  defp tick do
-    Process.sleep(20)
-    {:cont, :timeout}
-  end
-
-  defp reap_over_socket(operation, socket, instance, cap) do
-    case Client.start_link(
-           operation: operation,
-           instance: instance,
-           socket_path: socket,
-           cap: cap,
-           subject: "runtime-reaper",
-           session: "runtime-reaper"
-         ) do
-      {:ok, pid} ->
-        # The handshake is asynchronous now, so wait for it before asking for anything: a
-        # cancel sent while the socket is still being attached answers `worker_attaching`
-        # and reaps nothing.
-        _ = await_attached(pid)
-        _ = Client.cancel(pid)
-        GenServer.stop(pid, :normal, 2_000)
-
-        Logger.info("fleet deployment cancelled the worker it could not adopt for #{operation}")
-
-      {:error, reason} ->
-        Logger.warning(
-          "fleet deployment could not reach the worker it could not adopt for #{operation}: " <>
-            "#{inspect(reason)}"
-        )
-    end
-  catch
-    _kind, _reason -> :ok
-  end
-
   # The exit is caught and the reason is *discarded*, not wrapped. A `DynamicSupervisor` that
   # is not running exits the caller rather than answering it, and that exit's reason carries
-  # the child spec — which carries the capability. This is the same shape of bug as the one
-  # the review found in the client's `call/3` (F1): an exit reason is an argument list, and
-  # an argument list here is a credential. The broker also does not die of a sibling that is
-  # restarting, which is the other half of why this is a catch rather than a let-it-crash.
-  defp start_client(state, operation, instance, socket, cap, binding) do
+  # the child spec — which, once spawn lived here, carried the capability. The same shape as
+  # the client's `call/3` (F1): an exit reason is an argument list. The broker also does not
+  # die of a sibling that is restarting, which is the other half of why this is a catch.
+  defp start_client(state, operation, binding, dir, request) do
     DynamicSupervisor.start_child(
       state.supervisor,
       {Client,
        [
          operation: operation,
-         instance: instance,
-         socket_path: socket,
-         cap: cap,
          subject: binding[:subject],
          session: binding[:session],
          takeover?: binding[:takeover?] == true,
-         clock: state.clock
+         clock: state.clock,
+         launcher: state.launcher,
+         data_dir: dir,
+         request: request,
+         spawn_timeout: @spawn_timeout
        ]}
     )
   catch
     :exit, _reason -> {:error, :client_supervisor_unavailable}
   end
 
-  # The capability is at least 32 hex characters in a 0600 file the worker removes when it
-  # exits. Both facts are checked: a capability file anybody on this machine can read is not
-  # a capability, and this refuses to present one rather than quietly accepting a weaker
-  # boundary than the worker promised.
-  # Retried, because the capability file and the socket are written in an order this side
-  # does not control. The worker currently writes the capability *after* it binds, and
-  # `worker start` returns once it has bound — so a read that happens immediately can land in
-  # between and report `capability_missing` against a worker that publishes one a moment
-  # later. Only a genuinely absent file is retried: a file that is there and wrong is a
-  # refusal that will not improve by asking again.
-  #
-  # This sleeps in the broker's own call, which is the one thing review F12 was about. It is
-  # bounded, and it only sleeps on the rare path — the ordinary read succeeds first time and
-  # costs nothing. If that stops being true this belongs in the client beside the connect
-  # retry, where waiting costs nobody else anything.
-  defp read_capability(data_dir, operation) do
-    deadline = System.monotonic_time(:millisecond) + @capability_budget
-    attempt_capability(data_dir, operation, deadline, @first_backoff)
-  end
+  # Completed and cancelled journals older than 30 days, and more than the newest 50 of
+  # those two states, are swept here rather than left to accumulate under `<data dir>/deploy/`.
+  # Failed and interrupted stay: they are resumable. Live clients are skipped even when the
+  # journal already says they finished.
+  defp retain(state) do
+    case resolve_data_dir(state) do
+      {:ok, dir} ->
+        Journal.prune(dir, attached: Map.keys(state.operations), now: state.clock.())
+        state
 
-  defp attempt_capability(data_dir, operation, deadline, backoff) do
-    case capability(data_dir, operation) do
-      {:error, :capability_missing} ->
-        now = System.monotonic_time(:millisecond)
-
-        if now + backoff < deadline do
-          Process.sleep(backoff)
-          attempt_capability(data_dir, operation, deadline, min(backoff * 2, @max_backoff))
-        else
-          {:error, {:capability_missing, worker_log_tail(data_dir, operation)}}
-        end
-
-      settled ->
-        settled
-    end
-  end
-
-  # The worker's own log, bounded, for the one refusal an operator cannot otherwise explain:
-  # the file this runtime was waiting for never appeared, and the reason is in the log beside
-  # it rather than anywhere this process can see.
-  defp worker_log_tail(data_dir, operation) do
-    path = Path.join(Journal.deploy_dir(data_dir), operation <> ".log")
-
-    case File.read(path) do
-      {:ok, ""} -> "its log #{path} is empty"
-      {:ok, body} -> "its log #{path} ends: " <> tail(body)
-      {:error, _reason} -> "its log #{path} could not be read"
-    end
-  end
-
-  defp tail(body) do
-    body
-    |> String.split("\n", trim: true)
-    |> Enum.take(-5)
-    |> Enum.join(" / ")
-    |> String.slice(0, 1_000)
-  end
-
-  defp capability(data_dir, operation) do
-    path = Path.join(Journal.deploy_dir(data_dir), operation <> ".cap")
-
-    with {:ok, %File.Stat{type: :regular, mode: mode, size: size}} when size <= 256 <-
-           File.lstat(path),
-         true <- Bitwise.band(mode, 0o077) == 0,
-         {:ok, body} <- File.read(path),
-         cap = String.trim(body),
-         true <- String.match?(cap, ~r/\A[0-9a-fA-F]{32,128}\z/) do
-      {:ok, cap}
-    else
-      {:error, :enoent} -> {:error, :capability_missing}
-      false -> {:error, :capability_unusable}
-      {:ok, %File.Stat{}} -> {:error, :capability_unusable}
-      {:error, reason} -> {:error, {:capability_unreadable, reason}}
+      _absent ->
+        state
     end
   end
 

@@ -515,7 +515,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     end
 
     test "an identity is translated into the shape the worker names it by", context do
-      arrange_worker(context)
+      %{worker: worker} = arrange_worker(context)
       client = connected(scope: :operate)
 
       for {given, expected} <- [
@@ -526,17 +526,31 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
             {%{"kind" => "password"}, %{"kind" => "password"}},
             {%{"kind" => "default"}, %{"kind" => "default"}}
           ] do
-        assert call(client, "fleet.deployment.prepare", %{
-                 "target" => %{"address" => "100.64.12.44"},
-                 "ssh_user" => "deploy",
-                 "identity" => given
-               })["result"]
+        result =
+          call(client, "fleet.deployment.prepare", %{
+            "target" => %{"address" => "100.64.12.44"},
+            "ssh_user" => "deploy",
+            "identity" => given
+          })["result"]
 
+        assert result
         assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
         request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
 
         assert request["identity"] == expected,
                "#{inspect(given)} became #{inspect(request["identity"])}"
+
+        operation = result["operation_id"]
+        {:ok, pid} = Ouroboros.Fleet.Deployment.client(operation)
+        ref = Process.monitor(pid)
+        Process.exit(pid, :kill)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @receive_timeout
+
+        Enum.reduce_while(1..50, :attached, fn _attempt, _acc ->
+          if FleetWorkerFake.attached(worker) == nil,
+            do: {:halt, :ok},
+            else: Process.sleep(20) && {:cont, :attached}
+        end)
       end
     end
 

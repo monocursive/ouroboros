@@ -165,6 +165,13 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
           discard_request(path, request)
           {:error, reason}
 
+        {:error, :ouro_timeout} ->
+          # The parent `ouro fleet worker start` is SIGKILL'd on this ceiling, but the
+          # detached grandchild it forked may already be alive and reading the request.
+          # Unlinking the file from under it is how an operation that exists becomes a
+          # `worker_spawn_failed` the operator cannot resume.
+          {:error, {:worker_spawn_failed, :ouro_timeout}}
+
         {:error, reason} ->
           discard_request(path, request)
           {:error, {:worker_spawn_failed, reason}}
@@ -286,7 +293,8 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
         :exit_status,
         :hide,
         :stream,
-        {:args, args}
+        {:args, args},
+        {:env, inherited_env()}
       ])
 
     os_pid =
@@ -355,4 +363,25 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   # than passed through: it reaches a JSON-RPC `data` field and a log line.
   defp excerpt(output) when is_binary(output),
     do: output |> String.trim() |> String.slice(0, 2_000)
+
+  # The worker is handed an SSH credential. An inherited environment is how a secret in
+  # this runtime's env — a CI token, a canary, anything `OUROBOROS_*` did not name —
+  # becomes a secret in the process that holds the password. Keep an allowlist and unset
+  # every other key explicitly: Port `:env` replaces only the names it is given.
+  defp inherited_env do
+    Enum.map(System.get_env(), fn {key, value} ->
+      name = String.to_charlist(key)
+
+      if allowed_env?(key),
+        do: {name, String.to_charlist(value)},
+        else: {name, false}
+    end)
+  end
+
+  defp allowed_env?(key) when is_binary(key) do
+    key in ~w(PATH HOME USER LOGNAME LANG TMPDIR SSH_AUTH_SOCK) or
+      String.starts_with?(key, "LC_") or
+      String.starts_with?(key, "XDG_") or
+      String.starts_with?(key, "OUROBOROS_")
+  end
 end

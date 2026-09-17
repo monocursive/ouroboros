@@ -273,6 +273,19 @@ defmodule Ouroboros.Gateway.Conn do
     {:ok, state}
   end
 
+  # OTP's gen_server terminate report prints `last_message` even when this process is
+  # `:sensitive`. The first frame on an authenticate call is the raw JSON-RPC line with
+  # the password; `format_status/1` is what that report consults.
+  @impl true
+  def format_status(status) when is_map(status) do
+    status
+    |> Map.put(:message, :redacted)
+    |> Map.update(:state, nil, &redact_state/1)
+  end
+
+  defp redact_state(%{config: _} = state), do: %{state | config: :redacted}
+  defp redact_state(_other), do: :redacted
+
   @impl true
   def handle_info(:socket_ready, state) do
     peer =

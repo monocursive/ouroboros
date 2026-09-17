@@ -248,11 +248,13 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert {:ok, %{"operation_id" => operation}} =
                Deployment.prepare(detailed_request(), bound())
 
+      argv = await_fake_argv(context.fake_dir)
+
       # `ps` is readable by every local account on both platforms this ships to. A target
       # hostname and an SSH account name are not secrets in the sense the spec's one list
       # means, but publishing them to every shell on the box buys nothing, so the command
       # line is the operation and the directory and nothing else.
-      assert FleetOuroFake.argv(context.fake_dir) ==
+      assert argv ==
                ["fleet", "worker", "start", "--operation", operation, "--data-dir", context.root]
     end
 
@@ -263,8 +265,8 @@ defmodule Ouroboros.Fleet.DeploymentTest do
                Deployment.prepare(detailed_request(), bound())
 
       # What the worker actually saw: a 0600 file, whole, with the request in it.
+      body = await_fake_request_body(context.fake_dir)
       assert FleetOuroFake.request_mode(context.fake_dir) == "600"
-      body = FleetOuroFake.request_body(context.fake_dir)
       decoded = JSON.decode!(body)
 
       assert decoded["ssh_user"] == "deploy"
@@ -298,7 +300,13 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
       # The launch succeeded, so the request belongs to the worker even if it has not got
       # to it yet. A broker that tidied here would be racing the process it just started.
-      assert File.exists?(Journal.request_path(context.root, operation))
+      path = Journal.request_path(context.root, operation)
+
+      Enum.reduce_while(1..100, :missing, fn _attempt, _acc ->
+        if File.exists?(path), do: {:halt, :ok}, else: Process.sleep(20) && {:cont, :missing}
+      end)
+
+      assert File.exists?(path)
 
       assert File.stat!(Journal.request_path(context.root, operation)).mode |> Bitwise.band(0o777) ==
                0o600
@@ -307,10 +315,13 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     test "a launch that fails leaves no request behind", context do
       arrange_worker(context, exit_status: 3, keep_request: true)
 
-      assert {:error, {:worker_spawn_failed, {:ouro_failed, 3, _output}}} =
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
                Deployment.prepare(detailed_request(), bound())
 
-      # Nothing is coming to read it, so the broker takes it back. The deploy directory
+      assert {:attach_failed, {:worker_spawn_failed, {:ouro_failed, 3, _output}}} =
+               await_error(operation)
+
+      # Nothing is coming to read it, so the launcher takes it back. The deploy directory
       # holds no request file at all afterwards.
       deploy = Journal.deploy_dir(context.root)
       assert File.ls!(deploy) |> Enum.filter(&String.ends_with?(&1, ".request.json")) == []
@@ -347,7 +358,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       # `prepare` answers as soon as the process exists — the handshake is no longer run
       # inside the broker's call — so the refusal arrives as the operation's state rather
       # than as this call's return.
-      assert {:ok, %{"operation_id" => operation, "state" => "attaching"}} =
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
                Deployment.prepare(request(), bound())
 
       assert await_error(operation) == {:attach_failed, :instance_mismatch}
@@ -361,7 +372,10 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     test "refuses a capability file anybody on this machine could read", context do
       arrange_worker(context, cap_mode: 0o644)
 
-      assert {:error, :capability_unusable} = Deployment.prepare(request(), bound())
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
+               Deployment.prepare(request(), bound())
+
+      assert {:attach_failed, :capability_unusable} = await_error(operation)
     end
 
     test "refuses when the worker has published no capability at all", context do
@@ -370,7 +384,10 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       # Retried for a bounded moment first — the capability and the socket are written in an
       # order this side does not control — and the refusal carries the worker's own log, which
       # is the only place the reason for it can be.
-      assert {:error, {:capability_missing, detail}} = Deployment.prepare(request(), bound())
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
+               Deployment.prepare(request(), bound())
+
+      assert {:attach_failed, {:capability_missing, detail}} = await_error(operation)
       assert detail =~ ".log"
     end
 
@@ -378,8 +395,11 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       arrange_worker(context)
       FleetOuroFake.put_spawn_line!(context.fake_dir, "this is not a JSON line\n")
 
-      assert {:error, {:worker_spawn_failed, :unreadable_worker_line}} =
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
                Deployment.prepare(request(), bound())
+
+      assert {:attach_failed, {:worker_spawn_failed, :unreadable_worker_line}} =
+               await_error(operation)
     end
   end
 
@@ -666,6 +686,14 @@ defmodule Ouroboros.Fleet.DeploymentTest do
             "created_at" => created
           })
 
+          case DateTime.from_iso8601(created) do
+            {:ok, datetime, _offset} ->
+              File.touch!(Journal.path(context.root, operation), DateTime.to_unix(datetime))
+
+            _unreadable ->
+              :ok
+          end
+
           {created, operation}
         end
         |> Enum.sort(:desc)
@@ -854,6 +882,128 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   # ---------------------------------------------------------------------------
+  # Spawn does not stall the broker; a timeout does not discard the request
+
+  describe "an asynchronous spawn" do
+    test "does not stall fleet.devices or operations/1 behind a slow launcher", context do
+      arrange_worker(context, spawn_sleep: 3)
+
+      parent = self()
+
+      _preparer =
+        spawn(fn ->
+          send(parent, {:prepared, Deployment.prepare(request(), bound())})
+        end)
+
+      Process.sleep(150)
+      started = System.monotonic_time(:millisecond)
+      assert {:ok, _inventory} = Deployment.devices()
+      {_summaries, _total} = Deployment.operations(context.root)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert elapsed < 400, "devices/operations waited #{elapsed} ms behind a 3s spawn"
+      assert_receive {:prepared, {:ok, %{"state" => "spawning"}}}, 1_000
+    end
+
+    test "a spawn timeout does not unlink the request the grandchild may still be reading",
+         context do
+      ouro =
+        FleetOuroFake.write!(context.fake_dir,
+          spawn_sleep: 5,
+          spawn_line: "{}\n",
+          cap: nil
+        )
+
+      System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+      operation = random_operation()
+
+      assert {:error, {:worker_spawn_failed, :ouro_timeout}} =
+               Launcher.spawn_worker(operation, context.root, request(), 300)
+
+      assert File.exists?(Journal.request_path(context.root, operation)),
+             "a spawn timeout deleted the request a detached worker may still be reading"
+    end
+
+    test "a canary environment variable does not reach the child", context do
+      ouro = FleetOuroFake.write!(context.fake_dir, devices: ~s({"devices": []}\n))
+      System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+      System.put_env("FLEET_CANARY_SECRET", "should-never-reach-the-worker")
+
+      on_exit(fn -> System.delete_env("FLEET_CANARY_SECRET") end)
+
+      assert {:ok, _output} = Launcher.run(["fleet", "devices", "--json"], 5_000)
+      env = FleetOuroFake.env(context.fake_dir)
+      refute env =~ "FLEET_CANARY_SECRET"
+      assert env =~ "PATH="
+    end
+  end
+
+  describe "journal listing and retention" do
+    test "an unchanged file is not parsed again", context do
+      operation = plant_journal(context.root, "completed")
+      path = Journal.path(context.root, operation)
+      {first, 1, cache} = Journal.list(context.root)
+      {:ok, %File.Stat{mtime: mtime, size: size}} = File.lstat(path)
+
+      File.write!(path, String.duplicate("x", size))
+      File.touch!(path, unix_stat_mtime(mtime))
+      {second, 1, _cache} = Journal.list(context.root, cache)
+
+      assert hd(first)["readable"] == true
+      assert second == first
+    end
+
+    test "completed and cancelled journals older than 30 days are pruned, failed are kept",
+         context do
+      old = DateTime.to_unix(~U[2020-01-01 00:00:00Z])
+      now = DateTime.to_unix(~U[2026-09-17 00:00:00Z])
+
+      completed = plant_journal(context.root, "completed")
+      cancelled = plant_journal(context.root, "cancelled")
+      failed = plant_journal(context.root, "failed")
+      interrupted = plant_journal(context.root, "interrupted")
+
+      File.touch!(Journal.path(context.root, completed), old)
+      File.touch!(Journal.path(context.root, cancelled), old)
+      File.touch!(Journal.path(context.root, failed), old)
+      File.touch!(Journal.path(context.root, interrupted), old)
+
+      request = Journal.request_path(context.root, interrupted)
+      File.write!(request, "{}")
+
+      Journal.prune(context.root, now: now, attached: [])
+
+      refute File.exists?(Journal.path(context.root, completed))
+      refute File.exists?(Journal.path(context.root, cancelled))
+      assert File.exists?(Journal.path(context.root, failed))
+      assert File.exists?(Journal.path(context.root, interrupted))
+      assert File.exists?(request)
+    end
+
+    test "keeps the newest 50 terminal records and skips a live client", context do
+      now = System.system_time(:second)
+
+      ids =
+        Enum.map(1..55, fn n ->
+          operation = plant_journal(context.root, "completed")
+          File.touch!(Journal.path(context.root, operation), now - n)
+          operation
+        end)
+
+      attached = List.last(ids)
+      Journal.prune(context.root, now: now, attached: [attached])
+
+      remaining =
+        File.ls!(Journal.deploy_dir(context.root))
+        |> Enum.filter(&String.ends_with?(&1, ".json"))
+        |> Enum.reject(&String.ends_with?(&1, ".request.json"))
+
+      assert length(remaining) == 51
+      assert (attached <> ".json") in remaining
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
 
   defp bound, do: %{subject: "adele", session: "session-one"}
@@ -979,7 +1129,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   # The handshake runs in the client's own `handle_continue`, so its failure shows up a
   # moment after `prepare` answered. The broker keeps the reason; this waits for it.
   defp await_error(operation) do
-    Enum.reduce_while(1..100, nil, fn _attempt, _acc ->
+    Enum.reduce_while(1..400, nil, fn _attempt, _acc ->
       case Deployment.status(operation, bound()) do
         {:error, {:attach_failed, reason}} ->
           {:halt, {:attach_failed, reason}}
@@ -990,6 +1140,42 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       end
     end)
   end
+
+  defp await_fake_argv(dir) do
+    Enum.reduce_while(1..100, [], fn _attempt, _acc ->
+      case FleetOuroFake.argv(dir) do
+        [] ->
+          Process.sleep(20)
+          {:cont, []}
+
+        argv ->
+          {:halt, argv}
+      end
+    end)
+  end
+
+  defp await_fake_request_body(dir) do
+    Enum.reduce_while(1..100, nil, fn _attempt, _acc ->
+      case FleetOuroFake.request_body(dir) do
+        body when is_binary(body) and byte_size(body) > 2 ->
+          case JSON.decode(body) do
+            {:ok, _document} -> {:halt, body}
+            _incomplete -> Process.sleep(20) && {:cont, nil}
+          end
+
+        _absent ->
+          Process.sleep(20)
+          {:cont, nil}
+      end
+    end)
+  end
+
+  defp unix_stat_mtime({{year, month, day}, {hour, minute, second}}) do
+    {:ok, naive} = NaiveDateTime.new(year, month, day, hour, minute, second)
+    naive |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
+  end
+
+  defp unix_stat_mtime(seconds) when is_integer(seconds), do: seconds
 
   defp random_operation, do: Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 

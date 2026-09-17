@@ -209,7 +209,21 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     File.write!(token_path, @token)
     File.chmod!(token_path, 0o600)
 
-    config = Config.new!(data_dir: context.root, scope: Keyword.get(opts, :scope, :operate))
+    config_opts = [data_dir: context.root, scope: Keyword.get(opts, :scope, :operate)]
+
+    config_opts =
+      case Keyword.get(opts, :bind) do
+        nil ->
+          config_opts
+
+        bind ->
+          Keyword.merge(config_opts,
+            bind: bind,
+            allow_remote: Keyword.get(opts, :allow_remote, true)
+          )
+      end
+
+    config = Config.new!(config_opts)
     start_supervised!({Ouroboros.Web, config: config, server: false})
     freeze_recovery()
 
@@ -286,6 +300,13 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
     assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
     operation(view)
+  end
+
+  defp html_live_region(html) do
+    case Regex.run(~r/id="ouro-deploy-live"[^>]*>(.*?)<\/p>/s, html) do
+      [_, inner] -> String.trim(inner)
+      _missing -> nil
+    end
   end
 
   defp operation(view), do: :sys.get_state(view.pid).socket.assigns.drawer.operation
@@ -526,8 +547,14 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       refute has_element?(view, ~s{button[phx-value-address="100.64.0.5"]})
       assert html =~ "Deployment is disabled for this device while that blocker stands."
 
-      # A known member is not a deployment target either; it gets its own action word.
-      refute has_element?(view, ~s{button[phx-value-address="100.64.0.2"]})
+      # A known member is not a deployment target either; Diagnose is a read-only panel.
+      refute has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.0.2"]})
+
+      assert has_element?(
+               view,
+               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]}
+             )
+
       assert html =~ "Diagnose"
     end
 
@@ -706,8 +733,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
          context do
       issuer!(context.root)
       ouro!(context)
-      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
-      conn = web!(context)
+      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
 
       {:ok, view, html} = live(conn, "/devices")
 
@@ -1248,7 +1274,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     end
 
     test "cancelling asks the worker to stop and never claims an undo",
-         %{conn: conn, worker: worker} do
+         %{conn: conn} do
       {:ok, view, _html} = live(conn, "/devices")
       _operation = prepared(view)
 
@@ -1445,8 +1471,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     end
 
     test "cannot start a deployment on a cleartext non-loopback bind", context do
-      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
-      conn = web!(context)
+      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
 
       {:ok, view, html} = live(conn, "/devices")
       assert html =~ "credential entry is refused here"
@@ -1702,8 +1727,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     # M5b from the other side: a blocker that is not `no_ca_key` stops a setup too.
     test "a cleartext bind offers no Set up this device", context do
       ouro!(context)
-      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
-      conn = web!(context)
+      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
 
       {:ok, view, _html} = live(conn, "/devices")
       refute has_element?(view, ~s{button[phx-click="setup-device"]})
@@ -1952,27 +1976,28 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       :ok = FleetWorkerFake.emit(worker, step)
       _ = await(view, "Update a roster on vps-1: done.")
-      first = :sys.get_state(view.pid).socket.assigns.announced
+      first = render(view)
+      first_live = html_live_region(first)
 
       :ok = FleetWorkerFake.emit(worker, step)
 
-      # A live region announces a change. The same sentence twice is one change to the DOM
-      # and therefore silence, which is the repetition an operator most needs to hear.
+      # A live region announces a change. The same sentence twice is one change to the
+      # announcement text unless the counter beside it changes the text node.
       second =
-        Enum.reduce_while(1..100, first, fn _attempt, _acc ->
-          count = :sys.get_state(view.pid).socket.assigns.announced
+        Enum.reduce_while(1..100, first, fn _attempt, acc ->
+          html = render(view)
 
-          if count > first,
-            do: {:halt, count},
+          if html_live_region(html) != first_live,
+            do: {:halt, html},
             else:
               (
                 Process.sleep(20)
-                {:cont, first}
+                {:cont, acc}
               )
         end)
 
-      assert second > first, "the second identical step did not re-announce"
-      assert render(view) =~ "Update a roster on vps-1: done."
+      assert html_live_region(second) != first_live
+      assert second =~ "Update a roster on vps-1: done."
     end
 
     test "is emptied when the drawer closes", %{conn: conn, worker: worker} do
@@ -2296,5 +2321,209 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     assert :ok == DevicesLive.allowed?(socket, :setup)
     render_click(reopened, "resume", %{"operation" => operation})
     assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+  end
+
+  describe "review follow-ups" do
+    setup context do
+      %{worker: worker!(context)}
+    end
+
+    test "local setup with no CA key still shows Cancel setup", context do
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view
+      |> element(~s{button[phx-click="setup-device"][phx-value-address="100.64.0.7"]})
+      |> render_click()
+
+      view
+      |> form("#ouro-deploy-setup", %{"machine" => "studio", "address" => "100.64.0.7"})
+      |> render_submit()
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      html = render(view)
+      assert html =~ "Cancel setup"
+      refute has_element?(view, ~s{button[phx-click="cancel-setup"][disabled]})
+
+      view |> element(~s{button[phx-click="cancel-setup"]}) |> render_click()
+      assert_receive {:fake_worker, %{"op" => "cancel"}}, @receive_timeout
+    end
+
+    test "opening a second operation resets the drawer and unsubscribes the first", context do
+      issuer!(context.root)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+      first = prepared(view)
+      {:ok, first_pid} = Ouroboros.Fleet.Deployment.client(first)
+
+      second = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+      journal!(context.root, second, %{"state" => "interrupted", "kind" => "add"})
+
+      view |> element(~s{button[phx-click="refresh"]}) |> render_click()
+      render_click(view, "open-operation", %{"operation" => second})
+
+      drawer = :sys.get_state(view.pid).socket.assigns.drawer
+      assert drawer.operation == second
+      assert drawer.cancelled? == false
+      assert drawer.approved == nil
+      assert drawer.residue == []
+      assert drawer.secret_nonce == 0
+      assert drawer.takeover == nil
+      refute drawer.operation == first
+
+      # The cast has to land; the first client must no longer be notifying this view.
+      Process.sleep(50)
+      refute Map.has_key?(:sys.get_state(first_pid).subscribers, view.pid)
+    end
+
+    test "a bidi-control device name is sanitized in the host-trust step", context do
+      issuer!(context.root)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared(view)
+
+      evil = "good\u202Etxt.exe"
+
+      :sys.replace_state(view.pid, fn %{socket: socket} = state ->
+        drawer = socket.assigns.drawer
+        device = Map.put(drawer.device || %{}, "name", evil)
+        %{state | socket: Phoenix.Component.assign(socket, :drawer, %{drawer | device: device})}
+      end)
+
+      :ok =
+        FleetWorkerFake.challenge(context.worker, "ht-bidi", "host_trust", %{
+          "metadata" => %{"address" => evil, "port" => "22"}
+        })
+
+      html = await(view, "Verify this host before continuing")
+      refute html =~ <<0x202E::utf8>>
+      assert html =~ "good"
+    end
+
+    test "View device and Diagnose open a read-only panel", context do
+      issuer!(context.root)
+      conn = web!(context)
+      {:ok, view, html} = live(conn, "/devices")
+
+      assert has_element?(
+               view,
+               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.1"]}
+             )
+
+      assert html =~ "View device"
+
+      assert has_element?(
+               view,
+               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]}
+             )
+
+      assert html =~ "Diagnose"
+
+      html =
+        view
+        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.1"]})
+        |> render_click()
+
+      assert html =~ "Roster name"
+      assert html =~ "Network name"
+      assert html =~ "Runtime running"
+      assert has_element?(view, ~s{#ouro-deploy button[phx-click="refresh"]})
+
+      view |> element(~s{button[phx-click="drawer-close"]}) |> render_click()
+
+      html =
+        view
+        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> render_click()
+
+      assert html =~ "Diagnose"
+      assert html =~ "not reported" or html =~ "no"
+    end
+
+    test "read scope still gets the View device panel", context do
+      issuer!(context.root)
+      conn = web!(context, scope: :read)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html =
+        view
+        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.1"]})
+        |> render_click()
+
+      assert html =~ "Roster name"
+      refute has_element?(view, ~s{button[phx-click="cancel-setup"]})
+    end
+
+    test "a pending authenticate is refused after the bind becomes cleartext", context do
+      issuer!(context.root)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared(view)
+
+      :ok = FleetWorkerFake.challenge(context.worker, "pw-stale", "password")
+      _ = await(view, ~s(data-ouro-secret))
+
+      config = Config.for_endpoint(Ouroboros.Web.Endpoint)
+      Phoenix.Config.put(Ouroboros.Web.Endpoint, :ouroboros_web, %{config | bind: {0, 0, 0, 0}})
+
+      html =
+        view
+        |> form("#ouro-deploy-auth", %{"challenge" => "pw-stale", "secret" => "stale-secret"})
+        |> render_submit()
+
+      assert html =~ "credential entry is refused here"
+      refute_receive {:fake_worker, %{"op" => "respond"}}, 400
+    end
+
+    test "forwarded headers do not change the cleartext bind decision", context do
+      issuer!(context.root)
+
+      conn =
+        web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
+        |> Plug.Conn.put_req_header("x-forwarded-for", "127.0.0.1")
+        |> Plug.Conn.put_req_header("x-forwarded-proto", "https")
+        |> Map.put(:host, "ouro.example")
+
+      {:ok, view, html} = live(conn, "/devices")
+      assert html =~ "credential entry is refused here"
+      refute has_element?(view, ~s{button[phx-click="deploy"]:not([disabled])})
+    end
+
+    test "a raise in authenticate assigns a generic error and never logs the secret",
+         context do
+      issuer!(context.root)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared(view)
+      :ok = FleetWorkerFake.challenge(context.worker, "pw-boom", "password")
+      _ = await(view, ~s(data-ouro-secret))
+
+      secret = "LIVE-SECRET-#{System.unique_integer([:positive])}"
+
+      :sys.replace_state(view.pid, fn %{socket: socket} = state ->
+        %{state | socket: Phoenix.Component.assign(socket, :crash_point, fn -> raise "boom" end)}
+      end)
+
+      log =
+        capture_log(fn ->
+          view
+          |> form("#ouro-deploy-auth", %{"challenge" => "pw-boom", "secret" => secret})
+          |> render_submit()
+        end)
+
+      refute log =~ secret
+      assert render(view) =~ "The deployment could not complete that action."
+    end
+
+    test "malformed events do not crash the view", context do
+      issuer!(context.root)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      assert render_click(view, "deploy", %{})
+      assert render_click(view, "filter", %{"filter" => "nope"})
+      assert render_click(view, "approve", %{})
+      assert render_click(view, "no-such-event", %{"x" => 1})
+    end
   end
 end

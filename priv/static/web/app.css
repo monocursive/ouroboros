@@ -540,10 +540,13 @@ body.phx-loading {
   align-items: center;
   gap: 0.35rem;
 }
-/* The dots keep their image role inside that link. `contents` means this wrapper adds
-   nothing to the row's layout — the dots stay flex children of the link above. */
+/* The dots keep their image role inside that link. Flex, not `contents`: historically
+   `display: contents` dropped the wrapper from the accessibility tree and took the
+   image role with it. */
 .ouro-presence-dots {
-  display: contents;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 .ouro-presence-label {
   color: var(--secondary);

@@ -99,39 +99,92 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     end
   end
 
+  # How long a `completed`/`cancelled` journal is kept, and how many of those terminal
+  # records survive even when they are younger. `failed`/`interrupted` are resumable and
+  # are never swept by this policy.
+  @retention_seconds 30 * 24 * 60 * 60
+  @max_kept_terminal 50
+  @prunable ~w(completed cancelled)
+
   @doc """
   Every operation this data directory has a journal for, newest first, and how many there are.
 
-  `{operations, total}`. The list is cut to `@max_list`; `total` is what it was cut from, so
-  a surface can say "and 40 older" rather than quietly showing a prefix.
+  `{operations, total, cache}`. The list is cut to `@max_list`; `total` is what it was cut
+  from, so a surface can say "and 40 older" rather than quietly showing a prefix.
 
-  The cut happens **after** reading and sorting, which is the whole point. Sorting the file
-  names and taking the first 200 read the 200 lexically smallest ids — and an operation id is
-  random hex, so past 200 journals that was an arbitrary sample of the operations an operator
-  had ever run, presented as the current ones. It is ordered by `created_at` now, with the id
-  breaking ties so the order is total and stable rather than dependent on how the filesystem
-  happened to list the directory.
+  Only the newest `@max_list` files (by mtime) are decoded. A data directory that has
+  accumulated years of journals used to be parsed in full on every `fleet.devices` call;
+  mtime is the cheap order the filesystem already maintains, and `created_at` then orders
+  the decoded window so the page still reads newest-first by the worker's own clock.
+
+  `cache` is keyed by `{path, mtime, size}` so an unchanged file is not parsed again. The
+  broker holds it; this module does not.
 
   An unreadable journal is listed as one rather than skipped: an operation whose record this
   build cannot read is exactly the operation an operator needs to be told about. It sorts
   last, because it has no `created_at` to place it by.
   """
-  @spec list(Path.t()) :: {[map()], non_neg_integer()}
-  def list(data_dir) when is_binary(data_dir) do
+  @spec list(Path.t()) :: {[map()], non_neg_integer(), map()}
+  @spec list(Path.t(), map()) :: {[map()], non_neg_integer(), map()}
+  def list(data_dir, cache \\ %{}) when is_binary(data_dir) and is_map(cache) do
     case File.ls(deploy_dir(data_dir)) do
       {:ok, names} ->
-        summaries =
-          names
-          |> Enum.filter(&String.ends_with?(&1, ".json"))
-          |> Enum.map(&String.replace_suffix(&1, ".json", ""))
-          |> Enum.filter(&(validate_operation(&1) == :ok))
-          |> Enum.map(&summary(data_dir, &1))
-          |> Enum.sort_by(&order/1, :desc)
+        entries = journal_entries(data_dir, names)
+        total = length(entries)
 
-        {Enum.take(summaries, @max_list), length(summaries)}
+        newest =
+          entries
+          |> Enum.sort_by(&{&1.mtime, &1.operation}, :desc)
+          |> Enum.take(@max_list)
+
+        {summaries, next_cache} =
+          Enum.map_reduce(newest, %{}, fn entry, acc ->
+            summary = cached_summary(cache, entry)
+            {summary, Map.put(acc, entry.key, summary)}
+          end)
+
+        {Enum.sort_by(summaries, &order/1, :desc), total, next_cache}
 
       {:error, _reason} ->
-        {[], 0}
+        {[], 0, %{}}
+    end
+  end
+
+  defp journal_entries(data_dir, names) do
+    names
+    |> Enum.filter(&journal_name?/1)
+    |> Enum.flat_map(fn name ->
+      operation = String.replace_suffix(name, ".json", "")
+
+      with :ok <- validate_operation(operation),
+           path = path(data_dir, operation),
+           {:ok, %File.Stat{mtime: mtime, size: size, type: :regular}} <- File.lstat(path) do
+        [
+          %{
+            operation: operation,
+            data_dir: data_dir,
+            path: path,
+            mtime: mtime,
+            size: size,
+            key: {path, mtime, size}
+          }
+        ]
+      else
+        _other -> []
+      end
+    end)
+  end
+
+  # `.request.json` also ends in `.json`; an operation id is hex, so those names never
+  # survive `validate_operation/1`. Matching the suffix the worker actually writes is still
+  # cheaper than opening them.
+  defp journal_name?(name),
+    do: String.ends_with?(name, ".json") and not String.ends_with?(name, ".request.json")
+
+  defp cached_summary(cache, entry) do
+    case Map.fetch(cache, entry.key) do
+      {:ok, summary} -> summary
+      :error -> summary(entry.data_dir, entry.operation)
     end
   end
 
@@ -191,6 +244,93 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
 
   defp reason_code(:unknown_operation), do: "unknown_operation"
   defp reason_code({:journal_unreadable, _detail}), do: "journal_unreadable"
+
+  @doc """
+  Removes journals this runtime no longer needs to resume from.
+
+  `completed` and `cancelled` records older than 30 days go, and of what remains of those
+  two states only the newest 50 are kept. `failed` and `interrupted` are resumable and are
+  not touched. A live client is the authority on an operation that is still attached, so
+  those ids are skipped even when their journal already says they finished.
+
+  A `.request.json` for a non-terminal operation is never deleted: the worker may still
+  be reading it. This function only deletes files of operations whose journal is already
+  in a prunable state.
+  """
+  @spec prune(Path.t(), keyword()) :: :ok
+  def prune(data_dir, opts \\ []) when is_binary(data_dir) do
+    attached = MapSet.new(Keyword.get(opts, :attached, []))
+    now = Keyword.get(opts, :now, System.system_time(:second))
+
+    case File.ls(deploy_dir(data_dir)) do
+      {:ok, names} ->
+        entries = journal_entries(data_dir, names)
+
+        candidates =
+          entries
+          |> Enum.reject(&MapSet.member?(attached, &1.operation))
+          |> Enum.flat_map(fn entry ->
+            summary = summary(data_dir, entry.operation)
+
+            if summary["state"] in @prunable do
+              [{entry, unix_mtime(entry.mtime), summary}]
+            else
+              []
+            end
+          end)
+          |> Enum.sort_by(fn {entry, unix, _summary} -> {unix, entry.operation} end, :desc)
+
+        {_kept, drop} = drop_retained(candidates, now)
+
+        Enum.each(drop, fn {entry, _unix, _summary} ->
+          delete_operation(data_dir, entry.operation)
+        end)
+
+        :ok
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp drop_retained(candidates, now) do
+    {kept, drop} =
+      Enum.split_with(Enum.with_index(candidates), fn {{_entry, unix, _summary}, index} ->
+        index < @max_kept_terminal and now - unix <= @retention_seconds
+      end)
+
+    {Enum.map(kept, &elem(&1, 0)), Enum.map(drop, &elem(&1, 0))}
+  end
+
+  # `File.lstat/1` answers mtime as an Erlang datetime. Retention compares against the
+  # broker's clock, which is unix seconds.
+  defp unix_mtime({{year, month, day}, {hour, minute, second}}) do
+    case NaiveDateTime.new(year, month, day, hour, minute, second) do
+      {:ok, naive} -> naive |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix()
+      _unreadable -> 0
+    end
+  end
+
+  defp unix_mtime(seconds) when is_integer(seconds), do: seconds
+  defp unix_mtime(_other), do: 0
+
+  defp delete_operation(data_dir, operation) do
+    dir = deploy_dir(data_dir)
+
+    Enum.each(
+      [
+        Path.join(dir, operation <> ".json"),
+        Path.join(dir, operation <> ".request.json"),
+        Path.join(dir, operation <> ".log"),
+        Path.join(dir, operation <> ".cap"),
+        Path.join(dir, operation <> ".sock")
+      ],
+      &File.rm/1
+    )
+
+    _ = File.rm_rf(Path.join(dir, operation <> ".d"))
+    :ok
+  end
 
   @doc """
   An operation id this runtime will touch a path with.

@@ -165,6 +165,13 @@ defmodule Ouroboros.Web.Live.Devices do
   @spec blocked?(map()) :: boolean()
   def blocked?(device) when is_map(device), do: device["state"] in @blocked_states
 
+  @doc "Whether this row's primary action is the read-only View device / Diagnose panel."
+  @spec inspectable?(map()) :: boolean()
+  def inspectable?(device) when is_map(device),
+    do: state_action(device["state"]) in ["View device", "Diagnose"]
+
+  def inspectable?(_other), do: false
+
   @doc "Whether this row is a device an SSH deployment can be aimed at."
   @spec deployable?(map()) :: boolean()
   def deployable?(device) when is_map(device) do
@@ -406,6 +413,7 @@ defmodule Ouroboros.Web.Live.Devices do
   # Two states before the proposal's eleven begin: the broker answers `prepare` as soon as
   # the connection process exists, so an operation is visible while its handshake with the
   # worker is still running.
+  def operation_state("spawning"), do: "Starting the deployment worker"
   def operation_state("attaching"), do: "Connecting to the deployment worker"
   def operation_state("attached"), do: "Connected to the deployment worker"
   def operation_state("inspecting"), do: "Inspecting the target"
@@ -448,13 +456,20 @@ defmodule Ouroboros.Web.Live.Devices do
   Returns `{state words, action label, event}`.
   """
   @spec operation_row(term()) :: {String.t(), String.t(), String.t()}
-  def operation_row("completed"),
+  @spec operation_row(term(), term()) :: {String.t(), String.t(), String.t()}
+  def operation_row(state, kind \\ "add")
+
+  def operation_row("completed", _kind),
     do: {"Set up just now by this machine", "Open device", "open-operation"}
 
-  def operation_row("failed"), do: {"Setup failed", "Retry", "open-operation"}
-  def operation_row("cancelled"), do: {"Setup cancelled", "Deploy again", "deploy"}
+  def operation_row("failed", _kind), do: {"Setup failed", "Retry", "open-operation"}
 
-  def operation_row(state),
+  def operation_row("cancelled", "setup"),
+    do: {"Setup cancelled", "Set up this device", "setup-device"}
+
+  def operation_row("cancelled", _kind), do: {"Setup cancelled", "Deploy again", "deploy"}
+
+  def operation_row(state, _kind),
     do:
       {"Deployment waiting for input, interrupted or partially complete — " <>
          String.downcase(operation_state(state)), "Continue setup", "open-operation"}
@@ -725,9 +740,6 @@ defmodule Ouroboros.Web.Live.Devices do
   def plan_grants(plan) when is_map(plan), do: plan["grants"] |> List.wrap() |> Enum.map(&text/1)
   def plan_grants(_absent), do: []
 
-  @plan_fields ~w(schema operation kind deployment_host target release service members restart
-                  grants build)
-
   @doc """
   Whether a digest is the shape seam S6 fixes: sha256, lowercase hex, sixty-four characters.
 
@@ -798,15 +810,20 @@ defmodule Ouroboros.Web.Live.Devices do
   # never reaches one, which is the point rather than a missing fact.
   defp ssh_line(target) do
     if present?(target["ssh_user"]) do
-      "#{target["ssh_user"]}@#{text(target["address"]) || "this device"} port #{target["port"] || 22}"
+      "#{plain(target["ssh_user"], 64)}@#{text(target["address"]) || "this device"} port #{plain(target["port"], 8) || 22}"
     end
   end
 
   defp install_line(release) when is_map(release) do
-    digest = release["sha256"] || ""
+    digest = release["sha256"]
+
+    digest =
+      if is_binary(digest) and digest != "",
+        do: " sha256 #{String.slice(digest, 0, 16)}",
+        else: ""
 
     "ouro #{text(release["version"]) || "an unnamed version"} (#{text(release["target"]) || "an unnamed platform"})" <>
-      if(digest == "", do: "", else: " sha256 #{String.slice(digest, 0, 16)}")
+      digest
   end
 
   defp install_line(_absent), do: "not needed; the target already has ouro"

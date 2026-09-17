@@ -209,10 +209,13 @@ test("the whole deployment: host trust, a masked credential, review, progress, f
       new Promise(resolve => {
         const region = document.getElementById("ouro-deploy-live");
         const seen = [];
-        // The sentence is the region's first text node; the counter beside it is what makes
-        // two identical sentences two announcements rather than one silent no-op, and it is
-        // not part of what is said.
-        const said = () => ((region.firstChild && region.firstChild.textContent) || "").trim();
+        // The sentence is the region's first text node; a visually-hidden counter beside
+        // it is what makes two identical sentences two announcements rather than one
+        // silent no-op, and it is not part of what is said.
+        const said = () => {
+          const first = region.querySelector("span") || region.firstChild;
+          return ((first && first.textContent) || "").trim();
+        };
         const observer = new MutationObserver(() => {
           const text = said();
           if (text && seen[seen.length - 1] !== text) seen.push(text);

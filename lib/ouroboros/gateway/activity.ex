@@ -245,18 +245,61 @@ defmodule Ouroboros.Gateway.Activity do
 
   @impl true
   def init(_opts) do
-    # Public, because `enter/1` and `leave/1` run in the process making the call rather
-    # than in this one. This process owns the table only so that it has an owner.
-    table =
-      :ets.new(@table, [
-        :set,
-        :public,
-        :named_table,
-        read_concurrency: true,
-        write_concurrency: true
-      ])
+    # The table is owned by a process that does nothing else. `compute/1` walks it from
+    # this GenServer; a crash during that walk used to take the table with it, and
+    # `in_flight/0` then answered 0 (or nil) for calls that were still running.
+    _ = ensure_ledger()
+    {:ok, %{cached: %{}}}
+  end
 
-    {:ok, %{table: table, cached: %{}}}
+  @ledger __MODULE__.Ledger
+
+  defp ensure_ledger do
+    case Process.whereis(@ledger) do
+      pid when is_pid(pid) ->
+        pid
+
+      nil ->
+        pid = spawn(&ledger_loop/0)
+
+        try do
+          Process.register(pid, @ledger)
+        rescue
+          ArgumentError ->
+            Process.exit(pid, :kill)
+            Process.whereis(@ledger)
+        else
+          true ->
+            take_table(pid)
+            pid
+        end
+    end
+  end
+
+  defp take_table(owner) do
+    case :ets.whereis(@table) do
+      :undefined ->
+        table =
+          :ets.new(@table, [
+            :set,
+            :public,
+            :named_table,
+            {:heir, owner, :ledger},
+            read_concurrency: true,
+            write_concurrency: true
+          ])
+
+        :ets.give_away(table, owner, :ledger)
+
+      _tid ->
+        :ok
+    end
+  end
+
+  defp ledger_loop do
+    receive do
+      _message -> ledger_loop()
+    end
   end
 
   @impl true

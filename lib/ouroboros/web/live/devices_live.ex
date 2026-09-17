@@ -25,6 +25,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   the URL and never rendered back. The field is emptied afterwards by giving it a new DOM id,
   so the browser replaces the element rather than keeping the value the operator typed.
 
+  The field uses `autocomplete="off"` rather than `new-password` so the browser is not
+  invited to save the value. Browsers still sometimes offer a save; the emptied field and
+  the nonce that replaces it are what this page can actually do about that.
+
   The secret's journey after that is `Ouroboros.Fleet.Deployment`'s, which documents it:
   the broker never sees it, and `Ouroboros.Gateway.AuditLine` redacts this one verb's
   parameters rather than digesting them.
@@ -69,21 +73,23 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   @status_retries 8
   @status_retry_after 150
+  @reload_burst 150
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok,
-     socket
-     |> assign(:view_session, tab_session(socket))
-     |> assign(:page_title, "Devices")
-     |> assign(:refusal, nil)
-     |> assign(:announced, 0)
-     |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
-     |> assign(:query, "")
-     |> assign(:filter, "all")
-     |> assign(:drawer, nil)
-     |> assign(:announcement, "")
-     |> load()}
+    socket =
+      socket
+      |> assign(:view_session, tab_session(socket))
+      |> assign(:page_title, "Devices")
+      |> assign(:refusal, nil)
+      |> assign(:announced, 0)
+      |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
+      |> assign(:query, "")
+      |> assign(:filter, "all")
+      |> assign(:drawer, nil)
+      |> assign(:announcement, "")
+
+    {:ok, if(connected?(socket), do: load(socket), else: loading(socket))}
   end
 
   @doc """
@@ -172,7 +178,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   #
   # The gate is the same question the render asks, asked again where it cannot be skipped.
   # The gateway refuses these verbs on its own side too, and that is the boundary that
-  # matters; this is the surface keeping its own word.
+  # matters; this is the surface keeping its own word. `cancel-setup` asks `:cancel`, which
+  # is availability of `fleet.deployment.cancel` and nothing else: a local setup on a
+  # machine with no CA key still has to be stoppable.
   def handle_event("deploy", %{"address" => address}, socket) do
     with :ok <- allowed?(socket, :add),
          {:ok, device} <- deployable(socket, address) do
@@ -216,15 +224,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   end
 
   def handle_event("connect", params, %{assigns: %{drawer: %{operation: nil}}} = socket) do
-    socket =
-      update_drawer(socket, &%{&1 | form: form(params, &1.form), error: nil, busy: :prepare})
+    guarded(socket, fn ->
+      socket =
+        update_drawer(socket, &%{&1 | form: form(params, &1.form), error: nil, busy: :prepare})
 
-    with :ok <- allowed?(socket, drawer_gate(socket)),
-         :ok <- local_setup_target(socket) do
-      start_inspection(socket)
-    else
-      {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
-    end
+      with :ok <- allowed?(socket, drawer_gate(socket)),
+           :ok <- local_setup_target(socket) do
+        start_inspection(socket)
+      else
+        {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
+      end
+    end)
   end
 
   # A second submission of a form whose operation already exists is not a second deployment.
@@ -248,11 +258,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         %{assigns: %{drawer: %{operation: operation}}} = socket
       )
       when is_binary(operation) and is_binary(challenge) and is_binary(secret) do
-    case allowed?(socket, drawer_gate(socket)) do
-      {:refused, sentence} ->
-        {:noreply, drawer_refused(socket, sentence)}
-
-      :ok ->
+    guarded(socket, fn ->
+      with :ok <- secret_bind_ok?(socket),
+           :ok <- allowed?(socket, drawer_gate(socket)) do
         result =
           operate(socket, @authenticate, %{
             "operation_id" => operation,
@@ -269,7 +277,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
          |> update_drawer(&%{&1 | secret_nonce: &1.secret_nonce + 1, busy: nil})
          |> reload()
          |> answered(result, "The credential was sent to the deployment worker.")}
-    end
+      else
+        {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
+      end
+    end)
   end
 
   def handle_event("authenticate", _params, socket), do: {:noreply, socket}
@@ -280,11 +291,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         %{assigns: %{drawer: %{operation: operation}}} = socket
       )
       when is_binary(operation) do
-    case allowed?(socket, drawer_gate(socket)) do
-      {:refused, sentence} ->
-        {:noreply, drawer_refused(socket, sentence)}
-
-      :ok ->
+    guarded(socket, fn ->
+      with :ok <- secret_bind_ok?(socket),
+           :ok <- allowed?(socket, drawer_gate(socket)) do
         result =
           operate(socket, @confirm_host, %{
             "operation_id" => operation,
@@ -298,54 +307,66 @@ defmodule Ouroboros.Web.Live.DevicesLive do
             else: "The host was not trusted, and this attempt was refused."
 
         {:noreply, socket |> reload() |> answered(result, said)}
-    end
+      else
+        {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
+      end
+    end)
   end
 
   def handle_event("trust-host", _params, socket), do: {:noreply, socket}
 
   def handle_event("approve", %{"digest" => digest}, socket) when is_binary(digest) do
-    drawer = socket.assigns.drawer
+    guarded(socket, fn ->
+      drawer = socket.assigns.drawer
 
-    with :ok <- allowed?(socket, drawer_gate(socket)),
-         :ok <- approvable(socket, digest) do
-      result =
-        operate(socket, @start, %{
-          "operation_id" => drawer.operation,
-          "plan_digest" => digest,
-          "idempotency_key" => drawer.approval_key
-        })
+      with :ok <- secret_bind_ok?(socket),
+           :ok <- allowed?(socket, drawer_gate(socket)),
+           :ok <- approvable(socket, digest) do
+        result =
+          operate(socket, @start, %{
+            "operation_id" => drawer.operation,
+            "plan_digest" => digest,
+            "idempotency_key" => drawer.approval_key
+          })
 
-      {:noreply,
-       socket
-       |> update_drawer(&%{&1 | approved: digest})
-       |> reload()
-       |> answered(result, "The plan was approved.")}
-    else
-      {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
-    end
+        {:noreply,
+         socket
+         |> update_drawer(&%{&1 | approved: digest})
+         |> reload()
+         |> answered(result, "The plan was approved.")}
+      else
+        {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
+      end
+    end)
   end
 
   def handle_event("approve", _params, socket), do: {:noreply, socket}
 
   def handle_event("cancel-setup", _params, %{assigns: %{drawer: %{operation: op}}} = socket)
       when is_binary(op) do
-    case operate(socket, @cancel, %{"operation_id" => op}) do
-      {:ok, reply} when is_map(reply) ->
-        # The worker answered, so this page knows how the operation ended even if nothing
-        # else ever tells it: the broker releases the socket once a cancel has been
-        # acknowledged, and a fake or an old worker may leave no journal to read afterwards.
-        # What is recorded here is what was observed — the worker said it was stopping — and
-        # not a state invented on its behalf.
-        {:noreply,
-         socket
-         |> update_drawer(
-           &%{&1 | residue: List.wrap(reply["residue"]), error: nil, cancelled?: true}
-         )
-         |> reload()
-         |> announce("The setup was asked to stop at a safe boundary.")}
+    case allowed?(socket, :cancel) do
+      {:refused, sentence} ->
+        {:noreply, drawer_refused(socket, sentence)}
 
-      refused ->
-        {:noreply, drawer_refusal(socket, refused)}
+      :ok ->
+        case operate(socket, @cancel, %{"operation_id" => op}) do
+          {:ok, reply} when is_map(reply) ->
+            # The worker answered, so this page knows how the operation ended even if nothing
+            # else ever tells it: the broker releases the socket once a cancel has been
+            # acknowledged, and a fake or an old worker may leave no journal to read afterwards.
+            # What is recorded here is what was observed — the worker said it was stopping — and
+            # not a state invented on its behalf.
+            {:noreply,
+             socket
+             |> update_drawer(
+               &%{&1 | residue: List.wrap(reply["residue"]), error: nil, cancelled?: true}
+             )
+             |> reload()
+             |> announce("The setup was asked to stop at a safe boundary.")}
+
+          refused ->
+            {:noreply, drawer_refusal(socket, refused)}
+        end
     end
   end
 
@@ -379,6 +400,20 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   def handle_event("open-operation", _params, socket), do: {:noreply, socket}
 
+  def handle_event("inspect-device", %{"address" => address}, socket) when is_binary(address) do
+    case Enum.find(devices(socket), &(&1["address"] == address)) do
+      device when is_map(device) ->
+        if Devices.inspectable?(device),
+          do: {:noreply, open_inspect(socket, device)},
+          else: {:noreply, socket}
+
+      _unknown ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event(_event, _params, socket), do: {:noreply, socket}
+
   # ------------------------------------------------------------------------------------
   # Worker events
   # ------------------------------------------------------------------------------------
@@ -391,7 +426,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # finished — so a page that announced the disconnect first replaced "asked to stop at a
       # safe boundary" with "the result is unknown", about a stop the operator had just asked
       # for and been told had happened.
-      socket = reload(socket)
+      #
+      # Log lines arrive in bursts; coalescing those is what this is for. A challenge, a
+      # state change or a done frame is the thing the drawer is waiting to draw, and it is
+      # reloaded immediately rather than 150 ms later.
+      socket = schedule_reload(socket, operation, event)
 
       cond do
         event["event"] != "disconnected" -> {:noreply, announce(socket, said(event))}
@@ -422,9 +461,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   end
 
   def handle_info({:devices_reload, operation}, socket) do
-    if socket.assigns.drawer && socket.assigns.drawer.operation == operation,
-      do: {:noreply, reload(socket)},
-      else: {:noreply, socket}
+    if socket.assigns.drawer && socket.assigns.drawer.operation == operation do
+      {:noreply,
+       socket
+       |> update_drawer(&%{&1 | reload_pending?: false})
+       |> reload()}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info(_other, socket), do: {:noreply, socket}
@@ -508,6 +552,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # ------------------------------------------------------------------------------------
   # Loading
   # ------------------------------------------------------------------------------------
+
+  defp loading(socket) do
+    socket
+    |> assign(:availability, :loading)
+    |> assign(:fleet, nil)
+    |> assign(:fleet_error, nil)
+    |> assign(:inventory, :loading)
+    |> assign(:inventory_error, nil)
+    |> assign(:operations, [])
+  end
 
   defp load(socket) do
     socket
@@ -598,6 +652,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       approved: nil,
       reloads: 0,
       monitor: nil,
+      reload_pending?: false,
       advanced?: false,
       secret_nonce: 0,
       approval_key: nil,
@@ -612,6 +667,31 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         "data_dir" => "",
         "service" => "true"
       }
+    })
+  end
+
+  defp open_inspect(socket, device) do
+    socket
+    |> close_drawer()
+    |> assign(:drawer, %{
+      device: device,
+      kind: "inspect",
+      operation: nil,
+      status: nil,
+      error: nil,
+      residue: [],
+      busy: nil,
+      takeover: nil,
+      rebind: nil,
+      cancelled?: false,
+      approved: nil,
+      reloads: 0,
+      monitor: nil,
+      reload_pending?: false,
+      advanced?: false,
+      secret_nonce: 0,
+      approval_key: nil,
+      form: %{}
     })
   end
 
@@ -637,6 +717,18 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # Attaching is the only way an operation gets into the drawer, whether it arrived from a
   # `prepare`, from a `resume`, from a row, or from the address bar after a reload.
   defp attach(socket, operation, device) do
+    socket =
+      case socket.assigns.drawer do
+        %{operation: current} when is_binary(current) and current != operation ->
+          close_drawer(socket)
+
+        %{kind: "inspect"} ->
+          close_drawer(socket)
+
+        _same_or_empty ->
+          socket
+      end
+
     summary = Enum.find(socket.assigns.operations, &(&1["operation"] == operation))
     kind = (summary && summary["kind"]) || "add"
     drawer = socket.assigns.drawer || open_drawer(socket, device, kind).assigns.drawer
@@ -732,6 +824,60 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   defp update_drawer(socket, _fun), do: socket
 
+  defp schedule_reload(socket, operation, %{"event" => "log"}) do
+    drawer = socket.assigns.drawer
+
+    if is_map(drawer) and drawer[:reload_pending?] do
+      socket
+    else
+      Process.send_after(self(), {:devices_reload, operation}, @reload_burst)
+      update_drawer(socket, &%{&1 | reload_pending?: true})
+    end
+  end
+
+  defp schedule_reload(socket, _operation, _event), do: reload(socket)
+
+  # Never re-raise with the event params on the stack. OTP's LiveView crash report would
+  # print the Phoenix message payload — the password, the host-trust answer — and
+  # `filter_parameters` does not cover that translator.
+  defp guarded(socket, fun) do
+    _ = crash_point(socket)
+    fun.()
+  rescue
+    _exception -> {:noreply, generic_drawer_error(socket)}
+  catch
+    _kind, _reason -> {:noreply, generic_drawer_error(socket)}
+  end
+
+  defp crash_point(%{assigns: %{crash_point: fun}}) when is_function(fun, 0), do: fun.()
+  defp crash_point(_socket), do: :ok
+
+  defp generic_drawer_error(socket) do
+    sentence = "The deployment could not complete that action."
+
+    socket
+    |> update_drawer(&%{&1 | error: sentence, busy: nil})
+    |> announce(sentence)
+  end
+
+  # The broker's answer can lag the bind this socket is actually on. Secret-carrying
+  # events read the running endpoint, not a forwarded header and not a stale inventory.
+  defp secret_bind_ok?(socket) do
+    case Config.for_endpoint(socket.endpoint) do
+      %{bind: bind} ->
+        if Ouroboros.Web.Config.loopback?(bind),
+          do: :ok,
+          else: {:refused, Devices.deploy_blocker("cleartext_web_bind", posture(socket))}
+
+      _missing ->
+        {:refused, Devices.deploy_blocker("cleartext_web_bind", posture(socket))}
+    end
+  rescue
+    _exception -> {:refused, Devices.deploy_blocker("cleartext_web_bind", posture(socket))}
+  catch
+    _kind, _reason -> {:refused, Devices.deploy_blocker("cleartext_web_bind", posture(socket))}
+  end
+
   # ------------------------------------------------------------------------------------
   # The gate
   # ------------------------------------------------------------------------------------
@@ -744,9 +890,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   `:setup` drops `no_ca_key` for the reason `setup?/1` gives: the first local setup is what
   creates that key.
   """
-  @spec allowed?(Phoenix.LiveView.Socket.t(), :add | :setup) :: :ok | {:refused, String.t()}
+  @spec allowed?(Phoenix.LiveView.Socket.t(), :add | :setup | :cancel) ::
+          :ok | {:refused, String.t()}
   def allowed?(socket, :setup) do
     if setup?(socket), do: :ok, else: {:refused, setup_blocked(socket)}
+  end
+
+  def allowed?(socket, :cancel) do
+    if Call.available?(socket.assigns.scope, @cancel),
+      do: :ok,
+      else: {:refused, unavailable(socket, @cancel)}
   end
 
   def allowed?(socket, _add) do
@@ -953,9 +1106,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     %{
       "kind" => "add",
       "target" =>
-        %{"address" => String.trim(form["address"] || "")}
+        %{"address" => trimmed(form["address"]) || ""}
         |> put_present("machine", trimmed(form["machine"])),
-      "ssh_user" => String.trim(form["ssh_user"] || ""),
+      "ssh_user" => trimmed(form["ssh_user"]) || "",
       "port" => port(form["port"]),
       "service" => form["service"] == "true"
     }
@@ -1069,6 +1222,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       Call.available?(socket.assigns.scope, @prepare)
   end
 
+  defp cancel?(socket), do: Call.available?(socket.assigns.scope, @cancel)
+
   defp deploy_blocked(socket) do
     case blockers(socket) do
       [] -> unavailable(socket, @prepare)
@@ -1142,12 +1297,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       |> assign(:deploy_blocked, deploy_blocked(assigns_socket(assigns)))
       |> assign(:setup?, setup?(assigns_socket(assigns)))
       |> assign(:setup_blocked, setup_blocked(assigns_socket(assigns)))
-      |> assign(:setup?, setup?(assigns_socket(assigns)))
-      |> assign(:setup_blocked, setup_blocked(assigns_socket(assigns)))
+      |> assign(:cancel?, cancel?(assigns_socket(assigns)))
       |> assign(:rows, rows(assigns))
-      |> assign(:unfinished, unfinished(assigns))
-      |> assign(:waiting, Enum.filter(unfinished(assigns), &Devices.waiting?(&1["state"])))
-      |> assign(:stopped, Enum.reject(unfinished(assigns), &Devices.waiting?(&1["state"])))
+      |> then(fn assigns ->
+        unfinished = unfinished(assigns)
+
+        assigns
+        |> assign(:unfinished, unfinished)
+        |> assign(:waiting, Enum.filter(unfinished, &Devices.waiting?(&1["state"])))
+        |> assign(:stopped, Enum.reject(unfinished, &Devices.waiting?(&1["state"])))
+      end)
 
     ~H"""
     <div>
@@ -1165,7 +1324,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
         <.deployment_host host={@host} availability={@availability} />
 
-        <section :if={@availability != :available} class="ouro-panel">
+        <p :if={@inventory == :loading} class="ouro-devices-empty" role="status">
+          Loading devices…
+        </p>
+
+        <section :if={@availability not in [:available, :loading]} class="ouro-panel">
           <div class="ouro-panel-head">
             <h2>Deployment is not available here</h2>
           </div>
@@ -1187,7 +1350,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           stopped={@stopped}
         />
 
-        <section :if={@inventory} class="ouro-panel">
+        <section :if={is_map(@inventory)} class="ouro-panel">
           <div class="ouro-panel-head">
             <h2>Devices</h2>
             <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
@@ -1281,7 +1444,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           drawer={@drawer}
           host={@host}
           announcement={@announcement}
-          can_operate?={@deploy?}
+          announced={@announced}
+          can_operate?={@cancel?}
+          operations={@operations}
         />
       </main>
     </div>
@@ -1497,10 +1662,19 @@ defmodule Ouroboros.Web.Live.DevicesLive do
             >
               Set up this device
             </button>
+            <button
+              :if={is_nil(operation_for(@operations, device)) and Devices.inspectable?(device)}
+              type="button"
+              class="ouro-button"
+              phx-click="inspect-device"
+              phx-value-address={device["address"]}
+            >
+              {Devices.state_action(device["state"])}
+            </button>
             <span
               :if={
                 is_nil(operation_for(@operations, device)) and not Devices.deployable?(device) and
-                  not Devices.setup?(device)
+                  not Devices.setup?(device) and not Devices.inspectable?(device)
               }
               class="ouro-devices-quiet"
             >
@@ -1580,7 +1754,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         Devices.state_words(device["state"])
 
       operation ->
-        {words, _label, _event} = Devices.operation_row(operation["state"])
+        {words, _label, _event} = Devices.operation_row(operation["state"], operation["kind"])
         words
     end
   end
@@ -1588,7 +1762,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp row_action(operations, device) do
     case latest_operation(operations, device) do
       empty when empty == %{} -> {nil, Devices.state_action(device["state"]), "deploy"}
-      operation -> Devices.operation_row(operation["state"])
+      operation -> Devices.operation_row(operation["state"], operation["kind"])
     end
   end
 
@@ -1703,7 +1877,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   attr :drawer, :map, required: true
   attr :host, :map, default: nil
   attr :announcement, :string, required: true
+  attr :announced, :integer, required: true
   attr :can_operate?, :boolean, required: true
+  attr :operations, :list, default: []
 
   defp drawer(assigns) do
     assigns = assign(assigns, :step, step(assigns.drawer))
@@ -1719,16 +1895,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       data-step={@step}
     >
       <div class="ouro-session-dialog-form">
-        <h2 id="ouro-deploy-title">
-          {if @drawer.kind == "setup", do: "Set up this device", else: "Deploy Ouroboros"}
-        </h2>
+        <h2 id="ouro-deploy-title">{drawer_title(@drawer)}</h2>
 
         <p class="ouro-devices-host" data-ouro-deployment-host>
           <strong>
-            Deploying from {(@host && @host["hostname"]) || Devices.this_device()} · local user {(@host &&
-                                                                                                    @host[
-                                                                                                      "user"
-                                                                                                    ]) ||
+            Deploying from {Devices.plain(@host && @host["hostname"], 96) || Devices.this_device()} · local user {Devices.plain(
+              @host && @host["user"],
+              64
+            ) ||
               "not reported"}
           </strong>
         </p>
@@ -1752,7 +1926,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           aria-live="polite"
           aria-atomic="true"
         >
-          {@announcement}
+          <span>{@announcement}</span>
+          <span class="ouro-visually-hidden">{@announced}</span>
         </p>
 
         <p :if={@drawer.error} id="ouro-deploy-error" class="ouro-refusal" role="alert">
@@ -1762,6 +1937,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <.takeover :if={taken_over?(@drawer)} drawer={@drawer} />
         <.rebind :if={@drawer.rebind && @drawer.rebind == @drawer.operation} drawer={@drawer} />
 
+        <.inspect_step :if={@step == :inspect} drawer={@drawer} operations={@operations} />
         <.setup_step :if={@step == :select and @drawer.kind == "setup"} drawer={@drawer} />
         <.connect_step :if={@step == :select and @drawer.kind != "setup"} drawer={@drawer} />
         <.host_trust_step :if={@step == :host_trust} drawer={@drawer} />
@@ -1770,7 +1946,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <.progress_step :if={@step in [:progress, :connecting]} drawer={@drawer} />
         <.finish_step :if={@step == :finish} drawer={@drawer} />
 
-        <.steps :if={@step not in [:select]} drawer={@drawer} />
+        <.steps :if={@step not in [:select, :inspect]} drawer={@drawer} />
 
         <div class="ouro-devices-drawer-foot">
           <button type="button" class="ouro-quiet-button" phx-click="drawer-close">
@@ -1873,6 +2049,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   # Which step the drawer is on. Challenges first, because an open challenge is the runtime
   # waiting for this operator and outranks whatever the last state event said.
+  defp step(%{kind: "inspect"}), do: :inspect
   defp step(%{operation: nil}), do: :select
   defp step(%{status: nil}), do: :connecting
 
@@ -1917,6 +2094,85 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     do: true
 
   defp taken_over?(_drawer), do: false
+
+  defp drawer_title(%{kind: "inspect"} = drawer),
+    do: Devices.state_action(drawer.device && drawer.device["state"])
+
+  defp drawer_title(%{kind: "setup"}), do: "Set up this device"
+  defp drawer_title(_other), do: "Deploy Ouroboros"
+
+  attr :drawer, :map, required: true
+  attr :operations, :list, default: []
+
+  defp inspect_step(assigns) do
+    device = assigns.drawer.device || %{}
+    operation = latest_operation(assigns.operations, device)
+
+    assigns =
+      assigns
+      |> assign(:device, device)
+      |> assign(:operation, operation)
+
+    ~H"""
+    <section class="ouro-devices-step" aria-labelledby="ouro-deploy-inspect-title">
+      <h3 id="ouro-deploy-inspect-title">{drawer_title(@drawer)}</h3>
+
+      <dl class="ouro-facts">
+        <div class="ouro-fact">
+          <dt>Roster name</dt>
+          <dd>{Devices.plain(@device["machine"], 96) || "not on this fleet's roster"}</dd>
+        </div>
+        <div class="ouro-fact">
+          <dt>Network name</dt>
+          <dd>{Devices.plain(@device["name"], 96) || "not reported"}</dd>
+        </div>
+        <div class="ouro-fact">
+          <dt>Addresses</dt>
+          <dd class="ouro-mono">
+            {Devices.plain(@device["address"], 64) || "no private address reported"}
+          </dd>
+        </div>
+        <div class="ouro-fact">
+          <dt>Connected to this runtime</dt>
+          <dd>{inspect_flag(@device["connected"])}</dd>
+        </div>
+        <div class="ouro-fact">
+          <dt>Compatible</dt>
+          <dd>{inspect_flag(@device["compatible"])}</dd>
+        </div>
+        <div class="ouro-fact">
+          <dt>Runtime running</dt>
+          <dd>{inspect_flag(@device["runtime_running"])}</dd>
+        </div>
+        <div class="ouro-fact">
+          <dt>Last probe</dt>
+          <dd>{Devices.plain(@device["last_probe"], 64) || "not reported"}</dd>
+        </div>
+      </dl>
+
+      <p :if={Devices.blocked?(@device)} class="ouro-devices-blocked">
+        {Devices.state_words(@device["state"])}. Deployment is disabled while that blocker
+        stands. Refresh after the device comes back.
+      </p>
+
+      <div :if={@operation != %{}} class="ouro-devices-note">
+        <p>
+          Latest operation <span class="ouro-mono">{Devices.plain(@operation["operation"], 32)}</span>
+          — {Devices.operation_state(@operation["state"])}
+          {if @operation["attached"], do: "(a worker is attached)", else: "(journal only)"}
+        </p>
+      </div>
+
+      <div class="ouro-devices-actions">
+        <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
+      </div>
+    </section>
+    """
+  end
+
+  defp inspect_flag(true), do: "yes"
+  defp inspect_flag(false), do: "no"
+  defp inspect_flag(_unknown), do: "not reported"
 
   attr :drawer, :map, required: true
 
@@ -2200,18 +2456,24 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <div class="ouro-fact">
           <dt>Device</dt>
           <dd>
-            {(@drawer.device && @drawer.device["name"]) || @facts["address"] || "the selected device"}
+            {(@drawer.device && Devices.plain(@drawer.device["name"], 96)) ||
+              Devices.plain(@facts["address"], 64) || "the selected device"}
           </dd>
         </div>
         <div class="ouro-fact">
           <dt>Address and port</dt>
           <dd class="ouro-mono">
-            {@facts["address"] || @drawer.form["address"]}:{@facts["port"] || @drawer.form["port"]}
+            {Devices.plain(@facts["address"], 64) || Devices.plain(@drawer.form["address"], 64)}:{Devices.plain(
+              @facts["port"] || @drawer.form["port"],
+              16
+            )}
           </dd>
         </div>
         <div class="ouro-fact">
           <dt>Account</dt>
-          <dd class="ouro-mono">{Devices.plain(@facts["user"], 64) || @drawer.form["ssh_user"]}</dd>
+          <dd class="ouro-mono">
+            {Devices.plain(@facts["user"], 64) || Devices.plain(@drawer.form["ssh_user"], 64)}
+          </dd>
         </div>
         <div class="ouro-fact">
           <dt>Key algorithm</dt>
@@ -2301,7 +2563,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
             name="secret"
             value=""
             required
-            autocomplete="new-password"
+            autocomplete="off"
             spellcheck="false"
             data-ouro-secret
             aria-describedby="ouro-deploy-auth-hint"
@@ -2516,7 +2778,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # `last_error` is the broker's, for a frame that carried one. The `reason` beside them is
   # a stable code and stays out of the sentence.
   defp cause(status, done) do
-    Presentation.refusal(status["last_error"] || done["detail"])
+    Presentation.refusal(status["last_error"] || Devices.plain(done["detail"]))
   end
 
   attr :drawer, :map, required: true
@@ -2532,13 +2794,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       |> assign(
         :stages,
         Enum.map(Devices.stages(), fn {key, label, _names} ->
-          {key, label, Enum.filter(reported, &(Devices.stage_of(&1["step"]) == key))}
+          {key, label,
+           Enum.filter(reported, &(is_map(&1) and Devices.stage_of(&1["step"]) == key))}
         end)
       )
       # And the steps that belong to none of the six — cooperative removal's, and the
       # explicit test task — under their own names rather than folded into a stage they
       # are not part of.
-      |> assign(:extra, Enum.filter(reported, &is_nil(Devices.stage_of(&1["step"]))))
+      |> assign(
+        :extra,
+        Enum.filter(reported, &(is_map(&1) and is_nil(Devices.stage_of(&1["step"]))))
+      )
       |> assign(:log, List.wrap((assigns.drawer.status || %{})["log"]))
 
     ~H"""
@@ -2583,7 +2849,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <summary>What the worker reported</summary>
         <ul class="ouro-devices-log">
           <li :for={line <- @log} class="ouro-mono">
-            {Devices.plain(line["line"]) || Devices.plain(line)}
+            {log_line(line)}
           </li>
         </ul>
       </details>
@@ -2606,4 +2872,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       true -> List.last(outcomes)
     end
   end
+
+  defp log_line(%{"line" => line}), do: Devices.plain(line)
+  defp log_line(line) when is_binary(line), do: Devices.plain(line)
+  defp log_line(other), do: Devices.plain(other)
 end

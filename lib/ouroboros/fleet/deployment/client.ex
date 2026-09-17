@@ -50,6 +50,7 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
   alias Ouroboros.Fleet.Deployment.Frame
   alias Ouroboros.Fleet.Deployment.Journal
+  alias Ouroboros.Fleet.Deployment.Launcher
 
   # Per attempt, not in total: the whole handshake is bounded by `@attach_budget` below, and
   # an attempt that sits on a connect for five seconds would eat the budget by itself.
@@ -60,6 +61,11 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   @max_backoff 1_000
   @attach_timeout 10_000
   @request_timeout 30_000
+  # How long `prepare` waits for the worker to publish its capability, and the backoff it
+  # waits with. Same shape as the connect retry, and the same reasoning.
+  @capability_budget 5_000
+  @capability_first_backoff 25
+  @capability_max_backoff 500
   # Enough to render the tail of an operation without turning this process into a log store.
   @max_log 50
   @max_steps 200
@@ -138,11 +144,16 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
     state = %{
       operation: Keyword.fetch!(opts, :operation),
-      instance: Keyword.fetch!(opts, :instance),
-      socket_path: Keyword.fetch!(opts, :socket_path),
+      instance: Keyword.get(opts, :instance),
+      socket_path: Keyword.get(opts, :socket_path),
       subject: Keyword.fetch!(opts, :subject),
       session: Keyword.fetch!(opts, :session),
-      cap: Keyword.fetch!(opts, :cap),
+      cap: Keyword.get(opts, :cap),
+      launcher: Keyword.get(opts, :launcher, Launcher),
+      data_dir: Keyword.get(opts, :data_dir),
+      request: Keyword.get(opts, :request),
+      spawn_timeout: Keyword.get(opts, :spawn_timeout, 25_000),
+      reaper?: Keyword.get(opts, :reaper?, false),
       # The worker refuses an attach from a subject other than the operation's owner unless
       # this says so, and records a `takeover` step when it does. The broker has already
       # made the same decision against the journal; this is the half the worker enforces,
@@ -158,25 +169,112 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       challenge_seq: 0,
       steps: [],
       log: [],
-      state: "attaching",
+      state:
+        if(Keyword.get(opts, :cap) && Keyword.get(opts, :socket_path),
+          do: "attaching",
+          else: "spawning"
+        ),
       kind: nil,
       owner: nil,
       last_error: nil,
       done: nil
     }
 
-    # The connection and the handshake happen in `handle_continue`, not here. `init/1` runs
-    # inside `DynamicSupervisor.start_child/2`, which the broker calls from its own
-    # `handle_call`: a worker that accepts the socket and then says nothing used to hold the
-    # named broker — and therefore every other operation — for the full attach timeout
-    # (review F12). Now `prepare` answers as soon as the process exists, in state
-    # `attaching`, and the handshake's own failure kills this process rather than the call.
-    {:ok, state, {:continue, :attach}}
+    # Spawn (when this process was started to *create* a worker) and the handshake both
+    # happen in `handle_continue`, not here. `init/1` runs inside
+    # `DynamicSupervisor.start_child/2`, which the broker calls from its own `handle_call`:
+    # a 10–20 second `ouro fleet worker start` inside that call used to stall every other
+    # verb on the named singleton. Now `prepare` answers as soon as the process exists, in
+    # state `spawning`, and a spawn or handshake failure kills this process rather than
+    # the call.
+    continue =
+      if is_binary(state.cap) and is_binary(state.socket_path),
+        do: :attach,
+        else: :spawn
+
+    {:ok, state, {:continue, continue}}
   end
 
+  # OTP's gen_server terminate report prints `last_message` even when this process is
+  # `:sensitive`. `format_status/1` is the callback that report actually consults: replace
+  # the message (a `{:respond, ..., %{"secret" => ...}, ...}` call) and drop the capability
+  # so neither lands in a crash dump.
   @impl true
+  def format_status(status) when is_map(status) do
+    status
+    |> Map.put(:message, :redacted)
+    |> Map.update(:state, nil, &redact_state/1)
+  end
+
+  defp redact_state(%{cap: _} = state), do: %{state | cap: :redacted, request: :redacted}
+  defp redact_state(_other), do: :redacted
+
+  @impl true
+  def handle_continue(:spawn, state), do: spawn_worker(state)
+
   def handle_continue(:attach, state) do
     try_attach(state, System.monotonic_time(:millisecond) + @attach_budget, @first_backoff)
+  end
+
+  # Spawn, then read the capability file, then connect. In that order because the worker
+  # writes the capability file before its socket listens (S3): a capability that is not there
+  # yet means a worker that is not listening yet, and connecting first would only make that
+  # race harder to read.
+  #
+  # This used to run inside the broker's `handle_call`. A named singleton that sleeps on
+  # `ouro fleet worker start` is a named singleton that cannot answer `fleet.devices`.
+  defp spawn_worker(state) do
+    case state.launcher.spawn_worker(
+           state.operation,
+           state.data_dir,
+           state.request,
+           state.spawn_timeout
+         ) do
+      {:ok, %{socket: socket, instance: instance}} ->
+        adopt_spawn(%{state | socket_path: socket, instance: instance, request: nil})
+
+      {:error, reason} ->
+        give_up_spawn(state, reason)
+    end
+  end
+
+  defp adopt_spawn(state) do
+    case read_capability(state.data_dir, state.operation) do
+      {:ok, cap} ->
+        try_attach(
+          %{state | cap: cap, state: "attaching"},
+          System.monotonic_time(:millisecond) + @attach_budget,
+          @first_backoff
+        )
+
+      {:error, reason} ->
+        case Journal.read(state.data_dir, state.operation) do
+          {:ok, document} ->
+            # The worker finished before this could attach — an operation that fails fast
+            # enough never publishes a capability at all, or removes it on the way out. It
+            # still *happened*, and its journal says what happened. Stopping normally lets
+            # the broker drop this connection so `status` reads that journal.
+            {:stop, :normal, %{state | cap: nil, state: document["state"] || "unknown"}}
+
+          {:error, _no_journal} ->
+            Logger.warning(
+              "fleet deployment could not adopt the worker for #{state.operation} and it left no " <>
+                "journal: #{inspect(reason)}"
+            )
+
+            {:stop, {:shutdown, {:attach_failed, reason}}, %{state | cap: nil}}
+        end
+    end
+  end
+
+  defp give_up_spawn(state, reason) do
+    case state.data_dir && Journal.read(state.data_dir, state.operation) do
+      {:ok, document} ->
+        {:stop, :normal, %{state | cap: nil, state: document["state"] || "unknown"}}
+
+      _no_journal ->
+        {:stop, {:shutdown, {:attach_failed, reason}}, %{state | cap: nil}}
+    end
   end
 
   # Connect, handshake, and **retry** — because there is a window between the worker binding
@@ -212,6 +310,7 @@ defmodule Ouroboros.Fleet.Deployment.Client do
           Process.send_after(self(), {:attach_retry, deadline, next_backoff(backoff)}, backoff)
           {:noreply, state}
         else
+          maybe_reap(state)
           {:stop, {:shutdown, {:attach_failed, give_up(reason)}}, %{state | cap: nil}}
         end
     end
@@ -413,17 +512,21 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
     case authorize(state, challenge_id, expect, binding, now) do
       {:ok, challenge} ->
-        # Consumed at the moment it is sent, not when the answer comes back: two responses
-        # racing on one challenge must not both reach the worker, and a worker that never
-        # answers must not leave a challenge somebody can try again with a second guess.
-        state = put_in(state.challenges[challenge_id], %{challenge | consumed?: true})
+        case deliver(
+               state,
+               from,
+               %{"op" => "respond", "challenge" => challenge_id, "response" => response},
+               challenge
+             ) do
+          {:noreply, sent} ->
+            # Consumed once the frame is on the socket, not before: a send that never
+            # leaves this process must not spend the one-use challenge, or a dropped TCP
+            # write becomes a credential the operator cannot offer again.
+            {:noreply, put_in(sent.challenges[challenge_id], %{challenge | consumed?: true})}
 
-        deliver(
-          state,
-          from,
-          %{"op" => "respond", "challenge" => challenge_id, "response" => response},
-          challenge
-        )
+          other ->
+            other
+        end
 
       {:error, reason} ->
         audit(state, challenge_id, kind_of(state, challenge_id), reason)
@@ -890,6 +993,137 @@ defmodule Ouroboros.Fleet.Deployment.Client do
         |> Enum.map(&challenge_view/1)
         |> Enum.sort_by(& &1["challenge"])
     }
+  end
+
+  # A usable capability in hand after a spawn that this process then failed to attach is a
+  # worker nobody else will cancel. The original binding is what the worker already records
+  # as owner, so a reaper that attached as `runtime-reaper` used to force a takeover on the
+  # real operator's next resume.
+  defp maybe_reap(%{reaper?: true}), do: :ok
+
+  defp maybe_reap(%{cap: cap, socket_path: socket, instance: instance} = state)
+       when is_binary(cap) and is_binary(socket) and is_binary(instance) do
+    binding = %{subject: state.subject, session: state.session}
+    _ = spawn(fn -> reap_over_socket(state.operation, socket, instance, cap, binding) end)
+    :ok
+  end
+
+  defp maybe_reap(_state), do: :ok
+
+  defp reap_over_socket(operation, socket, instance, cap, binding) do
+    case start_link(
+           operation: operation,
+           instance: instance,
+           socket_path: socket,
+           cap: cap,
+           subject: binding.subject,
+           session: binding.session,
+           reaper?: true
+         ) do
+      {:ok, pid} ->
+        _ = await_attached(pid)
+        _ = cancel(pid)
+        GenServer.stop(pid, :normal, 2_000)
+        Logger.info("fleet deployment cancelled the worker it could not adopt for #{operation}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "fleet deployment could not reach the worker it could not adopt for #{operation}: " <>
+            "#{inspect(reason)}"
+        )
+    end
+  catch
+    _kind, _reason -> :ok
+  end
+
+  defp await_attached(pid) do
+    deadline = System.monotonic_time(:millisecond) + @attach_budget
+
+    Enum.reduce_while(1..1_000, :timeout, fn _attempt, _acc ->
+      if System.monotonic_time(:millisecond) >= deadline do
+        {:halt, :timeout}
+      else
+        case snapshot(pid) do
+          {:ok, %{"attached" => true}} ->
+            {:halt, :ok}
+
+          {:error, _reason} ->
+            {:halt, :gone}
+
+          _not_yet ->
+            Process.sleep(20)
+            {:cont, :timeout}
+        end
+      end
+    end)
+  end
+
+  # The capability is at least 32 hex characters in a 0600 file the worker removes when it
+  # exits. Both facts are checked: a capability file anybody on this machine can read is not
+  # a capability, and this refuses to present one rather than quietly accepting a weaker
+  # boundary than the worker promised.
+  defp read_capability(data_dir, operation) do
+    deadline = System.monotonic_time(:millisecond) + @capability_budget
+    attempt_capability(data_dir, operation, deadline, @capability_first_backoff)
+  end
+
+  defp attempt_capability(data_dir, operation, deadline, backoff) do
+    case capability(data_dir, operation) do
+      {:error, :capability_missing} ->
+        now = System.monotonic_time(:millisecond)
+
+        if now + backoff < deadline do
+          Process.sleep(backoff)
+
+          attempt_capability(
+            data_dir,
+            operation,
+            deadline,
+            min(backoff * 2, @capability_max_backoff)
+          )
+        else
+          {:error, {:capability_missing, worker_log_tail(data_dir, operation)}}
+        end
+
+      settled ->
+        settled
+    end
+  end
+
+  defp worker_log_tail(data_dir, operation) do
+    path = Path.join(Journal.deploy_dir(data_dir), operation <> ".log")
+
+    case File.read(path) do
+      {:ok, ""} -> "its log #{path} is empty"
+      {:ok, body} -> "its log #{path} ends: " <> tail(body)
+      {:error, _reason} -> "its log #{path} could not be read"
+    end
+  end
+
+  defp tail(body) do
+    body
+    |> String.split("\n", trim: true)
+    |> Enum.take(-5)
+    |> Enum.join(" / ")
+    |> String.slice(0, 1_000)
+  end
+
+  defp capability(data_dir, operation) do
+    path = Path.join(Journal.deploy_dir(data_dir), operation <> ".cap")
+
+    with {:ok, %File.Stat{type: :regular, mode: mode, size: size}} when size <= 256 <-
+           File.lstat(path),
+         true <- Bitwise.band(mode, 0o077) == 0,
+         {:ok, body} <- File.read(path),
+         cap = String.trim(body),
+         true <- String.match?(cap, ~r/\A[0-9a-fA-F]{32,128}\z/) do
+      {:ok, cap}
+    else
+      {:error, :enoent} -> {:error, :capability_missing}
+      false -> {:error, :capability_unusable}
+      {:ok, %File.Stat{}} -> {:error, :capability_unusable}
+      {:error, reason} -> {:error, {:capability_unreadable, reason}}
+    end
   end
 
   defp challenge_view(challenge) do

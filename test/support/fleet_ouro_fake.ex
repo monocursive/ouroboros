@@ -34,6 +34,8 @@ defmodule Ouroboros.Test.FleetOuroFake do
       all, which is the "the worker has not published its capability yet" case.
     * `:devices` — the JSON `fleet devices --json` prints.
     * `:sleep` — seconds `fleet devices --json` sleeps first, for the ceiling test.
+    * `:spawn_sleep` — seconds `fleet worker start` sleeps before publishing, for the
+      broker-must-not-block test.
     * `:exit_status` — the status every subcommand exits with instead of 0.
     * `:keep_request` — true leaves the request file in place instead of unlinking it, the
       way a worker that died before reading it would.
@@ -53,6 +55,8 @@ defmodule Ouroboros.Test.FleetOuroFake do
 
     status = Keyword.get(opts, :exit_status, 0)
     sleep = Keyword.get(opts, :sleep, 0)
+    spawn_sleep = Keyword.get(opts, :spawn_sleep, 0)
+    env_file = Path.join(dir, "env")
     cap = Keyword.get(opts, :cap)
     cap_mode = Keyword.get(opts, :cap_mode, 0o600)
     request_mode_file = Path.join(dir, "request-mode")
@@ -80,6 +84,7 @@ defmodule Ouroboros.Test.FleetOuroFake do
 
     script = """
     #!/bin/sh
+    env > #{shell_quote(env_file)}
     : > #{shell_quote(argv_file)}
     for arg in "$@"; do printf '%s\\n' "$arg" >> #{shell_quote(argv_file)}; done
     if [ #{status} -ne 0 ]; then
@@ -92,6 +97,7 @@ defmodule Ouroboros.Test.FleetOuroFake do
         cat #{shell_quote(devices_file)}
         ;;
       "fleet worker start")
+        [ #{spawn_sleep} -gt 0 ] && sleep #{spawn_sleep}
         operation=""
         data_dir=""
         while [ $# -gt 0 ]; do
@@ -157,6 +163,15 @@ defmodule Ouroboros.Test.FleetOuroFake do
   @doc "Replaces the line `fleet worker start` prints, after the fake exists."
   @spec put_spawn_line!(Path.t(), String.t()) :: :ok
   def put_spawn_line!(dir, line), do: File.write!(Path.join(dir, "spawn-line"), line)
+
+  @doc "The environment the fake process saw, as `KEY=value` lines."
+  @spec env(Path.t()) :: String.t()
+  def env(dir) do
+    case File.read(Path.join(dir, "env")) do
+      {:ok, body} -> body
+      {:error, _reason} -> ""
+    end
+  end
 
   # The script is generated, so the paths interpolated into it are quoted rather than trusted
   # to be well behaved: a temporary directory with a space in its name must not turn into a

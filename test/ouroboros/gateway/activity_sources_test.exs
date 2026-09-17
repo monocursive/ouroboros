@@ -295,10 +295,25 @@ defmodule Ouroboros.Gateway.ActivitySourcesTest do
       assert summary["operator_clients"] == nil
       assert Enum.sort(summary["unknown"]) == Enum.sort(Activity.limits().counters)
 
-      # The ledger goes with it, and says so rather than answering zero.
-      assert Activity.in_flight() == nil
-      assert Activity.enter("workspace.exec") == nil
-      assert Activity.leave(nil) == :ok
+      # The ledger outlives the walker, so in-flight calls are not reported as zero.
+      assert is_integer(Activity.in_flight())
+      token = Activity.enter("workspace.exec")
+      assert is_reference(token)
+      assert Activity.leave(token) == :ok
+    end
+
+    test "a cached idle summary does not hide a node that became busy in the same window" do
+      first = Methods.activity(conn_supervisor: :w1b_sources_conns, max_age_ms: 0)
+      assert first["idle"] == true
+
+      token = Activity.enter("workspace.exec")
+      on_exit(fn -> Activity.leave(token) end)
+
+      cached = Methods.activity(conn_supervisor: :w1b_sources_conns, max_age_ms: 250)
+      fresh = Methods.activity(conn_supervisor: :w1b_sources_conns, max_age_ms: 0)
+
+      assert cached["idle"] == true
+      assert fresh["idle"] == false
     end
 
     test "a fresh read is still a fresh read, which is what the gate asks for" do

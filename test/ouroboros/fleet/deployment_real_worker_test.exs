@@ -103,7 +103,7 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
     # (a) The first local fleet, end to end
 
     test "a setup is inspected, reviewed, approved and completed", context do
-      assert {:ok, %{"operation_id" => operation, "state" => "attaching"}} =
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
                prepare(%{
                  "kind" => "setup",
                  "machine" => "lab",

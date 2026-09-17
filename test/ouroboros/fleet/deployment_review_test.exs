@@ -152,6 +152,35 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
         refute inspect(reason) =~ secret
       end)
     end
+
+    test "and a crash report redacts the last message that carried the secret", context do
+      %{worker: worker} = arrange_worker(context)
+      secret = "F1B-FORMAT-#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{"operation_id" => operation}} =
+               Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
+
+      assert {:ok, pid} = await_client(operation)
+      :ok = FleetWorkerFake.challenge(worker, "pw-1", "password")
+      await_challenge(operation, "pw-1")
+
+      :sys.replace_state(pid, fn state ->
+        %{state | clock: fn -> raise "client-test-boom" end}
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :error], fn ->
+          _ =
+            Deployment.authenticate(operation, "pw-1", secret, %{
+              subject: "runtime-unattributed",
+              session: "tab-a"
+            })
+
+          Process.sleep(300)
+        end)
+
+      refute log =~ secret
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -392,10 +421,11 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
 
     log =
       capture_log(fn ->
-        assert {:error, _code, _message, data} =
+        assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
                  Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
 
-        assert data["reason"] == "capability_unusable"
+        assert {:error, {:attach_failed, :capability_unusable}} =
+                 await_status_error(operation)
       end)
 
     # This runtime refused to *use* that capability because anyone on the machine could read
@@ -408,8 +438,8 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
     refute_received {:fake_worker, %{"op" => "cancel"}}
   end
 
-  test "F8b and when the capability is usable, the worker is cancelled", context do
-    %{worker: worker} = arrange_worker(context)
+  test "F8b and when the supervisor is down, nothing is forked", context do
+    _arranged = arrange_worker(context)
 
     # The client supervisor is down, so `start_client` fails *after* the fork with a
     # perfectly good capability in hand — which is the branch that can, and does, reap.
@@ -422,18 +452,15 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
 
     log =
       capture_log(fn ->
-        assert {:error, _code, _message, _data} =
+        assert {:error, _code, _message, data} =
                  Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
 
-        assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-        assert_receive {:fake_worker, %{"op" => "cancel"}}, @receive_timeout
-
-        # The reaper logs after it has closed the connection, and it runs in its own process.
-        Process.sleep(300)
+        assert data["reason"] in ["client_supervisor_unavailable", "no_data_dir"]
       end)
 
-    assert log =~ "cancelled the worker it could not adopt"
-    assert FleetWorkerFake.refusals(worker) == 0
+    refute_receive {:fake_worker, %{"op" => "attach"}}, 400
+    refute_receive {:fake_worker, %{"op" => "cancel"}}, 400
+    refute log =~ "cancelled the worker it could not adopt"
   end
 
   # ---------------------------------------------------------------------------
@@ -722,13 +749,27 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
       # Nothing is listening on that path yet, which is exactly the window.
       refute File.exists?(socket_path)
 
-      assert {:ok, %{"operation_id" => operation, "state" => "attaching"}} =
+      assert {:ok, %{"operation_id" => operation, "state" => "spawning"}} =
                Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
 
-      # The row says `attaching`, and it says it *answerably* — the client is waiting on a
-      # timer rather than sleeping, so a surface polling the operation still gets replies.
-      assert {:ok, %{"attached" => false, "state" => "attaching"}} =
-               Deployment.status(operation, bound())
+      # The row says `spawning` then `attaching`, and it says it *answerably* — the client
+      # is waiting on a timer rather than sleeping, so a surface polling the operation
+      # still gets replies.
+      snapshot =
+        Enum.reduce_while(1..50, nil, fn _attempt, _acc ->
+          case Deployment.status(operation, bound()) do
+            {:ok, %{"attached" => false, "state" => state} = snap}
+            when state in ["spawning", "attaching"] ->
+              {:halt, snap}
+
+            _other ->
+              Process.sleep(20)
+              {:cont, nil}
+          end
+        end)
+
+      assert snapshot["attached"] == false
+      assert snapshot["state"] in ["spawning", "attaching"]
 
       # The worker starts listening a moment later, as a real one does.
       Process.sleep(300)
@@ -829,8 +870,8 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
 
     System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
 
-    # The prepare answers immediately, in state `attaching`.
-    assert {:ok, %{"state" => "attaching"}} =
+    # The prepare answers immediately, in state `spawning`.
+    assert {:ok, %{"state" => "spawning"}} =
              Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
 
     assert_receive :accepted, 10_000
@@ -927,6 +968,25 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
   end
 
   # The handshake is asynchronous now, so a test that wants the connection waits for it.
+  defp await_status_error(operation) do
+    Enum.reduce_while(1..400, nil, fn _attempt, _acc ->
+      case Deployment.status(operation, bound()) do
+        # The client is still dying: its call maps every exit to `worker_unavailable`
+        # until the broker's monitor records the attach failure.
+        {:error, :worker_unavailable} ->
+          Process.sleep(20)
+          {:cont, nil}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+
+        _other ->
+          Process.sleep(20)
+          {:cont, nil}
+      end
+    end)
+  end
+
   defp await_client(operation) do
     Enum.reduce_while(1..100, {:error, :no_worker}, fn _attempt, _acc ->
       with {:ok, pid} <- Deployment.client(operation),

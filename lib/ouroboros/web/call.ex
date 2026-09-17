@@ -100,21 +100,19 @@ defmodule Ouroboros.Web.Call do
   end
 
   @doc """
-  A fresh per-view session id, for the one thing the cookie's id cannot identify.
+  A fresh session id for one browser tab.
 
   `Ouroboros.Web.Auth` writes exactly one id into the session cookie, and every tab in that
   browser reads it. Binding a deployment credential challenge to that id therefore made the
   contract's "a second tab cannot answer the first tab's prompt" false: two tabs are one
-  cookie (review F7). A challenge is bound to one *connected view* instead, which is the
-  thing a person is actually looking at.
+  cookie (review F7). A challenge is bound to the *tab* instead.
 
-  A LiveView calls this **once in `mount/3`**, keeps it in an assign, and passes
-  `session: assigns.view_session` on every `fleet.deployment.*` call. Its other calls keep
-  passing the cookie's id, so the audit line for those still correlates a browser across
-  requests; where the two must differ on one call, `:client_session` sets the binding and
-  `:session` stays the one that is logged.
+  `DevicesLive.tab_session/1` is what a LiveView calls: `app.js` keeps one id in
+  `sessionStorage` (per tab by definition) and sends it as a connect parameter. This
+  function is the fallback when that parameter is absent — a browser that refuses storage,
+  or the dead render, which answers no events anyway.
 
-  Minted per mount rather than derived from anything: a derived id is one somebody else can
+  Minted fresh rather than derived from anything: a derived id is one somebody else can
   derive.
   """
   @spec view_session() :: String.t()
