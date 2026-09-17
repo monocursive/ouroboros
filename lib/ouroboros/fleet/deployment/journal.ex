@@ -2,7 +2,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @moduledoc """
   The worker's durable record, read and never written (seam S5).
 
-  `<data dir>/fleet/deploy/<operation>.json` is the operation's authority for what actually
+  `<data dir>/deploy/<operation>.json` is the operation's authority for what actually
   happened. The worker writes it atomically before and after every externally visible step;
   this runtime reads it when no worker is alive, which is the whole of "status of an
   interrupted operation". Nothing in this module opens the file for writing, and there is
@@ -29,8 +29,13 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
 
   # S5's field list. A key the worker adds later is dropped here until this build is taught
   # what it means, which is the direction an operator-facing summary has to fail in.
+  #
+  # `owner` is the identity that started the operation. It is the worker's to record and this
+  # build's to enforce: without it in this allowlist the field was scrubbed out of every
+  # journal read, and a second administrator could resume somebody else's deployment and
+  # inherit its credential prompts (review F11).
   @fields ~w(
-    operation kind state created_at updated_at target roster release paths
+    operation owner kind state created_at updated_at target roster release paths
     plan_digest steps residue last_error
   )
 
@@ -39,10 +44,18 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   # value is dropped before it can reach a log line or a browser.
   @forbidden ~w(secret password passphrase cookie token credential private_key key_pem)
 
-  @doc "The directory the worker keeps its sockets, capability files and journals in."
+  @doc """
+  The directory the worker keeps its sockets, capability files and journals in.
+
+  `<data dir>/deploy/`, deliberately **not** under `fleet/`. A fleet profile is committed by
+  one atomic rename of a staging directory, so nothing may exist inside `fleet/` beforehand —
+  and a `setup` operation's journal has to exist before the fleet it is creating does. The
+  file names inside are unchanged: `<id>.sock`, `<id>.cap`, `<id>.json`, `<id>.request.json`,
+  `<id>.log`, and the worker's own `<id>.d/` scratch. Mode 0700, created by whichever side
+  gets there first.
+  """
   @spec deploy_dir(Path.t()) :: Path.t()
-  def deploy_dir(data_dir) when is_binary(data_dir),
-    do: Path.join([data_dir, "fleet", "deploy"])
+  def deploy_dir(data_dir) when is_binary(data_dir), do: Path.join(data_dir, "deploy")
 
   @doc "One operation's journal path."
   @spec path(Path.t(), String.t()) :: Path.t()
@@ -115,9 +128,10 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     case read(data_dir, operation) do
       {:ok, document} ->
         document
-        |> Map.take(~w(operation kind state created_at updated_at plan_digest))
+        |> Map.take(~w(operation owner kind state created_at updated_at plan_digest))
         |> Map.put("operation", operation)
         |> Map.put_new("state", nil)
+        |> Map.put_new("owner", nil)
         |> Map.put_new("kind", nil)
         |> Map.put_new("created_at", nil)
         |> Map.put_new("updated_at", nil)
@@ -126,6 +140,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
       {:error, reason} ->
         %{
           "operation" => operation,
+          "owner" => nil,
           "kind" => nil,
           "state" => nil,
           "created_at" => nil,

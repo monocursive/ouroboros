@@ -353,6 +353,9 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       # anything to resume.
       write_journal(context.root, operation, %{
         "operation" => operation,
+        # Seam S5's owner. A listener that authenticated with the local token resolves to
+        # `local-owner`, which is what `Audit.Identity.actor/0` answers for this caller.
+        "owner" => "local-owner",
         "kind" => "add",
         "state" => "interrupted"
       })
@@ -415,7 +418,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   defp arrange_worker(context) do
     cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
     instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-    socket_path = Path.join([context.root, "fleet", "deploy", "w.sock"])
+    socket_path = Path.join([context.root, "deploy", "w.sock"])
 
     worker =
       start_supervised!(
@@ -554,7 +557,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   end
 
   defp write_journal(root, operation, document) do
-    dir = Path.join([root, "fleet", "deploy"])
+    dir = Path.join([root, "deploy"])
     File.mkdir_p!(dir)
     path = Path.join(dir, operation <> ".json")
     File.write!(path, JSON.encode!(document))

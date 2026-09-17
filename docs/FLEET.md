@@ -516,7 +516,7 @@ not an executor:
 
 1. **It states the request in a private file.** Which machine, which SSH account, which
    port, which identity *reference*, which paths — written to
-   `<data dir>/fleet/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
+   `<data dir>/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
    (an exclusive temporary inode chmodded before the first byte, then renamed) and as
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is
    readable by every local account, and while a target hostname and an account name are not
@@ -525,6 +525,12 @@ not an executor:
    broker takes it back, because nothing is coming to read it. A resume writes no request —
    the worker already has its journal, and re-stating a target would be a second chance to
    state a different one.
+
+   The operation namespace is `<data dir>/deploy/`, deliberately **not** under `fleet/`: a
+   fleet profile is committed by one atomic rename of a staging directory, so nothing may
+   exist inside `fleet/` beforehand — and a `setup` operation's journal has to exist before
+   the fleet it is creating does. Inside it, one operation owns `<id>.sock`, `<id>.cap`,
+   `<id>.json`, `<id>.request.json`, `<id>.log` and the worker's `<id>.d/` scratch.
 2. **It starts a worker it does not own.** `ouro fleet worker start --operation <id>
    --data-dir <dir>`, and nothing else on the command line, forks a detached worker into its
    own session and process group, with its stdio on a private log, and prints one JSON line
@@ -538,7 +544,7 @@ not an executor:
    that writes past that cap loses its connection and nothing else.
 4. **It reconnects by instance, not by path.** A socket that exists is not evidence that the
    worker which printed it is the process listening on it.
-5. **It reads the journal when no worker is alive.** `<data dir>/fleet/deploy/<id>.json` is
+5. **It reads the journal when no worker is alive.** `<data dir>/deploy/<id>.json` is
    the operation's durable authority, written by the worker before and after every
    externally visible step. The broker opens it read-only and sanitizes what it returns; it
    never writes one, because a broker that repaired a journal would be inventing steps the
@@ -555,9 +561,21 @@ in an operation journal or receipt, not passed to a command line or an environme
 and — uniquely in this protocol — not passed to the audit parameter digest. Hashing a human's
 password into a log is not redaction, so that one method's audit line names the operation and
 the challenge and nothing else, on both the listener and the browser surface. A challenge is
-bound at issue to the identity *and* the client session it was issued to: a second browser
-tab or a second listener connection is refused `challenge_not_bound` before anything is
-written, and a challenge is consumed the moment it is answered, so there is no second guess.
+bound at issue to the identity *and* the client session it was issued to: a second listener
+connection or a second LiveView is refused `challenge_not_bound` before anything is written,
+and a challenge is consumed the moment it is answered, so there is no second guess. A
+browser's *cookie* id is not that session — one cookie per browser, read by every tab — so a
+LiveView mints its own with `Ouroboros.Web.Call.view_session/0` and passes it as `session:`
+on deployment calls.
+
+**Ownership.** The journal records the identity that started an operation. `status` and
+`cancel` refuse a different one; `resume` refuses it too, and additionally refuses a journal
+whose owner this build cannot establish, because a resume attaches under the *resuming*
+identity and every challenge from then on binds to them. `takeover: true` says so out loud:
+it is permitted, it leaves an audit line naming who took what from whom, and the worker
+records a `takeover` step of its own. An operation nobody can attribute stays *readable* —
+a read grants no authority, and refusing every status on a runtime whose `ouro` predates the
+field would break recovery without protecting anything.
 
 **Authorization.** Every verb here needs an administrator once identities are configured —
 the network inventory as much as the mutations, because a tailnet inventory is every machine

@@ -207,6 +207,7 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
         })
 
       assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      await_attached(operation)
       :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
       await_challenge(operation, "pw")
 
@@ -242,6 +243,7 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
         call(first, "fleet.deployment.prepare", request())["result"]["operation_id"]
 
       assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      await_attached(operation)
       :ok = FleetWorkerFake.challenge(worker, "pw", "password")
       await_challenge(operation, "pw")
 
@@ -302,7 +304,7 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
       # Nothing the operation can be asked about afterwards holds it, and neither does the
       # process that sent it: the response is an argument on the way to the socket and is
       # never written into state.
-      assert {:ok, snapshot} = Ouroboros.Fleet.Deployment.status(operation)
+      assert {:ok, snapshot} = Ouroboros.Fleet.Deployment.status(operation, bound())
       refute JSON.encode!(snapshot) =~ secret
 
       assert {:ok, client} = Ouroboros.Fleet.Deployment.client(operation)
@@ -361,7 +363,7 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
       start_supervised!(
         {FleetWorkerFake,
          [
-           socket_path: Path.join([context.root, "fleet", "deploy", "w.sock"]),
+           socket_path: Path.join([context.root, "deploy", "w.sock"]),
            cap: cap,
            instance: instance,
            operation_file: FleetOuroFake.operation_file(context.fake_dir),
@@ -380,9 +382,22 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     %{worker: worker, ouro: ouro}
   end
 
+  defp bound, do: %{subject: "runtime-unattributed", session: "web-session-1"}
+
+  # The handshake runs in the client's own process now, so a fake that writes a challenge the
+  # moment `prepare` answers writes it into a socket nobody has accepted yet.
+  defp await_attached(operation) do
+    Enum.reduce_while(1..100, :missing, fn _attempt, _acc ->
+      case Ouroboros.Fleet.Deployment.status(operation, bound()) do
+        {:ok, %{"attached" => true}} -> {:halt, :ok}
+        _not_yet -> tick()
+      end
+    end)
+  end
+
   defp await_challenge(operation, challenge) do
     Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      case Ouroboros.Fleet.Deployment.status(operation) do
+      case Ouroboros.Fleet.Deployment.status(operation, bound()) do
         {:ok, %{"challenges" => challenges}} ->
           if Enum.any?(challenges, &(&1["challenge"] == challenge)),
             do: {:halt, :ok},

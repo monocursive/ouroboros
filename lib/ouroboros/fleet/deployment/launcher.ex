@@ -20,6 +20,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
 
   import Bitwise
 
+  alias Ouroboros.DataDir
   alias Ouroboros.Fleet.Deployment.Journal
 
   @helper_env "OUROBOROS_PROCESS_ID_HELPER"
@@ -28,6 +29,16 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   # A request past this is a caller this build refuses rather than one it hands to another
   # process.
   @max_request_bytes 64 * 1024
+
+  # What `ouro` may print into this runtime's heap before it is stopped. A device inventory
+  # for a large tailnet is tens of kilobytes; half a megabyte is generous, and past it the
+  # child is not answering the question that was asked.
+  @max_output_bytes 512 * 1024
+
+  # The same absolute paths `Ouroboros.RuntimeOwner` holds its liveness checker to. A
+  # deadline that resolved `kill` through an inherited PATH would be a deadline a
+  # project-local shim could disarm.
+  @trusted_kill_paths ["/bin/kill", "/usr/bin/kill"]
 
   @typedoc "Why this runtime cannot name an `ouro` to run."
   @type path_error ::
@@ -75,15 +86,17 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   callers parse the stdout as JSON, and a warning line mixed into it would be reported as
   unreadable output instead of as the warning it is.
   """
-  @spec run([String.t()], pos_integer()) ::
+  @spec run([String.t()], pos_integer(), pos_integer()) ::
           {:ok, String.t()}
           | {:error, path_error()}
           | {:error, {:ouro_failed, integer(), String.t()}}
           | {:error, {:ouro_crashed, term()}}
+          | {:error, {:ouro_output_too_large, pos_integer()}}
           | {:error, :ouro_timeout}
-  def run(args, timeout) when is_list(args) and is_integer(timeout) and timeout > 0 do
+  def run(args, timeout, max_bytes \\ @max_output_bytes)
+      when is_list(args) and is_integer(timeout) and timeout > 0 and is_integer(max_bytes) do
     with {:ok, ouro} <- executable() do
-      case command(ouro, args, timeout) do
+      case command(ouro, args, timeout, max_bytes) do
         {:ok, {output, 0}} -> {:ok, output}
         {:ok, {output, status}} -> {:error, {:ouro_failed, status, excerpt(output)}}
         {:error, reason} -> {:error, reason}
@@ -106,7 +119,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   are a closed list with no verb that describes a target. The request an operator made —
   which machine, which SSH account, which port, which identity *reference*, which paths —
   therefore has to reach the worker some third way, and it goes in
-  `<data dir>/fleet/deploy/<operation>.request.json`.
+  `<data dir>/deploy/<operation>.request.json`.
 
   Not on the command line, and the reason is `ps`. An argv is readable by every local user
   on both platforms this ships to; a target hostname and an SSH account name are not
@@ -242,34 +255,95 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
     end
   end
 
-  defp command(executable, args, timeout) do
-    caller = self()
-    ref = make_ref()
+  # The Port is opened here rather than through `System.cmd/3`, for two reasons `System.cmd`
+  # cannot give:
+  #
+  #   * **The child is reaped on a deadline.** `System.cmd/3` has no timeout, and killing
+  #     the Elixir process that owns the Port closes the Port — which, for a child that is
+  #     ignoring its closed stdout, leaves the operating-system process running (review F5).
+  #     Owning the Port means holding its `os_pid`, and the deadline sends that pid SIGKILL
+  #     through the same trusted absolute `kill` the ownership marker uses.
+  #   * **The output is bounded as it arrives.** `System.cmd/3` accumulates whatever the
+  #     child prints; a fake `ouro` printing 64 MiB put 64 MiB in this runtime's heap before
+  #     anything looked at it (review F6). Here the accumulator is checked per chunk and the
+  #     child is killed the moment it goes past the cap.
+  #
+  # stderr is deliberately not redirected: these callers parse stdout as JSON, and a warning
+  # folded into it would be reported as unreadable output rather than as the warning it is.
+  defp command(executable, args, timeout, max_bytes) do
+    port =
+      Port.open({:spawn_executable, executable}, [
+        :binary,
+        :exit_status,
+        :hide,
+        :stream,
+        {:args, args}
+      ])
 
-    {worker, monitor} =
-      spawn_monitor(fn ->
-        send(caller, {ref, System.cmd(executable, args, stderr_to_stdout: false)})
-      end)
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        _gone -> nil
+      end
+
+    deadline = System.monotonic_time(:millisecond) + timeout
+    collect(port, os_pid, deadline, max_bytes, [], 0)
+  end
+
+  defp collect(port, os_pid, deadline, max_bytes, chunks, size) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {^ref, result} ->
-        Process.demonitor(monitor, [:flush])
-        {:ok, result}
+      {^port, {:data, chunk}} ->
+        size = size + byte_size(chunk)
 
-      {:DOWN, ^monitor, :process, ^worker, reason} ->
+        if size > max_bytes do
+          reap(port, os_pid)
+          {:error, {:ouro_output_too_large, size}}
+        else
+          collect(port, os_pid, deadline, max_bytes, [chunk | chunks], size)
+        end
+
+      {^port, {:exit_status, status}} ->
+        {:ok, {chunks |> Enum.reverse() |> IO.iodata_to_binary(), status}}
+
+      {:EXIT, ^port, reason} ->
+        reap(port, os_pid)
         {:error, {:ouro_crashed, reason}}
     after
-      timeout ->
-        Process.demonitor(monitor, [:flush])
-        Process.exit(worker, :kill)
+      remaining ->
+        reap(port, os_pid)
         {:error, :ouro_timeout}
     end
+  end
+
+  # Close the Port, then kill the process it spawned. In that order, and both: closing alone
+  # leaves a child that is not reading its stdin and not writing its stdout exactly where it
+  # was.
+  #
+  # Only the child's own pid, never its process group — the child is not in a session of its
+  # own (it must not be; that is the *worker's* job, done behind `fleet worker start`), so
+  # its process group is this runtime's, and signalling that would take the BEAM down with
+  # it. A grandchild the child spawned therefore survives, which is stated here rather than
+  # implied away.
+  defp reap(port, os_pid) do
+    _ = if Port.info(port), do: Port.close(port)
+
+    if os_pid do
+      case DataDir.trusted_executable!(@trusted_kill_paths, "kill") do
+        kill -> System.cmd(kill, ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      end
+    end
+
+    :ok
+  rescue
+    _unavailable -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   # A failed command's output is an operator-facing diagnostic, so it is bounded rather
   # than passed through: it reaches a JSON-RPC `data` field and a log line.
   defp excerpt(output) when is_binary(output),
     do: output |> String.trim() |> String.slice(0, 2_000)
-
-  defp excerpt(_other), do: ""
 end

@@ -66,6 +66,15 @@ defmodule Ouroboros.Test.FleetWorkerFake do
   def challenge(pid, id, kind, extra \\ %{}),
     do: GenServer.call(pid, {:challenge, id, kind, extra})
 
+  @doc """
+  Stops answering `respond` frames, the way a worker that is busy or wedged does.
+
+  A call that never comes back is what lets a test kill the client process while it is
+  holding a secret, which is the only honest way to exercise the exit path.
+  """
+  @spec stall(pid(), boolean()) :: :ok
+  def stall(pid, stall?), do: GenServer.call(pid, {:stall, stall?})
+
   @doc "Makes the next `respond` answer `ok:false` with this reason instead of accepting."
   @spec refuse_next(pid(), String.t()) :: :ok
   def refuse_next(pid, reason), do: GenServer.call(pid, {:refuse_next, reason})
@@ -112,7 +121,8 @@ defmodule Ouroboros.Test.FleetWorkerFake do
        socket: nil,
        attached: nil,
        refusals: 0,
-       refuse_next: nil
+       refuse_next: nil,
+       stall: false
      }}
   end
 
@@ -162,6 +172,8 @@ defmodule Ouroboros.Test.FleetWorkerFake do
 
   def handle_call({:refuse_next, reason}, _from, state),
     do: {:reply, :ok, %{state | refuse_next: reason}}
+
+  def handle_call({:stall, stall?}, _from, state), do: {:reply, :ok, %{state | stall: stall?}}
 
   def handle_call(:emit_oversize, _from, state) do
     _ =
@@ -215,6 +227,8 @@ defmodule Ouroboros.Test.FleetWorkerFake do
   end
 
   defp dispatch(%{attached: nil} = state, %{"id" => id}), do: refuse(state, id, "not_attached")
+
+  defp dispatch(%{stall: true} = state, %{"v" => 1, "op" => "respond"}), do: state
 
   defp dispatch(state, %{"v" => 1, "id" => id, "op" => "respond"} = frame) do
     case state.refuse_next do

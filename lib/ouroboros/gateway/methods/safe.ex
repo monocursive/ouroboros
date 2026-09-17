@@ -325,7 +325,23 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     operation_finished: {:upstream_error, "that operation has finished and cannot be resumed"},
     operation_state_unknown:
       {:upstream_error, "that operation's journal does not record a state to resume from"},
-    worker_refused: {:upstream_error, "the deployment worker refused the request"}
+    worker_refused: {:upstream_error, "the deployment worker refused the request"},
+    worker_attaching:
+      {:unavailable,
+       "that operation's worker is still being attached to; read its status in a moment"},
+    operation_not_yours:
+      {:scope_denied,
+       "that operation belongs to another identity; resume it with takeover if you mean to take it over"},
+    devices_busy:
+      {:unavailable, "this runtime is already running as many device inventories as it allows"},
+    ouro_output_too_large:
+      {:upstream_error, "`ouro` printed more than this runtime will read from it"},
+    socket_not_private:
+      {:upstream_error,
+       "the worker's socket path is not a socket this account owns in a private directory"},
+    socket_unreadable: {:unavailable, "the worker's socket could not be inspected"},
+    client_supervisor_unavailable:
+      {:unavailable, "this runtime's deployment connection supervisor is not running"}
   }
 
   @doc "Every stable deployment reason code, for the reference and the tests."

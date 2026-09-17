@@ -57,6 +57,13 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   # Enough to render the tail of an operation without turning this process into a log store.
   @max_log 50
   @max_steps 200
+  # A deployment asks for a host key, a password with at most three attempts, a passphrase
+  # and a plan. Sixty-four is two orders of magnitude of headroom over that; past it, the
+  # worker is not running a deployment.
+  @max_challenges 64
+  # How long a consumed challenge is kept so that a second answer still gets the precise
+  # `challenge_consumed` rather than the vaguer `challenge_not_bound`.
+  @consumed_grace 300
 
   @typedoc "Who is asking, as `Audit.Identity.actor/0` and the client session id."
   @type binding :: %{subject: String.t(), session: String.t()}
@@ -94,20 +101,21 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   @spec unsubscribe(pid(), pid()) :: :ok
   def unsubscribe(pid, subscriber), do: GenServer.cast(pid, {:unsubscribe, subscriber})
 
-  # A client that has just died is a disconnected worker, which every caller here already
-  # has an answer for. Turning the exit into that answer keeps a race between "the worker
-  # closed" and "somebody asked" from crashing the asker.
+  # EVERY exit, mapped to one of two stable reasons, and the raw reason is discarded here
+  # rather than returned.
+  #
+  # That last part is the whole point. A `GenServer.call` exit carries the *call arguments*
+  # in its reason — for `respond` that is the secret — and a reason this returned would be
+  # passed to `Ouroboros.Gateway.Methods.Safe.exit_result/1`, Wire-encoded, and written onto
+  # the socket as JSON-RPC error data. Catching only the three shapes that were expected let
+  # every unexpected one through with the credential attached (review F1). There is no
+  # reason here a caller needs that is worth that risk: the worker is either gone or it did
+  # not answer, and those are the two answers.
   defp call(pid, message, timeout) do
     GenServer.call(pid, message, timeout)
   catch
-    :exit, {reason, _mfa} when reason in [:noproc, :normal, :shutdown] ->
-      {:error, :worker_unavailable}
-
-    :exit, {{:shutdown, _detail}, _mfa} ->
-      {:error, :worker_unavailable}
-
-    :exit, {:timeout, _mfa} ->
-      {:error, :worker_timeout}
+    :exit, {:timeout, _mfa} -> {:error, :worker_timeout}
+    :exit, _any -> {:error, :worker_unavailable}
   end
 
   # ---------------------------------------------------------------------------
@@ -116,12 +124,24 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
+    # Belt to `call/3`'s braces, and the one that holds when a future edit gets it wrong.
+    # A sensitive process keeps its mailbox, dictionary and stack out of crash reports,
+    # `Process.info/2` and the crash dump — which is exactly where a `respond` call's
+    # arguments would otherwise be printed if anything on that path ever raised again.
+    _ = :erlang.process_flag(:sensitive, true)
+
     state = %{
       operation: Keyword.fetch!(opts, :operation),
       instance: Keyword.fetch!(opts, :instance),
       socket_path: Keyword.fetch!(opts, :socket_path),
       subject: Keyword.fetch!(opts, :subject),
       session: Keyword.fetch!(opts, :session),
+      cap: Keyword.fetch!(opts, :cap),
+      # The worker refuses an attach from a subject other than the operation's owner unless
+      # this says so, and records a `takeover` step when it does. The broker has already
+      # made the same decision against the journal; this is the half the worker enforces,
+      # and the two agreeing is what makes the audit line and the journal tell one story.
+      takeover?: Keyword.get(opts, :takeover?, false),
       clock: Keyword.get(opts, :clock, &default_clock/0),
       socket: nil,
       counter: 0,
@@ -129,36 +149,92 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       timers: %{},
       subscribers: %{},
       challenges: %{},
+      challenge_seq: 0,
       steps: [],
       log: [],
-      state: nil,
+      state: "attaching",
       kind: nil,
+      owner: nil,
       last_error: nil,
       done: nil
     }
 
-    cap = Keyword.fetch!(opts, :cap)
+    # The connection and the handshake happen in `handle_continue`, not here. `init/1` runs
+    # inside `DynamicSupervisor.start_child/2`, which the broker calls from its own
+    # `handle_call`: a worker that accepts the socket and then says nothing used to hold the
+    # named broker — and therefore every other operation — for the full attach timeout
+    # (review F12). Now `prepare` answers as soon as the process exists, in state
+    # `attaching`, and the handshake's own failure kills this process rather than the call.
+    {:ok, state, {:continue, :attach}}
+  end
 
+  @impl true
+  def handle_continue(:attach, state) do
     with {:ok, socket} <- connect(state.socket_path),
-         {:ok, reply} <- attach(socket, cap, state) do
+         {:ok, reply} <- attach(socket, state.cap, state) do
       :ok = :inet.setopts(socket, active: :once)
-      {:ok, adopt_attach(%{state | socket: socket}, reply)}
+
+      # The capability has been presented; there is no reason to keep it.
+      {:noreply, adopt_attach(%{state | socket: socket, cap: nil}, reply)}
     else
-      {:error, reason} -> {:stop, {:attach_failed, reason}}
+      {:error, reason} -> {:stop, {:shutdown, {:attach_failed, reason}}, %{state | cap: nil}}
     end
   end
 
   defp default_clock, do: System.system_time(:second)
 
+  # The path is inspected before the capability is written to it. A socket the worker
+  # removed on exit can be replaced by any local account, and connecting first would hand
+  # that account a capability it could replay against the real worker (review L1). `lstat`
+  # so a symlink is refused rather than followed, and the directory is checked too: a
+  # world-writable deploy directory is a place where the swap can still happen.
   defp connect(path) do
-    :gen_tcp.connect({:local, path}, 0, socket_options(), @connect_timeout)
+    with :ok <- private_socket(path) do
+      :gen_tcp.connect({:local, path}, 0, socket_options(), @connect_timeout)
+    end
   end
 
+  defp private_socket(path) do
+    with {:ok, %File.Stat{type: :other, uid: uid}} <- File.lstat(path),
+         true <- uid == own_uid(),
+         {:ok, %File.Stat{type: :directory, uid: dir_uid, mode: mode}} <-
+           File.lstat(Path.dirname(path)),
+         true <- dir_uid == own_uid() and Bitwise.band(mode, 0o077) == 0 do
+      :ok
+    else
+      {:ok, %File.Stat{}} -> {:error, :socket_not_private}
+      false -> {:error, :socket_not_private}
+      {:error, reason} -> {:error, {:socket_unreadable, reason}}
+    end
+  end
+
+  # Cached for the life of the VM: it is a fact about the process, it cannot change, and
+  # resolving it means running `id -u` through the trusted-executable path.
+  defp own_uid do
+    case :persistent_term.get({__MODULE__, :uid}, nil) do
+      nil ->
+        uid = Ouroboros.DataDir.current_uid!()
+        :persistent_term.put({__MODULE__, :uid}, uid)
+        uid
+
+      uid ->
+        uid
+    end
+  end
+
+  # `buffer` and `recbuf` alongside `packet_size`, and that is not decoration. `packet_size`
+  # tells the driver what a legal line may be; `buffer` is how much it will actually
+  # accumulate before giving up, and its default is 9216 bytes. Without these two, every
+  # worker frame over about nine kilobytes — an ordinary plan, an SSH banner — was delivered
+  # as a fragment and reported to the operator as a frame over the one-megabyte cap (review
+  # F9). The cap in the protocol and the cap the socket enforces are now the same number.
   defp socket_options do
     [
       :binary,
       packet: :line,
       packet_size: Frame.max_bytes(),
+      buffer: Frame.max_bytes(),
+      recbuf: Frame.max_bytes(),
       active: false,
       nodelay: true
     ]
@@ -174,7 +250,8 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       "op" => "attach",
       "cap" => cap,
       "subject" => state.subject,
-      "session" => state.session
+      "session" => state.session,
+      "takeover" => state.takeover?
     }
 
     with {:ok, line} <- Frame.encode(frame),
@@ -206,15 +283,28 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   defp adopt_attach(state, reply) do
     %{
       state
-      | state: reply["state"] || state.state,
-        kind: reply["kind"] || state.kind
+      | state: reply["state"] || "attached",
+        kind: reply["kind"] || state.kind,
+        # Seam S5's ownership field, echoed by the worker. The broker compares it against
+        # the actor asking, so a snapshot that carries it is what makes `status` and
+        # `cancel` answerable without a second source of truth.
+        owner: string_or_nil(reply["owner"])
     }
   end
+
+  defp string_or_nil(value) when is_binary(value), do: value
+  defp string_or_nil(_other), do: nil
 
   # ---------------------------------------------------------------------------
 
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, {:ok, snapshot_of(state)}, state}
+
+  # Everything that writes to the socket needs one. While the handshake is still running
+  # there is nothing to write to, and saying so is better than blocking the caller until
+  # there is (review F12): the operation exists, it is simply not ready to be answered yet.
+  def handle_call(_message, _from, %{socket: nil} = state),
+    do: {:reply, {:error, :worker_attaching}, state}
 
   def handle_call({:respond, challenge_id, expect, response, binding}, from, state) do
     now = state.clock.()
@@ -338,6 +428,7 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
   defp disconnect({:shutdown, {:frame_too_large, _detail}}), do: :worker_frame_too_large
   defp disconnect({:shutdown, {:socket_error, _reason}}), do: :worker_unavailable
+  defp disconnect({:shutdown, {:attach_failed, _reason}}), do: :attach_failed
   defp disconnect(_reason), do: :worker_unavailable
 
   # ---------------------------------------------------------------------------
@@ -448,6 +539,21 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   # A challenge names the subject and session it was issued to. This connection attached as
   # exactly one of those, so a challenge naming a different one is not this connection's to
   # hold — it is dropped rather than recorded, and nobody here can answer it.
+  #
+  # `bound_to` is matched as a map rather than indexed into. A worker that sent a string
+  # there used to raise `FunctionClauseError` out of `Access.get/2` and take the whole
+  # connection with it (review F3); now it is a frame this build does not understand, which
+  # is a thing to drop and log, not a thing to die of.
+  defp record_challenge(state, %{"challenge" => id, "bound_to" => bound})
+       when is_binary(id) and not is_map(bound) and not is_nil(bound) do
+    Logger.warning(
+      "fleet deployment worker #{label(state.operation)} issued a challenge whose bound_to " <>
+        "is not an object; dropping it"
+    )
+
+    state
+  end
+
   defp record_challenge(state, %{"challenge" => id} = frame) when is_binary(id) do
     bound = frame["bound_to"] || %{"subject" => state.subject, "session" => state.session}
 
@@ -457,15 +563,22 @@ defmodule Ouroboros.Fleet.Deployment.Client do
         kind: frame["kind"],
         expires_at: frame["expires_at"],
         consumed?: false,
+        recorded_at: state.clock.(),
+        # A sequence, because `recorded_at` is in seconds and a worker can issue a thousand
+        # challenges inside one of them: ordering by the clock made "keep the newest" a tie
+        # nobody broke, and the challenge an operator was actually answering could be the
+        # one evicted.
+        seq: state.challenge_seq,
         metadata: Journal.scrub_value(Map.drop(frame, ["v", "event", "bound_to"]))
       }
 
-      %{state | challenges: Map.put(state.challenges, id, challenge)}
+      state
+      |> put_challenge(id, challenge)
       |> announce(frame)
     else
       Logger.warning(
-        "fleet deployment worker #{state.operation} issued challenge #{id} bound to another " <>
-          "session; ignoring it"
+        "fleet deployment worker #{label(state.operation)} issued challenge #{label(id)} " <>
+          "bound to another session; ignoring it"
       )
 
       state
@@ -473,6 +586,56 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   end
 
   defp record_challenge(state, _frame), do: state
+
+  # `steps` is capped and `log` is capped; this was the one collection a worker could grow
+  # without bound, and 2 500 challenges of ordinary size came to ten megabytes of retained
+  # state per connection (review F2).
+  #
+  # Two rules, in order. A consumed challenge is dead weight past its grace window — it is
+  # kept only so a second answer still gets `challenge_consumed` rather than the vaguer
+  # `challenge_not_bound` — so those go first. If that is not enough, the oldest go, and the
+  # drop is logged rather than silent: a worker issuing this many challenges is a worker
+  # doing something nobody designed for.
+  defp put_challenge(state, id, challenge) do
+    challenges = Map.put(state.challenges, id, challenge)
+    now = state.clock.()
+
+    challenges =
+      if map_size(challenges) > @max_challenges,
+        do: evict(challenges, now, state.operation),
+        else: challenges
+
+    %{state | challenges: challenges, challenge_seq: state.challenge_seq + 1}
+  end
+
+  defp evict(challenges, now, operation) do
+    kept =
+      :maps.filter(
+        fn _id, challenge ->
+          not (challenge.consumed? and now - challenge.recorded_at > @consumed_grace)
+        end,
+        challenges
+      )
+
+    kept =
+      if map_size(kept) > @max_challenges do
+        kept
+        |> Enum.sort_by(fn {_id, challenge} -> challenge.seq end, :desc)
+        |> Enum.take(@max_challenges)
+        |> Map.new()
+      else
+        kept
+      end
+
+    if map_size(kept) < map_size(challenges) do
+      Logger.warning(
+        "fleet deployment worker #{label(operation)} has issued more than " <>
+          "#{@max_challenges} challenges; dropping the oldest"
+      )
+    end
+
+    kept
+  end
 
   defp announce(state, frame) do
     broadcast(state, frame)
@@ -567,12 +730,35 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   # The allowlist, and nothing else: operation, challenge id, challenge kind, outcome. The
   # response object is not an argument to this function, so no future edit to this line can
   # accidentally start printing it.
+  #
+  # Every field is put through a labeller rather than interpolated. `kind` is chosen by the
+  # *worker*, and a worker that answered `kind: {"trap": true}` made this line raise
+  # `Protocol.UndefinedError` inside the call that was holding the secret — which put the
+  # secret in the crash report and, through the exit reason, onto the wire (review F1).
+  # Interpolating a value another process chose is the bug; the labeller is the fix.
   defp audit(state, challenge_id, kind, outcome) do
-    Logger.info(
-      "fleet deployment challenge operation=#{state.operation} challenge=#{challenge_id} " <>
-        "kind=#{kind || "unknown"} outcome=#{outcome}"
-    )
+    Logger.info([
+      "fleet deployment challenge operation=",
+      label(state.operation),
+      " challenge=",
+      label(challenge_id),
+      " kind=",
+      label(kind),
+      " outcome=",
+      label(outcome)
+    ])
   end
+
+  @doc false
+  # A binary stays a binary (cut, and only if it is printable), an atom becomes its name,
+  # and anything else — a map, a list, a number a worker made up — becomes "unknown". This
+  # never raises and never grows the line.
+  def label(value) when is_binary(value) do
+    if String.printable?(value), do: String.slice(value, 0, 64), else: "unknown"
+  end
+
+  def label(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
+  def label(_other), do: "unknown"
 
   # ---------------------------------------------------------------------------
 
@@ -581,9 +767,13 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       "operation" => state.operation,
       "instance" => state.instance,
       "source" => "worker",
-      "attached" => true,
+      "attached" => not is_nil(state.socket),
       "state" => state.state,
       "kind" => state.kind,
+      # Seam S5's owner, as the worker reports it. Null on a worker that does not yet send
+      # it, which is exactly when the broker falls back to refusing a takeover rather than
+      # permitting one.
+      "owner" => state.owner,
       "steps" => state.steps,
       "log" => state.log,
       "last_error" => Journal.scrub_value(state.last_error),

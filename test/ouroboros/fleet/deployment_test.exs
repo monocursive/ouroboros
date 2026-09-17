@@ -321,13 +321,18 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       FleetOuroFake.put_spawn_line!(
         ouro_dir,
         JSON.encode!(%{
-          "socket" => Path.join([context.root, "fleet", "deploy", "w.sock"]),
+          "socket" => Path.join([context.root, "deploy", "w.sock"]),
           "instance" => "0000000000000000"
         }) <> "\n"
       )
 
-      assert {:error, {:attach_failed, :instance_mismatch}} =
+      # `prepare` answers as soon as the process exists — the handshake is no longer run
+      # inside the broker's call — so the refusal arrives as the operation's state rather
+      # than as this call's return.
+      assert {:ok, %{"operation_id" => operation, "state" => "attaching"}} =
                Deployment.prepare(request(), bound())
+
+      assert await_error(operation) == {:attach_failed, :instance_mismatch}
 
       # The fake accepted the attach; this runtime is the side that refused it, which is
       # the point of seam S2 — a recycled pid answering on a recycled path is not the
@@ -483,7 +488,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
       Process.sleep(100)
 
-      assert {:ok, snapshot} = Deployment.status(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
       assert snapshot["challenges"] == []
 
       assert {:error, :challenge_not_bound} =
@@ -569,7 +574,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     test "status comes from the journal, marked as the journal's", context do
       operation = plant_journal(context.root, "awaiting_auth")
 
-      assert {:ok, snapshot} = Deployment.status(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
 
       assert snapshot["source"] == "journal"
       assert snapshot["attached"] == false
@@ -590,7 +595,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
         "some_future_field" => "leaked"
       })
 
-      assert {:ok, snapshot} = Deployment.status(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
 
       encoded = JSON.encode!(snapshot)
       refute encoded =~ "leaked"
@@ -599,13 +604,13 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     end
 
     test "an operation nobody started is not found", _context do
-      assert {:error, :unknown_operation} = Deployment.status(random_operation())
+      assert {:error, :unknown_operation} = Deployment.status(random_operation(), bound())
     end
 
     test "an operation id that is not an operation id is refused before any path is built",
          _context do
       for candidate <- ["../../etc/passwd", "a/b", "", "NOT-HEX", String.duplicate("a", 65)] do
-        assert {:error, :invalid_operation} = Deployment.status(candidate),
+        assert {:error, :invalid_operation} = Deployment.status(candidate, bound()),
                "#{inspect(candidate)} must not be accepted as an operation id"
       end
     end
@@ -635,7 +640,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
       assert FleetWorkerFake.refusals(worker) == 0
 
-      assert {:ok, snapshot} = Deployment.status(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
       assert snapshot["source"] == "worker"
       assert snapshot["attached"] == true
     end
@@ -668,7 +673,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
       assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
 
-      assert {:ok, reply} = Deployment.cancel(operation)
+      assert {:ok, reply} = Deployment.cancel(operation, bound())
       assert reply["cancelled"] == true
       assert reply["residue"] == []
 
@@ -678,7 +683,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
     test "an operation with no worker cannot be cancelled through one", context do
       operation = plant_journal(context.root, "interrupted")
-      assert {:error, :no_worker} = Deployment.cancel(operation)
+      assert {:error, :no_worker} = Deployment.cancel(operation, bound())
     end
   end
 
@@ -752,7 +757,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
                       %{"event" => "state", "state" => "awaiting_auth"}},
                      @receive_timeout
 
-      assert {:ok, %{"state" => "awaiting_auth"}} = Deployment.status(operation)
+      assert {:ok, %{"state" => "awaiting_auth"}} = Deployment.status(operation, bound())
 
       :ok = Deployment.unsubscribe(operation)
       :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
@@ -778,7 +783,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert event["line"] == "connecting to build-linux"
       refute Map.has_key?(event, "ssh_password")
 
-      assert {:ok, snapshot} = Deployment.status(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
       refute JSON.encode!(snapshot) =~ "should-never-be-here"
     end
   end
@@ -847,7 +852,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   defp arrange_worker(context, opts \\ []) do
     cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
     instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-    socket_path = Path.join([context.root, "fleet", "deploy", "w.sock"])
+    socket_path = Path.join([context.root, "deploy", "w.sock"])
 
     assert byte_size(socket_path) < 104,
            "the fixture's socket path is longer than sun_path: #{socket_path}"
@@ -883,7 +888,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
   defp await_challenge(operation, id) do
     Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      case Deployment.status(operation) do
+      case Deployment.status(operation, bound()) do
         {:ok, %{"challenges" => challenges}} ->
           if Enum.any?(challenges, &(&1["challenge"] == id)) do
             {:halt, :ok}
@@ -903,6 +908,21 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     end
   end
 
+  # The handshake runs in the client's own `handle_continue`, so its failure shows up a
+  # moment after `prepare` answered. The broker keeps the reason; this waits for it.
+  defp await_error(operation) do
+    Enum.reduce_while(1..100, nil, fn _attempt, _acc ->
+      case Deployment.status(operation, bound()) do
+        {:error, {:attach_failed, reason}} ->
+          {:halt, {:attach_failed, reason}}
+
+        _other ->
+          Process.sleep(20)
+          {:cont, nil}
+      end
+    end)
+  end
+
   defp random_operation, do: Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
   defp plant_journal(root, state) do
@@ -910,6 +930,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
     write_journal(root, operation, %{
       "operation" => operation,
+      "owner" => "adele",
       "kind" => "add",
       "state" => state,
       "created_at" => "2026-09-17T10:00:00Z",

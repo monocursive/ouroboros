@@ -9,7 +9,7 @@ defmodule Ouroboros.Test.FleetOuroFake do
 
   Its `fleet worker start` arm does what the real one does with its argv: it reads the
   `--operation` the broker minted, writes that operation's capability file at 0600 under
-  `<data dir>/fleet/deploy/`, records the id where the fake worker can read it, and prints
+  `<data dir>/deploy/`, records the id where the fake worker can read it, and prints
   the one JSON line naming the socket and the instance.
 
   It also stands in for the worker's side of the request file (seam S2): it records that
@@ -29,7 +29,7 @@ defmodule Ouroboros.Test.FleetOuroFake do
   Options:
 
     * `:spawn_line` — the single line `fleet worker start` prints.
-    * `:cap` — the capability it writes to `<data dir>/fleet/deploy/<operation>.cap`.
+    * `:cap` — the capability it writes to `<data dir>/deploy/<operation>.cap`.
     * `:cap_mode` — that file's octal mode; `0o600` by default, and `nil` writes no file at
       all, which is the "the worker has not published its capability yet" case.
     * `:devices` — the JSON `fleet devices --json` prints.
@@ -69,10 +69,10 @@ defmodule Ouroboros.Test.FleetOuroFake do
     capability =
       if cap && cap_mode do
         """
-            mkdir -p "$data_dir/fleet/deploy"
-            chmod 700 "$data_dir/fleet/deploy"
-            printf '%s\\n' #{shell_quote(cap)} > "$data_dir/fleet/deploy/$operation.cap"
-            chmod #{Integer.to_string(cap_mode, 8)} "$data_dir/fleet/deploy/$operation.cap"
+            mkdir -p "$data_dir/deploy"
+            chmod 700 "$data_dir/deploy"
+            printf '%s\\n' #{shell_quote(cap)} > "$data_dir/deploy/$operation.cap"
+            chmod #{Integer.to_string(cap_mode, 8)} "$data_dir/deploy/$operation.cap"
         """
       else
         "        :\n"
@@ -102,7 +102,7 @@ defmodule Ouroboros.Test.FleetOuroFake do
           esac
         done
         printf '%s' "$operation" > #{shell_quote(operation_file)}
-        request="$data_dir/fleet/deploy/$operation.request.json"
+        request="$data_dir/deploy/$operation.request.json"
         if [ -f "$request" ]; then
           ( stat -f '%Lp' "$request" 2>/dev/null || stat -c '%a' "$request" 2>/dev/null ) \
             > #{shell_quote(request_mode_file)}

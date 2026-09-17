@@ -61,6 +61,11 @@ defmodule Ouroboros.Fleet.Deployment do
   # directory room to be somewhere a person chose.
   @operation_bytes 8
 
+  # How many `ouro fleet devices --json` children may be in flight at once across this whole
+  # runtime, and how many recent attach failures are kept so `status` can explain one.
+  @max_devices 4
+  @max_failures 32
+
   # A journal state the operation cannot be continued from.
   @terminal ~w(completed cancelled)
 
@@ -75,8 +80,12 @@ defmodule Ouroboros.Fleet.Deployment do
   @doc """
   The supervised pair: the client supervisor, then the broker that starts children in it.
 
-  In that order, and under `:rest_for_one` where it is installed, so a broker that restarts
-  never adopts client processes whose operations it has forgotten.
+  In that order, because the broker starts children in the supervisor and so needs it first.
+  They sit under `Ouroboros.Surface.Supervisor`, which is `:one_for_one` — so a broker crash
+  does **not** restart the client supervisor beside it, and the connections it was tracking
+  outlive the process that was tracking them. That is why `init/1` reaps them: the ordering
+  is what a supervisor gives, and the adoption problem is solved in code rather than
+  asserted in a comment.
   """
   @spec children() :: [Supervisor.child_spec() | {module(), keyword()}]
   def children do
@@ -101,6 +110,25 @@ defmodule Ouroboros.Fleet.Deployment do
     data_dir = Keyword.get(opts, :data_dir) || data_dir()
     timeout = Keyword.get(opts, :timeout, @devices_timeout)
 
+    # Each call forks `ouro` and may hold half a megabyte of its output. Running in the
+    # caller keeps a slow inventory from stalling every other operation, but it also means
+    # nothing serialises these — a page that refreshes in a loop, or a client that retries,
+    # would otherwise be able to fork as many children as it liked. The slot is released by
+    # the broker on this process's `:DOWN`, so a caller that dies mid-call does not leak one.
+    case acquire_devices() do
+      :ok ->
+        try do
+          run_devices(timeout, data_dir)
+        after
+          release_devices()
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_devices(timeout, data_dir) do
     case Launcher.run(["fleet", "devices", "--json"], timeout) do
       {:ok, output} ->
         case JSON.decode(output) do
@@ -111,6 +139,18 @@ defmodule Ouroboros.Fleet.Deployment do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp acquire_devices do
+    GenServer.call(__MODULE__, :acquire_devices, @call_timeout)
+  catch
+    :exit, _reason -> {:error, :no_data_dir}
+  end
+
+  defp release_devices do
+    GenServer.cast(__MODULE__, {:release_devices, self()})
+  catch
+    :exit, _reason -> :ok
   end
 
   # An allowlist rather than a merge. What `ouro` prints is a document this build reads three
@@ -200,11 +240,29 @@ defmodule Ouroboros.Fleet.Deployment do
   defp cleartext_web_bind? do
     web = Application.get_env(:ouroboros, :web, [])
 
-    case {Keyword.get(web, :enabled, false), Keyword.get(web, :bind)} do
-      {true, bind} when is_tuple(bind) -> not Ouroboros.Web.Config.loopback?(bind)
-      _no_endpoint_or_no_bind -> false
+    if Keyword.get(web, :enabled, false),
+      do: not loopback_bind?(Keyword.get(web, :bind)),
+      else: false
+  end
+
+  # `config/runtime.exs` writes this key as a **string** at every site that sets it, so the
+  # previous `is_tuple/1` guard meant the blocker never fired on a real deployment: a runtime
+  # on `OUROBOROS_WEB_BIND=0.0.0.0 OUROBOROS_WEB_ALLOW_REMOTE=1` reported `deploy: true` and
+  # invited a password into a cleartext endpoint (review F10). Both shapes are accepted now,
+  # and anything this cannot resolve to a loopback address is treated as not loopback.
+  #
+  # Fail closed, deliberately. The question is "may a credential be typed into this host",
+  # and the honest answer for a bind this build cannot parse is no.
+  defp loopback_bind?(bind) when is_tuple(bind), do: Ouroboros.Web.Config.loopback?(bind)
+
+  defp loopback_bind?(bind) when is_binary(bind) do
+    case bind |> String.trim() |> String.to_charlist() |> :inet.parse_address() do
+      {:ok, address} -> Ouroboros.Web.Config.loopback?(address)
+      {:error, _reason} -> false
     end
   end
+
+  defp loopback_bind?(_absent), do: false
 
   @doc """
   Every operation this data directory holds a journal for, with whether a worker is attached.
@@ -247,15 +305,53 @@ defmodule Ouroboros.Fleet.Deployment do
   administrator's read that the identity rule already gates, and making it fail for the
   second browser tab would be a restriction with no property behind it.
   """
-  @spec status(String.t()) :: {:ok, map()} | {:error, term()}
-  def status(operation) when is_binary(operation) do
-    with :ok <- Journal.validate_operation(operation) do
-      case client(operation) do
-        {:ok, pid} -> Client.snapshot(pid)
-        {:error, :no_worker} -> journal_status(operation)
-      end
+  @spec status(String.t(), binding()) :: {:ok, map()} | {:error, term()}
+  def status(operation, binding) when is_binary(operation) and is_map(binding) do
+    with :ok <- Journal.validate_operation(operation),
+         {:ok, snapshot} <- snapshot(operation),
+         :ok <- owned_by?(snapshot["owner"], binding) do
+      {:ok, snapshot}
     end
   end
+
+  defp snapshot(operation) do
+    case client(operation) do
+      {:ok, pid} ->
+        Client.snapshot(pid)
+
+      {:error, :no_worker} ->
+        case journal_status(operation) do
+          # An operation whose handshake never completed has no journal and no worker. The
+          # broker remembers why for a while, so this answers `attach_failed` rather than
+          # the flatly wrong `no such operation`.
+          {:error, :unknown_operation} -> attach_failure(operation)
+          other -> other
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp attach_failure(operation) do
+    case GenServer.call(__MODULE__, {:failure, operation}, @call_timeout) do
+      {:ok, reason} -> {:error, {:attach_failed, reason}}
+      :error -> {:error, :unknown_operation}
+    end
+  catch
+    :exit, _reason -> {:error, :unknown_operation}
+  end
+
+  # Seam S5's ownership check, applied to everything that reads or stops an operation.
+  #
+  # `nil` passes, and that is a decision rather than an oversight: a worker that does not
+  # report an owner leaves this build unable to *establish* one, and refusing every read on a
+  # runtime whose `ouro` predates the field would be a gate that protects nothing and breaks
+  # recovery. What it does not do is let an unknown owner authorize a *takeover* — `resume/3`
+  # holds the stricter rule, because that is the verb that inherits the credential prompt.
+  defp owned_by?(nil, _binding), do: :ok
+  defp owned_by?(owner, %{subject: subject}) when owner == subject, do: :ok
+  defp owned_by?(_owner, _binding), do: {:error, :operation_not_yours}
 
   defp journal_status(operation) do
     case data_dir() do
@@ -303,21 +399,39 @@ defmodule Ouroboros.Fleet.Deployment do
   @spec start(String.t(), String.t(), String.t(), binding()) :: {:ok, map()} | {:error, term()}
   def start(operation, plan_digest, idempotency_key, binding)
       when is_binary(plan_digest) and is_binary(idempotency_key) do
+    # Read the ledger, then look for the plan, then claim — in that order, and each step is
+    # there for its own reason.
+    #
+    # Reading first is what makes a retry a retry: an answer that was already recorded is
+    # replayed here without the worker being touched at all, and a start still in flight is
+    # named as one. Looking for the plan before claiming is what stops a start sent a moment
+    # too early from wedging the operation: claiming first meant it took the key, failed
+    # `no_review_pending`, and left the ledger believing a start was in flight forever — the
+    # same key then answered `start_in_flight` and a fresh one `operation_in_progress`, so
+    # the plan could never be approved again (review F4). Claiming last keeps the claim
+    # atomic against a second caller racing this one.
     with :ok <- Journal.validate_operation(operation),
          {:ok, pid} <- client(operation),
-         :ok <- claim(operation, idempotency_key),
-         {:ok, challenge} <- review_challenge(pid) do
-      result =
-        Client.respond(
-          pid,
-          challenge,
-          ["review"],
-          %{"approve" => true, "plan_digest" => plan_digest},
-          binding
-        )
+         :fresh <- peek(operation, idempotency_key),
+         {:ok, challenge} <- review_challenge(pid),
+         :ok <- claim(operation, idempotency_key) do
+      case Client.respond(
+             pid,
+             challenge,
+             ["review"],
+             %{"approve" => true, "plan_digest" => plan_digest},
+             binding
+           ) do
+        {:ok, _value} = success ->
+          record(operation, idempotency_key, success)
+          success
 
-      record(operation, idempotency_key, result)
-      result
+        {:error, _reason} = failure ->
+          # A refusal is not an outcome to replay. The key goes back so the operator can
+          # fix what the worker objected to and approve the same plan again.
+          release(operation, idempotency_key)
+          failure
+      end
     else
       {:replay, result} -> result
       {:error, reason} -> {:error, reason}
@@ -357,9 +471,13 @@ defmodule Ouroboros.Fleet.Deployment do
   is inside, reaps its SSH children and reports its residue; a credential already delivered to
   another machine stays delivered.
   """
-  @spec cancel(String.t()) :: {:ok, map()} | {:error, term()}
-  def cancel(operation) when is_binary(operation) do
-    with {:ok, pid} <- client(operation), do: Client.cancel(pid)
+  @spec cancel(String.t(), binding()) :: {:ok, map()} | {:error, term()}
+  def cancel(operation, binding) when is_binary(operation) and is_map(binding) do
+    with {:ok, pid} <- client(operation),
+         {:ok, snapshot} <- Client.snapshot(pid),
+         :ok <- owned_by?(snapshot["owner"], binding) do
+      Client.cancel(pid)
+    end
   end
 
   @doc """
@@ -370,10 +488,11 @@ defmodule Ouroboros.Fleet.Deployment do
   state or cannot be read at all, because resuming an operation whose record is unreadable
   would be starting a second worker against a machine whose state nobody knows.
   """
-  @spec resume(String.t(), binding()) :: {:ok, map()} | {:error, term()}
-  def resume(operation, binding) when is_binary(operation) and is_map(binding) do
+  @spec resume(String.t(), binding(), boolean()) :: {:ok, map()} | {:error, term()}
+  def resume(operation, binding, takeover? \\ false)
+      when is_binary(operation) and is_map(binding) and is_boolean(takeover?) do
     with :ok <- Journal.validate_operation(operation) do
-      GenServer.call(__MODULE__, {:resume, operation, binding}, @call_timeout)
+      GenServer.call(__MODULE__, {:resume, operation, binding, takeover?}, @call_timeout)
     end
   end
 
@@ -416,12 +535,36 @@ defmodule Ouroboros.Fleet.Deployment do
        supervisor: supervisor,
        clock: Keyword.get(opts, :clock, fn -> System.system_time(:second) end),
        # `operation => %{pid, ref, instance, key, result}`
-       operations: %{}
+       operations: %{},
+       # `caller pid => monitor ref`, bounded by `@max_devices`.
+       devices: %{},
+       # `operation => reason`, bounded by `@max_failures`. Why a client stopped, kept just
+       # long enough that `status` can say `attach_failed` rather than `no_worker` for an
+       # operation whose handshake never completed — which since the handshake moved off the
+       # broker's call is the only place that answer can come from.
+       failures: %{},
+       failure_order: []
      }}
   end
 
   @impl true
   def handle_call(:attached, _from, state), do: {:reply, Map.keys(state.operations), state}
+
+  def handle_call(:acquire_devices, {caller, _tag}, state) do
+    cond do
+      Map.has_key?(state.devices, caller) ->
+        {:reply, :ok, state}
+
+      map_size(state.devices) >= @max_devices ->
+        {:reply, {:error, :devices_busy}, state}
+
+      true ->
+        {:reply, :ok, put_in(state.devices[caller], Process.monitor(caller))}
+    end
+  end
+
+  def handle_call({:failure, operation}, _from, state),
+    do: {:reply, Map.fetch(state.failures, operation), state}
 
   def handle_call({:client, operation}, _from, state) do
     case Map.fetch(state.operations, operation) do
@@ -435,15 +578,31 @@ defmodule Ouroboros.Fleet.Deployment do
     open(state, operation, request, binding)
   end
 
-  def handle_call({:resume, operation, binding}, _from, state) do
+  def handle_call({:resume, operation, binding, takeover?}, _from, state) do
     if Map.has_key?(state.operations, operation) do
       {:reply, {:error, :already_attached}, state}
     else
-      case resumable(state, operation) do
-        :ok -> open(state, operation, nil, binding)
+      case resumable(state, operation, binding, takeover?) do
+        # The worker enforces the same rule on its side and records a `takeover` step, so
+        # the flag travels with the attach rather than being a decision this side made alone.
+        :ok -> open(state, operation, nil, Map.put(binding, :takeover?, takeover?))
         {:error, reason} -> {:reply, {:error, reason}, state}
       end
     end
+  end
+
+  # Read-only. Says what a start under this key would be without making it so.
+  def handle_call({:peek, operation, key}, _from, state) do
+    reply =
+      case Map.fetch(state.operations, operation) do
+        {:ok, %{key: nil}} -> :fresh
+        {:ok, %{key: ^key, result: nil}} -> {:error, :start_in_flight}
+        {:ok, %{key: ^key, result: result}} -> {:replay, result}
+        {:ok, %{key: _other}} -> {:error, :operation_in_progress}
+        :error -> {:error, :no_worker}
+      end
+
+    {:reply, reply, state}
   end
 
   def handle_call({:claim, operation, key}, _from, state) do
@@ -465,6 +624,16 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
+  def handle_call({:release, operation, key}, _from, state) do
+    case Map.fetch(state.operations, operation) do
+      {:ok, %{key: ^key, result: nil} = entry} ->
+        {:reply, :ok, put_in(state.operations[operation], %{entry | key: nil})}
+
+      _other ->
+        {:reply, :ok, state}
+    end
+  end
+
   def handle_call({:record, operation, key, result}, _from, state) do
     case Map.fetch(state.operations, operation) do
       {:ok, %{key: ^key} = entry} ->
@@ -476,18 +645,56 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+  def handle_cast({:release_devices, caller}, state), do: {:noreply, drop_devices(state, caller)}
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, pid, reason}, state) do
+    state = drop_devices(state, pid)
+
     case Enum.find(state.operations, fn {_id, entry} -> entry.ref == ref end) do
       nil ->
         {:noreply, state}
 
       {operation, _entry} ->
         Logger.info("fleet deployment operation #{operation} lost its worker: #{inspect(reason)}")
-        {:noreply, %{state | operations: Map.delete(state.operations, operation)}}
+
+        {:noreply,
+         state
+         |> Map.put(:operations, Map.delete(state.operations, operation))
+         |> remember_failure(operation, reason)}
     end
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  defp drop_devices(state, pid) do
+    case Map.pop(state.devices, pid) do
+      {nil, _devices} ->
+        state
+
+      {ref, devices} ->
+        Process.demonitor(ref, [:flush])
+        %{state | devices: devices}
+    end
+  end
+
+  # Only the reasons a client's own `terminate/2` produced, and only the ones an operator can
+  # act on. A raw exit reason is never kept: it can carry call arguments, and this map is
+  # read by `status`.
+  defp remember_failure(state, operation, {:shutdown, {:attach_failed, reason}}) do
+    order = [operation | state.failure_order -- [operation]]
+    {order, failures} = trim_failures(order, Map.put(state.failures, operation, reason))
+    %{state | failures: failures, failure_order: order}
+  end
+
+  defp remember_failure(state, _operation, _reason), do: state
+
+  defp trim_failures(order, failures) when length(order) <= @max_failures, do: {order, failures}
+
+  defp trim_failures(order, failures) do
+    {kept, dropped} = Enum.split(order, @max_failures)
+    {kept, Map.drop(failures, dropped)}
+  end
 
   # ---------------------------------------------------------------------------
 
@@ -498,24 +705,117 @@ defmodule Ouroboros.Fleet.Deployment do
   defp open(state, operation, request, binding) do
     with {:ok, dir} <- resolve_data_dir(state),
          {:ok, %{socket: socket, instance: instance}} <-
-           state.launcher.spawn_worker(operation, dir, request, @spawn_timeout),
-         {:ok, cap} <- read_capability(dir, operation),
-         {:ok, pid} <- start_client(state, operation, instance, socket, cap, binding) do
-      entry = %{
-        pid: pid,
-        ref: Process.monitor(pid),
-        instance: instance,
-        key: nil,
-        result: nil
-      }
-
-      {:reply, {:ok, %{"operation_id" => operation, "instance" => instance}},
-       put_in(state.operations[operation], entry)}
+           state.launcher.spawn_worker(operation, dir, request, @spawn_timeout) do
+      adopt(state, operation, dir, socket, instance, binding)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
+  # Past this point a detached worker exists. Anything that fails from here has to *say so*
+  # to that worker, because nothing else will: it is in its own session, it outlives this
+  # runtime by design, and an operation the broker never recorded is an operation no verb can
+  # reach. Before this, a capability file with the wrong mode left a worker running with a
+  # socket nobody would ever connect to, waiting out its own idle timeout (review F8).
+  defp adopt(state, operation, dir, socket, instance, binding) do
+    case read_capability(dir, operation) do
+      {:ok, cap} ->
+        case start_client(state, operation, instance, socket, cap, binding) do
+          {:ok, pid} ->
+            entry = %{
+              pid: pid,
+              ref: Process.monitor(pid),
+              instance: instance,
+              key: nil,
+              result: nil
+            }
+
+            {:reply,
+             {:ok,
+              %{"operation_id" => operation, "instance" => instance, "state" => "attaching"}},
+             put_in(state.operations[operation], entry)}
+
+          {:error, reason} ->
+            # The capability is in hand, so the worker can be told to stop.
+            reap_worker(operation, socket, instance, cap)
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        # It cannot. A capability this runtime refused to *use* is one it must not present
+        # either — that refusal is the whole point of checking the file's mode — so the
+        # honest thing is to say a worker was left running and let its own bounded idle
+        # timeout end it. Silence here is what the review found (F8); this is the part of it
+        # that can be fixed without handing out the capability anyway.
+        Logger.warning(
+          "fleet deployment left a worker for #{operation} running: its capability could not " <>
+            "be used, so it cannot be cancelled and will exit on its own idle timeout"
+        )
+
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Best effort, and said plainly: this connects with the capability if it can still read
+  # one, attaches, asks the worker to cancel, and gives up quietly otherwise. A capability
+  # this runtime could not use is one it may not be able to present either — in which case
+  # the worker's own bounded idle timeout is what ends it, and the log line is the only thing
+  # this can honestly offer.
+  defp reap_worker(operation, socket, instance, cap) do
+    _ = spawn(fn -> reap_over_socket(operation, socket, instance, cap) end)
+    :ok
+  end
+
+  defp await_attached(pid) do
+    Enum.reduce_while(1..100, :timeout, fn _attempt, _acc ->
+      case Client.snapshot(pid) do
+        {:ok, %{"attached" => true}} -> {:halt, :ok}
+        {:error, _reason} -> {:halt, :gone}
+        _not_yet -> tick()
+      end
+    end)
+  end
+
+  defp tick do
+    Process.sleep(20)
+    {:cont, :timeout}
+  end
+
+  defp reap_over_socket(operation, socket, instance, cap) do
+    case Client.start_link(
+           operation: operation,
+           instance: instance,
+           socket_path: socket,
+           cap: cap,
+           subject: "runtime-reaper",
+           session: "runtime-reaper"
+         ) do
+      {:ok, pid} ->
+        # The handshake is asynchronous now, so wait for it before asking for anything: a
+        # cancel sent while the socket is still being attached answers `worker_attaching`
+        # and reaps nothing.
+        _ = await_attached(pid)
+        _ = Client.cancel(pid)
+        GenServer.stop(pid, :normal, 2_000)
+
+        Logger.info("fleet deployment cancelled the worker it could not adopt for #{operation}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "fleet deployment could not reach the worker it could not adopt for #{operation}: " <>
+            "#{inspect(reason)}"
+        )
+    end
+  catch
+    _kind, _reason -> :ok
+  end
+
+  # The exit is caught and the reason is *discarded*, not wrapped. A `DynamicSupervisor` that
+  # is not running exits the caller rather than answering it, and that exit's reason carries
+  # the child spec — which carries the capability. This is the same shape of bug as the one
+  # the review found in the client's `call/3` (F1): an exit reason is an argument list, and
+  # an argument list here is a credential. The broker also does not die of a sibling that is
+  # restarting, which is the other half of why this is a catch rather than a let-it-crash.
   defp start_client(state, operation, instance, socket, cap, binding) do
     DynamicSupervisor.start_child(
       state.supervisor,
@@ -527,9 +827,12 @@ defmodule Ouroboros.Fleet.Deployment do
          cap: cap,
          subject: binding[:subject],
          session: binding[:session],
+         takeover?: binding[:takeover?] == true,
          clock: state.clock
        ]}
     )
+  catch
+    :exit, _reason -> {:error, :client_supervisor_unavailable}
   end
 
   # The capability is at least 32 hex characters in a 0600 file the worker removes when it
@@ -554,16 +857,44 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
-  defp resumable(state, operation) do
+  defp resumable(state, operation, binding, takeover?) do
     with {:ok, dir} <- resolve_data_dir(state),
-         {:ok, document} <- Journal.read(dir, operation) do
-      case document["state"] do
-        recorded when recorded in @terminal -> {:error, :operation_finished}
-        nil -> {:error, :operation_state_unknown}
-        _open -> :ok
-      end
+         {:ok, document} <- Journal.read(dir, operation),
+         :ok <- resumable_state(document["state"]),
+         :ok <- resumable_owner(document["owner"], binding, operation, takeover?) do
+      :ok
     end
   end
+
+  defp resumable_state(recorded) when recorded in @terminal, do: {:error, :operation_finished}
+  defp resumable_state(nil), do: {:error, :operation_state_unknown}
+  defp resumable_state(_open), do: :ok
+
+  # The strict half of the ownership rule, and the reason it is stricter than `status`'s.
+  #
+  # A resume attaches a *new* client under the resuming identity and session, so every
+  # challenge the worker issues from then on is bound to the resumer. That is not reading
+  # somebody else's operation; it is inheriting their credential prompt, which is exactly
+  # what a second administrator did unchallenged before this existed (review F11).
+  #
+  # So: the owner matches, or the caller says `takeover: true` out loud. An *unknown* owner
+  # does not pass — a journal this build cannot attribute is one it must not hand over on
+  # its own say-so — and a takeover leaves its own audit line naming who took what from whom,
+  # because the point is not to prevent it but to make it impossible to do quietly.
+  defp resumable_owner(owner, %{subject: subject}, _operation, _takeover?)
+       when is_binary(owner) and owner == subject,
+       do: :ok
+
+  defp resumable_owner(owner, binding, operation, true) do
+    Logger.warning(
+      "fleet deployment takeover operation=#{operation} " <>
+        "actor=#{inspect(binding[:subject])} previous_owner=#{inspect(owner)}"
+    )
+
+    :ok
+  end
+
+  defp resumable_owner(_owner, _binding, _operation, false), do: {:error, :operation_not_yours}
 
   defp resolve_data_dir(state) do
     case state.data_dir || data_dir() do
@@ -587,11 +918,17 @@ defmodule Ouroboros.Fleet.Deployment do
     :exit, _not_started -> :ok
   end
 
+  defp peek(operation, key),
+    do: GenServer.call(__MODULE__, {:peek, operation, key}, @call_timeout)
+
   defp claim(operation, key),
     do: GenServer.call(__MODULE__, {:claim, operation, key}, @call_timeout)
 
   defp record(operation, key, result),
     do: GenServer.call(__MODULE__, {:record, operation, key, result}, @call_timeout)
+
+  defp release(operation, key),
+    do: GenServer.call(__MODULE__, {:release, operation, key}, @call_timeout)
 
   # The open `review` challenge is a fact about the connection, so it is read from the client
   # rather than tracked a second time in the broker.

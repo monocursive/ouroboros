@@ -592,8 +592,13 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       scope: :operate,
       timeout: @default_timeout,
       params:
-        {:closed, [@deployment_operation],
-         "forks a new worker for an operation whose previous one is gone, after reading the journal\'s state. Refused when a worker is still attached (`already_attached`), when the journal records a finished operation (`operation_finished`), and when the journal records no state at all (`operation_state_unknown`) — resuming an operation whose record cannot be read would be starting a second worker against a machine whose state nobody knows"},
+        {:closed,
+         [
+           @deployment_operation,
+           {"takeover", {:optional, false}, :boolean,
+            "required to resume an operation another identity started, or one whose owner this build cannot establish. A resume attaches under the resuming identity, so every later challenge binds to *them* — that is inheriting somebody else's credential prompt, and it leaves its own audit line naming who took what from whom"}
+         ],
+         "forks a new worker for an operation whose previous one is gone, after reading the journal\'s state. Refused when a worker is still attached (`already_attached`), when the journal records a finished operation (`operation_finished`), and when the journal records no state at all (`operation_state_unknown`) — resuming an operation whose record cannot be read would be starting a second worker against a machine whose state nobody knows — and when the journal's `owner` is not this identity and `takeover` was not set (`operation_not_yours`)"},
       handler: :handle_fleet_deployment_resume
     },
     "fleet.doctor" => %{

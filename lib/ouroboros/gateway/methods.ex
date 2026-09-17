@@ -749,12 +749,13 @@ defmodule Ouroboros.Gateway.Methods do
 
   @doc false
   def handle_fleet_deployment_status(params) do
-    # The one deployment verb with no session binding: reading what an operation is doing is
-    # the administrator read the identity rule already gates, and failing it for the second
-    # browser tab would be a restriction with no property behind it.
+    # Needs the *subject* — an operation belongs to the identity that started it (seam S5) —
+    # but not a client session. A session is what a challenge is answered against, and this
+    # verb answers nothing; failing a read for the second browser tab would be a restriction
+    # with no property behind it.
     safe(fn ->
       with {:ok, operation} <- fetch_string(params, "operation_id") do
-        Deployment.status(operation) |> deployment_reply()
+        Deployment.status(operation, deployment_subject()) |> deployment_reply()
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -804,7 +805,7 @@ defmodule Ouroboros.Gateway.Methods do
   def handle_fleet_deployment_cancel(params) do
     safe(fn ->
       with {:ok, operation} <- fetch_string(params, "operation_id") do
-        Deployment.cancel(operation) |> deployment_reply()
+        Deployment.cancel(operation, deployment_subject()) |> deployment_reply()
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -814,10 +815,19 @@ defmodule Ouroboros.Gateway.Methods do
   @doc false
   def handle_fleet_deployment_resume(params) do
     deployment(fn binding ->
-      with {:ok, operation} <- fetch_string(params, "operation_id") do
-        Deployment.resume(operation, binding)
+      with {:ok, operation} <- fetch_string(params, "operation_id"),
+           {:ok, takeover?} <- deployment_takeover(params) do
+        Deployment.resume(operation, binding, takeover?)
       end
     end)
+  end
+
+  defp deployment_takeover(params) do
+    case Map.get(params, "takeover") do
+      nil -> {:ok, false}
+      takeover when is_boolean(takeover) -> {:ok, takeover}
+      _other -> {:invalid, "params.takeover must be true or false"}
+    end
   end
 
   # Every deployment mutation runs the same three steps: establish who is asking, run the
@@ -839,6 +849,12 @@ defmodule Ouroboros.Gateway.Methods do
           deployment_reply(refusal)
       end
     end)
+  end
+
+  # Who is asking, with no session. The identity rule has already decided this caller may
+  # reach the verb; this is the narrower question of whose operation it is.
+  defp deployment_subject do
+    %{subject: Ouroboros.Audit.Identity.actor(), session: Process.get(:ouroboros_client_session)}
   end
 
   defp deployment_binding do

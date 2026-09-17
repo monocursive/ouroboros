@@ -62,8 +62,12 @@ defmodule Ouroboros.Web.Call do
   @doc """
   Runs one gateway method on behalf of an authenticated browser session.
 
-  Options: `:session` (the authenticated session id, for the audit line) and
-  `:task_supervisor` (defaults to `Ouroboros.Web.TaskSupervisor`).
+  Options: `:session` (the session id this call is attributed to, and the one a deployment
+  challenge binds to), `:client_session` (an explicit binding id when it must differ from the
+  one the audit line names) and `:task_supervisor` (defaults to
+  `Ouroboros.Web.TaskSupervisor`).
+
+  See `view_session/0` for why a `fleet.deployment.*` call should not pass the cookie's id.
 
   Returns exactly what `Ouroboros.Gateway.Methods.invoke/2` returns, or the same error
   shapes the gateway would have produced for a method this build does not serve, a method
@@ -96,6 +100,27 @@ defmodule Ouroboros.Web.Call do
   end
 
   @doc """
+  A fresh per-view session id, for the one thing the cookie's id cannot identify.
+
+  `Ouroboros.Web.Auth` writes exactly one id into the session cookie, and every tab in that
+  browser reads it. Binding a deployment credential challenge to that id therefore made the
+  contract's "a second tab cannot answer the first tab's prompt" false: two tabs are one
+  cookie (review F7). A challenge is bound to one *connected view* instead, which is the
+  thing a person is actually looking at.
+
+  A LiveView calls this **once in `mount/3`**, keeps it in an assign, and passes
+  `session: assigns.view_session` on every `fleet.deployment.*` call. Its other calls keep
+  passing the cookie's id, so the audit line for those still correlates a browser across
+  requests; where the two must differ on one call, `:client_session` sets the binding and
+  `:session` stays the one that is logged.
+
+  Minted per mount rather than derived from anything: a derived id is one somebody else can
+  derive.
+  """
+  @spec view_session() :: String.t()
+  def view_session, do: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+  @doc """
   Whether this build serves a method at all, at this scope.
 
   The feature gate the whole surface uses: a page shows a verb's control if and only if
@@ -103,6 +128,7 @@ defmodule Ouroboros.Web.Call do
   `hello` answers for a terminal client, asked directly because there is no handshake
   between a LiveView and the table it reads.
   """
+
   @spec available?(scope(), String.t()) :: boolean()
   def available?(scope, method) when scope in [:read, :operate] and is_binary(method) do
     case Methods.fetch(method) do
@@ -122,10 +148,11 @@ defmodule Ouroboros.Web.Call do
   defp run(method, params, entry, opts) do
     supervisor = Keyword.get(opts, :task_supervisor, Ouroboros.Web.TaskSupervisor)
     subject = Ouroboros.Audit.Identity.current()
-    # The authenticated browser session, carried into the handler the same way the listener
-    # carries its connection identity. A deployment challenge is bound to it at issue (seam
-    # S4), so a second tab — a second session — cannot answer the first one's prompt.
-    session = Keyword.get(opts, :session)
+    # What a deployment challenge binds to. Normally the caller's `:session`, which for a
+    # LiveView making a `fleet.deployment.*` call is its own `view_session/0` rather than the
+    # cookie's id; `:client_session` is the explicit override for a caller that needs the
+    # binding and the audited id to be different values.
+    session = Keyword.get(opts, :client_session) || Keyword.get(opts, :session)
 
     task =
       Task.Supervisor.async_nolink(supervisor, fn ->
