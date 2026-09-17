@@ -253,11 +253,19 @@ fn a_machine_joins_a_fleet_entirely_through_the_helper_and_doctor_calls_it_healt
     assert_eq!(hello["helper"], json!(ouro::fleet_helper::HELPER_VERSION));
     assert_eq!(hello["wire"], json!(ouro::fleet_helper::WIRE_VERSION));
     // Seam C1: the revision and the build metadata arrive with the protocol module.
-    assert_eq!(hello["protocol"], Value::Null);
+    assert_eq!(
+        hello["protocol"],
+        serde_json::json!(ouro::fleet_protocol::FLEET_PROTOCOL_REVISION)
+    );
 
     let before = helper.ok(json!({"op": "inspect"}));
     assert_eq!(before["fleet"], Value::Null);
-    assert_eq!(before["build"], Value::Null, "seam C1");
+    assert_eq!(
+        before["build"]["fleet_protocol_revision"],
+        serde_json::json!(ouro::fleet_protocol::FLEET_PROTOCOL_REVISION),
+        "seam C1: inspect carries the build contract"
+    );
+    assert!(before["build"]["ouroboros_version"].is_string(), "seam C1");
     assert_eq!(before["runtime_running"], json!(false));
     assert_eq!(before["data_dir"], json!(target.display().to_string()));
     assert_eq!(before["os"], json!(std::env::consts::OS));

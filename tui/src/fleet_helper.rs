@@ -42,12 +42,10 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Seam C1: `fleet_protocol::FLEET_PROTOCOL_REVISION` is the single source of truth
-/// for the machine-management protocol revision, and it arrives with W1-A's branch
-/// together with the drift test that pins it to `lib/ouroboros/cluster.ex`. Reporting
-/// a second hand-written copy of that number here would be exactly the drift that test
-/// exists to catch, so this wave answers `null` — the same seam `inspect`'s `"build"`
-/// uses — and the integrator fills both from that module.
-pub const HELPER_PROTOCOL: Option<u64> = None;
+/// for the machine-management protocol revision, pinned to `lib/ouroboros/cluster.ex`
+/// by that module's drift test. The helper reports it rather than a second copy.
+pub const HELPER_PROTOCOL: Option<u64> =
+    Some(crate::fleet_protocol::FLEET_PROTOCOL_REVISION as u64);
 
 /// Bounded identifiers: an `id` is echoed into a reply, so it is checked before it is.
 const MAX_ID_BYTES: usize = 128;
@@ -420,10 +418,13 @@ impl Helper {
         let mut value =
             serde_json::to_value(&inspection).context("encoding this machine's inspection")?;
         if let Value::Object(fields) = &mut value {
-            // Seam C1: the packaged build metadata arrives with W1-A's
-            // `fleet_protocol::build_metadata()`; this wave states that it is absent
-            // rather than guessing at a version an orchestrator would then trust.
-            fields.insert("build".to_string(), Value::Null);
+            // Seam C1: the build contract an orchestrator compares before any credential
+            // leaves the issuer. Unknown facts inside it are null, never guessed.
+            fields.insert(
+                "build".to_string(),
+                serde_json::to_value(crate::fleet_protocol::build_metadata())
+                    .context("encoding this build's metadata")?,
+            );
         }
         Ok(value)
     }
@@ -558,8 +559,11 @@ mod tests {
         assert_eq!(reply["id"], json!("a1"));
         assert_eq!(reply["ok"], json!(true));
         assert_eq!(reply["helper"], json!(HELPER_VERSION));
-        // Seam C1, stated rather than guessed.
-        assert_eq!(reply["protocol"], Value::Null);
+        // Seam C1: the one revision the runtime advertises.
+        assert_eq!(
+            reply["protocol"],
+            json!(crate::fleet_protocol::FLEET_PROTOCOL_REVISION)
+        );
     }
 
     /// `bye` is the only op that stops the loop, and it still answers first.
