@@ -121,9 +121,9 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       # Seam S5's owner, echoed by the worker from the attach frame this broker sent.
       assert snapshot["owner"] == subject()
 
-      # (d) The request file was consumed by the worker, and every file it left is private.
+      # (d) The request is retained for recovery, and every file is private.
       deploy = Journal.deploy_dir(context.root)
-      refute File.exists?(Journal.request_path(context.root, operation))
+      assert File.exists?(Journal.request_path(context.root, operation))
       assert_private(deploy)
 
       # It inspects, then asks for a review carrying the plan it built and the digest of it.

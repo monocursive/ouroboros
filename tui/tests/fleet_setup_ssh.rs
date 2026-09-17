@@ -16,6 +16,7 @@ mod fleet_setup_support;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -749,4 +750,108 @@ fn grep_tree_except(root: &std::path::Path, needle: &str, except: &[&str]) -> bo
         }
     }
     false
+}
+
+#[test]
+fn explicit_key_and_agent_choices_ignore_other_configured_identities() {
+    for use_agent in [false, true] {
+        let rig = Sshd::start("pin-config");
+        let work = scratch("pin-cfg");
+        let store = work.join("known_hosts");
+        trust_now(&rig, &store, &work);
+        let wrong = work.join("selected_key");
+        assert!(std::process::Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&wrong)
+            .status()
+            .unwrap()
+            .success());
+        let config = work.join("ssh_config");
+        std::fs::write(
+            &config,
+            format!("Host *\n  IdentityFile {}\n", rig.client_key.display()),
+        )
+        .unwrap();
+        let wrapper = work.join("ssh");
+        write_script(
+            &wrapper,
+            &format!(
+                "#!/bin/sh\nexec /usr/bin/ssh -F '{}' \"$@\"\n",
+                config.display()
+            ),
+        );
+        let agent = use_agent.then(|| Agent::start("pin-agent", &wrong));
+        let programs = Programs {
+            ssh: wrapper,
+            agent_socket: agent.as_ref().map(|agent| agent.socket.clone()),
+            ..programs()
+        };
+        let selected = if use_agent {
+            let identities = ouro::fleet_setup::ssh::agent_identities(&programs, &work).unwrap();
+            ouro::fleet_setup::ssh::resolve_identity(
+                &programs,
+                &ouro::fleet_setup::IdentityChoice::Agent {
+                    fingerprint: identities[0].fingerprint.clone(),
+                },
+                &work,
+            )
+            .unwrap()
+        } else {
+            ResolvedIdentity::Key {
+                path: wrong,
+                label: "selected_key".into(),
+                fingerprint: None,
+            }
+        };
+        let mut runner = runner(&rig, selected, vec![store], programs, None);
+        runner.inspect_effective_config().unwrap();
+        assert!(
+            runner.check_access().is_err(),
+            "authenticated using the unselected configured key"
+        );
+        runner.identity = ResolvedIdentity::Key {
+            path: rig.client_key.clone(),
+            label: "authorized".into(),
+            fingerprint: None,
+        };
+        runner
+            .check_access()
+            .expect("the selected authorized key still works");
+        // Configured routing remains an explicit refusal, even though connections
+        // with a selected key isolate the identity list from that config.
+        std::fs::write(&config, "Host *\n  ProxyJump bastion.invalid\n").unwrap();
+        assert_eq!(
+            reason_of(&runner.inspect_effective_config().unwrap_err()),
+            Some("unsupported_routing")
+        );
+    }
+}
+
+#[test]
+fn an_unterminated_helper_reply_is_bounded_before_eof() {
+    let rig = Sshd::start("frame-limit");
+    let work = scratch("frame-limit");
+    let wrapper = work.join("ssh");
+    write_script(
+        &wrapper,
+        "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=2 2>/dev/null\nsleep 30\n",
+    );
+    let runner = runner(
+        &rig,
+        ResolvedIdentity::Default,
+        vec![],
+        Programs {
+            ssh: wrapper,
+            ..programs()
+        },
+        None,
+    );
+    let mut session = ouro::fleet_setup::helper::Session::open(&runner, "ouro", None).unwrap();
+    let start = std::time::Instant::now();
+    let result = session.ask("inspect", serde_json::json!({})).unwrap_err();
+    assert_eq!(reason_of(&result), Some("frame_too_large"));
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "waited for the remote producer to exit"
+    );
 }

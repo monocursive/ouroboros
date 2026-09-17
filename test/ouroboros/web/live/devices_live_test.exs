@@ -2275,4 +2275,26 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   end
 
   defp digest(token), do: :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
+
+  test "a reopened local setup can resume before its CA exists", context do
+    worker!(context)
+    conn = web!(context)
+    {:ok, view, _} = live(conn, "/devices")
+    render_click(view, "setup-device", %{"address" => "100.64.0.7"})
+
+    view
+    |> form("#ouro-deploy-setup", %{"machine" => "studio", "address" => "100.64.0.7"})
+    |> render_submit()
+
+    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+    operation = operation(view)
+    journal!(context.root, operation, %{"state" => "failed", "kind" => "setup"})
+    detach!(operation)
+    {:ok, reopened, _} = live(conn, "/devices?operation=" <> operation)
+    socket = :sys.get_state(reopened.pid).socket
+    assert socket.assigns.drawer.kind == "setup"
+    assert :ok == DevicesLive.allowed?(socket, :setup)
+    render_click(reopened, "resume", %{"operation" => operation})
+    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+  end
 end

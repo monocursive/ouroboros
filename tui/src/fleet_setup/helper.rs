@@ -10,7 +10,7 @@
 //! quoting — not the fact that this process built an argument array — is what keeps a
 //! path from being read as shell source.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,7 +49,7 @@ pub struct Session {
     /// can only arrive while the `ssh` it belongs to is alive.
     armed: Option<super::askpass::Armed>,
     input: Option<std::process::ChildStdin>,
-    replies: Receiver<String>,
+    replies: Receiver<Result<String, ()>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     next_id: u64,
     label: String,
@@ -79,20 +79,29 @@ impl Session {
             .take()
             .ok_or_else(|| anyhow::anyhow!("the ssh child has no stderr"))?;
 
-        let (sender, replies) = sync_channel::<String>(4);
+        let (sender, replies) = sync_channel::<Result<String, ()>>(4);
         std::thread::Builder::new()
             .name("ouro-helper-stdout".to_string())
             .spawn(move || {
-                for line in BufReader::new(output).split(b'\n') {
-                    let Ok(line) = line else { return };
+                let mut reader = BufReader::new(output);
+                loop {
+                    let mut line = Vec::new();
+                    let read = reader
+                        .by_ref()
+                        .take(super::MAX_FRAME_BYTES as u64 + 1)
+                        .read_until(b'\n', &mut line);
+                    if !matches!(read, Ok(n) if n > 0) {
+                        return;
+                    }
                     if line.len() > super::MAX_FRAME_BYTES {
+                        let _ = sender.send(Err(()));
                         return;
                     }
                     let text = String::from_utf8_lossy(&line).trim_end().to_string();
                     if text.is_empty() {
                         continue;
                     }
-                    if sender.send(text).is_err() {
+                    if sender.send(Ok(text)).is_err() {
                         return;
                     }
                 }
@@ -218,7 +227,14 @@ impl Session {
             })?;
 
         let reply = match self.replies.recv_timeout(REPLY_DEADLINE) {
-            Ok(reply) => reply,
+            Ok(Ok(reply)) => reply,
+            Ok(Err(())) => {
+                self.abort();
+                return refuse(
+                    "frame_too_large",
+                    "the remote helper exceeded the reply frame limit; its connection was closed",
+                );
+            }
             Err(RecvTimeoutError::Timeout) => {
                 return refuse(
                     "helper_timeout",
@@ -288,6 +304,17 @@ impl Session {
     /// helper resident on the target, and the helper exits on EOF anyway.
     pub fn close(mut self) {
         self.close_in_place();
+    }
+
+    fn abort(&mut self) {
+        self.finished = true;
+        drop(self.input.take());
+        // The child is unreaped and owns the process group created by Runner::spawn.
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        let _ = self.child.wait();
+        self.armed = None;
     }
 
     fn close_in_place(&mut self) {
@@ -383,6 +410,11 @@ fn known_reason(reason: &str) -> &'static str {
         "materials_differ",
         "helper_unsupported",
         "runtime_running",
+        "runtime_busy",
+        "activity_unknown",
+        "shutdown_unavailable",
+        "shutdown_incomplete",
+        "publication_mismatch",
         "unsupported_action",
         "unsupported_platform",
         "foreign_unit",

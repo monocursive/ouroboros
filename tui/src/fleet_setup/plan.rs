@@ -145,6 +145,8 @@ pub struct Plan {
     #[serde(default)]
     pub release: Option<PlanRelease>,
     pub service: ServicePlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_workspace: Option<String>,
     pub members: Vec<PlanMember>,
     /// The idle restart this operation needs, when it needs one.
     #[serde(default)]
@@ -187,6 +189,9 @@ impl Plan {
         text.push_str(&format!("  action       {}\n", self.kind.as_str()));
         text.push_str(&format!("  machine      {}\n", self.target.machine));
         text.push_str(&format!("  address      {}\n", self.target.address));
+        if let Some(workspace) = &self.test_workspace {
+            text.push_str(&format!("  model check  one turn in {workspace}\n"));
+        }
         if !self.target.ssh_user.is_empty() {
             text.push_str(&format!(
                 "  ssh          {}@{} port {}\n",
@@ -308,6 +313,7 @@ mod tests {
             },
             release: None,
             service: ServicePlan::Managed,
+            test_workspace: None,
             members: vec![PlanMember {
                 machine: "studio".into(),
                 host: "100.64.0.1".into(),

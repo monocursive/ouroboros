@@ -58,6 +58,7 @@ pub struct AddArgs {
     pub install_path: Option<String>,
     pub remote_data_dir: Option<String>,
     pub run_test_task: bool,
+    pub test_workspace: Option<String>,
     pub common: CommonArgs,
 }
 
@@ -256,6 +257,7 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
     request.dry_run = args.common.dry_run;
     request.assume_yes = args.common.yes;
     request.run_test_task = args.run_test_task;
+    request.test_workspace = args.test_workspace.clone();
     request.ports = test_ports();
     drive(paths, request, &args.common).await
 }

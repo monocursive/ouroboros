@@ -785,17 +785,52 @@ fn remove_member_locked(data_dir: &Path, machine: &str) -> Result<Member> {
                 gone.node
             );
         }
+        // Issuance may have succeeded before delivery or the roster update. An
+        // explicit removal retires that admission too, so its documented recovery
+        // does not require deleting replay evidence by hand.
+        if let Some(retired) = retire_issued_admissions(data_dir, machine)? {
+            return Ok(retired);
+        }
         bail!(
             "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
         );
     };
     let removed = profile.members.remove(index);
+    retire_issued_admissions(data_dir, &removed.machine)?;
     profile.roster_revision = profile
         .roster_revision
         .checked_add(1)
         .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
     write_profile(data_dir, &profile).context("taking the machine out of this machine's roster")?;
     Ok(removed)
+}
+
+fn retire_issued_admissions(data_dir: &Path, machine: &str) -> Result<Option<Member>> {
+    let mut retired = None;
+    for receipt in read_receipts(data_dir)?.receipts {
+        if !(same_name(&receipt.machine, machine) || same_name(&receipt.node, machine))
+            || !receipt.has_step("issue")
+        {
+            continue;
+        }
+        if !receipt.has_step("retire") {
+            append_receipt_step(
+                data_dir,
+                &receipt.operation,
+                "retire",
+                "ok",
+                Some(
+                    "the operator removed this admission; this does not revoke copied credentials",
+                ),
+            )?;
+        }
+        retired = Some(Member {
+            machine: receipt.machine,
+            host: receipt.host,
+            node: receipt.node,
+        });
+    }
+    Ok(retired)
 }
 
 fn empty_tags() -> Value {
@@ -5551,8 +5586,19 @@ pub fn issue_member_certificate(
     data_dir: &Path,
     request: &AdmissionRequest,
 ) -> Result<AdmissionMaterials> {
+    let (materials, _lock) = issue_member_certificate_checked(data_dir, request, None)?;
+    Ok(materials)
+}
+
+/// Keep roster mutations and runtime restarts fenced through credential delivery and
+/// the issuer's roster update. The caller must retain this lock across that boundary.
+pub(crate) fn issue_member_certificate_checked(
+    data_dir: &Path,
+    request: &AdmissionRequest,
+    expected: Option<&Profile>,
+) -> Result<(AdmissionMaterials, runtime::SpawnLock)> {
     validate_admission_request(request)?;
-    let _lock = lock_live_fleet_update(data_dir, "ouro fleet admission issue")?;
+    let lock = lock_live_fleet_update(data_dir, "ouro fleet admission issue")?;
 
     let profile = load(data_dir)?.ok_or_else(|| {
         AdmissionError::new(
@@ -5560,6 +5606,14 @@ pub fn issue_member_certificate(
             "this machine is standalone; only a machine with a fleet can admit another",
         )
     })?;
+    if expected.is_some_and(|expected| {
+        expected.fleet_id != profile.fleet_id
+            || expected.roster_revision != profile.roster_revision
+            || expected.members != profile.members
+            || expected.tombstones != profile.tombstones
+    }) {
+        return refuse("roster_conflict", "the issuer's fleet or roster changed after review; no credentials were issued. Review a new operation");
+    }
     let root = fleet_dir(data_dir);
     if !root
         .join(CA_KEY_FILE)
@@ -5685,7 +5739,7 @@ pub fn issue_member_certificate(
         )?;
     }
 
-    Ok(materials)
+    Ok((materials, lock))
 }
 
 /// Refuse an operation id this machine already answered, and a machine it already
@@ -5708,7 +5762,10 @@ fn ensure_admission_not_recorded(
                 ),
             );
         }
-        if same_name(&receipt.machine, &request.machine) && receipt.has_step("issue") {
+        if same_name(&receipt.machine, &request.machine)
+            && receipt.has_step("issue")
+            && !receipt.has_step("retire")
+        {
             return refuse(
                 "machine_already_issued",
                 format!(
@@ -6351,6 +6408,18 @@ pub fn apply_roster_change(
     expected_revision: u64,
     change: &RosterChange,
 ) -> Result<RosterOutcome> {
+    let lock = lock_live_fleet_update(data_dir, "ouro fleet helper roster")
+        .map_err(|error| refusing("lock_unavailable", error))?;
+    apply_roster_change_locked(data_dir, operation, expected_revision, change, &lock)
+}
+
+pub(crate) fn apply_roster_change_locked(
+    data_dir: &Path,
+    operation: &str,
+    expected_revision: u64,
+    change: &RosterChange,
+    _lock: &runtime::SpawnLock,
+) -> Result<RosterOutcome> {
     validate_operation_id(operation)?;
     let machine = match change {
         RosterChange::Add { machine, .. }
@@ -6380,8 +6449,6 @@ pub fn apply_roster_change(
         }
     }
 
-    let _lock = lock_live_fleet_update(data_dir, "ouro fleet helper roster")
-        .map_err(|error| refusing("lock_unavailable", error))?;
     let before = load(data_dir)?.ok_or_else(|| {
         AdmissionError::new(
             "no_fleet",
@@ -9184,6 +9251,60 @@ mod tests {
         mislabelled.key_fingerprint = public_fingerprint(b"not this key");
         let error = issue_member_certificate(&issuer, &mislabelled).unwrap_err();
         assert_eq!(reason_of(&error), "csr_identity_mismatch");
+    }
+
+    #[test]
+    fn retiring_an_undelivered_admission_allows_a_new_operation_but_not_replay() {
+        let issuer = issuer_fleet("issuer-retire");
+        let target = scratch("target-retire");
+        let old = prepare_admission(&target, "op-retire-old", "vps", "127.0.0.1").unwrap();
+        issue_member_certificate(&issuer, &old).unwrap();
+        assert_eq!(remove_member(&issuer, "vps").unwrap().machine, "vps");
+        let receipt = read_receipt(&issuer, &old.operation).unwrap().unwrap();
+        assert!(receipt.has_step("issue") && receipt.has_step("retire"));
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &old).unwrap_err()),
+            "operation_replayed"
+        );
+        let new = crafted_request("op-retire-new", "vps", "127.0.0.1", |_| {});
+        issue_member_certificate(&issuer, &new).unwrap();
+        let duplicate = crafted_request("op-retire-duplicate", "vps", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &duplicate).unwrap_err()),
+            "machine_already_issued"
+        );
+    }
+
+    #[test]
+    fn issuance_holds_the_roster_fence_until_local_membership_is_recorded() {
+        let issuer = issuer_fleet("issuer-fence");
+        let target = scratch("target-fence");
+        let request = prepare_admission(&target, "op-fenced", "vps", "127.0.0.1").unwrap();
+        let profile = load(&issuer).unwrap().unwrap();
+        let (_materials, lock) =
+            issue_member_certificate_checked(&issuer, &request, Some(&profile)).unwrap();
+        assert!(add_member(&issuer, "concurrent", "127.0.0.2", None).is_err());
+        apply_roster_change_locked(
+            &issuer,
+            "op-fenced-roster",
+            profile.roster_revision,
+            &RosterChange::Add {
+                machine: "vps".into(),
+                host: "127.0.0.1".into(),
+                node: None,
+            },
+            &lock,
+        )
+        .unwrap();
+        assert!(add_member(&issuer, "concurrent", "127.0.0.2", None).is_err());
+        drop(lock);
+        add_member(&issuer, "concurrent", "127.0.0.2", None).unwrap();
+        let profile = load(&issuer).unwrap().unwrap();
+        assert!(profile.members.iter().any(|member| member.machine == "vps"));
+        assert!(profile
+            .members
+            .iter()
+            .any(|member| member.machine == "concurrent"));
     }
 
     /// One machine, one identity: not twice under one operation id, not twice under

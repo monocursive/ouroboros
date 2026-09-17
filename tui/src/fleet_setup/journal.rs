@@ -117,6 +117,8 @@ pub struct Record {
     pub paths: IntendedPaths,
     #[serde(default)]
     pub plan_digest: Option<String>,
+    #[serde(default)]
+    pub plan: Option<super::plan::Plan>,
     /// The authenticated subject this operation belongs to: the first client that
     /// attached to the worker, or the local account for an operation run from the CLI.
     ///
@@ -200,6 +202,7 @@ impl Journal {
                     release: None,
                     paths: IntendedPaths::default(),
                     plan_digest: None,
+                    plan: None,
                     owner: None,
                     steps: Vec::new(),
                     residue: Vec::new(),
@@ -333,6 +336,12 @@ impl Journal {
         self.flush()
     }
 
+    pub fn set_plan(&mut self, plan: &super::plan::Plan) -> Result<()> {
+        self.record.plan_digest = Some(plan.digest());
+        self.record.plan = Some(plan.clone());
+        self.flush()
+    }
+
     /// Write the "about to happen" half of a step.
     pub fn begin_step(&mut self, machine: &str, step: &str) -> Result<()> {
         self.push(machine, step, "started", None, None)
@@ -442,6 +451,13 @@ impl Handle {
         act(&mut journal)
     }
 
+    pub fn reload(&self, data_dir: &Path, operation: &str, kind: OperationKind) -> Result<()> {
+        self.with(|journal| {
+            *journal = Journal::open(data_dir, operation, kind)?;
+            Ok(())
+        })
+    }
+
     /// A snapshot. Owned on purpose: a caller holding a borrow across a step would hold
     /// the lock across an SSH round trip.
     pub fn record(&self) -> Record {
@@ -486,6 +502,10 @@ impl Handle {
 
     pub fn set_plan_digest(&self, digest: &str) -> Result<()> {
         self.with(|journal| journal.set_plan_digest(digest))
+    }
+
+    pub fn set_plan(&self, plan: &super::plan::Plan) -> Result<()> {
+        self.with(|journal| journal.set_plan(plan))
     }
 
     pub fn begin_step(&self, machine: &str, step: &str) -> Result<()> {

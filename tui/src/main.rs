@@ -1664,6 +1664,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             install_path,
             remote_data_dir,
             run_test_task,
+            test_workspace,
             common,
         } => {
             fleet_setup::cli::add(
@@ -1678,6 +1679,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     install_path,
                     remote_data_dir,
                     run_test_task,
+                    test_workspace,
                     common: setup_common(common),
                 },
             )

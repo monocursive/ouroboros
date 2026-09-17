@@ -944,6 +944,7 @@ impl Challenge {
 /// The sanitized snapshot of one operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
+    pub kind: Option<String>,
     /// `worker` when one is attached, `journal` when none is. The operator's whole
     /// question after an interruption, so it is drawn rather than inferred.
     pub source: String,
@@ -969,6 +970,7 @@ impl Snapshot {
 
         Self {
             source: text(value.get("source")).unwrap_or_else(|| "journal".into()),
+            kind: text(value.get("kind")),
             attached: value
                 .get("attached")
                 .and_then(Value::as_bool)
@@ -1128,7 +1130,7 @@ impl Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectField {
     User,
-    /// `setup` only: what this device calls itself in its own fleet.
+    /// The device's roster name, for both setup and admission.
     Machine,
     Port,
     Identity,
@@ -1141,8 +1143,9 @@ pub enum ConnectField {
 
 impl ConnectField {
     /// Every field, in the order an `add` draws them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::User,
+        Self::Machine,
         Self::Port,
         Self::Identity,
         Self::IdentityRef,
@@ -1252,7 +1255,7 @@ pub struct ConnectForm {
     pub setup: bool,
     pub field: ConnectField,
     pub user: String,
-    /// `setup` only: what this device calls itself in its own fleet.
+    /// The device's roster name, for both setup and admission.
     pub machine: String,
     pub port: String,
     pub identity: IdentityKind,
@@ -1273,7 +1276,7 @@ impl ConnectForm {
             setup: false,
             field: ConnectField::User,
             user: String::new(),
-            machine: String::new(),
+            machine: row.name.clone(),
             port: "22".into(),
             identity: IdentityKind::default(),
             identity_ref: String::new(),
@@ -1366,6 +1369,10 @@ impl ConnectForm {
             return self.setup_params();
         }
 
+        if let Err(error) = crate::fleet_setup::engine::normalize_machine(&self.machine) {
+            return Err((ConnectField::Machine, error.to_string()));
+        }
+
         let user = self.user.trim();
         if user.is_empty() {
             return Err((
@@ -1404,7 +1411,7 @@ impl ConnectForm {
 
         let mut params = json!({
             "kind": "add",
-            "target": { "address": address },
+            "target": { "address": address, "machine": self.machine.trim() },
             "ssh_user": user,
             "port": port,
             "service": self.service,
@@ -1496,6 +1503,7 @@ impl Takeover {
 #[derive(Debug)]
 pub struct Operation {
     pub id: String,
+    pub kind: Option<String>,
     /// The row's name, for the header. The plan carries the machine name the worker
     /// resolved; this is what the operator pressed Deploy on.
     pub device: String,
@@ -1521,6 +1529,7 @@ impl Operation {
     fn new(id: String, device: String) -> Self {
         Self {
             id,
+            kind: None,
             device,
             snapshot: Loadable::default(),
             secret: SecretInput::default(),
@@ -1771,8 +1780,14 @@ impl App {
                             .map(|form| form.device.clone())
                             .unwrap_or_else(|| "this device".into());
 
+                        let mut operation = Operation::new(id, device);
+                        operation.kind = self
+                            .devices
+                            .connect
+                            .as_ref()
+                            .map(|form| if form.setup { "setup" } else { "add" }.into());
                         self.devices.connect = None;
-                        self.devices.operation = Some(Box::new(Operation::new(id, device)));
+                        self.devices.operation = Some(Box::new(operation));
                         self.devices.notice = None;
                         self.devices.scroll = 0;
                         self.poll_devices();
@@ -1811,6 +1826,9 @@ impl App {
                         let state = snapshot.state.clone();
 
                         if let Some(current) = self.devices.operation.as_mut() {
+                            if snapshot.kind.is_some() {
+                                current.kind = snapshot.kind.clone();
+                            }
                             // A challenge that is gone takes the buffer typed for it with
                             // it: an answer consumed, expired or superseded must never be
                             // resubmitted to the next question.
@@ -2016,7 +2034,9 @@ impl App {
 
     /// The takeover question's gate, applied before the answer rather than after it.
     fn devices_takeover_refused(&mut self) -> bool {
-        let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume", false) else {
+        let Some(refusal) =
+            self.devices_deploy_refusal("fleet.deployment.resume", self.devices_local_setup())
+        else {
             return false;
         };
 
@@ -2214,6 +2234,13 @@ impl App {
         }
     }
 
+    fn devices_local_setup(&self) -> bool {
+        self.devices
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind.as_deref() == Some("setup"))
+    }
+
     /// The three gates every mutating deployment verb passes, in words.
     ///
     /// One function rather than three checks at each call site: `prepare` had them and the
@@ -2295,6 +2322,7 @@ impl App {
             .unwrap_or_else(|| "a device this runtime could not name".into());
 
         let mut operation = Operation::new(open.operation.clone(), device);
+        operation.kind = open.kind.clone();
 
         // A journal with no worker behind it needs one before it can be answered, and a
         // resume is a mutation like any other: the same three gates. A failed operation
@@ -2302,7 +2330,10 @@ impl App {
         // "Retry" becomes a fresh inspection and a fresh review rather than a second go
         // at a plan nobody re-read.
         if !open.attached {
-            if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume", false) {
+            if let Some(refusal) = self.devices_deploy_refusal(
+                "fleet.deployment.resume",
+                open.kind.as_deref() == Some("setup"),
+            ) {
                 self.devices.notice = Some(refusal);
                 return;
             }
@@ -2828,7 +2859,9 @@ impl App {
         // *cancelled* or *completed* operation goes back to the list, because the broker
         // will not resume either.
         if state == "failed" {
-            if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume", false) {
+            if let Some(refusal) =
+                self.devices_deploy_refusal("fleet.deployment.resume", self.devices_local_setup())
+            {
                 if let Some(operation) = self.devices.operation.as_mut() {
                     operation.error = Some(refusal);
                 }
@@ -4735,6 +4768,7 @@ mod tests {
     #[test]
     fn the_connect_form_refuses_a_port_that_is_not_one() {
         let mut form = ConnectForm::deploy(&DeviceRow {
+            name: "vps".into(),
             address: Some("100.64.0.9".into()),
             ..DeviceRow::default()
         });
@@ -4750,6 +4784,7 @@ mod tests {
     #[test]
     fn an_unchosen_identity_is_omitted_rather_than_guessed() {
         let mut form = ConnectForm::deploy(&DeviceRow {
+            name: "vps".into(),
             address: Some("100.64.0.9".into()),
             ..DeviceRow::default()
         });

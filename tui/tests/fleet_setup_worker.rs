@@ -231,11 +231,10 @@ fn the_worker_outlives_its_spawner_and_finishes_the_operation() {
         "an instance id is 16 random bytes"
     );
 
-    // Seam S2's reconciliation: the request file has served its purpose by the time the
-    // socket line is printed, and does not lie around describing the target.
+    // The private request remains available to restart a failed worker.
     assert!(
-        !ouro::fleet_setup::request_path(&data, operation).exists(),
-        "the request file is consumed once the worker is listening"
+        ouro::fleet_setup::request_path(&data, operation).exists(),
+        "the private request survives the worker handoff"
     );
     // And the journal already names what the operation is for.
     let early = Journal::read(&data, operation)
@@ -598,7 +597,7 @@ fn a_worker_nobody_attaches_to_gives_up_and_cleans_up() {
         ouro::fleet_setup::worker::ATTACH_DEADLINE.as_secs()
     );
     assert!(!ouro::fleet_setup::capability_path(&data, operation).exists());
-    assert!(!ouro::fleet_setup::request_path(&data, operation).exists());
+    assert!(ouro::fleet_setup::request_path(&data, operation).exists());
 
     let record = Journal::read(&data, operation)
         .expect("a readable journal")
@@ -873,4 +872,88 @@ fn the_capability_is_readable_the_instant_start_returns() {
         let cancelled = client.ask("cancel", json!({}));
         assert_eq!(cancelled["ok"], json!(true), "round {round}: {cancelled}");
     }
+}
+
+#[test]
+fn starting_an_existing_worker_reattaches_without_replacing_its_socket_or_capability() {
+    let data = data_dir("wkr-reuse");
+    let operation = "op-review-reuse";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+    let first = spawn_detached(&data, operation);
+    let capability =
+        std::fs::read_to_string(ouro::fleet_setup::capability_path(&data, operation)).unwrap();
+    let second = spawn_detached(&data, operation);
+    assert_eq!(first.instance, second.instance);
+    assert_eq!(
+        capability,
+        std::fs::read_to_string(ouro::fleet_setup::capability_path(&data, operation)).unwrap()
+    );
+    let mut client = Client::connect(&first.socket);
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": capability.trim(), "subject": "operator", "session": "reconnected"})
+        )["ok"],
+        true
+    );
+    client.ask("cancel", json!({}));
+}
+
+#[test]
+fn a_crashed_worker_restarts_from_its_private_request_with_a_new_instance() {
+    let data = data_dir("wkr-crash");
+    let operation = "op-review-crash";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+    let mut child = Command::new(OURO)
+        .args([
+            "fleet",
+            "worker",
+            "run",
+            "--operation",
+            operation,
+            "--data-dir",
+        ])
+        .arg(&data)
+        .env("OUROBOROS_DATA_DIR", &data)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let socket = ouro::fleet_setup::socket_path(&data, operation);
+    let mut client = Client::connect(&socket);
+    let old_capability =
+        std::fs::read_to_string(ouro::fleet_setup::capability_path(&data, operation)).unwrap();
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": old_capability.trim(), "subject": "operator", "session": "before"})
+        )["ok"],
+        true
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(client);
+    assert!(ouro::fleet_setup::request_path(&data, operation).exists());
+    let resumed = spawn_detached(&data, operation);
+    let capability =
+        std::fs::read_to_string(ouro::fleet_setup::capability_path(&data, operation)).unwrap();
+    assert_ne!(capability, old_capability);
+    let mut client = Client::connect(&resumed.socket);
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": capability.trim(), "subject": "operator", "session": "after"})
+        )["ok"],
+        true
+    );
+    client.ask("cancel", json!({}));
 }

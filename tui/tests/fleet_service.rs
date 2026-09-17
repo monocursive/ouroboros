@@ -404,13 +404,16 @@ fn installing_a_launchagent_writes_one_private_file_and_bootstraps_exactly_once(
     assert_eq!(mode(&data_dir.join("service.out.log")), 0o600);
     assert_eq!(mode(&data_dir.join("service.err.log")), 0o600);
 
-    // Installing twice is the same install: the unit is replaced and re-bootstrapped,
-    // and nothing accumulates.
+    // Repeating the same install preserves the loaded service, without a restart.
     fakes.forget_calls();
     let again = fleet_service::install(&plan, &fakes.programs, false).expect("a second install");
     assert_eq!(again.ownership, Ownership::Ours);
     assert_eq!(fs::read_dir(agents).expect("a listing").count(), 1);
-    assert_eq!(fakes.calls().len(), 4);
+    assert_eq!(fakes.calls().len(), 2);
+    assert!(fakes
+        .calls()
+        .iter()
+        .all(|call| call.starts_with("launchctl print")));
 }
 
 #[test]
@@ -1661,6 +1664,7 @@ fn f6_a_refused_hand_off_takes_back_the_unit_it_just_wrote() {
     fakes.set("bootstrap_fails", false);
     fleet_service::install(&plan, &fakes.programs, false).expect("an install");
     fakes.set("bootstrap_fails", true);
+    fakes.set("loaded", false);
     let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
     assert!(plan.unit_path().exists());
     assert!(
@@ -2536,4 +2540,132 @@ fn h0_a_child_writes_its_unit_under_the_home_it_was_given_and_nowhere_else() {
         0,
         "the fence has to refuse before anything is written"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_a_managed_service_refuses_busy_work_before_any_manager_stop() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let root = scratch("disable-busy");
+        let (listener, address) = support::listener().await;
+        let runtime = FakeRuntime::new(&root, address.port());
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &runtime.data_dir);
+        // The stop gate must work even when no owned unit is currently present.
+        fakes.watch(&plan);
+        let token = runtime.token.clone();
+        let server = tokio::spawn(async move {
+            let mut peer = support::Peer::accept(&listener).await;
+            peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
+                .await;
+            let request = peer.request().await.unwrap();
+            assert_eq!(request["method"], "runtime.shutdown");
+            assert_eq!(request["params"], json!({"require_idle": true}));
+            peer.error(
+                &request["id"],
+                -32004,
+                "busy",
+                Some(json!({"reason": "runtime_busy", "activity": {"running_turns": 1}})),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let programs = fakes.programs.clone();
+        let error = tokio::task::spawn_blocking(move || fleet_service::disable(&plan, &programs))
+            .await
+            .unwrap()
+            .unwrap_err();
+        server.abort();
+        assert_eq!(
+            fleet_service::service_error(&error).unwrap().reason,
+            "runtime_busy"
+        );
+        assert!(ouro::runtime::pid_alive(runtime.child.id() as i32));
+        assert!(
+            !fakes
+                .calls()
+                .iter()
+                .any(|call| call.contains("bootout") || call.contains("disable --now")),
+            "{:?}",
+            fakes.calls()
+        );
+    }
+}
+
+#[test]
+fn installation_releases_the_spawn_lock_before_the_manager_can_start_a_runtime() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let root = scratch("review-startup-lock");
+        let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &data_dir);
+        fs::write(
+            fakes.state.join("spawn_lock_path"),
+            data_dir
+                .join(ouro::runtime::SPAWN_LOCK_FILE)
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        let program = match platform {
+            Platform::MacOs => &fakes.programs.launchctl,
+            Platform::Linux => &fakes.programs.systemctl,
+        };
+        let script = fs::read_to_string(program).unwrap().replacen(
+            "case \"$1\" in",
+            r#"case "$1" in
+  bootout)
+    if [ ! -f "$(cat "$state/spawn_lock_path")" ]; then
+      touch "$state/unlocked_stop"
+    fi ;;
+  bootstrap|enable)
+    if [ -e "$(cat "$state/spawn_lock_path")" ]; then
+      echo "the new runtime cannot acquire its spawn lock" >&2
+      exit 70
+    fi ;;
+esac
+case "$1" in"#,
+            1,
+        );
+        write_script(program, &script);
+
+        let report = fleet_service::install(&plan, &fakes.programs, false).unwrap();
+        assert_eq!(report.running, Some(true));
+        assert!(!fakes.state.join("unlocked_stop").exists());
+    }
+}
+
+#[test]
+fn reinstall_preserves_a_live_service_and_refuses_to_replace_it() {
+    let root = scratch("review-reinstall");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let runtime = FakeRuntime::new(&root, listener.local_addr().unwrap().port());
+    data_dir_with_profile(&root, "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let mut plan = plan_for(Platform::MacOs, &root, &runtime.data_dir);
+    fleet_service::install(&plan, &fakes.programs, false).unwrap();
+    fakes.forget_calls();
+    fleet_service::install(&plan, &fakes.programs, false).unwrap();
+    let calls = fakes.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("launchctl bootout")
+                || call.starts_with("launchctl bootstrap")),
+        "{calls:?}"
+    );
+    assert!(listener.accept().is_err(), "unexpected gateway request");
+    let original = fs::read(plan.unit_path()).unwrap();
+    plan.executable = PathBuf::from("/usr/bin/true");
+    fakes.forget_calls();
+    let error = fleet_service::install(&plan, &fakes.programs, false).unwrap_err();
+    assert_eq!(
+        fleet_service::service_error(&error).unwrap().reason,
+        "runtime_running"
+    );
+    assert_eq!(fs::read(plan.unit_path()).unwrap(), original);
+    assert!(!fakes
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("launchctl bootout")));
 }

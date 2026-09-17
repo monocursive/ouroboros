@@ -172,7 +172,10 @@ impl Lab {
         request.install_path = Some(OURO.to_string());
         request.remote_data_dir = Some(target.display().to_string());
         request.service = false;
-        request.ports = Some(ephemeral());
+        request.ports = OperationRequest::read(&self.issuer, operation)
+            .ok()
+            .and_then(|previous| previous.ports)
+            .or_else(|| Some(ephemeral()));
         request
     }
 
@@ -1450,4 +1453,564 @@ fn a_dry_run_that_accepts_a_host_key_keeps_it_for_that_run_only() {
         "{:?}",
         plan.target.host_fingerprint
     );
+}
+
+#[test]
+fn resume_after_own_roster_write_retries_startup() {
+    for unrelated_edit in [false, true] {
+        let lab = Lab::new("rvrost", "studio");
+        let target = data_dir("rvrost-t");
+        let mut request = lab.request("op-review-roster", "vps", &target);
+        request.service = true;
+        let refused = Arc::new(CountingServiceActions::new(true, vec![]));
+        let first = lab
+            .engine(
+                request.clone(),
+                Operator::new(),
+                gateway(&["studio", "vps"]),
+                refused,
+            )
+            .run()
+            .unwrap_err();
+        println!("first: {first:#}");
+        assert!(Journal::read(&lab.issuer, &request.operation)
+            .unwrap()
+            .unwrap()
+            .completed("studio", "roster"));
+        if unrelated_edit {
+            fleet::add_member(&lab.issuer, "unrelated", "127.0.0.2", None).unwrap();
+        }
+        let second = lab
+            .engine(
+                request,
+                Operator::new(),
+                gateway(&["studio", "vps"]),
+                services(),
+            )
+            .run();
+        if unrelated_edit {
+            assert_eq!(reason_of(&second.unwrap_err()), Some("roster_changed"));
+        } else {
+            assert!(
+                second.is_ok(),
+                "resume after this operation's own roster write: {second:?}"
+            );
+        }
+    }
+}
+#[test]
+fn resume_verifies_and_reuses_the_installed_release() {
+    for changed_binary in [false, true] {
+        let lab = Lab::new("rvbin", "studio");
+        let target = data_dir("rvbin-t");
+        let version = env!("CARGO_PKG_VERSION");
+        let bytes = std::fs::read(OURO).unwrap();
+        let triple = ouro::update::release::target_triple(
+            std::env::consts::OS,
+            &uname_machine(),
+            &system_version(),
+        )
+        .unwrap();
+        let asset = ouro::update::release::asset_name(version, &triple);
+        let server = ReleaseServer::start(version, &asset, bytes);
+        let mut request = lab.request("op-review-binary", "vps", &target);
+        request.install_path = Some(".local/bin/ouro".into());
+        let first = Engine {
+            origin: ouro::update::release::Origin::loopback(&server.base).unwrap(),
+            ..lab.engine(
+                request.clone(),
+                Operator::stopping_after("prepare"),
+                gateway(&["studio", "vps"]),
+                services(),
+            )
+        }
+        .run()
+        .unwrap_err();
+        println!("first: {first:#}");
+        assert!(Journal::read(&lab.issuer, &request.operation)
+            .unwrap()
+            .unwrap()
+            .completed("vps", "install_binary"));
+        if changed_binary {
+            std::fs::write(lab.rig.home.join(".local/bin/ouro"), b"different binary").unwrap();
+        }
+        let second = Engine {
+            origin: ouro::update::release::Origin::loopback(&server.base).unwrap(),
+            ..lab.engine(
+                request,
+                Operator::new(),
+                gateway(&["studio", "vps"]),
+                services(),
+            )
+        }
+        .run();
+        if changed_binary {
+            assert_eq!(reason_of(&second.unwrap_err()), Some("plan_changed"));
+        } else {
+            assert!(
+                second.is_ok(),
+                "resume after this operation installed its binary: {second:?}"
+            );
+        }
+    }
+}
+#[test]
+fn setup_resumes_after_service_installation_failure() {
+    let lab = Lab::new("rvsetup", "studio");
+    let local = data_dir("rvlocal");
+    let mut request = OperationRequest::new("op-review-setup", OperationKind::Setup, "local");
+    request.address = Some("127.0.0.1".into());
+    request.ports = Some(ephemeral());
+    let stopped = Arc::new(ScriptedGateway::new(false, vec![]));
+    let first = Engine {
+        data_dir: local.clone(),
+        token_file: local.join("gateway.token"),
+        ..lab.engine(
+            request.clone(),
+            Operator::new(),
+            stopped.clone(),
+            Arc::new(CountingServiceActions::new(true, vec![])),
+        )
+    }
+    .run()
+    .unwrap_err();
+    println!("first: {first:#}");
+    assert!(fleet::load(&local).unwrap().is_some());
+    let actions = services();
+    let second = Engine {
+        data_dir: local.clone(),
+        token_file: local.join("gateway.token"),
+        ..lab.engine(request, Operator::new(), stopped, actions.clone())
+    }
+    .run()
+    .unwrap();
+    assert!(
+        actions.local_calls().contains(&ServiceAction::Install),
+        "reported {:?} with no service retry: {:?}",
+        second.state,
+        actions.local_calls()
+    );
+}
+
+struct HeldAdmission {
+    inner: Arc<Operator>,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+impl Conversation for HeldAdmission {
+    fn ask(&self, request: ChallengeRequest) -> anyhow::Result<Answer> {
+        self.inner.ask(request)
+    }
+    fn notify(&self, event: Event) {
+        self.inner.notify(event.clone());
+        if let Event::Step { step, outcome, .. } = event {
+            if step == "install" && outcome == "ok" {
+                self.entered.wait();
+                self.release.wait();
+            }
+        }
+    }
+}
+#[test]
+fn simultaneous_admissions_are_serialized_before_credentials_and_retry_updates_every_member() {
+    let lab = Lab::new("rvconc", "studio");
+    let first = data_dir("rvconc-a");
+    let second = data_dir("rvconc-b");
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let engine_a = lab.engine(
+        lab.request("op-review-concurrent-a", "alpha", &first),
+        Arc::new(HeldAdmission {
+            inner: Operator::new(),
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        gateway(&["studio", "alpha", "beta"]),
+        services(),
+    );
+    let request_b = lab.request("op-review-concurrent-b", "beta", &second);
+    let a = std::thread::spawn(move || engine_a.run());
+    entered.wait();
+    let refused = lab
+        .engine(
+            request_b.clone(),
+            Operator::new(),
+            gateway(&["studio", "alpha", "beta"]),
+            services(),
+        )
+        .run();
+    release.wait();
+    let outcome_a = a.join().unwrap().unwrap();
+    assert_eq!(
+        reason_of(&refused.unwrap_err()),
+        Some("operation_in_progress")
+    );
+    assert!(fleet::load(&second).unwrap().is_none());
+    let outcome_b = lab
+        .engine(
+            request_b,
+            Operator::new(),
+            gateway(&["studio", "alpha", "beta"]),
+            services(),
+        )
+        .run()
+        .unwrap();
+    assert_eq!(outcome_a.state, OperationState::Completed);
+    assert_eq!(outcome_b.state, OperationState::Completed);
+    let issuer = fleet::load(&lab.issuer).unwrap().unwrap();
+    for target in [&first, &second] {
+        let member = fleet::load(target).unwrap().unwrap();
+        assert_eq!(member.members, issuer.members);
+    }
+}
+
+#[test]
+fn admission_rejects_a_valid_csr_for_an_unreviewed_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = Lab::new("rvid", "studio");
+    let target = data_dir("rvid-t");
+    let shim = lab.rig.dir.join("identity-shim");
+    let body = r#"#!/usr/bin/env python3
+import json, subprocess, sys
+ouro = __OURO__
+if sys.argv[1:] != ['fleet', 'helper']:
+    raise SystemExit(subprocess.call([ouro] + sys.argv[1:]))
+p = subprocess.Popen([ouro, 'fleet', 'helper'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get('op') == 'prepare':
+        request['machine'] = 'unreviewed'
+    p.stdin.write(json.dumps(request) + '\n')
+    p.stdin.flush()
+    reply = p.stdout.readline()
+    print(reply, end='', flush=True)
+    if request.get('op') == 'bye': break
+p.stdin.close()
+p.wait()
+"#.replace("__OURO__", &serde_json::to_string(OURO).unwrap());
+    std::fs::write(&shim, body).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut request = lab.request("op-review-identity", "vps", &target);
+    request.install_path = Some(shim.display().to_string());
+    let result = lab
+        .engine(
+            request,
+            Operator::new(),
+            gateway(&["studio", "vps"]),
+            services(),
+        )
+        .run();
+    println!("result: {:?}", result.as_ref().map(|r| r.state));
+    let installed = fleet::load(&target).unwrap();
+    println!(
+        "installed: {:?}",
+        installed.as_ref().map(|p| (&p.machine, &p.host))
+    );
+    assert!(
+        result.is_err(),
+        "must reject a valid CSR for an identity the operator did not review"
+    );
+    assert!(installed.is_none());
+}
+
+#[test]
+fn later_admission_reuses_existing_member_access_without_private_overrides() {
+    let lab = Lab::new("rvaccess", "studio");
+    let existing = data_dir("rvaccess-a");
+    let target = data_dir("rvaccess-b");
+    lab.engine(
+        lab.request("op-review-access-a", "alpha", &existing),
+        Operator::new(),
+        gateway(&["studio", "alpha"]),
+        services(),
+    )
+    .run()
+    .unwrap();
+    // No public CLI/RPC field supplies OperationRequest.members. Keep its default,
+    // and exercise an existing member deployed with the supported data_dir field.
+    let second_host = Sshd::start("rvaccess-other");
+    let mut request = lab.request("op-review-access-b", "beta", &target);
+    request.ssh_port = Some(second_host.port);
+    request.identity = IdentityChoice::Key {
+        path: second_host.client_key.clone(),
+    };
+    assert!(request.members.is_empty());
+    let outcome = lab
+        .engine(
+            request,
+            Operator::new(),
+            gateway(&["studio", "alpha", "beta"]),
+            services(),
+        )
+        .run();
+    assert!(
+        outcome.is_ok(),
+        "existing member access from the completed admission must be reused: {outcome:?}"
+    );
+}
+
+#[test]
+fn the_explicit_model_check_submits_and_observes_one_turn_in_the_reviewed_workspace() {
+    for terminal in ["completed", "failed"] {
+        let lab = Lab::new("model-check", "studio");
+        let target = data_dir("model-check-t");
+        let operation = "op-model-check";
+        let mut request = lab.request(operation, "vps", &target);
+        request.run_test_task = true;
+        request.test_workspace = Some("/srv/project".into());
+        let id = format!("fleet-check-{operation}");
+        let turn = format!("{id}-turn");
+        let calls = Arc::new(ScriptedGateway::new(
+            true,
+            vec![
+                (
+                    "interactive.start",
+                    json!({"id": id, "ready": true, "node": "ouro-vps@127.0.0.1"}),
+                ),
+                ("interactive.send_message", json!({"turn_id": turn})),
+                (
+                    "interactive.info",
+                    json!({"turns": {turn.clone(): {"status": terminal}}}),
+                ),
+            ],
+        ));
+        let outcome = lab
+            .engine(request, Operator::new(), calls.clone(), services())
+            .run();
+        if terminal == "completed" {
+            let outcome = outcome.unwrap();
+            assert_eq!(outcome.state, OperationState::Completed);
+            assert_eq!(
+                outcome.plan.unwrap().test_workspace.as_deref(),
+                Some("/srv/project")
+            );
+        } else {
+            assert_eq!(reason_of(&outcome.unwrap_err()), Some("test_task_failed"));
+        }
+        let sent = calls.calls();
+        let start = &sent
+            .iter()
+            .find(|(method, _)| method == "interactive.start")
+            .unwrap()
+            .1;
+        assert_eq!(start["workspace"], "/srv/project");
+        assert_eq!(start["machine"], "vps");
+        assert_eq!(start["max_turns"], 1);
+        assert_eq!(calls.called("interactive.send_message"), 1);
+        assert_eq!(calls.called("interactive.info"), 1);
+        for (method, params) in &sent {
+            if matches!(
+                method.as_str(),
+                "interactive.send_message" | "interactive.info" | "interactive.interrupt"
+            ) {
+                assert_eq!(params["node"], "ouro-vps@127.0.0.1");
+                assert!(params.get("machine").is_none());
+            }
+        }
+        let record = Journal::read(&lab.issuer, operation).unwrap().unwrap();
+        assert_eq!(
+            record.completed("vps", "test_task"),
+            terminal == "completed"
+        );
+    }
+}
+
+#[test]
+fn a_model_check_without_a_destination_workspace_refuses_before_mutation() {
+    let lab = Lab::new("model-no-path", "studio");
+    let target = data_dir("model-no-path-t");
+    let mut request = lab.request("op-model-no-path", "vps", &target);
+    request.run_test_task = true;
+    let error = lab
+        .engine(request, Operator::new(), gateway(&[]), services())
+        .run()
+        .unwrap_err();
+    assert_eq!(reason_of(&error), Some("invalid_request"));
+    assert!(fleet::load(&target).unwrap().is_none());
+}
+
+#[test]
+fn a_running_target_refuses_before_issuance_and_can_retry_after_stopping() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = Lab::new("rvrun", "studio");
+    let target = data_dir("rvrun-t");
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("180")
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    let birth = ouro::runtime::process_birth(pid).unwrap().unwrap();
+    let owner = target.join("runtime.owner");
+    std::fs::write(
+        &owner,
+        json!({"pid":pid,"birth":birth,"owner":"review-fixture"}).to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let request = lab.request("op-running-target", "vps", &target);
+    let result = lab
+        .engine(
+            request.clone(),
+            Operator::new(),
+            gateway(&["studio"]),
+            services(),
+        )
+        .run();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let first = result.unwrap_err();
+    let journal = Journal::read(&lab.issuer, &request.operation)
+        .unwrap()
+        .unwrap();
+    println!(
+        "FIRST={first:#}; ISSUE_RECORDED={}",
+        journal.completed("vps", "issue")
+    );
+    assert_eq!(reason_of(&first), Some("runtime_running"));
+    assert!(!journal.completed("vps", "issue"));
+    assert!(fleet::read_receipt(&lab.issuer, &request.operation)
+        .unwrap()
+        .is_none());
+    let second = lab
+        .engine(request, Operator::new(), gateway(&["studio"]), services())
+        .run()
+        .unwrap();
+    assert_eq!(second.state, OperationState::Completed);
+}
+#[test]
+fn removal_resumes_after_the_local_roster_entry_has_gone() {
+    let lab = Lab::new("rvleave", "studio");
+    let second = data_dir("rvl-2");
+    let third = data_dir("rvl-3");
+    lab.engine(
+        lab.request("op-admit-vps", "vps", &second),
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .unwrap();
+    lab.engine(
+        lab.request("op-admit-third", "buildbox", &third),
+        Operator::new(),
+        gateway(&["studio", "vps", "buildbox"]),
+        services(),
+    )
+    .run()
+    .unwrap();
+    let mut request = lab.request("op-leave-vps", "vps", &second);
+    request.kind = OperationKind::Leave;
+    let first = lab
+        .engine(
+            request.clone(),
+            Operator::stopping_after("roster"),
+            gateway(&["studio", "buildbox"]),
+            services(),
+        )
+        .run()
+        .unwrap_err();
+    println!("INTERRUPTED={first:#}");
+    let local = fleet::load(&lab.issuer).unwrap().unwrap();
+    assert!(!local.members.iter().any(|m| m.machine == "vps"));
+    assert!(fleet::load(&third)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|m| m.machine == "vps"));
+    let outcome = lab
+        .engine(
+            request,
+            Operator::new(),
+            gateway(&["studio", "buildbox"]),
+            services(),
+        )
+        .run()
+        .unwrap();
+    assert_eq!(outcome.state, OperationState::Completed);
+    assert!(!fleet::load(&third)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|m| m.machine == "vps"));
+}
+#[test]
+fn a_cooperatively_removed_member_can_be_admitted_again() {
+    let lab = Lab::new("rvreadd", "studio");
+    let target = data_dir("rvrea-t");
+    lab.engine(
+        lab.request("op-first-admit", "vps", &target),
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .unwrap();
+    let mut request = lab.request("op-first-leave", "vps", &target);
+    request.kind = OperationKind::Leave;
+    lab.engine(request, Operator::new(), gateway(&["studio"]), services())
+        .run()
+        .unwrap();
+    let outcome = lab
+        .engine(
+            lab.request("op-second-admit", "vps", &target),
+            Operator::new(),
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .unwrap();
+    assert_eq!(outcome.state, OperationState::Completed);
+    let old = fleet::read_receipt(&lab.issuer, "op-first-admit")
+        .unwrap()
+        .unwrap();
+    assert!(old.has_step("issue") && old.has_step("retire"));
+    let current = fleet::read_receipt(&lab.issuer, "op-second-admit")
+        .unwrap()
+        .unwrap();
+    assert!(current.has_step("issue") && !current.has_step("retire"));
+}
+
+struct EditDuringReview {
+    issuer: PathBuf,
+    inner: Arc<Operator>,
+}
+impl Conversation for EditDuringReview {
+    fn ask(&self, request: ChallengeRequest) -> anyhow::Result<Answer> {
+        if request.kind == ChallengeKind::Review {
+            fleet::add_member(&self.issuer, "concurrent", "127.0.0.2", None)?;
+        }
+        self.inner.ask(request)
+    }
+    fn notify(&self, event: Event) {
+        self.inner.notify(event);
+    }
+    fn cancelled(&self) -> bool {
+        false
+    }
+}
+#[test]
+fn roster_changes_during_approval_refuse_before_credential_issuance() {
+    let lab = Lab::new("rvstale", "studio");
+    let target = data_dir("rvst-t");
+    let operator = Arc::new(EditDuringReview {
+        issuer: lab.issuer.clone(),
+        inner: Operator::new(),
+    });
+    let result = lab
+        .engine(
+            lab.request("op-stale-review", "vps", &target),
+            operator,
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .unwrap_err();
+    println!("STALE_REVIEW={result:#}");
+    assert_eq!(reason_of(&result), Some("roster_conflict"));
+    assert!(fleet::load(&target).unwrap().is_none());
+    assert!(fleet::read_receipt(&lab.issuer, "op-stale-review")
+        .unwrap()
+        .is_none());
 }

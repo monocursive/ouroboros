@@ -131,7 +131,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   secrets in the sense the spec's one list means, but they are exactly the reconnaissance
   that makes the next attempt cheaper, and there is no reason to publish them to a shell
   account that has no business with this deployment. The file is 0600 in a 0700 directory,
-  written whole before the worker exists, and the worker unlinks it once it has read it.
+  written whole before the worker exists, and retained for recovery after a worker crash.
 
   Written atomically — an exclusive temporary inode chmodded before a byte goes in, then
   renamed into place — so the worker never opens a half-written request, and never a
@@ -144,7 +144,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   again, because nothing is coming to read it. When the launch succeeds the file is the
   worker's, even if this runtime cannot then parse what it printed.
 
-  A resume passes `nil` and writes nothing: the worker already has its journal, and
+  A resume passes `nil` and writes nothing: the worker retains its request and journal, and
   re-stating a target would be a second chance to state a different one.
   """
   @spec spawn_worker(String.t(), Path.t(), map() | nil, pos_integer()) ::

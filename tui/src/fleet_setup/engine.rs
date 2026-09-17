@@ -122,24 +122,50 @@ impl Engine {
     /// file that `--dry-run` promises not to write.
     pub fn run(&self) -> Result<Outcome> {
         super::validate_operation_id(&self.request.operation)?;
+        if self.request.run_test_task
+            && !self
+                .request
+                .test_workspace
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path).is_absolute())
+        {
+            return refuse("invalid_request", "--run-test-task requires --test-workspace with an absolute directory on the target");
+        }
         if self.request.dry_run {
             return self.dry_run();
         }
+        let _operation_lock = super::lock::Lock::acquire(&self.data_dir, "operation.lock")?;
         let journal = JournalHandle::new(Journal::open(
             &self.data_dir,
             &self.request.operation,
             self.request.kind,
         )?);
-        self.run_with(&journal)
+        self.run_locked(&journal)
     }
 
     /// The same, against a journal somebody else is also writing — the worker's socket
     /// thread records the operation's owner there while the engine records its steps.
     pub fn run_with(&self, journal: &JournalHandle) -> Result<Outcome> {
         super::validate_operation_id(&self.request.operation)?;
+        if self.request.run_test_task
+            && !self
+                .request
+                .test_workspace
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path).is_absolute())
+        {
+            return refuse("invalid_request", "--run-test-task requires --test-workspace with an absolute directory on the target");
+        }
         if self.request.dry_run {
             return self.dry_run();
         }
+        let _operation_lock = super::lock::Lock::acquire(&self.data_dir, "operation.lock")?;
+        journal.reload(&self.data_dir, &self.request.operation, self.request.kind)?;
+        self.run_locked(journal)
+    }
+
+    fn run_locked(&self, journal: &JournalHandle) -> Result<Outcome> {
+        self.request.write(&self.data_dir)?;
         if let Some(owner) = &self.owner {
             journal.claim(owner)?;
         }
@@ -274,6 +300,46 @@ impl Engine {
         })
     }
 
+    fn member_access(&self, machine: &str) -> (super::MemberAccess, super::IdentityChoice) {
+        let latest = Journal::list(&self.data_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|operation| Journal::read(&self.data_dir, &operation).ok().flatten())
+            .filter(|record| {
+                record.kind == OperationKind::Add
+                    && record.state == OperationState::Completed
+                    && record
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.machine == machine)
+            })
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then(a.updated_at.cmp(&b.updated_at))
+            });
+        let mut access = super::MemberAccess::default();
+        let mut identity = self.request.identity.clone();
+        if let Some(record) = latest {
+            if let Some(target) = record.target {
+                access.ssh_user = target.ssh_user;
+                access.ssh_port = target.port;
+                access.install_path = record.paths.install_path;
+                access.data_dir = record.paths.data_dir;
+            }
+            if let Ok(request) = super::OperationRequest::read(&self.data_dir, &record.operation) {
+                identity = request.identity;
+            }
+        }
+        if let Some(overrides) = self.request.members.get(machine) {
+            access.ssh_user = overrides.ssh_user.clone().or(access.ssh_user);
+            access.ssh_port = overrides.ssh_port.or(access.ssh_port);
+            access.install_path = overrides.install_path.clone().or(access.install_path);
+            access.data_dir = overrides.data_dir.clone().or(access.data_dir);
+        }
+        (access, identity)
+    }
+
     /// The same, for one existing member, honouring its own access overrides.
     fn member_destination(&self, host: &str, access: &super::MemberAccess) -> Result<Destination> {
         let mut destination = self.destination(
@@ -292,8 +358,16 @@ impl Engine {
     /// Everything between "we have an address" and "we have an authenticated channel":
     /// the effective-config check, host trust, and the first authentication.
     fn connect(&self, destination: Destination) -> Result<Connection> {
+        self.connect_with_identity(destination, &self.request.identity)
+    }
+
+    fn connect_with_identity(
+        &self,
+        destination: Destination,
+        choice: &super::IdentityChoice,
+    ) -> Result<Connection> {
         let scratch = self.scratch()?;
-        let identity = ssh::resolve_identity(&self.programs, &self.request.identity, &scratch)?;
+        let identity = ssh::resolve_identity(&self.programs, choice, &scratch)?;
         let known_hosts = self.known_hosts(&scratch);
 
         // Built without a bridge first: `ssh -G` does not authenticate, and arming the
@@ -474,7 +548,7 @@ impl Engine {
             return Ok(());
         }
         self.review(plan)?;
-        journal.set_plan_digest(&digest)
+        journal.set_plan(plan)
     }
 
     fn local_profile(&self) -> Result<Option<fleet::Profile>> {
@@ -518,6 +592,40 @@ impl Engine {
         if recorded.roster_revision != current.roster_revision
             || recorded.members != current.members
         {
+            let record = journal.record();
+            let mut expected = recorded.members.clone();
+            match self.request.kind {
+                OperationKind::Add => {
+                    if let Some(target) = &record.target {
+                        if let Some(host) = &target.address {
+                            expected.push(RosterMember {
+                                machine: target.machine.clone(),
+                                host: host.clone(),
+                            });
+                        }
+                    }
+                }
+                OperationKind::Leave => {
+                    expected.retain(|member| member.machine != self.request.machine)
+                }
+                OperationKind::Setup => {}
+            }
+            expected.sort_by(|a, b| a.machine.cmp(&b.machine));
+            let mut actual = current.members.clone();
+            actual.sort_by(|a, b| a.machine.cmp(&b.machine));
+            if record.attempted(&profile.machine, "roster")
+                && current.roster_revision == recorded.roster_revision.saturating_add(1)
+                && actual == expected
+            {
+                journal.finish_step(
+                    &profile.machine,
+                    "roster",
+                    "ok",
+                    Some(format!("reconciled revision {}", current.roster_revision)),
+                    None,
+                )?;
+                return Ok(());
+            }
             return refuse(
                 "roster_changed",
                 format!(
@@ -541,7 +649,7 @@ impl Engine {
         let plan = match self.request.kind {
             OperationKind::Add => self.plan_add()?.0,
             OperationKind::Setup => self.plan_setup()?,
-            OperationKind::Leave => self.plan_leave()?.0,
+            OperationKind::Leave => self.plan_leave(None)?.0,
         };
         let _ = std::fs::remove_dir_all(self.dry_run_scratch());
         Ok(Outcome {
@@ -653,6 +761,7 @@ impl Engine {
                 )),
             },
             release: release_plan.clone(),
+            test_workspace: self.request.test_workspace.clone(),
             service: if self.request.service {
                 ServicePlan::Managed
             } else {
@@ -709,7 +818,12 @@ impl Engine {
         preflight: &super::bootstrap::Preflight,
     ) -> Result<String> {
         // An explicit request always wins: it is what the operator just typed.
-        if let Some(requested) = self.request.install_path.clone() {
+        if let Some(requested) = self
+            .request
+            .install_path
+            .clone()
+            .filter(|_| machine == self.request.machine)
+        {
             if requested.starts_with('/') {
                 return Ok(requested);
             }
@@ -759,7 +873,49 @@ impl Engine {
     }
 
     fn run_add(&self, journal: &JournalHandle) -> Result<Outcome> {
-        let (plan, prepared) = self.plan_add()?;
+        let (mut plan, mut prepared) = self.plan_add()?;
+        let before = journal.record();
+        self.ensure_roster_unchanged(journal, &prepared.profile)?;
+        if let Some(roster) = &before.roster {
+            // The new member is contacted as the target, never as an old member on retry.
+            prepared.profile.members.retain(|member| {
+                roster
+                    .members
+                    .iter()
+                    .any(|old| old.machine == member.machine)
+            });
+            plan.members.retain(|member| {
+                roster
+                    .members
+                    .iter()
+                    .any(|old| old.machine == member.machine)
+            });
+        }
+        if before.attempted(&prepared.machine, "install_binary") && plan.release.is_none() {
+            if let Some(release) = before.plan.as_ref().and_then(|plan| plan.release.as_ref()) {
+                let command = format!("if command -v sha256sum >/dev/null 2>&1; then sha256sum < {}; else shasum -a 256 < {}; fi", ssh::shell_quote(&prepared.executable), ssh::shell_quote(&prepared.executable));
+                let checked = prepared.connection.runner.run(&command, None)?;
+                if !checked.success()
+                    || String::from_utf8_lossy(&checked.stdout)
+                        .split_whitespace()
+                        .next()
+                        != Some(release.sha256.as_str())
+                {
+                    return refuse(
+                        "plan_changed",
+                        "the installed binary no longer matches this operation's approved release",
+                    );
+                }
+                plan.release = Some(release.clone());
+                journal.finish_step(
+                    &prepared.machine,
+                    "install_binary",
+                    "ok",
+                    Some("verified the previously installed release checksum".into()),
+                    None,
+                )?;
+            }
+        }
         let machine = prepared.machine.clone();
         let target_host = plan.target.address.clone();
 
@@ -794,7 +950,6 @@ impl Engine {
         // changes the digest — and `plan_changed` is the vaguer answer to a question
         // this machine can answer precisely: the roster moved, re-run so the change is
         // reconciled rather than overwritten.
-        self.ensure_roster_unchanged(journal, &prepared.profile)?;
         self.bind_plan(journal, &plan)?;
 
         self.notify_state(OperationState::Deploying);
@@ -837,7 +992,7 @@ impl Engine {
                 )?;
                 self.step_event(&machine, "install_binary", "ok", Some(installed.path));
             }
-        } else {
+        } else if !journal.record().completed(&machine, "install_binary") {
             journal.skip_step(&machine, "install_binary", "the target already has ouro")?;
         }
 
@@ -856,6 +1011,12 @@ impl Engine {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if existing_fleet == prepared.profile.fleet_id {
+                if existing.get("machine").and_then(Value::as_str) != Some(machine.as_str())
+                    || existing.get("host").and_then(Value::as_str) != Some(target_host.as_str())
+                    || existing.get("node").and_then(Value::as_str) != plan.target.node.as_deref()
+                {
+                    return refuse("identity_mismatch", "the installed target identity does not match the reviewed machine, host and node");
+                }
                 target_admitted = true;
             } else {
                 return refuse(
@@ -866,6 +1027,9 @@ impl Engine {
                     ),
                 );
             }
+        }
+        if !target_admitted && inspection.get("runtime_running") != Some(&Value::Bool(false)) {
+            return refuse("runtime_running", format!("{machine}'s runtime must be stopped before admission. Run `ouro stop --require-idle` for its data directory, then retry; no credentials were issued"));
         }
         journal.finish_step(
             &machine,
@@ -900,6 +1064,7 @@ impl Engine {
             .members
             .iter()
             .any(|member| member.machine == machine);
+        let mut issuance_lock = None;
         if target_admitted {
             for step in ["prepare", "issue", "install"] {
                 if !journal.record().completed(&machine, step) {
@@ -949,6 +1114,13 @@ impl Engine {
                         ),
                     }
                 })?;
+            if admission.operation != self.request.operation
+                || admission.machine != machine
+                || admission.host != target_host
+                || Some(admission.node.as_str()) != plan.target.node.as_deref()
+            {
+                return refuse("identity_mismatch", "the target's admission request does not match the reviewed operation, machine, host and node; no credentials were issued");
+            }
             journal.finish_step(
                 &machine,
                 "prepare",
@@ -977,7 +1149,12 @@ impl Engine {
             }
 
             journal.begin_step(&machine, "issue")?;
-            let materials = fleet::issue_member_certificate(&self.data_dir, &admission)?;
+            let (materials, lock) = fleet::issue_member_certificate_checked(
+                &self.data_dir,
+                &admission,
+                Some(&prepared.profile),
+            )?;
+            issuance_lock = Some(lock);
             journal.finish_step(
                 &machine,
                 "issue",
@@ -1034,16 +1211,15 @@ impl Engine {
         }
 
         // ---- roster on every member
-        self.apply_roster_everywhere(
-            journal,
-            &prepared.profile,
-            &mut member_sessions,
-            fleet::RosterChange::Add {
-                machine: machine.clone(),
-                host: target_host.clone(),
-                node: None,
-            },
-        )?;
+        let change = fleet::RosterChange::Add {
+            machine: machine.clone(),
+            host: target_host.clone(),
+            node: None,
+        };
+        if let Some(lock) = issuance_lock.take() {
+            self.apply_local_roster(journal, &prepared.profile, &change, Some(&lock))?;
+        }
+        self.apply_roster_everywhere(journal, &prepared.profile, &mut member_sessions, change)?;
 
         // ---- startup
         let startup = self.arrange_startup(journal, &machine, &mut session)?;
@@ -1207,14 +1383,9 @@ impl Engine {
             }
             self.check_cancelled()?;
             journal.begin_step(&member.machine, "member_preflight")?;
-            let access = self
-                .request
-                .members
-                .get(&member.machine)
-                .cloned()
-                .unwrap_or_default();
+            let (access, identity) = self.member_access(&member.machine);
             let destination = self.member_destination(&member.host, &access)?;
-            let connection = self.connect(destination).map_err(|error| {
+            let connection = self.connect_with_identity(destination, &identity).map_err(|error| {
                 super::SetupError {
                     reason: "member_unreachable",
                     detail: format!(
@@ -1300,32 +1471,41 @@ impl Engine {
         Ok(sessions)
     }
 
-    /// Apply one roster change on the local member and on every remote member.
-    fn apply_roster_everywhere(
+    fn apply_local_roster(
         &self,
         journal: &JournalHandle,
         profile: &fleet::Profile,
-        members: &mut [MemberSession],
-        change: fleet::RosterChange,
+        change: &fleet::RosterChange,
+        lock: Option<&crate::runtime::SpawnLock>,
     ) -> Result<()> {
         let step = "roster";
         if !journal.record().completed(&profile.machine, step) {
-            self.check_cancelled()?;
+            // Once issued, finish delivery and the local roster boundary before
+            // honoring cancellation. The issuance lock also excludes manual edits.
+            if lock.is_none() {
+                self.check_cancelled()?;
+            }
             journal.begin_step(&profile.machine, step)?;
-            let current = self.local_profile()?.ok_or_else(|| super::SetupError {
-                reason: "no_fleet",
-                detail: "this machine's fleet profile disappeared mid-operation".into(),
-            })?;
             // A receipt belongs to one machine identity, and on the issuer this
             // operation's receipt already belongs to the machine being admitted. The
             // issuer's own roster edit is therefore recorded under a derived id; the
             // journal is what ties the two halves of the operation together.
-            let outcome = fleet::apply_roster_change(
-                &self.data_dir,
-                &self.local_roster_operation(),
-                current.roster_revision,
-                &change,
-            )?;
+            let outcome = if let Some(lock) = lock {
+                fleet::apply_roster_change_locked(
+                    &self.data_dir,
+                    &self.local_roster_operation(),
+                    profile.roster_revision,
+                    change,
+                    lock,
+                )?
+            } else {
+                fleet::apply_roster_change(
+                    &self.data_dir,
+                    &self.local_roster_operation(),
+                    profile.roster_revision,
+                    change,
+                )?
+            };
             journal.finish_step(
                 &profile.machine,
                 step,
@@ -1335,6 +1515,19 @@ impl Engine {
             )?;
             self.step_event(&profile.machine, step, "ok", None);
         }
+        Ok(())
+    }
+
+    /// Apply one roster change on the local member and on every remote member.
+    fn apply_roster_everywhere(
+        &self,
+        journal: &JournalHandle,
+        profile: &fleet::Profile,
+        members: &mut [MemberSession],
+        change: fleet::RosterChange,
+    ) -> Result<()> {
+        self.apply_local_roster(journal, profile, &change, None)?;
+        let step = "roster";
 
         for member in members.iter_mut() {
             if journal.record().completed(&member.machine, step) {
@@ -1342,7 +1535,7 @@ impl Engine {
             }
             self.check_cancelled()?;
             journal.begin_step(&member.machine, step)?;
-            let mut revision = member.revision;
+            let revision = member.revision;
             let mut attempt = 0;
             loop {
                 attempt += 1;
@@ -1372,30 +1565,12 @@ impl Engine {
                         break;
                     }
                     // A lock held by a concurrent roster edit on that machine is a
-                    // retry; a stale revision is a re-read; an invalid change is neither.
+                    // retry; a stale revision requires reconciliation, never a blind rebase.
                     Err(error)
                         if attempt <= ROSTER_RETRIES
                             && super::reason_of(&error) == Some("lock_unavailable") =>
                     {
                         std::thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
-                        continue;
-                    }
-                    Err(error) if super::reason_of(&error) == Some("roster_conflict") => {
-                        // The member's roster moved. Re-read it once and try again with
-                        // the revision it actually holds; a second conflict is reported
-                        // rather than retried into a lost update.
-                        if attempt > 2 {
-                            return Err(error);
-                        }
-                        let inspection = member.session.ask("inspect", json!({}))?;
-                        let Some(now) = inspection
-                            .get("fleet")
-                            .and_then(|fleet| fleet.get("roster_revision"))
-                            .and_then(Value::as_u64)
-                        else {
-                            return Err(error);
-                        };
-                        revision = now;
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -1413,14 +1588,13 @@ impl Engine {
         change: &str,
     ) -> PlanMember {
         let local = member.machine == profile.machine;
-        let access = self.request.members.get(&member.machine).cloned();
+        let (access, _) = self.member_access(&member.machine);
         PlanMember {
             machine: member.machine.clone(),
             host: member.host.clone(),
             reached_by: if local { "local".into() } else { "ssh".into() },
             change: change.to_string(),
             ssh: (!local).then(|| {
-                let access = access.unwrap_or_default();
                 format!(
                     "{}@{} port {}",
                     access
@@ -1613,54 +1787,103 @@ impl Engine {
         Ok(())
     }
 
-    /// The explicit first-task check, only when asked for.
+    /// One explicit model turn, with stable ids so a retry observes the same work.
     fn run_test_task(&self, journal: &JournalHandle, machine: &str) -> Result<()> {
+        if journal.record().completed(machine, "test_task") {
+            return Ok(());
+        }
         journal.begin_step(machine, "test_task")?;
-        // A *planning* session, deliberately: it reads and reasons and edits nothing, and
-        // it is the smallest real thing that exercises the new member's model access
-        // through the normal path. The proposal's rule is that a real model call happens
-        // only when the operator asks, which is what `--run-test-task` is.
-        match self.gateway.call(
-            "interactive.start",
-            json!({ "machine": machine, "plan": true }),
-        ) {
-            Ok(Some(started)) => {
-                let id = started
-                    .get("id")
+        let id = format!("fleet-check-{}", self.request.operation);
+        let turn_id = format!("{}-turn", id);
+        let result = (|| -> Result<()> {
+            let started = self
+                .gateway
+                .call(
+                    "interactive.start",
+                    json!({
+                        "id": id, "machine": machine, "plan": true,
+                        "workspace": self.request.test_workspace, "max_turns": 1,
+                    }),
+                )?
+                .ok_or_else(|| {
+                    super::refusing(
+                        "test_task_failed",
+                        anyhow::anyhow!("the local runtime is not running"),
+                    )
+                })?;
+            if started.get("id").and_then(Value::as_str) != Some(id.as_str())
+                || started.get("ready") == Some(&Value::Bool(false))
+            {
+                return refuse(
+                    "test_task_failed",
+                    "the target session was not ready for its model check",
+                );
+            }
+            let node = started
+                .get("node")
+                .and_then(Value::as_str)
+                .unwrap_or(machine);
+            self.gateway.call("interactive.send_message", json!({
+                "id": id, "node": node, "turn_id": turn_id,
+                "input": "Reply with exactly OK. Do not use tools, read files, or change anything. This is a fleet model connectivity check.",
+            }))?.ok_or_else(|| super::refusing("test_task_failed", anyhow::anyhow!("the runtime disappeared before the model check")))?;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                if self.conversation.cancelled() || Instant::now() >= deadline {
+                    let _ = self.gateway.call(
+                        "interactive.interrupt",
+                        json!({ "id": id, "node": node, "turn_id": turn_id }),
+                    );
+                    return refuse("test_task_failed", format!("the bounded model check did not complete; inspect session {id} on {machine}"));
+                }
+                let status = self
+                    .gateway
+                    .call("interactive.info", json!({ "id": id, "node": node }))?
+                    .ok_or_else(|| {
+                        super::refusing(
+                            "test_task_failed",
+                            anyhow::anyhow!(
+                                "the runtime disappeared while observing the model check"
+                            ),
+                        )
+                    })?;
+                match status
+                    .get("turns")
+                    .and_then(|turns| turns.get(&turn_id))
+                    .and_then(|turn| turn.get("status"))
                     .and_then(Value::as_str)
-                    .map(|id| sanitize_remote_text(id, 64))
-                    .unwrap_or_else(|| "unnamed".into());
+                {
+                    Some("completed") => return Ok(()),
+                    Some("failed" | "interrupted" | "ambiguous") => {
+                        return refuse(
+                            "test_task_failed",
+                            format!("the model check failed; inspect session {id} on {machine}"),
+                        )
+                    }
+                    _ => std::thread::sleep(Duration::from_millis(250)),
+                }
+            }
+        })();
+        match &result {
+            Ok(()) => {
                 journal.finish_step(
                     machine,
                     "test_task",
                     "ok",
-                    Some(format!(
-                        "started planning session {id} on {machine}; open it with `ouro attach`"
-                    )),
+                    Some(format!("model turn completed in session {id} on {machine}")),
                     None,
                 )?;
                 self.step_event(machine, "test_task", "ok", Some(id));
             }
-            Ok(None) => {
-                journal.finish_step(
-                    machine,
-                    "test_task",
-                    "skipped",
-                    Some("this machine's runtime is not running, so no task was started".into()),
-                    None,
-                )?;
-            }
-            Err(error) => {
-                journal.finish_step(
-                    machine,
-                    "test_task",
-                    "failed",
-                    Some(format!("the task could not be started: {error:#}")),
-                    None,
-                )?;
-            }
+            Err(error) => journal.finish_step(
+                machine,
+                "test_task",
+                "failed",
+                Some(error.to_string()),
+                None,
+            )?,
         }
-        Ok(())
+        result
     }
 
     // ---------------------------------------------------------------- setup
@@ -1705,6 +1928,7 @@ impl Engine {
                 node: Some(format!("ouro-{machine}@{parsed}")),
             },
             release: None,
+            test_workspace: self.request.test_workspace.clone(),
             service: if self.request.service {
                 ServicePlan::Managed
             } else {
@@ -1729,7 +1953,11 @@ impl Engine {
     fn run_setup(&self, journal: &JournalHandle) -> Result<Outcome> {
         let machine = normalize_machine(&self.request.machine)?;
         // Calling setup on a configured machine is an inspection.
-        if let Some(profile) = self.local_profile()? {
+        let existing = self.local_profile()?;
+        if let Some(profile) = existing
+            .as_ref()
+            .filter(|_| !journal.record().attempted(&machine, "create"))
+        {
             journal.set_state(OperationState::Completed)?;
             return Ok(Outcome {
                 operation: self.request.operation.clone(),
@@ -1749,7 +1977,39 @@ impl Engine {
             });
         }
 
-        let plan = self.plan_setup()?;
+        let mut plan = self.plan_setup()?;
+        if let Some(approved) = journal.record().plan {
+            if let Some(profile) = &existing {
+                if let Some(roster) = journal.record().roster {
+                    if roster.fleet_id.as_deref() != Some(profile.fleet_id.as_str()) {
+                        return refuse(
+                            "fleet_changed",
+                            "the local fleet identity changed after this setup created it",
+                        );
+                    }
+                }
+                if profile.machine != machine
+                    || profile.host != approved.target.address
+                    || Some(profile.node.as_str()) != approved.target.node.as_deref()
+                {
+                    return refuse(
+                        "identity_mismatch",
+                        "the local fleet differs from the identity this setup created",
+                    );
+                }
+                plan.deployment_host.issuer = approved.deployment_host.issuer;
+                journal.finish_step(
+                    &machine,
+                    "create",
+                    "ok",
+                    Some("verified this operation's local fleet identity".into()),
+                    None,
+                )?;
+            }
+            if journal.record().attempted(&machine, "stop_runtime") {
+                plan.restart = approved.restart;
+            }
+        }
         journal.set_target(TargetIdentity {
             machine: machine.clone(),
             address: Some(plan.target.address.clone()),
@@ -1809,11 +2069,14 @@ impl Engine {
                 Some(format!("{} at {}", profile.node, profile.host)),
                 None,
             )?;
+            journal.set_roster(self.roster_snapshot(&profile))?;
             self.step_event(&machine, "create", "ok", None);
         }
 
         let mut unknown = Vec::new();
-        let started = if self.request.service {
+        let started = if journal.record().completed(&machine, "service") {
+            true
+        } else if self.request.service {
             journal.begin_step(&machine, "service")?;
             let installed = self.services.local(ServiceAction::Install)?;
             if installed.supported {
@@ -1868,7 +2131,7 @@ impl Engine {
 
     // ---------------------------------------------------------------- leave
 
-    fn plan_leave(&self) -> Result<(Plan, fleet::Profile)> {
+    fn plan_leave(&self, journal: Option<&JournalHandle>) -> Result<(Plan, fleet::Profile)> {
         self.notify_state(OperationState::Inspecting);
         let machine = normalize_machine(&self.request.machine)?;
         let profile = self.local_profile()?.ok_or_else(|| super::SetupError {
@@ -1903,6 +2166,23 @@ impl Engine {
             .iter()
             .find(|member| member.machine == machine)
             .cloned()
+            .or_else(|| {
+                let record = journal?.record();
+                if !record.attempted(&profile.machine, "roster")
+                    || !record.completed(&machine, "leave")
+                {
+                    return None;
+                }
+                let target = record.target?;
+                if target.machine != machine {
+                    return None;
+                }
+                Some(fleet::Member {
+                    machine: target.machine,
+                    host: target.address?,
+                    node: target.node?,
+                })
+            })
         else {
             return refuse(
                 "machine_unknown",
@@ -1952,6 +2232,7 @@ impl Engine {
             },
             release: None,
             service: ServicePlan::Manual,
+            test_workspace: None,
             members,
             restart: Some(format!(
                 "{machine}'s runtime is stopped through its own idle-gated shutdown before its credentials are removed"
@@ -1963,7 +2244,7 @@ impl Engine {
     }
 
     fn run_leave(&self, journal: &JournalHandle) -> Result<Outcome> {
-        let (plan, profile) = self.plan_leave()?;
+        let (plan, profile) = self.plan_leave(Some(journal))?;
         let machine = plan.target.machine.clone();
         journal.set_target(TargetIdentity {
             machine: machine.clone(),
@@ -1982,67 +2263,71 @@ impl Engine {
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
 
-        let destination =
-            self.destination(&plan.target.address, self.request.ssh_user.as_deref())?;
-        let connection = self.connect(destination)?;
-        let preflight = super::bootstrap::preflight(&connection.runner)?;
-        let executable = self.remote_executable(&preflight)?;
-        let mut session = helper::Session::open(
-            &connection.runner,
-            &executable,
-            self.request.remote_data_dir.as_deref(),
-        )?;
+        let disconnected;
+        if !journal.record().completed(&machine, "leave") {
+            let destination =
+                self.destination(&plan.target.address, self.request.ssh_user.as_deref())?;
+            let connection = self.connect(destination)?;
+            let preflight = super::bootstrap::preflight(&connection.runner)?;
+            let executable = self.remote_executable(&preflight)?;
+            let mut session = helper::Session::open(
+                &connection.runner,
+                &executable,
+                self.request.remote_data_dir.as_deref(),
+            )?;
 
-        // ---- what this machine will lose sight of
-        let inspection = session.ask("inspect", json!({}))?;
-        let running = inspection
-            .get("runtime_running")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let sessions_note = self.session_ownership(&machine);
-        journal.finish_step(
-            &machine,
-            "inspect",
-            "ok",
-            Some(format!(
-                "runtime {}; {sessions_note}",
-                if running { "running" } else { "stopped" }
-            )),
-            None,
-        )?;
-        self.step_event(&machine, "inspect", "ok", Some(sessions_note.clone()));
-
-        // ---- stop it from coming back, then stop it
-        if !journal.record().completed(&machine, "disable_service") {
-            journal.begin_step(&machine, "disable_service")?;
-            let disabled = self.services.remote(&mut session, ServiceAction::Disable)?;
+            // ---- what this machine will lose sight of
+            let inspection = session.ask("inspect", json!({}))?;
+            let running = inspection
+                .get("runtime_running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let sessions_note = self.session_ownership(&machine);
             journal.finish_step(
                 &machine,
-                "disable_service",
-                if disabled.supported { "ok" } else { "skipped" },
-                Some(disabled.detail.clone()),
+                "inspect",
+                "ok",
+                Some(format!(
+                    "runtime {}; {sessions_note}",
+                    if running { "running" } else { "stopped" }
+                )),
                 None,
             )?;
-            self.step_event(&machine, "disable_service", "ok", Some(disabled.detail));
-        }
+            self.step_event(&machine, "inspect", "ok", Some(sessions_note.clone()));
 
-        if !journal.record().completed(&machine, "stop_runtime") {
-            journal.begin_step(&machine, "stop_runtime")?;
-            if running {
-                let command = match self.request.remote_data_dir.as_deref() {
-                    Some(data_dir) => format!(
-                        "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} stop --require-idle",
-                        ssh::shell_quote(data_dir),
-                        ssh::shell_quote(&executable)
-                    ),
-                    None => format!("exec {} stop --require-idle", ssh::shell_quote(&executable)),
-                };
-                let completed = connection.runner.run(&command, None)?;
-                if !completed.success() {
-                    // `ouro stop --require-idle` documents these two: 10 is a runtime
-                    // with work in flight, 11 is a runtime that could not say. Unknown
-                    // activity never authorizes a removal either.
-                    let (reason, detail): (&'static str, String) = match completed.code {
+            // ---- stop it from coming back, then stop it
+            if !journal.record().completed(&machine, "disable_service") {
+                journal.begin_step(&machine, "disable_service")?;
+                let disabled = self.services.remote(&mut session, ServiceAction::Disable)?;
+                journal.finish_step(
+                    &machine,
+                    "disable_service",
+                    if disabled.supported { "ok" } else { "skipped" },
+                    Some(disabled.detail.clone()),
+                    None,
+                )?;
+                self.step_event(&machine, "disable_service", "ok", Some(disabled.detail));
+            }
+
+            if !journal.record().completed(&machine, "stop_runtime") {
+                journal.begin_step(&machine, "stop_runtime")?;
+                if running {
+                    let command = match self.request.remote_data_dir.as_deref() {
+                        Some(data_dir) => format!(
+                            "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} stop --require-idle",
+                            ssh::shell_quote(data_dir),
+                            ssh::shell_quote(&executable)
+                        ),
+                        None => {
+                            format!("exec {} stop --require-idle", ssh::shell_quote(&executable))
+                        }
+                    };
+                    let completed = connection.runner.run(&command, None)?;
+                    if !completed.success() {
+                        // `ouro stop --require-idle` documents these two: 10 is a runtime
+                        // with work in flight, 11 is a runtime that could not say. Unknown
+                        // activity never authorizes a removal either.
+                        let (reason, detail): (&'static str, String) = match completed.code {
                         Some(10) => (
                             "runtime_busy",
                             format!("{machine} is working, so it was not stopped and nothing was removed. Let the work finish and run this again"),
@@ -2059,50 +2344,57 @@ impl Engine {
                             ),
                         ),
                     };
-                    return refuse(reason, detail);
+                        return refuse(reason, detail);
+                    }
+                    journal.finish_step(
+                        &machine,
+                        "stop_runtime",
+                        "ok",
+                        Some("stopped through its own idle-gated shutdown".into()),
+                        None,
+                    )?;
+                } else {
+                    journal.skip_step(&machine, "stop_runtime", "its runtime was not running")?;
                 }
+                self.step_event(&machine, "stop_runtime", "ok", None);
+            }
+
+            // ---- verify it is gone from this machine's view
+            disconnected = self.await_disconnection(journal, &machine)?;
+
+            // ---- retire its credentials there
+            if !journal.record().completed(&machine, "leave") {
+                journal.begin_step(&machine, "leave")?;
+                let left = session.ask(
+                    "leave",
+                    json!({ "operation": self.request.operation, "machine": machine }),
+                )?;
                 journal.finish_step(
                     &machine,
-                    "stop_runtime",
+                    "leave",
                     "ok",
-                    Some("stopped through its own idle-gated shutdown".into()),
+                    Some(
+                        left.get("removed")
+                            .and_then(Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_else(|| "credentials removed".into()),
+                    ),
                     None,
                 )?;
-            } else {
-                journal.skip_step(&machine, "stop_runtime", "its runtime was not running")?;
+                self.step_event(&machine, "leave", "ok", None);
             }
-            self.step_event(&machine, "stop_runtime", "ok", None);
-        }
 
-        // ---- verify it is gone from this machine's view
-        let disconnected = self.await_disconnection(journal, &machine)?;
-
-        // ---- retire its credentials there
-        if !journal.record().completed(&machine, "leave") {
-            journal.begin_step(&machine, "leave")?;
-            let left = session.ask(
-                "leave",
-                json!({ "operation": self.request.operation, "machine": machine }),
-            )?;
-            journal.finish_step(
-                &machine,
-                "leave",
-                "ok",
-                Some(
-                    left.get("removed")
-                        .and_then(Value::as_array)
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .unwrap_or_else(|| "credentials removed".into()),
-                ),
-                None,
-            )?;
-            self.step_event(&machine, "leave", "ok", None);
+            session.close();
+        } else {
+            // Credentials are already retired: finishing propagation must not
+            // depend on reaching the retired machine again.
+            disconnected = self.await_disconnection(journal, &machine)?;
         }
 
         // ---- and take it out of every remaining roster
@@ -2116,7 +2408,6 @@ impl Engine {
             },
         )?;
 
-        session.close();
         for member in members.drain(..) {
             member.session.close();
         }

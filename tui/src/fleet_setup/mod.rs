@@ -40,6 +40,7 @@ pub mod engine;
 pub mod gateway;
 pub mod helper;
 pub mod journal;
+pub(crate) mod lock;
 pub mod plan;
 pub mod service;
 pub mod ssh;
@@ -271,6 +272,9 @@ pub struct OperationRequest {
     /// Run a bounded model call on the new member, only when asked.
     #[serde(default)]
     pub run_test_task: bool,
+    /// Explicit absolute workspace on the target for the opt-in model check.
+    #[serde(default)]
+    pub test_workspace: Option<String>,
     /// Test-only port policy for the target's profile. `None` is the production policy.
     #[serde(default)]
     pub ports: Option<PortPolicy>,
@@ -345,6 +349,7 @@ impl OperationRequest {
             dry_run: false,
             assume_yes: false,
             run_test_task: false,
+            test_workspace: None,
             ports: None,
             members: std::collections::BTreeMap::new(),
         }
@@ -442,10 +447,8 @@ impl OperationRequest {
         Ok(request)
     }
 
-    /// Remove the request file. The worker's parent does this once the child is
-    /// listening: the parameters have been read and validated by then, and leaving the
-    /// document on disk would keep a description of the target lying around for the life
-    /// of the operation.
+    /// Explicitly remove a request during cleanup. A running or recoverable worker
+    /// retains it: it contains only intent and identity references, never credentials.
     pub fn consume(data_dir: &Path, operation: &str) -> Result<()> {
         let path = request_path(data_dir, operation);
         match std::fs::remove_file(&path) {
@@ -461,6 +464,18 @@ impl OperationRequest {
         validate_operation_id(&self.operation)?;
         ensure_deploy_dir(data_dir)?;
         let path = request_path(data_dir, &self.operation);
+        if path.try_exists()? {
+            let previous = Self::read(data_dir, &self.operation)?;
+            let mut before = serde_json::to_value(previous)?;
+            let mut after = serde_json::to_value(self)?;
+            // How approval is collected may change on a retry; its target and intent may not.
+            before.as_object_mut().unwrap().remove("assume_yes");
+            after.as_object_mut().unwrap().remove("assume_yes");
+            if before != after {
+                return refuse("plan_changed", "this operation already has a different request; use a new operation to review different intent");
+            }
+            return Ok(());
+        }
         let bytes = serde_json::to_vec_pretty(self).context("encoding the operation request")?;
         write_private_atomic(&path, &bytes)
     }

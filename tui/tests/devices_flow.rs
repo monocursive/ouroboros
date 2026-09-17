@@ -807,6 +807,8 @@ fn selecting_a_device_asks_for_the_account_and_prepares_the_operation() {
     let prepare = call_for(&calls, "fleet.deployment.prepare");
 
     assert_eq!(prepare.params["target"]["address"], json!("100.64.12.44"));
+    assert_eq!(prepare.params["target"]["machine"], json!("build-linux"));
+    ouro::fleet::validate_machine(prepare.params["target"]["machine"].as_str().unwrap()).unwrap();
     assert_eq!(prepare.params["ssh_user"], json!("deploy"));
     assert_eq!(prepare.params["port"], json!(22));
     assert!(
@@ -3165,4 +3167,57 @@ fn a_server_side_deploy_blocked_reads_as_the_same_blocker_the_list_would_name() 
     let hint = ouro::ui::app::devices_hint_line(&app);
     assert!(hint.contains("a reason from the future"), "{hint:?}");
     assert!(!hint.contains("a_reason_from_the_future"), "{hint:?}");
+}
+
+#[test]
+fn local_setup_can_resume_and_retry_without_a_ca() {
+    let _mode = normal();
+    let operation = "abcdef0123456789";
+    let mut reply = populated();
+    reply["host"] = host(false, &["no_ca_key"]);
+    reply["devices"] = json!([{
+        "name": "studio", "machine": Value::Null, "os": "macos",
+        "address": "100.64.12.21", "online": true,
+        "state": "this_device_without_profile", "action": "set up this device"
+    }]);
+    reply["operations"] = json!([{
+        "operation": operation, "state": "failed", "kind": "setup",
+        "owner": "local-owner", "attached": false, "readable": true,
+        "target": { "machine": "studio", "address": "100.64.12.21" }
+    }]);
+    let mut app = with_inventory(reply);
+    drained(&mut app);
+    activate(&mut app, "studio");
+    let calls = drained(&mut app);
+    let resume = call_for(&calls, "fleet.deployment.resume");
+    assert_eq!(resume.params["operation_id"], operation);
+    refuse(
+        &mut app,
+        resume.tag.clone(),
+        ErrorCode::ScopeDenied,
+        Some(json!({"reason":"operation_not_yours"})),
+    );
+    app.apply(key(KeyCode::Char('t')));
+    let calls = drained(&mut app);
+    let takeover = call_for(&calls, "fleet.deployment.resume");
+    assert_eq!(takeover.params["takeover"], true);
+    answer(
+        &mut app,
+        takeover.tag.clone(),
+        json!({"operation_id":operation}),
+    );
+    answer(
+        &mut app,
+        Tag::Devices(DevicesTag::Status {
+            operation: operation.into(),
+        }),
+        json!({"source":"journal", "kind":"setup", "state":"failed", "attached":false}),
+    );
+    drained(&mut app);
+    app.apply(key(KeyCode::Char('R')));
+    let calls = drained(&mut app);
+    assert_eq!(
+        call_for(&calls, "fleet.deployment.resume").params["operation_id"],
+        operation
+    );
 }

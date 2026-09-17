@@ -240,6 +240,11 @@ fn known_service_reason(reason: &str) -> &'static str {
         "foreign_unit",
         "manager_unavailable",
         "manager_refused",
+        "runtime_busy",
+        "activity_unknown",
+        "shutdown_unavailable",
+        "shutdown_incomplete",
+        "publication_mismatch",
         "no_fleet",
     ];
     KNOWN

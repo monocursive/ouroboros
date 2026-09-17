@@ -117,7 +117,16 @@ pub fn stop_require_idle(data_dir: &Path, token_file: &Path) -> Result<StopOutco
     let lock = runtime::acquire_spawn_lock(data_dir)
         .with_context(|| "serializing the deployment's runtime transition with start and stop")?;
 
-    let publication = match runtime::reconcile_publication_under_spawn_lock(data_dir, &lock)? {
+    stop_require_idle_locked(data_dir, token_file, &lock)
+}
+
+/// Keep the lifecycle namespace held while a caller subsequently disables its supervisor.
+pub fn stop_require_idle_locked(
+    data_dir: &Path,
+    token_file: &Path,
+    lock: &runtime::SpawnLock,
+) -> Result<StopOutcome> {
+    let publication = match runtime::reconcile_publication_under_spawn_lock(data_dir, lock)? {
         runtime::LockedPublication::Absent => return Ok(StopOutcome::NotRunning),
         runtime::LockedPublication::RemovedStale(publication) => {
             return Ok(StopOutcome::RemovedStale {
@@ -189,7 +198,6 @@ pub fn stop_require_idle(data_dir: &Path, token_file: &Path) -> Result<StopOutco
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    drop(lock);
     Ok(StopOutcome::Stopped {
         pid: publication.pid,
     })

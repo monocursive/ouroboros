@@ -157,6 +157,21 @@ written to a secret-free journal in `<data dir>/deploy/` before and after it hap
 an interrupted operation resumes from its boundary rather than issuing a second
 certificate: rerun the same command with `--operation <id>`.
 
+A standalone target must be stopped before admission. If it is running, setup refuses
+before issuing credentials; run `ouro stop --require-idle` against that target's data
+directory, then retry. The issuer rechecks the reviewed roster under its lifecycle lock
+and holds that lock through credential delivery and its own membership update.
+
+The optional CLI model check requires an explicit target workspace:
+
+```sh
+ouro fleet add deploy@buildbox --machine buildbox --run-test-task --test-workspace /srv/project
+```
+
+The reviewed plan includes this path. The check starts a planning session, submits one
+model turn, and waits up to one minute for that turn to complete. Session and turn IDs
+are stable across retries; a failed or unobserved turn is not reported as successful.
+
 Authentication is explicit and never takes a value on the command line, because a
 command line is readable by every process on the host:
 
@@ -166,6 +181,11 @@ command line is readable by every process on the host:
 | `--key <PATH>` | one private key file on the deployment host, checked for ownership and mode. An encrypted key is asked for its passphrase in a masked prompt |
 | `--agent <FINGERPRINT>` | one identity held by this machine's SSH agent, pinned so the agent offers nothing else. No agent is forwarded and no key is exported |
 | `--ask-password` | the target account's password, typed into a masked prompt and used for that operation only |
+
+For an explicitly selected key or agent identity, the connection uses the normalized
+options with `-F /dev/null`, so additional `IdentityFile` entries cannot offer another
+key. Preflight still inspects the deployment host's SSH configuration and refuses
+unsupported destination rewriting or proxy routing.
 
 An unknown host key is always a separate explicit question showing its algorithm and
 SHA256 fingerprint; `--yes` accepts a reviewed plan but never a host key, never a
@@ -332,6 +352,12 @@ remaining machine takes it out of their rosters. There is no revocation authorit
 signed roster to distribute; a machine whose credentials leaked is answered by re-creating
 the cluster, or by the network ACLs under "Trust".
 
+Removing a member also marks its issued admissions as retired, preserving their receipts.
+A fresh operation can then admit that name again; replaying an old operation remains
+refused. If issuance succeeded before delivery or membership was recorded, explicit
+`ouro fleet members remove NAME` retires that pending admission too. Retirement does not
+revoke any credentials that were copied elsewhere.
+
 A profile written by an older Ouroboros can carry a generated `ssl_dist.conf` this build no
 longer emits, and startup refuses it by name. `ouro fleet create --regenerate` rewrites only
 `ssl_dist.conf` and `vm.args` from the profile, in place, keeping the fleet id, CA, cookie,
@@ -369,6 +395,10 @@ ouro fleet service status [--json]  # installed / loaded / running / last exit
 ouro fleet service disable          # stop it and stop it respawning; keep the unit
 ouro fleet service remove           # disable, then delete the one file this wrote
 ```
+
+Repeating `install` preserves an identical loaded service without restarting it. Replacing
+an existing unit while its runtime owns the data directory is refused; stop that runtime
+with `ouro stop --require-idle` before retrying installation.
 
 | Platform | What the service does, and what it does not |
 |---|---|
@@ -575,10 +605,10 @@ not an executor:
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is
    readable by every local account, and while a target hostname and an account name are not
    secrets in the sense the list below means, publishing them to every shell on the box buys
-   nothing. The worker unlinks the file once it has read it; if the launch itself fails, the
-   broker takes it back, because nothing is coming to read it. A resume writes no request —
-   the worker already has its journal, and re-stating a target would be a second chance to
-   state a different one.
+   nothing. The worker retains this private, secret-free request for crash recovery and
+   future admissions that need this member's connection settings. A resume writes no new
+   request: it reconnects to a surviving worker or starts a replacement using the recorded
+   request and journal. An issuer-wide operation lock serializes deployments.
 
    The operation namespace is `<data dir>/deploy/`, deliberately **not** under `fleet/`: a
    fleet profile is committed by one atomic rename of a staging directory, so nothing may

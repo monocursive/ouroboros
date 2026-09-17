@@ -307,7 +307,24 @@ impl Runner {
     }
 
     fn base_command(&self) -> Command {
+        self.command_with_config(true)
+    }
+
+    fn explicit_identity(&self) -> bool {
+        matches!(
+            self.identity,
+            ResolvedIdentity::Key { .. } | ResolvedIdentity::Agent { .. }
+        )
+    }
+
+    fn command_with_config(&self, connecting: bool) -> Command {
         let mut command = Command::new(&self.programs.ssh);
+        // IdentityFile is additive: -i and IdentitiesOnly do not suppress keys from
+        // ssh_config. Inspect the ambient config for forbidden routing below, but
+        // make an explicitly selected identity connection from our options alone.
+        if connecting && self.explicit_identity() {
+            command.args(["-F", "/dev/null"]);
+        }
         for option in self.options() {
             command.arg("-o").arg(option);
         }
@@ -351,6 +368,9 @@ impl Runner {
     /// remote command is one shell string, because that is what `ssh` sends.
     pub fn argv(&self, remote: &str) -> Vec<String> {
         let mut argv = vec![self.programs.ssh.display().to_string()];
+        if self.explicit_identity() {
+            argv.extend(["-F".into(), "/dev/null".into()]);
+        }
         for option in self.options() {
             argv.push("-o".to_string());
             argv.push(option);
@@ -425,7 +445,7 @@ impl Runner {
     /// receive the credentials is not the one that was reviewed. Any proxy routing is
     /// out of scope for v1 and is named rather than silently followed.
     pub fn inspect_effective_config(&self) -> Result<EffectiveConfig> {
-        let mut command = self.base_command();
+        let mut command = self.command_with_config(false);
         command.arg("-G");
         command.arg(&self.destination.address);
         let completed = run_bounded(command, None, self.connect_timeout)?;

@@ -1691,8 +1691,12 @@ pub enum FleetCommand {
         /// machine's runtime and report what it said. A real model call happens only
         /// when this is given, and a planning session reads and reasons but edits
         /// nothing.
-        #[arg(long)]
+        #[arg(long, requires = "test_workspace")]
         run_test_task: bool,
+
+        /// Absolute workspace on the target for the bounded model check.
+        #[arg(long, value_name = "PATH", requires = "run_test_task")]
+        test_workspace: Option<String>,
 
         #[command(flatten)]
         common: FleetSetupArgs,

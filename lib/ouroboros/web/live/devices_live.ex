@@ -637,7 +637,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # Attaching is the only way an operation gets into the drawer, whether it arrived from a
   # `prepare`, from a `resume`, from a row, or from the address bar after a reload.
   defp attach(socket, operation, device) do
-    drawer = socket.assigns.drawer || open_drawer(socket, device, "add").assigns.drawer
+    summary = Enum.find(socket.assigns.operations, &(&1["operation"] == operation))
+    kind = (summary && summary["kind"]) || "add"
+    drawer = socket.assigns.drawer || open_drawer(socket, device, kind).assigns.drawer
 
     # `subscribe/1` is the broker's, not a gateway method: there is no wire verb for "tell
     # me when this changes", and polling a deployment would be a page refreshing itself
@@ -680,7 +682,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
        when is_binary(operation) do
     case operate(socket, @status, %{"operation_id" => operation}) do
       {:ok, status} when is_map(status) ->
-        update_drawer(socket, &%{&1 | status: status, error: nil, takeover: nil, reloads: 0})
+        update_drawer(socket, fn drawer ->
+          %{
+            drawer
+            | kind: status["kind"] || drawer.kind,
+              status: status,
+              error: nil,
+              takeover: nil,
+              reloads: 0
+          }
+        end)
 
       refused ->
         refused_status(socket, operation, refused)

@@ -1249,12 +1249,12 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         }
     }
 
-    // A runtime already owning this directory is not a refusal — the unit is for the
-    // next start — but it is a fact the operator is owed, because the service will not
-    // take over until that process stops.
-    if let Ok(Some(owner)) = crate::runtime::read_live_runtime_owner(&plan.data_dir) {
+    let lock = crate::runtime::acquire_spawn_lock(&canonical_dir(&plan.data_dir))?;
+    let owner = crate::runtime::read_live_runtime_owner(&canonical_dir(&plan.data_dir))?;
+    // Report an existing owner even when an unchanged, loaded service is preserved.
+    if let Some(owner) = &owner {
         report.notes.push(format!(
-            "a runtime already owns this data directory (pid {}); the service takes over only after it stops",
+            "a runtime already owns this data directory (pid {})",
             owner.pid
         ));
     }
@@ -1264,6 +1264,27 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
     ensure_inside_service_root(&unit_path)?;
     prepare_log(&plan.out_log())?;
     prepare_log(&plan.err_log())?;
+    if ownership == Ownership::Ours && fs::read_to_string(&unit_path)? == text {
+        inspect_manager(plan, programs, &mut report)?;
+        if report.loaded == Some(true) {
+            report.installed = true;
+            report
+                .notes
+                .push("the matching service is already loaded; it was left running".into());
+            return Ok(report);
+        }
+    }
+    // Replacing a managed unit can signal its runtime. Installation is not approval
+    // for a restart, and the spawn lock closes the gap between this check and handoff.
+    if owner.is_some() && ownership != Ownership::Absent {
+        return refuse("runtime_running", "a runtime owns this data directory; the existing service was not replaced. Stop it with `ouro stop --require-idle`, then install again");
+    }
+    if owner.is_some() && plan.platform == Platform::MacOs {
+        inspect_manager(plan, programs, &mut report)?;
+        if report.loaded != Some(false) {
+            return refuse("runtime_running", "a runtime owns this data directory and its service may be loaded; stop it with `ouro stop --require-idle` before replacing the service");
+        }
+    }
     write_private_atomic(&unit_path, text.as_bytes())?;
     report.step(format!("wrote {}", unit_path.display()));
     report.installed = true;
@@ -1278,6 +1299,7 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         adopt,
         replaced_label.as_deref(),
         &mut report,
+        lock,
     );
     if let Err(error) = handoff {
         if ownership == Ownership::Absent {
@@ -1305,6 +1327,7 @@ fn hand_to_manager(
     adopt: bool,
     replaced_label: Option<&str>,
     report: &mut Report,
+    lock: crate::runtime::SpawnLock,
 ) -> Result<()> {
     match plan.platform {
         Platform::MacOs => {
@@ -1339,6 +1362,9 @@ fn hand_to_manager(
             let plist = plist.to_str().ok_or_else(|| {
                 ServiceError::new("unusable_path", "the unit path is not valid UTF-8")
             })?;
+            // No more stops after this point. The newly bootstrapped service needs
+            // the spawn lock itself, so do not launch it while holding that lock.
+            drop(lock);
             report.record(&programs.launchctl, &["bootstrap", domain.as_str(), plist]);
             let outcome = run(
                 &programs.launchctl,
@@ -1357,6 +1383,7 @@ fn hand_to_manager(
             }
         }
         Platform::Linux => {
+            drop(lock);
             let unit = plan.manager_name();
             for args in [
                 vec!["--user", "daemon-reload"],
@@ -1448,6 +1475,20 @@ pub fn disable(plan: &Plan, programs: &Programs) -> Result<Report> {
                 .unwrap_or_else(|| "this machine has no user supervisor".to_string()),
         );
     }
+    // A supervisor stop signals its child. Authorize and observe the idle shutdown
+    // first, and retain the spawn lock so a restart cannot publish new work in between.
+    let lock = crate::runtime::acquire_spawn_lock(&plan.data_dir)?;
+    crate::fleet_setup::gateway::stop_require_idle_locked(
+        &plan.data_dir,
+        &plan.data_dir.join("gateway.token"),
+        &lock,
+    )
+    .map_err(|error| {
+        ServiceError::new(
+            crate::fleet_setup::reason_of(&error).unwrap_or("shutdown_unavailable"),
+            error.to_string(),
+        )
+    })?;
     disable_with_manager(plan, programs, &mut report)?;
     inspect_manager(plan, programs, &mut report)?;
     Ok(report)

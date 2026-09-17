@@ -71,6 +71,14 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
 
     super::validate_operation_id(operation)?;
     super::ensure_deploy_dir(data_dir)?;
+    let _launch_lock = super::lock::Lock::acquire(data_dir, &format!("{operation}.launch.lock"))?;
+    let socket = super::socket_path(data_dir, operation);
+    if let Some(instance) = probe_instance(&socket) {
+        return Ok(Started { socket, instance });
+    }
+    // A silent live worker must not have its socket or capability replaced.
+    let worker_lock = super::lock::Lock::acquire(data_dir, &format!("{operation}.worker.lock"))?;
+    drop(worker_lock);
     // The request is the worker's input and must exist, and be private, before anything
     // starts: the seam gives `worker start` an operation id and a data directory and
     // nothing else, precisely so that a target, an account and a port never appear in
@@ -91,8 +99,6 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
         }
     }
 
-    let socket = super::socket_path(data_dir, operation);
-    let _ = std::fs::remove_file(&socket);
     let instance = super::random_hex(16)?;
     let log = open_private_log(&super::log_path(data_dir, operation))?;
     let errors = log.try_clone().context("cloning the worker log")?;
@@ -147,10 +153,9 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
         // Both halves of seam S3, because the broker uses both the instant this line is
         // printed: it reads the capability file and then connects with what it found.
         // Either one alone is a worker that is only half there.
-        if published(&capability) && answers(&socket) {
-            // The child has read its request and is serving; the document has served its
-            // purpose and does not outlive the handoff.
-            OperationRequest::consume(data_dir, operation)?;
+        if published(&capability) && probe_instance(&socket).as_deref() == Some(instance.as_str()) {
+            // Keep the private, secret-free request for crash recovery and future
+            // admissions that need this member's connection settings.
             return Ok(Started { socket, instance });
         }
         if let Some(status) = child.try_wait()? {
@@ -211,10 +216,8 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
 
 /// Remove a file on the way out, but only while it is still the one this worker made.
 ///
-/// A second worker for the same operation binds its own socket and publishes its own
-/// capability over the first one's paths. A departing worker that unlinks those paths
-/// regardless takes its successor's socket and secret with it — which a broker reads as
-/// a worker that never published a capability, or as one it can never reach.
+/// The operation lock prevents concurrent workers. Still check ownership before cleanup
+/// so a stale worker can never remove a replacement socket or capability.
 fn unpublish(path: &Path, made: Option<(u64, u64)>) {
     if made.is_some() && file_identity(path) == made {
         let _ = std::fs::remove_file(path);
@@ -227,28 +230,28 @@ fn unpublish(path: &Path, made: Option<(u64, u64)>) {
 /// `status` comes back `not_attached` — which is a *complete* round trip through the
 /// accept loop, the uid check and the frame reader, and therefore the only honest answer
 /// to "is it serving yet?".
-fn answers(socket: &Path) -> bool {
+fn probe_instance(socket: &Path) -> Option<String> {
     let Ok(stream) = UnixStream::connect(socket) else {
-        return false;
+        return None;
     };
     if stream.set_read_timeout(Some(PROBE_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err()
     {
-        return false;
+        return None;
     }
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     if writeln!(writer, "{}", json!({"v": 1, "id": "probe", "op": "status"}))
         .and_then(|()| writer.flush())
         .is_err()
     {
-        return false;
+        return None;
     }
     let mut line = String::new();
     if BufReader::new(stream).read_line(&mut line).unwrap_or(0) == 0 {
-        return false;
+        return None;
     }
     serde_json::from_str::<Value>(line.trim())
         .ok()
@@ -256,9 +259,10 @@ fn answers(socket: &Path) -> bool {
             frame
                 .get("reason")
                 .and_then(Value::as_str)
-                .map(|reason| reason == "not_attached")
+                .filter(|reason| *reason == "not_attached")
+                .and_then(|_| frame.get("instance").and_then(Value::as_str))
+                .map(str::to_string)
         })
-        .unwrap_or(false)
 }
 
 /// The end of the worker's own log, for a failure an operator would otherwise have to go
@@ -490,6 +494,7 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
     super::validate_operation_id(operation)?;
     let data_dir = config.data_dir.clone();
     super::ensure_deploy_dir(&data_dir)?;
+    let _worker_lock = super::lock::Lock::acquire(&data_dir, &format!("{operation}.worker.lock"))?;
     let request = OperationRequest::read(&data_dir, operation)?;
 
     let capability = super::random_hex(32)?;
@@ -667,10 +672,6 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
     }
     unpublish(&socket_path, bound_socket);
     unpublish(&capability_path, published_capability);
-    // A worker that exits without its parent having consumed the request — the
-    // never-attached case, or a crash between `bind` and the socket line — takes the
-    // document describing the target with it.
-    let _ = OperationRequest::consume(&data_dir, operation);
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error),
@@ -774,7 +775,7 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
                     &mut writer,
                     &id_value,
                     false,
-                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`"}),
+                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`", "instance": shared.instance}),
                 );
                 continue;
             }
@@ -1106,20 +1107,29 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("a scratch directory");
 
         let missing = dir.join("absent.sock");
-        assert!(!answers(&missing), "nothing there answers nothing");
+        assert!(
+            probe_instance(&missing).is_none(),
+            "nothing there answers nothing"
+        );
 
         // A path that exists and is not a socket at all.
         let regular = dir.join("regular.sock");
         std::fs::write(&regular, b"not a socket").expect("a written file");
         assert!(regular.try_exists().unwrap_or(false));
-        assert!(!answers(&regular), "a file is not a listener");
+        assert!(
+            probe_instance(&regular).is_none(),
+            "a file is not a listener"
+        );
 
         // Bound, listening, and never accepting: the connect succeeds and the write
         // lands in the backlog, so only waiting for the reply tells the truth.
         let deaf = dir.join("deaf.sock");
         let _listener = UnixListener::bind(&deaf).expect("a bound socket");
         assert!(deaf.try_exists().unwrap_or(false));
-        assert!(!answers(&deaf), "a listener that never speaks is not ready");
+        assert!(
+            probe_instance(&deaf).is_none(),
+            "a listener that never speaks is not ready"
+        );
 
         // And one that answers the way the worker does.
         let live = dir.join("live.sock");
@@ -1134,11 +1144,14 @@ mod tests {
             writeln!(
                 writer,
                 "{}",
-                json!({"v": 1, "id": "probe", "ok": false, "reason": "not_attached"})
+                json!({"v": 1, "id": "probe", "ok": false, "reason": "not_attached", "instance": "test-instance"})
             )
             .expect("a written reply");
         });
-        assert!(answers(&live), "the worker's own refusal is the greeting");
+        assert!(
+            probe_instance(&live).is_some(),
+            "the worker's own refusal is the greeting"
+        );
         server.join().expect("the server thread");
 
         let _ = std::fs::remove_dir_all(&dir);
