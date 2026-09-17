@@ -817,3 +817,60 @@ fn a_worker_that_dies_before_it_serves_reports_its_own_last_words() {
         "and quotes what the worker itself said: {stderr}"
     );
 }
+
+/// The capability file is readable the instant `start` returns — twenty times over.
+///
+/// The broker's next move after the socket line is to read the capability and connect
+/// with it, and it saw `capability_missing` about once in six runs. The file is published
+/// before the socket is bound, but nothing held the socket line until it was *there*:
+/// readiness now means both, so the broker's next move cannot be too early.
+#[test]
+fn the_capability_is_readable_the_instant_start_returns() {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let data = data_dir("wcap");
+    for round in 0..20 {
+        let operation = format!("op-00000000b{round:03}");
+        let mut request = OperationRequest::new(&operation, OperationKind::Setup, "studio");
+        request.address = Some("127.0.0.1".into());
+        request.service = false;
+        request.ports = Some(ephemeral());
+        write_request(&data, &request);
+
+        let spawner = spawn_detached(&data, &operation);
+
+        // Exactly what the broker does next, with nothing in between.
+        let path = ouro::fleet_setup::capability_path(&data, &operation);
+        let metadata = std::fs::symlink_metadata(&path).unwrap_or_else(|error| {
+            panic!("round {round}: the capability was not published yet: {error}")
+        });
+        assert!(metadata.is_file(), "round {round}: a regular file");
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "round {round}: a private file"
+        );
+        assert_eq!(
+            metadata.uid(),
+            unsafe { libc::geteuid() },
+            "round {round}: this account's file"
+        );
+        let capability =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("round {round}: {error}"));
+        assert_eq!(capability.len(), 64, "round {round}: {capability:?}");
+
+        // And it is the capability this worker will accept: published early is not
+        // published stale.
+        let mut client = Client::connect(&spawner.socket);
+        let attached = client.ask(
+            "attach",
+            json!({"cap": capability, "subject": "operator", "session": "s1"}),
+        );
+        assert_eq!(attached["ok"], json!(true), "round {round}: {attached}");
+        assert_eq!(attached["instance"], json!(spawner.instance));
+
+        let cancelled = client.ask("cancel", json!({}));
+        assert_eq!(cancelled["ok"], json!(true), "round {round}: {cancelled}");
+    }
+}

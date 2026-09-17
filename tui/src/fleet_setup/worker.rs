@@ -136,6 +136,7 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
     let mut child = command.spawn().context("starting the deployment worker")?;
 
     let log = super::log_path(data_dir, operation);
+    let capability = super::capability_path(data_dir, operation);
     let deadline = Instant::now() + LISTEN_DEADLINE;
     loop {
         // Readiness is a round trip, not a path. `UnixListener::bind` creates the socket
@@ -143,7 +144,10 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
         // connect is refused — and a broker that connects once in that moment gives up
         // on a worker that is about to be perfectly fine. This asks the worker a
         // question and waits for its answer.
-        if answers(&socket) {
+        // Both halves of seam S3, because the broker uses both the instant this line is
+        // printed: it reads the capability file and then connects with what it found.
+        // Either one alone is a worker that is only half there.
+        if published(&capability) && answers(&socket) {
             // The child has read its request and is serving; the document has served its
             // purpose and does not outlive the handoff.
             OperationRequest::consume(data_dir, operation)?;
@@ -160,10 +164,15 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
             );
         }
         if Instant::now() >= deadline {
+            let unmet = if published(&capability) {
+                "answer on its socket"
+            } else {
+                "publish its capability file"
+            };
             return refuse(
                 "worker_failed",
                 format!(
-                    "the deployment worker did not answer within {} seconds; its log is {}{}",
+                    "the deployment worker did not {unmet} within {} seconds; its log is {}{}",
                     LISTEN_DEADLINE.as_secs(),
                     log.display(),
                     log_tail(&log)
@@ -171,6 +180,44 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
             );
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Whether the worker has published its capability, to the letter of seam S3.
+///
+/// The broker `lstat`s this file before it reads the secret and refuses anything that is
+/// not a private regular file of this account's, so the parent holds the socket line
+/// until the file would satisfy that same check.
+fn published(capability: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Ok(metadata) = std::fs::symlink_metadata(capability) else {
+        return false;
+    };
+    metadata.is_file()
+        && metadata.permissions().mode() & 0o777 == 0o600
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.len() > 0
+}
+
+/// Which file a path names right now, as the kernel counts identity.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// Remove a file on the way out, but only while it is still the one this worker made.
+///
+/// A second worker for the same operation binds its own socket and publishes its own
+/// capability over the first one's paths. A departing worker that unlinks those paths
+/// regardless takes its successor's socket and secret with it — which a broker reads as
+/// a worker that never published a capability, or as one it can never reach.
+fn unpublish(path: &Path, made: Option<(u64, u64)>) {
+    if made.is_some() && file_identity(path) == made {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -447,8 +494,12 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
 
     let capability = super::random_hex(32)?;
     let capability_path = super::capability_path(&data_dir, operation);
-    // Seam S3: the capability file exists before anything can connect.
+    // Seam S3, and the order matters: the capability is published *before* the socket is
+    // bound, so that anything able to connect can already read what it must send. The
+    // parent checks for both before it prints the socket line, and the broker reads the
+    // file the instant that line appears.
     super::write_private_atomic(&capability_path, capability.as_bytes())?;
+    let published_capability = file_identity(&capability_path);
 
     let socket_path = super::socket_path(&data_dir, operation);
     // Named before it is attempted: `sockaddr_un` caps a path at about a hundred bytes,
@@ -484,6 +535,7 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
     listener
         .set_nonblocking(true)
         .context("configuring the worker socket")?;
+    let bound_socket = file_identity(&socket_path);
 
     let journal = JournalHandle::new(Journal::open(&data_dir, operation, request.kind)?);
     let shared = Arc::new(Shared {
@@ -613,8 +665,8 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
             ),
         );
     }
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_file(&capability_path);
+    unpublish(&socket_path, bound_socket);
+    unpublish(&capability_path, published_capability);
     // A worker that exits without its parent having consumed the request — the
     // never-attached case, or a crash between `bind` and the socket line — takes the
     // document describing the target with it.
@@ -1088,6 +1140,78 @@ mod tests {
         });
         assert!(answers(&live), "the worker's own refusal is the greeting");
         server.join().expect("the server thread");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The capability check is the broker's, made before the socket line is printed.
+    #[test]
+    fn a_capability_is_a_private_regular_file_of_this_account_with_something_in_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("o-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+
+        assert!(
+            !published(&dir.join("absent.cap")),
+            "nothing is not a capability"
+        );
+        assert!(!published(&dir), "a directory is not a capability");
+
+        let empty = dir.join("empty.cap");
+        std::fs::write(&empty, b"").expect("a written file");
+        std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o600))
+            .expect("a private mode");
+        assert!(!published(&empty), "an empty file is a half-written one");
+
+        let loose = dir.join("loose.cap");
+        std::fs::write(&loose, b"cafe").expect("a written file");
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644))
+            .expect("a loose mode");
+        assert!(!published(&loose), "a readable secret is not a secret");
+
+        let good = dir.join("good.cap");
+        std::fs::write(&good, b"cafe").expect("a written file");
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o600))
+            .expect("a private mode");
+        assert!(published(&good));
+
+        let link = dir.join("link.cap");
+        std::os::unix::fs::symlink(&good, &link).expect("a symlink");
+        assert!(!published(&link), "a link to a capability is not one");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worker removes what it made, and only while it is still what it made.
+    #[test]
+    fn a_departing_worker_unpublishes_its_own_files_and_no_others() {
+        let dir = std::env::temp_dir().join(format!("o-unpub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+
+        let path = dir.join("op.cap");
+        std::fs::write(&path, b"mine").expect("a written file");
+        let mine = file_identity(&path);
+        assert!(mine.is_some());
+
+        // A successor replaced the file at that path: it is not this worker's to remove.
+        std::fs::remove_file(&path).expect("the old file");
+        std::fs::write(&path, b"theirs").expect("a successor's file");
+        unpublish(&path, mine);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            "theirs",
+            "a departing worker leaves its successor's file alone"
+        );
+
+        // And its own, it takes with it.
+        unpublish(&path, file_identity(&path));
+        assert!(!path.try_exists().expect("a readable directory"));
+
+        // A file that was never made is not removed, and nothing panics.
+        unpublish(&path, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
