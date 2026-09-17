@@ -569,7 +569,7 @@ defmodule Ouroboros.Fleet.Deployment.Client do
         # nobody broke, and the challenge an operator was actually answering could be the
         # one evicted.
         seq: state.challenge_seq,
-        metadata: Journal.scrub_value(Map.drop(frame, ["v", "event", "bound_to"]))
+        metadata: challenge_metadata(frame)
       }
 
       state
@@ -792,5 +792,23 @@ defmodule Ouroboros.Fleet.Deployment.Client do
     |> Map.put("challenge", challenge.id)
     |> Map.put("kind", challenge.kind)
     |> Map.put("expires_at", challenge.expires_at)
+  end
+
+  # Seam S4 describes a challenge's kind-specific fields as fields *of the challenge*: a
+  # `password` carries `{target, user, port, attempt, max_attempts}`, a `review` carries its
+  # plan and digest. The worker sends them one level down, under `metadata`, so this lifts
+  # them — a client reads `challenge["plan_digest"]` because that is where the seam says it
+  # is, rather than `challenge["metadata"]["plan_digest"]` because that is where this build
+  # happened to leave it.
+  #
+  # Found by driving the real worker. Both fakes had agreed with each other and with the
+  # seam; only the worker disagreed, which is the one opinion that decides.
+  defp challenge_metadata(frame) do
+    raw = Map.drop(frame, ["v", "event", "bound_to", "challenge", "kind", "expires_at"])
+
+    case Map.pop(raw, "metadata") do
+      {nested, rest} when is_map(nested) -> Journal.scrub_value(Map.merge(rest, nested))
+      _flat -> Journal.scrub_value(raw)
+    end
   end
 end

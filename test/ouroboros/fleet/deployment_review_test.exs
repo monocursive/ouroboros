@@ -637,6 +637,60 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
   end
 
   # ---------------------------------------------------------------------------
+  # F13. Not from the review: found by driving the real worker. It nests a challenge's
+  # kind-specific fields under `metadata`, one level below where seam S4 puts them — and
+  # both fakes had put them where the seam says, so the two agreed with each other and
+  # neither agreed with the program.
+
+  test "F13 a challenge's own fields are where the seam says, whichever level the worker used",
+       context do
+    %{worker: worker} = arrange_worker(context)
+
+    assert {:ok, %{"operation_id" => operation}} =
+             Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
+
+    assert {:ok, _pid} = await_client(operation)
+
+    # Exactly the shape the real worker sends: the kind's fields one level down.
+    :ok =
+      FleetWorkerFake.emit(worker, %{
+        "event" => "challenge",
+        "challenge" => "rev-nested",
+        "kind" => "review",
+        "expires_at" => nil,
+        "operation" => operation,
+        "bound_to" => %{"subject" => "runtime-unattributed", "session" => "tab-a"},
+        "metadata" => %{
+          "plan" => %{"kind" => "setup"},
+          "plan_digest" => String.duplicate("a", 64)
+        }
+      })
+
+    await_challenge(operation, "rev-nested")
+    assert {:ok, snapshot} = Deployment.status(operation, bound())
+    review = Enum.find(snapshot["challenges"], &(&1["challenge"] == "rev-nested"))
+
+    # A client reads `challenge["plan_digest"]` because that is where S4 says it is.
+    assert review["plan_digest"] == String.duplicate("a", 64)
+    assert review["plan"] == %{"kind" => "setup"}
+    refute Map.has_key?(review, "metadata")
+
+    # And a worker that sends them flat is read the same way.
+    :ok =
+      FleetWorkerFake.challenge(worker, "pw-flat", "password", %{
+        "attempt" => 1,
+        "max_attempts" => 3
+      })
+
+    await_challenge(operation, "pw-flat")
+    assert {:ok, snapshot} = Deployment.status(operation, bound())
+    password = Enum.find(snapshot["challenges"], &(&1["challenge"] == "pw-flat"))
+
+    assert password["attempt"] == 1
+    assert password["max_attempts"] == 3
+  end
+
+  # ---------------------------------------------------------------------------
   # F12 (MEDIUM). `Client.init/1` completed the handshake inside the broker's `handle_call`,
   # so one worker that accepted the socket and said nothing held the named singleton — and
   # every other operation — for the full attach timeout.
