@@ -159,8 +159,28 @@ certificate: rerun the same command with `--operation <id>`.
 
 A standalone target must be stopped before admission. If it is running, setup refuses
 before issuing credentials; run `ouro stop --require-idle` against that target's data
-directory, then retry. The issuer rechecks the reviewed roster under its lifecycle lock
-and holds that lock through credential delivery and its own membership update.
+directory, then retry. The issuer rechecks the reviewed roster under its lifecycle lock,
+writes the durable issue receipt, and releases the lock before credentials go over SSH.
+Its own membership update takes the lock again and is refused `roster_conflict` if the
+local roster moved, rather than silently rebased.
+
+The issuer-wide `operation.lock` covers the mutation phase only — for `add`, from
+certificate issue through every roster write; for `setup`, create, stop and start; for
+`leave`, from `stop_runtime` through the roster removals. Inspection, host trust,
+authentication and review run without it. A waiter that cannot take the lock is told
+which operation holds it (`operation_in_progress`, naming the holder and its state).
+
+The Tailscale node key (`nodekey:…`) for the target address is recorded when discovery
+or the request can name one, and a later add or resume that sees a different key is
+refused `peer_identity_changed`. A manual private-network address with no key is
+recorded as unset and the check is skipped.
+
+The request file at `<data dir>/deploy/<id>.request.json` is kept while the operation
+is running, failed or interrupted, because resume still needs the identity reference.
+On `completed` or `cancelled` the identity choice is folded into the journal's target
+record and the request is deleted. Completed and cancelled journals older than thirty
+days are pruned, keeping the newest fifty; failed and interrupted work is left alone,
+as is anything whose worker lock is still held.
 
 The optional CLI model check requires an explicit target workspace:
 
@@ -203,6 +223,10 @@ is refused rather than made.
 
 `--json` prints the operation's result with stable reason codes; incomplete setup exits
 non-zero even when some steps succeeded.
+
+One SSH ControlMaster socket is reused for the operation, so a password is typed once
+and retried up to three times, with a five-minute window to answer. Host-trust and
+review challenges use the same five-minute window.
 
 On this branch the Devices views (the web page at `/devices`, the terminal client's
 `ctrl+x D`) and the `fleet.devices` / `fleet.deployment.*` gateway methods drive this
@@ -475,31 +499,32 @@ existing dialer reconnects.
 
 ### Stopping a supervised runtime
 
-A supervisor that is still enabled will restart a runtime the moment it stops, so take it
-out of the supervisor's hands first:
+A supervisor that is still enabled will restart a runtime the moment it stops, so gate
+the runtime first, then take the unit down:
 
 ```sh
-ouro fleet service disable
 ouro stop --require-idle
+ouro fleet service disable
 ```
 
-`ouro stop --require-idle` sends `runtime.shutdown {"require_idle": true}`. The runtime
-reads its own running and queued turns, image transfers and preparation, and connected
-operator clients, and refuses if any of it is non-zero — or if it could not establish one
-of them, because unknown activity is not idleness. The two refusals have their own exit
-codes so a script can tell them apart:
+`ouro stop --require-idle` sends `runtime.shutdown {"require_idle": true}`. Exit 0 also
+covers a data directory with nothing running. The runtime reads its own running and
+queued turns, image transfers and preparation, and connected operator clients, and
+refuses if any of it is non-zero — or if it could not establish one of them, because
+unknown activity is not idleness. The two refusals have their own exit codes so a
+script can tell them apart:
 
 | Exit | Meaning |
 |---|---|
-| 0 | the runtime accepted the stop and the pid it published is gone |
+| 0 | the runtime accepted the stop and the pid it published is gone, or nothing was running here |
 | 10 | `runtime_busy` — the activity summary is printed, field by field |
 | 11 | `activity_unknown` — the runtime could not read one or more counters, and they are named |
 | 12 | the runtime does not serve `runtime.activity`, so it has no gate to apply. Nothing was sent: a runtime that predates the gate ignores the parameter and stops, which from the outside is indistinguishable from one that checked and found itself idle |
 | 13 | the connection closed before an answer arrived, so whether the gate passed, refused or was never reached is unknown |
 
-`remove` and `disable` have no idle gate and cannot have one: a service manager stops a
-process with a signal and knows nothing about turns or transfers. Gate first, with the
-command above, and take the supervisor down afterwards.
+`disable` and `remove` gate themselves the same way (`stop --require-idle` first); a
+second gate on a stopped runtime is a no-op. A unit that is not installed is left
+untouched. Cooperative `leave` uses this same order: stop, then disable.
 
 Plain `ouro stop` is unchanged: it sends the same request it always has, with no
 parameter, and stops the runtime unconditionally.
@@ -605,10 +630,13 @@ not an executor:
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is
    readable by every local account, and while a target hostname and an account name are not
    secrets in the sense the list below means, publishing them to every shell on the box buys
-   nothing. The worker retains this private, secret-free request for crash recovery and
-   future admissions that need this member's connection settings. A resume writes no new
+   nothing. The request is kept while the operation is running, failed or interrupted
+   (resume still needs the identity reference). On `completed` or `cancelled` the identity
+   choice is folded into the journal and the request is deleted. A resume writes no new
    request: it reconnects to a surviving worker or starts a replacement using the recorded
-   request and journal. An issuer-wide operation lock serializes deployments.
+   request and journal. An issuer-wide operation lock serializes the mutation phase only
+   (issue through roster writes, not inspection or challenges); a waiter is told which
+   operation holds it.
 
    The operation namespace is `<data dir>/deploy/`, deliberately **not** under `fleet/`: a
    fleet profile is committed by one atomic rename of a staging directory, so nothing may

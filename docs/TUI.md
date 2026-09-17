@@ -352,7 +352,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | method | maps to |
 |---|---|
 | `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's roster *tombstones*, which `ouro fleet sessions forget --accept-state-loss` writes on this machine immediately before calling — the operator's statement that the machine is gone, never inferred from a disconnect. Refuses a connected node (the client then puts the member back), and syncs the checkpoint before success. A client that dies between the two leaves the tombstone standing; `ouro fleet status` and `ouro fleet doctor` name it and `ouro fleet sessions restore NAME` undoes it. This removes local discoverability evidence, not remote files or credentials. |
-| `fleet.deployment.prepare` `{kind?, target?, machine?, address?, ssh_user?, port?, identity?, install_path?, data_dir?, service?}` | `Fleet.Deployment.prepare/2` — forks the deployment worker for a new operation through `ouro fleet worker start --operation <id> --data-dir <dir>` — and nothing else on that command line — and attaches to it, then answers `{operation_id}`. These parameters travel in a private 0600 file under the data directory, written atomically before the launch and unlinked by the worker once read, because `ps` is readable by every local account. The worker is **detached**: closing the page does not cancel the deployment and neither does stopping this runtime, which is what lets first local fleet setup restart the runtime serving the UI. Inspection, host verification and authentication all happen behind the returned id. Refused `-32003` `deploy_blocked` with `data.blockers` when this host cannot deploy — the same list `fleet.devices` reports — and so are `.start`, `.authenticate` and `.resume`; `.cancel` never is, because stopping a deployment must stay possible on a host that may no longer start one. A `setup` is exempt from `no_ca_key` alone, since it is what creates the key. No secret is a parameter — an identity is named by reference (`agent`/`key`/`password` plus a `ref`), never by key material. **`kind`** is `add` by default, which deploys onto another machine and requires `target.address` and `ssh_user`; `kind: "setup"` is the first *local* fleet — the spec's "Set up this device", which configures this machine without SSH to itself — and takes neither, only an optional `machine` (this host's own name by default) and `address` (the worker refuses `unresolved_address` rather than guessing, and `fleet.devices` reports it). The request is written in the worker's own shape, which refuses a key it does not know, so a `peer_id` with no address is refused here rather than sent as one |
+| `fleet.deployment.prepare` `{kind?, target?, machine?, address?, ssh_user?, port?, identity?, install_path?, data_dir?, service?}` | `Fleet.Deployment.prepare/2` — forks the deployment worker for a new operation through `ouro fleet worker start --operation <id> --data-dir <dir>` — and nothing else on that command line — and attaches to it, then answers `{operation_id}`. These parameters travel in a private 0600 file under the data directory, written atomically before the launch. The request is kept while the operation is running, failed or interrupted (resume still needs the identity reference); on `completed` or `cancelled` the identity choice is folded into the journal and the request is deleted. `ps` is readable by every local account, which is why none of this is on the worker command line. The worker is **detached**: closing the page does not cancel the deployment and neither does stopping this runtime, which is what lets first local fleet setup restart the runtime serving the UI. Inspection, host verification and authentication all happen behind the returned id. Refused `-32003` `deploy_blocked` with `data.blockers` when this host cannot deploy — the same list `fleet.devices` reports — and so are `.start`, `.authenticate` and `.resume`; `.cancel` never is, because stopping a deployment must stay possible on a host that may no longer start one. A `setup` is exempt from `no_ca_key` alone, since it is what creates the key. No secret is a parameter — an identity is named by reference (`agent`/`key`/`password` plus a `ref`), never by key material. **`kind`** is `add` by default, which deploys onto another machine and requires `target.address` and `ssh_user`; `kind: "setup"` is the first *local* fleet — the spec's "Set up this device", which configures this machine without SSH to itself — and takes neither, only an optional `machine` (this host's own name by default) and `address` (the worker refuses `unresolved_address` rather than guessing, and `fleet.devices` reports it). The request is written in the worker's own shape, which refuses a key it does not know, so a `peer_id` with no address is refused here rather than sent as one |
 | `fleet.deployment.start` `{operation_id, plan_digest, idempotency_key}` | Approves the plan that was reviewed. `plan_digest` is the sha256 of the canonical plan; the worker refuses one that is not the plan it holds, so a plan that changed between review and approval is `plan_changed` rather than a deployment nobody read. `idempotency_key` is caller-owned: the same key replays the recorded answer without touching the worker, a different key against a running operation is `operation_in_progress`, and a start still in flight is `start_in_flight`. `outcome: unknown` on a ceiling breach — the deployment does not stop because this socket did |
 | `fleet.deployment.authenticate` `{operation_id, challenge, secret}` | **The one method in this protocol whose parameters never reach the audit digest.** The spec names `Web.Call` and gateway parameter digests among the places a secret may never appear, *even hashed* — a hash of a human's password is that password in a form somebody can look up — so `Ouroboros.Gateway.AuditLine` writes `params=redacted operation_id=… challenge=…` for this verb on both surfaces and never calls the digest at all; the challenge's kind and the outcome are logged by the broker, which knows them. Answering requires the identity **and the client session** the challenge was issued to (seam S4): a second listener connection, a second LiveView, or another administrator is `challenge_not_bound` and the frame is never written. What "session" means is the surface's: for a listener it is the connection, minted per socket; for a browser it is **not** the cookie's id, because `Ouroboros.Web.Auth` writes one of those per browser and every tab reads it — a LiveView calls `Ouroboros.Web.Call.view_session/0` once in `mount/3`, keeps it in an assign, and passes `session: assigns.view_session` on every `fleet.deployment.*` call, while its other calls keep passing the cookie id the audit line correlates by. A challenge is consumed when it is sent (`challenge_consumed`), expires on the worker's own deadline (`challenge_expired`), and cannot be answered in the wrong shape (`challenge_kind_mismatch`). The secret goes from the parameter into the frame encoder and onto the worker's socket; it is never stored in any process state, and the broker never sees it |
 | `fleet.deployment.confirm_host` `{operation_id, challenge, accept}` | Explicit trust for one unknown SSH host key, bound to its session exactly as `authenticate` is. `accept: true` appends it to the operation's private known-hosts store. A key that *changed* is never offered here: that is `host_key_changed` and it blocks |
@@ -2652,6 +2652,14 @@ been in a fleet carries no runtime line at all rather than reading as disconnect
 state string this build has no words for is named in a sentence; the column is never
 blank.
 
+**View device and Diagnose.** Enter on a known member opens a read-only panel of what
+`fleet.devices` already carries: connected, compatible, runtime_running, last_probe,
+roster name versus network name, address and path, and the most recent operation for
+that device from the operations list. **Diagnose** is the same panel for a disconnected
+member, with its blockers named and an explicit Refresh (`r`). Esc returns to the list.
+Nothing in the panel starts SSH or a new gateway method; hostile strings go through the
+same `ignorable()` + width caps as the list.
+
 **The inventory** is two sections — *Fleet devices* and *Available on this network* —
 merged by `ouro fleet devices --json` on the deployment host and rendered here with the
 state in words rather than codes: `DeviceState::label()` is the one place those words
@@ -2672,7 +2680,10 @@ them.
 
 **The deploy flow** is the proposal's five steps. Select and connect asks for the SSH
 username — required, and never inferred from the network client's owner — with port,
-identity and paths as advanced fields. **Set up this device** is the same flow with none
+identity and paths as advanced fields. The roster identity is pre-filled only when the
+peer's hostname is already a valid machine name and does not collide with a roster
+member; otherwise the field starts blank and the hostname is drawn as a hint next to
+it. **Set up this device** is the same flow with none
 of them: `fleet.deployment.prepare {kind: "setup"}` takes a machine name and this host's
 own overlay address, because the spec is explicit that a machine configures itself
 without SSH to itself. It answers to a shorter blocker list than Deploy — every reason
@@ -2739,11 +2750,15 @@ prompts.
 **Where the secret is, and is not.** One field holds a typed secret: a `Zeroizing` buffer
 whose `Debug` prints a character count and no characters, which renders as one bullet per
 character, and which is cleared on submit, on cancel, on the challenge being replaced and
-on closing the view. It is never on a `Tag` — tags are cloned, hashed and `Debug`-printed
-— never in a notice and never in a log line. What leaves the view is one
+on closing the view — including Ctrl+C, which goes through the same overlay teardown as
+Esc rather than dropping the overlay with the buffer still full. A paste into that field
+is wrapped in `Zeroizing` and not trimmed, so a password with leading or trailing spaces
+is the password. It is never on a `Tag` — tags are cloned, hashed and `Debug`-printed —
+never in a notice and never in a log line. What leaves the view is one
 `fleet.deployment.authenticate` call, the one method whose parameters the gateway keeps
 out of its audit digest. `tests/devices_flow.rs` types a unique password and then looks
-for it in the frame, in the view's own `Debug` and in every queued request.
+for it in the frame, in the buffer's length (not the redacted `Debug`) and in every queued
+request.
 
 **Read scope and non-administrator.** `fleet.devices` is a read-scope method that the
 identity rule reserves for administrators, so a `-32003` on it can only be the identity
@@ -2774,9 +2789,8 @@ resolves `auto` to the bell in this mode whether or not the terminal has focus.
 **The list follows its cursor.** `PageUp`/`PageDown` are the operator's own scrolling, but
 a selected row below the fold is a row `Enter` acts on and nobody can see, so the renderer
 keeps the marked line on the page. A bracketed paste reaches the masked field and the
-connect form's text fields, flattened to one line: a pasted passphrase is exactly what
-somebody keeps in a password manager, and dropping it with "nothing here is taking text"
-was this client telling them their terminal was broken while they tried to authenticate.
+connect form's text fields. The connect form is flattened to one line; a pasted passphrase
+keeps its spaces, because that is exactly what somebody keeps in a password manager.
 
 ### Names on screen, never wire words (T2.8)
 

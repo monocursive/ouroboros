@@ -908,3 +908,23 @@ says why:
 - `runtime.activity` counts in-flight operate-scope method invocations and each
   session's own idle fence, with a 250 ms cache on the read verb and a fresh walk for
   the gate; `runtime.shutdown` refuses unknown parameters.
+- The request file is kept while the operation is running, failed or interrupted;
+  `completed` and `cancelled` fold the identity choice into the journal and delete the
+  request. Completed/cancelled journals are pruned (newest 50, older than 30 days),
+  never while a `worker.lock` is held and never for failed or interrupted work.
+- The issuer-wide `operation.lock` covers the mutation phase only (issue through roster
+  writes; setup create/stop/start; leave stop through roster removals). Inspection,
+  host trust, authentication and review run without it. A waiter is told which
+  operation holds the lock.
+- The runtime spawn lock is held while the reviewed roster is rechecked and the issue
+  receipt is written, then released before credentials go over SSH. The issuer's own
+  roster write re-acquires it and is refused `roster_conflict` on a stale revision.
+- SSH reuses one private ControlPath for the operation, so a password is prompted once,
+  retried up to three times, with a five-minute answer window.
+- The CSR carries the operation id only as an unsigned envelope field, cross-checked
+  against receipts. Reviewers asked for a signed attribute; this build does not add
+  one.
+- Peer identity is the Tailscale node key (`nodekey:…`), recorded beside the stable
+  Tailscale `ID` when discovery or the request can name them. A later add or resume
+  that sees a different key is `peer_identity_changed`; a manual address with no key
+  skips the check.
