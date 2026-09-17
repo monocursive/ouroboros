@@ -35,7 +35,9 @@ defmodule Ouroboros.Test.FleetWorkerFake do
 
   Options: `:socket_path`, `:cap` (the capability it will demand), `:instance` (the identity
   it reports), `:operation_file` (where the fake `ouro` records the operation id it was
-  started for), and `:owner` (defaults to the calling process).
+  started for), `:owner` (the process frames are forwarded to; defaults to the caller), and
+  `:owner_subject` (the operation\'s owner this fake reports; by default it claims the
+  attaching subject, which is what the real worker does with an unowned operation).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -122,7 +124,8 @@ defmodule Ouroboros.Test.FleetWorkerFake do
        attached: nil,
        refusals: 0,
        refuse_next: nil,
-       stall: false
+       stall: false,
+       owner_subject: Keyword.get(opts, :owner_subject)
      }}
   end
 
@@ -276,7 +279,13 @@ defmodule Ouroboros.Test.FleetWorkerFake do
       "ok" => true,
       "operation" => operation,
       "instance" => state.instance,
-      "state" => "inspecting"
+      "state" => "inspecting",
+      # The real worker claims an unowned operation for the subject that attached and
+      # echoes the owner in this reply (`attach/4` in `tui/src/fleet_setup/worker.rs`).
+      # Answering `null` instead made every surface's ownership check pass by default,
+      # which is a gate that proves nothing — and made a *fresh* operation indistinguishable
+      # from one whose owner nobody could establish.
+      "owner" => state.owner_subject || frame["subject"]
     })
 
     %{state | attached: %{subject: frame["subject"], session: frame["session"]}}

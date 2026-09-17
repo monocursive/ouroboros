@@ -321,46 +321,107 @@ defmodule Ouroboros.Web.Live.Devices do
   @spec unfinished?(term()) :: boolean()
   def unfinished?(state), do: state not in ["completed", "cancelled"]
 
+  @doc """
+  How a row reads once an operation has touched the device it names.
+
+  A deployment that just finished is the most important fact about a row, and the
+  inventory's own `state` is a *discovery* fact that will not catch up until the next
+  refresh reaches the network client. So a row whose latest operation is finished says so —
+  and says which way it finished — rather than going back to reading "nothing has inspected
+  this device" the moment the drawer closes.
+
+  Returns `{state words, action label, event}`.
+  """
+  @spec operation_row(term()) :: {String.t(), String.t(), String.t()}
+  def operation_row("completed"),
+    do: {"Set up just now by this machine", "Open device", "open-operation"}
+
+  def operation_row("failed"), do: {"Setup failed", "Retry", "open-operation"}
+  def operation_row("cancelled"), do: {"Setup cancelled", "Deploy again", "deploy"}
+
+  def operation_row(state),
+    do:
+      {"Deployment waiting for input, interrupted or partially complete — " <>
+         String.downcase(operation_state(state)), "Continue setup", "open-operation"}
+
   @doc "Whether a state means the operation is waiting for this operator."
   @spec waiting?(term()) :: boolean()
   def waiting?(state),
     do: state in ["awaiting_host_trust", "awaiting_auth", "awaiting_review"]
 
+  # The engine's step names, joined to the proposal's six stages. Taken from every
+  # `step_event` and `finish_step` call in `tui/src/fleet_setup/engine.rs` rather than
+  # guessed at by prefix: `install_binary` is not `install`, `issue` is not any of the six
+  # words, and a list that matched on prefixes would file both wrongly and in silence.
+  @stages [
+    {"inspect", "Inspect the target", ~w(inspect)},
+    {"install", "Install Ouroboros if it is missing", ~w(install_binary install)},
+    {"membership", "Configure fleet membership",
+     ~w(prepare issue roster member_preflight create)},
+    {"startup", "Configure startup", ~w(service stop_runtime)},
+    {"connect", "Connect", ~w(connect)},
+    {"readiness", "Check readiness", ~w(readiness)}
+  ]
+
+  # A step in words. `leave` and `disable_service` belong to cooperative removal and
+  # `test_task` is the explicit first-task check, so none of the three is filed under one of
+  # the six stages — they are drawn under their own names instead.
+  @step_labels %{
+    "inspect" => "Inspect the target",
+    "install_binary" => "Install the `ouro` binary",
+    "install" => "Install Ouroboros",
+    "prepare" => "Prepare the target's profile",
+    "issue" => "Issue the new member's certificate",
+    "roster" => "Update a roster",
+    "member_preflight" => "Check an existing member",
+    "create" => "Create the fleet on this machine",
+    "service" => "Install the startup service",
+    "stop_runtime" => "Stop this runtime for the transition",
+    "connect" => "Connect",
+    "readiness" => "Check readiness",
+    "test_task" => "Run the test task",
+    "disable_service" => "Disable the startup service",
+    "leave" => "Leave the fleet"
+  }
+
   @doc """
-  The six stages a deployment runs through, in the proposal's order.
+  The six stages a deployment runs through, in the proposal's order, each with the worker's
+  own step names under it.
 
   Drawn as an outline rather than as claims: a stage the worker has not reported a step for
   reads "not reported yet", which is the honest thing for a surface whose only knowledge of
   the remote machine is what a worker told it.
   """
-  @spec stages() :: [{String.t(), String.t()}]
-  def stages do
-    [
-      {"inspect", "Inspect the target"},
-      {"install", "Install Ouroboros if it is missing"},
-      {"membership", "Configure fleet membership"},
-      {"startup", "Configure startup"},
-      {"connect", "Connect"},
-      {"readiness", "Check readiness"}
-    ]
-  end
+  @spec stages() :: [{String.t(), String.t(), [String.t()]}]
+  def stages, do: @stages
+
+  @doc "Which of the six stages a step name belongs to, or `nil` for one that belongs to none."
+  @spec stage_of(term()) :: String.t() | nil
+  def stage_of(step) when is_binary(step),
+    do: Enum.find_value(@stages, fn {key, _label, names} -> if step in names, do: key end)
+
+  def stage_of(_other), do: nil
+
+  @doc "One step's own name in words, or the name itself where this build has none for it."
+  @spec step_label(term()) :: String.t()
+  def step_label(step) when is_binary(step), do: Map.get(@step_labels, step, step)
+  def step_label(_absent), do: "a step"
 
   @doc """
   One step's outcome in words, and whether it is a failure.
+
+  The worker's vocabulary is four words — `started`, `ok`, `skipped`, `failed`
+  (`StepRecord` in `tui/src/fleet_setup/journal.rs`) — and anything else is shown as itself
+  rather than mapped onto the nearest one this build happens to know.
 
   Returns `{words, tone}` where tone is `:ok`, `:failed`, `:running` or `:unknown`. The tone
   is never the only carrier of the fact — it picks a mark that sits *beside* the words.
   """
   @spec outcome(term()) :: {String.t(), :ok | :failed | :running | :unknown}
-  def outcome(value) when value in ["ok", "success", "succeeded", "done", "completed"],
-    do: {"done", :ok}
-
-  def outcome(value) when value in ["failed", "error", "refused"], do: {"failed", :failed}
+  def outcome("ok"), do: {"done", :ok}
+  def outcome("failed"), do: {"failed", :failed}
   def outcome("skipped"), do: {"skipped", :ok}
-
-  def outcome(value) when value in ["running", "started", "in_progress"],
-    do: {"running", :running}
-
+  def outcome("started"), do: {"running", :running}
   def outcome(nil), do: {"no outcome reported", :unknown}
   def outcome(value) when is_binary(value), do: {value, :unknown}
   def outcome(_unreadable), do: {"no outcome reported", :unknown}
@@ -382,22 +443,221 @@ defmodule Ouroboros.Web.Live.Devices do
   def challenge_title(_unreadable),
     do: "The runtime is waiting for something this page cannot read"
 
-  @doc "The label under a masked field, naming what the secret is for."
+  @doc """
+  One challenge's kind-specific facts.
+
+  The worker nests them under `metadata` (`challenge_event/2` in
+  `tui/src/fleet_setup/worker.rs`), and the broker passes that object through untouched, so
+  this is where a surface reaches for them rather than at the challenge's top level. A
+  challenge whose metadata this build cannot read is an empty map, which makes every field
+  below read "not reported" instead of raising.
+  """
+  @spec metadata(term()) :: map()
+  def metadata(%{"metadata" => metadata}) when is_map(metadata), do: metadata
+  def metadata(_absent), do: %{}
+
+  @doc """
+  The label under a masked field, naming what the secret is for.
+
+  The two kinds name different things, and the proposal requires that: a password belongs
+  to an account on a target, and a passphrase belongs to a key. Both come out of the
+  worker's own metadata (`password_metadata/5` and `passphrase_metadata/2` in
+  `tui/src/fleet_setup/challenge.rs`).
+  """
   @spec secret_label(map()) :: String.t()
   def secret_label(%{"kind" => "passphrase"} = challenge) do
-    case challenge["key"] || challenge["identity"] do
-      ref when is_binary(ref) and ref != "" -> "Passphrase for #{ref}"
+    case metadata(challenge)["key_label"] do
+      label when is_binary(label) and label != "" -> "Passphrase for the key #{label}"
       _unnamed -> "Passphrase for the selected key"
     end
   end
 
   def secret_label(challenge) when is_map(challenge) do
-    case {challenge["user"], challenge["host"] || challenge["address"]} do
-      {user, host} when is_binary(user) and is_binary(host) -> "Password for #{user}@#{host}"
-      {user, _host} when is_binary(user) -> "Password for #{user}"
-      _unnamed -> "Password for this connection"
+    facts = metadata(challenge)
+
+    case {facts["user"], facts["target"]} do
+      {user, target} when is_binary(user) and is_binary(target) ->
+        "Password for #{user}@#{target}"
+
+      {user, _target} when is_binary(user) ->
+        "Password for #{user}"
+
+      _unnamed ->
+        "Password for this connection"
     end
   end
+
+  @doc """
+  "Attempt 2 of 3", where the worker said which attempt this is.
+
+  `nil` when it did not: the cap is the server's as well as the worker's, and inventing a
+  count would be this page claiming to know one.
+  """
+  @spec attempt(map()) :: String.t() | nil
+  def attempt(challenge) when is_map(challenge) do
+    facts = metadata(challenge)
+
+    case {facts["attempt"], facts["max_attempts"]} do
+      {attempt, max} when is_integer(attempt) and is_integer(max) ->
+        "Attempt #{attempt} of #{max}."
+
+      {attempt, _max} when is_integer(attempt) ->
+        "Attempt #{attempt}."
+
+      _unreported ->
+        nil
+    end
+  end
+
+  @doc """
+  What the operation said about readiness, as `{sentence, offer a test task?}`.
+
+  There is no `ready` flag on the wire. The worker's `done` frame carries `ok`, a state, a
+  summary, a next step and what it could not establish, so readiness is read from the
+  `readiness` step's own outcome — and where that step says `skipped`, which is what the
+  engine records today because the owner-local readiness methods answer for the runtime
+  they are asked rather than for the new member, this says so rather than claiming either
+  answer.
+  """
+  @spec readiness(term(), term()) :: {String.t(), boolean()}
+  def readiness(steps, done) do
+    step = Enum.find(List.wrap(steps), &(is_map(&1) and &1["step"] == "readiness"))
+    finished? = is_map(done) and done["ok"] == true
+
+    case {step && step["outcome"], finished?} do
+      {"ok", _finished?} ->
+        {"This device reported that it is ready.", true}
+
+      {"failed", _finished?} ->
+        {"This device did not report itself ready. What is missing is below.", false}
+
+      {"skipped", _finished?} ->
+        {"Readiness was not established from here. " <>
+           (step["detail"] || "The steps below say what was and was not checked."), true}
+
+      {_unreported, true} ->
+        {"The deployment finished. Readiness was not reported, so this page does not claim it.",
+         true}
+
+      {_unreported, _unfinished} ->
+        {"Readiness was not reported.", false}
+    end
+  end
+
+  @plan_fields ~w(schema operation kind deployment_host target release service members restart
+                  grants build)
+
+  @doc """
+  The reviewed plan, in the order and the words the CLI's own review uses.
+
+  `Plan::render/0` in `tui/src/fleet_setup/plan.rs` is the terminal's version of this
+  screen, and the proposal asks the two surfaces to show one plan rather than two: the
+  labels below are its labels — operation, action, machine, address, ssh, identity, host
+  key, node, executable, data dir, install, startup, members, restart, and the grants — and
+  the order is its order. What the raw document calls `install_path` and `data_dir` is not
+  what an operator is shown.
+
+  A row whose fact the plan does not carry is left out rather than printed as "not
+  reported", again following the CLI: the absence of an `ssh` line on a local setup is the
+  fact, not a gap in it.
+  """
+  @spec plan_rows(term()) :: [{String.t(), String.t()}]
+  def plan_rows(plan) when is_map(plan) do
+    target = plan["target"] || %{}
+
+    [
+      {"operation", text(plan["operation"])},
+      {"action", plan_action(plan["kind"])},
+      {"machine", text(target["machine"])},
+      {"address", text(target["address"])},
+      {"ssh", ssh_line(target)},
+      {"identity", if(present?(target["ssh_user"]), do: text(target["identity"]))},
+      {"host key", text(target["host_fingerprint"])},
+      {"node", text(target["node"])},
+      {"executable", text(target["install_path"])},
+      {"data dir", text(target["data_dir"])},
+      {"install", install_line(plan["release"])},
+      {"origin", origin_line(plan["release"])},
+      {"startup", startup_line(plan["service"])},
+      {"members", members_line(plan["members"])},
+      {"restart", text(plan["restart"])}
+    ]
+    |> Enum.reject(fn {_label, value} -> is_nil(value) end)
+  end
+
+  def plan_rows(_absent), do: []
+
+  @doc """
+  What approving this plan grants, in the plan's own sentences.
+
+  Separate from `plan_rows/1` because the CLI sets them apart too — each one prefixed `!`
+  under the facts — and because "what accepting this gives away" is the part of a plan an
+  operator most needs not to skim past.
+  """
+  @spec plan_grants(term()) :: [String.t()]
+  def plan_grants(plan) when is_map(plan), do: plan["grants"] |> List.wrap() |> Enum.map(&text/1)
+  def plan_grants(_absent), do: []
+
+  @plan_fields ~w(schema operation kind deployment_host target release service members restart
+                  grants build)
+
+  @doc "Every top-level key of a plan this build does not read, so nothing is cut in silence."
+  @spec plan_unread(term()) :: [String.t()]
+  def plan_unread(plan) when is_map(plan),
+    do: plan |> Map.keys() |> Kernel.--(@plan_fields) |> Enum.sort()
+
+  def plan_unread(_absent), do: []
+
+  defp plan_action("setup"), do: "setup — this machine becomes its own fleet"
+  defp plan_action("add"), do: "add — this device joins this fleet"
+  defp plan_action("remove"), do: "remove — this device leaves this fleet"
+  defp plan_action(kind) when is_binary(kind), do: kind
+  defp plan_action(_absent), do: nil
+
+  # The CLI prints an `ssh` line only where there is an account to print; a local setup
+  # never reaches one, which is the point rather than a missing fact.
+  defp ssh_line(target) do
+    if present?(target["ssh_user"]) do
+      "#{target["ssh_user"]}@#{text(target["address"]) || "this device"} port #{target["port"] || 22}"
+    end
+  end
+
+  defp install_line(release) when is_map(release) do
+    digest = release["sha256"] || ""
+
+    "ouro #{text(release["version"]) || "an unnamed version"} (#{text(release["target"]) || "an unnamed platform"})" <>
+      if(digest == "", do: "", else: " sha256 #{String.slice(digest, 0, 16)}")
+  end
+
+  defp install_line(_absent), do: "not needed; the target already has ouro"
+
+  defp origin_line(%{"official_origin" => false}),
+    do: "a loopback test origin, not the official release"
+
+  defp origin_line(_official), do: nil
+
+  defp startup_line("managed"),
+    do: "propose a user service (starts at login; not a pre-login daemon)"
+
+  defp startup_line("manual"), do: "manual start, explicitly chosen"
+  defp startup_line(other) when is_binary(other), do: other
+  defp startup_line(_absent), do: nil
+
+  defp members_line(members) when is_list(members) and members != [] do
+    Enum.map_join(members, "; ", fn member ->
+      "#{text(member["machine"]) || "an unnamed machine"} (#{text(member["host"]) || "no host"}, " <>
+        "#{text(member["change"]) || "no change"}, via #{text(member["reached_by"]) || "an unnamed route"})"
+    end)
+  end
+
+  defp members_line(_none), do: "none"
+
+  defp present?(value), do: is_binary(value) and value != ""
+
+  defp text(value) when is_binary(value), do: if(value == "", do: nil, else: value)
+  defp text(value) when is_number(value) or is_boolean(value), do: to_string(value)
+  defp text(nil), do: nil
+  defp text(value), do: inspect(value, limit: 5)
 
   @doc "The word for a device nobody named, used wherever a row has no name of its own."
   @spec this_device() :: String.t()

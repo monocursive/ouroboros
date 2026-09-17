@@ -5283,6 +5283,18 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   font-size: 0.95rem;
 }
 
+.ouro-devices-plan {
+  margin: 0 0 0.75rem;
+}
+
+.ouro-devices-plan h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+}
+
 .ouro-devices-steps {
   list-style: none;
   margin: 0;

@@ -337,7 +337,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # is actually following, so it is the one that names itself.
   defp said(%{"event" => "step"} = event) do
     {outcome, _tone} = Devices.outcome(event["outcome"])
-    "#{event["name"] || event["step"] || "A step"}: #{outcome}."
+    "#{Devices.step_label(event["step"])} on #{event["machine"] || "this fleet"}: #{outcome}."
   end
 
   defp said(%{"event" => "state"} = event), do: Devices.operation_state(event["state"]) <> "."
@@ -345,7 +345,15 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp said(%{"event" => "challenge"} = event),
     do: Devices.challenge_title(event["kind"]) <> "."
 
-  defp said(%{"event" => "done"} = event), do: Devices.operation_state(event["state"]) <> "."
+  # A `done` frame from the engine's failure path carries no state at all, only `ok`, a
+  # reason and a detail — so this reads the state where there is one and says what happened
+  # where there is not, rather than announcing "State not reported".
+  defp said(%{"event" => "done"} = event) do
+    case event["state"] do
+      state when is_binary(state) -> Devices.operation_state(state) <> "."
+      _absent -> if event["ok"] == true, do: "Finished.", else: "The deployment stopped."
+    end
+  end
 
   defp said(%{"event" => "disconnected"}) do
     "The connection to the deployment worker was lost. What it has done is unknown until " <>
@@ -410,15 +418,19 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     end
   end
 
-  # Every operation this data directory still holds open. The summary carries its own
-  # `target` — machine, address, account, port — which is what puts it on the row it is
-  # about rather than on every row, and this page therefore reads no operation's status
-  # until an operator opens one.
+  # Every operation this data directory holds a journal for, finished ones included. The
+  # summary carries its own `target` — machine, address, account, port — which is what puts
+  # it on the row it is about rather than on every row, and this page therefore reads no
+  # operation's status until an operator opens one.
+  #
+  # Finished ones are kept because they are the freshest thing known about their device: an
+  # inventory `state` is a *discovery* fact, and it will still say "nothing has inspected
+  # this" for as long as it takes the network client to notice otherwise.
   defp operations(_socket, inventory) do
     inventory
     |> Map.get("operations", [])
     |> List.wrap()
-    |> Enum.filter(&Devices.unfinished?(&1["state"]))
+    |> Enum.filter(&is_map/1)
   end
 
   # ------------------------------------------------------------------------------------
@@ -772,6 +784,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       |> assign(:setup?, setup?(assigns_socket(assigns)))
       |> assign(:setup_blocked, setup_blocked(assigns_socket(assigns)))
       |> assign(:rows, rows(assigns))
+      |> assign(
+        :unfinished,
+        Enum.filter(assigns[:operations] || [], &Devices.unfinished?(&1["state"]))
+      )
 
     ~H"""
     <div>
@@ -800,8 +816,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <p :if={@inventory_error} class="ouro-refusal">{@inventory_error}</p>
 
         <.operations
-          :if={@availability == :available and @operations != []}
-          operations={@operations}
+          :if={@availability == :available and @unfinished != []}
+          operations={@unfinished}
         />
 
         <section :if={@inventory} class="ouro-panel">
@@ -1039,6 +1055,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           :for={device <- @rows}
           class="ouro-devices-row"
           data-state={device["state"]}
+          data-operation-state={latest_operation(@operations, device)["state"]}
           data-address={device["address"]}
         >
           <span class="ouro-devices-name">{device["name"] || Devices.this_device()}</span>
@@ -1053,18 +1070,20 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           </span>
           <span class="ouro-devices-state">
             <span class="ouro-visually-hidden">Ouroboros state:</span>
-            {Devices.state_words(device["state"])}
+            {row_state(@operations, device)}
           </span>
 
           <span class="ouro-devices-action">
             <button
+              :for={{_words, label, event} <- [row_action(@operations, device)]}
               :if={operation_for(@operations, device)}
               type="button"
               class="ouro-button"
-              phx-click="open-operation"
+              phx-click={event}
               phx-value-operation={operation_for(@operations, device)}
+              phx-value-address={device["address"]}
             >
-              Continue setup
+              {label}
             </button>
             <button
               :if={
@@ -1149,6 +1168,32 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   end
 
   defp same_device?(_target, _device), do: false
+
+  # The row's own operation, where it has one — the list is the journal's, newest first.
+  defp latest_operation(operations, device) do
+    Enum.find(operations, %{}, &same_device?(&1["target"], device))
+  end
+
+  # What the row says about Ouroboros. An operation this machine holds for the device is the
+  # fresher fact and wins; otherwise it is the inventory's discovery state, in the
+  # proposal's words.
+  defp row_state(operations, device) do
+    case latest_operation(operations, device) do
+      empty when empty == %{} ->
+        Devices.state_words(device["state"])
+
+      operation ->
+        {words, _label, _event} = Devices.operation_row(operation["state"])
+        words
+    end
+  end
+
+  defp row_action(operations, device) do
+    case latest_operation(operations, device) do
+      empty when empty == %{} -> {nil, Devices.state_action(device["state"]), "deploy"}
+      operation -> Devices.operation_row(operation["state"])
+    end
+  end
 
   defp matches?(left, right) when is_binary(left) and is_binary(right) and left != "",
     do: left == right
@@ -1286,7 +1331,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           {@drawer.error}
         </p>
 
-        <.takeover :if={@drawer.takeover == @drawer.operation} drawer={@drawer} />
+        <.takeover :if={taken_over?(@drawer)} drawer={@drawer} />
 
         <.setup_step :if={@step == :select and @drawer.kind == "setup"} drawer={@drawer} />
         <.connect_step :if={@step == :select and @drawer.kind != "setup"} drawer={@drawer} />
@@ -1376,6 +1421,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       challenge(drawer, ["password", "passphrase"]) -> :authenticate
       challenge(drawer, ["review"]) -> :review
       state_of(drawer) in ["completed", "failed", "cancelled", "interrupted"] -> :finish
+      is_map(done_of(drawer)) -> :finish
       true -> :progress
     end
   end
@@ -1389,6 +1435,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   end
 
   defp state_of(drawer), do: (drawer.status || %{})["state"]
+
+  defp done_of(drawer), do: (drawer.status || %{})["done"]
+
+  # Whether *this* operation is one another identity owns. Both fields are nil on a drawer
+  # that has not prepared anything yet, and comparing them directly made `nil == nil` true —
+  # which drew "this setup was started by another identity" over a device nobody had
+  # touched. A takeover is a fact about an existing operation or it is not a fact.
+  defp taken_over?(%{takeover: operation, operation: operation}) when is_binary(operation),
+    do: true
+
+  defp taken_over?(_drawer), do: false
 
   attr :drawer, :map, required: true
 
@@ -1654,35 +1711,44 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   attr :drawer, :map, required: true
 
   defp host_trust_step(assigns) do
-    assigns = assign(assigns, :challenge, challenge(assigns.drawer, ["host_trust"]))
+    challenge = challenge(assigns.drawer, ["host_trust"])
+
+    assigns =
+      assigns
+      |> assign(:challenge, challenge)
+      |> assign(:facts, Devices.metadata(challenge))
 
     ~H"""
     <section class="ouro-devices-step" aria-labelledby="ouro-deploy-trust-title">
       <h3 id="ouro-deploy-trust-title">{Devices.challenge_title("host_trust")}</h3>
 
+      <%!-- Every fact here is the worker's own `host_trust` metadata
+            (`host_trust_metadata/5` in tui/src/fleet_setup/challenge.rs), with the form's
+            answer only as a fallback where the worker reported nothing. --%>
       <dl class="ouro-facts">
         <div class="ouro-fact">
           <dt>Device</dt>
-          <dd>{@challenge["peer"] || @challenge["host"] || @drawer.device["name"]}</dd>
+          <dd>
+            {(@drawer.device && @drawer.device["name"]) || @facts["address"] || "the selected device"}
+          </dd>
         </div>
         <div class="ouro-fact">
           <dt>Address and port</dt>
           <dd class="ouro-mono">
-            {@challenge["address"] || @drawer.form["address"]}:{@challenge["port"] ||
-              @drawer.form["port"]}
+            {@facts["address"] || @drawer.form["address"]}:{@facts["port"] || @drawer.form["port"]}
           </dd>
         </div>
         <div class="ouro-fact">
           <dt>Account</dt>
-          <dd class="ouro-mono">{@challenge["user"] || @drawer.form["ssh_user"]}</dd>
+          <dd class="ouro-mono">{@facts["user"] || @drawer.form["ssh_user"]}</dd>
         </div>
         <div class="ouro-fact">
           <dt>Key algorithm</dt>
-          <dd class="ouro-mono">{@challenge["algorithm"] || "not reported"}</dd>
+          <dd class="ouro-mono">{@facts["algorithm"] || "not reported"}</dd>
         </div>
         <div class="ouro-fact">
           <dt>SHA256 fingerprint</dt>
-          <dd class="ouro-mono">{@challenge["sha256_fingerprint"] || "not reported"}</dd>
+          <dd class="ouro-mono">{@facts["sha256_fingerprint"] || "not reported"}</dd>
         </div>
       </dl>
 
@@ -1726,15 +1792,20 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     assigns =
       assigns
       |> assign(:challenge, challenge)
+      |> assign(:facts, Devices.metadata(challenge))
       |> assign(:field, "ouro-deploy-secret-#{assigns.drawer.secret_nonce}")
 
     ~H"""
     <section class="ouro-devices-step" aria-labelledby="ouro-deploy-auth-title">
       <h3 id="ouro-deploy-auth-title">{Devices.challenge_title(@challenge["kind"])}</h3>
 
-      <p :if={@challenge["attempt"]} class="ouro-devices-quiet">
-        Attempt {@challenge["attempt"]}{if @challenge["attempts_allowed"],
-          do: " of #{@challenge["attempts_allowed"]}"}.
+      <%!-- "Attempt 2 of 3", where the worker said so — `password_metadata/5` carries
+            `attempt` and `max_attempts`, and a passphrase carries neither. --%>
+      <p :if={Devices.attempt(@challenge)} class="ouro-devices-quiet">
+        {Devices.attempt(@challenge)}
+      </p>
+      <p :if={@facts["public_fingerprint"]} class="ouro-devices-quiet">
+        Public fingerprint <span class="ouro-mono">{@facts["public_fingerprint"]}</span>
       </p>
 
       <%!-- No `phx-change`. A change event on this form would stream every keystroke of a
@@ -1786,22 +1857,43 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp review_step(assigns) do
     challenge = challenge(assigns.drawer, ["review"])
 
+    facts = Devices.metadata(challenge)
+
     assigns =
       assigns
       |> assign(:challenge, challenge)
-      |> assign(:plan, challenge["plan"])
-      |> assign(:digest, challenge["plan_digest"])
+      |> assign(:plan, facts["plan"])
+      |> assign(:digest, facts["plan_digest"])
+      |> assign(:rows, Devices.plan_rows(facts["plan"]))
+      |> assign(:grants, Devices.plan_grants(facts["plan"]))
+      |> assign(:unread, Devices.plan_unread(facts["plan"]))
 
     ~H"""
     <section class="ouro-devices-step" aria-labelledby="ouro-deploy-review-title">
       <h3 id="ouro-deploy-review-title">{Devices.challenge_title("review")}</h3>
 
-      <dl :if={is_map(@plan)} class="ouro-facts">
-        <div :for={{key, value} <- Enum.sort(@plan)} class="ouro-fact">
-          <dt>{key}</dt>
-          <dd class="ouro-mono">{plan_value(value)}</dd>
+      <%!-- The plan in the CLI's own labels and order (`Plan::render/0`), so the terminal
+            and this page show one plan rather than two. The document's raw key names —
+            `install_path`, `data_dir` — are not what an operator is shown. --%>
+      <dl :if={@rows != []} class="ouro-facts ouro-devices-plan">
+        <div :for={{label, value} <- @rows} class="ouro-fact">
+          <dt>{label}</dt>
+          <dd class="ouro-mono">{value}</dd>
         </div>
       </dl>
+
+      <div :if={@grants != []} class="ouro-devices-note">
+        <strong>What approving this grants:</strong>
+        <ul>
+          <li :for={grant <- @grants}>{grant}</li>
+        </ul>
+      </div>
+
+      <p :if={@unread != []} class="ouro-devices-note">
+        This plan also carries {Enum.join(@unread, ", ")}, which this page does not read.
+        Nothing here was approved on the strength of them — the digest below covers the
+        whole document.
+      </p>
 
       <p :if={not is_map(@plan)} class="ouro-devices-quiet">
         This operation's worker sent no plan this page can read. Nothing will be approved
@@ -1809,7 +1901,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       </p>
 
       <p class="ouro-devices-quiet">
-        <span class="ouro-visually-hidden">Plan digest:</span>
+        plan digest
         <span class="ouro-mono" data-ouro-plan-digest>{@digest || "no digest reported"}</span>
       </p>
 
@@ -1834,15 +1926,6 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     </section>
     """
   end
-
-  defp plan_value(value) when is_binary(value), do: value
-  defp plan_value(value) when is_number(value) or is_boolean(value), do: to_string(value)
-  defp plan_value(nil), do: "not reported"
-  defp plan_value(value) when is_list(value), do: Enum.map_join(value, ", ", &plan_value/1)
-
-  defp plan_value(value) when is_map(value),
-    do:
-      Enum.map_join(Enum.sort(value), "; ", fn {key, inner} -> "#{key}: #{plan_value(inner)}" end)
 
   attr :drawer, :map, required: true
 
@@ -1872,41 +1955,57 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp finish_step(assigns) do
     status = assigns.drawer.status || %{}
     done = status["done"] || %{}
+    {readiness, offer_task?} = Devices.readiness(status["steps"], done)
 
     assigns =
       assigns
-      |> assign(:state, status["state"])
+      # A `done` frame from the engine's failure path carries `ok: false`, a reason and a
+      # detail and **no state at all** (`worker.rs`'s error arm), so the last `state` event
+      # to arrive is still whatever the operation was doing when it stopped. A `done` frame
+      # *is* the end of the operation and `ok` says which way, so it settles the reading
+      # where the state has not — without overruling a state that already said so.
+      |> assign(:state, final_state(status, done))
       |> assign(:done, done)
-      |> assign(:ready, done["ready"])
-      |> assign(:cause, Presentation.refusal(status["last_error"] || done["error"]))
+      |> assign(:finished?, done["ok"] == true)
+      |> assign(:readiness, readiness)
+      |> assign(:offer_task?, offer_task?)
+      |> assign(:summary, done["summary"])
+      |> assign(:next, done["next"])
+      |> assign(:unknown, List.wrap(done["unknown"]))
+      |> assign(:cause, cause(status, done))
 
     ~H"""
     <section class="ouro-devices-step" aria-labelledby="ouro-deploy-finish-title">
       <h3 id="ouro-deploy-finish-title">{Devices.operation_state(@state)}</h3>
 
+      <p :if={@summary}>{@summary}</p>
       <p :if={@cause} class="ouro-refusal">{@cause}</p>
 
-      <p :if={@state == "completed" and @ready == true}>This device reported that it is ready.</p>
-      <p :if={@state == "completed" and @ready == false}>
-        The deployment finished and this device did not report itself ready. What is missing
-        is below.
-      </p>
-      <p :if={@state == "completed" and is_nil(@ready)}>
-        The deployment finished. Readiness was not reported, so this page does not claim it.
-      </p>
+      <%!-- "the next thing to do, which the proposal requires the final display to name"
+            — the worker's own words, not this page's guess at them. --%>
+      <p :if={@next} class="ouro-devices-note"><strong>Next:</strong> {@next}</p>
 
-      <div :if={@state == "completed"} class="ouro-devices-actions">
+      <p :if={@finished?}>{@readiness}</p>
+
+      <div :if={@unknown != []} class="ouro-devices-note">
+        <strong>What this operation could not establish:</strong>
+        <ul>
+          <li :for={fact <- @unknown}>{plain(fact)}</li>
+        </ul>
+      </div>
+
+      <div :if={@finished?} class="ouro-devices-actions">
         <a class="ouro-button" href="/status">Open device</a>
         <a class="ouro-quiet-button" href="/settings#providers">Configure model</a>
-        <a :if={@ready != false} class="ouro-quiet-button" href="/new">Run test task</a>
+        <a :if={@offer_task?} class="ouro-quiet-button" href="/new">Run test task</a>
       </div>
-      <p :if={@state == "completed"} class="ouro-new-hint">
+      <p :if={@finished?} class="ouro-new-hint">
         Model credentials are node-local: this Settings page configures the runtime serving
         this browser, and the new member's own model setup is a step on that machine.
       </p>
 
       <div
-        :if={@state in ["failed", "interrupted"] and @drawer.takeover != @drawer.operation}
+        :if={@state in ["failed", "interrupted"] and not taken_over?(@drawer)}
         class="ouro-devices-actions"
       >
         <button
@@ -1927,6 +2026,27 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     """
   end
 
+  @terminal ~w(completed failed cancelled interrupted)
+
+  defp final_state(status, done) do
+    cond do
+      status["state"] in @terminal -> status["state"]
+      done["ok"] == false -> "failed"
+      done["ok"] == true -> "completed"
+      true -> status["state"]
+    end
+  end
+
+  # What went wrong, in the worker's own sanitized words. `detail` is the failure arm's;
+  # `last_error` is the broker's, for a frame that carried one. The `reason` beside them is
+  # a stable code and stays out of the sentence.
+  defp cause(status, done) do
+    Presentation.refusal(status["last_error"] || done["detail"])
+  end
+
+  defp plain(value) when is_binary(value), do: value
+  defp plain(value), do: inspect(value, limit: 5)
+
   attr :drawer, :map, required: true
 
   defp steps(assigns) do
@@ -1935,18 +2055,18 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     assigns =
       assigns
       |> assign(:reported, reported)
+      # Each of the proposal's six stages, with every step the worker filed under it. A
+      # stage the worker has reported nothing for says so; it does not read as done.
       |> assign(
         :stages,
-        Enum.map(Devices.stages(), fn {key, label} ->
-          {key, label, Enum.find(reported, &stage?(&1, key))}
+        Enum.map(Devices.stages(), fn {key, label, _names} ->
+          {key, label, Enum.filter(reported, &(Devices.stage_of(&1["step"]) == key))}
         end)
       )
-      |> assign(
-        :extra,
-        Enum.reject(reported, fn step ->
-          Enum.any?(Devices.stages(), fn {key, _label} -> stage?(step, key) end)
-        end)
-      )
+      # And the steps that belong to none of the six — cooperative removal's, and the
+      # explicit test task — under their own names rather than folded into a stage they
+      # are not part of.
+      |> assign(:extra, Enum.filter(reported, &is_nil(Devices.stage_of(&1["step"]))))
       |> assign(:log, List.wrap((assigns.drawer.status || %{})["log"]))
 
     ~H"""
@@ -1954,23 +2074,29 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <h3 id="ouro-deploy-steps-title">Steps</h3>
 
       <ol class="ouro-devices-steps">
-        <li
-          :for={{key, label, step} <- @stages}
-          data-step={key}
-          data-outcome={step && step["outcome"]}
-        >
+        <li :for={{key, label, steps} <- @stages} data-step={key} data-outcome={stage_outcome(steps)}>
           <span class="ouro-devices-step-name">{label}</span>
           <span class="ouro-devices-step-outcome">
             <span class="ouro-visually-hidden">Outcome:</span>
-            {if step, do: elem(Devices.outcome(step["outcome"]), 0), else: "not reported yet"}
+            {if steps == [],
+              do: "not reported yet",
+              else: elem(Devices.outcome(stage_outcome(steps)), 0)}
           </span>
-          <span :if={step && step["detail"]} class="ouro-devices-detail">{step["detail"]}</span>
+          <span :for={step <- steps} class="ouro-devices-detail">
+            {Devices.step_label(step["step"])}{if step["machine"], do: " on #{step["machine"]}"} — {elem(
+              Devices.outcome(step["outcome"]),
+              0
+            )}{if step["detail"],
+              do: ": #{step["detail"]}"}
+          </span>
         </li>
       </ol>
 
       <ul :if={@extra != []} class="ouro-devices-steps">
-        <li :for={step <- @extra} data-outcome={step["outcome"]}>
-          <span class="ouro-devices-step-name">{step["name"] || step["step"] || "a step"}</span>
+        <li :for={step <- @extra} data-step={step["step"]} data-outcome={step["outcome"]}>
+          <span class="ouro-devices-step-name">
+            {Devices.step_label(step["step"])}{if step["machine"], do: " on #{step["machine"]}"}
+          </span>
           <span class="ouro-devices-step-outcome">
             <span class="ouro-visually-hidden">Outcome:</span>
             {elem(Devices.outcome(step["outcome"]), 0)}
@@ -1982,17 +2108,26 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <details :if={@log != []} class="ouro-devices-advanced">
         <summary>What the worker reported</summary>
         <ul class="ouro-devices-log">
-          <li :for={line <- @log} class="ouro-mono">{line["message"] || inspect(line, limit: 5)}</li>
+          <li :for={line <- @log} class="ouro-mono">{line["line"] || inspect(line, limit: 5)}</li>
         </ul>
       </details>
     </section>
     """
   end
 
-  defp stage?(step, key) when is_map(step) do
-    name = step["name"] || step["step"]
-    is_binary(name) and String.starts_with?(String.downcase(name), key)
-  end
+  # A stage is as done as its least finished step: one failure makes the stage failed, one
+  # step still running makes it running, and a stage whose steps are all `ok` or `skipped`
+  # is done. Never "done" because the last frame to arrive happened to say so.
+  defp stage_outcome([]), do: nil
 
-  defp stage?(_step, _key), do: false
+  defp stage_outcome(steps) do
+    outcomes = Enum.map(steps, & &1["outcome"])
+
+    cond do
+      "failed" in outcomes -> "failed"
+      "started" in outcomes -> "started"
+      Enum.all?(outcomes, &(&1 in ["ok", "skipped"])) -> "ok"
+      true -> List.last(outcomes)
+    end
+  end
 end

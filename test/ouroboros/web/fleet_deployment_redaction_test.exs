@@ -243,9 +243,11 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
         call(first, "fleet.deployment.prepare", request())["result"]["operation_id"]
 
       assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      await_attached(operation)
+      # Through a listener, `hello` resolves this node's local owner, and that is who the
+      # worker claims the operation for.
+      await_attached(operation, "local-owner")
       :ok = FleetWorkerFake.challenge(worker, "pw", "password")
-      await_challenge(operation, "pw")
+      await_challenge(operation, "pw", "local-owner")
 
       log =
         capture_log(fn ->
@@ -382,22 +384,29 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     %{worker: worker, ouro: ouro}
   end
 
-  defp bound, do: %{subject: "runtime-unattributed", session: "web-session-1"}
+  # Who an operation belongs to depends on which surface started it. The worker claims an
+  # unowned operation for the subject that attached (`attach/4` in
+  # `tui/src/fleet_setup/worker.rs`, and now the fake too), and a listener's `hello`
+  # resolves the local owner while a direct call from this test process is unattributed.
+  # Reading an operation as somebody it does not belong to is refused, so these helpers say
+  # who is asking rather than assuming one answer for both paths.
+  defp bound(subject \\ "runtime-unattributed"),
+    do: %{subject: subject, session: "web-session-1"}
 
   # The handshake runs in the client's own process now, so a fake that writes a challenge the
   # moment `prepare` answers writes it into a socket nobody has accepted yet.
-  defp await_attached(operation) do
+  defp await_attached(operation, subject \\ "runtime-unattributed") do
     Enum.reduce_while(1..100, :missing, fn _attempt, _acc ->
-      case Ouroboros.Fleet.Deployment.status(operation, bound()) do
+      case Ouroboros.Fleet.Deployment.status(operation, bound(subject)) do
         {:ok, %{"attached" => true}} -> {:halt, :ok}
         _not_yet -> tick()
       end
     end)
   end
 
-  defp await_challenge(operation, challenge) do
+  defp await_challenge(operation, challenge, subject \\ "runtime-unattributed") do
     Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      case Ouroboros.Fleet.Deployment.status(operation, bound()) do
+      case Ouroboros.Fleet.Deployment.status(operation, bound(subject)) do
         {:ok, %{"challenges" => challenges}} ->
           if Enum.any?(challenges, &(&1["challenge"] == challenge)),
             do: {:halt, :ok},

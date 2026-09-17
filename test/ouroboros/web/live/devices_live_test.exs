@@ -315,6 +315,52 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     end
   end
 
+  # `Plan::to_value/0` in tui/src/fleet_setup/plan.rs, field for field.
+  defp plan do
+    %{
+      "schema" => 1,
+      "operation" => "0011223344556677",
+      "kind" => "add",
+      "deployment_host" => %{
+        "hostname" => "studio",
+        "user" => "operator",
+        "os" => "macos",
+        "arch" => "aarch64",
+        "issuer" => true
+      },
+      "target" => %{
+        "machine" => "vps-1",
+        "address" => "100.64.12.44",
+        "port" => 22,
+        "ssh_user" => "deploy",
+        "identity" => "agent identity SHA256:anAgentKey",
+        "install_path" => "/usr/local/bin/ouro",
+        "data_dir" => "/home/deploy/.ouroboros",
+        "host_fingerprint" => "SHA256:aHostKey",
+        "node" => "ouro@vps-1"
+      },
+      "release" => %{
+        "version" => "0.1.8",
+        "target" => "x86_64-unknown-linux-gnu",
+        "asset" => "ouro-0.1.8.tar.gz",
+        "sha256" => "0123456789abcdef0123456789abcdef",
+        "official_origin" => true
+      },
+      "service" => "managed",
+      "members" => [
+        %{
+          "machine" => "studio",
+          "host" => "100.64.0.1",
+          "reached_by" => "local",
+          "change" => "add vps-1"
+        }
+      ],
+      "restart" => nil,
+      "grants" => ["Joining grants broad authority between this fleet's machines."],
+      "build" => nil
+    }
+  end
+
   # The worker's durable record, as this runtime would find it after an interruption.
   #
   # `owner` defaults to the identity this test is asking as, because the broker's resume
@@ -780,19 +826,47 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       refute Map.has_key?(request, "target")
     end
 
+    test "never shows a takeover panel over an operation nobody has started yet",
+         %{conn: conn} do
+      # Both fields are nil on a drawer that has prepared nothing, and comparing them
+      # directly drew "this setup was started by another identity" over a device nobody had
+      # touched.
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html =
+        view
+        |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
+        |> render_click()
+
+      refute html =~ "This setup was started by another identity"
+      refute has_element?(view, "[data-ouro-takeover]")
+
+      # And it stays absent once the operation exists and is this session's own — the
+      # worker claims an unowned operation for whoever attached, so the owner is us.
+      _operation = prepared(view)
+      refute render(view) =~ "This setup was started by another identity"
+
+      snapshot = :sys.get_state(view.pid).socket.assigns.drawer.status
+      assert snapshot["owner"] == Ouroboros.Audit.Identity.actor()
+    end
+
     test "renders a host-trust challenge from its metadata, with the verify guidance",
          %{conn: conn, worker: worker} do
       {:ok, view, _html} = live(conn, "/devices")
       operation = prepared(view)
 
+      # The worker's own frame: kind-specific facts nest under `metadata`
+      # (`challenge_event/2` in tui/src/fleet_setup/worker.rs), and `host_trust_metadata/5`
+      # fixes the five field names.
       :ok =
         FleetWorkerFake.challenge(worker, "ht-1", "host_trust", %{
-          "algorithm" => "ssh-ed25519",
-          "sha256_fingerprint" => "SHA256:5s0mEfIngeRPrinT",
-          "address" => "100.64.12.44",
-          "port" => 22,
-          "user" => "deploy",
-          "peer" => "vps-1"
+          "metadata" => %{
+            "address" => "100.64.12.44",
+            "port" => 22,
+            "algorithm" => "ssh-ed25519",
+            "sha256_fingerprint" => "SHA256:5s0mEfIngeRPrinT",
+            "user" => "deploy"
+          }
         })
 
       html = await(view, "SHA256:5s0mEfIngeRPrinT")
@@ -838,21 +912,40 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         {:ok, view, _html} = live(conn, "/devices")
         _operation = prepared(view)
 
-        :ok =
-          FleetWorkerFake.challenge(worker, "c-1", kind, %{
-            "user" => "deploy",
-            "host" => "100.64.12.44",
-            "key" => "/home/ouro/.ssh/id_ed25519",
-            "attempt" => 1,
-            "attempts_allowed" => 3
-          })
+        # `password_metadata/5` and `passphrase_metadata/2` in
+        # tui/src/fleet_setup/challenge.rs: a password names a target and an account and
+        # counts its attempts; a passphrase names a key and its public fingerprint, and
+        # counts nothing.
+        metadata =
+          if kind == "password",
+            do: %{
+              "target" => "100.64.12.44",
+              "user" => "deploy",
+              "port" => 22,
+              "attempt" => 1,
+              "max_attempts" => 3
+            },
+            else: %{
+              "key_label" => "/home/ouro/.ssh/id_ed25519",
+              "public_fingerprint" => "SHA256:aPub1icFingerprint"
+            }
+
+        :ok = FleetWorkerFake.challenge(worker, "c-1", kind, %{"metadata" => metadata})
 
         html = await(view, "Send this credential")
 
         assert html =~ ~s(type="password")
         assert html =~ "data-ouro-secret"
-        assert html =~ "Attempt 1 of 3."
         assert html =~ "not stored, not remembered for a reconnection"
+
+        if kind == "password" do
+          assert html =~ "Password for deploy@100.64.12.44"
+          assert html =~ "Attempt 1 of 3."
+        else
+          assert html =~ "Passphrase for the key /home/ouro/.ssh/id_ed25519"
+          assert html =~ "SHA256:aPub1icFingerprint"
+          refute html =~ "Attempt"
+        end
 
         # The one rule the proposal states about this form: no change event, because a
         # change event on a password field streams every keystroke to this server.
@@ -866,7 +959,11 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       {:ok, view, _html} = live(conn, "/devices")
       _operation = prepared(view)
 
-      :ok = FleetWorkerFake.challenge(worker, "pw-1", "password", %{"user" => "deploy"})
+      :ok =
+        FleetWorkerFake.challenge(worker, "pw-1", "password", %{
+          "metadata" => %{"target" => "100.64.12.44", "user" => "deploy", "port" => 22}
+        })
+
       _html = await(view, "Send this credential")
 
       secret = "w3a-unique-password-#{System.unique_integer([:positive])}"
@@ -947,22 +1044,33 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       :ok =
         FleetWorkerFake.challenge(worker, "rev-1", "review", %{
-          "plan" => %{
-            "release" => "0.1.8",
-            "machine" => "vps-1",
-            "install_path" => "/usr/local/bin/ouro",
-            "restarts" => ["studio"],
-            "trust" => "this fleet's certificate authority signs the new member"
-          },
-          "plan_digest" => "sha256-of-the-plan"
+          "metadata" => %{"plan" => plan(), "plan_digest" => "sha256-of-the-plan"}
         })
 
       html = await(view, "sha256-of-the-plan")
 
       assert html =~ "Review this plan"
-      assert html =~ "0.1.8"
-      assert html =~ "/usr/local/bin/ouro"
-      assert html =~ "this fleet&#39;s certificate authority signs the new member"
+      assert html =~ "plan digest"
+
+      # The CLI's labels, not the document's key names. `Plan::render/0` prints `executable`
+      # and `data dir`; a page that printed `install_path` and `data_dir` would be showing
+      # an operator the JSON rather than the plan.
+      for label <-
+            ~w(operation action machine address ssh identity node executable install startup members) do
+        assert html =~ ">#{label}</dt>", "the review has no `#{label}` row"
+      end
+
+      refute html =~ ">install_path</dt>"
+      refute html =~ ">data_dir</dt>"
+
+      assert html =~ "data dir"
+      assert html =~ "host key"
+      assert html =~ "deploy@100.64.12.44 port 22"
+      assert html =~ "ouro 0.1.8 (x86_64-unknown-linux-gnu) sha256 0123456789abcdef"
+      assert html =~ "propose a user service"
+      assert html =~ "studio (100.64.0.1, add vps-1, via local)"
+      assert html =~ "What approving this grants"
+      assert html =~ "Joining grants broad authority"
 
       view |> element(~s{button[phx-click="approve"]}) |> render_click()
 
@@ -983,7 +1091,11 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       {:ok, view, _html} = live(conn, "/devices")
       _operation = prepared(view)
 
-      :ok = FleetWorkerFake.challenge(worker, "rev-2", "review", %{"plan" => %{"release" => "x"}})
+      :ok =
+        FleetWorkerFake.challenge(worker, "rev-2", "review", %{
+          "metadata" => %{"plan" => plan()}
+        })
+
       html = await(view, "Review this plan")
 
       refute has_element?(view, ~s{button[phx-click="approve"]})
@@ -999,25 +1111,46 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
       _ = await(view, "Deploying")
 
+      # `install_binary` is the engine's name, and it belongs to the "install if missing"
+      # stage even though it is not spelled `install` — which is why the stage table names
+      # the worker's steps instead of matching on a prefix.
       :ok =
         FleetWorkerFake.emit(worker, %{
           "event" => "step",
-          "name" => "install",
+          "machine" => "vps-1",
+          "step" => "install_binary",
           "outcome" => "ok",
           "detail" => "0.1.8 from the official release"
         })
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "step",
+          "machine" => "vps-1",
+          "step" => "issue",
+          "outcome" => "ok",
+          "detail" => nil
+        })
+
+      :ok = FleetWorkerFake.emit(worker, %{"event" => "log", "line" => "ssh said something"})
 
       html = await(view, "0.1.8 from the official release")
 
       # Every stage the proposal names, and the ones nothing has reported say so rather
       # than claiming a result.
-      for {_key, label} <- Devices.stages(), do: assert(html =~ label)
+      for {_key, label, _names} <- Devices.stages(), do: assert(html =~ label)
       assert html =~ "not reported yet"
       assert html =~ ~s(data-step="install")
+      assert html =~ ~s(data-step="membership")
+      assert html =~ "Install the `ouro` binary on vps-1"
+      assert html =~ "Issue the new member&#39;s certificate on vps-1"
+
+      # The worker's log lines are `line`, not `message`.
+      assert html =~ "ssh said something"
 
       # The live region is polite and carries the last change in words.
       assert html =~ ~s(aria-live="polite")
-      assert html =~ "install: done."
+      assert html =~ "Issue the new member&#39;s certificate on vps-1: done."
     end
 
     test "a failure keeps the completed steps, names the cause and offers a retry",
@@ -1028,22 +1161,27 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       :ok =
         FleetWorkerFake.emit(worker, %{
           "event" => "step",
-          "name" => "inspect",
+          "machine" => "vps-1",
+          "step" => "inspect",
           "outcome" => "ok"
         })
 
+      # The engine's failure arm sends `{ok: false, reason, detail}` and **no state at
+      # all**, so a page that only looked at `state` would still be drawing "Deploying".
       :ok =
         FleetWorkerFake.emit(worker, %{
           "event" => "done",
-          "state" => "failed",
-          "error" => "the target refused the connection"
+          "ok" => false,
+          "reason" => "ssh_refused",
+          "detail" => "the target refused the connection"
         })
 
-      html = await(view, "Failed")
+      html = await(view, "the target refused the connection")
 
-      assert html =~ "the target refused the connection"
+      assert html =~ "Failed"
       assert html =~ "Retry"
       assert html =~ ~s(data-step="inspect")
+      refute html =~ "ssh_refused"
 
       # Retrying means resuming, and resuming needs the previous worker to be gone — which
       # is exactly the state an interrupted operation is in.
@@ -1153,11 +1291,58 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
              )
     end
 
+    test "a finished operation speaks for its row until discovery catches up",
+         %{conn: conn, root: root} do
+      {:ok, view, _html} = live(conn, "/devices")
+      operation = prepared(view)
+      detach!(operation)
+
+      target = %{"machine" => "vps-1", "address" => "100.64.12.44"}
+
+      # Three endings, three different things for the row to say. The inventory's own
+      # `state` never moves in any of them — it is a discovery fact, and the point is that
+      # the operation is the fresher one.
+      for {state, words, action} <- [
+            {"completed", "Set up just now by this machine", "Open device"},
+            {"failed", "Setup failed", "Retry"},
+            {"cancelled", "Setup cancelled", "Deploy again"}
+          ] do
+        journal!(root, operation, %{"state" => state, "kind" => "add", "target" => target})
+
+        {:ok, fresh, html} = live(conn, "/devices")
+
+        row =
+          fresh
+          |> element(~s{[data-address="100.64.12.44"][data-operation-state="#{state}"]})
+          |> render()
+
+        assert row =~ words, "a #{state} operation does not say so on its row"
+        assert row =~ action, "a #{state} operation does not offer #{action}"
+
+        # The inventory still calls it an uninspected peer — that is the discovery fact,
+        # and the row no longer reads as one.
+        refute row =~ "Discovered peer; Ouroboros installation unknown",
+               "a #{state} operation left its row reading as untouched discovery"
+
+        refute row =~ "Deploy Ouroboros",
+               "a #{state} operation left a second deployment one press away"
+
+        assert html =~ ~s(data-state="discovered_installation_unknown")
+
+        # And a finished one is not listed as a setup still in progress.
+        if state in ["completed", "cancelled"],
+          do: refute(html =~ "Setups in progress"),
+          else: assert(html =~ "Setups in progress")
+      end
+    end
+
     test "an operation another identity started needs an explicit takeover",
          %{conn: conn, root: root} do
       {:ok, view, _html} = live(conn, "/devices")
       operation = prepared(view)
 
+      # The journal is the authority when no worker is attached, and this one records an
+      # owner that is not this session.
       journal!(root, operation, %{
         "state" => "interrupted",
         "kind" => "add",

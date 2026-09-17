@@ -93,18 +93,6 @@ defmodule Ouroboros.Test.BrowserFleet do
         "name_conflicts_with_roster" => nil
       },
       %{
-        "name" => "fixture-vps",
-        "machine" => nil,
-        "os" => "linux",
-        "address" => "100.100.0.44",
-        "online" => true,
-        "last_seen" => "2026-09-16T10:00:00Z",
-        "path" => "relayed",
-        "state" => "discovered_installation_unknown",
-        "action" => "deploy Ouroboros",
-        "name_conflicts_with_roster" => nil
-      },
-      %{
         "name" => "fixture-toaster",
         "machine" => nil,
         "os" => "plan9",
@@ -119,17 +107,85 @@ defmodule Ouroboros.Test.BrowserFleet do
     ]
   }
 
-  @plan %{
-    "release" => "0.1.8",
-    "machine" => "fixture-vps",
-    "install_path" => "/usr/local/bin/ouro",
-    "data_dir" => "/home/deploy/.ouroboros",
-    "service" => "an Ouroboros-owned user service",
-    "members_to_update" => "fixture-studio",
-    "trust" => "this fleet's certificate authority will sign the new member"
-  }
+  # `Plan::to_value/0` in tui/src/fleet_setup/plan.rs, field for field. A fixture that
+  # invented its own key names would let the page agree with itself about a shape the real
+  # worker never sends.
+  defp plan(request) do
+    machine = machine_of(request)
+
+    %{
+      "schema" => 1,
+      "operation" => "fixture",
+      "kind" => request["kind"] || "add",
+      "deployment_host" => %{
+        "hostname" => "fixture-studio",
+        "user" => "fixture",
+        "os" => "macos",
+        "arch" => "aarch64",
+        "issuer" => true
+      },
+      "target" => %{
+        "machine" => machine,
+        "address" => request["address"],
+        "port" => request["ssh_port"] || 22,
+        "ssh_user" => request["ssh_user"] || "",
+        "identity" => "agent identity SHA256:fixtureAgentKey",
+        "install_path" => request["install_path"] || "/usr/local/bin/ouro",
+        "data_dir" => request["remote_data_dir"] || "/home/deploy/.ouroboros",
+        "host_fingerprint" => "SHA256:fixtureFingerprintNotARealHostKey",
+        "node" => "ouro@#{machine}"
+      },
+      "release" => %{
+        "version" => "0.1.8",
+        "target" => "x86_64-unknown-linux-gnu",
+        "asset" => "ouro-0.1.8-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256" => "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "official_origin" => true
+      },
+      "service" => "managed",
+      "members" => [
+        %{
+          "machine" => "fixture-studio",
+          "host" => "100.100.0.1",
+          "reached_by" => "local",
+          "change" => "add #{machine}"
+        }
+      ],
+      "restart" => nil,
+      "grants" => [
+        "Joining grants broad authority between this fleet's machines: connected nodes can reach each other's runtimes."
+      ],
+      "build" => nil
+    }
+  end
 
   @digest "sha256:fixture-plan-digest"
+
+  # Ten identical uninspected peers. A deployment leaves a journal behind, and a journal is
+  # what makes a row stop reading as an untouched peer — correctly, and permanently for the
+  # life of this fixture runtime. Playwright runs this spec once per project against one
+  # server, so a spec that reused one row would have its second test looking at the first
+  # test's leftovers. A row each is the cheap, honest way out.
+  @peers 10
+
+  defp peers do
+    for index <- 1..@peers do
+      %{
+        "name" => "fixture-peer-#{String.pad_leading("#{index}", 2, "0")}",
+        "machine" => nil,
+        "os" => "linux",
+        "address" => "100.100.7.#{index}",
+        "online" => true,
+        "last_seen" => "2026-09-16T10:00:00Z",
+        "path" => "relayed",
+        "state" => "discovered_installation_unknown",
+        "action" => "deploy Ouroboros",
+        "name_conflicts_with_roster" => nil
+      }
+    end
+  end
+
+  defp inventory, do: %{@inventory | "devices" => @inventory["devices"] ++ peers()}
 
   @doc "Stands the fixture up. Called once, by the fixture runtime, after the app boots."
   @spec seed() :: {:ok, pid()}
@@ -142,6 +198,20 @@ defmodule Ouroboros.Test.BrowserFleet do
     File.mkdir_p!(fleet)
     File.write!(Path.join(fleet, "ca-key.pem"), "browser fixture; not a key\n")
     File.chmod!(Path.join(fleet, "ca-key.pem"), 0o600)
+
+    # Every journal this fixture wrote on a previous run, gone. The data directory outlives
+    # the server — Playwright keeps `_build/playwright-j2-data` between runs — and a journal
+    # is exactly the thing that makes a device's row stop offering Deploy. Left behind, the
+    # second run of this spec looks at the first run's leftovers and finds no button.
+    deploy = Path.join(data_dir, "deploy")
+
+    case File.ls(deploy) do
+      {:ok, names} ->
+        for name <- names, String.ends_with?(name, ".json"), do: File.rm(Path.join(deploy, name))
+
+      {:error, _absent} ->
+        :ok
+    end
 
     # `start/3`, not `start_link/3`. The fixture runtime script is a Mix task process that
     # finishes the moment it has seeded everything, and a linked fixture dies with it — which
@@ -184,6 +254,7 @@ defmodule Ouroboros.Test.BrowserFleet do
       serving: nil,
       next: nil,
       workers: [],
+      subject: nil,
       counter: 0
     }
 
@@ -191,7 +262,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
     ouro =
       FleetOuroFake.write!(bin,
-        devices: JSON.encode!(@inventory) <> "\n",
+        devices: JSON.encode!(inventory()) <> "\n",
         spawn_line: FleetWorkerFake.spawn_line(state.next),
         cap: cap
       )
@@ -226,22 +297,26 @@ defmodule Ouroboros.Test.BrowserFleet do
   @impl true
   # The script. Every frame the broker sends arrives here, and each one answers the next
   # thing a real deployment would ask for.
-  def handle_info({:fake_worker, %{"op" => "attach"}}, state) do
+  def handle_info({:fake_worker, %{"op" => "attach"} = frame}, state) do
     case attached_worker(state) do
       nil ->
         {:noreply, state}
 
       serving ->
-        state = %{state | serving: serving} |> warm()
+        state = %{state | serving: serving, subject: frame["subject"]} |> warm()
         FleetOuroFake.put_spawn_line!(state.bin, FleetWorkerFake.spawn_line(state.next))
+        journal(state, "deploying")
+
+        asked = request(state)
 
         FleetWorkerFake.challenge(serving, "fixture-host", "host_trust", %{
-          "peer" => "fixture-vps",
-          "address" => "100.100.0.44",
-          "port" => 22,
-          "user" => "deploy",
-          "algorithm" => "ssh-ed25519",
-          "sha256_fingerprint" => "SHA256:fixtureFingerprintNotARealHostKey"
+          "metadata" => %{
+            "address" => asked["address"],
+            "port" => asked["ssh_port"] || 22,
+            "algorithm" => "ssh-ed25519",
+            "sha256_fingerprint" => "SHA256:fixtureFingerprintNotARealHostKey",
+            "user" => asked["ssh_user"]
+          }
         })
 
         {:noreply, state}
@@ -251,11 +326,16 @@ defmodule Ouroboros.Test.BrowserFleet do
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-host"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_auth"})
 
+    asked = request(state)
+
     FleetWorkerFake.challenge(state.serving, "fixture-password", "password", %{
-      "user" => "deploy",
-      "host" => "100.100.0.44",
-      "attempt" => 1,
-      "attempts_allowed" => 3
+      "metadata" => %{
+        "target" => asked["address"],
+        "user" => asked["ssh_user"],
+        "port" => asked["ssh_port"] || 22,
+        "attempt" => 1,
+        "max_attempts" => 3
+      }
     })
 
     {:noreply, state}
@@ -265,8 +345,7 @@ defmodule Ouroboros.Test.BrowserFleet do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_review"})
 
     FleetWorkerFake.challenge(state.serving, "fixture-review", "review", %{
-      "plan" => @plan,
-      "plan_digest" => @digest
+      "metadata" => %{"plan" => plan(request(state)), "plan_digest" => @digest}
     })
 
     {:noreply, state}
@@ -274,36 +353,42 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-review"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "deploying"})
-    Process.send_after(self(), {:step, 0}, 120)
+    Process.send_after(self(), {:step, 0}, 90)
     {:noreply, state}
   end
 
+  # The engine's own step names and outcomes (`step_event` in
+  # tui/src/fleet_setup/engine.rs), including the `skipped` readiness it really records.
   def handle_info({:step, index}, state) do
-    steps = [
-      {"inspect", "reachable, and no Ouroboros installed"},
-      {"install", "0.1.8 verified against the official checksum"},
-      {"membership", "the roster on both machines now names the other"},
-      {"startup", "an Ouroboros-owned user service"},
-      {"connect", "the new member joined the cluster"},
-      {"readiness", "the runtime answered its own status"}
-    ]
+    machine = machine_of(request(state))
 
-    case Enum.at(steps, index) do
-      {name, detail} ->
+    case Enum.at(steps(machine), index) do
+      {machine, step, outcome, detail} ->
         FleetWorkerFake.emit(state.serving, %{
           "event" => "step",
-          "name" => name,
-          "outcome" => "ok",
+          "machine" => machine,
+          "step" => step,
+          "outcome" => outcome,
           "detail" => detail
         })
 
-        Process.send_after(self(), {:step, index + 1}, 120)
+        Process.send_after(self(), {:step, index + 1}, 90)
 
       nil ->
+        journal(state, "completed")
+
+        # `done_frame/1` in worker.rs: `ok`, a state, a one-line summary, the next thing to
+        # do, residue and what could not be established. There is no `ready` flag.
         FleetWorkerFake.emit(state.serving, %{
           "event" => "done",
+          "ok" => true,
           "state" => "completed",
-          "ready" => true
+          "summary" => "#{machine} joined this fleet",
+          "next" => "Configure a model on #{machine}, then run a test task.",
+          "residue" => [],
+          "unknown" => [
+            "#{machine}'s provider, model and workspace prerequisites — configure a model on #{machine}"
+          ]
         })
     end
 
@@ -323,6 +408,81 @@ defmodule Ouroboros.Test.BrowserFleet do
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # The durable record the real worker writes and this runtime reads when no worker is
+  # attached. Without one, `fleet.devices` lists no operations at all — and the row that a
+  # deployment has touched would go back to reading as an untouched peer the moment the
+  # drawer closed, which is the thing the page is supposed to stop doing.
+  defp journal(state, operation_state) do
+    with {:ok, id} <- File.read(FleetOuroFake.operation_file(state.bin)),
+         id = String.trim(id),
+         true <- id != "" do
+      asked = request(state)
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+      dir = Path.join(state.data_dir, "deploy")
+      File.mkdir_p!(dir)
+      File.chmod!(dir, 0o700)
+      path = Path.join(dir, id <> ".json")
+
+      File.write!(
+        path,
+        JSON.encode!(%{
+          "schema" => 1,
+          "operation" => id,
+          "owner" => state.subject,
+          "kind" => asked["kind"] || "add",
+          "state" => operation_state,
+          "created_at" => now,
+          "updated_at" => now,
+          "target" => %{
+            "machine" => machine_of(asked),
+            "address" => asked["address"],
+            "ssh_user" => asked["ssh_user"],
+            "port" => asked["ssh_port"] || 22
+          }
+        })
+      )
+
+      File.chmod!(path, 0o600)
+    else
+      _no_operation_yet -> :ok
+    end
+  end
+
+  defp steps(machine) do
+    [
+      {machine, "inspect", "ok", "reachable, and no Ouroboros installed"},
+      {machine, "install_binary", "started", nil},
+      {machine, "install_binary", "ok", "/usr/local/bin/ouro"},
+      {machine, "prepare", "ok", nil},
+      {machine, "issue", "ok", nil},
+      {machine, "install", "ok", nil},
+      {"fixture-studio", "roster", "ok", "revision 4"},
+      {machine, "roster", "ok", "revision 4"},
+      {machine, "service", "ok", "an Ouroboros-owned user service"},
+      {machine, "connect", "ok", nil},
+      {machine, "readiness", "skipped",
+       "provider, model and workspace prerequisites on the new member are unknown from here"}
+    ]
+  end
+
+  # What the broker asked for: the request file the fake `ouro` recorded before unlinking
+  # it. Every fact the fixture reports about "the target" comes from here rather than from a
+  # constant, so ten spare peers are ten different deployments and not ten readings of one.
+  defp request(state) do
+    case FleetOuroFake.request_body(state.bin) do
+      body when is_binary(body) ->
+        case JSON.decode(body) do
+          {:ok, decoded} when is_map(decoded) -> decoded
+          _unreadable -> %{}
+        end
+
+      _absent ->
+        %{}
+    end
+  end
+
+  defp machine_of(request), do: request["machine"] || request["address"] || "the target"
 
   # The newest worker that has an attachment and is not the one already being served. The
   # fake records the attachment while handling the very frame it forwarded here, so by the
