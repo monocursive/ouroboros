@@ -2974,3 +2974,195 @@ fn a_refused_action_always_says_so_on_a_row_that_is_on_the_page() {
     app.apply(key(KeyCode::Char('r')));
     assert!(ouro::ui::app::devices_hint_line(&app).contains("r refresh"));
 }
+
+/// A member this runtime is connected to says so, in its own state and its own line.
+///
+/// `ouro fleet devices` merges the roster with what the *network client* can see, which
+/// is not the runtime's answer to "is that machine here, now" — so a member whose runtime
+/// this one is connected to still read "in the fleet, not visible on this network"
+/// whenever the client could not see it. The broker merges the cluster's facts onto
+/// member rows and promotes the state; this is the row that draws it.
+#[test]
+fn a_connected_member_reads_as_connected_and_keeps_the_network_facts_separate() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["devices"] = json!([
+        {
+            "name": "build-linux", "machine": "build-linux", "os": "linux",
+            "address": "100.64.12.44",
+            // The network client cannot see it...
+            "online": false, "last_seen": "2026-09-17T07:50:00.1Z",
+            // ...and this runtime is talking to it.
+            "state": "fleet_member_connected",
+            "connected": true, "compatible": true, "runtime_running": true,
+            "last_probe": "2026-09-17T08:10:00Z",
+            "name_conflicts_with_roster": Value::Null
+        },
+        {
+            "name": "old-pi", "machine": "old-pi", "os": "linux",
+            "address": "100.64.12.10", "online": true, "last_seen": Value::Null,
+            "state": "fleet_member",
+            "connected": false, "compatible": Value::Null,
+            "runtime_running": Value::Null, "last_probe": Value::Null,
+            "name_conflicts_with_roster": Value::Null
+        },
+        {
+            // A peer that has never been in a fleet: this runtime knows nothing about it,
+            // and says nothing rather than reporting it as disconnected.
+            "name": "vps", "machine": Value::Null, "os": "linux",
+            "address": "100.64.12.99", "online": true, "last_seen": Value::Null,
+            "state": "discovered_installation_unknown",
+            "connected": Value::Null, "compatible": Value::Null,
+            "runtime_running": Value::Null, "last_probe": Value::Null,
+            "name_conflicts_with_roster": Value::Null
+        }
+    ]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    let drawn = screen(&mut app);
+    let text = flowed(&drawn);
+
+    // The state, in words, and the action a member gets.
+    assert!(
+        device_row(&drawn, "build-linux").contains("View device"),
+        "{:?}",
+        device_row(&drawn, "build-linux")
+    );
+    assert!(text.contains("connected now"), "{text}");
+    assert!(
+        !text.contains("not visible on this network"),
+        "a connected member still read as invisible:\n{text}"
+    );
+
+    // The runtime's facts, on their own line.
+    assert!(
+        text.contains("runtime connected \u{b7} compatible build \u{b7} runtime running \u{b7} probed 2026-09-17T08:10:00Z"),
+        "the live facts are not drawn:\n{text}"
+    );
+
+    // And the network's facts are still the network's: `online: false` is not overwritten
+    // by the runtime being connected, because those are two different questions.
+    assert!(
+        text.contains("offline, last seen 2026-09-17T07:50:00.1Z"),
+        "the network fact was replaced by the cluster's:\n{text}"
+    );
+
+    // A member this runtime is not connected to says that much and no more.
+    assert!(text.contains("runtime not connected"), "{text}");
+
+    // A non-member carries no runtime line at all — null is "not known", not "absent".
+    let vps = drawn
+        .rows
+        .iter()
+        .skip_while(|row| !row.contains("vps"))
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !vps.contains("runtime "),
+        "a device that has never been in a fleet was given cluster facts: {vps:?}"
+    );
+}
+
+/// A state string this build has never seen is a sentence, never a blank column.
+#[test]
+fn an_unreadable_state_is_named_rather_than_left_blank() {
+    let _mode = normal();
+
+    for (state, expected) in [
+        ("quantum_entangled", "quantum_entangled"),
+        ("", "reported no state"),
+    ] {
+        let mut reply = populated();
+        reply["devices"] = json!([{
+            "name": "mystery", "machine": Value::Null, "os": "linux",
+            "address": "100.64.12.50", "online": true, "last_seen": Value::Null,
+            "state": state, "name_conflicts_with_roster": Value::Null
+        }]);
+
+        let mut app = with_inventory(reply);
+        let _settled = drained(&mut app);
+        let text = prose(&mut app);
+
+        assert!(text.contains(expected), "{state:?}:\n{text}");
+
+        // The row is still a row, with its own fields drawn.
+        let drawn = screen(&mut app);
+        assert!(device_row(&drawn, "mystery").contains("Refresh or details"));
+        assert!(text.contains("100.64.12.50"), "{state:?}:\n{text}");
+    }
+}
+
+/// The server's own refusal speaks the same words the capability list does.
+///
+/// `deploy_blocked` carries `data.blockers` in exactly `capabilities.reasons`'
+/// vocabulary, and it is the authority: a blocker can appear between the inventory being
+/// read and the action being pressed, so the client-side gate passing means nothing by
+/// the time the call lands. It goes to the hint line like every other refusal.
+#[test]
+fn a_server_side_deploy_blocked_reads_as_the_same_blocker_the_list_would_name() {
+    let _mode = normal();
+
+    for (code, expected) in [
+        ("cleartext_web_bind", "credential entry is refused"),
+        (
+            "no_ca_key",
+            "does not hold the fleet's certificate authority key",
+        ),
+        ("no_data_dir", "serves no durable data directory"),
+    ] {
+        // The inventory says this host *can* deploy, so the client-side gate lets the
+        // call through and only the server refuses it.
+        let mut app = with_inventory(populated());
+        let _settled = drained(&mut app);
+
+        activate(&mut app, "build-linux");
+        for message in typed("deploy") {
+            app.apply(message);
+        }
+        focus_inspect(&mut app);
+        app.apply(key(KeyCode::Enter));
+
+        let calls = drained(&mut app);
+        refuse(
+            &mut app,
+            call_for(&calls, "fleet.deployment.prepare").tag.clone(),
+            ErrorCode::ScopeDenied,
+            Some(json!({ "reason": "deploy_blocked", "blockers": [code] })),
+        );
+
+        let hint = ouro::ui::app::devices_hint_line(&app);
+        assert!(hint.contains(expected), "{code}: {hint:?}");
+
+        // The form is gone: this is not a field to correct, it is the host saying no.
+        let text = prose(&mut app);
+        assert!(!text.contains("ssh username"), "{code}:\n{text}");
+        assert!(text.contains(expected), "{code}:\n{text}");
+    }
+
+    // A refusal naming a code this build predates is still a sentence, not an identifier.
+    let mut app = with_inventory(populated());
+    let _settled = drained(&mut app);
+    activate(&mut app, "build-linux");
+    for message in typed("deploy") {
+        app.apply(message);
+    }
+    focus_inspect(&mut app);
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    refuse(
+        &mut app,
+        call_for(&calls, "fleet.deployment.prepare").tag.clone(),
+        ErrorCode::ScopeDenied,
+        Some(json!({ "reason": "deploy_blocked", "blockers": ["a_reason_from_the_future"] })),
+    );
+
+    let hint = ouro::ui::app::devices_hint_line(&app);
+    assert!(hint.contains("a reason from the future"), "{hint:?}");
+    assert!(!hint.contains("a_reason_from_the_future"), "{hint:?}");
+}

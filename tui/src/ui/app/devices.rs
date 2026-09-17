@@ -226,26 +226,7 @@ impl DeploymentHost {
     /// unrecognised code is named rather than swallowed, because a runtime that grew a
     /// new blocker must not read as no blocker at all.
     pub fn blocker(&self) -> Option<String> {
-        self.reasons.first().map(|reason| match reason.as_str() {
-            "no_ca_key" => "This machine does not hold the fleet's certificate authority \
-                            key, so it can describe the fleet but cannot admit a member. \
-                            Open Devices on the machine that does."
-                .to_string(),
-            "ouro_path_unknown" => "This runtime cannot say where its own ouro executable \
-                                    is, so it has nothing to hand a deployment worker."
-                .to_string(),
-            "no_data_dir" => "This runtime serves no durable data directory, so a \
-                              deployment would have nowhere to keep its journal."
-                .to_string(),
-            "cleartext_web_bind" => "This runtime publishes its web endpoint on a \
-                                     non-loopback address with no TLS, so credential \
-                                     entry is refused on this deployment host."
-                .to_string(),
-            other => format!(
-                "This runtime reports the blocker {}.",
-                other.replace('_', " ")
-            ),
-        })
+        self.reasons.first().map(|reason| blocker_sentence(reason))
     }
 }
 
@@ -295,6 +276,16 @@ pub struct DeviceRow {
     pub last_seen: Option<String>,
     /// The snake_case state code. The words are [`DeviceRow::state_label`].
     pub state: String,
+    /// Whether *this runtime* is connected to that member's runtime. A different
+    /// question from `online`, which is what the network client can see, and the two
+    /// disagreeing is a real and useful thing to show rather than a contradiction to
+    /// resolve. `None` for every row that is not a member: discovery sees devices that
+    /// have never been in a fleet, and this runtime knows nothing about those.
+    pub connected: Option<bool>,
+    pub compatible: Option<bool>,
+    pub runtime_running: Option<bool>,
+    /// When the runtime last had an answer from that member.
+    pub last_probe: Option<String>,
     pub name_conflict: Option<String>,
 }
 
@@ -308,6 +299,10 @@ impl DeviceRow {
             online: value.get("online").and_then(Value::as_bool),
             last_seen: text(value.get("last_seen")),
             state: text(value.get("state")).unwrap_or_default(),
+            connected: value.get("connected").and_then(Value::as_bool),
+            compatible: value.get("compatible").and_then(Value::as_bool),
+            runtime_running: value.get("runtime_running").and_then(Value::as_bool),
+            last_probe: text(value.get("last_probe")),
             name_conflict: text(value.get("name_conflicts_with_roster")),
         }
     }
@@ -321,16 +316,73 @@ impl DeviceRow {
     /// rather than as a guess: the row is still a device, and inventing words for a
     /// state nothing here can reason about would be the honesty failure, not the gap.
     pub fn state_label(&self) -> String {
-        match self.parsed_state() {
-            Some(state) => state.label().to_string(),
-            None => format!("{} (a state this client does not know)", self.state),
+        if let Some(state) = self.parsed_state() {
+            return state.label().to_string();
         }
+
+        match self.state.as_str() {
+            // The broker's own promotion: a member whose runtime this one is connected to
+            // says so in its own state rather than being left on discovery's word, which
+            // called it "not visible on this network" whenever the network client could
+            // not see it. `DeviceState` has no variant for this — it is a fact about the
+            // cluster, and that enum is about the network — so the words live here, in the
+            // same house style as the ones it does own.
+            "fleet_member_connected" => "connected now".into(),
+            // Never a blank row. A state this client has no words for is still a device,
+            // and a row whose Ouroboros column is empty says nothing at all — including
+            // nothing about the fact that something is there this build cannot read.
+            "" => "this runtime reported no state for this device".into(),
+            other => format!("{other} (a state this client does not know)"),
+        }
+    }
+
+    /// The live facts, as a line — or `None` when this runtime knows none of them.
+    ///
+    /// Separate from [`DeviceRow::presence`] on purpose. That line is the *network's*
+    /// answer, from `online` and `last_seen`; this one is the *runtime's*, from the
+    /// cluster. A machine reachable over BEAM but invisible to the network client is a
+    /// different problem from one that is neither, and one line carrying both would make
+    /// those two look like the same row.
+    pub fn runtime_facts(&self) -> Option<String> {
+        let mut facts = Vec::new();
+
+        if let Some(connected) = self.connected {
+            facts.push(if connected {
+                "runtime connected".to_string()
+            } else {
+                "runtime not connected".to_string()
+            });
+        }
+
+        if let Some(compatible) = self.compatible {
+            facts.push(if compatible {
+                "compatible build".to_string()
+            } else {
+                "incompatible build".to_string()
+            });
+        }
+
+        if let Some(running) = self.runtime_running {
+            facts.push(if running {
+                "runtime running".to_string()
+            } else {
+                "runtime stopped".to_string()
+            });
+        }
+
+        if let Some(probe) = self.last_probe.as_deref() {
+            facts.push(format!("probed {probe}"));
+        }
+
+        (!facts.is_empty()).then(|| facts.join(" \u{b7} "))
     }
 
     /// Whether this row belongs under "Fleet devices" rather than "Available on this
     /// network". The same split `render_devices` makes for the CLI.
     pub fn in_fleet(&self) -> bool {
-        self.machine.is_some() || self.parsed_state() == Some(DeviceState::ThisDeviceWithoutProfile)
+        self.machine.is_some()
+            || self.parsed_state() == Some(DeviceState::ThisDeviceWithoutProfile)
+            || self.state == "fleet_member_connected"
     }
 
     /// Network presence with its observation time, in the CLI's words.
@@ -354,6 +406,9 @@ impl DeviceRow {
             Some(DeviceState::PeerOffline)
             | Some(DeviceState::UnsupportedPlatform)
             | Some(DeviceState::NoUsableIpv4) => Primary::Blocked,
+            // A member this runtime is talking to is a member: the same action as any
+            // other, and never the "nothing to do here" an unrecognised code would get.
+            None if self.state == "fleet_member_connected" => Primary::View,
             None => Primary::Blocked,
         }
     }
@@ -1732,7 +1787,16 @@ impl App {
                 Err(error) => {
                     let sentence =
                         devices_error_sentence(&error, "fleet.deployment.prepare", &self.hello);
-                    self.devices_form_error(&sentence);
+
+                    // A host that has become unable to deploy is not a bad form field: it
+                    // is the same refusal the list draws, and it goes where every other
+                    // refusal goes.
+                    if refusal_reason(&error).as_deref() == Some("deploy_blocked") {
+                        self.devices.connect = None;
+                        self.devices_refuse(sentence);
+                    } else {
+                        self.devices_form_error(&sentence);
+                    }
                 }
             },
             DevicesTag::Status { operation } => {
@@ -1790,10 +1854,18 @@ impl App {
                     return;
                 }
 
+                let blocked = result.as_ref().err().is_some_and(|error| {
+                    refusal_reason(error).as_deref() == Some("deploy_blocked")
+                });
+
                 let sentence = match result {
                     Ok(_accepted) => None,
                     Err(error) => Some(devices_error_sentence(&error, label, &self.hello)),
                 };
+
+                if let Some(sentence) = sentence.as_ref().filter(|_| blocked) {
+                    self.devices_refuse(sentence.clone());
+                }
 
                 if let Some(current) = self.devices.operation.as_mut() {
                     current.submitting = false;
@@ -1847,7 +1919,7 @@ impl App {
                         current.error = Some(sentence.clone());
                     }
 
-                    self.devices.notice = Some(sentence);
+                    self.devices_refuse(sentence);
                 }
             },
         }
@@ -3009,6 +3081,13 @@ const NAME_COLUMNS: usize = 28;
 /// How many columns a device's other fields may occupy. Also a device's choice.
 const ROW_FIELD_COLUMNS: usize = 44;
 
+/// How many columns a line this build composed may occupy.
+///
+/// Wider, because the words are this client's: a remote string inside one has already
+/// been bounded on the way in, and holding the whole sentence to a hostile name's budget
+/// only truncates the part that says what is going on.
+const OWN_WORDS_COLUMNS: usize = 96;
+
 fn row_lines(
     app: &App,
     inventory: &Inventory,
@@ -3059,15 +3138,39 @@ fn row_lines(
         ),
     ]));
 
-    for (label, value) in [
-        ("address", row.address.clone().unwrap_or_else(unknown)),
-        ("platform", row.os.clone().unwrap_or_else(unknown)),
-        ("network", row.presence()),
-        ("ouroboros", row.state_label()),
-    ] {
+    // Two budgets, because there are two kinds of value here. `address` and `platform`
+    // are a *device's* strings and are held short; the rest are sentences this build
+    // composed out of its own words, where the only remote part — a timestamp, a state
+    // code — was already bounded on the way in. Holding those to a device's budget cut
+    // "runtime connected · compatible build · runtime running · probed …" in half and
+    // lost the facts the line exists to show.
+    let mut fields = vec![
+        (
+            "address",
+            row.address.clone().unwrap_or_else(unknown),
+            ROW_FIELD_COLUMNS,
+        ),
+        (
+            "platform",
+            row.os.clone().unwrap_or_else(unknown),
+            ROW_FIELD_COLUMNS,
+        ),
+        // The network's answer, and only the network's.
+        ("network", row.presence(), OWN_WORDS_COLUMNS),
+    ];
+
+    // The runtime's answer, drawn beside it rather than folded into it, and only for the
+    // rows this runtime knows anything about.
+    if let Some(facts) = row.runtime_facts() {
+        fields.push(("runtime", facts, OWN_WORDS_COLUMNS));
+    }
+
+    fields.push(("ouroboros", row.state_label(), OWN_WORDS_COLUMNS));
+
+    for (label, value, columns) in fields {
         lines.push(Line::from(vec![
             Span::styled(format!("      {label:<12}"), theme::label()),
-            Span::styled(scrub(&value, ROW_FIELD_COLUMNS), Style::default()),
+            Span::styled(scrub(&value, columns), Style::default()),
         ]));
     }
 
@@ -4021,6 +4124,12 @@ fn devices_error_sentence(error: &ClientError, method: &str, hello: &Hello) -> S
             let reason = refusal_reason(error);
 
             match reason.as_deref() {
+                // The server checked the same list this client draws from, and it is the
+                // authority: a blocker can appear between the inventory being read and
+                // the action being pressed.
+                Some("deploy_blocked") => refusal_blockers(error).unwrap_or_else(|| {
+                    "This host cannot deploy right now; press r to read why.".into()
+                }),
                 Some(reason) => format!("{method} was refused: {}", reason_sentence(reason)),
                 None => match rpc.code {
                     ErrorCode::MethodNotFound => {
@@ -4049,6 +4158,49 @@ fn devices_error_sentence(error: &ClientError, method: &str, hello: &Hello) -> S
         }
         other => format!("{method} could not be sent: {}", clean(&other.to_string())),
     }
+}
+
+/// One blocker code, in words.
+///
+/// The single vocabulary for both places the codes arrive: `fleet.devices`'s
+/// `capabilities.reasons`, which says in advance what this host cannot do, and a
+/// `deploy_blocked` refusal, which says the same thing at the moment something is
+/// attempted. Two lists of sentences for one list of codes would be two lists to keep in
+/// step, and the operator would be told different things about one fact depending on
+/// whether they had pressed anything yet.
+pub fn blocker_sentence(reason: &str) -> String {
+    match reason {
+        "no_ca_key" => "This machine does not hold the fleet's certificate authority key, \
+                        so it can describe the fleet but cannot admit a member. Open \
+                        Devices on the machine that does."
+            .into(),
+        "ouro_path_unknown" => "This runtime cannot say where its own ouro executable is, \
+                                so it has nothing to hand a deployment worker."
+            .into(),
+        "no_data_dir" => "This runtime serves no durable data directory, so a deployment \
+                          would have nowhere to keep its journal."
+            .into(),
+        "cleartext_web_bind" => "This runtime publishes its web endpoint on a non-loopback \
+                                 address with no TLS, so credential entry is refused on \
+                                 this deployment host."
+            .into(),
+        other => format!(
+            "This runtime reports the blocker {}.",
+            other.replace('_', " ")
+        ),
+    }
+}
+
+/// The blockers a `deploy_blocked` refusal names, in words.
+fn refusal_blockers(error: &ClientError) -> Option<String> {
+    let ClientError::Rpc(rpc) = error else {
+        return None;
+    };
+
+    let blockers = rpc.data.as_ref()?.get("blockers")?.as_array()?;
+    let first = blockers.iter().find_map(Value::as_str)?;
+
+    Some(blocker_sentence(first))
 }
 
 /// The broker's stable reason codes, as sentences. An unrecognised code is printed as
@@ -4082,6 +4234,9 @@ fn reason_sentence(reason: &str) -> String {
         "operation_not_yours" => "this operation belongs to another identity, and taking \
                                   it over is a decision to make out loud."
             .into(),
+        // Named here too so the code never reaches the fallback; the sentence a caller
+        // actually draws comes from `refusal_blockers`, which has the list.
+        "deploy_blocked" => "this host cannot deploy right now.".into(),
         "no_worker" => "no worker is attached to this operation; read its status, then \
                         continue it."
             .into(),

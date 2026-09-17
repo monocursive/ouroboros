@@ -2637,6 +2637,21 @@ fallback) and draws what comes back. The permanent header `Deploying from <host>
 user <account>` is on every screen of the flow, because a credential typed into the wrong
 host's prompt is the failure the header exists to prevent.
 
+**Two sources, kept apart.** `fleet.devices` merges this machine's roster with what the
+network client can see, and neither is the runtime's own answer to "is that machine here,
+now" — so a member whose runtime this one is connected to read "in the fleet, not visible
+on this network" whenever the client could not see it. Member rows now carry `connected`,
+`compatible`, `runtime_running` and `last_probe` from the cluster, and their `state`
+becomes `fleet_member_connected`, which the row draws as **connected now · View device**.
+The `network` line stays the network's answer (`online`, `last_seen`); a separate
+`runtime` line carries the cluster's ("runtime connected · compatible build · probed
+‹time›"). A row where the two disagree is a real and useful thing to show — a machine
+reachable over BEAM but invisible to the network client is a different problem from one
+that is neither — and `null` throughout means "not known", so a device that has never
+been in a fleet carries no runtime line at all rather than reading as disconnected. A
+state string this build has no words for is named in a sentence; the column is never
+blank.
+
 **The inventory** is two sections — *Fleet devices* and *Available on this network* —
 merged by `ouro fleet devices --json` on the deployment host and rendered here with the
 state in words rather than codes: `DeviceState::label()` is the one place those words
@@ -2743,7 +2758,11 @@ here** rather than carrying a label the gate will refuse.
 **Nothing is refused in silence.** Every refused Enter writes its sentence to the hint
 line, which is the one row always on the page: the notice at the foot of the inventory
 is below the fold on a real screen, so a refusal that went only there was a keypress that
-visibly did nothing.
+visibly did nothing. That includes the server's own `deploy_blocked` (`-32003` with
+`data.blockers`), which is the authority — a blocker can appear between the inventory
+being read and the action being pressed — and whose codes are `capabilities.reasons`'
+codes, rendered by the one `blocker_sentence` both paths share so the same fact is never
+described two ways.
 
 **Screen-reader mode** numbers the rows and the menu answers and *answers to those
 numbers* — host trust, the takeover question, the review and the connect form each route
