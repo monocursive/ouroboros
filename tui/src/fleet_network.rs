@@ -31,6 +31,24 @@
 //! direct path; anything else reads as `unknown` until a probe says otherwise.
 //! `fleet doctor --peer` is that probe, and it reports what `tailscale ping` printed.
 //!
+//! ## Everything a peer says is hostile text
+//!
+//! A hostname, a MagicDNS label, an OS string and a last-seen time are all written by the
+//! device that reports them, and they land in a terminal. Unsanitized, a hostname carrying
+//! newlines and the right indentation forges a whole extra row reading `fleet_member`, an
+//! ESC sequence clears the screen or repositions the cursor over what was already printed,
+//! a bidi override reverses a name, and a four-thousand character name scrolls the real
+//! rows away. [`human`] is the single funnel every peer-derived string passes through on
+//! the way to a person: controls and bidi overrides are removed, whitespace is collapsed
+//! to single spaces, and the result is truncated to a column budget. The JSON forms keep
+//! the raw values, because `serde_json` escapes them and a machine reader wants what the
+//! client actually said.
+//!
+//! Anything derived from the client's own output also passes through [`redact_urls`]. The
+//! Tailscale CLI prints `To authenticate, visit: https://login.tailscale.com/a/<secret>`
+//! on stderr when a node key has expired, and that URL is a credential: whoever opens it
+//! adds a device to the tailnet. It is replaced before it is ever stored.
+//!
 //! ## Bounds
 //!
 //! Every invocation is a fixed argument array, a five second deadline, at most 4 MiB of
@@ -43,6 +61,7 @@ use std::ffi::OsStr;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -114,9 +133,15 @@ fn locate_client_with(
 ) -> Option<Client> {
     if let Some(named) = override_path.filter(|value| !value.is_empty()) {
         let path = PathBuf::from(named);
-        // A rejected override is not a silent fall through to another program: an
-        // operator who named a client meant that one.
-        return executable(&path).then_some(Client {
+        // Absolute, for the reason `ouro wasm` requires it of its helper: a relative name
+        // would make the working directory decide which program runs, so a `tailscale`
+        // dropped into a repository an operator happens to be standing in would be
+        // executed as this machine's network client.
+        //
+        // A rejected override is not a silent fall through to another program either: an
+        // operator who named a client meant that one, and running a different one under
+        // their instruction is worse than running none.
+        return (path.is_absolute() && executable(&path)).then_some(Client {
             program: path,
             source: ClientSource::Environment,
         });
@@ -189,6 +214,39 @@ impl RunError {
     }
 }
 
+/// How long the stderr drain may keep the command waiting once the child itself has
+/// exited. A grandchild that inherited the pipe and is still holding it open — a
+/// backgrounded `sleep`, a wrapper's helper — must not turn a complete, correct answer on
+/// stdout into a five second timeout. What has been read by then is what is reported.
+const STDERR_GRACE: Duration = Duration::from_millis(250);
+
+/// The stderr drain's handle, which aborts rather than detaches when it is dropped.
+///
+/// A detached task would keep the read end of a pipe open for as long as whatever
+/// inherited the write end lives, which is exactly the orphan this guard exists to avoid.
+struct Drain(Option<tokio::task::JoinHandle<()>>);
+
+impl Drain {
+    /// Gives the drain `grace` to finish on its own; aborts it if it does not. Either way
+    /// the bytes it has already put in the shared buffer are kept.
+    async fn finish(mut self, grace: Duration) {
+        let Some(handle) = self.0.as_mut() else {
+            return;
+        };
+        if tokio::time::timeout(grace, handle).await.is_ok() {
+            self.0 = None;
+        }
+    }
+}
+
+impl Drop for Drain {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// Runs the client with a fixed argument array under the deadline and the output bound.
 ///
 /// `kill_on_drop` is what makes this cancellation-safe: if the caller's future is
@@ -211,18 +269,28 @@ async fn run(program: &Path, args: &[&str], timeout: Duration) -> Result<Capture
     // document to stdout cannot deadlock against a full pipe buffer. Past the bound it
     // is discarded rather than left unread: stderr is only ever a first line and a
     // permission marker here, and a child blocked writing to it would never exit.
-    let noise = tokio::spawn(async move {
-        let mut captured = Vec::new();
-        let _ = (&mut stderr)
-            .take(MAX_OUTPUT as u64)
-            .read_to_end(&mut captured)
-            .await;
-        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-        captured
-    });
+    //
+    // The bytes go into a shared buffer rather than the task's return value, so the ones
+    // already read survive a drain that has to be abandoned — see `Drain::finish`.
+    let noise = Arc::new(Mutex::new(Vec::new()));
+    let filling = Arc::clone(&noise);
+    let drain = Drain(Some(tokio::spawn(async move {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let mut held = filling.lock().expect("an uncontended stderr buffer");
+                    let room = MAX_OUTPUT.saturating_sub(held.len());
+                    held.extend_from_slice(&chunk[..read.min(room)]);
+                }
+            }
+        }
+    })));
 
     // The whole read owns the child, so dropping this future — a deadline, a cancelled
-    // operator, a refusal below — drops the child and `kill_on_drop` signals it.
+    // operator, a refusal below — drops the child and `kill_on_drop` signals it, and
+    // drops `Drain`, which aborts the stderr task rather than detaching it.
     let collected = tokio::time::timeout(timeout, async move {
         let mut out = Vec::new();
         let mut bounded = stdout.take(MAX_OUTPUT as u64 + 1);
@@ -231,10 +299,11 @@ async fn run(program: &Path, args: &[&str], timeout: Duration) -> Result<Capture
             return Err(RunError::TooMuchOutput);
         }
         let status = child.wait().await.map_err(RunError::Io)?;
+        drain.finish(STDERR_GRACE).await;
         Ok(Captured {
             status: status.code(),
             stdout: out,
-            stderr: noise.await.unwrap_or_default(),
+            stderr: noise.lock().expect("an uncontended stderr buffer").clone(),
         })
     })
     .await;
@@ -737,13 +806,115 @@ fn trimmed(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+// --------------------------------------------------------------- hostile text, made safe
+
+/// The widest a single peer-derived field may print. Wide enough for a real MagicDNS name
+/// on a narrow terminal, narrow enough that a four-thousand character hostname cannot
+/// scroll the rows above it out of the scrollback.
+pub const FIELD_COLUMNS: usize = 72;
+
+/// How much of a client's own message may reach a person. Longer than a field because it
+/// is a sentence rather than a name, and still bounded, because it is text a program this
+/// one did not write chose to print.
+pub const MESSAGE_COLUMNS: usize = 300;
+
+/// What is left of `text` once it cannot move a cursor, repaint a screen, reverse itself,
+/// or forge a line.
+///
+/// Removed: C0 and C1 controls including ESC, DEL, and the newlines and tabs that would
+/// otherwise let one field draw several rows; the Unicode bidi overrides and isolates
+/// (U+200E/U+200F, U+202A–U+202E, U+2066–U+2069), which reverse a name's apparent spelling
+/// without changing its bytes. Runs of whitespace collapse to one space. The result is cut
+/// to `columns` display columns — measured in columns rather than characters, because the
+/// budget exists to protect a terminal's layout and a CJK name is two columns per glyph.
+pub fn human(text: &str, columns: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut out = String::new();
+    let mut width = 0;
+    let mut space_pending = false;
+    let mut truncated = false;
+
+    for character in text.chars() {
+        let removed = character.is_control()
+            || ('\u{80}'..='\u{9f}').contains(&character)
+            || matches!(character, '\u{200e}' | '\u{200f}')
+            || ('\u{202a}'..='\u{202e}').contains(&character)
+            || ('\u{2066}'..='\u{2069}').contains(&character);
+        if removed || character.is_whitespace() {
+            // A removed control collapses like the whitespace around it rather than
+            // joining two halves of a forged word together.
+            space_pending = !out.is_empty();
+            continue;
+        }
+        let character_width = character.width().unwrap_or(0);
+        let separator = usize::from(space_pending);
+        // One column is kept for the ellipsis so the cut is visible rather than silent.
+        if width + separator + character_width > columns.saturating_sub(1) {
+            truncated = true;
+            break;
+        }
+        if space_pending {
+            out.push(' ');
+            width += 1;
+            space_pending = false;
+        }
+        out.push(character);
+        width += character_width;
+    }
+
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+/// Replaces every `http://` or `https://` run with a placeholder.
+///
+/// `tailscale` prints `To authenticate, visit: https://login.tailscale.com/a/<secret>` on
+/// stderr when a node key has expired, and `ouro fleet devices` would otherwise copy it
+/// into a JSON document an operator pastes into a ticket. That URL is a bearer credential:
+/// whoever opens it joins a device to the tailnet. Nothing derived from the client's own
+/// output is stored before it passes through here.
+pub fn redact_urls(text: &str) -> String {
+    const PLACEHOLDER: &str = "<redacted url>";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.to_ascii_lowercase().find("http") {
+        let tail = &rest[start..];
+        let scheme = ["https://", "http://"].iter().find(|scheme| {
+            tail.len() >= scheme.len() && tail[..scheme.len()].eq_ignore_ascii_case(scheme)
+        });
+        let Some(scheme) = scheme else {
+            // A bare "http" that is not the start of a URL: keep it and move past it.
+            out.push_str(&rest[..start + 4]);
+            rest = &rest[start + 4..];
+            continue;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(PLACEHOLDER);
+        // A URL ends at the first character that cannot be inside one.
+        let end = tail[scheme.len()..]
+            .find(|character: char| character.is_whitespace() || character.is_control())
+            .map_or(tail.len(), |offset| scheme.len() + offset);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The first non-empty line of a program's output, redacted and bounded.
+///
+/// Every path that stores something the client printed goes through here, so the
+/// redaction and the length bound are properties of the funnel rather than of each
+/// caller's memory.
 fn first_line(text: &str) -> String {
     let line = text
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("no output");
-    line.chars().take(300).collect()
+    human(&redact_urls(line), MESSAGE_COLUMNS)
 }
 
 // -------------------------------------------------------------------- the device route
@@ -758,6 +929,10 @@ pub enum RouteCode {
     Unknown,
     /// The name or address given does not match a device this client can see.
     PeerUnknown,
+    /// The name given matches more than one visible device. The real tailnet this was
+    /// built against has a peer literally named `localhost`, so this is not a corner:
+    /// picking one silently would probe whichever the map iterated first.
+    PeerAmbiguous,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -770,42 +945,96 @@ pub struct RouteProbe {
     pub detail: String,
 }
 
+/// What an operator's `--peer` resolved to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PeerResolution {
+    /// Exactly one device, and the address the client reported for it.
+    One(Ipv4Addr),
+    /// More than one visible device answers to that name.
+    Ambiguous(Vec<Ipv4Addr>),
+    /// Nothing visible answers to it.
+    None,
+}
+
 /// Resolves an operator's `--peer` to one visible device's IPv4 address.
 ///
-/// Accepts the device's hostname, its MagicDNS name or first label, or the address
-/// itself. Matching is on the client's own reported fields; no address shape is assumed.
-pub fn resolve_peer(inventory: &Inventory, peer: &str) -> Option<Ipv4Addr> {
+/// The order matters. A name that is in this machine's roster is resolved through *the
+/// profile* — the address the operator themselves bound with `fleet create` or
+/// `fleet members add` — before anything a peer said is consulted. Otherwise a tailnet
+/// device that sets its own hostname to a roster machine's name would capture the probe:
+/// `doctor --peer attic` would report the impostor reachable and call the fleet healthy.
+///
+/// After that, a literal address must be one the client actually reported, and a name is
+/// matched against the MagicDNS name (which the coordination server assigns and keeps
+/// unique) and the device's own hostname (which it does not). A name that matches more
+/// than one device is ambiguous rather than silently first-wins.
+pub fn resolve_peer(summary: &Summary, inventory: &Inventory, peer: &str) -> PeerResolution {
     let wanted = peer.trim().trim_end_matches('.').to_ascii_lowercase();
     if wanted.is_empty() {
-        return None;
+        return PeerResolution::None;
     }
-    if let Ok(address) = wanted.parse::<Ipv4Addr>() {
-        return inventory
-            .peers
+
+    let devices = || inventory.peers.iter().chain(inventory.self_device.iter());
+
+    // 1. The operator's own roster, by machine name.
+    if let Some(member) = summary.profile.as_ref().and_then(|profile| {
+        profile
+            .members
             .iter()
-            .chain(inventory.self_device.iter())
-            .any(|device| device.ipv4 == Some(address))
-            .then_some(address);
+            .find(|member| member.machine.trim().to_ascii_lowercase() == wanted)
+    }) {
+        let host = member
+            .host
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let matched: Vec<Ipv4Addr> = devices()
+            .filter(|device| matches_member(device, &host))
+            .filter_map(|device| device.ipv4)
+            .collect();
+        return match matched.as_slice() {
+            [address] => PeerResolution::One(*address),
+            [] => PeerResolution::None,
+            _several => PeerResolution::Ambiguous(matched),
+        };
     }
-    inventory
-        .peers
-        .iter()
-        .chain(inventory.self_device.iter())
-        .find(|device| {
-            [
-                device.host_name.clone(),
-                device.dns_name.clone(),
-                device
-                    .dns_name
-                    .as_deref()
-                    .and_then(|name| name.split('.').next())
-                    .map(str::to_string),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|candidate| candidate.trim().to_ascii_lowercase() == wanted)
-        })
-        .and_then(|device| device.ipv4)
+
+    // 2. A literal address the client reported for some visible device.
+    if let Ok(address) = wanted.parse::<Ipv4Addr>() {
+        return if devices().any(|device| device.ipv4 == Some(address)) {
+            PeerResolution::One(address)
+        } else {
+            PeerResolution::None
+        };
+    }
+
+    // 3. A name a visible device answers to.
+    let matched: Vec<Ipv4Addr> = devices()
+        .filter(|device| device_answers_to(device, &wanted))
+        .filter_map(|device| device.ipv4)
+        .collect();
+    match matched.as_slice() {
+        [address] => PeerResolution::One(*address),
+        [] => PeerResolution::None,
+        _several => PeerResolution::Ambiguous(matched),
+    }
+}
+
+/// Whether a visible device answers to `wanted`, which is already lowercased and has no
+/// trailing dot.
+fn device_answers_to(device: &Device, wanted: &str) -> bool {
+    [
+        device.host_name.clone(),
+        device.dns_name.clone(),
+        device
+            .dns_name
+            .as_deref()
+            .and_then(|name| name.split('.').next())
+            .map(str::to_string),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| candidate.trim().to_ascii_lowercase() == wanted)
 }
 
 /// One bounded overlay probe of one operator-selected device.
@@ -813,7 +1042,7 @@ pub fn resolve_peer(inventory: &Inventory, peer: &str) -> Option<Ipv4Addr> {
 /// An overlay ping establishes that the two clients can exchange packets. It does not
 /// establish that the distribution ports are open, which is why this is a separate
 /// `doctor` layer from the runtime's own connectivity check.
-pub async fn probe_route(inventory: &Inventory, peer: &str) -> RouteProbe {
+pub async fn probe_route(summary: &Summary, inventory: &Inventory, peer: &str) -> RouteProbe {
     let unknown = |code: RouteCode, address, detail: String| RouteProbe {
         code,
         peer: peer.to_string(),
@@ -822,21 +1051,45 @@ pub async fn probe_route(inventory: &Inventory, peer: &str) -> RouteProbe {
         detail,
     };
 
+    // Resolution happens before the client is even located, so a name that resolves to
+    // nothing costs no invocation at all. An address is probed only when this machine's
+    // client reported it for a device, or when it is the address the operator themselves
+    // bound for a roster member: a dotted quad typed on the command line is never sent to
+    // the network on the strength of being well formed.
+    let address = match resolve_peer(summary, inventory, peer) {
+        PeerResolution::One(address) => address,
+        PeerResolution::Ambiguous(candidates) => {
+            let listed = candidates
+                .iter()
+                .map(Ipv4Addr::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return unknown(
+                RouteCode::PeerAmbiguous,
+                None,
+                format!(
+                    "`{peer}` matches more than one visible device ({listed}); name the \
+                     one you mean by its private address"
+                ),
+            );
+        }
+        PeerResolution::None => {
+            return unknown(
+                RouteCode::PeerUnknown,
+                None,
+                format!(
+                    "`{peer}` does not match a device this machine's Tailscale client can \
+                     see; run `ouro fleet devices` for the visible list"
+                ),
+            )
+        }
+    };
+
     let Some(client) = locate_client() else {
         return unknown(
             RouteCode::Unknown,
-            None,
+            Some(address),
             "no Tailscale client is installed to probe the route with".into(),
-        );
-    };
-    let Some(address) = resolve_peer(inventory, peer) else {
-        return unknown(
-            RouteCode::PeerUnknown,
-            None,
-            format!(
-                "`{peer}` does not match a device this machine's Tailscale client can \
-                 see; run `ouro fleet devices` for the visible list"
-            ),
         );
     };
 
@@ -879,12 +1132,15 @@ pub async fn probe_route(inventory: &Inventory, peer: &str) -> RouteProbe {
 /// here, because every reachable device on the capture network had a direct path. An
 /// unrecognised line is `unknown`, not a guess.
 fn read_ping(stdout: &str, status: Option<i32>) -> RouteProbe {
+    // The same funnel the client's stderr goes through: bounded, and with any URL
+    // removed. `tailscale ping` prints an authentication URL here when the node key has
+    // expired, and an unbounded line is an unbounded line wherever it came from.
     let line = stdout
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .to_string();
+        .map(|line| human(&redact_urls(line), MESSAGE_COLUMNS))
+        .unwrap_or_default();
 
     let mut probe = RouteProbe {
         code: RouteCode::Unknown,
@@ -907,7 +1163,7 @@ fn read_ping(stdout: &str, status: Option<i32>) -> RouteProbe {
         probe.code = RouteCode::TimedOut;
         return probe;
     }
-    if status == Some(0) {
+    if status == Some(0) && !line.is_empty() {
         probe.detail =
             format!("the Tailscale client answered something this build cannot read: {line}");
     }
@@ -986,9 +1242,24 @@ impl DeviceState {
             Self::FleetMember => "view device",
             Self::FleetMemberNotVisible => "diagnose",
             Self::DiscoveredInstallationUnknown => "deploy Ouroboros",
-            Self::PeerOffline => "refresh or inspect details",
-            Self::UnsupportedPlatform => "no supported Ouroboros release",
-            Self::NoUsableIpv4 => "no usable private IPv4 address",
+            Self::PeerOffline => "refresh or inspect",
+            Self::UnsupportedPlatform => "nothing to deploy",
+            Self::NoUsableIpv4 => "nothing to deploy",
+        }
+    }
+
+    /// The same state as a person reads it. The snake_case identifier is the `--json`
+    /// contract and belongs there; a column in a terminal is prose.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ThisDevice => "this machine, set up",
+            Self::ThisDeviceWithoutProfile => "this machine, not set up here",
+            Self::FleetMember => "in this machine's fleet",
+            Self::FleetMemberNotVisible => "in the fleet, not visible on this network",
+            Self::DiscoveredInstallationUnknown => "not inspected yet",
+            Self::PeerOffline => "offline, not inspected",
+            Self::UnsupportedPlatform => "no supported release for this platform",
+            Self::NoUsableIpv4 => "no private IPv4 address the fleet can use",
         }
     }
 }
@@ -1018,6 +1289,12 @@ pub struct DeviceRow {
     pub path: PathObservation,
     pub state: DeviceState,
     pub action: &'static str,
+    /// Set when a visible device calls itself by a roster machine's name while *not*
+    /// being that member's advertised address. Naming it is the whole point: a device
+    /// that adopts a member's name is either a mistake worth fixing or an attempt to be
+    /// mistaken for it, and silently listing it as an ordinary peer says neither.
+    #[serde(rename = "name_conflicts_with_roster")]
+    pub name_conflict: Option<String>,
 }
 
 /// Merges this machine's roster with the visible peers.
@@ -1050,7 +1327,10 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
         }),
         online: inventory.code.answered().then_some(true),
         last_seen: None,
-        path: PathObservation::Direct,
+        // This machine's path to itself is whatever the client observed, and `unknown`
+        // when there is no client to have observed anything. A hardcoded `direct` would
+        // be a claim about a network this row has not looked at.
+        path: self_device.map_or(PathObservation::Unknown, |device| device.path),
         state: if profile.is_some() {
             DeviceState::ThisDevice
         } else {
@@ -1061,6 +1341,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
         } else {
             DeviceState::ThisDeviceWithoutProfile.action()
         },
+        name_conflict: None,
     };
     rows.push(self_row);
 
@@ -1076,7 +1357,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
             .peers
             .iter()
             .enumerate()
-            .find(|(_index, peer)| matches_member(peer, &member.host, &member.machine));
+            .find(|(_index, peer)| matches_member(peer, &member.host));
         if let Some((index, peer)) = matched {
             claimed.push(index);
             rows.push(DeviceRow {
@@ -1089,6 +1370,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
                 path: peer.path,
                 state: DeviceState::FleetMember,
                 action: DeviceState::FleetMember.action(),
+                name_conflict: None,
             });
         } else {
             rows.push(DeviceRow {
@@ -1101,6 +1383,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
                 path: PathObservation::Unknown,
                 state: DeviceState::FleetMemberNotVisible,
                 action: DeviceState::FleetMemberNotVisible.action(),
+                name_conflict: None,
             });
         }
     }
@@ -1132,19 +1415,43 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
             path: peer.path,
             state,
             action: state.action(),
+            name_conflict: roster_name_collision(profile, peer),
         });
     }
 
     rows
 }
 
+/// The roster machine name a visible device is calling itself by, when it is not that
+/// member's advertised address.
+fn roster_name_collision(profile: Option<&fleet::Profile>, peer: &Device) -> Option<String> {
+    let claimed = peer
+        .host_name
+        .as_deref()
+        .map(|name| name.trim().to_ascii_lowercase())?;
+    profile?
+        .members
+        .iter()
+        .find(|member| member.machine.trim().to_ascii_lowercase() == claimed)
+        .map(|member| member.machine.clone())
+}
+
 /// Whether a visible peer is the roster member that advertises `host`.
 ///
-/// The roster's host is an address or a private DNS name the operator chose. It is
-/// compared against the peer's own reported fields — never against an address prefix.
-fn matches_member(peer: &Device, host: &str, machine: &str) -> bool {
+/// Only the advertised host decides — the address or private DNS name the operator bound
+/// with `fleet create` or `fleet members add`. It is compared against the peer's IPv4
+/// address and its MagicDNS name, both of which the coordination server assigns and keeps
+/// unique within a network.
+///
+/// The peer's *hostname* is deliberately not consulted. A hostname is whatever the device
+/// says it is, it is not unique, and matching on it let any tailnet device claim a roster
+/// row by renaming itself: the row would then show the impostor's platform, presence and
+/// connection path against the real member's address, the impostor would vanish from the
+/// available list, and `doctor --peer <member>` would report it reachable. A device that
+/// adopts a member's name is surfaced by [`roster_name_collision`] instead, as the
+/// separate device it is.
+fn matches_member(peer: &Device, host: &str) -> bool {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    let machine = machine.trim().to_ascii_lowercase();
     if host.is_empty() {
         return false;
     }
@@ -1155,22 +1462,34 @@ fn matches_member(peer: &Device, host: &str, machine: &str) -> bool {
             .as_deref()
             .and_then(|name| name.split('.').next())
             .map(str::to_string),
-        peer.host_name.clone(),
     ];
-    candidates.into_iter().flatten().any(|candidate| {
-        let candidate = candidate.trim().to_ascii_lowercase();
-        candidate == host || (!machine.is_empty() && candidate == machine)
-    })
+    candidates
+        .into_iter()
+        .flatten()
+        .any(|candidate| candidate.trim().to_ascii_lowercase() == host)
 }
 
 // ----------------------------------------------------------------------------- rendering
 
-fn or_unknown(value: Option<&str>) -> &str {
-    value.unwrap_or("unknown")
+/// A peer-derived optional field, made safe for a terminal, or the word `unknown`.
+///
+/// Every human-path field goes through this rather than through `unwrap_or`, so adding a
+/// column cannot accidentally add an unsanitized one.
+fn or_unknown(value: Option<&str>) -> String {
+    match value {
+        Some(value) => human(value, FIELD_COLUMNS),
+        None => "unknown".into(),
+    }
 }
 
 fn presence(row: &DeviceRow) -> String {
-    match (row.online, row.last_seen.as_deref()) {
+    // `LastSeen` is a string the peer's client put in a JSON document; it is no more
+    // trustworthy than a hostname and is bounded and stripped the same way.
+    let seen = row
+        .last_seen
+        .as_deref()
+        .map(|seen| human(seen, FIELD_COLUMNS));
+    match (row.online, seen) {
         (Some(true), _connected) => "online now".into(),
         (Some(false), Some(seen)) => format!("offline, last seen {seen}"),
         (Some(false), None) => "offline".into(),
@@ -1205,7 +1524,8 @@ pub fn render_devices(summary: &Summary, inventory: &Inventory) -> String {
         .collect();
     if available.is_empty() {
         match &inventory.detail {
-            Some(detail) => text.push_str(&format!("  {detail}\n")),
+            // `detail` can carry a line the client printed, so it is bounded here too.
+            Some(detail) => text.push_str(&format!("  {}\n", human(detail, MESSAGE_COLUMNS))),
             None => text.push_str("  (none)\n"),
         }
     }
@@ -1220,19 +1540,28 @@ pub fn render_devices(summary: &Summary, inventory: &Inventory) -> String {
     text
 }
 
+/// One row, four fixed lines, and no field that a device can make into a fifth.
+///
+/// `row.name` and the platform come from the device; the state and the action are this
+/// build's own words. The state prints as prose — the snake_case identifier is the
+/// `--json` contract and has no business in a terminal column.
 fn render_row(row: &DeviceRow) -> String {
-    format!(
-        "  {}\n      address      {}\n      platform     {}\n      network      {}\n      ouroboros    {} — {}\n",
-        row.name,
+    let mut text = format!(
+        "  {}\n      address      {}\n      platform     {}\n      network      {}\n      ouroboros    {} · {}\n",
+        human(&row.name, FIELD_COLUMNS),
         or_unknown(row.address.as_deref()),
         or_unknown(row.os.as_deref()),
         presence(row),
-        serde_json::to_value(row.state)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".into()),
+        row.state.label(),
         row.action,
-    )
+    );
+    if let Some(machine) = &row.name_conflict {
+        text.push_str(&format!(
+            "      [note] this device calls itself `{}`, which is the name of a machine in              this fleet at a different address. It is not that machine.\n",
+            human(machine, FIELD_COLUMNS),
+        ));
+    }
+    text
 }
 
 /// `ouro fleet devices --json`.
@@ -1339,14 +1668,24 @@ pub fn doctor_healthy(report: &fleet::DoctorReport, probe: Option<&RouteProbe>) 
 }
 
 /// The two new layers, appended to the existing human doctor text.
-pub fn render_doctor_layers(inventory: &Inventory, probe: Option<&RouteProbe>) -> String {
+///
+/// Every marker here is `[note]`. `refresh_doctor_report`'s `[fix]` means "this run is
+/// not healthy, and the command exited non-zero because of it"; nothing in these layers
+/// feeds [`doctor_healthy`] except a probe the operator explicitly asked for, whose
+/// outcome is printed as its own verdict line. A `[fix]` that a green verdict and a zero
+/// exit contradict two lines later is worse than no marker at all.
+pub fn render_doctor_layers(
+    summary: &Summary,
+    inventory: &Inventory,
+    probe: Option<&RouteProbe>,
+) -> String {
     let mut text = format!(
         "\nNetwork client — {}\n  {}\n",
         or_unknown(inventory.client.version.as_deref()),
         inventory.headline()
     );
     if let Some(detail) = &inventory.detail {
-        text.push_str(&format!("  {detail}\n"));
+        text.push_str(&format!("  {}\n", human(detail, MESSAGE_COLUMNS)));
     }
     if let Some(device) = &inventory.self_device {
         text.push_str(&format!(
@@ -1357,8 +1696,35 @@ pub fn render_doctor_layers(inventory: &Inventory, probe: Option<&RouteProbe>) -
                 |ip| ip.to_string()
             )
         ));
-        if let BindCheck::NotBindable(reason) = self_bindable(inventory) {
-            text.push_str(&format!("  [fix] {reason}\n"));
+        // The address the client discovered and the address the fleet advertises are two
+        // different facts, and an operator reading one of them as the other is how a
+        // profile ends up pointing somewhere this machine cannot bind. Name both when
+        // they differ, and never call the discovered one "advertised".
+        let advertised = summary
+            .profile
+            .as_ref()
+            .map(|profile| profile.host.as_str());
+        match (advertised, device.ipv4) {
+            (Some(advertised), Some(discovered)) if advertised != discovered.to_string() => {
+                text.push_str(&format!(
+                    "  [note] this fleet advertises {advertised}, which is not the private \
+                     address the network client discovered. That is expected for a manually \
+                     configured host, and a mistake if this machine was meant to use the \
+                     private network.\n"
+                ));
+            }
+            _same_or_unknown => {}
+        }
+        if let BindCheck::NotBindable(_cause) = self_bindable(inventory) {
+            // The cause sentence comes from `fleet::ensure_local_bind_address`, which is
+            // written for `fleet create`'s *advertised* host. Repeating it here would
+            // call the discovered address the advertised one, which is the confusion
+            // this layer exists to prevent. `--json` keeps the raw cause under
+            // `bindable_self_address`.
+            text.push_str(
+                "  [note] the private address the network client discovered is not \
+                 assigned to a local interface, so this machine could not bind it.\n",
+            );
         }
     }
     if let Some(probe) = probe {
@@ -1369,14 +1735,15 @@ pub fn render_doctor_layers(inventory: &Inventory, probe: Option<&RouteProbe>) -
         };
         text.push_str(&format!(
             "\nDevice route — {}\n  {} · {path}\n  {}\n",
-            probe.peer,
+            human(&probe.peer, FIELD_COLUMNS),
             match probe.code {
                 RouteCode::Reachable => "reachable over the private network",
                 RouteCode::TimedOut => "the overlay probe timed out",
                 RouteCode::Unknown => "the route could not be established",
                 RouteCode::PeerUnknown => "no visible device matches that name",
+                RouteCode::PeerAmbiguous => "more than one visible device answers to that name",
             },
-            probe.detail,
+            human(&probe.detail, MESSAGE_COLUMNS),
         ));
         text.push_str(
             "  An overlay probe does not establish that the distribution ports are open.\n",
@@ -1433,6 +1800,27 @@ mod tests {
         assert_eq!(
             locate_client_with(
                 Some(unreadable.as_os_str()),
+                Some(dir.path().as_os_str()),
+                &["/nonexistent/tailscale"],
+            ),
+            None
+        );
+
+        // A relative override would make the working directory decide which program is
+        // this machine's network client. It is refused, and refused all the way — not
+        // resolved against the cwd, and not fallen back on either.
+        assert_eq!(
+            locate_client_with(
+                Some(OsStr::new("tailscale")),
+                Some(dir.path().as_os_str()),
+                &["/nonexistent/tailscale"],
+            ),
+            None,
+            "a relative OUROBOROS_TAILSCALE must never be run"
+        );
+        assert_eq!(
+            locate_client_with(
+                Some(OsStr::new("./named-client")),
                 Some(dir.path().as_os_str()),
                 &["/nonexistent/tailscale"],
             ),
@@ -1562,6 +1950,35 @@ mod tests {
         );
     }
 
+    /// Three states a fixture never reached before, each with its own repair. Collapsing
+    /// them into `unrecognised` would tell an operator whose client is still starting
+    /// that this build cannot act on their client at all.
+    #[test]
+    fn every_backend_state_this_build_knows_has_its_own_reason() {
+        for (name, code, reason) in [
+            ("needs-machine-auth.json", DiscoveryCode::SignedOut, None),
+            (
+                "starting.json",
+                DiscoveryCode::Unavailable,
+                Some(UnavailableReason::BackendStarting),
+            ),
+            (
+                "no-state.json",
+                DiscoveryCode::Unavailable,
+                Some(UnavailableReason::BackendNoState),
+            ),
+        ] {
+            let inventory = classify(&fixture(name), b"", Some(0));
+            assert_eq!(inventory.code, code, "{name}");
+            assert_eq!(inventory.reason, reason, "{name}");
+            assert_ne!(
+                inventory.reason,
+                Some(UnavailableReason::BackendUnrecognized),
+                "{name} is a state this build knows, not one it cannot read"
+            );
+        }
+    }
+
     #[test]
     fn stopped_is_unavailable_with_its_own_reason() {
         let inventory = classify(&fixture("stopped.json"), b"", Some(0));
@@ -1605,6 +2022,20 @@ mod tests {
         let other = classify(b"", b"failed to connect to local tailscaled\n", Some(1));
         assert_eq!(other.code, DiscoveryCode::Unavailable);
         assert_eq!(other.reason, Some(UnavailableReason::CommandFailed));
+
+        // A refusal that still printed a readable document is still a refusal. Without
+        // this the document would be believed and an empty, working-looking network
+        // reported to an operator whose client would not answer them.
+        let with_document = classify(
+            &fixture("running-but-refused.json"),
+            &fixture("permission-denied.stderr"),
+            Some(1),
+        );
+        assert_eq!(
+            with_document.code,
+            DiscoveryCode::PermissionDenied,
+            "a non-zero exit and a permission complaint outrank a parseable document"
+        );
     }
 
     #[test]
@@ -1705,11 +2136,187 @@ mod tests {
 
         let silent = read_ping("", Some(1));
         assert_eq!(silent.code, RouteCode::Unknown);
+        assert!(
+            silent.detail.is_empty(),
+            "nothing printed is nothing to report"
+        );
+
+        // `tailscale ping` prints an authentication URL here when the node key expired.
+        let expired = read_ping(
+            "To authenticate, visit: https://login.example/a/DEADBEEF\n",
+            Some(1),
+        );
+        assert!(
+            !expired.detail.contains("login.example") && expired.detail.contains("<redacted url>"),
+            "a login URL is a credential wherever the client prints it: {}",
+            expired.detail
+        );
+
+        // And an unbounded line from a program this one did not write stays bounded.
+        // A fixed sentence of this build's own, plus a quote bounded to MESSAGE_COLUMNS.
+        let shouty = read_ping(&format!("pong {}\n", "x".repeat(5000)), Some(0));
+        assert!(
+            shouty.detail.chars().count() <= MESSAGE_COLUMNS + 80,
+            "the detail is bounded: {} characters",
+            shouty.detail.chars().count()
+        );
+        assert!(shouty.detail.ends_with('…'), "and the cut is visible");
+    }
+
+    // ------------------------------------------------------------- hostile text
+
+    #[test]
+    fn a_name_can_never_move_a_cursor_forge_a_row_or_run_off_the_screen() {
+        let inventory = classify(&fixture("hostile-names.json"), b"", Some(0));
+        assert_eq!(inventory.code, DiscoveryCode::Ok);
+        assert_eq!(inventory.peers.len(), 6);
+
+        let text = render_devices(&summary_with(&[]), &inventory);
+
+        // Nothing that can address a terminal survives.
+        for (index, byte) in text.bytes().enumerate() {
+            assert!(
+                byte >= 0x20 || byte == b'\n',
+                "a control byte {byte:#04x} reached the terminal at offset {index}"
+            );
+            assert_ne!(byte, 0x7f, "DEL reached the terminal at offset {index}");
+        }
+        assert!(
+            !text.contains('\u{202e}'),
+            "a bidi override reached the terminal"
+        );
+
+        // Six peers plus this machine, and the forged row did not become a seventh.
+        // Each row's first line is the only one with exactly two leading spaces.
+        let rows = text
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+            .count();
+        assert_eq!(rows, 7, "one row per device and not one more:\n{text}");
+        assert_eq!(
+            text.matches("      ouroboros    ").count(),
+            7,
+            "and one state line per row, so no field drew its own"
+        );
+        assert!(
+            !text.contains("ghost"),
+            "the forged row's trailing name did not become a row of its own"
+        );
+
+        // The four-thousand character name is cut, visibly.
+        assert!(!text.contains(&"L".repeat(FIELD_COLUMNS + 1)));
+        assert!(text.contains('…'), "the cut is shown rather than silent");
+
+        // A hostile LastSeen is a peer-written string like any other.
+        assert!(!text.contains("OWNED\u{1b}"));
+        for line in text.lines() {
+            assert!(
+                line.chars().count() < 400,
+                "no single line runs away: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sanitizer_keeps_what_a_real_name_needs_and_drops_what_a_terminal_obeys() {
+        assert_eq!(human("build-linux", FIELD_COLUMNS), "build-linux");
+        assert_eq!(
+            human("host.tailnet-example.ts.net", FIELD_COLUMNS),
+            "host.tailnet-example.ts.net"
+        );
+        // Non-ASCII names are ordinary names, not something to strip.
+        assert_eq!(human("café-münchen", FIELD_COLUMNS), "café-münchen");
+        assert_eq!(
+            human("Mönch\u{2019}s MacBook", FIELD_COLUMNS),
+            "Mönch\u{2019}s MacBook"
+        );
+
+        // The ESC is what a terminal obeys; `[2J` without it is four printable
+        // characters. They are left alone deliberately: stripping "anything that looks
+        // like a CSI sequence" would silently rewrite a device legitimately named
+        // `[2J`, and this function's job is to make text inert, not to guess at it.
+        assert_eq!(human("a\u{1b}[2Jb", FIELD_COLUMNS), "a [2Jb");
+        assert_eq!(human("a\u{1b}b", FIELD_COLUMNS), "a b");
+        assert_eq!(human("a\u{7f}b", FIELD_COLUMNS), "a b");
+        assert_eq!(human("a\u{9b}b", FIELD_COLUMNS), "a b", "C1 CSI too");
+        assert_eq!(human("a\nb\tc", FIELD_COLUMNS), "a b c");
+        assert_eq!(human("  padded  ", FIELD_COLUMNS), "padded");
+        // A removed override collapses like the whitespace around it rather than
+        // joining the two halves it was separating into one word.
+        assert_eq!(human("gpj.\u{202e}gnp", FIELD_COLUMNS), "gpj. gnp");
+        assert_eq!(human("a\u{2066}b\u{2069}c", FIELD_COLUMNS), "a b c");
+        assert_eq!(human("", FIELD_COLUMNS), "");
+
+        // The budget is display columns, so a wide script is cut where it looks cut.
+        let wide = human(&"漢".repeat(40), 11);
+        assert_eq!(wide.chars().filter(|c| *c == '漢').count(), 5);
+        assert!(wide.ends_with('…'));
+    }
+
+    #[test]
+    fn a_url_is_removed_wherever_it_appears_and_the_rest_of_the_sentence_survives() {
+        assert_eq!(
+            redact_urls("To authenticate, visit: https://login.example/a/SECRET now"),
+            "To authenticate, visit: <redacted url> now"
+        );
+        assert_eq!(
+            redact_urls("see http://a/1 and HTTPS://B/2"),
+            "see <redacted url> and <redacted url>"
+        );
+        assert_eq!(
+            redact_urls("no scheme here, just the word http and httpd"),
+            "no scheme here, just the word http and httpd"
+        );
+        assert_eq!(redact_urls("https://only"), "<redacted url>");
+        assert_eq!(redact_urls("plain text"), "plain text");
+    }
+
+    #[test]
+    fn an_authentication_url_on_stderr_never_reaches_a_stored_field() {
+        // Both shapes the client prints: the indented three-line form, and the one-line
+        // form `tailscale status` uses when a node key has expired.
+        for name in ["auth-url.stderr", "auth-url-oneline.stderr"] {
+            let inventory = classify(b"", &fixture(name), Some(1));
+            let rendered = serde_json::to_string(&inventory).expect("serializes");
+            assert!(
+                !rendered.contains("login.example") && !rendered.contains("0123456789abcdef"),
+                "{name}: the URL a person would click to join a device to the tailnet \
+                 reached output: {rendered}"
+            );
+        }
+
+        let one_line = classify(b"", &fixture("auth-url-oneline.stderr"), Some(1));
+        assert!(
+            one_line
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("<redacted url>")),
+            "and the sentence still says what happened: {:?}",
+            one_line.detail
+        );
+    }
+
+    /// An unbounded stderr line is an unbounded line on someone's terminal.
+    #[test]
+    fn the_clients_own_message_is_bounded_before_it_is_stored() {
+        let shouting = format!("{}\n", "z".repeat(9000));
+        let inventory = classify(b"", shouting.as_bytes(), Some(1));
+        let detail = inventory.detail.expect("a detail");
+        assert!(
+            detail.chars().count() <= MESSAGE_COLUMNS + 64,
+            "a client's line cannot fill a screen: {} characters",
+            detail.chars().count()
+        );
     }
 
     #[test]
     fn a_peer_is_resolved_by_the_clients_own_fields_and_never_invented() {
         let inventory = running();
+        let standalone = Summary {
+            profile: None,
+            tls: false,
+            problems: Vec::new(),
+        };
         let address = Ipv4Addr::new(100, 64, 12, 44);
         for spelling in [
             "build-linux",
@@ -1719,32 +2326,157 @@ mod tests {
             "100.64.12.44",
         ] {
             assert_eq!(
-                resolve_peer(&inventory, spelling),
-                Some(address),
+                resolve_peer(&standalone, &inventory, spelling),
+                PeerResolution::One(address),
                 "`{spelling}` names the same visible device"
             );
         }
-        assert_eq!(resolve_peer(&inventory, "100.64.12.99"), None);
-        assert_eq!(resolve_peer(&inventory, "not-a-device"), None);
-        assert_eq!(resolve_peer(&inventory, "  "), None);
+        // A well-formed address is not an address this client reported. Probing one
+        // would turn `--peer` into a way to send packets to anything on the overlay.
+        assert_eq!(
+            resolve_peer(&standalone, &inventory, "100.64.12.99"),
+            PeerResolution::None
+        );
+        assert_eq!(
+            resolve_peer(&standalone, &inventory, "203.0.113.7"),
+            PeerResolution::None
+        );
+        assert_eq!(
+            resolve_peer(&standalone, &inventory, "not-a-device"),
+            PeerResolution::None
+        );
+        assert_eq!(
+            resolve_peer(&standalone, &inventory, "  "),
+            PeerResolution::None
+        );
+    }
+
+    /// The real tailnet these fixtures came from has a peer literally named `localhost`.
+    /// Two devices answering to one name is an ordinary Tuesday, and picking whichever a
+    /// map iterated first would probe a device the operator did not mean.
+    #[test]
+    fn an_ambiguous_name_is_refused_rather_than_resolved_to_whichever_came_first() {
+        let inventory = classify(&fixture("duplicate-names.json"), b"", Some(0));
+        let standalone = Summary {
+            profile: None,
+            tls: false,
+            problems: Vec::new(),
+        };
+        let PeerResolution::Ambiguous(mut candidates) =
+            resolve_peer(&standalone, &inventory, "build-linux")
+        else {
+            panic!("two devices answer to `build-linux`");
+        };
+        candidates.sort();
+        assert_eq!(
+            candidates,
+            vec![
+                Ipv4Addr::new(100, 64, 12, 44),
+                Ipv4Addr::new(100, 64, 12, 200)
+            ]
+        );
+
+        // Their unique MagicDNS names still resolve, which is the way out of it.
+        assert_eq!(
+            resolve_peer(&standalone, &inventory, "aaa.tailnet-example.ts.net"),
+            PeerResolution::One(Ipv4Addr::new(100, 64, 12, 44))
+        );
+    }
+
+    /// HIGH-3, the resolution half. A device that renames itself after a roster machine
+    /// must not capture that machine's probe.
+    #[test]
+    fn a_roster_name_resolves_through_the_operators_own_profile_not_a_peers_hostname() {
+        let spoofed = classify(&fixture("roster-spoof.json"), b"", Some(0));
+        let summary = summary_with(&[("attic", "100.64.12.77")]);
+
+        assert_eq!(
+            resolve_peer(&summary, &spoofed, "attic"),
+            PeerResolution::None,
+            "the real attic is not visible, and the impostor does not stand in for it"
+        );
+
+        // The same name resolves to the real member as soon as the member is the device
+        // at that address — which is the only thing that makes it the member.
+        let honest = classify(&fixture("running-with-peers.json"), b"", Some(0));
+        let honest_summary = summary_with(&[("buildbox", "100.64.12.44")]);
+        assert_eq!(
+            resolve_peer(&honest_summary, &honest, "buildbox"),
+            PeerResolution::One(Ipv4Addr::new(100, 64, 12, 44))
+        );
+
+        // And the impostor is still reachable under the name it actually owns.
+        assert_eq!(
+            resolve_peer(&summary, &spoofed, "impostor.tailnet-example.ts.net"),
+            PeerResolution::One(Ipv4Addr::new(100, 64, 12, 250))
+        );
+    }
+
+    /// HIGH-3, the inventory half.
+    #[test]
+    fn a_device_that_adopts_a_roster_name_is_listed_as_itself_and_named_as_a_conflict() {
+        let spoofed = classify(&fixture("roster-spoof.json"), b"", Some(0));
+        let summary = summary_with(&[("attic", "100.64.12.77")]);
+        let rows = device_rows(&summary, &spoofed);
+
+        let member = state_of(&rows, "attic");
+        assert_eq!(
+            member.state,
+            DeviceState::FleetMemberNotVisible,
+            "the roster row belongs to the advertised address, and nothing is there"
+        );
+        assert_eq!(member.address.as_deref(), Some("100.64.12.77"));
+        assert_eq!(
+            member.os, None,
+            "the impostor's platform is not the member's"
+        );
+        assert_eq!(member.online, None);
+
+        // The impostor is still listed — it is a real device on this network — under its
+        // own identity, with the collision said out loud.
+        let impostor = rows
+            .iter()
+            .find(|row| row.address.as_deref() == Some("100.64.12.250"))
+            .expect("the impostor is listed as the separate device it is");
+        assert_eq!(impostor.machine, None);
+        assert_eq!(
+            impostor.name_conflict.as_deref(),
+            Some("attic"),
+            "a device wearing a member's name is named as doing so"
+        );
+        assert_eq!(
+            impostor.state,
+            DeviceState::UnsupportedPlatform,
+            "it is a Windows box, judged on what it reported about itself"
+        );
+
+        let text = render_devices(&summary, &spoofed);
+        assert!(
+            text.contains("It is not that machine."),
+            "the human list says so too: {text}"
+        );
     }
 
     // ------------------------------------------------------------------- the device rows
 
     fn summary_with(members: &[(&str, &str)]) -> Summary {
+        summary_at("100.64.12.21", members)
+    }
+
+    fn summary_at(host: &str, members: &[(&str, &str)]) -> Summary {
         let profile = fleet::Profile {
             tags: json!({"tags": []}),
             schema: 1,
             fleet_id: "f".into(),
             name: "studio's fleet".into(),
             machine: "studio".into(),
-            host: "100.64.12.21".into(),
-            node: "ouro-studio@100.64.12.21".into(),
+            host: host.to_string(),
+            node: format!("ouro-studio@{host}"),
             role: "core".into(),
             members: std::iter::once(fleet::Member {
                 machine: "studio".into(),
-                host: "100.64.12.21".into(),
-                node: "ouro-studio@100.64.12.21".into(),
+                host: host.to_string(),
+                node: format!("ouro-studio@{host}"),
             })
             .chain(members.iter().map(|(machine, host)| fleet::Member {
                 machine: (*machine).to_string(),
@@ -1773,6 +2505,40 @@ mod tests {
                 rows.iter().map(|r| &r.name).collect::<Vec<_>>()
             )
         })
+    }
+
+    /// The device's own reported name wins over its DNS label, and the DNS label is the
+    /// fallback rather than the other way round: `App::machine_label` applies the same
+    /// preference in the UI, and two surfaces calling one device two names is how an
+    /// operator ends up deploying to the wrong one.
+    #[test]
+    fn a_devices_own_name_wins_over_its_dns_label_and_the_label_is_the_fallback() {
+        let named = Device {
+            host_name: Some("build-linux".into()),
+            dns_name: Some("zzz.tailnet-example.ts.net".into()),
+            ..Device::default()
+        };
+        assert_eq!(named.display_name().as_deref(), Some("build-linux"));
+
+        let unnamed = Device {
+            host_name: None,
+            dns_name: Some("zzz.tailnet-example.ts.net".into()),
+            ..Device::default()
+        };
+        assert_eq!(unnamed.display_name().as_deref(), Some("zzz"));
+
+        let blank = Device {
+            host_name: Some("   ".into()),
+            dns_name: Some("zzz.tailnet-example.ts.net".into()),
+            ..Device::default()
+        };
+        assert_eq!(
+            blank.display_name().as_deref(),
+            Some("zzz"),
+            "a whitespace-only hostname is no name at all"
+        );
+
+        assert_eq!(Device::default().display_name(), None);
     }
 
     #[test]
@@ -1828,6 +2594,37 @@ mod tests {
             "not visible is not known to be offline"
         );
         assert_eq!(absent.action, "diagnose");
+    }
+
+    /// This machine's row describes this machine, and it has not observed a path to
+    /// itself when there is no client to observe one with.
+    #[test]
+    fn the_self_row_reports_the_path_the_client_observed_and_not_a_hardcoded_one() {
+        let blind = Inventory::failed(DiscoveryCode::ClientMissing, None, "install it");
+        let rows = device_rows(&summary_with(&[]), &blind);
+        assert_eq!(
+            rows[0].path,
+            PathObservation::Unknown,
+            "with no network client there is no observed path to report"
+        );
+        assert_eq!(rows[0].online, None, "and no presence either");
+
+        // `running-with-peers.json` reports an empty `CurAddr` for Self, so even a
+        // working client leaves this unknown rather than direct.
+        let rows = device_rows(&summary_with(&[]), &running());
+        assert_eq!(rows[0].path, PathObservation::Unknown);
+
+        let observed = Inventory {
+            self_device: Some(Device {
+                path: PathObservation::Direct,
+                ..Device::default()
+            }),
+            ..running()
+        };
+        assert_eq!(
+            device_rows(&summary_with(&[]), &observed)[0].path,
+            PathObservation::Direct
+        );
     }
 
     #[test]
@@ -1918,15 +2715,12 @@ mod tests {
         assert_eq!(value["problems"][0], "a missing certificate");
     }
 
+    /// What the layers claim and what the command exits with are one fact, checked
+    /// together: a layer that says `problem` while `healthy` stays true would be a
+    /// verdict an operator cannot act on.
     #[test]
-    fn the_doctor_layers_fail_only_on_what_was_asked_for() {
-        let missing = Inventory::failed(DiscoveryCode::ClientMissing, None, "install it");
-        assert_eq!(
-            doctor_network_layer(&missing)["problem"],
-            false,
-            "a private LAN fleet has no client to find, and that is not a broken fleet"
-        );
-
+    fn a_layers_problem_flag_and_the_commands_verdict_are_the_same_fact() {
+        let report = fleet::doctor_stopped(fleet::doctor(Path::new("/nonexistent/data-dir")));
         let reachable = RouteProbe {
             code: RouteCode::Reachable,
             peer: "buildbox".into(),
@@ -1934,19 +2728,55 @@ mod tests {
             path: PathObservation::Relayed,
             detail: "pong".into(),
         };
-        assert_eq!(doctor_route_layer(&reachable)["problem"], false);
-        assert_eq!(doctor_route_layer(&reachable)["path"], "relayed");
 
-        let timed_out = RouteProbe {
-            code: RouteCode::TimedOut,
-            ..reachable
-        };
-        assert_eq!(doctor_route_layer(&timed_out)["problem"], true);
+        for inventory in [
+            Inventory::failed(DiscoveryCode::ClientMissing, None, "install it"),
+            Inventory::failed(DiscoveryCode::SignedOut, None, "sign in"),
+            running(),
+        ] {
+            // A fleet configured by hand over a private LAN has no client to find, and
+            // that is not a broken fleet: the layer never changes the verdict.
+            let without = doctor_json(&report, &inventory, None);
+            assert_eq!(
+                without["layers"]["network_client"]["problem"], false,
+                "{:?} must not fail a doctor nobody asked to probe anything",
+                inventory.code
+            );
+            assert_eq!(
+                without["healthy"],
+                doctor_healthy(&report, None),
+                "the document's verdict is the command's exit code"
+            );
+
+            let asked = doctor_json(&report, &inventory, Some(&reachable));
+            assert_eq!(asked["layers"]["device_route"]["problem"], false);
+            assert_eq!(asked["layers"]["device_route"]["path"], "relayed");
+        }
+
+        // Every probe outcome that is not `reachable` is a problem, and each one turns
+        // the verdict — this is the only thing in these layers that can.
+        for code in [
+            RouteCode::TimedOut,
+            RouteCode::Unknown,
+            RouteCode::PeerUnknown,
+            RouteCode::PeerAmbiguous,
+        ] {
+            let probe = RouteProbe {
+                code,
+                ..reachable.clone()
+            };
+            assert_eq!(doctor_route_layer(&probe)["problem"], true, "{code:?}");
+            assert!(
+                !doctor_healthy(&report, Some(&probe)),
+                "{code:?} must fail the command the operator ran"
+            );
+        }
     }
 
     #[test]
     fn the_human_layers_say_what_was_observed_and_what_was_not() {
         let text = render_doctor_layers(
+            &summary_at("10.9.9.9", &[]),
             &running(),
             Some(&RouteProbe {
                 code: RouteCode::Reachable,
@@ -1959,6 +2789,27 @@ mod tests {
         assert!(text.contains("Network client — 1.102.1"));
         assert!(text.contains("connection path not observed"));
         assert!(text.contains("does not establish that the distribution ports are open"));
+
+        // A layer that never changes the verdict never prints the marker that means the
+        // verdict changed. `[fix]` beside "locally ready" and a zero exit is a lie in
+        // three lines.
+        assert!(
+            !text.contains("[fix]"),
+            "these layers are notes, and the verdict says so: {text}"
+        );
+        assert!(
+            text.contains("[note] this fleet advertises 10.9.9.9"),
+            "the advertised address and the discovered one are named separately: {text}"
+        );
+        assert!(
+            !text.contains("advertised address 100.64.12.21"),
+            "the discovered address is never described as the advertised one: {text}"
+        );
+
+        // When they are the same address there is nothing to warn about.
+        let same = render_doctor_layers(&summary_with(&[]), &running(), None);
+        assert!(!same.contains("this fleet advertises"), "{same}");
+        assert!(!same.contains("[fix]"), "{same}");
     }
 
     #[test]
@@ -1966,7 +2817,6 @@ mod tests {
         let text = render_devices(&summary_with(&[("attic", "100.64.12.77")]), &running());
         assert!(text.starts_with("Fleet devices\n"));
         assert!(text.contains("Available on this network"));
-        assert!(text.contains("discovered_installation_unknown — deploy Ouroboros"));
         assert!(text.contains("no device was inspected"));
 
         let blind = render_devices(
@@ -1978,6 +2828,64 @@ mod tests {
             "known members survive blind discovery"
         );
         assert!(blind.contains("stopped"));
+    }
+
+    /// The `--json` `state` is a contract for scripts; a terminal column is prose. The
+    /// two are checked against each other so neither can drift into the other's job.
+    #[test]
+    fn the_human_column_reads_as_words_and_the_json_keeps_the_codes() {
+        let summary = summary_with(&[("attic", "100.64.12.77")]);
+        let text = render_devices(&summary, &running());
+        assert!(
+            text.contains("not inspected yet · deploy Ouroboros"),
+            "{text}"
+        );
+        assert!(
+            text.contains("offline, not inspected · refresh or inspect"),
+            "{text}"
+        );
+        assert!(
+            text.contains("no supported release for this platform · nothing to deploy"),
+            "{text}"
+        );
+        assert!(
+            text.contains("in the fleet, not visible on this network · diagnose"),
+            "{text}"
+        );
+
+        for state in [
+            DeviceState::ThisDevice,
+            DeviceState::ThisDeviceWithoutProfile,
+            DeviceState::FleetMember,
+            DeviceState::FleetMemberNotVisible,
+            DeviceState::DiscoveredInstallationUnknown,
+            DeviceState::PeerOffline,
+            DeviceState::UnsupportedPlatform,
+            DeviceState::NoUsableIpv4,
+        ] {
+            let code = serde_json::to_value(state).expect("a code");
+            let code = code.as_str().expect("a string code");
+            assert!(code.contains('_') || !code.contains(' '), "{code}");
+            assert!(
+                !text.contains(code),
+                "the snake_case `{code}` belongs to --json and not to a terminal:\n{text}"
+            );
+            assert!(
+                !state.label().contains('_'),
+                "`{}` is a code, not prose",
+                state.label()
+            );
+        }
+
+        let value = devices_json(&summary, &running());
+        let codes: Vec<_> = value["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .map(|row| row["state"].as_str().expect("a state code").to_string())
+            .collect();
+        assert!(codes.contains(&"discovered_installation_unknown".to_string()));
+        assert!(codes.contains(&"fleet_member_not_visible".to_string()));
     }
 
     // ------------------------------------------------------------------- bounded running
@@ -2082,6 +2990,38 @@ mod tests {
         assert_eq!(
             inventory.client.program.as_deref(),
             Some(program.display().to_string().as_str())
+        );
+    }
+
+    /// A complete, correct answer on stdout must not be thrown away because something
+    /// the client left behind is still holding the stderr pipe.
+    #[tokio::test]
+    async fn a_grandchild_holding_stderr_does_not_turn_a_good_answer_into_a_timeout() {
+        let dir = tempdir();
+        let fixture_path = format!("{FIXTURES}/running-with-peers.json");
+        let program = script(
+            dir.path(),
+            "tailscale",
+            &format!(
+                "#!/bin/sh\nprintf 'Warning: version skew\\n' >&2\n\
+                 cat {fixture_path}\nsleep 120 >/dev/null 2>&1 &\nexit 0\n"
+            ),
+        );
+        let started = std::time::Instant::now();
+        let inventory = inventory_with(&Client {
+            program,
+            source: ClientSource::Path,
+        })
+        .await;
+        assert_eq!(
+            inventory.code,
+            DiscoveryCode::Ok,
+            "the child exited 0 with a complete document; an orphan on its stderr is not \
+             this command's problem"
+        );
+        assert!(
+            started.elapsed() < CLIENT_TIMEOUT,
+            "and the answer came back inside the deadline, not at it"
         );
     }
 

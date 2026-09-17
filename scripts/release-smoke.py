@@ -106,6 +106,14 @@ def smoke(binary, version, target, *, require_self_update=False):
                         f"{reported[field]!r}; its release records {recorded[field]!r}")
             if reported["embedded_release"] is not True:
                 raise ValueError("a packaged binary must report an embedded release")
+            # The client's compiled-in revision and the one its own release recorded are
+            # two facts. A packaged binary whose halves disagree cannot form a fleet with
+            # anything, and would say so only here.
+            if reported["revision_matches_embedded_release"] is not True:
+                raise ValueError(
+                    "packaged client reports fleet protocol "
+                    f"{reported['fleet_protocol_revision']!r} and its embedded release "
+                    f"recorded {reported['release_fleet_protocol_revision']!r}")
             if run(str(installed), "fleet", "protocol").strip() != str(
                     recorded["fleet_protocol_revision"]):
                 raise ValueError("`ouro fleet protocol` and `--json` disagree")

@@ -110,6 +110,17 @@ cannot derive an OTP release from bytes it never boots. A development build has 
 embedded release: it reports `null` for both and `embedded_release: false` rather than
 guessing at a number an operator would compare against a peer.
 
+It also prints what the embedded release itself recorded —
+`release_fleet_protocol_revision`, `release_ouroboros_version` — and
+`revision_matches_embedded_release`, because those are a different fact from the client's
+own. A packaged binary whose two halves disagree cannot form a fleet with anything, and
+this is the only place that says so without starting a runtime. `null` there means there
+was nothing to compare against, which is not the same answer as `false`.
+
+The command answers before a data directory is discovered. It is what an onboarding
+preflight calls on a machine that has no Ouroboros state, so it neither requires that
+state nor creates it.
+
 ## Two machines, by hand
 
 Nothing below contacts a machine. An operator copies one directory, types four commands,
@@ -169,8 +180,18 @@ nothing. A discovered peer's Ouroboros state is `discovered_installation_unknown
 here has inspected one, so nothing here calls one uninstalled.
 
 The client is found on `$PATH`, then at the usual macOS and Linux locations. Set
-`OUROBOROS_TAILSCALE` to an absolute path to name a different one; an override that is not
-an executable file is a refusal rather than a quiet fall through to another program.
+`OUROBOROS_TAILSCALE` to name a different one. It must be **absolute** — a relative name
+would let the directory you happen to be standing in decide which program runs as your
+network client — and an override that is not an absolute path to an executable file is a
+refusal rather than a quiet fall through to another program.
+
+Everything a peer reports — its hostname, its MagicDNS label, its OS, its last-seen
+time — is a string that device wrote, and the human output strips control characters and
+bidi overrides from all of it, collapses whitespace and truncates to a column budget. A
+hostname is otherwise enough to forge a device row, clear the screen, or scroll the real
+rows away. `--json` keeps the raw values. Anything the client itself printed is redacted
+first: `tailscale` writes `To authenticate, visit: <url>` on stderr when a node key has
+expired, and that URL is a credential — whoever opens it joins a device to the tailnet.
 
 Discovery has distinct outcomes, and `--json` reports each under a stable `code`:
 `client_missing`, `signed_out`, `permission_denied`, `unavailable` (with a `reason` such
@@ -185,6 +206,17 @@ issues its own ranges and suffix, and every decision here comes from the client'
 reported fields. A connection path is reported only when it was observed: a peer's
 configured DERP region is inventory, not a claim that traffic is relayed through it.
 
+A roster row is matched to a visible device by the **advertised host** alone — the address
+or private DNS name you gave `fleet create` or `fleet members add`. A peer's hostname is
+not consulted, because a hostname is whatever that device says it is: matching on it would
+let any device on the network claim a member's row by renaming itself, and show its own
+platform and presence under your member's address. A device that does adopt a member's
+name is listed under **Available on this network** as the separate device it is, with
+`name_conflicts_with_roster` in `--json` and a note in the human list.
+
+Human output reads as prose; the snake_case `state` codes are the `--json` contract and
+appear only there.
+
 `ouro fleet status --json` and `ouro fleet doctor --json` print the same kind of document.
 Unavailable facts are `null`. `status --json` exits non-zero when this machine's setup is
 incomplete, even if some steps succeeded; the human `ouro fleet status` is unchanged and
@@ -196,11 +228,19 @@ bindable here. A missing or signed-out client is a note rather than a failure, b
 fleet configured by hand over a private LAN has no client to find.
 
 `ouro fleet doctor --peer NAME|ADDRESS` additionally probes the route to one visible
-device with a single `tailscale ping`, and reports `reachable`, `timed_out`, `unknown` or
-`peer_unknown`, with the path `direct`, `relayed` or `unknown` — only ever the one that
-was observed. A relay is a valid connection. An overlay probe does not establish that the
-distribution ports are open, so it is a separate layer from the runtime's own connectivity
-check, and a probe that was asked for and did not succeed exits non-zero.
+device with a single `tailscale ping`, and reports `reachable`, `timed_out`, `unknown`,
+`peer_unknown` or `peer_ambiguous`, with the path `direct`, `relayed` or `unknown` — only
+ever the one that was observed. A relay is a valid connection. An overlay probe does not
+establish that the distribution ports are open, so it is a separate layer from the
+runtime's own connectivity check, and a probe that was asked for and did not succeed exits
+non-zero.
+
+The name is resolved before anything is sent. A machine in your roster resolves through
+*your profile* — the address you bound — never through a peer's claim to that name. An
+address is probed only if this machine's client actually reported it for a device, so a
+well-formed address is not by itself something `--peer` will send a packet to. A name two
+visible devices answer to is `peer_ambiguous` with both addresses named, rather than
+whichever the map iterated first.
 
 `create --from` refuses a directory that is not a complete copy of a fleet directory, and
 refuses a `--machine` name the copied roster already holds. It writes no `ca-key.pem` on the

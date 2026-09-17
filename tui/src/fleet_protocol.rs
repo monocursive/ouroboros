@@ -49,6 +49,17 @@ pub struct BuildMetadata {
     /// Whether this binary carries a packaged runtime at all. `false` is a development
     /// build; the two version fields above are `null` in that case.
     pub embedded_release: bool,
+    /// The revision the embedded release itself recorded, which is a different fact from
+    /// the one this client was compiled with.
+    pub release_fleet_protocol_revision: Option<u32>,
+    /// The Ouroboros version the embedded release recorded, likewise.
+    pub release_ouroboros_version: Option<String>,
+    /// Whether the two revisions agree. `null` when there is no release, or when a
+    /// release predates the packaging step and recorded no revision — which is not the
+    /// same answer as `false`, and an operator comparing two machines needs to see the
+    /// difference. A `false` here is a client and a runtime that will not form a fleet
+    /// with each other, discovered without starting either.
+    pub revision_matches_embedded_release: Option<bool>,
 }
 
 /// The subset of `releases/<vsn>/ouroboros-build.json` this client reads.
@@ -69,7 +80,16 @@ pub struct ReleaseBuild {
 
 /// This binary's fleet build metadata. Starts no runtime and touches no network.
 pub fn build_metadata() -> BuildMetadata {
-    let release = embedded_build();
+    metadata_from(embedded_build())
+}
+
+/// The shaping, separated from the lookup so every combination — no release, a release
+/// that recorded nothing, a release that disagrees with this client — is a case a test
+/// can drive rather than a case that needs a particular binary to exist.
+fn metadata_from(release: Option<ReleaseBuild>) -> BuildMetadata {
+    let recorded = release
+        .as_ref()
+        .and_then(|build| build.fleet_protocol_revision);
     BuildMetadata {
         fleet_protocol_revision: FLEET_PROTOCOL_REVISION,
         ouroboros_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -80,6 +100,12 @@ pub fn build_metadata() -> BuildMetadata {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         embedded_release: release.is_some(),
+        release_fleet_protocol_revision: recorded,
+        release_ouroboros_version: release
+            .as_ref()
+            .and_then(|build| build.ouroboros_version.clone()),
+        revision_matches_embedded_release: recorded
+            .map(|recorded| recorded == FLEET_PROTOCOL_REVISION),
     }
 }
 
@@ -117,20 +143,37 @@ pub(crate) fn read_release_build(tarball: &[u8]) -> Option<ReleaseBuild> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
     let entries = archive.entries().ok()?;
     for entry in entries {
-        let mut entry = entry.ok()?;
-        let path = entry.path().ok()?.into_owned();
+        let Ok(mut entry) = entry else { continue };
+        // Only a regular file answers for the release. A link entry in a well-formed
+        // archive carries no bytes of its own, so the scan below would move past it
+        // anyway; this is the cheaper and more direct statement of the same rule, and
+        // it holds for a reader that would otherwise follow a link's declared size.
+        // No well-formed archive can distinguish the two guards, so no test does.
+        if entry.header().entry_type() != tar::EntryType::Regular {
+            continue;
+        }
+        let Ok(path) = entry.path().map(|path| path.into_owned()) else {
+            continue;
+        };
         if !is_build_metadata_path(&path) {
             continue;
         }
         let mut text = String::new();
         // `take` bounds the read; a larger file is read up to the cap and then fails to
-        // parse, which reports unknown versions rather than a truncated pair of them.
-        entry
+        // parse. An entry that does not read or does not parse leaves the scan running:
+        // a duplicate name earlier in the archive must not decide the answer for a
+        // readable one after it.
+        if entry
             .by_ref()
             .take(MAX_METADATA_BYTES)
             .read_to_string(&mut text)
-            .ok()?;
-        return serde_json::from_str(&text).ok();
+            .is_err()
+        {
+            continue;
+        }
+        if let Ok(build) = serde_json::from_str(&text) {
+            return Some(build);
+        }
     }
     None
 }
@@ -164,11 +207,14 @@ mod tests {
     /// evidence of why.
     #[test]
     fn revision_matches_the_runtime() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../lib/ouroboros/cluster.ex"
-        ))
-        .expect("lib/ouroboros/cluster.ex is readable from the crate directory");
+        const CLUSTER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/ouroboros/cluster.ex");
+        let source = std::fs::read_to_string(CLUSTER).unwrap_or_else(|error| {
+            panic!(
+                "this test compares the client's revision against the runtime's, so it \
+                 requires the source tree: {CLUSTER} could not be read ({})",
+                error.kind()
+            )
+        });
 
         let literal = source
             .lines()
@@ -185,21 +231,51 @@ mod tests {
         );
     }
 
-    /// A development build knows its own version and refuses to guess the runtime's.
+    /// The four states the packaging fact can be in, each one a different answer.
     #[test]
-    fn a_build_without_a_release_reports_unknown_versions() {
-        let metadata = build_metadata();
-        assert_eq!(metadata.fleet_protocol_revision, FLEET_PROTOCOL_REVISION);
-        assert_eq!(metadata.ouroboros_version, env!("CARGO_PKG_VERSION"));
-        assert!(!metadata.os.is_empty());
-        assert!(!metadata.arch.is_empty());
+    fn a_disagreeing_release_is_a_fact_in_the_document_and_an_absent_one_is_not_a_guess() {
+        let none = metadata_from(None);
+        assert!(!none.embedded_release);
+        assert_eq!(none.otp_release, None);
+        assert_eq!(none.elixir_version, None);
+        assert_eq!(none.release_fleet_protocol_revision, None);
+        assert_eq!(
+            none.revision_matches_embedded_release, None,
+            "no release to compare against is unknown, never a mismatch"
+        );
 
-        // `cargo test -p ouro` builds without `embed`, so there is never a release here.
-        // The packaged case is covered by `scripts/release-smoke.py`.
-        if !metadata.embedded_release {
-            assert_eq!(metadata.otp_release, None);
-            assert_eq!(metadata.elixir_version, None);
-        }
+        let agreeing = metadata_from(Some(ReleaseBuild {
+            fleet_protocol_revision: Some(FLEET_PROTOCOL_REVISION),
+            ouroboros_version: Some("0.1.8".into()),
+            otp_release: Some("29".into()),
+            elixir_version: Some("1.20.2".into()),
+        }));
+        assert!(agreeing.embedded_release);
+        assert_eq!(agreeing.otp_release.as_deref(), Some("29"));
+        assert_eq!(agreeing.revision_matches_embedded_release, Some(true));
+
+        // A client and a runtime that would refuse to form a fleet, said out loud
+        // without starting either of them.
+        let disagreeing = metadata_from(Some(ReleaseBuild {
+            fleet_protocol_revision: Some(FLEET_PROTOCOL_REVISION + 1),
+            ouroboros_version: Some("0.9.9".into()),
+            ..ReleaseBuild::default()
+        }));
+        assert_eq!(disagreeing.fleet_protocol_revision, FLEET_PROTOCOL_REVISION);
+        assert_eq!(
+            disagreeing.release_fleet_protocol_revision,
+            Some(FLEET_PROTOCOL_REVISION + 1)
+        );
+        assert_eq!(
+            disagreeing.release_ouroboros_version.as_deref(),
+            Some("0.9.9")
+        );
+        assert_eq!(disagreeing.revision_matches_embedded_release, Some(false));
+
+        // A release packaged before the metadata step: it exists, and says nothing.
+        let silent = metadata_from(Some(ReleaseBuild::default()));
+        assert!(silent.embedded_release);
+        assert_eq!(silent.revision_matches_embedded_release, None);
     }
 
     /// The JSON form is a contract for scripts: the field names and the `null`s are the
@@ -214,6 +290,9 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
             embedded_release: false,
+            release_fleet_protocol_revision: None,
+            release_ouroboros_version: None,
+            revision_matches_embedded_release: None,
         };
         let value = serde_json::to_value(&metadata).expect("build metadata serializes");
         assert_eq!(value["fleet_protocol_revision"], 5);
@@ -223,9 +302,12 @@ mod tests {
         assert_eq!(value["os"], "macos");
         assert_eq!(value["arch"], "aarch64");
         assert_eq!(value["embedded_release"], false);
+        assert!(value["release_fleet_protocol_revision"].is_null());
+        assert!(value["release_ouroboros_version"].is_null());
+        assert!(value["revision_matches_embedded_release"].is_null());
         assert_eq!(
             value.as_object().expect("an object").len(),
-            7,
+            10,
             "a new field is a change to a documented machine-readable shape"
         );
     }
@@ -312,6 +394,68 @@ mod tests {
             assert_eq!(build.otp_release.as_deref(), Some("29"));
             assert_eq!(build.elixir_version, None);
             assert_eq!(build.fleet_protocol_revision, None);
+        }
+
+        /// A link cannot answer for the release, and a first entry that does not parse
+        /// does not get to decide the answer for a readable one after it.
+        #[test]
+        fn a_shadowing_link_and_an_unreadable_duplicate_do_not_stop_the_scan() {
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::fast(),
+            ));
+            // A link entry in the release's own metadata path. In a well-formed archive
+            // it carries no body of its own, so what keeps it from deciding the answer
+            // is the scan continuing past an entry that yields nothing — the entry-type
+            // check in `read_release_build` is a second guard over the same case, and
+            // this archive cannot tell the two apart. What it does prove is the
+            // property that matters: a link does not shadow the real file.
+            let mut link = tar::Header::new_gnu();
+            link.set_size(0);
+            link.set_mode(0o777);
+            link.set_entry_type(tar::EntryType::Symlink);
+            builder
+                .append_link(
+                    &mut link,
+                    "releases/0.1.8/ouroboros-build.json",
+                    "/etc/passwd",
+                )
+                .expect("appending a symlink entry");
+            let mut broken = tar::Header::new_gnu();
+            let garbage = b"not json";
+            broken.set_size(garbage.len() as u64);
+            broken.set_mode(0o644);
+            broken.set_cksum();
+            builder
+                .append_data(
+                    &mut broken,
+                    "releases/0.1.8/ouroboros-build.json",
+                    &garbage[..],
+                )
+                .expect("appending an unreadable duplicate");
+            let mut real = tar::Header::new_gnu();
+            real.set_size(METADATA.len() as u64);
+            real.set_mode(0o644);
+            real.set_cksum();
+            builder
+                .append_data(
+                    &mut real,
+                    "releases/0.1.8/ouroboros-build.json",
+                    METADATA.as_bytes(),
+                )
+                .expect("appending the real entry");
+            let bytes = builder
+                .into_inner()
+                .expect("finishing the tar")
+                .finish()
+                .expect("finishing the gzip stream");
+
+            let build = read_release_build(&bytes).expect("the readable entry answers");
+            assert_eq!(
+                build.otp_release.as_deref(),
+                Some("28"),
+                "a link and an unreadable duplicate both give way to the real entry"
+            );
         }
 
         /// An unreadable document reports unknown versions; it never panics and never

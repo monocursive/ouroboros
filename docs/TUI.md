@@ -1106,10 +1106,12 @@ ouro fleet tag list [--machine NAME]
                       edit local or connected target tags; visible next probe
 ouro fleet protocol [--json]
                       the fleet protocol revision this build speaks, without
-                      starting a runtime. --json adds the Ouroboros version, the
-                      OTP and Elixir releases recorded by release packaging, the
-                      platform, and whether a release is embedded; unknown
-                      versions are null rather than guessed
+                      starting a runtime and without discovering or creating a
+                      data directory. --json adds the Ouroboros version, the OTP
+                      and Elixir releases recorded by release packaging, the
+                      platform, whether a release is embedded, and whether the
+                      embedded release's own revision agrees; unknown versions
+                      are null rather than guessed
 ouro fleet status [--json]
                       expected/connected/offline machines, OS/arch, tags and TLS
                       posture, and the machines this roster declares gone.
@@ -1119,7 +1121,10 @@ ouro fleet devices [--json]
                       the roster beside the devices the installed Tailscale
                       client can see. One `tailscale status --json`, bounded and
                       deadlined; contacts no device and inspects no installation,
-                      so a discovered peer is never labelled uninstalled
+                      so a discovered peer is never labelled uninstalled. A
+                      roster row is matched by the advertised host alone, never
+                      by a name a peer reports about itself. $OUROBOROS_TAILSCALE
+                      names a client, and must be absolute
 ouro fleet doctor [--json] [--peer NAME|ADDRESS]
                       actionable profile/network/runtime checks, including any
                       fleet-directory entry `leave` would refuse to remove, plus

@@ -97,6 +97,19 @@ async fn run(cli: Cli) -> Result<()> {
         return ouro::mcp_serve::serve().await;
     }
 
+    // `fleet protocol` is the command an onboarding preflight calls on a machine that has
+    // no Ouroboros state yet, and its whole contract is that it answers from this binary
+    // alone. `Paths::discover` creates a data directory and refuses an unusable one, so
+    // going through it would make the compatibility question depend on state the question
+    // exists to precede — and would silently create that state on a machine somebody was
+    // only asking a question about.
+    if let Some(Command::Fleet {
+        command: FleetCommand::Protocol { json },
+    }) = &cli.command
+    {
+        return fleet_protocol_command(*json);
+    }
+
     let paths = Paths::discover(cli.dev)?;
 
     // Read once, for the surfaces that consult it. A file that does not parse costs the
@@ -1190,6 +1203,22 @@ async fn fleet_rpc(paths: &Paths, method: &str, params: Value) -> Result<Value> 
     result.map_err(Into::into)
 }
 
+/// The bare number is what scripts already read, so it stays a bare number. `--json` is
+/// the build contract an onboarding preflight compares. Both forms answer from this
+/// binary alone: no runtime is started, no data directory is touched, and nothing is
+/// written anywhere.
+fn fleet_protocol_command(json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&fleet_protocol::build_metadata())?
+        );
+    } else {
+        println!("{}", fleet_protocol::FLEET_PROTOCOL_REVISION);
+    }
+    Ok(())
+}
+
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
     paths.ensure_private_data_dir()?;
 
@@ -1234,20 +1263,8 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             }
             Ok(())
         }
-        FleetCommand::Protocol { json } => {
-            // The bare number is what scripts already read, so it stays a bare number.
-            // `--json` is the build contract an onboarding preflight compares, and both
-            // forms answer from this binary alone: no runtime is started either way.
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&fleet_protocol::build_metadata())?
-                );
-            } else {
-                println!("{}", fleet_protocol::FLEET_PROTOCOL_REVISION);
-            }
-            Ok(())
-        }
+        // Answered in `run`, before a data directory is discovered.
+        FleetCommand::Protocol { json } => fleet_protocol_command(json),
         FleetCommand::Helper => ouro::fleet_helper::serve(paths.data_dir.clone()),
         FleetCommand::Create {
             name,
@@ -1429,8 +1446,9 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             // Discovery is read-only and contacts nothing. The route probe contacts the
             // one device the operator named on the command line, and only that one.
             let inventory = fleet_network::inventory().await;
+            let summary = fleet::summary(&paths.data_dir);
             let probe = match peer.as_deref() {
-                Some(peer) => Some(fleet_network::probe_route(&inventory, peer).await),
+                Some(peer) => Some(fleet_network::probe_route(&summary, &inventory, peer).await),
                 None => None,
             };
             let healthy = fleet_network::doctor_healthy(&report, probe.as_ref());
@@ -1448,7 +1466,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 print!("{}", report.text);
                 print!(
                     "{}",
-                    fleet_network::render_doctor_layers(&inventory, probe.as_ref())
+                    fleet_network::render_doctor_layers(&summary, &inventory, probe.as_ref())
                 );
             }
 
