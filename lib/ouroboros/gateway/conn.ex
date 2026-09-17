@@ -94,6 +94,7 @@ defmodule Ouroboros.Gateway.Conn do
   require Logger
 
   alias Ouroboros.Cluster
+  alias Ouroboros.Gateway.AuditLine
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Wire
@@ -227,6 +228,12 @@ defmodule Ouroboros.Gateway.Conn do
     state = %{
       socket: Keyword.fetch!(opts, :socket),
       config: config,
+      # This connection's own identity, minted here and never reused. A deployment
+      # challenge is bound at issue to the subject *and* the session that was attached
+      # (seam S4), and a listener has no session cookie to borrow one from — so the
+      # connection is the session, and a second connection by the same operator cannot
+      # answer the first one's credential prompt.
+      session: "gateway-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower),
       task_supervisor: Keyword.fetch!(opts, :task_supervisor),
       # Named rather than discovered, because the one thing this process cannot ask a
       # supervisor is who its supervisor is. It is here for `runtime.activity`'s
@@ -595,22 +602,25 @@ defmodule Ouroboros.Gateway.Conn do
   # its contents: an objective, a prompt, or a workspace path in a log is a payload the
   # operator did not choose to write down. The digest is enough to correlate a log entry
   # with the request a client can reproduce.
+  #
+  # `Ouroboros.Gateway.AuditLine` owns what that field may contain, shared with
+  # `Ouroboros.Web.Call` so the two surfaces cannot redact differently. For
+  # `fleet.deployment.authenticate` it never computes a digest at all: hashing a human's
+  # SSH password is not a redaction of it.
   defp audit(state, method, params, %{scope: :operate}) do
-    Logger.info(
-      "gateway operate #{method} params=#{params_digest(params)} peer=#{describe_peer(state.peer)}"
-    )
+    Logger.info([
+      "gateway operate ",
+      method,
+      " params=",
+      AuditLine.params(method, params),
+      " peer=",
+      describe_peer(state.peer)
+    ])
 
     state
   end
 
   defp audit(state, _method, _params, _entry), do: state
-
-  defp params_digest(params) do
-    :sha256
-    |> :crypto.hash(params |> Wire.to_json() |> JSON.encode_to_iodata!())
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
-  end
 
   defp hello(id, params, state) do
     with :ok <- authenticate(params, state.config),
@@ -1051,11 +1061,13 @@ defmodule Ouroboros.Gateway.Conn do
     identity = state.identity
     max_frame = state.config.max_frame
     conn_supervisor = state.conn_supervisor
+    session = state.session
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         Process.put(:ouroboros_attachment_frame, max_frame)
         Process.put(:ouroboros_gateway_conn_supervisor, conn_supervisor)
+        Process.put(:ouroboros_client_session, session)
         Ouroboros.Audit.Identity.with_subject(identity, fn -> method_invoker.(method, params) end)
       end)
 

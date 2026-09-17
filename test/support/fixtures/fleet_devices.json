@@ -1,0 +1,88 @@
+{
+  "_fixture": {
+    "note": "What `ouro fleet devices --json` prints. Derived by hand from the sanitized capture in tui/tests/fixtures/tailscale/running-with-peers.json, whose hostnames, addresses, keys and account names are already invented; the peers and their observed states are that file's, rendered through fleet_network::device_rows. Kept here so the Elixir suite never needs the Rust build. This key is not read by anything and proves an unknown top-level key is named in `unknown` rather than passed through.",
+    "source": "tui/tests/fixtures/tailscale/running-with-peers.json"
+  },
+  "fleet_protocol_revision": 5,
+  "discovery": {
+    "code": "ok",
+    "reason": null,
+    "detail": null,
+    "client": {
+      "program": "/usr/local/bin/tailscale",
+      "source": "path",
+      "version": "1.102.1",
+      "backend_state": "Running",
+      "magic_dns_suffix": "tailnet-example.ts.net"
+    },
+    "self": {
+      "host_name": "operator-laptop",
+      "dns_name": "operator-laptop.tailnet-example.ts.net",
+      "os": "macOS",
+      "online": true,
+      "ipv4": "100.64.12.21",
+      "relay_region": "par",
+      "path": "direct",
+      "current_address": null,
+      "last_seen": null
+    },
+    "visible_peers": 4
+  },
+  "devices": [
+    {
+      "name": "operator-laptop",
+      "machine": null,
+      "os": "macOS",
+      "address": "100.64.12.21",
+      "online": true,
+      "last_seen": null,
+      "path": "direct",
+      "state": "this_device_without_profile",
+      "action": "set up this device"
+    },
+    {
+      "name": "build-linux",
+      "machine": null,
+      "os": "linux",
+      "address": "100.64.12.44",
+      "online": true,
+      "last_seen": null,
+      "path": "direct",
+      "state": "discovered_installation_unknown",
+      "action": "deploy Ouroboros"
+    },
+    {
+      "name": "old-pi",
+      "machine": null,
+      "os": "linux",
+      "address": "100.64.12.10",
+      "online": false,
+      "last_seen": null,
+      "path": "unknown",
+      "state": "peer_offline",
+      "action": "refresh or inspect details"
+    },
+    {
+      "name": "pocket-phone",
+      "machine": null,
+      "os": "iOS",
+      "address": "100.64.12.31",
+      "online": true,
+      "last_seen": null,
+      "path": "unknown",
+      "state": "unsupported_platform",
+      "action": "no supported Ouroboros release"
+    },
+    {
+      "name": "ipv6-only-box",
+      "machine": null,
+      "os": "linux",
+      "address": null,
+      "online": true,
+      "last_seen": null,
+      "path": "unknown",
+      "state": "no_usable_ipv4",
+      "action": "no usable private IPv4 address"
+    }
+  ]
+}

@@ -438,10 +438,67 @@ Nothing here deletes a file on the lost machine.
 | `fleet.doctor` | read | per-node checks with guidance, and the non-answers named |
 | `fleet.tags` | operate | add / remove / list advisory tags on a connected machine |
 | `fleet.forget_session_owner` | operate | the irreversible local retirement above |
+| `fleet.devices` | read, administrator | the Devices inventory: this deployment host, what its network client can see, and whether it may deploy at all |
+| `fleet.deployment.status` | read, administrator | one deployment operation, from its worker or from its journal |
+| `fleet.deployment.prepare` / `.start` / `.authenticate` / `.confirm_host` / `.cancel` / `.resume` | operate, administrator | the deployment lifecycle below |
 
 Fleet views are *observations*: bounded per-node answers merged at read time, with
 unreachable nodes named. Nothing here is membership consensus, quorum, or a partition
 policy.
+
+## Deploying onto another machine — not yet shipped in a release
+
+**This section describes work in progress.** The Elixir broker below is in the tree; the
+Rust deployment worker it talks to is being built alongside it and is not in a released
+`ouro`. On a runtime whose `ouro` does not serve `fleet worker start`, every verb here
+answers a stable reason code — it does not appear to work.
+
+A deployment is long, interruptible, and carries an SSH credential, so the work does not
+happen inside the runtime that was asked for it. `Ouroboros.Fleet.Deployment` is a broker,
+not an executor:
+
+1. **It starts a worker it does not own.** `ouro fleet worker start --operation <id>
+   --data-dir <dir>` forks a detached worker into its own session and process group, with
+   its stdio on a private log, and prints one JSON line naming the worker's Unix socket and
+   its instance identity. The broker finds `ouro` at the absolute path the launcher exported
+   in `OUROBOROS_PROCESS_ID_HELPER` — never through `PATH`, because this is the process that
+   will be handed a password.
+2. **It connects, and proves it may.** The worker writes a 32-byte capability into a 0600
+   file before its socket listens; the broker reads it — refusing a file anyone else could
+   read — and presents it in the first frame, along with the audited identity and the client
+   session. Frames are NDJSON, one per line, capped at 1 MiB in both directions; a worker
+   that writes past that cap loses its connection and nothing else.
+3. **It reconnects by instance, not by path.** A socket that exists is not evidence that the
+   worker which printed it is the process listening on it.
+4. **It reads the journal when no worker is alive.** `<data dir>/fleet/deploy/<id>.json` is
+   the operation's durable authority, written by the worker before and after every
+   externally visible step. The broker opens it read-only and sanitizes what it returns; it
+   never writes one, because a broker that repaired a journal would be inventing steps the
+   target machine never saw.
+
+What that buys: closing the page does not cancel a deployment, and neither does stopping
+the runtime — which is what lets the *first local fleet setup* restart the very runtime
+serving the UI. What it costs: this runtime is never the authority on what happened.
+
+**Credentials.** A password or key passphrase is answered to its own challenge and nowhere
+else. It arrives as a parameter of `fleet.deployment.authenticate`, goes into the frame
+encoder, and goes onto the worker's socket; it is not stored in any process state, not put
+in an operation journal or receipt, not passed to a command line or an environment variable,
+and — uniquely in this protocol — not passed to the audit parameter digest. Hashing a human's
+password into a log is not redaction, so that one method's audit line names the operation and
+the challenge and nothing else, on both the listener and the browser surface. A challenge is
+bound at issue to the identity *and* the client session it was issued to: a second browser
+tab or a second listener connection is refused `challenge_not_bound` before anything is
+written, and a challenge is consumed the moment it is answered, so there is no second guess.
+
+**Authorization.** Every verb here needs an administrator once identities are configured —
+the network inventory as much as the mutations, because a tailnet inventory is every machine
+on an operator's private network. A non-administrator sees `fleet.status`'s membership
+subset in Devices instead. Credential entry is additionally decided on the web endpoint's
+**bind**, the one transport fact the server can verify: a loopback bind permits it whether
+the browser is local or arrives through `tailscale serve`, and a non-loopback bind under
+`OUROBOROS_WEB_ALLOW_REMOTE=1` is cleartext by definition and refuses it. Forwarded and
+proxy headers play no part in that decision.
 
 ## Trust
 

@@ -46,8 +46,8 @@ defmodule Ouroboros.Web.Call do
 
   require Logger
 
+  alias Ouroboros.Gateway.AuditLine
   alias Ouroboros.Gateway.Methods
-  alias Ouroboros.Gateway.Wire
 
   @type scope :: :read | :operate
   # The fourth element is the gateway's own `data`, passed through untouched: a map for
@@ -122,9 +122,15 @@ defmodule Ouroboros.Web.Call do
   defp run(method, params, entry, opts) do
     supervisor = Keyword.get(opts, :task_supervisor, Ouroboros.Web.TaskSupervisor)
     subject = Ouroboros.Audit.Identity.current()
+    # The authenticated browser session, carried into the handler the same way the listener
+    # carries its connection identity. A deployment challenge is bound to it at issue (seam
+    # S4), so a second tab — a second session — cannot answer the first one's prompt.
+    session = Keyword.get(opts, :session)
 
     task =
       Task.Supervisor.async_nolink(supervisor, fn ->
+        Process.put(:ouroboros_client_session, session)
+
         Ouroboros.Audit.Identity.with_subject(subject, fn -> Methods.invoke(method, params) end)
       end)
 
@@ -176,10 +182,20 @@ defmodule Ouroboros.Web.Call do
 
   # Matches on the *method's* scope, not the endpoint's: the line exists to record that
   # something mutating happened, and a read-scope endpoint cannot reach this at all.
+  #
+  # What the `params=` field may contain is `Ouroboros.Gateway.AuditLine`'s decision, shared
+  # with the listener so one request reproduced against either surface leaves the same
+  # sixteen hex characters in both logs — and so that the one method whose parameters carry
+  # an SSH secret is redacted in both, rather than in whichever file somebody remembered.
   defp audit(method, params, %{scope: :operate}, opts) do
-    Logger.info(
-      "web operate #{method} params=#{params_digest(params)} session=#{session_id(opts)}"
-    )
+    Logger.info([
+      "web operate ",
+      method,
+      " params=",
+      AuditLine.params(method, params),
+      " session=",
+      session_id(opts)
+    ])
   end
 
   defp audit(_method, _params, _entry, _opts), do: :ok
@@ -189,14 +205,5 @@ defmodule Ouroboros.Web.Call do
       id when is_binary(id) -> id
       _other -> "unattributed"
     end
-  end
-
-  # The gateway's digest, computed the gateway's way, so one request reproduced against
-  # either surface leaves the same 16 hex characters in both logs.
-  defp params_digest(params) do
-    :sha256
-    |> :crypto.hash(params |> Wire.to_json() |> JSON.encode_to_iodata!())
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
   end
 end
