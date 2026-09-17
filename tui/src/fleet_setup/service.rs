@@ -169,7 +169,7 @@ fn summarize_fields(
 impl ServiceActions for LocalServiceActions {
     fn local(&self, action: ServiceAction) -> Result<ServiceOutcome> {
         let plan = crate::fleet_service::Plan::for_this_machine(&self.data_dir)?;
-        let programs = crate::fleet_service::Programs::from_env();
+        let programs = crate::fleet_service::Programs::from_env()?;
         let report = match action {
             ServiceAction::Install => crate::fleet_service::install(&plan, &programs, false),
             ServiceAction::Status => crate::fleet_service::status(&plan, &programs),
