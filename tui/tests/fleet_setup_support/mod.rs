@@ -91,16 +91,35 @@ impl Sshd {
     }
 
     fn boot(dir: PathBuf, label: &str) -> Self {
+        Self::boot_with(dir, label, &["host_key"])
+    }
+
+    /// Two host keys of different types, so a client that records one can be shown
+    /// whether `UpdateHostKeys` rewrites the private store.
+    pub fn start_with_two_host_keys(label: &str) -> Self {
+        let dir = scratch(label);
+        keygen(&dir.join("host_key"), "");
+        keygen_type(&dir.join("host_key_rsa"), "rsa", "");
+        keygen(&dir.join("client_key"), "");
+        authorize(&dir, &[&dir.join("client_key.pub")]);
+        Self::boot_with(dir, label, &["host_key", "host_key_rsa"])
+    }
+
+    fn boot_with(dir: PathBuf, label: &str, host_keys: &[&str]) -> Self {
         let port = free_port();
         let home = dir.join("home");
         fs::create_dir_all(&home).expect("a fake home");
+        let host_key_lines: String = host_keys
+            .iter()
+            .map(|name| format!("HostKey {}\n", dir.join(name).display()))
+            .collect();
         let config = dir.join("sshd_config");
         fs::write(
             &config,
             format!(
                 "Port {port}\n\
                  ListenAddress 127.0.0.1\n\
-                 HostKey {host}\n\
+                 {host_key_lines}\
                  AuthorizedKeysFile {authorized}\n\
                  PasswordAuthentication no\n\
                  KbdInteractiveAuthentication no\n\
@@ -110,7 +129,6 @@ impl Sshd {
                  StrictModes no\n\
                  SetEnv HOME={home}\n\
                  LogLevel VERBOSE\n",
-                host = dir.join("host_key").display(),
                 authorized = dir.join("authorized_keys").display(),
                 home = home.display(),
             ),
@@ -211,6 +229,20 @@ fn keygen(path: &Path, passphrase: &str) {
         .status()
         .expect("ssh-keygen");
     assert!(status.success(), "ssh-keygen failed for {}", path.display());
+}
+
+fn keygen_type(path: &Path, algorithm: &str, passphrase: &str) {
+    let status = Command::new("/usr/bin/ssh-keygen")
+        .args(["-q", "-t", algorithm, "-N", passphrase, "-f"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .status()
+        .expect("ssh-keygen");
+    assert!(
+        status.success(),
+        "ssh-keygen -t {algorithm} failed for {}",
+        path.display()
+    );
 }
 
 fn authorize(dir: &Path, public_keys: &[&Path]) {
@@ -434,4 +466,20 @@ fn answer(mut stream: std::net::TcpStream, routes: &[(String, Vec<u8>)]) {
     let mut drain = [0_u8; 1024];
     use std::io::Read as _;
     let _ = stream.read(&mut drain);
+}
+
+/// A wrapper around the built `ouro` that intercepts `stop --require-idle`.
+///
+/// Leave talks to the helper through this same path, so every other verb still reaches
+/// the real binary; only the idle-gated stop is scripted.
+pub fn stop_intercept_shim(dir: &Path, real: &Path, exit: i32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("stop-shim");
+    let body = format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--require-idle\" ]; then\n    echo intercept >&2\n    exit {exit}\n  fi\ndone\nexec {} \"$@\"\n",
+        real.display()
+    );
+    fs::write(&path, body).expect("a stop intercept shim");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("an executable shim");
+    path
 }

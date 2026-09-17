@@ -240,8 +240,9 @@ pub enum Command {
         /// does not serve `runtime.activity` and therefore has no gate to apply (the
         /// request is not sent at all, because an older runtime ignores the parameter
         /// and stops, which looks exactly like a pass), and 13 for a connection that
-        /// closed before any answer arrived. Without this flag `ouro stop` behaves
-        /// exactly as it always has.
+        /// closed before any answer arrived. A data directory with no published runtime
+        /// is not a refusal: the command exits 0 and says there was nothing to stop.
+        /// Without this flag `ouro stop` behaves exactly as it always has.
         #[arg(long)]
         require_idle: bool,
     },
@@ -1738,7 +1739,7 @@ pub enum FleetCommand {
         ask_password: bool,
 
         #[command(flatten)]
-        common: FleetSetupArgs,
+        common: LeaveSetupArgs,
     },
 
     /// Run one deployment operation as a process that outlives whatever started it.
@@ -1774,7 +1775,7 @@ pub enum FleetCommand {
     Helper,
 }
 
-/// The flags `setup`, `add` and cooperative `leave` share.
+/// The flags `setup` and `add` share.
 #[derive(Args, Debug, Default)]
 pub struct FleetSetupArgs {
     /// Inspect and print the concrete plan, and change nothing: no journal, no
@@ -1802,6 +1803,35 @@ pub struct FleetSetupArgs {
     /// Resume (or name) one operation instead of starting a new one. An operation id is
     /// 8 to 64 characters of lowercase letters, digits and single hyphens.
     #[arg(long, value_name = "ID")]
+    pub operation: Option<String>,
+}
+
+/// The flags cooperative `leave --machine` shares with `setup`/`add`, minus `--no-service`.
+///
+/// Flattened into [`FleetCommand::Leave`], which is also the local credential-removal
+/// command when `--machine` is omitted. Every flag here requires `--machine` so a bare
+/// `leave --dry-run` is a parse error rather than a real local leave that ignored the
+/// flag. `--no-service` is not here: cooperative removal always disables a managed
+/// service, and a flag that selected manual startup would be silently meaningless.
+#[derive(Args, Debug, Default)]
+pub struct LeaveSetupArgs {
+    /// Inspect and print the concrete plan, and change nothing.
+    #[arg(long, requires = "machine")]
+    pub dry_run: bool,
+
+    /// Accept the resolved plan without a confirmation prompt. It never accepts an
+    /// unknown or changed host key, never answers a password prompt, and never makes a
+    /// busy runtime idle.
+    #[arg(long, requires = "machine")]
+    pub yes: bool,
+
+    /// Machine-readable result on stdout, with stable reason codes.
+    #[arg(long, requires = "machine")]
+    pub json: bool,
+
+    /// Resume (or name) one operation instead of starting a new one. An operation id is
+    /// 8 to 64 characters of lowercase letters, digits and single hyphens.
+    #[arg(long, value_name = "ID", requires = "machine")]
     pub operation: Option<String>,
 }
 
@@ -3127,6 +3157,59 @@ mod tests {
         assert!(
             Cli::try_parse_from(["ouro", "fleet", "leave", "--machine", "buildbox"]).is_err(),
             "a cooperative removal without an SSH account is refused at parse time"
+        );
+        // Setup flags on a bare leave used to parse and then be discarded, so
+        // `leave --dry-run` performed the real local credential removal.
+        for flag in [
+            ["ouro", "fleet", "leave", "--dry-run"].as_slice(),
+            ["ouro", "fleet", "leave", "--json"].as_slice(),
+            ["ouro", "fleet", "leave", "--yes"].as_slice(),
+            ["ouro", "fleet", "leave", "--operation", "x"].as_slice(),
+            ["ouro", "fleet", "leave", "--no-service"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(flag).is_err(),
+                "{} must not parse as a silent local leave",
+                flag.join(" ")
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "ouro",
+                "fleet",
+                "leave",
+                "--machine",
+                "vps",
+                "--user",
+                "me",
+                "--no-service"
+            ])
+            .is_err(),
+            "cooperative leave has no manual-startup choice to make"
+        );
+        assert!(matches!(
+            parse(&[
+                "fleet",
+                "leave",
+                "--machine",
+                "vps",
+                "--user",
+                "me",
+                "--dry-run"
+            ])
+            .command,
+            Some(Command::Fleet {
+                command: FleetCommand::Leave {
+                    machine: Some(machine),
+                    user: Some(user),
+                    common,
+                    ..
+                }
+            }) if machine == "vps" && user == "me" && common.dry_run
+        ));
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "setup", "--dry-run"]).is_ok(),
+            "setup still inspects without an explicit --machine"
         );
     }
 }

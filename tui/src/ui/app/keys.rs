@@ -35,7 +35,7 @@ impl App {
         // panel, the footer, and the palette able to *state* the effective binding (D14).
         if self.keymap.hits(Action::Palette, key) {
             if matches!(self.overlay, Some(Overlay::Commands(_))) {
-                self.overlay = None;
+                self.close_overlay();
             } else if self.overlay.is_none() {
                 self.overlay = Some(Overlay::Commands(CommandPalette::default()));
             }

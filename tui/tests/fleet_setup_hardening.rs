@@ -126,6 +126,9 @@ fn the_askpass_window_closes_with_the_ssh_child_that_opened_it() {
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
 
     // Baseline: before any ssh runs, a stray caller is refused.
@@ -226,14 +229,17 @@ fn a_far_end_cannot_put_a_keyboard_interactive_prompt_in_front_of_an_operator() 
             port: 22,
             user: "op".into(),
         },
-        // `IdentityChoice::Default` is the shipped default and sets no
-        // PreferredAuthentications, so keyboard-interactive is on the menu.
+        // `IdentityChoice::Default` names PreferredAuthentications=publickey, so
+        // keyboard-interactive is not on the menu.
         identity: ResolvedIdentity::Default,
         known_hosts: vec![work.join("known_hosts")],
         user_known_hosts: None,
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
     // The method list is what keeps keyboard-interactive off the menu in the first
     // place, so the far end never gets to compose a prompt at all.
@@ -268,7 +274,16 @@ fn a_far_end_cannot_put_a_keyboard_interactive_prompt_in_front_of_an_operator() 
             ssh: probing.clone(),
             ..programs()
         },
-        ..runner
+        destination: runner.destination.clone(),
+        identity: runner.identity.clone(),
+        known_hosts: runner.known_hosts.clone(),
+        user_known_hosts: runner.user_known_hosts.clone(),
+        connect_timeout: runner.connect_timeout,
+        command_timeout: runner.command_timeout,
+        bridge: runner.bridge.clone(),
+        control: None,
+        cancelled: runner.cancelled.clone(),
+        challenge_window: runner.challenge_window,
     };
     probing_runner
         .run("exec true", None)
@@ -658,6 +673,9 @@ fn a_revoked_host_key_is_refused_by_name() {
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: None,
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
     let refused = runner
         .check_access()
@@ -939,6 +957,9 @@ fn adv_hostile_inputs_do_not_change_the_remote_command_string() {
             connect_timeout: CONNECT_TIMEOUT,
             command_timeout: COMMAND_TIMEOUT,
             bridge: None,
+            control: None,
+            cancelled: None,
+            challenge_window: None,
         };
         let argv = runner.argv(PREFLIGHT);
         // The user is one argv element, the value of -l, and never part of the command.
@@ -1358,6 +1379,9 @@ fn a_rewritten_destination_is_refused() {
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: None,
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
     let refused = runner
         .inspect_effective_config()
@@ -1387,6 +1411,9 @@ fn a_rewritten_destination_is_refused() {
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: None,
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
     let refused = runner
         .inspect_effective_config()
@@ -1443,6 +1470,9 @@ fn authentication_attempts_are_capped_within_one_connection() {
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
     runner.run("exec true", None).expect("the shim runs");
 
@@ -1475,12 +1505,20 @@ fn authentication_attempts_are_capped_within_one_connection() {
             ssh: shim.clone(),
             ..programs()
         },
+        destination: runner.destination.clone(),
         identity: ResolvedIdentity::Key {
             path: PathBuf::from("/k"),
             label: "id_ed25519".into(),
             fingerprint: Some("SHA256:k".into()),
         },
-        ..runner
+        known_hosts: runner.known_hosts.clone(),
+        user_known_hosts: runner.user_known_hosts.clone(),
+        connect_timeout: runner.connect_timeout,
+        command_timeout: runner.command_timeout,
+        bridge: runner.bridge.clone(),
+        control: None,
+        cancelled: runner.cancelled.clone(),
+        challenge_window: runner.challenge_window,
     };
     runner.run("exec true", None).expect("the shim runs");
     let answers = std::fs::read_to_string(format!("{}.answers", shim.display()))

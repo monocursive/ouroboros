@@ -21,19 +21,20 @@
 //!   the journal or an error string. It exists as a [`Zeroizing<String>`] for the length
 //!   of one `write_all`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 use super::challenge::{passphrase_metadata, password_metadata, Answer, ChallengeKind};
-use super::{refuse, sanitize_remote_text, ChallengeRequest, Conversation};
+use super::{refuse, sanitize_remote_text, ChallengeRequest, Conversation, CHALLENGE_LIFETIME};
 
 /// The environment variable that names the bridge's socket.
 pub const SOCKET_ENV: &str = "OUROBOROS_ASKPASS_SOCKET";
@@ -105,12 +106,19 @@ pub fn classify(prompt: &str) -> Prompt {
 #[must_use = "the askpass bridge stays armed until this guard is dropped"]
 pub struct Armed {
     bridge: Arc<Bridge>,
+    group: i32,
+    issuer: u64,
 }
 
 impl Drop for Armed {
     fn drop(&mut self) {
-        self.bridge.disarm();
+        self.bridge.disarm(self.group, self.issuer);
     }
+}
+
+struct GroupState {
+    refs: u32,
+    issuer: u64,
 }
 
 pub struct Bridge {
@@ -119,19 +127,21 @@ pub struct Bridge {
     home: PathBuf,
     /// The two-line launcher `SSH_ASKPASS` names.
     launcher: PathBuf,
-    armed: Arc<AtomicBool>,
-    /// The process group of the `ssh` child the window is open for. A connecting peer
-    /// has to belong to it.
-    armed_group: Arc<AtomicI32>,
+    /// Armed process groups. Membership, not a toggle: a helper session and a
+    /// one-shot `run` can overlap, and dropping one must not close the other.
+    groups: Arc<Mutex<HashMap<i32, GroupState>>>,
     stop: Arc<AtomicBool>,
-    attempts: Arc<AtomicU32>,
     /// The number of prompts this bridge actually served, for tests and for the journal
     /// line that says how many attempts an authentication took.
     served: Arc<AtomicU32>,
-    /// The key labels a passphrase has already been asked for on this connection. A
-    /// second prompt for the same key is a server that keeps asking, not an operator who
-    /// mistyped.
-    passphrases: Arc<Mutex<Vec<String>>>,
+    /// Prompts that reached classification, including ones we refused. A host-key
+    /// confirmation routed here increments this without incrementing [`Self::served`].
+    prompted: Arc<AtomicU32>,
+    in_flight: Arc<AtomicU32>,
+    prompt_began: Arc<Mutex<Option<Instant>>>,
+    last_reason: Arc<Mutex<Option<&'static str>>>,
+    conversation: Arc<dyn Conversation>,
+    next_issuer: AtomicU64,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -154,8 +164,7 @@ impl Bridge {
         use std::os::unix::fs::OpenOptionsExt as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        let home = std::env::temp_dir().join(format!("ouro-ap-{}", super::random_hex(5)?));
-        super::ensure_private_subdir(&home)?;
+        let home = create_bridge_home()?;
         let socket = home.join("s");
 
         // `SSH_ASKPASS` names an executable and OpenSSH passes the prompt as its only
@@ -196,23 +205,29 @@ impl Bridge {
             .set_nonblocking(true)
             .context("configuring the askpass socket")?;
 
-        let armed = Arc::new(AtomicBool::new(false));
-        let armed_group = Arc::new(AtomicI32::new(0));
+        let groups = Arc::new(Mutex::new(HashMap::<i32, GroupState>::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU32::new(0));
         let served = Arc::new(AtomicU32::new(0));
+        let prompted = Arc::new(AtomicU32::new(0));
+        let in_flight = Arc::new(AtomicU32::new(0));
+        let prompt_began = Arc::new(Mutex::new(None));
+        let last_reason = Arc::new(Mutex::new(None));
         let passphrases = Arc::new(Mutex::new(Vec::<String>::new()));
 
         let thread = {
             let state = AcceptState {
-                armed: Arc::clone(&armed),
-                armed_group: Arc::clone(&armed_group),
+                groups: Arc::clone(&groups),
                 stop: Arc::clone(&stop),
                 attempts: Arc::clone(&attempts),
                 served: Arc::clone(&served),
+                prompted: Arc::clone(&prompted),
+                in_flight: Arc::clone(&in_flight),
+                prompt_began: Arc::clone(&prompt_began),
+                last_reason: Arc::clone(&last_reason),
                 passphrases: Arc::clone(&passphrases),
                 context,
-                conversation,
+                conversation: Arc::clone(&conversation),
             };
             std::thread::Builder::new()
                 .name("ouro-askpass".to_string())
@@ -224,12 +239,15 @@ impl Bridge {
             socket,
             home,
             launcher,
-            armed,
-            armed_group,
+            groups,
             stop,
-            attempts,
             served,
-            passphrases,
+            prompted,
+            in_flight,
+            prompt_began,
+            last_reason,
+            conversation,
+            next_issuer: AtomicU64::new(1),
             thread: Some(thread),
         })
     }
@@ -253,8 +271,8 @@ impl Bridge {
         ]
     }
 
-    /// Open the prompt window for one `ssh` child, and reset the per-connection attempt
-    /// counters. The window closes when the returned guard is dropped.
+    /// Open the prompt window for one `ssh` child. The window for *this* child closes
+    /// when the returned guard is dropped; other armed groups are untouched.
     ///
     /// `group` is that child's process group. Every `ssh` this module starts is a group
     /// leader (`process_group(0)`), and the askpass helper OpenSSH forks inherits the
@@ -262,37 +280,113 @@ impl Bridge {
     /// the kernel can answer, rather than "is this caller the same account as us?",
     /// which every process of this operator's would pass.
     pub fn arm(self: &Arc<Self>, group: i32) -> Armed {
-        self.attempts.store(0, Ordering::SeqCst);
-        self.passphrases
+        let mut groups = self
+            .groups
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.armed_group.store(group, Ordering::SeqCst);
-        self.armed.store(true, Ordering::SeqCst);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let issuer = if let Some(state) = groups.get_mut(&group) {
+            state.refs += 1;
+            state.issuer
+        } else {
+            let issuer = self.next_issuer.fetch_add(1, Ordering::Relaxed);
+            groups.insert(group, GroupState { refs: 1, issuer });
+            issuer
+        };
         Armed {
             bridge: Arc::clone(self),
+            group,
+            issuer,
         }
     }
 
-    fn disarm(&self) {
-        self.armed.store(false, Ordering::SeqCst);
-        self.armed_group.store(0, Ordering::SeqCst);
+    fn disarm(&self, group: i32, issuer: u64) {
+        let last = {
+            let mut groups = self
+                .groups
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match groups.get_mut(&group) {
+                Some(state) => {
+                    state.refs = state.refs.saturating_sub(1);
+                    if state.refs == 0 {
+                        groups.remove(&group);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            }
+        };
+        if last {
+            self.conversation.withdraw(issuer, "connection_lost");
+        }
     }
 
-    /// Whether the window is open, for the tests that assert it closes.
+    /// Withdraw every challenge the currently armed children issued. Used when a
+    /// child's deadline passes with a prompt still in front of the operator, so the
+    /// accept thread is not left parked on a human.
+    pub fn abort_active(&self, reason: &'static str) {
+        let issuers: Vec<u64> = self
+            .groups
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .map(|state| state.issuer)
+            .collect();
+        for issuer in issuers {
+            self.conversation.withdraw(issuer, reason);
+        }
+        *self
+            .last_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+    }
+
+    /// Whether any window is open, for the tests that assert it closes.
     pub fn armed(&self) -> bool {
-        self.armed.load(Ordering::SeqCst)
+        !self
+            .groups
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
     }
 
     /// How many prompts this bridge has answered, in total.
     pub fn served(&self) -> u32 {
         self.served.load(Ordering::SeqCst)
     }
+
+    /// How many prompts reached classification, answered or not.
+    pub fn prompted(&self) -> u32 {
+        self.prompted.load(Ordering::SeqCst)
+    }
+
+    pub fn prompt_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst) > 0
+    }
+
+    pub fn prompt_began(&self) -> Option<Instant> {
+        *self
+            .prompt_began
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn take_reason(&self) -> Option<&'static str> {
+        self.last_reason
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // Before joining: a `serve_one` thread parked in `Conversation::ask` unblocks
+        // once its issuer is withdrawn. Joining without that waits for a human.
+        self.abort_active("connection_lost");
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -305,11 +399,14 @@ impl Drop for Bridge {
 /// What the accept loop and every connection it serves share.
 #[derive(Clone)]
 struct AcceptState {
-    armed: Arc<AtomicBool>,
-    armed_group: Arc<AtomicI32>,
+    groups: Arc<Mutex<HashMap<i32, GroupState>>>,
     stop: Arc<AtomicBool>,
     attempts: Arc<AtomicU32>,
     served: Arc<AtomicU32>,
+    prompted: Arc<AtomicU32>,
+    in_flight: Arc<AtomicU32>,
+    prompt_began: Arc<Mutex<Option<Instant>>>,
+    last_reason: Arc<Mutex<Option<&'static str>>>,
     passphrases: Arc<Mutex<Vec<String>>>,
     context: PromptContext,
     conversation: Arc<dyn Conversation>,
@@ -371,17 +468,20 @@ fn serve_one(stream: UnixStream, state: &AcceptState) -> Result<()> {
             "this socket answers only the account that owns the operation",
         );
     }
-    if !state.armed.load(Ordering::SeqCst) {
-        return deny(
-            &mut writer,
-            "not_authenticating",
-            "no authentication attempt is in flight for this operation",
-        );
-    }
-    // Same account is not enough: every process this operator runs would pass it. The
-    // caller has to belong to the `ssh` this bridge was armed for.
-    let group = state.armed_group.load(Ordering::SeqCst);
-    if !belongs_to(peer_pid, group) {
+    let issuer = issuer_for_peer(&state.groups, peer_pid);
+    if issuer == 0 {
+        let any_armed = !state
+            .groups
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty();
+        if !any_armed {
+            return deny(
+                &mut writer,
+                "not_authenticating",
+                "no authentication attempt is in flight for this operation",
+            );
+        }
         return deny(
             &mut writer,
             "peer_not_in_connection",
@@ -420,6 +520,7 @@ fn serve_one(stream: UnixStream, state: &AcceptState) -> Result<()> {
         }
     };
     let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
+    state.prompted.fetch_add(1, Ordering::SeqCst);
 
     let (kind, metadata) = match classify(prompt) {
         Prompt::Passphrase => {
@@ -494,7 +595,9 @@ fn serve_one(stream: UnixStream, state: &AcceptState) -> Result<()> {
         }
     };
 
-    let answer = conversation.ask(ChallengeRequest { kind, metadata });
+    begin_prompt(&state.in_flight, &state.prompt_began);
+    let answer = conversation.ask_from(issuer, ChallengeRequest { kind, metadata });
+    end_prompt(&state.in_flight, &state.prompt_began);
     match answer {
         Ok(Answer::Secret(secret)) => {
             served.fetch_add(1, Ordering::SeqCst);
@@ -507,6 +610,7 @@ fn serve_one(stream: UnixStream, state: &AcceptState) -> Result<()> {
         ),
         Err(error) => {
             let reason = super::reason_of(&error).unwrap_or("authentication_cancelled");
+            record_reason(&state.last_reason, reason);
             deny(
                 &mut writer,
                 reason,
@@ -556,6 +660,84 @@ fn deny(writer: &mut UnixStream, reason: &'static str, detail: &str) -> Result<(
         .and_then(|()| writer.flush())
         .context("refusing an askpass request")?;
     refuse(reason, detail.to_string())
+}
+
+fn issuer_for_peer(groups: &Mutex<HashMap<i32, GroupState>>, peer: i32) -> u64 {
+    let groups = groups
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    groups
+        .iter()
+        .find(|(&group, _)| belongs_to(peer, group))
+        .map(|(_, state)| state.issuer)
+        .unwrap_or(0)
+}
+
+fn record_reason(slot: &Mutex<Option<&'static str>>, reason: &'static str) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+}
+
+fn begin_prompt(in_flight: &AtomicU32, began: &Mutex<Option<Instant>>) {
+    if in_flight.fetch_add(1, Ordering::SeqCst) == 0 {
+        *began
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+    }
+}
+
+fn end_prompt(in_flight: &AtomicU32, began: &Mutex<Option<Instant>>) {
+    if in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+        *began
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+/// A short, exclusive 0700 directory under `TMPDIR`. `create_dir` refuses a name
+/// that is already there rather than adopting it: a planted directory with looser
+/// permissions must not become the askpass home.
+fn create_bridge_home() -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+
+    let uid = unsafe { libc::geteuid() };
+    let mut last_error = None;
+    for _ in 0..16 {
+        let home = std::env::temp_dir().join(format!("ouro-ap-{}", super::random_hex(5)?));
+        match std::fs::DirBuilder::new().mode(0o700).create(&home) {
+            Ok(()) => {
+                let metadata = std::fs::symlink_metadata(&home)
+                    .with_context(|| format!("re-stating {}", home.display()))?;
+                if !metadata.file_type().is_dir()
+                    || metadata.uid() != uid
+                    || metadata.permissions().mode() & 0o777 != 0o700
+                {
+                    let _ = std::fs::remove_dir(&home);
+                    return refuse(
+                        "askpass_unavailable",
+                        "the askpass directory is not a private directory this account owns",
+                    );
+                }
+                return Ok(home);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("creating the askpass directory {}", home.display()))
+            }
+        }
+    }
+    refuse(
+        "askpass_unavailable",
+        format!(
+            "could not allocate a private askpass directory{}",
+            last_error
+                .map(|error| format!(" ({error})"))
+                .unwrap_or_default()
+        ),
+    )
 }
 
 /// Who is on the other end: the account, and the process.
@@ -680,7 +862,7 @@ pub fn request(socket: &Path, prompt: &str) -> Result<Zeroizing<String>> {
     let stream = UnixStream::connect(socket)
         .with_context(|| format!("connecting to {}", socket.display()))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(300)))
+        .set_read_timeout(Some(CHALLENGE_LIFETIME))
         .context("bounding the askpass read")?;
     let mut writer = stream.try_clone().context("cloning the askpass socket")?;
     let frame = json!({ "prompt": prompt }).to_string();
@@ -796,5 +978,44 @@ mod tests {
             classify("Enter passphrase for key (password-protected): "),
             Prompt::Passphrase
         );
+    }
+
+    /// Arming is membership in a map of process groups, not a single toggle. Dropping
+    /// B must not close A's window.
+    #[test]
+    fn arming_two_groups_and_dropping_one_leaves_the_other_armed() {
+        struct Silent;
+        impl Conversation for Silent {
+            fn ask(&self, _request: ChallengeRequest) -> Result<Answer> {
+                super::super::refuse("cancelled", "silent")
+            }
+            fn notify(&self, _: super::super::Event) {}
+        }
+
+        let bridge = Arc::new(
+            Bridge::start(
+                Path::new("ouro"),
+                PromptContext {
+                    target: "127.0.0.1".into(),
+                    user: "t".into(),
+                    port: 22,
+                    key_label: None,
+                    key_fingerprint: None,
+                },
+                Arc::new(Silent),
+            )
+            .expect("a bridge"),
+        );
+        let group_a = unsafe { libc::getpgrp() };
+        let a = bridge.arm(group_a);
+        let b = bridge.arm(i32::MAX);
+        assert!(bridge.armed());
+        drop(b);
+        assert!(
+            bridge.armed(),
+            "dropping B must not disarm A: arming is per process group"
+        );
+        drop(a);
+        assert!(!bridge.armed());
     }
 }

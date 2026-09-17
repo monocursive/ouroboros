@@ -602,7 +602,7 @@ fn forget_machine_locked(data_dir: &Path, machine: &str) -> Result<Member> {
     let mut profile = load(data_dir)?.context(
         "this machine is standalone; there is no cluster roster to declare a machine gone in",
     )?;
-    if machine == profile.machine || machine == profile.node {
+    if same_name(machine, &profile.machine) || same_name(machine, &profile.node) {
         bail!(
             "{machine} is this machine; `ouro fleet leave` retires this machine's own identity, and `ouro fleet sessions forget` is for a machine that is gone for good"
         );
@@ -610,14 +610,14 @@ fn forget_machine_locked(data_dir: &Path, machine: &str) -> Result<Member> {
     if let Some(gone) = profile
         .tombstones
         .iter()
-        .find(|entry| entry.machine == machine || entry.node == machine)
+        .find(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, machine))
     {
         return Ok(gone.clone());
     }
     let Some(index) = profile
         .members
         .iter()
-        .position(|entry| entry.machine == machine || entry.node == machine)
+        .position(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, machine))
     else {
         bail!(
             "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
@@ -714,7 +714,7 @@ fn add_member_locked(
     if let Some(gone) = profile
         .tombstones
         .iter()
-        .find(|entry| entry.machine == machine || entry.node == added.node)
+        .find(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, &added.node))
     {
         bail!(
             "this machine's roster records {} as gone for good; `ouro fleet sessions restore {}` puts it back before it can be added again",
@@ -725,7 +725,7 @@ fn add_member_locked(
     if let Some(existing) = profile
         .members
         .iter()
-        .find(|entry| entry.machine == machine || entry.node == added.node)
+        .find(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, &added.node))
     {
         if existing == &added {
             return Ok(added);
@@ -765,7 +765,7 @@ pub fn remove_member(data_dir: &Path, machine: &str) -> Result<Member> {
 fn remove_member_locked(data_dir: &Path, machine: &str) -> Result<Member> {
     let mut profile = load(data_dir)?
         .context("this machine is standalone; there is no cluster roster to edit")?;
-    if machine == profile.machine || machine == profile.node {
+    if same_name(machine, &profile.machine) || same_name(machine, &profile.node) {
         bail!(
             "{machine} is this machine; `ouro fleet leave` retires its own identity, and `ouro fleet members remove` edits this machine's view of the others"
         );
@@ -773,12 +773,12 @@ fn remove_member_locked(data_dir: &Path, machine: &str) -> Result<Member> {
     let Some(index) = profile
         .members
         .iter()
-        .position(|entry| entry.machine == machine || entry.node == machine)
+        .position(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, machine))
     else {
         if let Some(gone) = profile
             .tombstones
             .iter()
-            .find(|entry| entry.machine == machine || entry.node == machine)
+            .find(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, machine))
         {
             bail!(
                 "this machine's roster already records {} as gone for good; nothing was changed",
@@ -5065,7 +5065,7 @@ pub fn receipts_dir(data_dir: &Path) -> PathBuf {
 /// only lower-case names (see [`validate_admission_machine`]), and every comparison
 /// against a name that is *already* on disk — written by an older `ouro fleet members
 /// add`, which still accepts either case — folds case so the existing entry shadows.
-fn same_name(left: &str, right: &str) -> bool {
+pub fn same_name(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
@@ -5586,17 +5586,18 @@ pub fn issue_member_certificate(
     data_dir: &Path,
     request: &AdmissionRequest,
 ) -> Result<AdmissionMaterials> {
-    let (materials, _lock) = issue_member_certificate_checked(data_dir, request, None)?;
-    Ok(materials)
+    issue_member_certificate_checked(data_dir, request, None)
 }
 
-/// Keep roster mutations and runtime restarts fenced through credential delivery and
-/// the issuer's roster update. The caller must retain this lock across that boundary.
+/// Recheck the reviewed roster under the lifecycle lock, write the durable `issue`
+/// receipt, then drop the lock before returning the materials. Delivery over SSH and
+/// the issuer's own roster write take their own locks; holding this one across that
+/// boundary would block local mutations for the length of a remote install.
 pub(crate) fn issue_member_certificate_checked(
     data_dir: &Path,
     request: &AdmissionRequest,
     expected: Option<&Profile>,
-) -> Result<(AdmissionMaterials, runtime::SpawnLock)> {
+) -> Result<AdmissionMaterials> {
     validate_admission_request(request)?;
     let lock = lock_live_fleet_update(data_dir, "ouro fleet admission issue")?;
 
@@ -5739,7 +5740,8 @@ pub(crate) fn issue_member_certificate_checked(
         )?;
     }
 
-    Ok((materials, lock))
+    drop(lock);
+    Ok(materials)
 }
 
 /// Refuse an operation id this machine already answered, and a machine it already
@@ -6398,10 +6400,9 @@ fn finished_install(
 /// The revision check is what keeps an operator from getting a lost update dressed up
 /// as a successful admission: a caller states the revision it read, and a roster that
 /// has moved on refuses with `roster_conflict` and the revision it actually holds. The
-/// read and the edit happen under one hold of the lifecycle lock — the `*_locked`
-/// variants of the roster editors exist for exactly this — so "the revision I checked"
-/// and "the revision I edited" are the same revision, and two callers racing one
-/// revision cannot both win.
+/// read and the edit happen under one hold of the lifecycle lock, so "the revision I
+/// checked" and "the revision I edited" are the same revision, and two callers racing
+/// one revision cannot both win.
 pub fn apply_roster_change(
     data_dir: &Path,
     operation: &str,
@@ -6413,7 +6414,7 @@ pub fn apply_roster_change(
     apply_roster_change_locked(data_dir, operation, expected_revision, change, &lock)
 }
 
-pub(crate) fn apply_roster_change_locked(
+fn apply_roster_change_locked(
     data_dir: &Path,
     operation: &str,
     expected_revision: u64,
@@ -6466,9 +6467,9 @@ pub(crate) fn apply_roster_change_locked(
         }
         .into());
     }
-    // A name that differs from one already on disk only by case is the same machine,
-    // and the roster editors below compare bytes. Without this, `add Studio` on a
-    // machine whose roster says `studio` is a second entry for one machine.
+    // A name that differs from one already on disk only by case is the same machine.
+    // The roster editors fold case too; this check keeps the on-disk spelling in the
+    // refusal so an operator is told which entry is already there.
     if let RosterChange::Add { .. } = change {
         for entry in before
             .members
@@ -6490,8 +6491,8 @@ pub(crate) fn apply_roster_change_locked(
 
     // The other direction of the same rule: a roster written by an older `ouro fleet
     // members add` may spell a machine `Vps`, and a lower-case request to remove or
-    // forget it names the same machine. Resolve to the spelling on disk so the editors
-    // below, which compare bytes, see the entry the operator meant.
+    // forget it names the same machine. Resolve to the spelling on disk so the receipt
+    // records the name that is actually there.
     let on_disk = before
         .members
         .iter()
@@ -9276,15 +9277,14 @@ mod tests {
     }
 
     #[test]
-    fn issuance_holds_the_roster_fence_until_local_membership_is_recorded() {
+    fn issuance_releases_the_roster_fence_before_delivery() {
         let issuer = issuer_fleet("issuer-fence");
         let target = scratch("target-fence");
         let request = prepare_admission(&target, "op-fenced", "vps", "127.0.0.1").unwrap();
         let profile = load(&issuer).unwrap().unwrap();
-        let (_materials, lock) =
-            issue_member_certificate_checked(&issuer, &request, Some(&profile)).unwrap();
-        assert!(add_member(&issuer, "concurrent", "127.0.0.2", None).is_err());
-        apply_roster_change_locked(
+        issue_member_certificate_checked(&issuer, &request, Some(&profile)).unwrap();
+        add_member(&issuer, "concurrent", "127.0.0.2", None).unwrap();
+        let error = apply_roster_change(
             &issuer,
             "op-fenced-roster",
             profile.roster_revision,
@@ -9293,12 +9293,21 @@ mod tests {
                 host: "127.0.0.1".into(),
                 node: None,
             },
-            &lock,
+        )
+        .unwrap_err();
+        assert_eq!(reason_of(&error), "roster_conflict");
+        let current = load(&issuer).unwrap().unwrap();
+        apply_roster_change(
+            &issuer,
+            "op-fenced-roster",
+            current.roster_revision,
+            &RosterChange::Add {
+                machine: "vps".into(),
+                host: "127.0.0.1".into(),
+                node: None,
+            },
         )
         .unwrap();
-        assert!(add_member(&issuer, "concurrent", "127.0.0.2", None).is_err());
-        drop(lock);
-        add_member(&issuer, "concurrent", "127.0.0.2", None).unwrap();
         let profile = load(&issuer).unwrap().unwrap();
         assert!(profile.members.iter().any(|member| member.machine == "vps"));
         assert!(profile
@@ -9925,6 +9934,54 @@ mod tests {
             reason_of(&issue_member_certificate(&issuer, &its_own).unwrap_err()),
             "machine_known"
         );
+    }
+
+    /// The same folding on the roster editors an operator types, not only on admission.
+    #[test]
+    fn roster_editors_treat_a_second_spelling_as_the_same_machine() {
+        let dir = scratch("members-case");
+        create(&dir, None, "studio", "127.0.0.1", ephemeral_ports()).unwrap();
+        add_member(&dir, "Vps", "127.0.0.1", None).unwrap();
+
+        let error = add_member(&dir, "vps", "127.0.0.1", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("already names"),
+            "vps beside Vps is one machine: {error}"
+        );
+        assert_eq!(
+            load(&dir)
+                .unwrap()
+                .unwrap()
+                .members
+                .iter()
+                .filter(|member| same_name(&member.machine, "vps"))
+                .count(),
+            1,
+            "a refused add must not write a second spelling"
+        );
+
+        let removed = remove_member(&dir, "vps").unwrap();
+        assert_eq!(removed.machine, "Vps");
+        assert!(load(&dir)
+            .unwrap()
+            .unwrap()
+            .members
+            .iter()
+            .all(|member| !same_name(&member.machine, "vps")));
+
+        add_member(&dir, "Vps", "127.0.0.1", None).unwrap();
+        let forgotten = forget_machine(&dir, "vps").unwrap();
+        assert_eq!(forgotten.machine, "Vps");
+        let after = load(&dir).unwrap().unwrap();
+        assert!(after
+            .members
+            .iter()
+            .all(|member| !same_name(&member.machine, "vps")));
+        assert_eq!(after.tombstones, vec![forgotten]);
+
+        fs::remove_dir_all(dir).ok();
     }
 
     /// One address is one node name, however it is spelled.

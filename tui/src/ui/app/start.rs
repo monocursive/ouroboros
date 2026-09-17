@@ -330,7 +330,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => self.overlay = None,
+            KeyCode::Esc => self.close_overlay(),
             KeyCode::Tab | KeyCode::Down => dialog.move_field(1),
             KeyCode::BackTab | KeyCode::Up => dialog.move_field(-1),
             KeyCode::Left => dialog.cycle(-1, &machines),
@@ -414,7 +414,7 @@ impl App {
 
         let start_failure = started.start_failure.clone();
 
-        self.overlay = None;
+        self.close_overlay();
         self.home_pending = false;
         self.home_error = None;
         self.home_draft.accept_submission();

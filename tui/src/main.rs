@@ -1233,6 +1233,16 @@ fn setup_common(args: ouro::cli::FleetSetupArgs) -> fleet_setup::cli::CommonArgs
     }
 }
 
+fn leave_common(args: ouro::cli::LeaveSetupArgs) -> fleet_setup::cli::CommonArgs {
+    fleet_setup::cli::CommonArgs {
+        dry_run: args.dry_run,
+        yes: args.yes,
+        json: args.json,
+        no_service: false,
+        operation: args.operation,
+    }
+}
+
 /// The worker subcommands name their data directory explicitly, because the broker
 /// starts them from inside a runtime whose environment is not the operator's.
 fn worker_paths(paths: &Paths, data_dir: PathBuf) -> Paths {
@@ -1243,7 +1253,19 @@ fn worker_paths(paths: &Paths, data_dir: PathBuf) -> Paths {
 }
 
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
-    paths.ensure_private_data_dir()?;
+    // Read-only inventory must not create a data directory on a machine somebody was
+    // only asking a question about. `fleet protocol` is answered even earlier, before
+    // a path is discovered; these three still need the discovered path, just not a
+    // newly created leaf.
+    if !matches!(
+        command,
+        FleetCommand::Status { .. }
+            | FleetCommand::Doctor { .. }
+            | FleetCommand::Devices { .. }
+            | FleetCommand::Protocol { .. }
+    ) {
+        paths.ensure_private_data_dir()?;
+    }
 
     match command {
         FleetCommand::Tag { command } => {
@@ -1716,7 +1738,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     agent,
                     ask_password,
                     remote_executable,
-                    common: setup_common(common),
+                    common: leave_common(common),
                 },
             )
             .await
@@ -3365,6 +3387,18 @@ where
     let publication = match runtime::reconcile_publication_under_spawn_lock(&paths.data_dir, &lock)?
     {
         runtime::LockedPublication::Absent => {
+            // A stopped runtime is not a failure of the idle gate: there is nothing
+            // here to refuse. Cooperative `leave` and the service verbs gate first and
+            // then disable, so the second gate lands on a stopped runtime and has to be
+            // a successful, documented no-op rather than an exit 1 they would have to
+            // explain.
+            if require_idle {
+                println!(
+                    "ouro stop --require-idle: no runtime is published {}, so there is nothing here to stop",
+                    paths.publication().display()
+                );
+                return Ok(());
+            }
             bail!(
                 "no runtime published {}, so there is nothing here to stop",
                 paths.publication().display()

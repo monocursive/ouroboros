@@ -11,14 +11,17 @@
 //! "noninteractive use requires pre-established host trust and usable noninteractive
 //! authentication" a property of the code rather than a sentence in a document.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use super::challenge::{Answer, ChallengeKind};
+use super::challenge::Answer;
+use super::challenge::ChallengeKind;
 use super::plan::Plan;
 use super::{refuse, ChallengeRequest, Conversation, Event};
 
@@ -29,6 +32,10 @@ pub struct TerminalConversation {
     /// `--json`: progress is not printed, because stdout is a document.
     pub quiet: bool,
     cancelled: AtomicBool,
+    /// First withdrawal reason per armed `ssh` child. Polled from the masked
+    /// prompt so a dead connection does not leave the operator typing into a
+    /// socket whose peer was killed.
+    withdrawn: Mutex<HashMap<u64, &'static str>>,
 }
 
 impl TerminalConversation {
@@ -37,16 +44,42 @@ impl TerminalConversation {
             assume_yes,
             quiet,
             cancelled: AtomicBool::new(false),
+            withdrawn: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
+
+    fn withdrawn_reason(&self, issuer: u64) -> Option<&'static str> {
+        if issuer == 0 {
+            return None;
+        }
+        self.withdrawn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&issuer)
+            .copied()
+    }
+
+    fn read_secret(&self, prompt: &str, issuer: u64) -> Result<Zeroizing<String>> {
+        read_secret_until(prompt, || self.withdrawn_reason(issuer))
+    }
 }
 
 impl Conversation for TerminalConversation {
     fn ask(&self, request: ChallengeRequest) -> Result<Answer> {
+        self.ask_from(0, request)
+    }
+
+    fn ask_from(&self, issuer: u64, request: ChallengeRequest) -> Result<Answer> {
+        if let Some(reason) = self.withdrawn_reason(issuer) {
+            return refuse(
+                reason,
+                "the SSH connection closed before this secret was entered",
+            );
+        }
         match request.kind {
             ChallengeKind::HostTrust => {
                 let address = text(&request.metadata, "address");
@@ -84,7 +117,7 @@ impl Conversation for TerminalConversation {
                     number(&request.metadata, "attempt"),
                     number(&request.metadata, "max_attempts"),
                 );
-                Ok(Answer::Secret(read_secret(&prompt)?))
+                Ok(Answer::Secret(self.read_secret(&prompt, issuer)?))
             }
             ChallengeKind::Passphrase => {
                 let prompt = format!(
@@ -92,7 +125,7 @@ impl Conversation for TerminalConversation {
                     text(&request.metadata, "key_label"),
                     text(&request.metadata, "public_fingerprint"),
                 );
-                Ok(Answer::Secret(read_secret(&prompt)?))
+                Ok(Answer::Secret(self.read_secret(&prompt, issuer)?))
             }
             ChallengeKind::Review => {
                 let digest = text(&request.metadata, "plan_digest");
@@ -122,6 +155,17 @@ impl Conversation for TerminalConversation {
                 }
             }
         }
+    }
+
+    fn withdraw(&self, issuer: u64, reason: &'static str) {
+        if issuer == 0 {
+            return;
+        }
+        let mut held = self
+            .withdrawn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held.entry(issuer).or_insert(reason);
     }
 
     fn notify(&self, event: Event) {
@@ -236,6 +280,13 @@ fn confirm(question: &str) -> Result<bool> {
 /// prompt into an unmasked read of whatever is on the pipe. Echo is restored on every
 /// path, including the error one.
 pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
+    read_secret_until(prompt, || None)
+}
+
+fn read_secret_until(
+    prompt: &str,
+    withdrawn: impl Fn() -> Option<&'static str>,
+) -> Result<Zeroizing<String>> {
     use std::os::fd::AsRawFd as _;
 
     if !interactive() {
@@ -277,7 +328,45 @@ pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
     let _ = out.flush();
 
     let mut secret = Zeroizing::new(String::new());
-    let read = std::io::BufReader::new(&tty).read_line(&mut secret);
+    let mut buffer = [0_u8; 256];
+    let read = loop {
+        if let Some(reason) = withdrawn() {
+            unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &original) };
+            return refuse(
+                reason,
+                "the SSH connection closed before this secret was entered",
+            );
+        }
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pollfd` names this terminal for the duration of the call.
+        let ready = unsafe { libc::poll(&mut pollfd, 1, 100) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &original) };
+            return Err(error).context("waiting for the secret");
+        }
+        if ready == 0 {
+            continue;
+        }
+        match std::io::Read::read(&mut &tty, &mut buffer) {
+            Ok(0) => break Ok(0),
+            Ok(n) => {
+                secret.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                if secret.contains('\n') || secret.contains('\r') {
+                    break Ok(secret.len());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => break Err(error),
+        }
+    };
 
     // Restored before the result is examined: an error path that leaves a terminal with
     // echo off is a terminal the operator has to repair by hand.
@@ -382,6 +471,45 @@ mod tests {
         assert!(!conversation.cancelled());
         conversation.cancel();
         assert!(conversation.cancelled());
+    }
+
+    /// A withdrawn issuer unblocks before the prompt is rendered, so a dead
+    /// connection is not reported as a missing terminal.
+    #[test]
+    fn withdraw_unblocks_a_secret_prompt_by_name() {
+        let conversation = TerminalConversation::new(false, true);
+        conversation.withdraw(4, "connection_lost");
+        conversation.withdraw(4, "challenge_expired");
+        let error = conversation
+            .ask_from(
+                4,
+                ChallengeRequest {
+                    kind: ChallengeKind::Password,
+                    metadata: json!({
+                        "user": "me", "target": "100.64.0.2",
+                        "attempt": 1, "max_attempts": 3
+                    }),
+                },
+            )
+            .expect_err("a withdrawn issuer does not wait for a secret");
+        assert_eq!(
+            super::super::reason_of(&error),
+            Some("connection_lost"),
+            "the first withdrawal reason wins: {error:#}"
+        );
+        let host = conversation
+            .ask_from(
+                4,
+                ChallengeRequest {
+                    kind: ChallengeKind::HostTrust,
+                    metadata: json!({
+                        "address": "100.64.0.2", "port": 22, "algorithm": "ssh-ed25519",
+                        "sha256_fingerprint": "SHA256:abc", "user": "me"
+                    }),
+                },
+            )
+            .expect_err("withdrawn before the host-trust question");
+        assert_eq!(super::super::reason_of(&host), Some("connection_lost"));
     }
 
     /// Progress goes to stderr and is suppressed in `--json` mode, so stdout stays a

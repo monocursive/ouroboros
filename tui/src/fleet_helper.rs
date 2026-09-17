@@ -624,11 +624,10 @@ impl Helper {
     // this helper was started with, so an issuer cannot point a remote machine's service
     // at somewhere else on it.
     //
-    // `disable` and `remove` stop a runtime through its service manager, and the manager
-    // stops it with a signal: there is no idle gate on this path and there cannot be one,
-    // because a supervisor knows nothing about turns or transfers. An orchestrator that
-    // is taking a working machine out of a fleet gates first — `ouro stop --require-idle`
-    // against that machine's own gateway — and only then asks for `disable`.
+    // `disable` and `remove` gate themselves: they acquire the spawn lock, ask the
+    // published runtime to stop idle, and only then talk to the manager. The
+    // orchestrator may still gate first; a second gate on a runtime that is already
+    // stopped is a no-op (`NotRunning` / `RemovedStale`).
     fn service(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
         let action = required_str(object, "action")?;
         let plan =

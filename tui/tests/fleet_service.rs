@@ -19,6 +19,7 @@ mod support;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -2546,12 +2547,15 @@ fn h0_a_child_writes_its_unit_under_the_home_it_was_given_and_nowhere_else() {
 async fn disabling_a_managed_service_refuses_busy_work_before_any_manager_stop() {
     for platform in [Platform::MacOs, Platform::Linux] {
         let root = scratch("disable-busy");
+        let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &data_dir);
+        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+        fakes.watch(&plan);
+
         let (listener, address) = support::listener().await;
         let runtime = FakeRuntime::new(&root, address.port());
-        let fakes = Fakes::install(&root);
-        let plan = plan_for(platform, &root, &runtime.data_dir);
-        // The stop gate must work even when no owned unit is currently present.
-        fakes.watch(&plan);
+        fakes.forget_calls();
         let token = runtime.token.clone();
         let server = tokio::spawn(async move {
             let mut peer = support::Peer::accept(&listener).await;
@@ -2570,7 +2574,8 @@ async fn disabling_a_managed_service_refuses_busy_work_before_any_manager_stop()
             tokio::time::sleep(Duration::from_secs(5)).await;
         });
         let programs = fakes.programs.clone();
-        let error = tokio::task::spawn_blocking(move || fleet_service::disable(&plan, &programs))
+        let gated = plan.clone();
+        let error = tokio::task::spawn_blocking(move || fleet_service::disable(&gated, &programs))
             .await
             .unwrap()
             .unwrap_err();
@@ -2588,7 +2593,145 @@ async fn disabling_a_managed_service_refuses_busy_work_before_any_manager_stop()
             "{:?}",
             fakes.calls()
         );
+        assert!(
+            plan.unit_path().exists(),
+            "a busy runtime must leave the unit file in place"
+        );
     }
+}
+
+#[test]
+fn disable_without_a_unit_does_not_touch_a_hand_started_runtime() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let root = scratch("disable-absent");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let runtime = FakeRuntime::new(&root, listener.local_addr().expect("a port").port());
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &runtime.data_dir);
+        let report = fleet_service::disable(&plan, &fakes.programs).expect("a no-op disable");
+        assert!(!report.installed);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("not installed")),
+            "{:?}",
+            report.notes
+        );
+        assert!(
+            listener.accept().is_err(),
+            "disable must not call the gateway when no unit is installed"
+        );
+        assert!(
+            !fakes
+                .calls()
+                .iter()
+                .any(|call| call.contains("bootout") || call.contains("disable --now")),
+            "{:?}",
+            fakes.calls()
+        );
+        assert!(ouro::runtime::pid_alive(runtime.child.id() as i32));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_managed_service_refuses_busy_work_before_any_manager_stop() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let root = scratch("remove-busy");
+        let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &data_dir);
+        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+        fakes.watch(&plan);
+
+        let (listener, address) = support::listener().await;
+        let runtime = FakeRuntime::new(&root, address.port());
+        fakes.forget_calls();
+        let token = runtime.token.clone();
+        let server = tokio::spawn(async move {
+            let mut peer = support::Peer::accept(&listener).await;
+            peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
+                .await;
+            let request = peer.request().await.unwrap();
+            assert_eq!(request["method"], "runtime.shutdown");
+            assert_eq!(request["params"], json!({"require_idle": true}));
+            peer.error(
+                &request["id"],
+                -32004,
+                "busy",
+                Some(json!({"reason": "runtime_busy", "activity": {"running_turns": 1}})),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let programs = fakes.programs.clone();
+        let gated = plan.clone();
+        let error = tokio::task::spawn_blocking(move || fleet_service::remove(&gated, &programs))
+            .await
+            .unwrap()
+            .unwrap_err();
+        server.abort();
+        assert_eq!(
+            fleet_service::service_error(&error).unwrap().reason,
+            "runtime_busy"
+        );
+        assert!(ouro::runtime::pid_alive(runtime.child.id() as i32));
+        assert!(
+            !fakes
+                .calls()
+                .iter()
+                .any(|call| call.contains("bootout") || call.contains("disable --now")),
+            "{:?}",
+            fakes.calls()
+        );
+        assert!(
+            plan.unit_path().exists(),
+            "a busy runtime must leave the unit file in place"
+        );
+    }
+}
+
+#[test]
+fn remove_on_an_already_stopped_runtime_proceeds() {
+    let root = scratch("remove-stopped");
+    let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fakes.forget_calls();
+    let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+    assert!(!report.installed);
+    assert!(!plan.unit_path().exists());
+    assert!(
+        fakes.calls().iter().any(|call| call.contains("bootout")),
+        "a stopped runtime still disables through the manager: {:?}",
+        fakes.calls()
+    );
+}
+
+#[test]
+fn require_idle_stop_of_a_stopped_runtime_is_success() {
+    let root = scratch("stop-absent");
+    let data_dir = root.join("data");
+    fs::create_dir_all(&data_dir).expect("a data directory");
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).expect("a private dir");
+    let output = Command::new(OURO)
+        .args(["stop", "--require-idle"])
+        .env("OUROBOROS_DATA_DIR", &data_dir)
+        .env_remove("OUROBOROS_GATEWAY_ADDR")
+        .output()
+        .expect("the built ouro binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a stopped runtime is not a failure of the idle gate: {stderr}"
+    );
+    assert!(
+        stdout.contains("nothing here to stop"),
+        "stdout={stdout} stderr={stderr}"
+    );
 }
 
 #[test]

@@ -51,12 +51,18 @@ use zeroize::Zeroizing;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::fleet_network::{human, DeviceState, DiscoveryCode, FIELD_COLUMNS, MESSAGE_COLUMNS};
+use crate::fleet_network::{human, DeviceState, FIELD_COLUMNS, MESSAGE_COLUMNS};
 use crate::fleet_setup::{canonical_json, sha256_hex};
 
 use super::super::access;
 use super::super::theme;
 use super::*;
+
+use super::devices_catalogue as catalogue;
+pub use catalogue::{
+    blocker_known, blocker_sentence, operation_state, operation_state_known, reason_known,
+    reason_sentence, BLOCKER_CODES, OPERATION_STATES, REASON_CODES,
+};
 
 /// How often the live operation's snapshot is re-read while the view is open. The
 /// progress screen is the one place in this client where a second matters to a person
@@ -253,8 +259,10 @@ impl Discovery {
     /// The distinct empty states the proposal's Inventory section requires, in the words
     /// `ouro fleet devices` already prints for them.
     ///
-    /// Not retyped: [`headline_for`] builds the same [`crate::fleet_network::Inventory`]
-    /// the CLI builds and asks it, so the two surfaces cannot drift apart.
+    /// Count-based rather than by constructing a [`crate::fleet_network::Inventory`]:
+    /// that type's `headline` counts `peers.len()`, and feeding it a hostile
+    /// `visible_peers` used to mean allocating that many `Device`s. The wording is
+    /// pinned against the CLI in `every_discovery_code_keeps_the_cli_wording`.
     pub fn headline(&self) -> String {
         headline_for(&self.code, self.visible_peers)
     }
@@ -286,6 +294,9 @@ pub struct DeviceRow {
     pub runtime_running: Option<bool>,
     /// When the runtime last had an answer from that member.
     pub last_probe: Option<String>,
+    /// The network client's path observation (`direct` / `relayed` / `unknown`), when it
+    /// reported one. Kept as the string the runtime sent: this view does not re-derive it.
+    pub path: Option<String>,
     pub name_conflict: Option<String>,
 }
 
@@ -303,6 +314,7 @@ impl DeviceRow {
             compatible: value.get("compatible").and_then(Value::as_bool),
             runtime_running: value.get("runtime_running").and_then(Value::as_bool),
             last_probe: text(value.get("last_probe")),
+            path: text(value.get("path")),
             name_conflict: text(value.get("name_conflicts_with_roster")),
         }
     }
@@ -453,6 +465,7 @@ pub struct OperationSummary {
     pub operation: String,
     pub state: Option<String>,
     pub kind: Option<String>,
+    pub created_at: Option<String>,
     pub updated_at: Option<String>,
     /// The identity that started it (seam S5), or `None` on a journal this runtime
     /// cannot attribute. Shown, because continuing somebody else's setup inherits their
@@ -536,6 +549,7 @@ impl OperationSummary {
             operation: text(value.get("operation")).unwrap_or_default(),
             state: text(value.get("state")),
             kind: text(value.get("kind")),
+            created_at: text(value.get("created_at")),
             updated_at: text(value.get("updated_at")),
             owner: text(value.get("owner")),
             target: value.get("target").and_then(OperationTarget::decode),
@@ -1020,22 +1034,7 @@ impl Snapshot {
 
     /// The state a person reads. The codes stay in the data.
     pub fn state_label(&self) -> String {
-        match self.state.as_str() {
-            "attaching" => "connecting to the deployment worker".into(),
-            "inspecting" => "inspecting the target".into(),
-            "awaiting_host_trust" => "waiting for you to verify the host key".into(),
-            "awaiting_auth" => "waiting for your credential".into(),
-            "awaiting_review" => "waiting for you to review the plan".into(),
-            "deploying" => "deploying".into(),
-            "restarting_host" => "restarting this runtime".into(),
-            "checking_readiness" => "checking readiness".into(),
-            "completed" => "completed".into(),
-            "interrupted" => "interrupted".into(),
-            "failed" => "failed".into(),
-            "cancelled" => "cancelled".into(),
-            "" => "state not reported".into(),
-            other => format!("{other} (a state this client does not know)"),
-        }
+        operation_state(&self.state)
     }
 
     pub fn waiting(&self) -> bool {
@@ -1265,18 +1264,23 @@ pub struct ConnectForm {
     pub service: bool,
     /// The inline, actionable error for the field that is wrong.
     pub error: Option<String>,
+    /// The peer's self-reported hostname, drawn next to the machine field when that field
+    /// was *not* pre-filled. A hostname that fails machine-name validation, or that
+    /// collides with a roster identity, must not become the roster identity by default.
+    pub hostname_hint: Option<String>,
 }
 
 impl ConnectForm {
     /// Step 1 for another machine: an SSH account and where to reach it.
     fn deploy(row: &DeviceRow) -> Self {
+        let (machine, hostname_hint) = roster_identity_prefill(row);
         Self {
             device: row.name.clone(),
             address: row.address.clone(),
             setup: false,
             field: ConnectField::User,
             user: String::new(),
-            machine: row.name.clone(),
+            machine,
             port: "22".into(),
             identity: IdentityKind::default(),
             identity_ref: String::new(),
@@ -1284,18 +1288,20 @@ impl ConnectForm {
             data_dir: String::new(),
             service: true,
             error: None,
+            hostname_hint,
         }
     }
 
     /// Step 1 for *this* machine: a name, and whether to install a startup service.
     fn setup(row: &DeviceRow) -> Self {
+        let (machine, hostname_hint) = roster_identity_prefill(row);
         Self {
             device: row.name.clone(),
             address: row.address.clone(),
             setup: true,
             field: ConnectField::Machine,
             user: String::new(),
-            machine: row.name.clone(),
+            machine,
             port: String::new(),
             identity: IdentityKind::default(),
             identity_ref: String::new(),
@@ -1303,6 +1309,7 @@ impl ConnectForm {
             data_dir: String::new(),
             service: true,
             error: None,
+            hostname_hint,
         }
     }
 
@@ -1578,6 +1585,10 @@ pub struct DevicesState {
     /// a plan under review, a deployment's steps — are paged explicitly.
     pub scroll: usize,
     pub connect: Option<Box<ConnectForm>>,
+    /// The read-only device panel opened by **View device** / **Diagnose**. Held here
+    /// rather than as a nested overlay so Esc returns to the list without dropping the
+    /// Devices view, and so a refresh can re-find the same row.
+    pub inspect: Option<DeviceInspect>,
     pub operation: Option<Box<Operation>>,
     /// A sentence about the last thing that happened, shown in the view rather than in
     /// the global notice line so it is where the operator is looking.
@@ -1620,6 +1631,30 @@ impl DevicesState {
     }
 }
 
+/// The read-only panel for one inventory row. View and Diagnose are the same facts;
+/// Diagnose names the blockers and offers Refresh because the member is not reachable
+/// from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInspect {
+    pub name: String,
+    pub address: Option<String>,
+    pub diagnose: bool,
+}
+
+impl DeviceInspect {
+    fn of(row: &DeviceRow) -> Self {
+        Self {
+            name: row.name.clone(),
+            address: row.address.clone(),
+            diagnose: matches!(row.primary(), Primary::Diagnose),
+        }
+    }
+
+    fn matches(&self, row: &DeviceRow) -> bool {
+        row.name == self.name && row.address == self.address
+    }
+}
+
 // ----------------------------------------------------------------------- the App side
 
 impl App {
@@ -1652,10 +1687,19 @@ impl App {
         self.poll_devices();
     }
 
+    /// Drop whatever is over the screen. If that was Devices, the typed secret goes with
+    /// it — every path that clears `overlay` has to come through here, because Ctrl+C
+    /// used to set `overlay = None` without touching the buffer.
+    pub(super) fn close_overlay(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Devices)) {
+            self.devices.forget_secret();
+        }
+        let _dropped = self.overlay.take();
+    }
+
     /// Leaving the view. Never cancels the operation; only forgets what was typed.
     pub fn close_devices(&mut self) {
-        self.devices.forget_secret();
-        self.overlay = None;
+        self.close_overlay();
     }
 
     /// Whether the Devices row is offered at all.
@@ -1681,6 +1725,10 @@ impl App {
 
     pub(super) fn poll_devices(&mut self) {
         if !matches!(self.overlay, Some(Overlay::Devices)) {
+            // Belt: any teardown path that dropped the overlay without
+            // [`App::close_overlay`] still cannot leave a typed secret sitting in
+            // `DevicesState` for the next open.
+            self.devices.forget_secret();
             return;
         }
 
@@ -1736,210 +1784,241 @@ impl App {
     // ----- answers ---------------------------------------------------------------
 
     pub(super) fn devices_answer(&mut self, tag: DevicesTag, result: Result<Value, ClientError>) {
+        match tag {
+            DevicesTag::Inventory => self.devices_answer_inventory(result),
+            DevicesTag::FleetStatus => self.devices_answer_fleet_status(result),
+            DevicesTag::Prepare => self.devices_answer_prepare(result),
+            DevicesTag::Status { operation } => self.devices_answer_status(operation, result),
+            DevicesTag::Answer { operation, label } => {
+                self.devices_answer_challenge(operation, label, result)
+            }
+            DevicesTag::Resume { operation } => self.devices_answer_resume(operation, result),
+        }
+    }
+
+    fn devices_answer_inventory(&mut self, result: Result<Value, ClientError>) {
         let ticks = self.ticks;
 
-        match tag {
-            DevicesTag::Inventory => match result {
-                Ok(value) => {
-                    self.devices.refusal = None;
-                    let inventory = Inventory::decode(&value);
-                    self.devices.cursor = self
+        match result {
+            Ok(value) => {
+                self.devices.refusal = None;
+                let inventory = Inventory::decode(&value);
+                self.devices.cursor = self
+                    .devices
+                    .cursor
+                    .min(self.devices.visible(&inventory).len().saturating_sub(1));
+                self.devices.inventory.ok(inventory, ticks, INVENTORY_HOLD);
+            }
+            Err(error) => {
+                self.devices.refusal = Some(devices_refusal(&error, "fleet.devices", &self.hello));
+                self.devices
+                    .inventory
+                    .failed(clean(&error.to_string()), ticks, INVENTORY_HOLD);
+                self.poll_devices_fallback();
+            }
+        }
+    }
+
+    fn devices_answer_fleet_status(&mut self, result: Result<Value, ClientError>) {
+        let ticks = self.ticks;
+
+        match result {
+            Ok(value) => {
+                self.devices
+                    .fallback
+                    .ok(FleetSubset::decode(&value), ticks, INVENTORY_HOLD)
+            }
+            Err(error) => {
+                self.devices
+                    .fallback
+                    .failed(clean(&error.to_string()), ticks, INVENTORY_HOLD)
+            }
+        }
+    }
+
+    fn devices_answer_prepare(&mut self, result: Result<Value, ClientError>) {
+        match result {
+            Ok(value) => match text(value.get("operation_id")) {
+                Some(id) => {
+                    let device = self
                         .devices
-                        .cursor
-                        .min(self.devices.visible(&inventory).len().saturating_sub(1));
-                    self.devices.inventory.ok(inventory, ticks, INVENTORY_HOLD);
-                }
-                Err(error) => {
-                    self.devices.refusal =
-                        Some(devices_refusal(&error, "fleet.devices", &self.hello));
-                    self.devices
-                        .inventory
-                        .failed(clean(&error.to_string()), ticks, INVENTORY_HOLD);
-                    self.poll_devices_fallback();
-                }
-            },
-            DevicesTag::FleetStatus => match result {
-                Ok(value) => {
-                    self.devices
-                        .fallback
-                        .ok(FleetSubset::decode(&value), ticks, INVENTORY_HOLD)
-                }
-                Err(error) => {
-                    self.devices
-                        .fallback
-                        .failed(clean(&error.to_string()), ticks, INVENTORY_HOLD)
-                }
-            },
-            DevicesTag::Prepare => match result {
-                Ok(value) => match text(value.get("operation_id")) {
-                    Some(id) => {
-                        let device = self
-                            .devices
-                            .connect
-                            .as_ref()
-                            .map(|form| form.device.clone())
-                            .unwrap_or_else(|| "this device".into());
+                        .connect
+                        .as_ref()
+                        .map(|form| form.device.clone())
+                        .unwrap_or_else(|| "this device".into());
 
-                        let mut operation = Operation::new(id, device);
-                        operation.kind = self
-                            .devices
-                            .connect
-                            .as_ref()
-                            .map(|form| if form.setup { "setup" } else { "add" }.into());
-                        self.devices.connect = None;
-                        self.devices.operation = Some(Box::new(operation));
-                        self.devices.notice = None;
-                        self.devices.scroll = 0;
-                        self.poll_devices();
-                    }
-                    None => {
-                        self.devices_form_error(
-                            "The runtime accepted the request and answered no operation id, \
-                             so there is nothing to follow.",
-                        );
-                    }
-                },
-                Err(error) => {
-                    let sentence =
-                        devices_error_sentence(&error, "fleet.deployment.prepare", &self.hello);
-
-                    // A host that has become unable to deploy is not a bad form field: it
-                    // is the same refusal the list draws, and it goes where every other
-                    // refusal goes.
-                    if refusal_reason(&error).as_deref() == Some("deploy_blocked") {
-                        self.devices.connect = None;
-                        self.devices_refuse(sentence);
-                    } else {
-                        self.devices_form_error(&sentence);
-                    }
+                    let mut operation = Operation::new(id, device);
+                    operation.kind = self
+                        .devices
+                        .connect
+                        .as_ref()
+                        .map(|form| if form.setup { "setup" } else { "add" }.into());
+                    self.devices.connect = None;
+                    self.devices.operation = Some(Box::new(operation));
+                    self.devices.notice = None;
+                    self.devices.scroll = 0;
+                    self.poll_devices();
+                }
+                None => {
+                    self.devices_form_error(
+                        "The runtime accepted the request and answered no operation id, \
+                         so there is nothing to follow.",
+                    );
                 }
             },
-            DevicesTag::Status { operation } => {
-                if !self.devices_is_current(&operation) {
-                    return;
-                }
+            Err(error) => {
+                let sentence =
+                    devices_error_sentence(&error, "fleet.deployment.prepare", &self.hello);
 
-                match result {
-                    Ok(value) => {
-                        let snapshot = Snapshot::decode(&value);
-                        let waiting = snapshot.waiting();
-                        let state = snapshot.state.clone();
-
-                        if let Some(current) = self.devices.operation.as_mut() {
-                            if snapshot.kind.is_some() {
-                                current.kind = snapshot.kind.clone();
-                            }
-                            // A challenge that is gone takes the buffer typed for it with
-                            // it: an answer consumed, expired or superseded must never be
-                            // resubmitted to the next question.
-                            let open = snapshot.challenge().map(|challenge| challenge.id.clone());
-                            if current.answering.is_some() && current.answering != open {
-                                current.secret.clear();
-                                current.answering = None;
-                            }
-
-                            current.snapshot.ok(snapshot, ticks, SNAPSHOT_TICKS);
-                        }
-
-                        if waiting {
-                            self.devices_ring_for(&state);
-                        } else if let Some(current) = self.devices.operation.as_mut() {
-                            // Forget what was rung for, so a *second* question in the same
-                            // state — a retried password after a working stretch — rings
-                            // again rather than being mistaken for the first one.
-                            current.rung_for = None;
-                        }
-                    }
-                    Err(error) => {
-                        // A foreign owner is not a broken read: it is the takeover
-                        // question, asked before anything attaches under this identity.
-                        if refusal_reason(&error).as_deref() == Some("operation_not_yours") {
-                            self.devices_ask_takeover("fleet.deployment.status");
-                            return;
-                        }
-
-                        let sentence =
-                            devices_error_sentence(&error, "fleet.deployment.status", &self.hello);
-
-                        if let Some(current) = self.devices.operation.as_mut() {
-                            current.snapshot.failed(sentence, ticks, SNAPSHOT_TICKS);
-                        }
-                    }
+                // A host that has become unable to deploy is not a bad form field: it
+                // is the same refusal the list draws, and it goes where every other
+                // refusal goes.
+                if refusal_reason(&error).as_deref() == Some("deploy_blocked") {
+                    self.devices.connect = None;
+                    self.devices_refuse(sentence);
+                } else {
+                    self.devices_form_error(&sentence);
                 }
             }
-            DevicesTag::Answer { operation, label } => {
+        }
+    }
+
+    fn devices_answer_status(&mut self, operation: String, result: Result<Value, ClientError>) {
+        if !self.devices_is_current(&operation) {
+            return;
+        }
+
+        let ticks = self.ticks;
+
+        match result {
+            Ok(value) => {
+                let snapshot = Snapshot::decode(&value);
+                let waiting = snapshot.waiting();
+                let state = snapshot.state.clone();
+
+                if let Some(current) = self.devices.operation.as_mut() {
+                    if snapshot.kind.is_some() {
+                        current.kind = snapshot.kind.clone();
+                    }
+                    // A challenge that is gone takes the buffer typed for it with
+                    // it: an answer consumed, expired or superseded must never be
+                    // resubmitted to the next question.
+                    let open = snapshot.challenge().map(|challenge| challenge.id.clone());
+                    if current.answering.is_some() && current.answering != open {
+                        current.secret.clear();
+                        current.answering = None;
+                    }
+
+                    current.snapshot.ok(snapshot, ticks, SNAPSHOT_TICKS);
+                }
+
+                if waiting {
+                    self.devices_ring_for(&state);
+                } else if let Some(current) = self.devices.operation.as_mut() {
+                    // Forget what was rung for, so a *second* question in the same
+                    // state — a retried password after a working stretch — rings
+                    // again rather than being mistaken for the first one.
+                    current.rung_for = None;
+                }
+            }
+            Err(error) => {
+                // A foreign owner is not a broken read: it is the takeover
+                // question, asked before anything attaches under this identity.
+                if refusal_reason(&error).as_deref() == Some("operation_not_yours") {
+                    self.devices_ask_takeover("fleet.deployment.status");
+                    return;
+                }
+
+                let sentence =
+                    devices_error_sentence(&error, "fleet.deployment.status", &self.hello);
+
+                if let Some(current) = self.devices.operation.as_mut() {
+                    current.snapshot.failed(sentence, ticks, SNAPSHOT_TICKS);
+                }
+            }
+        }
+    }
+
+    fn devices_answer_challenge(
+        &mut self,
+        operation: String,
+        label: &'static str,
+        result: Result<Value, ClientError>,
+    ) {
+        if !self.devices_is_current(&operation) {
+            return;
+        }
+
+        let blocked = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| refusal_reason(error).as_deref() == Some("deploy_blocked"));
+
+        let sentence = match result {
+            Ok(_accepted) => None,
+            Err(error) => Some(devices_error_sentence(&error, label, &self.hello)),
+        };
+
+        if let Some(sentence) = sentence.as_ref().filter(|_| blocked) {
+            self.devices_refuse(sentence.clone());
+        }
+
+        if let Some(current) = self.devices.operation.as_mut() {
+            current.submitting = false;
+            current.error = sentence;
+            // Whatever happened, read the operation again rather than believing
+            // this client's idea of what the answer did.
+            current.snapshot.invalidate();
+        }
+
+        self.poll_devices();
+    }
+
+    fn devices_answer_resume(&mut self, operation: String, result: Result<Value, ClientError>) {
+        match result {
+            Ok(_resumed) => {
+                // The same guard the error arm has. Without it, a success for an
+                // operation this view walked away from ten minutes ago cleared the
+                // takeover question standing on the screen for a *different* one —
+                // and the question disappearing looks exactly like it being answered.
                 if !self.devices_is_current(&operation) {
                     return;
                 }
 
-                let blocked = result.as_ref().err().is_some_and(|error| {
-                    refusal_reason(error).as_deref() == Some("deploy_blocked")
-                });
-
-                let sentence = match result {
-                    Ok(_accepted) => None,
-                    Err(error) => Some(devices_error_sentence(&error, label, &self.hello)),
-                };
-
-                if let Some(sentence) = sentence.as_ref().filter(|_| blocked) {
-                    self.devices_refuse(sentence.clone());
+                self.devices.notice = None;
+                if let Some(current) = self.devices.operation.as_mut() {
+                    current.submitting = false;
+                    current.takeover = None;
+                    current.snapshot.invalidate();
+                }
+                self.poll_devices();
+            }
+            Err(error) => {
+                if !self.devices_is_current(&operation) {
+                    return;
                 }
 
                 if let Some(current) = self.devices.operation.as_mut() {
                     current.submitting = false;
-                    current.error = sentence;
-                    // Whatever happened, read the operation again rather than believing
-                    // this client's idea of what the answer did.
-                    current.snapshot.invalidate();
                 }
 
-                self.poll_devices();
+                // The one refusal that is a question rather than an error. A resume
+                // is never retried with `takeover: true` on this client's own
+                // initiative: the operator answers, by name, or nothing happens.
+                if refusal_reason(&error).as_deref() == Some("operation_not_yours") {
+                    self.devices_ask_takeover("fleet.deployment.resume");
+                    return;
+                }
+
+                let sentence =
+                    devices_error_sentence(&error, "fleet.deployment.resume", &self.hello);
+
+                if let Some(current) = self.devices.operation.as_mut() {
+                    current.error = Some(sentence.clone());
+                }
+
+                self.devices_refuse(sentence);
             }
-            DevicesTag::Resume { operation } => match result {
-                Ok(_resumed) => {
-                    // The same guard the error arm has. Without it, a success for an
-                    // operation this view walked away from ten minutes ago cleared the
-                    // takeover question standing on the screen for a *different* one —
-                    // and the question disappearing looks exactly like it being answered.
-                    if !self.devices_is_current(&operation) {
-                        return;
-                    }
-
-                    self.devices.notice = None;
-                    if let Some(current) = self.devices.operation.as_mut() {
-                        current.submitting = false;
-                        current.takeover = None;
-                        current.snapshot.invalidate();
-                    }
-                    self.poll_devices();
-                }
-                Err(error) => {
-                    if !self.devices_is_current(&operation) {
-                        return;
-                    }
-
-                    if let Some(current) = self.devices.operation.as_mut() {
-                        current.submitting = false;
-                    }
-
-                    // The one refusal that is a question rather than an error. A resume
-                    // is never retried with `takeover: true` on this client's own
-                    // initiative: the operator answers, by name, or nothing happens.
-                    if refusal_reason(&error).as_deref() == Some("operation_not_yours") {
-                        self.devices_ask_takeover("fleet.deployment.resume");
-                        return;
-                    }
-
-                    let sentence =
-                        devices_error_sentence(&error, "fleet.deployment.resume", &self.hello);
-
-                    if let Some(current) = self.devices.operation.as_mut() {
-                        current.error = Some(sentence.clone());
-                    }
-
-                    self.devices_refuse(sentence);
-                }
-            },
         }
     }
 
@@ -2110,6 +2189,11 @@ impl App {
             return;
         }
 
+        if self.devices.inspect.is_some() {
+            self.devices_inspect_key(key);
+            return;
+        }
+
         // The search field owns every printable character while it is open, so `r` and
         // `f` cannot be typed into a query and swallowed as verbs.
         if self.devices.searching {
@@ -2208,13 +2292,10 @@ impl App {
             Primary::Deploy => self.devices_begin_deploy(&row),
             Primary::SetUpThisDevice => self.devices_begin_setup(&row),
             Primary::View | Primary::Diagnose => {
-                self.devices.notice = Some(format!(
-                    "{} \u{b7} {} \u{b7} {}. Nothing here has been contacted over SSH; \
-                     `ouro fleet doctor` is the bounded remote check.",
-                    row.name,
-                    row.state_label(),
-                    row.presence()
-                ));
+                self.devices.notice = None;
+                self.devices.refusal_line = None;
+                self.devices.scroll = 0;
+                self.devices.inspect = Some(DeviceInspect::of(&row));
             }
             Primary::Blocked => {
                 let sentence = format!(
@@ -2292,6 +2373,7 @@ impl App {
 
         self.devices.notice = None;
         self.devices.scroll = 0;
+        self.devices.inspect = None;
         self.devices.connect = Some(Box::new(ConnectForm::deploy(row)));
     }
 
@@ -2308,6 +2390,7 @@ impl App {
 
         self.devices.notice = None;
         self.devices.scroll = 0;
+        self.devices.inspect = None;
         self.devices.connect = Some(Box::new(ConnectForm::setup(row)));
     }
 
@@ -2427,6 +2510,41 @@ impl App {
         if let Some(form) = self.devices.connect.as_mut() {
             form.error = None;
         }
+    }
+
+    fn devices_inspect_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.devices.inspect = None;
+                self.devices.scroll = 0;
+            }
+            KeyCode::Char('r') => {
+                self.devices.inventory.invalidate();
+                self.devices.fallback.invalidate();
+                self.devices.notice = None;
+                self.devices.refusal_line = None;
+                self.poll_devices();
+            }
+            KeyCode::PageDown | KeyCode::Down => {
+                self.devices.scroll = self.devices.scroll.saturating_add(10)
+            }
+            KeyCode::PageUp | KeyCode::Up => {
+                self.devices.scroll = self.devices.scroll.saturating_sub(10)
+            }
+            _other => {}
+        }
+    }
+
+    /// Whether a password or passphrase challenge currently owns the keyboard.
+    pub(super) fn devices_secret_open(&self) -> bool {
+        self.devices
+            .operation
+            .as_ref()
+            .and_then(|operation| operation.snapshot.value.as_ref())
+            .and_then(Snapshot::challenge)
+            .is_some_and(|challenge| matches!(challenge.kind.as_str(), "password" | "passphrase"))
     }
 
     /// A bracketed paste, into whichever field this view has open.
@@ -2928,6 +3046,11 @@ pub fn devices_lines(app: &App) -> Vec<Line<'static>> {
         return lines;
     }
 
+    if let Some(inspect) = state.inspect.as_ref() {
+        inspect_lines(app, inspect, &mut lines);
+        return lines;
+    }
+
     inventory_lines(app, &mut lines);
     lines
 }
@@ -3328,7 +3451,10 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
         let shown = if value.is_empty() {
             match field {
                 ConnectField::User => "(required)".to_string(),
-                ConnectField::Machine => "(this host's own name)".to_string(),
+                ConnectField::Machine if form.setup && form.hostname_hint.is_none() => {
+                    "(this host's own name)".to_string()
+                }
+                ConnectField::Machine => String::new(),
                 ConnectField::IdentityRef => form
                     .identity
                     .reference_hint()
@@ -3340,7 +3466,7 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
             value
         };
 
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 format!(
                     "{marker}{}",
@@ -3360,7 +3486,18 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
                     Style::default()
                 },
             ),
-        ]));
+        ];
+
+        if field == ConnectField::Machine {
+            if let Some(hostname) = form.hostname_hint.as_deref() {
+                spans.push(Span::styled(
+                    format!("  hint: {}", scrub(hostname, NAME_COLUMNS)),
+                    Style::default().fg(theme::muted()),
+                ));
+            }
+        }
+
+        lines.push(Line::from(spans));
     }
 
     lines.push(Line::from(""));
@@ -3385,6 +3522,246 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
     }
 
     let _ = app;
+}
+
+fn inspect_lines(app: &App, inspect: &DeviceInspect, lines: &mut Vec<Line<'static>>) {
+    let inventory = app.devices.inventory.value.as_ref();
+    let row =
+        inventory.and_then(|inventory| inventory.devices.iter().find(|row| inspect.matches(row)));
+    // Prefer the live row after a refresh: View and Diagnose are the same panel, and
+    // a member that has come back should not keep the disconnected heading.
+    let diagnose = row
+        .map(|row| matches!(row.primary(), Primary::Diagnose))
+        .unwrap_or(inspect.diagnose);
+
+    let heading = if diagnose { "Diagnose" } else { "View device" };
+
+    lines.push(Line::from(Span::styled(
+        format!("{heading} \u{b7} {}", scrub(&inspect.name, NAME_COLUMNS)),
+        theme::heading(),
+    )));
+    lines.push(Line::from(Span::styled(
+        if diagnose {
+            "Read-only. Nothing here contacts the device over SSH; r asks this runtime \
+             again. Disconnected does not mean the host is powered off."
+        } else {
+            "Read-only. These are facts this runtime already holds; nothing here \
+             contacts the device over SSH."
+        }
+        .to_string(),
+        Style::default().fg(theme::muted()),
+    )));
+    lines.push(Line::from(""));
+
+    let Some(inventory) = inventory else {
+        lines.push(Line::from(Span::styled(
+            "the inventory could not be read",
+            Style::default().fg(theme::muted()),
+        )));
+        return;
+    };
+
+    let Some(row) = row else {
+        lines.push(Line::from(Span::styled(
+            "this device is no longer in the inventory. Press r to look again, or Esc \
+             to go back to the list."
+                .to_string(),
+            Style::default().fg(theme::warn()),
+        )));
+        return;
+    };
+
+    let network_name = scrub(&row.name, NAME_COLUMNS);
+    let roster_name = row
+        .machine
+        .as_deref()
+        .map(|machine| scrub(machine, NAME_COLUMNS))
+        .unwrap_or_else(|| "(not in this fleet's roster)".into());
+
+    inspect_field(lines, "roster name", roster_name);
+    inspect_field(lines, "network name", network_name);
+    inspect_field(
+        lines,
+        "address",
+        row.address
+            .clone()
+            .map(|address| scrub(&address, ROW_FIELD_COLUMNS))
+            .unwrap_or_else(unknown),
+    );
+    inspect_field(
+        lines,
+        "path",
+        row.path
+            .clone()
+            .map(|path| scrub(&path, ROW_FIELD_COLUMNS))
+            .unwrap_or_else(unknown),
+    );
+    inspect_field(
+        lines,
+        "platform",
+        row.os
+            .clone()
+            .map(|os| scrub(&os, ROW_FIELD_COLUMNS))
+            .unwrap_or_else(unknown),
+    );
+    inspect_field(lines, "network", row.presence());
+    inspect_field(lines, "ouroboros", row.state_label());
+
+    match row.runtime_facts() {
+        Some(facts) => inspect_field(lines, "runtime", facts),
+        None => inspect_field(
+            lines,
+            "runtime",
+            "this runtime has no cluster facts for this device".into(),
+        ),
+    }
+
+    if let Some(conflict) = row.name_conflict.as_ref() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "this device calls itself {}, which is the name of a machine in this \
+                 fleet at a different address. It is not that machine.",
+                scrub(conflict, NAME_COLUMNS)
+            ),
+            Style::default().fg(theme::warn()),
+        )));
+    }
+
+    if diagnose {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Diagnosis", theme::label())));
+        for reason in diagnose_reasons(row, inventory) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  \u{b7} {}",
+                    access::speakable(&scrub(&reason, MESSAGE_COLUMNS))
+                ),
+                Style::default().fg(theme::warn()),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "r  Refresh \u{2014} read the inventory again; no SSH",
+            Style::default().fg(theme::action_colour()),
+        )));
+    }
+
+    if let Some(summary) = latest_operation_for(inventory, row) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Most recent operation",
+            theme::label(),
+        )));
+        inspect_field(lines, "id", scrub(&summary.operation, OWN_WORDS_COLUMNS));
+        inspect_field(
+            lines,
+            "state",
+            summary
+                .state
+                .as_deref()
+                .map(operation_state)
+                .unwrap_or_else(|| "state not recorded".into()),
+        );
+        if let Some(kind) = summary.kind.as_deref() {
+            inspect_field(lines, "kind", scrub(kind, ROW_FIELD_COLUMNS));
+        }
+        if let Some(owner) = summary.owner.as_deref() {
+            inspect_field(lines, "started by", scrub(owner, OWN_WORDS_COLUMNS));
+        }
+        if let Some(updated) = summary.updated_at.as_deref() {
+            inspect_field(lines, "updated", scrub(updated, OWN_WORDS_COLUMNS));
+        }
+        inspect_field(
+            lines,
+            "worker",
+            if summary.attached {
+                "attached".into()
+            } else {
+                "not attached".into()
+            },
+        );
+    } else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "No deployment operation is recorded for this device.",
+            Style::default().fg(theme::muted()),
+        )));
+    }
+
+    if !diagnose {
+        if let Some(blocker) = inventory.deploy_blocker() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                access::speakable(&scrub(&blocker, MESSAGE_COLUMNS)),
+                Style::default().fg(theme::warn()),
+            )));
+        }
+    }
+}
+
+fn inspect_field(lines: &mut Vec<Line<'static>>, label: &str, value: String) {
+    lines.push(Line::from(vec![
+        Span::styled(format!("  {label:<14}"), theme::label()),
+        Span::styled(value, Style::default()),
+    ]));
+}
+
+fn diagnose_reasons(row: &DeviceRow, inventory: &Inventory) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    reasons.push(format!("{}, {}", row.state_label(), row.presence()));
+
+    if row.connected == Some(false) {
+        reasons.push(
+            "this runtime is not connected to that member; that does not mean the host \
+             is powered off"
+                .into(),
+        );
+    }
+
+    if row.compatible == Some(false) {
+        reasons.push("the runtime on that member is not a compatible build".into());
+    }
+
+    if row.runtime_running == Some(false) {
+        reasons.push("that member's runtime is not running".into());
+    }
+
+    if let Some(conflict) = row.name_conflict.as_ref() {
+        reasons.push(format!(
+            "it reports the roster name {}, which belongs to a different address",
+            scrub(conflict, NAME_COLUMNS)
+        ));
+    }
+
+    for blocker in &inventory.host.reasons {
+        reasons.push(blocker_sentence(blocker));
+    }
+
+    reasons
+}
+
+fn latest_operation_for<'a>(
+    inventory: &'a Inventory,
+    row: &DeviceRow,
+) -> Option<&'a OperationSummary> {
+    inventory
+        .operations
+        .iter()
+        .filter(|operation| {
+            !operation.operation.is_empty()
+                && operation
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.is(row))
+        })
+        .max_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.operation.cmp(&right.operation))
+        })
 }
 
 fn operation_lines(app: &App, operation: &Operation, lines: &mut Vec<Line<'static>>) {
@@ -3970,6 +4347,14 @@ pub fn devices_hint_line(app: &App) -> String {
             .into();
     }
 
+    if let Some(inspect) = state.inspect.as_ref() {
+        return if inspect.diagnose {
+            "read-only diagnosis \u{b7} r refresh \u{b7} Esc back to the list".into()
+        } else {
+            "read-only \u{b7} r refresh \u{b7} Esc back to the list".into()
+        };
+    }
+
     if state.searching {
         return "type to search by name or address \u{b7} Enter keeps it \u{b7} Esc clears it"
             .into();
@@ -3990,20 +4375,7 @@ pub fn devices_hint_line(app: &App) -> String {
 /// a different string). Default-ignorable code points are removed before the bounding, so
 /// what reaches a `Line` is what a person can actually see.
 fn ignorable(character: char) -> bool {
-    matches!(character,
-        '\u{00ad}' | '\u{034f}' | '\u{061c}'
-        | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}'
-        | '\u{180b}'..='\u{180f}'
-        | '\u{200b}'..='\u{200f}'
-        | '\u{202a}'..='\u{202e}'
-        | '\u{2060}'..='\u{206f}'
-        | '\u{3164}'
-        | '\u{fe00}'..='\u{fe0f}'
-        | '\u{feff}'
-        | '\u{ffa0}'
-        | '\u{fff0}'..='\u{fff8}'
-        | '\u{1d173}'..='\u{1d17a}'
-        | '\u{e0000}'..='\u{e0fff}')
+    crate::fleet_network::ignorable(character)
 }
 
 /// One remote string, made safe to draw and bounded to `columns`.
@@ -4082,24 +4454,39 @@ fn parse_state(code: &str) -> Option<DeviceState> {
 
 /// The discovery headline, asked of the type that owns the words.
 ///
-/// Built rather than retyped: `Inventory::headline` is what `ouro fleet devices` prints,
-/// and a second copy of those six sentences in this file would be six sentences to keep
-/// in step with a file nobody editing them would think to open.
+/// Built rather than retyped: the sentences are `Inventory::headline`'s, but that
+/// method counts `peers.len()` and the only way to feed it a count used to be
+/// allocating that many [`crate::fleet_network::Device`]s. A hostile `visible_peers`
+/// u64 would OOM this client drawing a sentence. The count-based sibling below is
+/// the same match with the number already in hand.
 fn headline_for(code: &str, visible_peers: usize) -> String {
-    let inventory = crate::fleet_network::Inventory {
-        code: match code {
-            "client_missing" => DiscoveryCode::ClientMissing,
-            "signed_out" => DiscoveryCode::SignedOut,
-            "permission_denied" => DiscoveryCode::PermissionDenied,
-            "no_visible_peers" => DiscoveryCode::NoVisiblePeers,
-            "ok" => DiscoveryCode::Ok,
-            _unavailable => DiscoveryCode::Unavailable,
-        },
-        peers: vec![crate::fleet_network::Device::default(); visible_peers],
-        ..crate::fleet_network::Inventory::default()
-    };
+    headline_for_count(code, visible_peers)
+}
 
-    inventory.headline()
+fn headline_for_count(code: &str, visible_peers: usize) -> String {
+    match code {
+        "client_missing" => "no Tailscale client is installed on this machine".into(),
+        "signed_out" => "the Tailscale client is installed and this machine is signed out".into(),
+        "permission_denied" => "the Tailscale client refused this account's request".into(),
+        "no_visible_peers" => "the Tailscale client sees no other devices on this network".into(),
+        "ok" => format!(
+            "the Tailscale client sees {} device{} on this network",
+            visible_peers,
+            if visible_peers == 1 { "" } else { "s" }
+        ),
+        _unavailable => "the Tailscale client could not report this machine's network".into(),
+    }
+}
+
+/// A row's hostname becomes the roster identity only when it would be accepted as one
+/// and does not collide with a member already on the roster. Otherwise the field starts
+/// blank and the hostname is drawn as a hint.
+fn roster_identity_prefill(row: &DeviceRow) -> (String, Option<String>) {
+    if row.name_conflict.is_none() && crate::fleet::validate_machine(&row.name).is_ok() {
+        return (row.name.clone(), None);
+    }
+
+    (String::new(), Some(row.name.clone()))
 }
 
 /// Why the inventory is not here, from what the gateway answered.
@@ -4193,37 +4580,6 @@ fn devices_error_sentence(error: &ClientError, method: &str, hello: &Hello) -> S
     }
 }
 
-/// One blocker code, in words.
-///
-/// The single vocabulary for both places the codes arrive: `fleet.devices`'s
-/// `capabilities.reasons`, which says in advance what this host cannot do, and a
-/// `deploy_blocked` refusal, which says the same thing at the moment something is
-/// attempted. Two lists of sentences for one list of codes would be two lists to keep in
-/// step, and the operator would be told different things about one fact depending on
-/// whether they had pressed anything yet.
-pub fn blocker_sentence(reason: &str) -> String {
-    match reason {
-        "no_ca_key" => "This machine does not hold the fleet's certificate authority key, \
-                        so it can describe the fleet but cannot admit a member. Open \
-                        Devices on the machine that does."
-            .into(),
-        "ouro_path_unknown" => "This runtime cannot say where its own ouro executable is, \
-                                so it has nothing to hand a deployment worker."
-            .into(),
-        "no_data_dir" => "This runtime serves no durable data directory, so a deployment \
-                          would have nowhere to keep its journal."
-            .into(),
-        "cleartext_web_bind" => "This runtime publishes its web endpoint on a non-loopback \
-                                 address with no TLS, so credential entry is refused on \
-                                 this deployment host."
-            .into(),
-        other => format!(
-            "This runtime reports the blocker {}.",
-            other.replace('_', " ")
-        ),
-    }
-}
-
 /// The blockers a `deploy_blocked` refusal names, in words.
 fn refusal_blockers(error: &ClientError) -> Option<String> {
     let ClientError::Rpc(rpc) = error else {
@@ -4236,76 +4592,10 @@ fn refusal_blockers(error: &ClientError) -> Option<String> {
     Some(blocker_sentence(first))
 }
 
-/// The broker's stable reason codes, as sentences. An unrecognised code is printed as
-/// itself: a runtime that grew a refusal this build predates must still be legible.
-fn reason_sentence(reason: &str) -> String {
-    match reason {
-        "plan_changed" => "the plan changed after it was reviewed, so it was not applied. \
-                           Read the new one and approve that."
-            .into(),
-        "operation_in_progress" => {
-            "this operation is already running under a different approval.".into()
-        }
-        "start_in_flight" => "an approval for this operation is still in flight.".into(),
-        "challenge_not_bound" => "this question was asked of a different session, so this \
-                                  one cannot answer it."
-            .into(),
-        "challenge_consumed" => "this question has already been answered once. A challenge \
-                                 is consumed when it is sent, so this is not a second guess."
-            .into(),
-        "challenge_expired" => "this question expired before it was answered.".into(),
-        "challenge_kind_mismatch" => "this answer is the wrong shape for the question.".into(),
-        "host_key_changed" => "this host's key has changed. That blocks the deployment and \
-                               needs a separate, verified repair; it is never accepted here."
-            .into(),
-        "already_attached" => "a worker is already attached to this operation.".into(),
-        "operation_finished" => "this operation has already finished.".into(),
-        "operation_state_unknown" => "this operation's record cannot be read, so resuming \
-                                      it would be starting a second worker against a \
-                                      machine whose state nobody knows."
-            .into(),
-        "operation_not_yours" => "this operation belongs to another identity, and taking \
-                                  it over is a decision to make out loud."
-            .into(),
-        // Named here too so the code never reaches the fallback; the sentence a caller
-        // actually draws comes from `refusal_blockers`, which has the list.
-        "deploy_blocked" => "this host cannot deploy right now.".into(),
-        "no_worker" => "no worker is attached to this operation; read its status, then \
-                        continue it."
-            .into(),
-        "worker_attaching" => "this operation's worker is still being connected to.".into(),
-        "worker_unavailable" | "worker_unreachable" => {
-            "the deployment worker is no longer reachable from this runtime.".into()
-        }
-        "worker_timeout" => "the deployment worker did not answer in time.".into(),
-        "no_review_pending" => "this operation has no plan waiting for approval.".into(),
-        "session_unbound" => "this connection carries no client session, and a deployment \
-                              question is answered by the session it was issued to."
-            .into(),
-        "unknown_operation" => "this runtime has no operation with that id.".into(),
-        "devices_busy" => "this runtime is already running as many device inventories as \
-                           it allows. Try again in a moment."
-            .into(),
-        "no_data_dir" => "this runtime serves no durable data directory, so it holds no \
-                          deployments."
-            .into(),
-        "ouro_path_unknown" => "this runtime does not know where its own ouro executable \
-                                is, so it cannot run a deployment."
-            .into(),
-        "journal_unreadable" => "this operation's record on the deployment host could not \
-                                 be read."
-            .into(),
-        // A code this build predates, made readable rather than printed as an identifier.
-        // The words are the code's own — nothing is invented — so an operator can still
-        // quote it, and a screen full of `quantum_decoherence_detected` is not what a
-        // person is asked to act on.
-        other => format!("the runtime named the reason {}.", other.replace('_', " ")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet_network::DiscoveryCode;
 
     fn hello_at(scope: &str) -> Hello {
         serde_json::from_value(json!({
@@ -4630,6 +4920,42 @@ mod tests {
         .headline();
 
         assert_eq!(headline_for("ok", 3), expected);
+        assert_eq!(headline_for_count("ok", 3), expected);
+        // A hostile `visible_peers` used to allocate that many `Device`s. The count-based
+        // sibling must still produce the sentence without that allocation.
+        let huge = headline_for("ok", 1_000_000);
+        assert!(huge.contains("1000000"), "{huge}");
+    }
+
+    #[test]
+    fn a_hostname_that_is_not_a_machine_name_is_not_prefilled() {
+        let valid = DeviceRow {
+            name: "build-linux".into(),
+            ..DeviceRow::default()
+        };
+        assert_eq!(
+            roster_identity_prefill(&valid),
+            ("build-linux".into(), None)
+        );
+
+        let spaced = DeviceRow {
+            name: "Build Linux".into(),
+            ..DeviceRow::default()
+        };
+        assert_eq!(
+            roster_identity_prefill(&spaced),
+            (String::new(), Some("Build Linux".into()))
+        );
+
+        let conflict = DeviceRow {
+            name: "studio".into(),
+            name_conflict: Some("studio".into()),
+            ..DeviceRow::default()
+        };
+        assert_eq!(
+            roster_identity_prefill(&conflict),
+            (String::new(), Some("studio".into()))
+        );
     }
 
     /// The header the proposal requires, from the host the runtime named.
@@ -4911,31 +5237,7 @@ mod tests {
     /// Every stable reason code the broker documents reads as a sentence.
     #[test]
     fn each_broker_reason_reads_as_a_sentence() {
-        for reason in [
-            "plan_changed",
-            "operation_in_progress",
-            "start_in_flight",
-            "challenge_not_bound",
-            "challenge_consumed",
-            "challenge_expired",
-            "challenge_kind_mismatch",
-            "host_key_changed",
-            "already_attached",
-            "operation_finished",
-            "operation_state_unknown",
-            "operation_not_yours",
-            "no_worker",
-            "worker_attaching",
-            "worker_unavailable",
-            "worker_timeout",
-            "no_review_pending",
-            "session_unbound",
-            "unknown_operation",
-            "devices_busy",
-            "no_data_dir",
-            "ouro_path_unknown",
-            "journal_unreadable",
-        ] {
+        for reason in catalogue::REASON_CODES {
             let sentence = reason_sentence(reason);
             assert!(!sentence.contains(reason), "{reason} printed as its code");
             assert!(sentence.len() > 20, "{reason} has no explanation");

@@ -86,7 +86,7 @@ impl App {
                 dialog.pending = false;
                 dialog.path = None;
             } else {
-                self.overlay = None;
+                self.close_overlay();
             }
             return;
         }
@@ -141,7 +141,7 @@ impl App {
                 }
                 self.home_error = None;
                 self.save_pending = true;
-                self.overlay = None;
+                self.close_overlay();
                 self.poll();
             }
             KeyCode::Enter => {

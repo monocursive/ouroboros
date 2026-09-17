@@ -232,7 +232,7 @@ pub enum IdentityChoice {
 
 /// What an operation was asked to do.
 ///
-/// Written to `<data dir>/fleet/deploy/<id>.request.json` (0600) *before* the worker is
+/// Written to `<data dir>/deploy/<id>.request.json` (0600) *before* the worker is
 /// spawned, which is why `ouro fleet worker start` takes only an operation id and a data
 /// directory: a target, a user and a port on a command line would be published to every
 /// process on the host by `ps`, and the seam keeps argv free of operation data.
@@ -253,6 +253,12 @@ pub struct OperationRequest {
     pub ssh_port: Option<u16>,
     #[serde(default)]
     pub identity: IdentityChoice,
+    /// Tailscale `PublicKey` for the selected address, when discovery named one.
+    #[serde(default)]
+    pub peer_id: Option<String>,
+    /// Tailscale `ID`, recorded beside [`Self::peer_id`].
+    #[serde(default)]
+    pub stable_id: Option<String>,
     /// Where `ouro` lives on the target, relative to its `$HOME` unless absolute.
     #[serde(default)]
     pub install_path: Option<String>,
@@ -343,6 +349,8 @@ impl OperationRequest {
             ssh_user: None,
             ssh_port: None,
             identity: IdentityChoice::Default,
+            peer_id: None,
+            stable_id: None,
             install_path: None,
             remote_data_dir: None,
             service: true,
@@ -367,7 +375,7 @@ impl OperationRequest {
 
     /// Read the request a worker was spawned for, from its private file.
     ///
-    /// The broker writes `<data dir>/fleet/deploy/<id>.request.json` before it starts
+    /// The broker writes `<data dir>/deploy/<id>.request.json` before it starts
     /// the worker, because seam S2 gives `worker start` an operation id and a data
     /// directory and nothing else: a target host, an account and a port on a command
     /// line would be readable by every process on the machine through `ps`.
@@ -447,8 +455,11 @@ impl OperationRequest {
         Ok(request)
     }
 
-    /// Explicitly remove a request during cleanup. A running or recoverable worker
-    /// retains it: it contains only intent and identity references, never credentials.
+    /// Remove the request once the operation can no longer be resumed from it.
+    ///
+    /// Kept while the operation is running, failed or interrupted — resume still needs
+    /// the identity reference. Folded into the journal's target identity and deleted at
+    /// `completed` and `cancelled`.
     pub fn consume(data_dir: &Path, operation: &str) -> Result<()> {
         let path = request_path(data_dir, operation);
         match std::fs::remove_file(&path) {
@@ -513,8 +524,24 @@ pub enum Event {
 ///
 /// `Send + Sync` because the askpass bridge asks from its own accept thread while the
 /// engine thread is blocked inside `ssh`.
+///
+/// A password or passphrase asked with [`Self::ask_from`] is tagged with that
+/// `issuer` — one armed `ssh` child — and [`Self::withdraw`] unblocks it. Issuer `0`
+/// is the engine thread (host trust, review) and is never withdrawn, so a lost
+/// connection cannot cancel a plan the operator is mid-reading.
 pub trait Conversation: Send + Sync {
     fn ask(&self, request: ChallengeRequest) -> Result<challenge::Answer>;
+    /// Ask on behalf of one armed `ssh` child. The default delegates to [`Self::ask`],
+    /// which is enough for a conversation that answers immediately (scripted tests,
+    /// `--yes` reviews). A conversation that blocks — the worker's registry, a
+    /// terminal secret read — overrides this so [`Self::withdraw`] can unblock it.
+    fn ask_from(&self, _issuer: u64, request: ChallengeRequest) -> Result<challenge::Answer> {
+        self.ask(request)
+    }
+    /// Withdraw every still-pending challenge this issuer asked. The default is a
+    /// no-op: conversations that do not block have nothing to wake. First reason
+    /// wins; issuer `0` is ignored.
+    fn withdraw(&self, _issuer: u64, _reason: &'static str) {}
     fn notify(&self, event: Event);
     /// Whether the operator has asked the operation to stop. Checked at step
     /// boundaries, so cancellation lands somewhere durable rather than mid-write.
@@ -596,18 +623,18 @@ pub(crate) fn ensure_private_subdir(path: &Path) -> Result<()> {
             }
             Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirBuilder::new()
-            .mode(0o700)
-            .recursive(false)
-            .create(path)
-            .or_else(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    Ok(())
-                } else {
-                    Err(error)
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match DirBuilder::new().mode(0o700).recursive(false).create(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Created by a racing caller: re-check owner and mode rather than
+                    // adopting a directory we did not just make.
+                    ensure_private_subdir(path)
                 }
-            })
-            .with_context(|| format!("creating private directory {}", path.display())),
+                Err(error) => Err(error)
+                    .with_context(|| format!("creating private directory {}", path.display())),
+            }
+        }
         Err(error) => Err(error).with_context(|| format!("inspecting {}", path.display())),
     }
 }

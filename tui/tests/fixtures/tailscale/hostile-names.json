@@ -44,7 +44,7 @@
     },
     "k2": {
       "ID": "n1000000000000099CNTRL",
-      "HostName": "attacker\n      address      10.0.0.1\n      platform     linux\n      network      online now\n      ouroboros    in this machine's fleet \u00b7 view device\n  ghost",
+      "HostName": "attacker\n      address      10.0.0.1\n      platform     linux\n      network      online now\n      ouroboros    in this machine's fleet · view device\n  ghost",
       "DNSName": "forged.tailnet-example.ts.net.",
       "OS": "linux",
       "TailscaleIPs": [
@@ -58,7 +58,7 @@
     },
     "k3": {
       "ID": "n1000000000000099CNTRL",
-      "HostName": "gpj.\u202egnp.evil",
+      "HostName": "gpj.‮gnp.evil",
       "DNSName": "rtl.tailnet-example.ts.net.",
       "OS": "linux",
       "TailscaleIPs": [
@@ -111,6 +111,36 @@
       "Relay": "par",
       "Online": false,
       "LastSeen": "2026-01-01T00:00:00Z\u001b[2J\u001b[H OWNED"
+    },
+    "k7": {
+      "ID": "n1000000000000099CNTRL",
+      "PublicKey": "nodekey:f6a1b2c3f6a1b2c3f6a1b2c3f6a1b2c3f6a1b2c3f6a1b2c3f6a1b2c3f6a1b2c3",
+      "HostName": "bui​ld-linux",
+      "DNSName": "zwsp.tailnet-example.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": [
+        "100.64.12.37",
+        "fd7a:115c:a1e0::99"
+      ],
+      "CurAddr": "",
+      "Relay": "par",
+      "Online": true,
+      "LastSeen": "0001-01-01T00:00:00Z"
+    },
+    "k8": {
+      "ID": "n1000000000000099CNTRL",
+      "PublicKey": "nodekey:a7b8c9d0a7b8c9d0a7b8c9d0a7b8c9d0a7b8c9d0a7b8c9d0a7b8c9d0a7b8c9d0",
+      "HostName": "à̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀̀",
+      "DNSName": "combining.tailnet-example.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": [
+        "100.64.12.38",
+        "fd7a:115c:a1e0::99"
+      ],
+      "CurAddr": "",
+      "Relay": "par",
+      "Online": true,
+      "LastSeen": "0001-01-01T00:00:00Z"
     }
   }
 }

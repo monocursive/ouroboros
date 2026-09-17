@@ -127,6 +127,15 @@ fn bullets(app: &mut App) -> usize {
         .sum()
 }
 
+/// The secret buffer's character count, observed directly rather than through `Debug`.
+fn secret_chars(app: &App) -> usize {
+    app.devices
+        .operation
+        .as_ref()
+        .map(|operation| operation.secret.len())
+        .unwrap_or(0)
+}
+
 fn screen(app: &mut App) -> Screen {
     render(app, 150, 60)
 }
@@ -2081,10 +2090,7 @@ fn leaving_a_challenge_clears_what_was_typed_without_sending_it() {
         !calls.iter().any(|call| call.method.contains("cancel")),
         "Esc cancelled the operation"
     );
-    assert!(
-        !format!("{:?}", app.devices).contains(SECRET),
-        "Esc left the secret in the view's state"
-    );
+    assert_eq!(secret_chars(&app), 0, "Esc left the secret in the buffer");
     assert!(app.overlay.is_none(), "Esc did not leave the view");
 }
 
@@ -2140,7 +2146,7 @@ fn a_new_challenge_never_inherits_the_previous_ones_buffer() {
         0,
         "the buffer survived its challenge being replaced"
     );
-    assert!(!format!("{:?}", app.devices).contains(SECRET));
+    assert_eq!(secret_chars(&app), 0);
 
     app.apply(key(KeyCode::Enter));
     let calls = drained(&mut app);
@@ -2518,8 +2524,11 @@ fn leaving_by_either_door_forgets_the_typed_secret() {
     app.apply(key(KeyCode::Char('n')));
     assert!(app.devices.operation.is_none());
     assert_eq!(bullets(&mut app), 0);
+    assert_eq!(secret_chars(&app), 0);
 
-    // Closing the view on an open password question.
+    // Closing the view on an open password question — through the Cancel chord, not
+    // `close_devices()` directly. Ctrl+C used to drop the overlay without clearing the
+    // buffer, so a half-typed password survived until the next open.
     let mut app = deploying();
     answer(
         &mut app,
@@ -2540,12 +2549,14 @@ fn leaving_by_either_door_forgets_the_typed_secret() {
         app.apply(message);
     }
     assert_eq!(bullets(&mut app), SECRET.chars().count());
+    assert_eq!(secret_chars(&app), SECRET.chars().count());
 
-    app.close_devices();
+    app.apply(chord(KeyCode::Char('c')));
     assert!(app.overlay.is_none());
-    assert!(
-        !format!("{:?}", app.devices).contains(SECRET),
-        "closing the view kept the secret in its state"
+    assert_eq!(
+        secret_chars(&app),
+        0,
+        "Ctrl+C left the typed secret in the buffer"
     );
 
     // Reopening draws an empty field rather than the one that was typed into.
@@ -2556,6 +2567,7 @@ fn leaving_by_either_door_forgets_the_typed_secret() {
         0,
         "the field came back with what was typed into it before"
     );
+    assert_eq!(secret_chars(&app), 0);
 }
 
 /// An answer for another operation never lands on the one being followed.
@@ -3220,4 +3232,251 @@ fn local_setup_can_resume_and_retry_without_a_ca() {
         call_for(&calls, "fleet.deployment.resume").params["operation_id"],
         operation
     );
+}
+
+/// A hostname that is not a valid roster identity is not stuffed into the machine field.
+#[test]
+fn the_connect_form_does_not_prefill_an_invalid_or_conflicting_hostname() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["devices"] = json!([
+        {
+            "name": "Build Linux", "machine": Value::Null, "os": "linux",
+            "address": "100.64.12.44", "online": true,
+            "state": "discovered_installation_unknown", "action": "deploy Ouroboros",
+            "name_conflicts_with_roster": Value::Null
+        },
+        {
+            "name": "studio", "machine": Value::Null, "os": "linux",
+            "address": "100.64.12.88", "online": true,
+            "state": "discovered_installation_unknown", "action": "deploy Ouroboros",
+            "name_conflicts_with_roster": "studio"
+        }
+    ]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    activate(&mut app, "Build Linux");
+    let text = prose(&mut app);
+    assert!(
+        text.contains("hint: Build Linux"),
+        "the invalid hostname was not drawn as a hint:\n{text}"
+    );
+    assert_eq!(
+        app.devices
+            .connect
+            .as_ref()
+            .map(|form| form.machine.as_str()),
+        Some(""),
+        "an invalid hostname was pre-filled as the roster identity"
+    );
+    app.apply(key(KeyCode::Esc));
+
+    activate(&mut app, "studio");
+    let text = prose(&mut app);
+    assert!(
+        text.contains("hint: studio"),
+        "a roster collision was not drawn as a hint:\n{text}"
+    );
+    assert_eq!(
+        app.devices
+            .connect
+            .as_ref()
+            .map(|form| form.machine.as_str()),
+        Some(""),
+        "a colliding hostname was pre-filled as the roster identity"
+    );
+}
+
+/// Spaces in a pasted password survive; flattening used to trim them through a
+/// non-zeroized String before the masked field saw them.
+#[test]
+fn a_pasted_password_keeps_its_leading_and_trailing_spaces() {
+    let _mode = normal();
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "awaiting_auth",
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
+            json!({}),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    const PADDED: &str = "  zx9Qv-padded-secret  ";
+    app.apply(Msg::Paste(PADDED.into()));
+
+    assert_eq!(secret_chars(&app), PADDED.chars().count());
+    assert_eq!(bullets(&mut app), PADDED.chars().count());
+    assert!(
+        !prose(&mut app).contains(PADDED),
+        "the pasted secret was drawn in the clear"
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let calls = drained(&mut app);
+    let authenticate = call_for(&calls, "fleet.deployment.authenticate");
+    assert_eq!(authenticate.params["secret"], json!(PADDED));
+}
+
+/// Enter on a known member opens a read-only panel of facts this runtime already holds.
+#[test]
+fn enter_on_a_fleet_member_opens_a_read_only_device_panel() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["devices"] = json!([{
+        "name": "studio", "machine": "studio", "os": "macos",
+        "address": "100.64.12.21", "online": true, "path": "direct",
+        "state": "this_device", "action": "view device",
+        "connected": true, "compatible": true, "runtime_running": true,
+        "last_probe": "2026-09-17T08:10:00Z",
+        "name_conflicts_with_roster": Value::Null
+    }]);
+    reply["operations"] = json!([{
+        "operation": "op-old", "state": "completed", "kind": "setup",
+        "owner": "ada", "attached": false, "readable": true,
+        "created_at": "2026-09-16T08:00:00Z",
+        "updated_at": "2026-09-16T09:00:00Z",
+        "target": { "machine": "studio", "address": "100.64.12.21" }
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+    activate(&mut app, "studio");
+
+    let text = prose(&mut app);
+    assert!(text.contains("View device"), "{text}");
+    assert!(text.contains("Read-only"), "{text}");
+    assert!(text.contains("roster name"), "{text}");
+    assert!(text.contains("network name"), "{text}");
+    assert!(text.contains("100.64.12.21"), "{text}");
+    assert!(text.contains("runtime connected"), "{text}");
+    assert!(text.contains("probed 2026-09-17T08:10:00Z"), "{text}");
+    assert!(text.contains("Most recent operation"), "{text}");
+    assert!(text.contains("op-old"), "{text}");
+    assert!(
+        !text.contains("ssh username"),
+        "View device opened a deploy form:\n{text}"
+    );
+
+    app.apply(key(KeyCode::Char('r')));
+    let calls = drained(&mut app);
+    assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
+
+    app.apply(key(KeyCode::Esc));
+    let text = prose(&mut app);
+    assert!(
+        device_row(&screen(&mut app), "studio").contains("View device"),
+        "Esc did not return to the list:\n{text}"
+    );
+}
+
+/// Diagnose is the same panel for a disconnected member, with blockers and Refresh.
+#[test]
+fn enter_on_a_disconnected_member_opens_diagnose() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["devices"] = json!([{
+        "name": "attic", "machine": "attic", "os": "linux",
+        "address": "100.64.12.77", "online": false,
+        "last_seen": "2026-09-17T07:50:00Z",
+        "state": "fleet_member_not_visible", "action": "diagnose",
+        "connected": false, "compatible": true, "runtime_running": false,
+        "last_probe": Value::Null,
+        "name_conflicts_with_roster": Value::Null
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+    activate(&mut app, "attic");
+
+    let text = prose(&mut app);
+    assert!(text.contains("Diagnose"), "{text}");
+    assert!(text.contains("Read-only"), "{text}");
+    assert!(
+        text.contains("does not mean the host is powered off"),
+        "{text}"
+    );
+    assert!(text.contains("Diagnosis"), "{text}");
+    assert!(text.contains("r Refresh"), "{text}");
+    assert!(
+        !text.contains("ssh username"),
+        "Diagnose opened a deploy form:\n{text}"
+    );
+
+    app.apply(key(KeyCode::Char('r')));
+    let calls = drained(&mut app);
+    assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
+
+    app.apply(key(KeyCode::Esc));
+    assert!(device_row(&screen(&mut app), "attic").contains("Diagnose"));
+}
+
+/// Every reason, blocker and operation-state code the fixtures in this file put on the
+/// wire has a sentence in the TUI catalogue.
+#[test]
+fn every_code_the_fixtures_emit_has_a_sentence() {
+    use ouro::ui::app::devices::{
+        blocker_known, blocker_sentence, operation_state, operation_state_known, reason_sentence,
+    };
+
+    // Refusal / blocker codes this file actually sends.
+    for code in [
+        "operation_not_yours",
+        "host_key_changed",
+        "plan_changed",
+        "challenge_consumed",
+        "challenge_expired",
+        "challenge_not_bound",
+        "deploy_blocked",
+        "no_ca_key",
+        "ouro_path_unknown",
+        "no_data_dir",
+        "cleartext_web_bind",
+        "worker_refused",
+        "a_reason_from_the_future",
+    ] {
+        let sentence = if blocker_known(code) {
+            blocker_sentence(code)
+        } else {
+            reason_sentence(code)
+        };
+        assert!(!sentence.is_empty(), "{code} has no sentence");
+        assert!(
+            !sentence.contains(code),
+            "{code} reached the screen as an identifier: {sentence}"
+        );
+    }
+
+    for code in [
+        "attaching",
+        "inspecting",
+        "awaiting_host_trust",
+        "awaiting_auth",
+        "awaiting_review",
+        "deploying",
+        "restarting_host",
+        "checking_readiness",
+        "completed",
+        "interrupted",
+        "failed",
+        "cancelled",
+    ] {
+        assert!(operation_state_known(code), "{code} is not catalogued");
+        let sentence = operation_state(code);
+        assert!(
+            !sentence.contains("does not know"),
+            "{code} fell through: {sentence}"
+        );
+    }
 }

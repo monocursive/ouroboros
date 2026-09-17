@@ -24,6 +24,19 @@ use zeroize::Zeroizing;
 
 use super::{refuse, CHALLENGE_LIFETIME};
 
+fn withdrawn_detail(reason: &'static str) -> String {
+    match reason {
+        "connection_lost" => {
+            "the SSH connection closed before this challenge was answered".to_string()
+        }
+        "challenge_expired" => format!(
+            "nobody answered this challenge within {} seconds",
+            CHALLENGE_LIFETIME.as_secs()
+        ),
+        other => format!("this challenge was withdrawn ({other})"),
+    }
+}
+
 /// The four question types. Every one of them carries secret-free metadata only.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,6 +197,12 @@ struct Pending {
     deadline: Instant,
     answer: Option<Answer>,
     consumed: bool,
+    /// The armed SSH child that asked, or 0 if this question came from the engine
+    /// thread (host trust, review) and must not be withdrawn with a connection.
+    issuer: u64,
+    /// Set when the issuer is aborted. A late `respond` is refused with this reason
+    /// rather than `unknown_challenge`, so the operator sees *why* the prompt vanished.
+    withdrawn: Option<&'static str>,
     /// Kept so a client that attaches *after* the question was asked can be shown it.
     /// The metadata is secret-free by construction, which is what makes replay safe.
     expires_at: String,
@@ -198,8 +217,18 @@ struct Pending {
 /// wake up for that too.
 #[derive(Default)]
 pub struct Registry {
-    state: Mutex<HashMap<String, Pending>>,
+    state: Mutex<State>,
     signal: Condvar,
+}
+
+#[derive(Default)]
+struct State {
+    pending: HashMap<String, Pending>,
+    /// First withdrawal reason per issuer. A later `invalidate_issuer` (the `Armed`
+    /// guard dropping after a prompt expired) must not overwrite `challenge_expired`
+    /// with `connection_lost`. Lives on this registry, not in a process-global table:
+    /// moving the registry cannot leave a dangling pointer.
+    withdrawn_issuers: HashMap<u64, &'static str>,
 }
 
 impl Registry {
@@ -208,13 +237,17 @@ impl Registry {
     }
 
     /// Record a question as pending and return the wire form of it.
+    ///
+    /// `issuer` is the armed `ssh` child that asked, or `0` for an engine-thread
+    /// question (host trust, review) that [`Self::invalidate_issuer`] must not touch.
     pub fn issue(
         &self,
         kind: ChallengeKind,
         metadata: Value,
         bound_to: Option<Binding>,
+        issuer: u64,
     ) -> Result<Challenge> {
-        self.issue_for(kind, metadata, bound_to, CHALLENGE_LIFETIME)
+        self.issue_for(kind, metadata, bound_to, CHALLENGE_LIFETIME, issuer)
     }
 
     pub fn issue_for(
@@ -223,11 +256,17 @@ impl Registry {
         metadata: Value,
         bound_to: Option<Binding>,
         lifetime: Duration,
+        issuer: u64,
     ) -> Result<Challenge> {
         let id = super::random_hex(16)?;
         let expires_at = super::utc_timestamp_at(std::time::SystemTime::now() + lifetime)?;
         let mut state = self.lock();
-        state.insert(
+        if issuer != 0 {
+            if let Some(reason) = state.withdrawn_issuers.get(&issuer).copied() {
+                return refuse(reason, withdrawn_detail(reason));
+            }
+        }
+        state.pending.insert(
             id.clone(),
             Pending {
                 kind,
@@ -235,6 +274,8 @@ impl Registry {
                 deadline: Instant::now() + lifetime,
                 answer: None,
                 consumed: false,
+                issuer,
+                withdrawn: None,
                 expires_at: expires_at.clone(),
                 metadata: metadata.clone(),
             },
@@ -260,8 +301,9 @@ impl Registry {
         let mut claimed = Vec::new();
         let mut state = self.lock();
         let now = Instant::now();
-        for (id, pending) in state.iter_mut() {
+        for (id, pending) in state.pending.iter_mut() {
             if pending.consumed
+                || pending.withdrawn.is_some()
                 || pending.answer.is_some()
                 || now >= pending.deadline
                 || pending.bound_to.is_some()
@@ -285,12 +327,15 @@ impl Registry {
     /// replay/binding contract.
     pub fn respond(&self, challenge: &str, from: Option<&Binding>, response: &Value) -> Result<()> {
         let mut state = self.lock();
-        let Some(pending) = state.get_mut(challenge) else {
+        let Some(pending) = state.pending.get_mut(challenge) else {
             return refuse(
                 "unknown_challenge",
                 "this operation has no such pending challenge",
             );
         };
+        if let Some(reason) = pending.withdrawn {
+            return refuse(reason, withdrawn_detail(reason));
+        }
         if pending.consumed || pending.answer.is_some() {
             return refuse(
                 "challenge_consumed",
@@ -322,9 +367,13 @@ impl Registry {
     pub fn wait(&self, challenge: &str) -> Result<Answer> {
         let mut state = self.lock();
         loop {
-            let Some(pending) = state.get_mut(challenge) else {
+            let Some(pending) = state.pending.get_mut(challenge) else {
                 return refuse("unknown_challenge", "the challenge is no longer pending");
             };
+            if let Some(reason) = pending.withdrawn {
+                pending.consumed = true;
+                return refuse(reason, withdrawn_detail(reason));
+            }
             if let Some(answer) = pending.answer.take() {
                 pending.consumed = true;
                 return Ok(answer);
@@ -346,12 +395,37 @@ impl Registry {
         }
     }
 
+    /// Withdraw every unanswered challenge this issuer asked. The worker's UI sees
+    /// them leave `pending`; a late `respond` is refused with `reason`.
+    pub fn invalidate_issuer(&self, issuer: u64, reason: &'static str) {
+        if issuer == 0 {
+            return;
+        }
+        let mut state = self.lock();
+        // First reason wins: recorded even if nothing is pending yet, so a
+        // subsequent `issue` for this issuer is refused rather than parked.
+        let reason = *state.withdrawn_issuers.entry(issuer).or_insert(reason);
+        for pending in state.pending.values_mut() {
+            if pending.issuer != issuer {
+                continue;
+            }
+            if pending.withdrawn.is_some() {
+                continue;
+            }
+            pending.answer = None;
+            pending.consumed = true;
+            pending.withdrawn = Some(reason);
+            pending.deadline = Instant::now();
+        }
+        self.signal.notify_all();
+    }
+
     /// Drop every pending challenge, so a disconnected session's unconsumed secret has
     /// nothing left to be delivered to. The proposal: "A lost authentication session
     /// invalidates its pending challenge and drops any unconsumed secret."
     pub fn invalidate_all(&self) {
         let mut state = self.lock();
-        for pending in state.values_mut() {
+        for pending in state.pending.values_mut() {
             pending.answer = None;
             pending.consumed = true;
             pending.deadline = Instant::now();
@@ -363,15 +437,18 @@ impl Registry {
     pub fn pending_kinds(&self) -> Vec<(String, ChallengeKind)> {
         let state = self.lock();
         let mut pending: Vec<(String, ChallengeKind)> = state
+            .pending
             .iter()
-            .filter(|(_, entry)| !entry.consumed && entry.answer.is_none())
+            .filter(|(_, entry)| {
+                !entry.consumed && entry.withdrawn.is_none() && entry.answer.is_none()
+            })
             .map(|(id, entry)| (id.clone(), entry.kind))
             .collect();
         pending.sort_by(|left, right| left.0.cmp(&right.0));
         pending
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -415,6 +492,7 @@ pub fn host_trust_metadata(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{ChallengeRequest, Conversation, Event};
     use super::*;
     use std::sync::Arc;
 
@@ -434,6 +512,7 @@ mod tests {
                 ChallengeKind::Password,
                 password_metadata("100.64.0.2", "me", 22, 1, 3),
                 Some(binding("live")),
+                0,
             )
             .expect("an issued challenge");
 
@@ -489,6 +568,7 @@ mod tests {
                 host_trust_metadata("100.64.0.2", 22, "ssh-ed25519", "SHA256:abc", "me"),
                 None,
                 Duration::from_millis(40),
+                0,
             )
             .expect("an issued challenge");
 
@@ -515,7 +595,7 @@ mod tests {
     fn the_waiter_wakes_when_another_thread_answers() {
         let registry = Arc::new(Registry::new());
         let issued = registry
-            .issue(ChallengeKind::HostTrust, json!({}), None)
+            .issue(ChallengeKind::HostTrust, json!({}), None, 0)
             .expect("an issued challenge");
 
         let responder = Arc::clone(&registry);
@@ -566,7 +646,7 @@ mod tests {
     fn invalidating_a_session_drops_its_unconsumed_answer() {
         let registry = Registry::new();
         let issued = registry
-            .issue(ChallengeKind::Password, json!({}), Some(binding("live")))
+            .issue(ChallengeKind::Password, json!({}), Some(binding("live")), 0)
             .expect("an issued challenge");
         registry
             .respond(
@@ -591,7 +671,7 @@ mod tests {
     fn an_unowned_question_is_claimed_once_by_the_first_client_to_attach() {
         let registry = Registry::new();
         let issued = registry
-            .issue(ChallengeKind::Review, json!({"plan_digest": "d1"}), None)
+            .issue(ChallengeKind::Review, json!({"plan_digest": "d1"}), None, 0)
             .expect("an issued challenge");
 
         let claimed = registry.claim_unbound(&binding("first"));
@@ -633,5 +713,100 @@ mod tests {
     fn a_secret_answer_does_not_render_itself() {
         let answer = Answer::Secret(Zeroizing::new("hunter2-unique-probe".to_string()));
         assert_eq!(format!("{answer:?}"), "Answer::Secret(<redacted>)");
+    }
+
+    /// Aborting an issuer unblocks its waiter immediately and refuses a late answer
+    /// with that reason, without touching a question a different issuer asked.
+    #[test]
+    fn aborting_an_issuer_unblocks_its_waiter_and_refuses_a_late_answer() {
+        let registry = Arc::new(Registry::new());
+        let issuer = 7;
+        let issued = registry
+            .issue(ChallengeKind::Password, json!({}), None, issuer)
+            .expect("an issued challenge");
+        let other = registry
+            .issue(ChallengeKind::Review, json!({}), None, 0)
+            .expect("an engine-thread question");
+
+        let waiter = Arc::clone(&registry);
+        let id = issued.challenge.clone();
+        let thread = std::thread::spawn(move || waiter.wait(&id));
+
+        std::thread::sleep(Duration::from_millis(20));
+        registry.invalidate_issuer(issuer, "connection_lost");
+        registry.invalidate_issuer(issuer, "challenge_expired");
+
+        let waited = thread.join().expect("the waiter thread");
+        assert_eq!(
+            super::super::reason_of(&waited.expect_err("the prompt was withdrawn")),
+            Some("connection_lost"),
+            "the first withdrawal reason wins"
+        );
+
+        let late = registry
+            .respond(&issued.challenge, None, &json!({"secret": "too-late"}))
+            .expect_err("a late answer is refused by name");
+        assert_eq!(
+            super::super::reason_of(&late),
+            Some("connection_lost"),
+            "a late answer names the withdrawal, not a generic unknown: {late:#}"
+        );
+        assert!(
+            registry
+                .respond(
+                    &other.challenge,
+                    None,
+                    &json!({"approve": true, "plan_digest": "d"})
+                )
+                .is_ok(),
+            "an engine-thread question is not withdrawn with the SSH child"
+        );
+        assert!(registry.pending_kinds().is_empty());
+    }
+
+    /// A registry issued on the stack and then moved into an `Arc` is still the
+    /// conversation's registry. The old process-global pointer table would have
+    /// aborted the stale address.
+    #[test]
+    fn withdrawing_through_a_conversation_survives_moving_the_registry_into_an_arc() {
+        struct ViaConversation {
+            registry: Arc<Registry>,
+        }
+        impl Conversation for ViaConversation {
+            fn ask(&self, request: ChallengeRequest) -> anyhow::Result<Answer> {
+                self.ask_from(0, request)
+            }
+            fn ask_from(&self, issuer: u64, request: ChallengeRequest) -> anyhow::Result<Answer> {
+                let issued = self
+                    .registry
+                    .issue(request.kind, request.metadata, None, issuer)?;
+                self.registry.wait(&issued.challenge)
+            }
+            fn withdraw(&self, issuer: u64, reason: &'static str) {
+                self.registry.invalidate_issuer(issuer, reason);
+            }
+            fn notify(&self, _event: Event) {}
+        }
+
+        let registry = Registry::new();
+        let issued = registry
+            .issue(ChallengeKind::Password, json!({}), None, 11)
+            .expect("an issued challenge");
+        let registry = Arc::new(registry);
+        let conversation = ViaConversation {
+            registry: Arc::clone(&registry),
+        };
+
+        let waiter = Arc::clone(&registry);
+        let id = issued.challenge.clone();
+        let thread = std::thread::spawn(move || waiter.wait(&id));
+        std::thread::sleep(Duration::from_millis(20));
+        conversation.withdraw(11, "connection_lost");
+
+        let waited = thread.join().expect("the waiter thread");
+        assert_eq!(
+            super::super::reason_of(&waited.expect_err("the prompt was withdrawn")),
+            Some("connection_lost")
+        );
     }
 }

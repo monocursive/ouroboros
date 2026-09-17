@@ -4288,7 +4288,6 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     (rows, limits)
 }
 
-/// A popup of `width` percent and an explicit height, clamped to the frame.
 /// The Devices view: the machines this runtime can see, and the deployment of Ouroboros
 /// onto one of them.
 ///
@@ -4356,6 +4355,7 @@ fn devices(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// A popup of `width` percent and an explicit height, clamped to the frame.
 pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     let horizontal = Layout::horizontal([Constraint::Percentage(width_percent)])
         .flex(Flex::Center)

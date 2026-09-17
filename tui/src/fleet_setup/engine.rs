@@ -20,12 +20,14 @@
 //! 8. hand startup to the service seam;
 //! 9. observe connectivity, then report readiness separately from connectivity.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::fleet;
@@ -57,6 +59,50 @@ pub const CONNECT_DEADLINE: Duration = Duration::from_secs(60);
 pub const DISCONNECT_DEADLINE: Duration = Duration::from_secs(60);
 /// A roster edit that lost a lock race is retried this many times before it is reported.
 const ROSTER_RETRIES: u32 = 3;
+
+/// Dry-run scratch directories, keyed by process and operation so every step of one
+/// `--dry-run` shares a unique 0700 directory without parking it under the data dir.
+fn dry_run_scratch() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static PATHS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A short exclusive 0700 directory under `TMPDIR`. The name is kept tiny so an
+/// OpenSSH mux socket created inside it stays inside `sockaddr_un` after the
+/// destination hash OpenSSH appends to `ControlPath`.
+fn exclusive_temp_dir(prefix: &str) -> Result<PathBuf> {
+    for _ in 0..8 {
+        let path = std::env::temp_dir().join(format!("{prefix}{}", super::random_hex(4)?));
+        match std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(false)
+            .create(&path)
+        {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).context(format!("creating {}", path.display()));
+            }
+        }
+    }
+    refuse(
+        "invalid_request",
+        format!("could not create a private {prefix} directory"),
+    )
+}
+
+/// Hosts this process has already scanned and found trusted, keyed by the store
+/// they were recorded in. OpenSSH 9.8+ `PerSourcePenalties` bans a client that
+/// `ssh-keyscan`s the same address too often (the scan's RSA/ECDSA probes never
+/// authenticate); a second connect to a host we already accepted must not scan again.
+/// A changed key still fails at `ssh` itself (`StrictHostKeyChecking=yes`).
+type TrustedHost = (String, String, u16);
+type TrustedHostCache = HashMap<TrustedHost, String>;
+
+fn trusted_hosts() -> &'static Mutex<TrustedHostCache> {
+    static HOSTS: OnceLock<Mutex<TrustedHostCache>> = OnceLock::new();
+    HOSTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// What the operation ended up doing.
 #[derive(Clone, Debug)]
@@ -119,22 +165,14 @@ impl Engine {
     /// Run the operation the request names, journalling into a handle of its own.
     ///
     /// A dry run is answered *before* a journal is opened: opening one would create the
-    /// file that `--dry-run` promises not to write.
+    /// file that `--dry-run` promises not to write. The issuer-wide lock is taken later,
+    /// at the first mutating step, so inspection and challenges do not block other
+    /// deployments on this host.
     pub fn run(&self) -> Result<Outcome> {
-        super::validate_operation_id(&self.request.operation)?;
-        if self.request.run_test_task
-            && !self
-                .request
-                .test_workspace
-                .as_deref()
-                .is_some_and(|path| std::path::Path::new(path).is_absolute())
-        {
-            return refuse("invalid_request", "--run-test-task requires --test-workspace with an absolute directory on the target");
-        }
+        self.validate_request()?;
         if self.request.dry_run {
             return self.dry_run();
         }
-        let _operation_lock = super::lock::Lock::acquire(&self.data_dir, "operation.lock")?;
         let journal = JournalHandle::new(Journal::open(
             &self.data_dir,
             &self.request.operation,
@@ -146,22 +184,29 @@ impl Engine {
     /// The same, against a journal somebody else is also writing — the worker's socket
     /// thread records the operation's owner there while the engine records its steps.
     pub fn run_with(&self, journal: &JournalHandle) -> Result<Outcome> {
+        self.validate_request()?;
+        if self.request.dry_run {
+            return self.dry_run();
+        }
+        journal.reload(&self.data_dir, &self.request.operation, self.request.kind)?;
+        self.run_locked(journal)
+    }
+
+    fn validate_request(&self) -> Result<()> {
         super::validate_operation_id(&self.request.operation)?;
         if self.request.run_test_task
             && !self
                 .request
                 .test_workspace
                 .as_deref()
-                .is_some_and(|path| std::path::Path::new(path).is_absolute())
+                .is_some_and(|path| Path::new(path).is_absolute())
         {
-            return refuse("invalid_request", "--run-test-task requires --test-workspace with an absolute directory on the target");
+            return refuse(
+                "invalid_request",
+                "--run-test-task requires --test-workspace with an absolute directory on the target",
+            );
         }
-        if self.request.dry_run {
-            return self.dry_run();
-        }
-        let _operation_lock = super::lock::Lock::acquire(&self.data_dir, "operation.lock")?;
-        journal.reload(&self.data_dir, &self.request.operation, self.request.kind)?;
-        self.run_locked(journal)
+        Ok(())
     }
 
     fn run_locked(&self, journal: &JournalHandle) -> Result<Outcome> {
@@ -170,6 +215,7 @@ impl Engine {
             journal.claim(owner)?;
         }
         if journal.state() == OperationState::Completed {
+            self.consume_request_if_terminal(OperationState::Completed);
             return Ok(self.completed_outcome(journal));
         }
         journal.clear_error()?;
@@ -179,7 +225,10 @@ impl Engine {
             OperationKind::Leave => self.run_leave(journal),
         };
         match result {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                self.consume_request_if_terminal(outcome.state);
+                Ok(outcome)
+            }
             Err(error) => {
                 let reason = super::reason_of(&error).unwrap_or("failed");
                 let state = if reason == "cancelled" {
@@ -187,10 +236,25 @@ impl Engine {
                 } else {
                     OperationState::Failed
                 };
+                // A waiter that never mutated must not keep a review bound to a roster
+                // the holder is about to change; the retry re-plans against current
+                // members.
+                if reason == "operation_in_progress"
+                    && !journal.record().completed(&self.request.machine, "issue")
+                {
+                    journal.forget_review()?;
+                }
                 journal.fail(state, format!("{error:#}"))?;
+                self.consume_request_if_terminal(state);
                 self.notify_state(state);
                 Err(error)
             }
+        }
+    }
+
+    fn consume_request_if_terminal(&self, state: OperationState) {
+        if matches!(state, OperationState::Completed | OperationState::Cancelled) {
+            let _ = super::OperationRequest::consume(&self.data_dir, &self.request.operation);
         }
     }
 
@@ -246,20 +310,54 @@ impl Engine {
     /// operation journals into — is a change: on a machine that has never deployed, an
     /// inspection would leave that directory behind.
     fn scratch(&self) -> Result<PathBuf> {
-        let path = if self.request.dry_run {
-            self.dry_run_scratch()
-        } else {
-            super::ensure_deploy_dir(&self.data_dir)?;
-            super::scratch_dir(&self.data_dir, &self.request.operation)
-        };
+        if self.request.dry_run {
+            return self.prepare_dry_run_scratch();
+        }
+        super::ensure_deploy_dir(&self.data_dir)?;
+        let path = super::scratch_dir(&self.data_dir, &self.request.operation);
         super::ensure_private_subdir(&path)?;
         Ok(path)
     }
 
-    /// Deterministic, so every step of one dry run shares it, and outside the data
-    /// directory, so the dry run leaves nothing there.
-    fn dry_run_scratch(&self) -> PathBuf {
-        std::env::temp_dir().join(format!("ouro-dry-{}", self.request.operation))
+    /// A short exclusive directory for the SSH mux socket.
+    ///
+    /// OpenSSH binds `ControlPath` plus a destination hash (`s.<16>`). Operation
+    /// scratch under a nested `TMPDIR` is already most of `sockaddr_un`; handing
+    /// that path to `prepare_control_socket` produces a socket OpenSSH then refuses.
+    /// A fresh home per connection, because a resumed run must not inherit a
+    /// ControlMaster whose socket `Drop` could not unlink (the hashed name).
+    fn control_scratch(&self) -> Result<PathBuf> {
+        exclusive_temp_dir("oc")
+    }
+
+    /// Unique, mode 0700, and refused rather than adopted if that path already exists.
+    fn prepare_dry_run_scratch(&self) -> Result<PathBuf> {
+        let key = format!("{}:{}", std::process::id(), self.request.operation);
+        {
+            let paths = dry_run_scratch()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(path) = paths.get(&key) {
+                return Ok(path.clone());
+            }
+        }
+        let path = exclusive_temp_dir("od")?;
+        dry_run_scratch()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, path.clone());
+        Ok(path)
+    }
+
+    fn forget_dry_run_scratch(&self) {
+        let key = format!("{}:{}", std::process::id(), self.request.operation);
+        let path = dry_run_scratch()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+        if let Some(path) = path {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 
     /// The private host key stores this operation trusts against, in the order OpenSSH
@@ -326,9 +424,9 @@ impl Engine {
                 access.ssh_port = target.port;
                 access.install_path = record.paths.install_path;
                 access.data_dir = record.paths.data_dir;
-            }
-            if let Ok(request) = super::OperationRequest::read(&self.data_dir, &record.operation) {
-                identity = request.identity;
+                if let Some(recorded) = target.identity {
+                    identity = recorded;
+                }
             }
         }
         if let Some(overrides) = self.request.members.get(machine) {
@@ -338,6 +436,119 @@ impl Engine {
             access.data_dir = overrides.data_dir.clone().or(access.data_dir);
         }
         (access, identity)
+    }
+
+    fn lock_issuer(&self, journal: &JournalHandle) -> Result<super::lock::Lock> {
+        super::lock::Lock::acquire_issuer(
+            &self.data_dir,
+            &self.request.operation,
+            journal.state().as_str(),
+            Some(self.request.machine.as_str()),
+        )
+    }
+
+    /// Current Tailscale node key for `address`: discovery first, then the request.
+    fn current_peer_identity(&self, address: &str) -> (Option<String>, Option<String>) {
+        let discovered = discover_peer_keys(address);
+        if discovered.0.is_some() || discovered.1.is_some() {
+            return discovered;
+        }
+        (self.request.peer_id.clone(), self.request.stable_id.clone())
+    }
+
+    /// Node key recorded for this machine/address, from the current journal or a
+    /// previous admission of the same target.
+    fn recorded_peer_id(
+        &self,
+        journal: &JournalHandle,
+        machine: &str,
+        address: &str,
+    ) -> Option<String> {
+        if let Some(peer_id) = journal
+            .record()
+            .target
+            .as_ref()
+            .filter(|target| target.machine == machine)
+            .and_then(|target| target.peer_id.clone())
+        {
+            return Some(peer_id);
+        }
+        Journal::list(&self.data_dir)
+            .ok()?
+            .into_iter()
+            .filter_map(|operation| Journal::read(&self.data_dir, &operation).ok().flatten())
+            .filter(|record| {
+                record.operation != self.request.operation
+                    && record.kind == OperationKind::Add
+                    && record
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target.machine == machine)
+                    && record
+                        .target
+                        .as_ref()
+                        .and_then(|target| target.address.as_deref())
+                        == Some(address)
+            })
+            .max_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then(left.updated_at.cmp(&right.updated_at))
+            })
+            .and_then(|record| record.target.and_then(|target| target.peer_id))
+    }
+
+    fn bind_peer_identity(
+        &self,
+        journal: &JournalHandle,
+        machine: &str,
+        address: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let (peer_id, stable_id) = self.current_peer_identity(address);
+        if let Some(recorded) = self.recorded_peer_id(journal, machine, address) {
+            match &peer_id {
+                Some(current) if current != &recorded => {
+                    return refuse(
+                        "peer_identity_changed",
+                        format!(
+                            "{machine} at {address} presents a different Tailscale node key than the one recorded for it. A device re-registration needs explicit repair rather than a silent rewrite"
+                        ),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    if !journal.record().attempted(machine, "peer_identity") {
+                        journal.skip_step(
+                            machine,
+                            "peer_identity",
+                            "no Tailscale node key is visible for this address; the recorded identity was not re-checked",
+                        )?;
+                    }
+                }
+            }
+        } else if peer_id.is_none() {
+            if !journal.record().attempted(machine, "peer_identity") {
+                journal.skip_step(
+                    machine,
+                    "peer_identity",
+                    "no Tailscale node key is visible for this address; identity is not pinned",
+                )?;
+            }
+        } else if !journal.record().completed(machine, "peer_identity") {
+            journal.finish_step(
+                machine,
+                "peer_identity",
+                "ok",
+                Some("recorded the Tailscale node key for this address".into()),
+                None,
+            )?;
+        }
+        Ok((peer_id, stable_id))
+    }
+
+    fn remember_identity(&self, mut target: TargetIdentity) -> TargetIdentity {
+        target.identity = Some(self.request.identity.clone());
+        target
     }
 
     /// The same, for one existing member, honouring its own access overrides.
@@ -369,10 +580,12 @@ impl Engine {
         let scratch = self.scratch()?;
         let identity = ssh::resolve_identity(&self.programs, choice, &scratch)?;
         let known_hosts = self.known_hosts(&scratch);
+        let control = ssh::prepare_control_socket(&self.control_scratch()?)?;
 
         // Built without a bridge first: `ssh -G` does not authenticate, and arming the
         // askpass socket before the routing check would allow a prompt for a destination
-        // this operation is about to refuse.
+        // this operation is about to refuse. The probe also omits the mux socket so
+        // `ControlMaster=no` is what `-G` reports.
         let probe = Runner {
             programs: self.programs.clone(),
             destination: destination.clone(),
@@ -382,6 +595,9 @@ impl Engine {
             connect_timeout: ssh::CONNECT_TIMEOUT,
             command_timeout: ssh::COMMAND_TIMEOUT,
             bridge: None,
+            control: None,
+            cancelled: None,
+            challenge_window: None,
         };
         probe.inspect_effective_config()?;
 
@@ -399,6 +615,10 @@ impl Engine {
             Arc::clone(&self.conversation),
         )?);
 
+        let cancelled = {
+            let conversation = Arc::clone(&self.conversation);
+            Some(Arc::new(move || conversation.cancelled()) as Arc<dyn Fn() -> bool + Send + Sync>)
+        };
         let runner = Runner {
             programs: self.programs.clone(),
             destination,
@@ -408,6 +628,9 @@ impl Engine {
             connect_timeout: ssh::CONNECT_TIMEOUT,
             command_timeout: ssh::COMMAND_TIMEOUT,
             bridge: Some(Arc::clone(&bridge)),
+            control: Some(control),
+            cancelled,
+            challenge_window: None,
         };
         self.notify_state(OperationState::AwaitingAuth);
         runner.check_access()?;
@@ -436,6 +659,19 @@ impl Engine {
         if let Some(user_file) = &self.user_known_hosts {
             stores.push(user_file.clone());
         }
+        let cache_key = (
+            store.display().to_string(),
+            destination.address.clone(),
+            destination.port,
+        );
+        if let Some(fingerprint) = trusted_hosts()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok(fingerprint);
+        }
         match trust::examine(
             &self.trust_tools,
             &stores,
@@ -443,7 +679,13 @@ impl Engine {
             destination.port,
             scratch,
         )? {
-            Trust::Known { fingerprint, .. } => Ok(fingerprint),
+            Trust::Known { fingerprint, .. } => {
+                trusted_hosts()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(cache_key, fingerprint.clone());
+                Ok(fingerprint)
+            }
             Trust::Revoked {
                 algorithm,
                 fingerprint,
@@ -482,6 +724,10 @@ impl Engine {
                 match answer {
                     Answer::Trust(true) => {
                         trust::accept(&store, key)?;
+                        trusted_hosts()
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(cache_key, key.fingerprint.clone());
                         self.note(if self.request.dry_run {
                             format!(
                                 "trusting {} {} for this run only; a dry run records nothing",
@@ -651,7 +897,7 @@ impl Engine {
             OperationKind::Setup => self.plan_setup()?,
             OperationKind::Leave => self.plan_leave(None)?.0,
         };
-        let _ = std::fs::remove_dir_all(self.dry_run_scratch());
+        self.forget_dry_run_scratch();
         Ok(Outcome {
             operation: self.request.operation.clone(),
             state: OperationState::AwaitingReview,
@@ -919,18 +1165,18 @@ impl Engine {
         let machine = prepared.machine.clone();
         let target_host = plan.target.address.clone();
 
-        journal.set_target(TargetIdentity {
+        let (peer_id, stable_id) = self.bind_peer_identity(journal, &machine, &target_host)?;
+        journal.set_target(self.remember_identity(TargetIdentity {
             machine: machine.clone(),
-            peer_id: None,
-            hostname: None,
             address: Some(target_host.clone()),
             port: Some(plan.target.port),
             ssh_user: Some(plan.target.ssh_user.clone()),
-            os: None,
-            arch: None,
             node: plan.target.node.clone(),
             host_fingerprint: plan.target.host_fingerprint.clone(),
-        })?;
+            peer_id,
+            stable_id,
+            ..TargetIdentity::default()
+        }))?;
         journal.set_paths(IntendedPaths {
             install_path: Some(prepared.executable.clone()),
             data_dir: self.request.remote_data_dir.clone(),
@@ -996,6 +1242,10 @@ impl Engine {
             journal.skip_step(&machine, "install_binary", "the target already has ouro")?;
         }
 
+        // Member preflight before the target helper: the helper exits after a minute
+        // idle, and authenticating to every current member can take longer than that.
+        let mut member_sessions = self.preflight_members(journal, &prepared.profile)?;
+
         // ---- inspect the target through its own helper
         let mut session = helper::Session::open(
             &prepared.connection.runner,
@@ -1050,9 +1300,6 @@ impl Engine {
         )?;
         self.step_event(&machine, "inspect", "ok", None);
 
-        // ---- read every current member before any credential is issued
-        let mut member_sessions = self.preflight_members(journal, &prepared.profile)?;
-
         // ---- prepare, issue, install
         // Membership is the operator's *name*, and nothing else. Matching on the host as
         // well would call a machine a member because another member happens to share an
@@ -1064,7 +1311,7 @@ impl Engine {
             .members
             .iter()
             .any(|member| member.machine == machine);
-        let mut issuance_lock = None;
+        let mut admission = None;
         if target_admitted {
             for step in ["prepare", "issue", "install"] {
                 if !journal.record().completed(&machine, step) {
@@ -1083,10 +1330,12 @@ impl Engine {
                 ),
             );
         } else if journal.record().completed(&machine, "issue") {
-            // The certificate left this machine and the target does not have it. The
-            // materials cannot be reissued — replaying an admission is exactly what the
-            // issuer refuses — and they were never written down, because they carry the
-            // fleet cookie. Say so precisely instead of failing on a replay refusal.
+            // The certificate left this machine and the target does not have it — whether
+            // delivery never finished or the target lost it afterwards. The materials
+            // cannot be reissued: replaying an admission is exactly what the issuer
+            // refuses, and they were never written down, because they carry the fleet
+            // cookie. Say so precisely instead of failing on a replay refusal, or worse,
+            // writing a roster entry for a machine that holds no identity.
             return refuse(
                 "credentials_unrecoverable",
                 format!(
@@ -1105,7 +1354,7 @@ impl Engine {
                     "host": target_host,
                 }),
             )?;
-            let admission: fleet::AdmissionRequest =
+            let prepared_request: fleet::AdmissionRequest =
                 serde_json::from_value(Value::Object(request_fields.clone())).map_err(|error| {
                     super::SetupError {
                         reason: "helper_protocol",
@@ -1114,10 +1363,10 @@ impl Engine {
                         ),
                     }
                 })?;
-            if admission.operation != self.request.operation
-                || admission.machine != machine
-                || admission.host != target_host
-                || Some(admission.node.as_str()) != plan.target.node.as_deref()
+            if prepared_request.operation != self.request.operation
+                || prepared_request.machine != machine
+                || prepared_request.host != target_host
+                || Some(prepared_request.node.as_str()) != plan.target.node.as_deref()
             {
                 return refuse("identity_mismatch", "the target's admission request does not match the reviewed operation, machine, host and node; no credentials were issued");
             }
@@ -1125,16 +1374,15 @@ impl Engine {
                 &machine,
                 "prepare",
                 "ok",
-                Some(admission.node.clone()),
-                Some(admission.key_fingerprint.clone()),
+                Some(prepared_request.node.clone()),
+                Some(prepared_request.key_fingerprint.clone()),
             )?;
             self.step_event(&machine, "prepare", "ok", None);
 
             // The last safe place to stop. From here to the end of `install` the
             // operation finishes what it started: a certificate that has been issued and
             // not delivered cannot be reissued, so cancelling in that window would cost
-            // the target its identity rather than save it. The proposal's wording is
-            // "finish or reconcile the in-flight durable step".
+            // the target its identity rather than save it.
             if self.conversation.cancelled() {
                 journal.note_residue(format!(
                     "{machine} holds a prepared key for operation {}; resuming this operation uses it, and `ouro fleet doctor` there names it until then",
@@ -1147,14 +1395,17 @@ impl Engine {
                     ),
                 );
             }
+            admission = Some(prepared_request);
+        }
 
+        let _issuer_lock = self.lock_issuer(journal)?;
+        if let Some(admission) = admission {
             journal.begin_step(&machine, "issue")?;
-            let (materials, lock) = fleet::issue_member_certificate_checked(
+            let materials = fleet::issue_member_certificate_checked(
                 &self.data_dir,
                 &admission,
                 Some(&prepared.profile),
             )?;
-            issuance_lock = Some(lock);
             journal.finish_step(
                 &machine,
                 "issue",
@@ -1178,10 +1429,6 @@ impl Engine {
                 });
             }
             let installed = session.ask("install", install)?;
-            // The admission slice reports a post-rename bookkeeping failure as a warning
-            // beside a successful install: the target *is* admitted at that point, and
-            // calling it a failure would send an operator to undo something that
-            // happened.
             let warnings: Vec<String> = installed
                 .get("warnings")
                 .and_then(Value::as_array)
@@ -1210,16 +1457,13 @@ impl Engine {
             self.step_event(&machine, "install", "ok", warning);
         }
 
-        // ---- roster on every member
         let change = fleet::RosterChange::Add {
             machine: machine.clone(),
             host: target_host.clone(),
             node: None,
         };
-        if let Some(lock) = issuance_lock.take() {
-            self.apply_local_roster(journal, &prepared.profile, &change, Some(&lock))?;
-        }
         self.apply_roster_everywhere(journal, &prepared.profile, &mut member_sessions, change)?;
+        drop(_issuer_lock);
 
         // ---- startup
         let startup = self.arrange_startup(journal, &machine, &mut session)?;
@@ -1476,45 +1720,39 @@ impl Engine {
         journal: &JournalHandle,
         profile: &fleet::Profile,
         change: &fleet::RosterChange,
-        lock: Option<&crate::runtime::SpawnLock>,
     ) -> Result<()> {
         let step = "roster";
-        if !journal.record().completed(&profile.machine, step) {
-            // Once issued, finish delivery and the local roster boundary before
-            // honoring cancellation. The issuance lock also excludes manual edits.
-            if lock.is_none() {
-                self.check_cancelled()?;
-            }
-            journal.begin_step(&profile.machine, step)?;
-            // A receipt belongs to one machine identity, and on the issuer this
-            // operation's receipt already belongs to the machine being admitted. The
-            // issuer's own roster edit is therefore recorded under a derived id; the
-            // journal is what ties the two halves of the operation together.
-            let outcome = if let Some(lock) = lock {
-                fleet::apply_roster_change_locked(
-                    &self.data_dir,
-                    &self.local_roster_operation(),
-                    profile.roster_revision,
-                    change,
-                    lock,
-                )?
-            } else {
-                fleet::apply_roster_change(
-                    &self.data_dir,
-                    &self.local_roster_operation(),
-                    profile.roster_revision,
-                    change,
-                )?
-            };
-            journal.finish_step(
-                &profile.machine,
-                step,
-                "ok",
-                Some(format!("revision {}", outcome.roster_revision)),
-                None,
-            )?;
-            self.step_event(&profile.machine, step, "ok", None);
+        if journal.record().completed(&profile.machine, step) {
+            return Ok(());
         }
+        self.check_cancelled()?;
+        journal.begin_step(&profile.machine, step)?;
+        // A receipt belongs to one machine identity, and on the issuer this
+        // operation's receipt already belongs to the machine being admitted. The
+        // issuer's own roster edit is therefore recorded under a derived id; the
+        // journal is what ties the two halves of the operation together. The
+        // revision is whatever is on disk now: issuance no longer holds the
+        // lifecycle lock, so a concurrent local edit is a `roster_conflict`
+        // rather than a silent rebase onto a stale review snapshot.
+        let current = fleet::load(&self.data_dir)?.ok_or_else(|| super::SetupError {
+            reason: "no_fleet",
+            detail: "this machine's fleet profile disappeared before its roster could be updated"
+                .into(),
+        })?;
+        let outcome = fleet::apply_roster_change(
+            &self.data_dir,
+            &self.local_roster_operation(),
+            current.roster_revision,
+            change,
+        )?;
+        journal.finish_step(
+            &profile.machine,
+            step,
+            "ok",
+            Some(format!("revision {}", outcome.roster_revision)),
+            None,
+        )?;
+        self.step_event(&profile.machine, step, "ok", None);
         Ok(())
     }
 
@@ -1526,7 +1764,7 @@ impl Engine {
         members: &mut [MemberSession],
         change: fleet::RosterChange,
     ) -> Result<()> {
-        self.apply_local_roster(journal, profile, &change, None)?;
+        self.apply_local_roster(journal, profile, &change)?;
         let step = "roster";
 
         for member in members.iter_mut() {
@@ -2014,12 +2252,14 @@ impl Engine {
             machine: machine.clone(),
             address: Some(plan.target.address.clone()),
             node: plan.target.node.clone(),
+            identity: Some(self.request.identity.clone()),
             ..TargetIdentity::default()
         })?;
         self.bind_plan(journal, &plan)?;
 
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
+        let _issuer_lock = self.lock_issuer(journal)?;
 
         // The authorized local transition. The runtime that is running now is the one
         // serving whoever asked for this, so it is stopped only if it is idle.
@@ -2246,14 +2486,19 @@ impl Engine {
     fn run_leave(&self, journal: &JournalHandle) -> Result<Outcome> {
         let (plan, profile) = self.plan_leave(Some(journal))?;
         let machine = plan.target.machine.clone();
-        journal.set_target(TargetIdentity {
+        let (peer_id, stable_id) =
+            self.bind_peer_identity(journal, &machine, &plan.target.address)?;
+        journal.set_target(self.remember_identity(TargetIdentity {
             machine: machine.clone(),
             address: Some(plan.target.address.clone()),
             port: Some(plan.target.port),
             ssh_user: self.request.ssh_user.clone(),
             node: plan.target.node.clone(),
+            host_fingerprint: plan.target.host_fingerprint.clone(),
+            peer_id,
+            stable_id,
             ..TargetIdentity::default()
-        })?;
+        }))?;
         if journal.record().roster.is_none() {
             journal.set_roster(self.roster_snapshot(&profile))?;
         }
@@ -2264,6 +2509,7 @@ impl Engine {
         journal.set_state(OperationState::Deploying)?;
 
         let disconnected;
+        let _issuer_lock;
         if !journal.record().completed(&machine, "leave") {
             let destination =
                 self.destination(&plan.target.address, self.request.ssh_user.as_deref())?;
@@ -2276,7 +2522,6 @@ impl Engine {
                 self.request.remote_data_dir.as_deref(),
             )?;
 
-            // ---- what this machine will lose sight of
             let inspection = session.ask("inspect", json!({}))?;
             let running = inspection
                 .get("runtime_running")
@@ -2295,109 +2540,17 @@ impl Engine {
             )?;
             self.step_event(&machine, "inspect", "ok", Some(sessions_note.clone()));
 
-            // ---- stop it from coming back, then stop it
-            if !journal.record().completed(&machine, "disable_service") {
-                journal.begin_step(&machine, "disable_service")?;
-                let disabled = self.services.remote(&mut session, ServiceAction::Disable)?;
-                journal.finish_step(
-                    &machine,
-                    "disable_service",
-                    if disabled.supported { "ok" } else { "skipped" },
-                    Some(disabled.detail.clone()),
-                    None,
-                )?;
-                self.step_event(&machine, "disable_service", "ok", Some(disabled.detail));
-            }
-
-            if !journal.record().completed(&machine, "stop_runtime") {
-                journal.begin_step(&machine, "stop_runtime")?;
-                if running {
-                    let command = match self.request.remote_data_dir.as_deref() {
-                        Some(data_dir) => format!(
-                            "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} stop --require-idle",
-                            ssh::shell_quote(data_dir),
-                            ssh::shell_quote(&executable)
-                        ),
-                        None => {
-                            format!("exec {} stop --require-idle", ssh::shell_quote(&executable))
-                        }
-                    };
-                    let completed = connection.runner.run(&command, None)?;
-                    if !completed.success() {
-                        // `ouro stop --require-idle` documents these two: 10 is a runtime
-                        // with work in flight, 11 is a runtime that could not say. Unknown
-                        // activity never authorizes a removal either.
-                        let (reason, detail): (&'static str, String) = match completed.code {
-                        Some(10) => (
-                            "runtime_busy",
-                            format!("{machine} is working, so it was not stopped and nothing was removed. Let the work finish and run this again"),
-                        ),
-                        Some(11) => (
-                            "activity_unknown",
-                            format!("{machine} could not say whether it is idle, and unknown activity does not authorize a removal. Stop it yourself when you know it is safe, then run this again"),
-                        ),
-                        _ => (
-                            "runtime_busy",
-                            format!(
-                                "{machine}'s runtime did not stop: {}. Cooperative removal never stops a runtime that is working",
-                                completed.stderr_text()
-                            ),
-                        ),
-                    };
-                        return refuse(reason, detail);
-                    }
-                    journal.finish_step(
-                        &machine,
-                        "stop_runtime",
-                        "ok",
-                        Some("stopped through its own idle-gated shutdown".into()),
-                        None,
-                    )?;
-                } else {
-                    journal.skip_step(&machine, "stop_runtime", "its runtime was not running")?;
-                }
-                self.step_event(&machine, "stop_runtime", "ok", None);
-            }
-
-            // ---- verify it is gone from this machine's view
-            disconnected = self.await_disconnection(journal, &machine)?;
-
-            // ---- retire its credentials there
-            if !journal.record().completed(&machine, "leave") {
-                journal.begin_step(&machine, "leave")?;
-                let left = session.ask(
-                    "leave",
-                    json!({ "operation": self.request.operation, "machine": machine }),
-                )?;
-                journal.finish_step(
-                    &machine,
-                    "leave",
-                    "ok",
-                    Some(
-                        left.get("removed")
-                            .and_then(Value::as_array)
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(Value::as_str)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .unwrap_or_else(|| "credentials removed".into()),
-                    ),
-                    None,
-                )?;
-                self.step_event(&machine, "leave", "ok", None);
-            }
-
+            _issuer_lock = self.lock_issuer(journal)?;
+            disconnected =
+                self.stop_and_retire(journal, &machine, &connection, &mut session, &executable)?;
             session.close();
         } else {
             // Credentials are already retired: finishing propagation must not
             // depend on reaching the retired machine again.
+            _issuer_lock = self.lock_issuer(journal)?;
             disconnected = self.await_disconnection(journal, &machine)?;
         }
 
-        // ---- and take it out of every remaining roster
         let mut members = self.preflight_members_for_removal(journal, &profile, &machine)?;
         self.apply_roster_everywhere(
             journal,
@@ -2407,6 +2560,7 @@ impl Engine {
                 machine: machine.clone(),
             },
         )?;
+        drop(_issuer_lock);
 
         for member in members.drain(..) {
             member.session.close();
@@ -2432,6 +2586,100 @@ impl Engine {
             residue: journal.record().residue,
             unknown,
         })
+    }
+
+    /// Gate first (`ouro stop --require-idle`), then disable the supervisor. Resume
+    /// tolerates a journal that disabled first: a completed `disable_service` is
+    /// skipped, and a completed `stop_runtime` is not repeated.
+    fn stop_and_retire(
+        &self,
+        journal: &JournalHandle,
+        machine: &str,
+        connection: &Connection,
+        session: &mut helper::Session,
+        executable: &str,
+    ) -> Result<bool> {
+        if !journal.record().completed(machine, "stop_runtime") {
+            journal.begin_step(machine, "stop_runtime")?;
+            let command = match self.request.remote_data_dir.as_deref() {
+                Some(data_dir) => format!(
+                    "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} stop --require-idle",
+                    ssh::shell_quote(data_dir),
+                    ssh::shell_quote(executable)
+                ),
+                None => format!("exec {} stop --require-idle", ssh::shell_quote(executable)),
+            };
+            let completed = connection.runner.run(&command, None)?;
+            if !completed.success() {
+                let stderr = sanitize_remote_text(&completed.stderr_text(), 400);
+                let (reason, detail): (&'static str, String) = match completed.code {
+                    Some(10) => (
+                        "runtime_busy",
+                        format!("{machine} is working, so it was not stopped and nothing was removed. Let the work finish and run this again"),
+                    ),
+                    Some(11) => (
+                        "activity_unknown",
+                        format!("{machine} could not say whether it is idle, and unknown activity does not authorize a removal. Stop it yourself when you know it is safe, then run this again"),
+                    ),
+                    _ => (
+                        "shutdown_incomplete",
+                        format!("{machine}'s runtime did not stop: {stderr}"),
+                    ),
+                };
+                return refuse(reason, detail);
+            }
+            journal.finish_step(
+                machine,
+                "stop_runtime",
+                "ok",
+                Some("stopped through its own idle-gated shutdown".into()),
+                None,
+            )?;
+            self.step_event(machine, "stop_runtime", "ok", None);
+        }
+
+        if !journal.record().completed(machine, "disable_service") {
+            journal.begin_step(machine, "disable_service")?;
+            let disabled = self.services.remote(session, ServiceAction::Disable)?;
+            journal.finish_step(
+                machine,
+                "disable_service",
+                if disabled.supported { "ok" } else { "skipped" },
+                Some(disabled.detail.clone()),
+                None,
+            )?;
+            self.step_event(machine, "disable_service", "ok", Some(disabled.detail));
+        }
+
+        let disconnected = self.await_disconnection(journal, machine)?;
+
+        if !journal.record().completed(machine, "leave") {
+            journal.begin_step(machine, "leave")?;
+            let left = session.ask(
+                "leave",
+                json!({ "operation": self.request.operation, "machine": machine }),
+            )?;
+            journal.finish_step(
+                machine,
+                "leave",
+                "ok",
+                Some(
+                    left.get("removed")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_else(|| "credentials removed".into()),
+                ),
+                None,
+            )?;
+            self.step_event(machine, "leave", "ok", None);
+        }
+        Ok(disconnected)
     }
 
     /// The remaining members, for a removal. Unreachable members are named rather than
@@ -2562,6 +2810,26 @@ struct Prepared {
     connection: Connection,
     executable: String,
     release: Option<PlanRelease>,
+}
+
+/// Current Tailscale node key and stable id for an overlay address, if this
+/// machine's network client can name one. A missing client or a private-network
+/// address that is not in the inventory is `None`, and the engine then skips the
+/// pin rather than refusing.
+fn discover_peer_keys(address: &str) -> (Option<String>, Option<String>) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return (None, None);
+    };
+    let inventory = runtime.block_on(crate::fleet_network::inventory());
+    for device in inventory.self_device.iter().chain(inventory.peers.iter()) {
+        if device.ipv4.map(|ip| ip.to_string()).as_deref() == Some(address) {
+            return (device.node_key.clone(), device.stable_id.clone());
+        }
+    }
+    (None, None)
 }
 
 fn identity_label(identity: &ResolvedIdentity) -> Option<String> {

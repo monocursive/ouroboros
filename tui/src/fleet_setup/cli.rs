@@ -13,6 +13,7 @@
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -22,6 +23,7 @@ use crate::update::release;
 
 use super::engine::{Engine, Outcome};
 use super::gateway::LocalGateway;
+use super::journal::Journal;
 use super::service::LocalServiceActions;
 use super::terminal::TerminalConversation;
 use super::{refuse, IdentityChoice, OperationKind, OperationRequest, OperationState, PortPolicy};
@@ -235,18 +237,11 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
     let address = resolve_address(&paths.data_dir, &host).await?;
     let machine = match &args.machine {
         Some(machine) => machine.clone(),
-        None => {
-            if host.parse::<Ipv4Addr>().is_ok() {
-                return refuse(
-                    "invalid_request",
-                    "give the new machine a short name with --machine; an address is not a name",
-                );
-            }
-            host.clone()
-        }
+        None => derived_machine(&host)?,
     };
     let mut request =
         OperationRequest::new(operation_id(&args.common)?, OperationKind::Add, machine);
+    let (peer_id, stable_id) = peer_identity_for(&address).await;
     request.address = Some(address);
     request.ssh_user = user;
     request.ssh_port = args.port;
@@ -259,7 +254,32 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
     request.run_test_task = args.run_test_task;
     request.test_workspace = args.test_workspace.clone();
     request.ports = test_ports();
+    request.peer_id = peer_id;
+    request.stable_id = stable_id;
     drive(paths, request, &args.common).await
+}
+
+/// A typed destination is display information until `--machine` names it; this is how
+/// `me@Build-Linux` and `me@build-linux.tailnet.ts.net` become the same short name.
+fn derived_machine(host: &str) -> Result<String> {
+    if host.parse::<Ipv4Addr>().is_ok() {
+        return refuse(
+            "invalid_request",
+            "give the new machine a short name with --machine; an address is not a name",
+        );
+    }
+    crate::fleet::machine_from_host(host)
+}
+
+/// Tailscale node key and stable id for this overlay address, when discovery names one.
+async fn peer_identity_for(address: &str) -> (Option<String>, Option<String>) {
+    let inventory = fleet_network::inventory().await;
+    for device in inventory.self_device.iter().chain(inventory.peers.iter()) {
+        if device.ipv4.map(|ip| ip.to_string()).as_deref() == Some(address) {
+            return (device.node_key.clone(), device.stable_id.clone());
+        }
+    }
+    (None, None)
 }
 
 /// `ouro fleet leave --machine NAME`.
@@ -280,9 +300,12 @@ pub async fn leave_machine(paths: &Paths, args: LeaveArgs) -> Result<()> {
         if let Some(member) = profile
             .members
             .iter()
-            .find(|member| member.machine == args.machine)
+            .find(|member| crate::fleet::same_name(&member.machine, &args.machine))
         {
             request.address = Some(member.host.clone());
+            let (peer_id, stable_id) = peer_identity_for(&member.host).await;
+            request.peer_id = peer_id;
+            request.stable_id = stable_id;
         }
     }
     drive(paths, request, &args.common).await
@@ -316,15 +339,17 @@ fn operation_id(common: &CommonArgs) -> Result<String> {
 /// Run the engine off the async runtime, then report.
 async fn drive(paths: &Paths, request: OperationRequest, common: &CommonArgs) -> Result<()> {
     paths.ensure_private_data_dir()?;
-    // The CLI builds its request in memory and runs the engine itself. The private
-    // request file exists for the broker's handoff to a detached worker, and writing one
-    // here would leave a description of the target on disk for no reason.
+    // The engine writes the request so a crash can resume it. Completed and cancelled
+    // operations fold the identity choice into the journal and delete the file; failed
+    // and interrupted ones keep it for resume.
     let conversation = Arc::new(TerminalConversation::new(common.yes, common.json));
     let engine = engine_for(paths, request, conversation)?;
     let json = common.json;
+    let data_dir = paths.data_dir.clone();
     let result = tokio::task::spawn_blocking(move || engine.run())
         .await
         .context("the deployment engine stopped unexpectedly")?;
+    let _ = Journal::prune_terminal(&data_dir, 50, Duration::from_secs(30 * 86400));
 
     match result {
         Ok(outcome) => {
@@ -497,5 +522,21 @@ mod tests {
 
         let minted = operation_id(&CommonArgs::default()).expect("a minted id");
         assert!(super::super::validate_operation_id(&minted).is_ok());
+    }
+
+    #[test]
+    fn a_typed_destination_becomes_a_valid_machine_name() {
+        assert_eq!(
+            derived_machine("Build-Linux").expect("a name"),
+            "build-linux"
+        );
+        assert_eq!(
+            derived_machine("build-linux.tailnet.ts.net").expect("a MagicDNS name"),
+            "build-linux"
+        );
+        assert!(
+            derived_machine("100.64.0.2").is_err(),
+            "an address is not a name"
+        );
     }
 }

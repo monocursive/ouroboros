@@ -36,7 +36,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -106,9 +106,9 @@ impl Platform {
 // ------------------------------------------------------------ the programs we may run
 
 /// The three service-manager programs this module is allowed to run, so a test can hand
-/// it counting fakes without mutating the process environment. The defaults are bare
-/// names resolved through `PATH` by the operating system, exactly as an operator's own
-/// `launchctl`/`systemctl` would be.
+/// it counting fakes without mutating the process environment. Absolute system locations
+/// are preferred; `$PATH` is the fallback when those are not installed, and the
+/// `OUROBOROS_*` overrides below still win for tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Programs {
     pub launchctl: PathBuf,
@@ -122,9 +122,9 @@ pub struct Programs {
 impl Default for Programs {
     fn default() -> Self {
         Self {
-            launchctl: PathBuf::from("launchctl"),
-            systemctl: PathBuf::from("systemctl"),
-            loginctl: PathBuf::from("loginctl"),
+            launchctl: locate_manager_program(&["/bin/launchctl"], "launchctl"),
+            systemctl: locate_manager_program(&["/usr/bin/systemctl"], "systemctl"),
+            loginctl: locate_manager_program(&["/usr/bin/loginctl"], "loginctl"),
             deadline: MANAGER_TIMEOUT,
         }
     }
@@ -176,6 +176,43 @@ fn override_program(name: &str) -> Result<Option<PathBuf>> {
         );
     }
     Ok(Some(path))
+}
+
+/// Prefer a known absolute location, then `$PATH`, then the bare name `Command` will
+/// resolve the same way a person typing it would.
+fn locate_manager_program(known: &[&str], fallback_name: &str) -> PathBuf {
+    locate_manager_program_with(known, fallback_name, std::env::var_os("PATH").as_deref())
+}
+
+fn locate_manager_program_with(
+    known: &[&str],
+    fallback_name: &str,
+    search_path: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    for candidate in known {
+        let path = PathBuf::from(candidate);
+        if manager_executable(&path) {
+            return path;
+        }
+    }
+    if let Some(search_path) = search_path {
+        for directory in std::env::split_paths(search_path) {
+            if directory.as_os_str().is_empty() {
+                continue;
+            }
+            let candidate = directory.join(fallback_name);
+            if manager_executable(&candidate) {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(fallback_name)
+}
+
+fn manager_executable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 // ------------------------------------------------------------------- refusals by reason
@@ -1467,6 +1504,15 @@ pub fn disable(plan: &Plan, programs: &Programs) -> Result<Report> {
             ),
         );
     }
+    // A unit we never installed is not this verb's business: a runtime the operator
+    // started by hand stays running. Gate-then-disable applies only to a unit we own.
+    if ownership == Ownership::Absent {
+        report.notes.push(format!(
+            "{} is not installed, so nothing was disabled. A runtime this account started by hand was left running",
+            plan.unit_path().display()
+        ));
+        return Ok(report);
+    }
     if supervisor.code == SupervisorCode::Unsupported {
         return refuse(
             "unsupported",
@@ -1478,17 +1524,7 @@ pub fn disable(plan: &Plan, programs: &Programs) -> Result<Report> {
     // A supervisor stop signals its child. Authorize and observe the idle shutdown
     // first, and retain the spawn lock so a restart cannot publish new work in between.
     let lock = crate::runtime::acquire_spawn_lock(&plan.data_dir)?;
-    crate::fleet_setup::gateway::stop_require_idle_locked(
-        &plan.data_dir,
-        &plan.data_dir.join("gateway.token"),
-        &lock,
-    )
-    .map_err(|error| {
-        ServiceError::new(
-            crate::fleet_setup::reason_of(&error).unwrap_or("shutdown_unavailable"),
-            error.to_string(),
-        )
-    })?;
+    stop_idle_under_lock(plan, &lock)?;
     disable_with_manager(plan, programs, &mut report)?;
     inspect_manager(plan, programs, &mut report)?;
     Ok(report)
@@ -1528,6 +1564,13 @@ pub fn remove(plan: &Plan, programs: &Programs) -> Result<Report> {
             digest.unwrap_or_else(|| "unreadable".to_string())
         ));
     }
+
+    // Gate first, then disable: a manager stop signals its child, and a working
+    // runtime is not something this verb SIGTERMs. The spawn lock is held through
+    // file removal so a restart cannot republish between the idle check and the
+    // unlink. `NotRunning` / `RemovedStale` are success — nothing here to stop.
+    let lock = crate::runtime::acquire_spawn_lock(&plan.data_dir)?;
+    stop_idle_under_lock(plan, &lock)?;
 
     // Disabling first is the order the proposal asks for: a unit removed while its
     // manager still supervises it comes straight back.
@@ -1587,7 +1630,31 @@ pub fn remove(plan: &Plan, programs: &Programs) -> Result<Report> {
     }
     report.loaded = Some(false);
     report.running = Some(false);
+    drop(lock);
     Ok(report)
+}
+
+/// Ask the published runtime to stop, idle, under a lock the caller already holds.
+///
+/// `NotRunning` and `RemovedStale` are `Ok`: there is nothing here to stop, which is
+/// the state both `disable` and `remove` asked for. A busy or unknown runtime keeps
+/// the gateway's reason so nothing is unlinked behind a refusal.
+fn stop_idle_under_lock(
+    plan: &Plan,
+    lock: &crate::runtime::SpawnLock,
+) -> Result<crate::fleet_setup::gateway::StopOutcome> {
+    crate::fleet_setup::gateway::stop_require_idle_locked(
+        &plan.data_dir,
+        &plan.data_dir.join("gateway.token"),
+        lock,
+    )
+    .map_err(|error| {
+        ServiceError::new(
+            crate::fleet_setup::reason_of(&error).unwrap_or("shutdown_unavailable"),
+            error.to_string(),
+        )
+        .into()
+    })
 }
 
 /// Other units in this plan's own unit directory that carry our marker for the same
@@ -1873,8 +1940,9 @@ const MAX_MANAGER_LINE: usize = 500;
 
 fn sanitize_manager_text(text: &str) -> String {
     let mut clean = String::with_capacity(text.len().min(MAX_MANAGER_LINE));
+    let mut kept = 0;
     for character in text.chars() {
-        if clean.chars().count() >= MAX_MANAGER_LINE {
+        if kept >= MAX_MANAGER_LINE {
             clean.push('\u{2026}');
             break;
         }
@@ -1883,6 +1951,7 @@ fn sanitize_manager_text(text: &str) -> String {
             continue;
         }
         clean.push(character);
+        kept += 1;
     }
     clean
 }
@@ -1921,38 +1990,58 @@ fn run(program: &Path, args: &[&str], deadline: Duration) -> Result<Outcome> {
             Ok(())
         });
     }
-    let child = command
+    let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", program.display()))?;
     let pid = child.id() as libc::pid_t;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("stdout was not piped for {}", program.display()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("stderr was not piped for {}", program.display()))?;
+
+    // Bound the read itself so a manager that prints a novel cannot grow this process
+    // to the size of that novel. `wait_with_output` would hold every byte until the
+    // child exits; `take` stops at the cap the same way the Tailscale adapter does.
+    let stdout_reader = std::thread::Builder::new()
+        .name("ouro-service-stdout".to_string())
+        .spawn(move || read_bounded(stdout))
+        .context("starting the stdout reader for a service-manager command")?;
+    let stderr_reader = std::thread::Builder::new()
+        .name("ouro-service-stderr".to_string())
+        .spawn(move || read_bounded(stderr))
+        .context("starting the stderr reader for a service-manager command")?;
 
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("ouro-service-manager".to_string())
         .spawn(move || {
-            let _ = sender.send(child.wait_with_output());
+            let _ = sender.send(child.wait());
         })
-        .context("starting the reader for a service-manager command")?;
+        .context("starting the waiter for a service-manager command")?;
 
     match receiver.recv_timeout(deadline) {
-        Ok(Ok(output)) => Ok(Outcome {
-            status: output.status.code(),
-            stdout: bounded(&output.stdout),
-            stderr: bounded(&output.stderr),
+        Ok(Ok(status)) => Ok(Outcome {
+            status: status.code(),
+            stdout: join_bounded(stdout_reader, "stdout")?,
+            stderr: join_bounded(stderr_reader, "stderr")?,
         }),
-        Ok(Err(error)) => {
-            Err(error).with_context(|| format!("reading {} output", program.display()))
-        }
+        Ok(Err(error)) => Err(error).with_context(|| format!("waiting for {}", program.display())),
         Err(_) => {
-            // The reader thread still owns the child, so the deadline is enforced by
+            // The waiter still owns the child, so the deadline is enforced by
             // signalling the group rather than by dropping a handle we do not hold.
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
                 libc::kill(pid, libc::SIGKILL);
             }
-            // Give the group a moment to die so the reader can finish, then leave it:
+            // Give the group a moment to die so the readers can finish, then leave it:
             // a manager that ignores SIGKILL is not something this client waits on.
             let _ = receiver.recv_timeout(Duration::from_secs(2));
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             Err(ServiceError::new(
                 "manager_unavailable",
                 format!(
@@ -1966,9 +2055,25 @@ fn run(program: &Path, args: &[&str], deadline: Duration) -> Result<Outcome> {
     }
 }
 
-fn bounded(bytes: &[u8]) -> String {
-    let end = bytes.len().min(MAX_MANAGER_OUTPUT);
-    String::from_utf8_lossy(&bytes[..end]).to_string()
+fn read_bounded(reader: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    reader
+        .take(MAX_MANAGER_OUTPUT as u64)
+        .read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+fn join_bounded(
+    handle: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream: &str,
+) -> Result<String> {
+    match handle.join() {
+        Ok(Ok(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Ok(Err(error)) => Err(error).with_context(|| format!("reading service-manager {stream}")),
+        Err(_) => Err(anyhow!(
+            "the service-manager {stream} reader stopped unexpectedly"
+        )),
+    }
 }
 
 // ------------------------------------------------------------------------ private files
@@ -2274,6 +2379,36 @@ mod tests {
             uid: 501,
             user: "tester".to_string(),
         }
+    }
+
+    #[test]
+    fn a_known_manager_location_is_preferred_to_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "ouro-manager-locate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("a scratch dir");
+        let on_path = root.join("launchctl");
+        fs::write(&on_path, "#!/bin/sh\n").expect("a path candidate");
+        fs::set_permissions(&on_path, fs::Permissions::from_mode(0o755)).expect("executable");
+        let known = root.join("known-launchctl");
+        fs::write(&known, "#!/bin/sh\n").expect("a known candidate");
+        fs::set_permissions(&known, fs::Permissions::from_mode(0o755)).expect("executable");
+
+        let found = locate_manager_program_with(
+            &[known.to_str().expect("utf-8")],
+            "launchctl",
+            Some(root.as_os_str()),
+        );
+        assert_eq!(found, known);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

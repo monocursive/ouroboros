@@ -89,12 +89,12 @@ pub const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 /// relative name would make the working directory decide which program runs.
 pub const CLIENT_ENV: &str = "OUROBOROS_TAILSCALE";
 
-/// Where the client is looked for after `$PATH`, in order.
-const FALLBACK_PATHS: [&str; 4] = [
-    "/opt/homebrew/bin/tailscale",
-    "/usr/local/bin/tailscale",
+/// Where the client is looked for before `$PATH`, in order.
+const KNOWN_LOCATIONS: [&str; 4] = [
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
     "/usr/bin/tailscale",
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
 ];
 
 // ------------------------------------------------------------------ locating the client
@@ -119,7 +119,7 @@ pub fn locate_client() -> Option<Client> {
     locate_client_with(
         std::env::var_os(CLIENT_ENV).as_deref(),
         std::env::var_os("PATH").as_deref(),
-        &FALLBACK_PATHS,
+        &KNOWN_LOCATIONS,
     )
 }
 
@@ -147,21 +147,6 @@ fn locate_client_with(
         });
     }
 
-    if let Some(search_path) = search_path {
-        for directory in std::env::split_paths(search_path) {
-            if directory.as_os_str().is_empty() {
-                continue;
-            }
-            let candidate = directory.join("tailscale");
-            if executable(&candidate) {
-                return Some(Client {
-                    program: candidate,
-                    source: ClientSource::Path,
-                });
-            }
-        }
-    }
-
     fallbacks
         .iter()
         .map(PathBuf::from)
@@ -169,6 +154,22 @@ fn locate_client_with(
         .map(|program| Client {
             program,
             source: ClientSource::KnownLocation,
+        })
+        .or_else(|| {
+            let search_path = search_path?;
+            for directory in std::env::split_paths(search_path) {
+                if directory.as_os_str().is_empty() {
+                    continue;
+                }
+                let candidate = directory.join("tailscale");
+                if executable(&candidate) {
+                    return Some(Client {
+                        program: candidate,
+                        source: ClientSource::Path,
+                    });
+                }
+            }
+            None
         })
 }
 
@@ -355,6 +356,12 @@ struct RawNode {
     relay: Option<String>,
     #[serde(default, rename = "LastSeen")]
     last_seen: Option<String>,
+    /// Tailscale `PublicKey`, e.g. `nodekey:…`. Absent or empty becomes `None`.
+    #[serde(default, rename = "PublicKey")]
+    public_key: Option<String>,
+    /// Tailscale `ID` (stable node id). Absent or empty becomes `None`.
+    #[serde(default, rename = "ID")]
+    id: Option<String>,
 }
 
 // --------------------------------------------------------------------------- public DTOs
@@ -448,6 +455,10 @@ pub struct Device {
     /// RFC 3339, when the client reported a real one. Tailscale writes the zero time for
     /// a peer it is currently connected to; that is reported as `None`, not as year one.
     pub last_seen: Option<String>,
+    /// Tailscale `PublicKey` (`nodekey:…`). The durable peer identity.
+    pub node_key: Option<String>,
+    /// Tailscale `ID`. Stable across a node key rotation the PublicKey is not.
+    pub stable_id: Option<String>,
 }
 
 impl Device {
@@ -789,6 +800,8 @@ fn device(raw: &RawNode) -> Device {
         },
         path_detail: cur_addr,
         last_seen: trimmed(raw.last_seen.as_deref()).filter(|seen| !is_zero_time(seen)),
+        node_key: trimmed(raw.public_key.as_deref()),
+        stable_id: trimmed(raw.id.as_deref()),
     }
 }
 
@@ -822,51 +835,108 @@ pub const MESSAGE_COLUMNS: usize = 300;
 /// or forge a line.
 ///
 /// Removed: C0 and C1 controls including ESC, DEL, and the newlines and tabs that would
-/// otherwise let one field draw several rows; the Unicode bidi overrides and isolates
-/// (U+200E/U+200F, U+202A–U+202E, U+2066–U+2069), which reverse a name's apparent spelling
-/// without changing its bytes. Runs of whitespace collapse to one space. The result is cut
-/// to `columns` display columns — measured in columns rather than characters, because the
-/// budget exists to protect a terminal's layout and a CJK name is two columns per glyph.
+/// otherwise let one field draw several rows; default-ignorable code points (zero-width
+/// spaces, joiners, variation selectors, bidi overrides and isolates, soft hyphen, BOM),
+/// which never count toward display width and are how `bui\u{200b}ld-linux` is made to
+/// look like `build-linux`. Runs of whitespace collapse to one space. Combining-mark
+/// runs are capped per base character, and the result is cut to `columns` display
+/// columns *and* `columns * 4` characters — a 60 kB string of graves would otherwise
+/// pass a width budget of zero.
 pub fn human(text: &str, columns: usize) -> String {
     use unicode_width::UnicodeWidthChar;
 
     let mut out = String::new();
     let mut width = 0;
+    let mut chars = 0;
+    let mut combining_run = 0;
     let mut space_pending = false;
     let mut truncated = false;
+    let max_chars = columns.saturating_mul(4);
 
     for character in text.chars() {
-        let removed = character.is_control()
-            || ('\u{80}'..='\u{9f}').contains(&character)
-            || matches!(character, '\u{200e}' | '\u{200f}')
-            || ('\u{202a}'..='\u{202e}').contains(&character)
-            || ('\u{2066}'..='\u{2069}').contains(&character);
-        if removed || character.is_whitespace() {
+        if ignorable(character) {
+            continue;
+        }
+        if character.is_control() || character.is_whitespace() {
             // A removed control collapses like the whitespace around it rather than
             // joining two halves of a forged word together.
             space_pending = !out.is_empty();
+            combining_run = 0;
             continue;
         }
         let character_width = character.width().unwrap_or(0);
+        if character_width == 0 {
+            if out.is_empty() || combining_run >= MAX_COMBINING_PER_BASE {
+                continue;
+            }
+            if chars >= max_chars {
+                truncated = true;
+                break;
+            }
+            out.push(character);
+            chars += 1;
+            combining_run += 1;
+            continue;
+        }
+        combining_run = 0;
         let separator = usize::from(space_pending);
         // One column is kept for the ellipsis so the cut is visible rather than silent.
-        if width + separator + character_width > columns.saturating_sub(1) {
+        if width + separator + character_width > columns.saturating_sub(1)
+            || chars + separator >= max_chars
+        {
             truncated = true;
             break;
         }
         if space_pending {
             out.push(' ');
             width += 1;
+            chars += 1;
             space_pending = false;
         }
         out.push(character);
         width += character_width;
+        chars += 1;
     }
 
     if truncated {
         out.push('…');
     }
     out
+}
+
+/// Combining marks kept on one base character. Extra marks are dropped: a thousand
+/// graves on one letter is not a name, it is a way to pass a 60 kB string through a
+/// column budget that counts display width.
+const MAX_COMBINING_PER_BASE: usize = 2;
+
+/// Default-ignorable code points: they do not draw, so they never consume a column,
+/// and they are how one device name is made to look like another's.
+///
+/// The TUI's Devices view used to keep a private copy of this list and strip before
+/// calling [`human`]. The list lives here so every surface that prints a peer-written
+/// string applies the same filter.
+pub fn ignorable(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{034f}'
+            | '\u{061c}'
+            | '\u{115f}'
+            | '\u{1160}'
+            | '\u{17b4}'
+            | '\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fff8}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
+    )
 }
 
 /// Replaces every `http://` or `https://` run with a placeholder.
@@ -878,28 +948,32 @@ pub fn human(text: &str, columns: usize) -> String {
 /// output is stored before it passes through here.
 pub fn redact_urls(text: &str) -> String {
     const PLACEHOLDER: &str = "<redacted url>";
+    // Lowercased once: scanning the original with a fresh lowercase on every match was
+    // quadratic in the number of `http` runs.
+    let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.to_ascii_lowercase().find("http") {
-        let tail = &rest[start..];
+    let mut index = 0;
+    while let Some(rel) = lower[index..].find("http") {
+        let start = index + rel;
+        let tail = &text[start..];
         let scheme = ["https://", "http://"].iter().find(|scheme| {
             tail.len() >= scheme.len() && tail[..scheme.len()].eq_ignore_ascii_case(scheme)
         });
         let Some(scheme) = scheme else {
             // A bare "http" that is not the start of a URL: keep it and move past it.
-            out.push_str(&rest[..start + 4]);
-            rest = &rest[start + 4..];
+            out.push_str(&text[index..start + 4]);
+            index = start + 4;
             continue;
         };
-        out.push_str(&rest[..start]);
+        out.push_str(&text[index..start]);
         out.push_str(PLACEHOLDER);
         // A URL ends at the first character that cannot be inside one.
         let end = tail[scheme.len()..]
             .find(|character: char| character.is_whitespace() || character.is_control())
             .map_or(tail.len(), |offset| scheme.len() + offset);
-        rest = &tail[end..];
+        index = start + end;
     }
-    out.push_str(rest);
+    out.push_str(&text[index..]);
     out
 }
 
@@ -1295,6 +1369,11 @@ pub struct DeviceRow {
     /// mistaken for it, and silently listing it as an ordinary peer says neither.
     #[serde(rename = "name_conflicts_with_roster")]
     pub name_conflict: Option<String>,
+    /// Tailscale `PublicKey`, when this row is a visible device rather than a roster
+    /// member the client cannot see.
+    pub node_key: Option<String>,
+    /// Tailscale `ID`, same visibility as [`Self::node_key`].
+    pub stable_id: Option<String>,
 }
 
 /// Merges this machine's roster with the visible peers.
@@ -1342,6 +1421,8 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
             DeviceState::ThisDeviceWithoutProfile.action()
         },
         name_conflict: None,
+        node_key: self_device.and_then(|device| device.node_key.clone()),
+        stable_id: self_device.and_then(|device| device.stable_id.clone()),
     };
     rows.push(self_row);
 
@@ -1371,6 +1452,8 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
                 state: DeviceState::FleetMember,
                 action: DeviceState::FleetMember.action(),
                 name_conflict: None,
+                node_key: peer.node_key.clone(),
+                stable_id: peer.stable_id.clone(),
             });
         } else {
             rows.push(DeviceRow {
@@ -1384,6 +1467,8 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
                 state: DeviceState::FleetMemberNotVisible,
                 action: DeviceState::FleetMemberNotVisible.action(),
                 name_conflict: None,
+                node_key: None,
+                stable_id: None,
             });
         }
     }
@@ -1416,6 +1501,8 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
             state,
             action: state.action(),
             name_conflict: roster_name_collision(profile, peer),
+            node_key: peer.node_key.clone(),
+            stable_id: peer.stable_id.clone(),
         });
     }
 
@@ -1557,7 +1644,7 @@ fn render_row(row: &DeviceRow) -> String {
     );
     if let Some(machine) = &row.name_conflict {
         text.push_str(&format!(
-            "      [note] this device calls itself `{}`, which is the name of a machine in              this fleet at a different address. It is not that machine.\n",
+            "      [note] this device calls itself `{}`, which is the name of a machine in this fleet at a different address. It is not that machine.\n",
             human(machine, FIELD_COLUMNS),
         ));
     }
@@ -1834,6 +1921,22 @@ mod tests {
     }
 
     #[test]
+    fn a_known_location_is_preferred_to_path() {
+        let dir = tempdir();
+        let on_path = plant(dir.path(), "tailscale", 0o755);
+        let known = plant(dir.path(), "known-client", 0o755);
+        let found = locate_client_with(
+            None,
+            Some(dir.path().as_os_str()),
+            &[known.to_str().expect("utf-8 path")],
+        )
+        .expect("the known location wins");
+        assert_eq!(found.program, known);
+        assert_eq!(found.source, ClientSource::KnownLocation);
+        assert_ne!(found.program, on_path);
+    }
+
+    #[test]
     fn a_non_executable_candidate_is_not_a_client() {
         let dir = tempdir();
         plant(dir.path(), "tailscale", 0o644);
@@ -1865,6 +1968,11 @@ mod tests {
 
         let device = inventory.self_device.as_ref().expect("Self parsed");
         assert_eq!(device.host_name.as_deref(), Some("operator-laptop"));
+        assert_eq!(
+            device.node_key.as_deref(),
+            Some("nodekey:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4")
+        );
+        assert_eq!(device.stable_id.as_deref(), Some("n1000000000000010CNTRL"));
         assert_eq!(
             device.dns_name.as_deref(),
             Some("operator-laptop.tailnet-example.ts.net"),
@@ -2169,7 +2277,7 @@ mod tests {
     fn a_name_can_never_move_a_cursor_forge_a_row_or_run_off_the_screen() {
         let inventory = classify(&fixture("hostile-names.json"), b"", Some(0));
         assert_eq!(inventory.code, DiscoveryCode::Ok);
-        assert_eq!(inventory.peers.len(), 6);
+        assert_eq!(inventory.peers.len(), 8);
 
         let text = render_devices(&summary_with(&[]), &inventory);
 
@@ -2186,16 +2294,16 @@ mod tests {
             "a bidi override reached the terminal"
         );
 
-        // Six peers plus this machine, and the forged row did not become a seventh.
+        // Eight peers plus this machine, and the forged row did not become a ninth.
         // Each row's first line is the only one with exactly two leading spaces.
         let rows = text
             .lines()
             .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
             .count();
-        assert_eq!(rows, 7, "one row per device and not one more:\n{text}");
+        assert_eq!(rows, 9, "one row per device and not one more:\n{text}");
         assert_eq!(
             text.matches("      ouroboros    ").count(),
-            7,
+            9,
             "and one state line per row, so no field drew its own"
         );
         assert!(
@@ -2206,6 +2314,20 @@ mod tests {
         // The four-thousand character name is cut, visibly.
         assert!(!text.contains(&"L".repeat(FIELD_COLUMNS + 1)));
         assert!(text.contains('…'), "the cut is shown rather than silent");
+
+        assert!(
+            !text.contains('\u{200b}'),
+            "a zero-width space must not reach the terminal"
+        );
+        assert!(
+            text.contains("build-linux"),
+            "the zero-width twin renders as the clean name it was impersonating: {text}"
+        );
+        let combining_marks = text.chars().filter(|c| *c == '\u{0300}').count();
+        assert!(
+            combining_marks <= 2,
+            "a 1k combining-mark name is capped, not drawn in full: {combining_marks}"
+        );
 
         // A hostile LastSeen is a peer-written string like any other.
         assert!(!text.contains("OWNED\u{1b}"));
@@ -2241,16 +2363,40 @@ mod tests {
         assert_eq!(human("a\u{9b}b", FIELD_COLUMNS), "a b", "C1 CSI too");
         assert_eq!(human("a\nb\tc", FIELD_COLUMNS), "a b c");
         assert_eq!(human("  padded  ", FIELD_COLUMNS), "padded");
-        // A removed override collapses like the whitespace around it rather than
-        // joining the two halves it was separating into one word.
-        assert_eq!(human("gpj.\u{202e}gnp", FIELD_COLUMNS), "gpj. gnp");
-        assert_eq!(human("a\u{2066}b\u{2069}c", FIELD_COLUMNS), "a b c");
+        // Default-ignorable code points are dropped, not collapsed to a space, so a
+        // zero-width space cannot split a name and a bidi override cannot reverse one.
+        assert_eq!(human("gpj.\u{202e}gnp", FIELD_COLUMNS), "gpj.gnp");
+        assert_eq!(human("a\u{2066}b\u{2069}c", FIELD_COLUMNS), "abc");
+        assert_eq!(human("bui\u{200b}ld-linux", FIELD_COLUMNS), "build-linux");
         assert_eq!(human("", FIELD_COLUMNS), "");
 
         // The budget is display columns, so a wide script is cut where it looks cut.
         let wide = human(&"漢".repeat(40), 11);
         assert_eq!(wide.chars().filter(|c| *c == '漢').count(), 5);
         assert!(wide.ends_with('…'));
+
+        // Combining marks do not consume a column, so a width budget alone would let a
+        // 60 kB grave-accented letter through. Cap the run and the character count.
+        let combining = format!("b{}", "\u{0300}".repeat(1000));
+        let scrubbed = human(&combining, FIELD_COLUMNS);
+        assert!(
+            scrubbed.chars().count() <= FIELD_COLUMNS * 4 + 1,
+            "combining-mark names stay bounded: {} characters",
+            scrubbed.chars().count()
+        );
+        assert_ne!(
+            scrubbed, "b",
+            "a capped combining run is still not the clean name"
+        );
+        assert_ne!(
+            scrubbed, "build-linux",
+            "a combining-mark name must not collide with a real hostname"
+        );
+        let marks = scrubbed.chars().filter(|c| *c == '\u{0300}').count();
+        assert!(
+            marks <= 2,
+            "combining marks are capped per base: {scrubbed:?}"
+        );
     }
 
     #[test]
@@ -2677,12 +2823,23 @@ mod tests {
         assert!(absent["online"].is_null(), "an unknown fact is null");
         assert!(absent["os"].is_null());
 
-        let phone = devices
+        let linux = devices
             .iter()
-            .find(|row| row["name"] == "pocket-phone")
-            .expect("the iOS peer");
-        assert_eq!(phone["state"], "unsupported_platform");
-        assert_eq!(phone["path"], "unknown");
+            .find(|row| row["name"] == "build-linux")
+            .expect("the Linux peer");
+        assert_eq!(
+            linux["node_key"],
+            "nodekey:b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5"
+        );
+        assert_eq!(linux["stable_id"], "n1000000000000020CNTRL");
+        assert_eq!(
+            value["discovery"]["self"]["node_key"],
+            "nodekey:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+        );
+        assert_eq!(
+            value["discovery"]["self"]["stable_id"],
+            "n1000000000000010CNTRL"
+        );
 
         let unavailable = devices_json(&summary, &classify(&fixture("stopped.json"), b"", Some(0)));
         assert_eq!(unavailable["discovery"]["code"], "unavailable");

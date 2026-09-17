@@ -16,10 +16,11 @@ mod fleet_setup_support;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use fleet_setup_support::{account, scratch, ReleaseServer, Sshd, OURO};
+use fleet_setup_support::{account, scratch, stop_intercept_shim, ReleaseServer, Sshd, OURO};
 use ouro::fleet;
 use ouro::fleet_setup::challenge::{Answer, ChallengeKind};
 use ouro::fleet_setup::engine::{Engine, Outcome};
@@ -135,6 +136,50 @@ impl Conversation for Operator {
 
     fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Default)]
+struct ParkGate {
+    parked: AtomicBool,
+    release: AtomicBool,
+}
+
+enum ParkWhen {
+    State(OperationState),
+    Step(String),
+}
+
+struct ParkingOperator {
+    inner: Arc<Operator>,
+    gate: Arc<ParkGate>,
+    when: ParkWhen,
+}
+
+impl Conversation for ParkingOperator {
+    fn ask(&self, request: ChallengeRequest) -> anyhow::Result<Answer> {
+        self.inner.ask(request)
+    }
+
+    fn notify(&self, event: Event) {
+        self.inner.notify(event.clone());
+        let park = match (&self.when, &event) {
+            (ParkWhen::State(want), Event::State(got)) => want == got,
+            (ParkWhen::Step(want), Event::Step { step, outcome, .. }) => {
+                step == want && outcome == "ok"
+            }
+            _ => false,
+        };
+        if park {
+            self.gate.parked.store(true, Ordering::SeqCst);
+            while !self.gate.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.inner.cancelled()
     }
 }
 
@@ -377,6 +422,10 @@ fn a_machine_joins_over_real_ssh_and_both_rosters_name_it() {
         "{}",
         again.summary
     );
+    assert!(
+        !ouro::fleet_setup::request_path(&lab.issuer, "op-0000000000a1").exists(),
+        "a completed operation folds identity into the journal and deletes the request"
+    );
 }
 
 /// The journal a completed admission leaves behind has no secret in it — not the fleet
@@ -571,6 +620,10 @@ fn a_declined_host_key_sends_nothing() {
         !ouro::fleet_setup::known_hosts_path(&lab.issuer).exists(),
         "a declined key is not recorded"
     );
+    assert!(
+        ouro::fleet_setup::request_path(&lab.issuer, "op-0000000000e5").exists(),
+        "a failed operation keeps the request so it can be resumed"
+    );
 }
 
 /// A third machine joins, and the roster update reaches the second one over SSH.
@@ -644,6 +697,20 @@ fn a_third_machine_updates_the_roster_of_the_second_over_ssh() {
         .collect();
     names.sort_unstable();
     assert_eq!(names, vec!["buildbox", "studio", "vps"]);
+
+    let preflight = outcome
+        .steps
+        .iter()
+        .position(|step| step.step == "member_preflight");
+    let inspect = outcome
+        .steps
+        .iter()
+        .position(|step| step.machine == "buildbox" && step.step == "inspect");
+    assert!(
+        preflight.is_some() && inspect.is_some() && preflight < inspect,
+        "member preflight runs before the target helper inspect: {:?}",
+        outcome.steps
+    );
 }
 
 /// Cooperative removal: the member is stopped, its credentials are retired there, and
@@ -708,11 +775,25 @@ fn leave_machine_retires_a_member_and_every_remaining_roster_drops_it() {
         issuer.tombstones
     );
 
-    // The supervisor was disabled before anything else, so it could not restart it.
+    // Gate first, then disable: the helper's disable verb also gates, so a second gate
+    // on a stopped runtime is a no-op. The journal records that order.
+    let stop = outcome
+        .steps
+        .iter()
+        .position(|step| step.machine == "vps" && step.step == "stop_runtime");
+    let disable = outcome
+        .steps
+        .iter()
+        .position(|step| step.machine == "vps" && step.step == "disable_service");
+    assert!(
+        stop.is_some() && disable.is_some() && stop < disable,
+        "stop_runtime before disable_service: {:?}",
+        outcome.steps
+    );
     assert_eq!(
         services.remote_calls().first(),
         Some(&ServiceAction::Disable),
-        "the managed supervisor is disabled first"
+        "leave still talks to the supervisor, after the runtime is gated"
     );
 }
 
@@ -876,6 +957,9 @@ fn bootstrap_runner(lab: &Lab, _target: &Path) -> ouro::fleet_setup::ssh::Runner
         connect_timeout: ouro::fleet_setup::ssh::CONNECT_TIMEOUT,
         command_timeout: ouro::fleet_setup::ssh::COMMAND_TIMEOUT,
         bridge: None,
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     }
 }
 
@@ -1970,6 +2054,284 @@ fn a_cooperatively_removed_member_can_be_admitted_again() {
         .unwrap()
         .unwrap();
     assert!(current.has_step("issue") && !current.has_step("retire"));
+}
+
+/// A busy `ouro stop --require-idle` refuses before disable, and leaves the member.
+#[test]
+fn leave_refuses_a_busy_runtime_before_disable() {
+    use std::os::unix::fs::PermissionsExt;
+    let lab = Lab::new("lvbusy", "studio");
+    let target = data_dir("lvbusy-t");
+    lab.engine(
+        lab.request("op-admit-busy", "vps", &target),
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .expect("the machine joins");
+
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("180")
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    let birth = ouro::runtime::process_birth(pid).unwrap().unwrap();
+    let owner = target.join("runtime.owner");
+    std::fs::write(
+        &owner,
+        json!({"pid":pid,"birth":birth,"owner":"leave-busy"}).to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let shim = stop_intercept_shim(&lab.rig.dir, Path::new(OURO), 10);
+    let mut request = lab.request("op-leave-busy", "vps", &target);
+    request.kind = OperationKind::Leave;
+    request.install_path = Some(shim.display().to_string());
+    let services = services();
+    let error = lab
+        .engine(
+            request,
+            Operator::new(),
+            gateway(&["studio"]),
+            services.clone(),
+        )
+        .run()
+        .unwrap_err();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(reason_of(&error), Some("runtime_busy"));
+    assert!(
+        !services.remote_calls().contains(&ServiceAction::Disable),
+        "disable is not attempted after a busy stop: {:?}",
+        services.remote_calls()
+    );
+    assert!(
+        fleet::load(&target).unwrap().is_some(),
+        "a refused leave does not retire credentials"
+    );
+    assert!(fleet::load(&lab.issuer)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|member| member.machine == "vps"));
+}
+
+/// A successful gated stop is journalled before disable.
+#[test]
+fn leave_stops_before_it_disables() {
+    let lab = Lab::new("lvstop", "studio");
+    let target = data_dir("lvstop-t");
+    lab.engine(
+        lab.request("op-admit-stop", "vps", &target),
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .expect("the machine joins");
+
+    let shim = stop_intercept_shim(&lab.rig.dir, Path::new(OURO), 0);
+    let mut request = lab.request("op-leave-stop", "vps", &target);
+    request.kind = OperationKind::Leave;
+    request.install_path = Some(shim.display().to_string());
+    let outcome = lab
+        .engine(request, Operator::new(), gateway(&["studio"]), services())
+        .run()
+        .expect("a cooperative removal");
+    assert_eq!(outcome.state, OperationState::Completed);
+    let stop = outcome
+        .steps
+        .iter()
+        .position(|step| step.machine == "vps" && step.step == "stop_runtime")
+        .expect("stop_runtime");
+    let disable = outcome
+        .steps
+        .iter()
+        .position(|step| step.machine == "vps" && step.step == "disable_service")
+        .expect("disable_service");
+    assert!(stop < disable, "{:?}", outcome.steps);
+}
+
+/// Inspection and review of a second operation are not blocked by one waiting on auth.
+#[test]
+fn a_waiting_auth_does_not_hold_the_issuer_lock() {
+    let lab = Lab::new("m9auth", "studio");
+    let first_target = data_dir("m9auth-1");
+    let second_target = data_dir("m9auth-2");
+    let gate = Arc::new(ParkGate::default());
+    let parked = ParkingOperator {
+        inner: Operator::new(),
+        gate: Arc::clone(&gate),
+        when: ParkWhen::State(OperationState::AwaitingAuth),
+    };
+    let first_request = lab.request("op-m9auth-one", "vps", &first_target);
+    let engine = lab.engine(
+        first_request,
+        Arc::new(parked),
+        gateway(&["studio"]),
+        services(),
+    );
+    let handle = std::thread::spawn(move || engine.run());
+    let started = Instant::now();
+    while !gate.parked.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the first operation never reached awaiting_auth"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let second = lab
+        .engine(
+            lab.request("op-m9auth-two", "buildbox", &second_target),
+            Operator::new(),
+            gateway(&["studio", "buildbox"]),
+            services(),
+        )
+        .run()
+        .expect("a second operation can review while the first waits for a password");
+    assert_eq!(second.state, OperationState::Completed);
+    gate.release.store(true, Ordering::SeqCst);
+    let _ = handle.join().expect("the first engine thread");
+}
+
+/// Two mutating operations cannot share the issuer: the waiter names the holder.
+#[test]
+fn a_mutating_operation_names_the_holder_when_the_issuer_is_busy() {
+    let lab = Lab::new("m9hold", "studio");
+    let first_target = data_dir("m9hold-1");
+    let second_target = data_dir("m9hold-2");
+    let gate = Arc::new(ParkGate::default());
+    let parked = ParkingOperator {
+        inner: Operator::new(),
+        gate: Arc::clone(&gate),
+        when: ParkWhen::Step("issue".into()),
+    };
+    let engine = lab.engine(
+        lab.request("op-m9hold-one", "vps", &first_target),
+        Arc::new(parked),
+        gateway(&["studio"]),
+        services(),
+    );
+    let handle = std::thread::spawn(move || engine.run());
+    let started = Instant::now();
+    while !gate.parked.load(Ordering::SeqCst) {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the first operation never issued"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let error = lab
+        .engine(
+            lab.request("op-m9hold-two", "buildbox", &second_target),
+            Operator::new(),
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .unwrap_err();
+    assert_eq!(reason_of(&error), Some("operation_in_progress"));
+    let detail = format!("{error:#}");
+    assert!(
+        detail.contains("operation op-m9hold-one") && detail.contains("holds the issuer"),
+        "{detail}"
+    );
+    gate.release.store(true, Ordering::SeqCst);
+    let _ = handle.join().expect("the first engine thread");
+}
+
+/// The Tailscale node key from the request is recorded, and a later add with a different
+/// key is refused rather than rewritten.
+#[test]
+fn a_changed_tailscale_node_key_is_refused() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/tailscale/running-with-peers.json"))
+            .expect("the running-with-peers fixture");
+    let recorded = fixture["Peer"]
+        .as_object()
+        .and_then(|peers| peers.values().next())
+        .and_then(|peer| peer["PublicKey"].as_str())
+        .expect("a fixture PublicKey")
+        .to_string();
+    let lab = Lab::new("h6peer", "studio");
+    let target = data_dir("h6peer-t");
+    let mut request = lab.request("op-h6peer-one", "vps", &target);
+    request.peer_id = Some(recorded.clone());
+    request.stable_id = Some("n1000000000000020CNTRL".into());
+    lab.engine(
+        request,
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .expect("an admitted machine");
+    let journal = Journal::read(&lab.issuer, "op-h6peer-one")
+        .unwrap()
+        .unwrap();
+    let target_id = journal.target.expect("a recorded target");
+    assert_eq!(target_id.peer_id.as_deref(), Some(recorded.as_str()));
+    assert_eq!(
+        target_id.stable_id.as_deref(),
+        Some("n1000000000000020CNTRL")
+    );
+    assert!(target_id.identity.is_some());
+
+    let mut again = lab.request("op-h6peer-two", "vps", &target);
+    again.peer_id =
+        Some("nodekey:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into());
+    let error = lab
+        .engine(
+            again,
+            Operator::new(),
+            gateway(&["studio", "vps"]),
+            services(),
+        )
+        .run()
+        .unwrap_err();
+    assert_eq!(reason_of(&error), Some("peer_identity_changed"));
+}
+
+/// After the request is consumed, a later admission still reaches the first member from
+/// the journal's recorded identity.
+#[test]
+fn member_access_survives_without_the_request_file() {
+    let lab = Lab::new("m3acc", "studio");
+    let second = data_dir("m3acc-2");
+    let third = data_dir("m3acc-3");
+    lab.engine(
+        lab.request("op-m3acc-one", "vps", &second),
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .expect("the second machine joins");
+    assert!(
+        !ouro::fleet_setup::request_path(&lab.issuer, "op-m3acc-one").exists(),
+        "the completed request is gone"
+    );
+    let mut request = lab.request("op-m3acc-two", "buildbox", &third);
+    request.members.clear();
+    let outcome = lab
+        .engine(
+            request,
+            Operator::new(),
+            gateway(&["studio", "vps", "buildbox"]),
+            services(),
+        )
+        .run()
+        .expect("the third machine joins using the journal's member access");
+    assert_eq!(outcome.state, OperationState::Completed);
+    assert!(fleet::load(&second)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|member| member.machine == "buildbox"));
 }
 
 struct EditDuringReview {

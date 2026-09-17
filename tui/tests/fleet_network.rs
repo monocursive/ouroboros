@@ -385,6 +385,24 @@ fn fleet_devices_json_carries_stable_codes_and_null_for_unknown_facts() {
         phone["last_seen"].is_null(),
         "a connected peer has no last-seen time"
     );
+
+    let linux = rows
+        .iter()
+        .find(|row| row["name"] == "build-linux")
+        .expect("the Linux peer");
+    assert_eq!(
+        linux["node_key"],
+        "nodekey:b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5"
+    );
+    assert_eq!(linux["stable_id"], "n1000000000000020CNTRL");
+    assert_eq!(
+        value["discovery"]["self"]["node_key"],
+        "nodekey:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4"
+    );
+    assert_eq!(
+        value["discovery"]["self"]["stable_id"],
+        "n1000000000000010CNTRL"
+    );
 }
 
 #[test]
@@ -654,11 +672,11 @@ fn a_hostile_name_cannot_forge_a_row_move_a_cursor_or_run_off_the_screen() {
         "a bidi override reached the terminal"
     );
 
-    // Six devices plus this machine. The forged row's `ouroboros    ... view device`
-    // line must not have become a seventh device's.
+    // Eight devices plus this machine. The forged row's `ouroboros    ... view device`
+    // line must not have become a ninth device's.
     assert_eq!(
         text.matches("      ouroboros    ").count(),
-        7,
+        9,
         "exactly one state line per device:\n{text}"
     );
     assert!(
@@ -672,6 +690,19 @@ fn a_hostile_name_cannot_forge_a_row_move_a_cursor_or_run_off_the_screen() {
     for line in text.lines() {
         assert!(line.chars().count() < 400, "a runaway line: {line:?}");
     }
+    assert!(
+        !text.contains('\u{200b}'),
+        "a zero-width space reached the terminal"
+    );
+    assert!(
+        text.contains("build-linux"),
+        "the zero-width twin must render as the name it was impersonating:\n{text}"
+    );
+    let combining = text.chars().filter(|c| *c == '\u{0300}').count();
+    assert!(
+        combining <= 2,
+        "a 1k combining-mark name must be capped, not drawn in full: {combining}"
+    );
 
     // The JSON keeps what the client actually said — serde escapes it, and a machine
     // reader wants the raw value.

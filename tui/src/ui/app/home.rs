@@ -274,7 +274,7 @@ impl App {
         if !active || self.account_call_pending(&Tag::AccountLogin) {
             return;
         }
-        self.overlay = None;
+        self.close_overlay();
         self.open_url_pending = None;
         if self.restore_settings() {
             return;
@@ -310,7 +310,7 @@ impl App {
         };
         self.home_login_start = None;
         self.open_url_pending = None;
-        self.overlay = None;
+        self.close_overlay();
         if let Some(login_id) = login_id {
             self.issue(Call::new(
                 Tag::AccountCancel,
@@ -612,7 +612,7 @@ impl App {
 
     pub(super) fn new_home(&mut self) {
         self.home_login_start = None;
-        self.overlay = None;
+        self.close_overlay();
         self.tab = Tab::Sessions;
         self.remember_composer_history();
         self.sessions.open = None;
@@ -658,6 +658,27 @@ impl App {
     /// look broken in a way nothing on screen explained. Every overlay with a text field
     /// takes it; the rest say so rather than swallowing it.
     fn overlay_paste(&mut self, text: &str) {
+        // A secret challenge is not a one-line form field: leading and trailing spaces
+        // are part of the password, and flattening through a non-zeroized String would
+        // copy them into the allocator's leftover. Branch before that rewrite.
+        if matches!(self.overlay, Some(Overlay::Devices)) && self.devices_secret_open() {
+            use zeroize::Zeroizing;
+
+            let mut pasted = Zeroizing::new(String::new());
+            for character in text.chars() {
+                if character != '\n' && character != '\r' {
+                    pasted.push(character);
+                }
+            }
+            if pasted.is_empty() {
+                return;
+            }
+            if !self.devices_paste(&pasted) {
+                self.inform("nothing here is taking text right now", NoticeKind::Info);
+            }
+            return;
+        }
+
         // These are one-line fields. A multi-line clipboard becomes one line rather than
         // being refused, because the alternative is a field that silently holds a newline
         // it cannot draw.

@@ -55,6 +55,7 @@ pub struct Session {
     label: String,
     executable: String,
     finished: bool,
+    cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Session {
@@ -140,6 +141,7 @@ impl Session {
             label: runner.destination.label(),
             executable: executable.to_string(),
             finished: false,
+            cancelled: runner.cancelled.clone(),
         })
     }
 
@@ -226,16 +228,14 @@ impl Session {
                 .into_anyhow()
             })?;
 
-        let reply = match self.replies.recv_timeout(REPLY_DEADLINE) {
-            Ok(Ok(reply)) => reply,
-            Ok(Err(())) => {
+        let deadline = std::time::Instant::now() + REPLY_DEADLINE;
+        let reply = loop {
+            if self.cancelled.as_ref().is_some_and(|flag| flag()) {
                 self.abort();
-                return refuse(
-                    "frame_too_large",
-                    "the remote helper exceeded the reply frame limit; its connection was closed",
-                );
+                return refuse("cancelled", "the operation was cancelled");
             }
-            Err(RecvTimeoutError::Timeout) => {
+            let now = std::time::Instant::now();
+            if now >= deadline {
                 return refuse(
                     "helper_timeout",
                     format!(
@@ -243,30 +243,42 @@ impl Session {
                         self.label,
                         REPLY_DEADLINE.as_secs()
                     ),
-                )
+                );
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                let diagnostics = self.diagnostics();
-                // An `ouro` too old to speak this protocol answers with clap's
-                // "unrecognized subcommand" and a usage page. That is a specific,
-                // actionable situation — upgrade that machine — and it deserves a
-                // reason of its own rather than a wall of remote usage text.
-                if looks_unsupported(&diagnostics) {
+            let slice = (deadline - now).min(Duration::from_millis(100));
+            match self.replies.recv_timeout(slice) {
+                Ok(Ok(reply)) => break reply,
+                Ok(Err(())) => {
+                    self.abort();
                     return refuse(
-                        "helper_unsupported",
+                        "frame_too_large",
+                        "the remote helper exceeded the reply frame limit; its connection was closed",
+                    );
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    let diagnostics = self.diagnostics();
+                    // An `ouro` too old to speak this protocol answers with clap's
+                    // "unrecognized subcommand" and a usage page. That is a specific,
+                    // actionable situation — upgrade that machine — and it deserves a
+                    // reason of its own rather than a wall of remote usage text.
+                    if looks_unsupported(&diagnostics) {
+                        return refuse(
+                            "helper_unsupported",
+                            format!(
+                                "{} answered `{}` with `unrecognized subcommand`: the Ouroboros there is too old to run fleet setup verbs. Upgrade that machine's Ouroboros, or point this command at the right executable with --remote-executable",
+                                self.label, self.executable
+                            ),
+                        );
+                    }
+                    return refuse(
+                        "helper_unavailable",
                         format!(
-                            "{} answered `{}` with `unrecognized subcommand`: the Ouroboros there is too old to run fleet setup verbs. Upgrade that machine's Ouroboros, or point this command at the right executable with --remote-executable",
-                            self.label, self.executable
+                            "{} closed the setup protocol before answering `{op}`. {diagnostics}",
+                            self.label,
                         ),
                     );
                 }
-                return refuse(
-                    "helper_unavailable",
-                    format!(
-                        "{} closed the setup protocol before answering `{op}`. {diagnostics}",
-                        self.label,
-                    ),
-                );
             }
         };
         let value: Value = serde_json::from_str(&reply).map_err(|error| {
@@ -309,7 +321,8 @@ impl Session {
     fn abort(&mut self) {
         self.finished = true;
         drop(self.input.take());
-        // The child is unreaped and owns the process group created by Runner::spawn.
+        // SAFETY: the pid names this process's own unreaped child, which `Runner::spawn`
+        // placed in its own process group.
         unsafe {
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }

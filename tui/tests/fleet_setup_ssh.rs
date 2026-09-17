@@ -14,7 +14,7 @@
 mod fleet_setup_support;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,9 +22,10 @@ use serde_json::{json, Value};
 
 use fleet_setup_support::{account, scratch, write_script, Agent, Sshd, OURO};
 use ouro::fleet_setup::askpass::{Bridge, PromptContext};
-use ouro::fleet_setup::challenge::{Answer, ChallengeKind};
+use ouro::fleet_setup::challenge::{Answer, ChallengeKind, Registry};
 use ouro::fleet_setup::ssh::{
-    Destination, Programs, ResolvedIdentity, Runner, COMMAND_TIMEOUT, CONNECT_TIMEOUT,
+    prepare_control_socket, Destination, Programs, ResolvedIdentity, Runner, COMMAND_TIMEOUT,
+    CONNECT_TIMEOUT,
 };
 use ouro::fleet_setup::trust::{self, Trust};
 use ouro::fleet_setup::{reason_of, ChallengeRequest, Conversation, Event};
@@ -74,6 +75,10 @@ impl Conversation for Scripted {
     }
 
     fn notify(&self, _event: Event) {}
+
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 fn runner(
@@ -98,6 +103,9 @@ fn runner(
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge,
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     }
 }
 
@@ -575,6 +583,9 @@ exit 255
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
 
     // The password method is stated explicitly, so an agent cannot spend the server's
@@ -624,8 +635,8 @@ exit 255
     assert_eq!(conversation.asked().len(), 2);
     assert_eq!(
         conversation.asked()[1].1["attempt"],
-        json!(1),
-        "the attempt counter is per connection, and each `run` is a new connection"
+        json!(2),
+        "attempts accumulate on one bridge so a mistyped password can retry"
     );
 
     // A third attempt has no scripted answer; the bridge reports a refusal rather than
@@ -703,6 +714,9 @@ exit 255
         connect_timeout: CONNECT_TIMEOUT,
         command_timeout: COMMAND_TIMEOUT,
         bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
     };
 
     let completed = runner.run("exec true", None).expect("an attempt");
@@ -854,4 +868,455 @@ fn an_unterminated_helper_reply_is_bounded_before_eof() {
         start.elapsed() < Duration::from_secs(5),
         "waited for the remote producer to exit"
     );
+}
+
+/// Strict host checking is not only a string in argv: with an armed bridge that would
+/// accept, an unknown host must fail as `host_unknown` without the confirmation ever
+/// reaching askpass. Deleting `StrictHostKeyChecking=yes` would route the prompt here.
+#[test]
+fn a_cold_runner_with_an_armed_bridge_does_not_ask_about_an_unknown_host() {
+    let rig = Sshd::start("cold-ask");
+    let work = scratch("cold-ask");
+    let store = work.join("known_hosts");
+    let conversation = Scripted::new(vec![
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new("would-accept".into())),
+        ),
+        (
+            ChallengeKind::Passphrase,
+            Answer::Secret(zeroize::Zeroizing::new("would-accept".into())),
+        ),
+    ]);
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: account(),
+                port: rig.port,
+                key_label: Some("client_key".into()),
+                key_fingerprint: Some("SHA256:test".into()),
+            },
+            conversation.clone(),
+        )
+        .expect("an askpass bridge"),
+    );
+    let cold = runner(
+        &rig,
+        ResolvedIdentity::Key {
+            path: rig.client_key.clone(),
+            label: "client_key".into(),
+            fingerprint: None,
+        },
+        vec![store],
+        programs(),
+        Some(Arc::clone(&bridge)),
+    );
+    let refused = cold
+        .check_access()
+        .expect_err("an untrusted host is refused");
+    assert_eq!(reason_of(&refused), Some("host_unknown"), "{refused:#}");
+    assert_eq!(
+        bridge.served(),
+        0,
+        "a host confirmation must not be answered"
+    );
+    assert_eq!(
+        bridge.prompted(),
+        0,
+        "OpenSSH must not route the confirmation to askpass when StrictHostKeyChecking=yes"
+    );
+}
+
+/// Two host keys on the server, one line in the private store: `UpdateHostKeys=no`
+/// means the extra key is not appended after a successful connection.
+#[test]
+fn the_private_store_is_not_rewritten_with_a_second_host_key() {
+    let rig = Sshd::start_with_two_host_keys("upd-hk");
+    let work = scratch("upd-hk");
+    let store = work.join("known_hosts");
+    trust_now(&rig, &store, &work);
+    let before = std::fs::read_to_string(&store).expect("the store");
+    let lines = before
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    assert_eq!(
+        lines, 1,
+        "the test records exactly one trusted key:\n{before}"
+    );
+
+    let runner = runner(
+        &rig,
+        ResolvedIdentity::Key {
+            path: rig.client_key.clone(),
+            label: "client_key".into(),
+            fingerprint: None,
+        },
+        vec![store.clone()],
+        programs(),
+        None,
+    );
+    runner
+        .run("echo still-one", None)
+        .expect("the trusted host authenticates");
+    let after = std::fs::read_to_string(&store).expect("the store after connect");
+    assert_eq!(
+        after.lines().filter(|line| !line.trim().is_empty()).count(),
+        1,
+        "UpdateHostKeys=no must not append the server's other host key:\n{after}"
+    );
+}
+
+/// A muxed connection reuses authentication: the second `run` does not prompt again,
+/// the control socket lives in the scratch directory, and dropping the Runner removes it.
+#[test]
+fn a_second_run_on_the_same_runner_does_not_prompt_again() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    const PASSPHRASE: &str = "w2a-mux-passphrase-4e1a";
+    let rig = Sshd::start_with_encrypted_key("mux", PASSPHRASE);
+    let work = scratch("mux");
+    let store = work.join("known_hosts");
+    trust_now(&rig, &store, &work);
+    let control = prepare_control_socket(&work).expect("a control socket path");
+
+    let conversation = Scripted::new(vec![(
+        ChallengeKind::Passphrase,
+        Answer::Secret(zeroize::Zeroizing::new(PASSPHRASE.to_string())),
+    )]);
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: account(),
+                port: rig.port,
+                key_label: Some("client_key".into()),
+                key_fingerprint: Some("SHA256:test".into()),
+            },
+            conversation,
+        )
+        .expect("an askpass bridge"),
+    );
+
+    let mut runner = runner(
+        &rig,
+        ResolvedIdentity::Key {
+            path: rig.client_key.clone(),
+            label: "client_key".into(),
+            fingerprint: Some("SHA256:test".into()),
+        },
+        vec![store],
+        programs(),
+        Some(Arc::clone(&bridge)),
+    );
+    runner.control = Some(control.clone());
+
+    let first = runner.run("echo first", None).expect("the first command");
+    assert!(first.success(), "{}", first.stderr_text());
+    assert_eq!(bridge.served(), 1, "the passphrase is asked once");
+
+    let second = runner.run("echo second", None).expect("the second command");
+    assert!(second.success(), "{}", second.stderr_text());
+    assert_eq!(
+        bridge.served(),
+        1,
+        "the muxed connection must not prompt again"
+    );
+
+    let uid = unsafe { libc::geteuid() };
+    let dir = control.parent().expect("the control directory");
+    let dir_meta = std::fs::symlink_metadata(dir).expect("the control directory");
+    assert_eq!(dir_meta.uid(), uid);
+    assert_eq!(dir_meta.permissions().mode() & 0o777, 0o700);
+    let sock_meta = std::fs::symlink_metadata(&control).expect("the control socket");
+    assert_eq!(sock_meta.permissions().mode() & 0o777, 0o600);
+
+    drop(runner);
+    assert!(
+        !control.exists(),
+        "ssh -O exit must remove the control socket"
+    );
+}
+
+/// A delayed answer past the child's prompt window returns promptly as
+/// `challenge_expired`, unblocks the askpass thread, and refuses the late secret.
+#[test]
+fn a_late_password_is_refused_after_the_prompt_window_without_leaving_a_blocked_thread() {
+    struct Waiting {
+        registry: Arc<Registry>,
+    }
+    impl Conversation for Waiting {
+        fn ask(&self, request: ChallengeRequest) -> anyhow::Result<Answer> {
+            self.ask_from(0, request)
+        }
+        fn ask_from(&self, issuer: u64, request: ChallengeRequest) -> anyhow::Result<Answer> {
+            let issued = self
+                .registry
+                .issue(request.kind, request.metadata, None, issuer)
+                .expect("an issued challenge");
+            self.registry.wait(&issued.challenge)
+        }
+        fn withdraw(&self, issuer: u64, reason: &'static str) {
+            self.registry.invalidate_issuer(issuer, reason);
+        }
+        fn notify(&self, _event: Event) {}
+    }
+
+    let work = scratch("late-pw");
+    let shim = work.join("ssh");
+    write_script(
+        &shim,
+        r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-G" ]; then echo "hostname 127.0.0.1"; exit 0; fi
+done
+"$SSH_ASKPASS" "tester@127.0.0.1's password: " >/dev/null 2>&1
+echo "Permission denied" >&2
+exit 255
+"#,
+    );
+    let registry = Arc::new(Registry::new());
+    let conversation = Arc::new(Waiting {
+        registry: Arc::clone(&registry),
+    });
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: "tester".into(),
+                port: 2222,
+                key_label: None,
+                key_fingerprint: None,
+            },
+            conversation,
+        )
+        .expect("an askpass bridge"),
+    );
+    let runner = Runner {
+        programs: Programs {
+            ssh: shim,
+            ..programs()
+        },
+        destination: Destination {
+            address: "127.0.0.1".into(),
+            port: 2222,
+            user: "tester".into(),
+        },
+        identity: ResolvedIdentity::Password,
+        known_hosts: vec![work.join("known_hosts")],
+        user_known_hosts: None,
+        connect_timeout: Duration::from_secs(2),
+        command_timeout: Duration::from_secs(2),
+        bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: Some(Duration::from_millis(400)),
+    };
+
+    let watch = Arc::clone(&registry);
+    let watcher = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(2) {
+            let pending = watch.pending_kinds();
+            if let Some((id, _)) = pending.into_iter().next() {
+                return id;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        String::new()
+    });
+
+    let started = std::time::Instant::now();
+    let result = runner.run("exec true", None);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "must return at the prompt window, not hang on the challenge lifetime"
+    );
+    let error = result.expect_err("a late password is a refusal");
+    assert_eq!(
+        reason_of(&error),
+        Some("challenge_expired"),
+        "the operator-facing reason is not ssh_timeout: {error:#}"
+    );
+
+    let id = watcher.join().expect("the watcher");
+    assert!(
+        !id.is_empty(),
+        "the challenge was advertised while in flight"
+    );
+    let late = registry
+        .respond(&id, None, &json!({"secret": "too-late"}))
+        .expect_err("a late answer is refused by name");
+    assert!(
+        matches!(
+            reason_of(&late),
+            Some("challenge_expired" | "connection_lost" | "challenge_consumed")
+        ),
+        "a late answer is refused by name: {late:#}"
+    );
+
+    drop(runner);
+    let dropped = std::time::Instant::now();
+    drop(bridge);
+    assert!(
+        dropped.elapsed() < Duration::from_secs(1),
+        "Bridge::drop must not wait for a human"
+    );
+}
+
+/// Cancellation reaps the in-flight ssh child instead of waiting out its deadline.
+#[test]
+fn cancelling_kills_an_in_flight_ssh_child() {
+    let work = scratch("cancel");
+    let pid_file = work.join("pid");
+    let shim = work.join("ssh");
+    write_script(
+        &shim,
+        &format!(
+            "#!/bin/sh\necho $$ > {}\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let runner = Runner {
+        programs: Programs {
+            ssh: shim,
+            ..programs()
+        },
+        destination: Destination {
+            address: "127.0.0.1".into(),
+            port: 22,
+            user: "tester".into(),
+        },
+        identity: ResolvedIdentity::Default,
+        known_hosts: vec![work.join("known_hosts")],
+        user_known_hosts: None,
+        connect_timeout: Duration::from_secs(2),
+        command_timeout: Duration::from_secs(30),
+        bridge: None,
+        control: None,
+        cancelled: Some({
+            let stop = Arc::clone(&stop);
+            Arc::new(move || stop.load(Ordering::SeqCst))
+        }),
+        challenge_window: None,
+    };
+    let flag = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        flag.store(true, Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let error = runner
+        .run("exec true", None)
+        .expect_err("cancellation is a refusal");
+    assert_eq!(reason_of(&error), Some("cancelled"), "{error:#}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the sleeping child must be killed, not awaited: {:?}",
+        started.elapsed()
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the shim wrote its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // SAFETY: a liveness probe on a pid this test spawned; signal 0 delivers nothing.
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "the in-flight ssh child must be dead after cancel"
+    );
+}
+
+/// A mistyped password is a retry: `check_access` re-prompts up to three times.
+#[test]
+fn a_mistyped_password_is_retried_up_to_the_attempt_cap() {
+    const PASSWORD: &str = "w2a-retry-password-3c01";
+    let work = scratch("pw-try");
+    let count = work.join("count");
+    let shim = work.join("ssh");
+    write_script(
+        &shim,
+        &format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-G" ]; then echo "hostname 127.0.0.1"; exit 0; fi
+done
+n=0
+if [ -f {count} ]; then n=$(cat {count}); fi
+n=$((n + 1))
+echo "$n" > {count}
+answer=$("$SSH_ASKPASS" "tester@127.0.0.1's password: ")
+if [ "$n" -ge 3 ] && [ "$answer" = "{password}" ]; then
+  echo authenticated
+  exit 0
+fi
+echo "Permission denied, please try again." >&2
+exit 255
+"#,
+            count = count.display(),
+            password = PASSWORD,
+        ),
+    );
+    let conversation = Scripted::new(vec![
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new(PASSWORD.to_string())),
+        ),
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new(PASSWORD.to_string())),
+        ),
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new(PASSWORD.to_string())),
+        ),
+    ]);
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: "tester".into(),
+                port: 2222,
+                key_label: None,
+                key_fingerprint: None,
+            },
+            conversation.clone(),
+        )
+        .expect("an askpass bridge"),
+    );
+    let runner = Runner {
+        programs: Programs {
+            ssh: shim,
+            ..programs()
+        },
+        destination: Destination {
+            address: "127.0.0.1".into(),
+            port: 2222,
+            user: "tester".into(),
+        },
+        identity: ResolvedIdentity::Password,
+        known_hosts: vec![work.join("known_hosts")],
+        user_known_hosts: None,
+        connect_timeout: CONNECT_TIMEOUT,
+        command_timeout: COMMAND_TIMEOUT,
+        bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
+    };
+    runner
+        .check_access()
+        .expect("the third attempt authenticates");
+    let asked = conversation.asked();
+    assert_eq!(asked.len(), 3, "three prompts, then success");
+    assert_eq!(asked[0].1["attempt"], json!(1));
+    assert_eq!(asked[1].1["attempt"], json!(2));
+    assert_eq!(asked[2].1["attempt"], json!(3));
 }

@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use zeroize::Zeroizing;
 
 use super::challenge::{Answer, Binding, Challenge, Registry};
 use super::engine::{Engine, Outcome};
@@ -308,6 +310,10 @@ struct Shared {
     subscribers: Mutex<Vec<Subscriber>>,
     last_activity: Mutex<Instant>,
     cancelled: AtomicBool,
+    /// Set when the last attached client leaves while a challenge is still pending.
+    /// The waiter maps the resulting expiry onto `session_lost` rather than
+    /// `challenge_expired: nobody answered`.
+    session_lost: AtomicBool,
     /// Whether any client has ever completed an `attach`. A bare connection is not one:
     /// the parent's own readiness probe connects, asks one question and leaves, and that
     /// must not count as somebody taking charge of the operation.
@@ -434,17 +440,37 @@ struct WorkerConversation {
 
 impl Conversation for WorkerConversation {
     fn ask(&self, request: ChallengeRequest) -> Result<Answer> {
+        self.ask_from(0, request)
+    }
+
+    fn ask_from(&self, issuer: u64, request: ChallengeRequest) -> Result<Answer> {
         let binding = self.shared.current_binding();
         let challenge: Challenge =
             self.shared
                 .registry
-                .issue(request.kind, request.metadata, binding)?;
+                .issue(request.kind, request.metadata, binding, issuer)?;
         self.shared.touch();
         self.shared
             .broadcast(challenge_event(&self.shared, &challenge));
-        let answer = self.shared.registry.wait(&challenge.challenge)?;
+        let answer = match self.shared.registry.wait(&challenge.challenge) {
+            Ok(answer) => answer,
+            Err(error)
+                if super::reason_of(&error) == Some("challenge_expired")
+                    && self.shared.session_lost.swap(false, Ordering::SeqCst) =>
+            {
+                return refuse(
+                    "session_lost",
+                    "the attached client disconnected before answering; attach again and the step will ask a fresh question",
+                );
+            }
+            Err(error) => return Err(error),
+        };
         self.shared.touch();
         Ok(answer)
+    }
+
+    fn withdraw(&self, issuer: u64, reason: &'static str) {
+        self.shared.registry.invalidate_issuer(issuer, reason);
     }
 
     fn notify(&self, event: Event) {
@@ -553,6 +579,7 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
         subscribers: Mutex::new(Vec::new()),
         last_activity: Mutex::new(Instant::now()),
         cancelled: AtomicBool::new(false),
+        session_lost: AtomicBool::new(false),
         attached_ever: AtomicBool::new(false),
         finished: Mutex::new(None),
     });
@@ -735,7 +762,7 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
     let mut reader = BufReader::new(stream);
     let mut attached = false;
     loop {
-        let mut line = String::new();
+        let mut line = Zeroizing::new(String::new());
         let read = reader
             .by_ref()
             .take(super::MAX_FRAME_BYTES as u64 + 1)
@@ -757,6 +784,73 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
             continue;
         }
         shared.touch();
+        let Ok(head) = serde_json::from_str::<FrameHead>(line.trim()) else {
+            let _ = write_reply(
+                &mut writer,
+                &Value::Null,
+                false,
+                json!({"reason": "bad_request", "detail": "a request is one JSON object per line"}),
+            );
+            continue;
+        };
+        let id_value = head.id;
+        let op = head.op.as_str();
+
+        if op == "respond" {
+            if !attached {
+                let _ = write_reply(
+                    &mut writer,
+                    &id_value,
+                    false,
+                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`", "instance": shared.instance}),
+                );
+                continue;
+            }
+            if !owns(&shared, id) {
+                let _ = write_reply(
+                    &mut writer,
+                    &id_value,
+                    false,
+                    json!({
+                        "reason": "not_owner",
+                        "detail": "this operation belongs to another subject now",
+                    }),
+                );
+                continue;
+            }
+            let Ok(respond) = serde_json::from_str::<RespondFrame>(line.trim()) else {
+                let _ = write_reply(
+                    &mut writer,
+                    &id_value,
+                    false,
+                    json!({"reason": "bad_request", "detail": "a request is one JSON object per line"}),
+                );
+                continue;
+            };
+            let response = respond.response.into_value();
+            let binding = subscriber_binding(&shared, id);
+            match shared
+                .registry
+                .respond(&respond.challenge, binding.as_ref(), &response)
+            {
+                Ok(()) => {
+                    let _ = write_reply(&mut writer, &id_value, true, json!({}));
+                }
+                Err(error) => {
+                    let _ = write_reply(
+                        &mut writer,
+                        &id_value,
+                        false,
+                        json!({
+                            "reason": super::reason_of(&error).unwrap_or("refused"),
+                            "detail": format!("{error}"),
+                        }),
+                    );
+                }
+            }
+            continue;
+        }
+
         let Ok(Value::Object(frame)) = serde_json::from_str::<Value>(line.trim()) else {
             let _ = write_reply(
                 &mut writer,
@@ -766,8 +860,6 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
             );
             continue;
         };
-        let id_value = frame.get("id").cloned().unwrap_or(Value::Null);
-        let op = frame.get("op").and_then(Value::as_str).unwrap_or("");
 
         if !attached {
             if op != "attach" {
@@ -813,44 +905,6 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
         match op {
             "status" => {
                 let _ = write_reply(&mut writer, &id_value, true, shared.status());
-            }
-            "respond" => {
-                // Deliberately not logged, in any form: this is the one frame that may
-                // carry a secret.
-                let challenge = frame.get("challenge").and_then(Value::as_str).unwrap_or("");
-                let response = frame.get("response").cloned().unwrap_or(Value::Null);
-                if !owns(&shared, id) {
-                    let _ = write_reply(
-                        &mut writer,
-                        &id_value,
-                        false,
-                        json!({
-                            "reason": "not_owner",
-                            "detail": "this operation belongs to another subject now",
-                        }),
-                    );
-                    continue;
-                }
-                let binding = subscriber_binding(&shared, id);
-                match shared
-                    .registry
-                    .respond(challenge, binding.as_ref(), &response)
-                {
-                    Ok(()) => {
-                        let _ = write_reply(&mut writer, &id_value, true, json!({}));
-                    }
-                    Err(error) => {
-                        let _ = write_reply(
-                            &mut writer,
-                            &id_value,
-                            false,
-                            json!({
-                                "reason": super::reason_of(&error).unwrap_or("refused"),
-                                "detail": format!("{error}"),
-                            }),
-                        );
-                    }
-                }
             }
             "cancel" => {
                 // Only the operation's current owner may stop it. A session that has
@@ -961,6 +1015,7 @@ fn attach(
         }
     }
 
+    shared.session_lost.store(false, Ordering::SeqCst);
     shared.attached_ever.store(true, Ordering::SeqCst);
     let binding = Binding { subject, session };
     shared
@@ -996,8 +1051,10 @@ fn detach(shared: &Arc<Shared>, id: u64) {
     subscribers.retain(|subscriber| subscriber.id != id);
     if subscribers.len() != before && subscribers.is_empty() {
         // A lost authentication session invalidates its pending challenge and drops any
-        // unconsumed secret. The step then waits for a fresh one.
+        // unconsumed secret. The waiter is told `session_lost`; it does not sit for a
+        // replacement answer on a challenge nobody is attached to answer.
         drop(subscribers);
+        shared.session_lost.store(true, Ordering::SeqCst);
         shared.registry.invalidate_all();
     }
 }
@@ -1029,6 +1086,41 @@ fn subscriber_binding(shared: &Arc<Shared>, id: u64) -> Option<Binding> {
         .iter()
         .find(|subscriber| subscriber.id == id)
         .map(|subscriber| subscriber.binding.clone())
+}
+
+#[derive(Deserialize)]
+struct FrameHead {
+    #[serde(default)]
+    id: Value,
+    #[serde(default)]
+    op: String,
+}
+
+#[derive(Deserialize)]
+struct RespondFrame {
+    #[serde(default)]
+    challenge: String,
+    #[serde(default)]
+    response: RespondBody,
+}
+
+#[derive(Default, Deserialize)]
+struct RespondBody {
+    #[serde(default)]
+    secret: String,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+impl RespondBody {
+    fn into_value(self) -> Value {
+        let secret = Zeroizing::new(self.secret);
+        let mut map = self.extra;
+        if !secret.is_empty() {
+            map.insert("secret".into(), Value::String(secret.to_string()));
+        }
+        Value::Object(map)
+    }
 }
 
 fn write_reply(writer: &mut UnixStream, id: &Value, ok: bool, fields: Value) -> Result<()> {

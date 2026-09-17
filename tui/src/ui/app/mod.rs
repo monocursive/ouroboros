@@ -53,6 +53,7 @@ mod answers;
 mod cluster;
 mod details;
 pub mod devices;
+mod devices_catalogue;
 mod footer;
 mod home;
 mod image_drafts;
@@ -1516,14 +1517,14 @@ impl App {
     /// Claude Code's `[`: the whole conversation, handed back to the terminal that owns the
     /// scrollback, so `Cmd+F` and drag-to-copy work on it again.
     pub(super) fn dump_to_scrollback(&mut self) {
-        self.overlay = None;
+        self.close_overlay();
         self.scrollback_dump_pending = self.transcript_export();
     }
 
     /// Claude Code's `v`: the same text, in the operator's own editor, where searching and
     /// saving a piece of it are the editor's problem rather than this client's.
     pub(super) fn view_transcript(&mut self) {
-        self.overlay = None;
+        self.close_overlay();
         self.transcript_view_pending = self.transcript_export();
     }
 
@@ -1539,7 +1540,7 @@ impl App {
     /// it refuses to open: the two are the same decision, and an opener is a *more*
     /// dangerous way to touch a file than a header read.
     pub(super) fn open_newest_image(&mut self) {
-        self.overlay = None;
+        self.close_overlay();
 
         let Some((plane, id)) = self.sessions.open.clone() else {
             self.inform(
@@ -2284,7 +2285,7 @@ impl App {
     /// the same statement `Esc` makes — nothing was chosen — so it restores as well.
     pub fn open_theme_picker(&mut self) {
         if let Some(Overlay::Theme { previous, .. }) = self.overlay {
-            self.overlay = None;
+            self.close_overlay();
             super::switch_theme(previous);
             return;
         }

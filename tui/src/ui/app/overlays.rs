@@ -1005,7 +1005,7 @@ impl App {
 
         match overlay {
             Overlay::Help => match key.code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter => self.overlay = None,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter => self.close_overlay(),
                 // The table is grouped and it grows; the panel scrolls rather than
                 // silently ending, and the limits at its foot are pinned outside this.
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -1022,7 +1022,7 @@ impl App {
             Overlay::Devices => {}
             // Two read-only pages with the same discipline as `?`: scroll, or leave.
             Overlay::Keys { scroll } | Overlay::Cost { scroll } => match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.close_overlay(),
                 KeyCode::Char('j') | KeyCode::Down => *scroll = scroll.saturating_add(1),
                 KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
                 KeyCode::PageDown => *scroll = scroll.saturating_add(10),
@@ -1033,18 +1033,18 @@ impl App {
             // page of a diff is.
             Overlay::Diff(diff) => {
                 if !diff.key(key.code, DIFF_PAGE) {
-                    self.overlay = None;
+                    self.close_overlay();
                 }
             }
             Overlay::Quit { options, choice } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
                 KeyCode::Char('j') | KeyCode::Down => {
                     *choice = (*choice + 1).min(options.len().saturating_sub(1))
                 }
                 KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                 KeyCode::Enter => {
                     self.quit = options.get(*choice).map(|(_label, quit)| *quit);
-                    self.overlay = None;
+                    self.close_overlay();
                 }
                 _ => {}
             },
@@ -1052,7 +1052,7 @@ impl App {
                 options, choice, ..
             } => match key.code {
                 KeyCode::Esc => {
-                    self.overlay = None;
+                    self.close_overlay();
                     self.resume_picker_if_requested();
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -1071,7 +1071,7 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let call = options.get(*choice).and_then(|(_label, call)| call.clone());
-                    self.overlay = None;
+                    self.close_overlay();
 
                     if let Some(call) = call {
                         self.submit_confirm(call);
@@ -1103,7 +1103,7 @@ impl App {
                 let last = rows.saturating_sub(1);
 
                 match key.code {
-                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Esc => self.close_overlay(),
                     KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     // A10, as above: the number on the row is the key that picks it.
@@ -1185,7 +1185,7 @@ impl App {
                 let rewindable = *rewind_offered;
 
                 match key.code {
-                    KeyCode::Esc => self.overlay = None,
+                    KeyCode::Esc => self.close_overlay(),
                     KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     KeyCode::Char('e') => self.backtrack_edit(),
@@ -1195,7 +1195,7 @@ impl App {
                     // rewind's own, because a rewind states what it cannot restore before
                     // it is chosen and there is no room for that here.
                     KeyCode::Char('r') if rewindable => {
-                        self.overlay = None;
+                        self.close_overlay();
                         self.open_rewind();
                     }
                     KeyCode::Enter if forkable => self.backtrack_fork(),
@@ -1244,12 +1244,12 @@ impl App {
                 match key.code {
                     KeyCode::Enter => {
                         let name = super::super::theme::ThemeName::ALL[*choice];
-                        self.overlay = None;
+                        self.close_overlay();
                         // The App's own, which is the one that records and announces it.
                         self.switch_theme(name);
                     }
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        self.overlay = None;
+                        self.close_overlay();
                         super::super::switch_theme(previous);
                     }
                     _ => {}
@@ -1257,7 +1257,7 @@ impl App {
             }
             // D9. A read-only page, with the same discipline as `?`.
             Overlay::Context { scroll, .. } => match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.overlay = None,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.close_overlay(),
                 KeyCode::Char('j') | KeyCode::Down => *scroll = scroll.saturating_add(1),
                 KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
                 KeyCode::PageDown => *scroll = scroll.saturating_add(10),
@@ -1288,7 +1288,7 @@ impl App {
                     }
                 } else {
                     match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                        KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
                         KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                         KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                         KeyCode::Enter => *confirming = true,
@@ -1317,11 +1317,11 @@ impl App {
                         self.restore_picker(from_picker.then(|| (plane, id.clone())))
                     }
                     KeyCode::Enter => {
-                        self.overlay = None;
+                        self.close_overlay();
                         self.open_session(plane, id);
                     }
                     KeyCode::Char('r') => {
-                        self.overlay = None;
+                        self.close_overlay();
                         self.reply_to_session(plane, id);
                     }
                     _ => {}
@@ -1334,7 +1334,7 @@ impl App {
                 let last = (list.servers.len() + list.refusals.len()).saturating_sub(1);
 
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+                    KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
                     KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
                     KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
                     KeyCode::Char('r') => self.open_mcp(),
@@ -1367,7 +1367,7 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         if matches!(key.code, KeyCode::Esc) || (ctrl && matches!(key.code, KeyCode::Char('p'))) {
-            self.overlay = None;
+            self.close_overlay();
             return;
         }
 
@@ -1416,11 +1416,11 @@ impl App {
         match command {
             Command::NewSession => self.new_home(),
             Command::NewSessionOptions => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_new_session();
             }
             Command::WriteAccess => {
-                self.overlay = None;
+                self.close_overlay();
                 self.start_writable_session();
             }
             Command::SwitchSession => {
@@ -1434,71 +1434,71 @@ impl App {
                 self.poll();
             }
             Command::SessionDetails => {
-                self.overlay = None;
+                self.close_overlay();
                 self.toggle_session_details();
             }
             Command::CopyRawLast => {
-                self.overlay = None;
+                self.close_overlay();
                 self.copy_last_agent_source();
             }
             Command::Export => {
-                self.overlay = None;
+                self.close_overlay();
                 self.export_transcript("");
             }
             Command::CopyLast => {
-                self.overlay = None;
+                self.close_overlay();
                 self.copy_last_agent();
             }
             Command::DumpScrollback => self.dump_to_scrollback(),
             Command::ViewTranscript => self.view_transcript(),
             Command::Interrupt => {
-                self.overlay = None;
+                self.close_overlay();
                 self.interrupt_turn();
             }
             Command::Steer => {
-                self.overlay = None;
+                self.close_overlay();
                 self.compose(ComposerVerb::Steer);
             }
             Command::Backtrack => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_backtrack(None);
             }
             Command::Fork => {
-                self.overlay = None;
+                self.close_overlay();
                 self.fork_open_session();
             }
             // The palette teaches the verb rather than replacing it: both take an argument
             // the operator has to type anyway, and a second surface for choosing a model
             // would be a second place for it to disagree with the runtime.
             Command::Model => {
-                self.overlay = None;
+                self.close_overlay();
                 self.prefill_composer("/model ");
             }
             Command::Effort => {
-                self.overlay = None;
+                self.close_overlay();
                 self.prefill_composer("/effort ");
             }
             Command::ExternalEditor => {
-                self.overlay = None;
+                self.close_overlay();
                 self.request_external_editor();
             }
             Command::CloseSession => {
                 self.open_close_confirm();
             }
             Command::ConnectChatGpt => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_account();
             }
             Command::Runtime => {
-                self.overlay = None;
+                self.close_overlay();
                 self.select_tab(Tab::Dashboard);
             }
             Command::Upgrades => {
-                self.overlay = None;
+                self.close_overlay();
                 self.select_tab(Tab::Upgrade);
             }
             Command::ListCapabilities => {
-                self.overlay = None;
+                self.close_overlay();
                 self.list_capabilities();
             }
             Command::PreviewCapability => {
@@ -1516,62 +1516,62 @@ impl App {
                 });
             }
             Command::Logs => {
-                self.overlay = None;
+                self.close_overlay();
                 self.select_tab(Tab::Logs);
             }
             Command::Settings => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_settings();
             }
             Command::Devices => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_devices();
             }
             Command::Help => {
                 self.open_help();
             }
             Command::Keys => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_keymap();
             }
             Command::Cost => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_cost();
             }
             Command::Compact => {
-                self.overlay = None;
+                self.close_overlay();
                 self.compact_session(None);
             }
             // Both take words, so the palette teaches the verb by prefilling the composer
             // rather than acting on an argument the operator has not typed yet — the same
             // thing `/model` and `/effort` do.
             Command::Handoff => {
-                self.overlay = None;
+                self.close_overlay();
                 self.prefill_composer("/handoff ");
             }
             Command::Context => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_context();
             }
             Command::Rewind => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_rewind();
             }
             // T2.9. The list, not a step through it. A palette is a thing you look at and
             // keep or put back, and the palette row was the one place the verb was reached
             // by people who do not know the names.
             Command::Theme => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_theme_picker();
             }
             // B2. The palette row toggles, because the palette has nowhere to type
             // `on`/`off`; the slash verb takes both.
             Command::Plan => {
-                self.overlay = None;
+                self.close_overlay();
                 self.configure_plan(None);
             }
             Command::AutoApprove => {
-                self.overlay = None;
+                self.close_overlay();
                 self.set_auto_approve(None);
             }
             // Three postures have no toggle, so the palette teaches the verb by
@@ -1579,29 +1579,29 @@ impl App {
             // has to state rather than have guessed for them. The widest of the three
             // takes the OS sandbox away; a palette row that picked for them could pick it.
             Command::Sandbox => {
-                self.overlay = None;
+                self.close_overlay();
                 self.prefill_composer("/sandbox ");
             }
             Command::Mcp => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_mcp();
             }
             // F12. A title is words the operator has to type, so the palette teaches the
             // verb by prefilling it — the same thing `/model` and `/handoff` do.
             Command::Rename => {
-                self.overlay = None;
+                self.close_overlay();
                 self.prefill_composer("/rename ");
             }
             Command::Quit => {
-                self.overlay = None;
+                self.close_overlay();
                 self.open_quit();
             }
             Command::Approval => {
-                self.overlay = None;
+                self.close_overlay();
                 self.reopen_approval();
             }
             Command::ShowDiff => {
-                self.overlay = None;
+                self.close_overlay();
                 let Some(watch) = self.sessions.open_watch() else {
                     self.inform(
                         "open a session before reviewing what it changed",
@@ -1618,7 +1618,7 @@ impl App {
                 )));
             }
             Command::RawMode => {
-                self.overlay = None;
+                self.close_overlay();
                 self.toggle_raw_transcript();
             }
         }
@@ -1628,7 +1628,7 @@ impl App {
         use crossterm::event::KeyCode;
 
         if matches!(key.code, KeyCode::Esc) {
-            self.overlay = None;
+            self.close_overlay();
             return;
         }
 
@@ -1657,7 +1657,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let session = selected.or_else(|| self.sessions.picker_key(index));
-                self.overlay = None;
+                self.close_overlay();
                 if let Some((plane, id)) = session {
                     self.open_session(plane, id);
                 }
@@ -1673,7 +1673,7 @@ impl App {
             }
             KeyCode::Char('r') => {
                 let session = selected.or_else(|| self.sessions.picker_key(index));
-                self.overlay = None;
+                self.close_overlay();
 
                 if let Some((plane, id)) = session {
                     self.reply_to_session(plane, id);
@@ -1724,7 +1724,7 @@ impl App {
                 }
             }
             KeyCode::Char('l') if connected && self.hello.serves("account.logout") => {
-                self.overlay = None;
+                self.close_overlay();
                 self.issue(Call::new(Tag::AccountLogout, "account.logout", json!({})));
             }
             _ => {}
@@ -1960,7 +1960,7 @@ impl App {
                     },
                 ..
             }) => self.open_approval_with(plane, id, request_id, choice, None, follow_up),
-            _ => self.overlay = None,
+            _ => self.close_overlay(),
         }
     }
 
@@ -2193,7 +2193,7 @@ impl App {
         let extent = crate::ui::export::extent(watch);
         let extension = if json { "ndjson" } else { "txt" };
 
-        self.overlay = None;
+        self.close_overlay();
         self.export_pending = Some(ExportRequest {
             path,
             filename: format!("ouro-{}-{}.{extension}", plane.as_str(), file_stem(&id)),

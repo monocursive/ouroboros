@@ -31,6 +31,9 @@ use super::{refuse, sanitize_remote_text, IdentityChoice};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// The default ceiling on one remote command. The bootstrap upload raises it.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long `Drop` waits for `ssh -O exit` to close a mux master. A master that does not
+/// answer is unlinked anyway; `ControlPersist` reaps it.
+const CONTROL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where the operation is going. The address is the *selected overlay IPv4*, which is
 /// the only thing this path will connect to; a peer's reported hostname is display
@@ -149,6 +152,15 @@ pub struct Runner {
     pub connect_timeout: Duration,
     pub command_timeout: Duration,
     pub bridge: Option<Arc<Bridge>>,
+    /// Private mux socket for this Runner. Reused across `run`/`spawn` so a password
+    /// is typed once per connection; torn down in [`Drop`].
+    pub control: Option<PathBuf>,
+    /// Polled while a child runs. The engine sets this from `Conversation::cancelled`.
+    pub cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// How long a prompt may stay unanswered before the child is reaped. `None` is
+    /// [`super::CHALLENGE_LIFETIME`]. Tests shorten it so a late answer is a unit of
+    /// milliseconds, not five minutes.
+    pub challenge_window: Option<Duration>,
 }
 
 /// One bounded remote command's result.
@@ -189,19 +201,31 @@ pub const NEUTRALIZED_OPTIONS: &[&str] = &[
     "KnownHostsCommand=none",
     "GlobalKnownHostsFile=/dev/null",
     "RevokedHostKeys=none",
-    "CertificateFile=none",
     "PKCS11Provider=none",
+    "ProxyCommand=none",
+    "ProxyJump=none",
+    "UpdateHostKeys=no",
+    "VerifyHostKeyDNS=no",
+    "HashKnownHosts=no",
 ];
 
 /// The `ssh -G` keys whose effective value this client insists on, and the value it
 /// insists on. An `ssh -G` that reports anything else means the command line did not
 /// win, and the connection is refused rather than made.
+///
+/// `CertificateFile` is not here: it is additive in OpenSSH, and `=none` does not
+/// clear a config-supplied certificate. `controlmaster` is asserted on the `-G`
+/// probe, which always passes `ControlMaster=no`; connecting invocations may mux.
 const REQUIRED_EFFECTIVE: &[(&str, &str)] = &[
     ("knownhostscommand", "none"),
     ("globalknownhostsfile", "/dev/null"),
     ("revokedhostkeys", "none"),
-    ("certificatefile", "none"),
     ("pkcs11provider", "none"),
+    ("proxycommand", "none"),
+    ("proxyjump", "none"),
+    ("updatehostkeys", "false"),
+    ("verifyhostkeydns", "false"),
+    ("hashknownhosts", "no"),
     ("stricthostkeychecking", "true"),
     ("controlmaster", "false"),
     ("forwardagent", "no"),
@@ -222,6 +246,10 @@ impl Runner {
     /// can print it: this is a security boundary, and "which options did we actually
     /// pass" must be answerable without reading a process table.
     pub fn options(&self) -> Vec<String> {
+        self.options_for(true)
+    }
+
+    fn options_for(&self, connecting: bool) -> Vec<String> {
         let mut known_hosts = String::new();
         for store in self.known_hosts.iter().chain(self.user_known_hosts.iter()) {
             if !known_hosts.is_empty() {
@@ -241,8 +269,6 @@ impl Runner {
             "LocalCommand=none".to_string(),
             "RemoteCommand=none".to_string(),
             "RequestTTY=no".to_string(),
-            "ControlMaster=no".to_string(),
-            "ControlPath=none".to_string(),
             "StrictHostKeyChecking=yes".to_string(),
             format!("UserKnownHostsFile={known_hosts}"),
             "IdentitiesOnly=yes".to_string(),
@@ -253,15 +279,39 @@ impl Runner {
             // every prompt into an immediate failure instead.
             "BatchMode=no".to_string(),
         ];
-        // Neutralising the options that decide *what a host key means* and *who answers
-        // for a key*. `UserKnownHostsFile` alone is not the trust boundary: an operator's
-        // `KnownHostsCommand` supplies host keys from a program and is consulted in
-        // addition to the files, a `GlobalKnownHostsFile` adds a second trusted set, and
-        // `RevokedHostKeys`/`CertificateFile` change which keys count. `IdentityAgent`
-        // and `PKCS11Provider` decide which process is asked to sign. Every one of them
-        // is settable in `~/.ssh/config`, and this command line is what makes the
-        // reviewed trust store the only one in force.
+        if connecting {
+            if let Some(path) = &self.control {
+                options.push("ControlMaster=auto".to_string());
+                options.push(format!(
+                    "ControlPath={}",
+                    quote_option_value(&path.display().to_string())
+                ));
+                options.push("ControlPersist=10m".to_string());
+            } else {
+                options.push("ControlMaster=no".to_string());
+                options.push("ControlPath=none".to_string());
+            }
+        } else {
+            // The `-G` probe must not start a mux master, and must still be able to
+            // report inherited routing: `ProxyJump=none` is forced only when connecting.
+            options.push("ControlMaster=no".to_string());
+            options.push("ControlPath=none".to_string());
+        }
+        // Neutralising the options that decide *what a host key means*, *who answers
+        // for a key*, and *which machine the TCP connection reaches*. `UserKnownHostsFile`
+        // alone is not the trust boundary: an operator's `KnownHostsCommand` supplies
+        // host keys from a program and is consulted in addition to the files, a
+        // `GlobalKnownHostsFile` adds a second trusted set, and `RevokedHostKeys`
+        // changes which keys count. `IdentityAgent` and `PKCS11Provider` decide which
+        // process is asked to sign. `ProxyCommand`/`ProxyJump` would deliver credentials
+        // to a different machine than the one that was reviewed. `UpdateHostKeys` would
+        // rewrite the private store. Every one of them is settable in `~/.ssh/config`,
+        // and this command line is what makes the reviewed destination the only one
+        // in force.
         for neutral in NEUTRALIZED_OPTIONS {
+            if !connecting && matches!(*neutral, "ProxyCommand=none" | "ProxyJump=none") {
+                continue;
+            }
             options.push((*neutral).to_string());
         }
         match &self.identity {
@@ -306,40 +356,48 @@ impl Runner {
         }
     }
 
-    fn base_command(&self) -> Command {
-        self.command_with_config(true)
+    fn isolates_config(&self) -> bool {
+        !matches!(self.identity, ResolvedIdentity::Default)
     }
 
-    fn explicit_identity(&self) -> bool {
-        matches!(
-            self.identity,
-            ResolvedIdentity::Key { .. } | ResolvedIdentity::Agent { .. }
-        )
-    }
-
-    fn command_with_config(&self, connecting: bool) -> Command {
-        let mut command = Command::new(&self.programs.ssh);
+    /// Flags after the program name. One construction for `argv` and for `Command`.
+    fn flags(&self, connecting: bool) -> Vec<String> {
+        let mut flags = Vec::new();
         // IdentityFile is additive: -i and IdentitiesOnly do not suppress keys from
         // ssh_config. Inspect the ambient config for forbidden routing below, but
-        // make an explicitly selected identity connection from our options alone.
-        if connecting && self.explicit_identity() {
-            command.args(["-F", "/dev/null"]);
+        // make an explicitly selected identity — or a password, which has no
+        // legitimate need for config identities — from our options alone.
+        if connecting && self.isolates_config() {
+            flags.extend(["-F".into(), "/dev/null".into()]);
         }
-        for option in self.options() {
-            command.arg("-o").arg(option);
+        for option in self.options_for(connecting) {
+            flags.push("-o".to_string());
+            flags.push(option);
         }
-        command.arg("-p").arg(self.destination.port.to_string());
-        command.arg("-l").arg(&self.destination.user);
+        flags.push("-p".to_string());
+        flags.push(self.destination.port.to_string());
+        flags.push("-l".to_string());
+        flags.push(self.destination.user.clone());
         match &self.identity {
             ResolvedIdentity::Agent {
                 public_key_file, ..
             } => {
-                command.arg("-i").arg(public_key_file);
+                flags.push("-i".to_string());
+                flags.push(public_key_file.display().to_string());
             }
             ResolvedIdentity::Key { path, .. } => {
-                command.arg("-i").arg(path);
+                flags.push("-i".to_string());
+                flags.push(path.display().to_string());
             }
             ResolvedIdentity::Default | ResolvedIdentity::Password => {}
+        }
+        flags
+    }
+
+    fn command_from_argv(&self, argv: &[String]) -> Command {
+        let mut command = Command::new(&argv[0]);
+        if let Some(args) = argv.get(1..) {
+            command.args(args);
         }
         self.apply_env(&mut command);
         command
@@ -368,30 +426,7 @@ impl Runner {
     /// remote command is one shell string, because that is what `ssh` sends.
     pub fn argv(&self, remote: &str) -> Vec<String> {
         let mut argv = vec![self.programs.ssh.display().to_string()];
-        if self.explicit_identity() {
-            argv.extend(["-F".into(), "/dev/null".into()]);
-        }
-        for option in self.options() {
-            argv.push("-o".to_string());
-            argv.push(option);
-        }
-        argv.push("-p".to_string());
-        argv.push(self.destination.port.to_string());
-        argv.push("-l".to_string());
-        argv.push(self.destination.user.clone());
-        match &self.identity {
-            ResolvedIdentity::Agent {
-                public_key_file, ..
-            } => {
-                argv.push("-i".to_string());
-                argv.push(public_key_file.display().to_string());
-            }
-            ResolvedIdentity::Key { path, .. } => {
-                argv.push("-i".to_string());
-                argv.push(path.display().to_string());
-            }
-            ResolvedIdentity::Default | ResolvedIdentity::Password => {}
-        }
+        argv.extend(self.flags(true));
         argv.push(self.destination.address.clone());
         argv.push(remote.to_string());
         argv
@@ -408,10 +443,16 @@ impl Runner {
         stdin: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Completed> {
-        let mut command = self.base_command();
-        command.arg(&self.destination.address);
-        command.arg(remote);
-        run_bounded_for(command, stdin, timeout, self.bridge.as_ref())
+        let argv = self.argv(remote);
+        let command = self.command_from_argv(&argv);
+        run_bounded_for(
+            command,
+            stdin,
+            timeout,
+            self.bridge.as_ref(),
+            self.cancelled.as_ref(),
+            self.challenge_window,
+        )
     }
 
     /// Start `ssh <dest> <remote>` with piped stdin and stdout, for the framed helper
@@ -420,9 +461,8 @@ impl Runner {
     /// The caller owns the child *and* the arming guard, and must keep them together:
     /// the prompt window belongs to this connection and closes when it does.
     pub fn spawn(&self, remote: &str) -> Result<(std::process::Child, Option<Armed>)> {
-        let mut command = self.base_command();
-        command.arg(&self.destination.address);
-        command.arg(remote);
+        let argv = self.argv(remote);
+        let mut command = self.command_from_argv(&argv);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -445,10 +485,19 @@ impl Runner {
     /// receive the credentials is not the one that was reviewed. Any proxy routing is
     /// out of scope for v1 and is named rather than silently followed.
     pub fn inspect_effective_config(&self) -> Result<EffectiveConfig> {
-        let mut command = self.command_with_config(false);
-        command.arg("-G");
-        command.arg(&self.destination.address);
-        let completed = run_bounded(command, None, self.connect_timeout)?;
+        let mut argv = vec![self.programs.ssh.display().to_string()];
+        argv.extend(self.flags(false));
+        argv.push("-G".to_string());
+        argv.push(self.destination.address.clone());
+        let command = self.command_from_argv(&argv);
+        let completed = run_bounded_for(
+            command,
+            None,
+            self.connect_timeout,
+            None,
+            self.cancelled.as_ref(),
+            None,
+        )?;
         if !completed.success() {
             return refuse(
                 "ssh_unavailable",
@@ -461,11 +510,27 @@ impl Runner {
         }
         let config = EffectiveConfig::parse(&String::from_utf8_lossy(&completed.stdout));
 
+        // Routing first: the proposal asks for an explanation when a jump/proxy would
+        // have applied, not a generic "unsafe option". `ProxyJump=none` is forced only
+        // on connecting invocations, so this probe still sees inherited routing.
+        if let Some(routing) = config.routing() {
+            return refuse(
+                "unsupported_routing",
+                format!(
+                    "this deployment host's SSH configuration routes {} through {routing}. Proxy and jump routing are not supported for fleet setup: the private-network address must be reached directly. Remove the routing for this host, or deploy from a machine that reaches it directly",
+                    self.destination.address
+                ),
+            );
+        }
+
         // What the command line asked for has to be what is in force. OpenSSH takes the
         // first value it obtains and the command line is read first, so this should
         // always hold — and if a future OpenSSH ever changes that, this operation stops
         // rather than trusting a host key store it did not choose.
         for (key, required) in REQUIRED_EFFECTIVE {
+            if *key == "proxycommand" || *key == "proxyjump" {
+                continue;
+            }
             if let Some(actual) = config.value(key) {
                 if !actual.eq_ignore_ascii_case(required) {
                     return refuse(
@@ -477,16 +542,6 @@ impl Runner {
                     );
                 }
             }
-        }
-
-        if let Some(routing) = config.routing() {
-            return refuse(
-                "unsupported_routing",
-                format!(
-                    "this deployment host's SSH configuration routes {} through {routing}. Proxy and jump routing are not supported for fleet setup: the private-network address must be reached directly. Remove the routing for this host, or deploy from a machine that reaches it directly",
-                    self.destination.address
-                ),
-            );
         }
         match config.value("hostname") {
             Some(hostname) if hostname == self.destination.address => {}
@@ -511,40 +566,167 @@ impl Runner {
 
     /// Whether this destination authenticates at all, using the selected identity.
     /// Runs `true` on the target, which is the cheapest thing a POSIX shell can do.
+    ///
+    /// A mistyped password is a retry, not a failure: OpenSSH is told
+    /// `NumberOfPasswordPrompts=1` so each child asks once, and this loop re-prompts
+    /// through the bridge up to [`super::MAX_PASSWORD_ATTEMPTS`].
     pub fn check_access(&self) -> Result<()> {
-        let completed = self.run_with_timeout("exec true", None, self.connect_timeout * 3)?;
-        if completed.success() {
-            return Ok(());
-        }
-        // Classified against the *whole* transcript, and only then shortened for a
-        // person: OpenSSH's changed-key banner is longer than any display cap, and the
-        // sentence that identifies it is at the end of it.
-        let full = String::from_utf8_lossy(&completed.stderr).to_ascii_lowercase();
-        let stderr = completed.stderr_text();
-        if let Some(reason) = classify_ssh_failure(&full) {
-            return refuse(
-                reason,
-                match reason {
-                    "host_key_changed" => format!(
-                        "{}'s host key is not the one this deployment host trusts. A changed host key blocks setup; verify the machine's identity out of band and repair the trust record deliberately. Nothing was sent",
-                        self.destination.address
-                    ),
-                    "host_unknown" => format!(
-                        "{} is not a host this deployment host has verified, and strict host checking is never relaxed. Verify its key first",
-                        self.destination.address
-                    ),
-                    _ => format!(
-                        "{} refused this authentication. {stderr}",
-                        self.destination.label()
-                    ),
-                },
-            );
+        let attempts = match self.identity {
+            ResolvedIdentity::Password => super::MAX_PASSWORD_ATTEMPTS,
+            _ => 1,
+        };
+        let timeout = self.connect_timeout.saturating_mul(3);
+        let mut last_stderr = String::new();
+        for attempt in 1..=attempts {
+            match self.run_with_timeout("exec true", None, timeout) {
+                Ok(completed) if completed.success() => return Ok(()),
+                Ok(completed) => {
+                    let full = String::from_utf8_lossy(&completed.stderr).to_ascii_lowercase();
+                    let stderr = completed.stderr_text();
+                    if let Some(reason) = classify_ssh_failure(&full) {
+                        if reason == "ssh_auth_failed"
+                            && matches!(self.identity, ResolvedIdentity::Password)
+                            && attempt < attempts
+                        {
+                            last_stderr = stderr;
+                            continue;
+                        }
+                        return refuse(
+                            reason,
+                            match reason {
+                                "host_key_changed" => format!(
+                                    "{}'s host key is not the one this deployment host trusts. A changed host key blocks setup; verify the machine's identity out of band and repair the trust record deliberately. Nothing was sent",
+                                    self.destination.address
+                                ),
+                                "host_unknown" => format!(
+                                    "{} is not a host this deployment host has verified, and strict host checking is never relaxed. Verify its key first",
+                                    self.destination.address
+                                ),
+                                _ => format!(
+                                    "{} refused this authentication. {stderr}",
+                                    self.destination.label()
+                                ),
+                            },
+                        );
+                    }
+                    return refuse(
+                        "ssh_unavailable",
+                        format!("{} did not answer: {stderr}", self.destination.label()),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
         refuse(
-            "ssh_unavailable",
-            format!("{} did not answer: {stderr}", self.destination.label()),
+            "ssh_auth_failed",
+            format!(
+                "{} refused this authentication after {attempts} attempts. {last_stderr}",
+                self.destination.label()
+            ),
         )
     }
+}
+
+impl Drop for Runner {
+    fn drop(&mut self) {
+        self.close_control();
+    }
+}
+
+impl Runner {
+    fn close_control(&self) {
+        let Some(path) = &self.control else {
+            return;
+        };
+        if path.exists() {
+            // The same config isolation the connection had: `-O exit` only talks to the
+            // mux socket, but ssh still reads its configuration first, and a `Match exec`
+            // there would run on the way out. Bounded, because this runs from `Drop` and
+            // a master that has stopped answering must not hold the engine thread.
+            let mut command = Command::new(&self.programs.ssh);
+            if self.isolates_config() {
+                command.args(["-F", "/dev/null"]);
+            }
+            command
+                .arg("-o")
+                .arg(format!(
+                    "ControlPath={}",
+                    quote_option_value(&path.display().to_string())
+                ))
+                .arg("-O")
+                .arg("exit")
+                .arg("-p")
+                .arg(self.destination.port.to_string())
+                .arg("-l")
+                .arg(&self.destination.user)
+                .arg(&self.destination.address)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            self.apply_env(&mut command);
+            let _ = run_bounded(command, None, CONTROL_EXIT_TIMEOUT);
+        }
+        let _ = std::fs::remove_file(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
+/// A mux socket inside `scratch`, short enough for `sockaddr_un`. The directory is
+/// 0700; OpenSSH creates the socket itself at 0600. A data directory whose path is
+/// already most of a hundred bytes falls back to a short name under `TMPDIR`.
+pub fn prepare_control_socket(scratch: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+
+    let uid = unsafe { libc::geteuid() };
+    let dir = scratch.join("c");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("creating the SSH control directory {}", dir.display()))
+        }
+    }
+    let metadata =
+        std::fs::symlink_metadata(&dir).with_context(|| format!("re-stating {}", dir.display()))?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return refuse(
+            "ssh_unavailable",
+            format!(
+                "{} is not a private directory this account owns; a multiplexed SSH socket cannot live there",
+                dir.display()
+            ),
+        );
+    }
+    let socket = dir.join("s");
+    if socket.as_os_str().len() <= 100 {
+        return Ok(socket);
+    }
+    let home = std::env::temp_dir().join(format!("ouro-cm-{}", super::random_hex(5)?));
+    match std::fs::DirBuilder::new().mode(0o700).create(&home) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("creating the SSH control directory {}", home.display()))
+        }
+    }
+    let socket = home.join("s");
+    if socket.as_os_str().len() > 100 {
+        return refuse(
+            "ssh_unavailable",
+            format!(
+                "{} is too long for a Unix socket; set TMPDIR to a shorter directory",
+                socket.display()
+            ),
+        );
+    }
+    Ok(socket)
 }
 
 /// The subset of `ssh -G` this path cares about.
@@ -800,16 +982,19 @@ const STDERR_CAP: usize = 256 * 1024;
 /// passes or this function is unwound, so an `ssh` that hangs on a dead network does not
 /// outlive the step that started it.
 pub fn run_bounded(command: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<Completed> {
-    run_bounded_for(command, stdin, timeout, None)
+    run_bounded_for(command, stdin, timeout, None, None, None)
 }
 
 /// The same, with the askpass window opened for exactly this child and closed when it
-/// is reaped.
+/// is reaped. A pending prompt pauses the idle clock; an unanswered prompt past
+/// `challenge_window` is `challenge_expired`, not `ssh_timeout`.
 fn run_bounded_for(
     mut command: Command,
     stdin: Option<&[u8]>,
     timeout: Duration,
     bridge: Option<&Arc<Bridge>>,
+    cancelled: Option<&Arc<dyn Fn() -> bool + Send + Sync>>,
+    challenge_window: Option<Duration>,
 ) -> Result<Completed> {
     use std::io::Write as _;
 
@@ -866,11 +1051,35 @@ fn run_bounded_for(
     set_nonblocking(&stdout)?;
     set_nonblocking(&stderr)?;
 
-    let deadline = std::time::Instant::now() + timeout;
+    let window = challenge_window.unwrap_or(super::CHALLENGE_LIFETIME);
+    let mut idle_deadline = std::time::Instant::now() + timeout;
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = loop {
-        if std::time::Instant::now() >= deadline {
+        if cancelled.is_some_and(|flag| flag()) {
+            if let Some(bridge) = bridge {
+                bridge.abort_active("cancelled");
+            }
+            return refuse("cancelled", "the operation was cancelled");
+        }
+        let now = std::time::Instant::now();
+        if bridge.is_some_and(|bridge| bridge.prompt_in_flight()) {
+            if let Some(began) = bridge.and_then(|bridge| bridge.prompt_began()) {
+                if now.saturating_duration_since(began) >= window {
+                    if let Some(bridge) = bridge {
+                        bridge.abort_active("challenge_expired");
+                    }
+                    return refuse(
+                        "challenge_expired",
+                        format!(
+                            "nobody answered the authentication prompt within {} seconds",
+                            window.as_secs().max(1)
+                        ),
+                    );
+                }
+            }
+            idle_deadline = now + timeout;
+        } else if now >= idle_deadline {
             return refuse(
                 "ssh_timeout",
                 format!(
@@ -889,6 +1098,26 @@ fn run_bounded_for(
         }
         std::thread::sleep(Duration::from_millis(5));
     };
+
+    if !matches!(code, Some(0)) {
+        if let Some(bridge) = bridge {
+            if let Some(reason) = bridge.take_reason() {
+                if matches!(reason, "challenge_expired" | "connection_lost") {
+                    return refuse(
+                        reason,
+                        match reason {
+                            "challenge_expired" => format!(
+                                "nobody answered the authentication prompt within {} seconds",
+                                window.as_secs().max(1)
+                            ),
+                            _ => "the SSH connection closed before authentication finished"
+                                .to_string(),
+                        },
+                    );
+                }
+            }
+        }
+    }
 
     Ok(Completed {
         code,
@@ -1035,6 +1264,9 @@ mod tests {
             connect_timeout: CONNECT_TIMEOUT,
             command_timeout: COMMAND_TIMEOUT,
             bridge: None,
+            control: None,
+            cancelled: None,
+            challenge_window: None,
         }
     }
 
@@ -1062,6 +1294,11 @@ mod tests {
             "ConnectTimeout=15",
             "ServerAliveInterval=15",
             "BatchMode=no",
+            "ProxyCommand=none",
+            "ProxyJump=none",
+            "UpdateHostKeys=no",
+            "VerifyHostKeyDNS=no",
+            "HashKnownHosts=no",
         ] {
             assert!(
                 options.iter().any(|option| option == required),
@@ -1083,9 +1320,13 @@ mod tests {
             "KnownHostsCommand",
             "GlobalKnownHostsFile",
             "RevokedHostKeys",
-            "CertificateFile",
             "PKCS11Provider",
             "IdentityAgent",
+            "ProxyCommand",
+            "ProxyJump",
+            "UpdateHostKeys",
+            "VerifyHostKeyDNS",
+            "HashKnownHosts",
         ] {
             let neutralised = options
                 .iter()
@@ -1094,7 +1335,8 @@ mod tests {
             assert!(
                 neutralised.ends_with("=none")
                     || neutralised.ends_with("=/dev/null")
-                    || neutralised.ends_with("=SSH_AUTH_SOCK"),
+                    || neutralised.ends_with("=SSH_AUTH_SOCK")
+                    || neutralised.ends_with("=no"),
                 "`{dangerous}` must be inert or explicitly this host's own: {neutralised}"
             );
         }
@@ -1167,6 +1409,13 @@ mod tests {
             .iter()
             .any(|o| o == "PreferredAuthentications=password"));
         assert!(options.iter().any(|o| o == "PubkeyAuthentication=no"));
+        let password_argv = runner.argv("exec true");
+        assert!(
+            password_argv
+                .windows(2)
+                .any(|pair| pair[0] == "-F" && pair[1] == "/dev/null"),
+            "a password connection has no legitimate need for config identities: {password_argv:?}"
+        );
 
         runner.identity = ResolvedIdentity::Key {
             path: PathBuf::from("/home/me/.ssh/id_ed25519"),

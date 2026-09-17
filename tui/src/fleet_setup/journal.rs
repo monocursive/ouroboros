@@ -1,6 +1,6 @@
 //! The operation journal: the durable authority for what has already happened.
 //!
-//! Seam S5. `<data dir>/fleet/deploy/<id>.json`, mode 0600, rewritten atomically
+//! Seam S5. `<data dir>/deploy/<id>.json`, mode 0600, rewritten atomically
 //! *before* and *after* every externally visible step. Before, so a process that dies
 //! mid-step leaves behind the statement "this was attempted"; after, so a resume knows
 //! not to repeat it. The proposal is explicit that admission is not a distributed
@@ -19,16 +19,21 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ensure_deploy_dir, journal_path, utc_timestamp, write_private_atomic, OperationKind,
-    OperationState, SCHEMA,
+    ensure_deploy_dir, journal_path, utc_timestamp, utc_timestamp_at, write_private_atomic,
+    IdentityChoice, OperationKind, OperationState, SCHEMA,
 };
 
 /// Who the operation is against, as far as it has been established.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TargetIdentity {
     pub machine: String,
+    /// Tailscale `PublicKey` (`nodekey:…`) for this address, when discovery could
+    /// name one. `None` for a manual private-network address that has no node key.
     #[serde(default)]
     pub peer_id: Option<String>,
+    /// Tailscale `ID`, recorded beside [`Self::peer_id`] when discovery named it.
+    #[serde(default)]
+    pub stable_id: Option<String>,
     #[serde(default)]
     pub hostname: Option<String>,
     #[serde(default)]
@@ -37,6 +42,10 @@ pub struct TargetIdentity {
     pub port: Option<u16>,
     #[serde(default)]
     pub ssh_user: Option<String>,
+    /// How this operation authenticated to the target. Folded here from the request
+    /// so `completed`/`cancelled` operations can drop the request file.
+    #[serde(default)]
+    pub identity: Option<IdentityChoice>,
     #[serde(default)]
     pub os: Option<String>,
     #[serde(default)]
@@ -257,6 +266,52 @@ impl Journal {
         Ok(operations)
     }
 
+    /// Drop durable files for `completed`/`cancelled` operations that are both older
+    /// than `older_than` and outside the newest `keep_newest`. Failed, interrupted and
+    /// in-flight work is left alone, as is anything whose `worker.lock` is currently held.
+    pub fn prune_terminal(
+        data_dir: &Path,
+        keep_newest: usize,
+        older_than: std::time::Duration,
+    ) -> Result<usize> {
+        let cutoff = match std::time::SystemTime::now().checked_sub(older_than) {
+            Some(at) => utc_timestamp_at(at)?,
+            None => return Ok(0),
+        };
+        let mut candidates = Vec::new();
+        for operation in Self::list(data_dir)? {
+            if super::lock::Lock::held(data_dir, &format!("{operation}.worker.lock")) {
+                continue;
+            }
+            let Some(record) = Self::read(data_dir, &operation)? else {
+                continue;
+            };
+            if !matches!(
+                record.state,
+                OperationState::Completed | OperationState::Cancelled
+            ) {
+                continue;
+            }
+            candidates.push((record.updated_at, record.created_at, operation));
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then(right.1.cmp(&left.1))
+                .then(right.2.cmp(&left.2))
+        });
+        let mut removed = 0;
+        for (updated_at, _, operation) in candidates.into_iter().skip(keep_newest) {
+            if updated_at >= cutoff {
+                continue;
+            }
+            remove_operation_files(data_dir, &operation)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     pub fn record(&self) -> &Record {
         &self.record
     }
@@ -331,14 +386,17 @@ impl Journal {
             .expect("the step just pushed"))
     }
 
-    pub fn set_plan_digest(&mut self, digest: &str) -> Result<()> {
-        self.record.plan_digest = Some(digest.to_string());
-        self.flush()
-    }
-
     pub fn set_plan(&mut self, plan: &super::plan::Plan) -> Result<()> {
         self.record.plan_digest = Some(plan.digest());
         self.record.plan = Some(plan.clone());
+        self.flush()
+    }
+
+    /// Drop a review that never reached a mutating step, so a retry re-plans.
+    pub fn forget_review(&mut self) -> Result<()> {
+        self.record.plan = None;
+        self.record.plan_digest = None;
+        self.record.roster = None;
         self.flush()
     }
 
@@ -500,12 +558,12 @@ impl Handle {
         self.with(|journal| journal.set_paths(paths))
     }
 
-    pub fn set_plan_digest(&self, digest: &str) -> Result<()> {
-        self.with(|journal| journal.set_plan_digest(digest))
-    }
-
     pub fn set_plan(&self, plan: &super::plan::Plan) -> Result<()> {
         self.with(|journal| journal.set_plan(plan))
+    }
+
+    pub fn forget_review(&self) -> Result<()> {
+        self.with(|journal| journal.forget_review())
     }
 
     pub fn begin_step(&self, machine: &str, step: &str) -> Result<()> {
@@ -541,6 +599,29 @@ impl Handle {
     pub fn clear_error(&self) -> Result<()> {
         self.with(|journal| journal.clear_error())
     }
+}
+
+fn remove_operation_files(data_dir: &Path, operation: &str) -> Result<()> {
+    for path in [
+        super::journal_path(data_dir, operation),
+        super::log_path(data_dir, operation),
+        super::request_path(data_dir, operation),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("removing {}", path.display()))
+            }
+        }
+    }
+    let scratch = super::scratch_dir(data_dir, operation);
+    match std::fs::remove_dir_all(&scratch) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("removing {}", scratch.display())),
+    }
+    Ok(())
 }
 
 /// Free text out of a subprocess or an error chain, on its way into a durable file.
@@ -686,5 +767,79 @@ mod tests {
             Journal::list(&data).expect("a listing"),
             vec!["op-0000000000d4".to_string(), "op-0000000000e5".to_string()]
         );
+    }
+
+    /// Completed and cancelled journals outside the newest-N window and older than the
+    /// cutoff are removed; failed and interrupted work is not.
+    #[test]
+    fn prune_keeps_the_newest_completed_and_never_touches_failed_or_interrupted() {
+        let data = scratch("prune");
+        for index in 0..55u32 {
+            let id = format!("op-00000000{index:04x}");
+            let mut journal = Journal::open(&data, &id, OperationKind::Add).expect("a journal");
+            journal
+                .set_state(OperationState::Completed)
+                .expect("completed");
+            let path = journal_path(&data, &id);
+            let mut record: Record =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("a journal file"))
+                    .expect("a record");
+            record.updated_at = format!("2020-01-01T00:{:02}:{:02}Z", index / 60, index % 60);
+            super::super::write_private_atomic(
+                &path,
+                &serde_json::to_vec_pretty(&record).expect("bytes"),
+            )
+            .expect("rewritten");
+        }
+        let mut failed =
+            Journal::open(&data, "op-00000000fail", OperationKind::Add).expect("failed");
+        failed
+            .fail(OperationState::Failed, "still resumable")
+            .expect("failed");
+        let mut interrupted =
+            Journal::open(&data, "op-00000000intr", OperationKind::Add).expect("interrupted");
+        interrupted
+            .fail(OperationState::Interrupted, "still resumable")
+            .expect("interrupted");
+
+        let removed =
+            Journal::prune_terminal(&data, 50, std::time::Duration::from_secs(30 * 86400))
+                .expect("prune");
+        assert_eq!(removed, 5, "55 completed minus the newest 50");
+        let remaining = Journal::list(&data).expect("a listing");
+        assert_eq!(remaining.len(), 52, "{remaining:?}");
+        assert!(remaining.iter().any(|id| id == "op-00000000fail"));
+        assert!(remaining.iter().any(|id| id == "op-00000000intr"));
+        assert!(journal_path(&data, "op-00000000fail").exists());
+        assert!(journal_path(&data, "op-00000000intr").exists());
+    }
+
+    /// A live worker keeps its journal even when the operation is already completed.
+    #[test]
+    fn prune_does_not_remove_an_operation_whose_worker_lock_is_held() {
+        let data = scratch("held");
+        let mut journal =
+            Journal::open(&data, "op-00000000hold", OperationKind::Add).expect("a journal");
+        journal
+            .set_state(OperationState::Completed)
+            .expect("completed");
+        let path = journal_path(&data, "op-00000000hold");
+        let mut record: Record =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("a journal file"))
+                .expect("a record");
+        record.updated_at = "2020-01-01T00:00:00Z".into();
+        super::super::write_private_atomic(
+            &path,
+            &serde_json::to_vec_pretty(&record).expect("bytes"),
+        )
+        .expect("rewritten");
+        let _worker = super::super::lock::Lock::acquire(&data, "op-00000000hold.worker.lock")
+            .expect("a held worker lock");
+        assert_eq!(
+            Journal::prune_terminal(&data, 0, std::time::Duration::from_secs(30 * 86400))
+                .expect("prune"),
+            0
+        );
+        assert!(path.exists());
     }
 }

@@ -458,7 +458,7 @@ impl App {
         }
         if settings.section == SettingsSection::Runtime {
             match key.code {
-                KeyCode::Esc => self.overlay = None,
+                KeyCode::Esc => self.close_overlay(),
                 // The proposal's Devices link, from the Runtime section it names. It
                 // replaces this overlay rather than stacking on it: two full pages over
                 // each other is a screen an operator cannot get out of predictably.
@@ -469,7 +469,7 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => self.overlay = None,
+            KeyCode::Esc => self.close_overlay(),
             KeyCode::Tab | KeyCode::Down => settings.move_field(1),
             KeyCode::BackTab | KeyCode::Up => settings.move_field(-1),
             KeyCode::Left => settings.cycle(-1),
@@ -511,7 +511,7 @@ impl App {
         };
 
         match key.code {
-            KeyCode::Esc => self.overlay = None,
+            KeyCode::Esc => self.close_overlay(),
             KeyCode::Tab | KeyCode::Down => settings.move_client(1),
             KeyCode::BackTab | KeyCode::Up => settings.move_client(-1),
             KeyCode::Left => settings.cycle_client(-1),
@@ -626,7 +626,7 @@ impl App {
         };
         settings.connection = settings.connection.min(rows.len().saturating_sub(1));
         match key.code {
-            KeyCode::Esc => self.overlay = None,
+            KeyCode::Esc => self.close_overlay(),
             KeyCode::Up | KeyCode::BackTab => {
                 settings.connection = settings.connection.saturating_sub(1)
             }
