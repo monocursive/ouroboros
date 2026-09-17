@@ -33,9 +33,20 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     File.chmod!(root, 0o700)
     fake_dir = Path.join(root, "bin")
 
+    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
+    # enforces that rather than only reporting it. These suites deploy onto other machines,
+    # so they are issuers.
+    File.mkdir_p!(Path.join(root, "fleet"))
+    ca = Path.join([root, "fleet", "ca-key.pem"])
+    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    File.chmod!(ca, 0o600)
+
     previous = %{
       data_dir: Application.get_env(:ouroboros, :data_dir),
       audit: Application.get_env(:ouroboros, :audit),
+      # The deploy blockers read this, and a case that reconfigures the endpoint to prove one
+      # of them would otherwise leave it set for every case after it.
+      web: Application.get_env(:ouroboros, :web),
       ouro: System.get_env("OUROBOROS_PROCESS_ID_HELPER")
     }
 
@@ -44,6 +55,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     on_exit(fn ->
       restore(:data_dir, previous.data_dir)
       restore(:audit, previous.audit)
+      restore(:web, previous.web)
 
       if previous.ouro,
         do: System.put_env("OUROBOROS_PROCESS_ID_HELPER", previous.ouro),
@@ -103,7 +115,8 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       result = call(client, "fleet.devices")["result"]
 
       assert result["devices"] == []
-      assert result["host"]["capabilities"]["deploy"] == false
+      assert is_boolean(result["host"]["capabilities"]["deploy"])
+      assert result["host"]["issuer"] == true
 
       # Status of an operation nobody started is a not-found, not a scope refusal.
       assert call(client, "fleet.deployment.status", %{"operation_id" => "00aa11bb22cc33dd"})[
@@ -385,8 +398,11 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       assert error["code"] == -32_004
       assert error["data"]["reason"] == "ouro_path_unknown"
 
+      # `prepare` does not get as far as the launcher: not knowing where `ouro` is, is one of
+      # the blockers this host is refused for, and the refusal names the whole set.
       error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
-      assert error["data"]["reason"] == "ouro_path_unknown"
+      assert error["data"]["reason"] == "deploy_blocked"
+      assert "ouro_path_unknown" in error["data"]["blockers"]
     end
 
     test "an operation id that is not one is refused before any path is built", _context do
@@ -629,6 +645,94 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
           assert Map.has_key?(row, field), "#{field} missing from #{inspect(row)}"
         end
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # A disabled button is a rendering; this is the boundary
+
+  describe "deploy blockers" do
+    setup context do
+      context
+      |> arrange_worker()
+      |> Map.put(:client, connected(scope: :operate))
+    end
+
+    test "no CA key blocks an add, and does not block the setup that creates one", %{
+      client: client,
+      root: root
+    } do
+      File.rm!(Path.join([root, "fleet", "ca-key.pem"]))
+
+      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
+      assert error["data"]["reason"] == "deploy_blocked"
+      assert error["data"]["blockers"] == ["no_ca_key"]
+
+      # The first local fleet is what *creates* the key, so refusing it for not having one
+      # would make the operation that fixes the blocker impossible.
+      assert call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+    end
+
+    test "a cleartext bind blocks a setup too, because it still writes a fleet", %{
+      client: client
+    } do
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      for params <- [prepare_params(), %{"kind" => "setup"}] do
+        error = call(client, "fleet.deployment.prepare", params)["error"]
+        assert error["data"]["reason"] == "deploy_blocked"
+        assert "cleartext_web_bind" in error["data"]["blockers"]
+      end
+    end
+
+    test "every blocker this host has is named at once", %{client: client, root: root} do
+      File.rm!(Path.join([root, "fleet", "ca-key.pem"]))
+      System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
+
+      assert error["code"] == -32_003
+
+      assert Enum.sort(error["data"]["blockers"]) ==
+               ["cleartext_web_bind", "no_ca_key", "ouro_path_unknown"]
+    end
+
+    test "an operation already under way cannot be advanced on a host that became blocked",
+         %{client: client, worker: worker} do
+      operation =
+        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
+      await_challenge(client, operation, "pw")
+
+      # The endpoint is reconfigured under a running deployment. The credential must not be
+      # accepted after that, which is the whole point of deciding on the bind.
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      for {method, params} <- [
+            {"fleet.deployment.authenticate",
+             %{"operation_id" => operation, "challenge" => "pw", "secret" => "blocked-secret"}},
+            {"fleet.deployment.start",
+             %{
+               "operation_id" => operation,
+               "plan_digest" => "sha",
+               "idempotency_key" => "blocked"
+             }},
+            {"fleet.deployment.resume", %{"operation_id" => operation}}
+          ] do
+        error = call(client, method, params)["error"]
+
+        assert error["data"]["reason"] == "deploy_blocked", "#{method} was not blocked"
+        assert "cleartext_web_bind" in error["data"]["blockers"]
+      end
+
+      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+
+      # Stopping one is always allowed: an operator must be able to end a deployment on a
+      # host that may no longer start one.
+      assert call(client, "fleet.deployment.cancel", %{"operation_id" => operation})["result"]
     end
   end
 

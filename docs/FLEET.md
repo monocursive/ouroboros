@@ -628,6 +628,13 @@ records a `takeover` step of its own. An operation nobody can attribute stays *r
 a read grants no authority, and refusing every status on a runtime whose `ouro` predates the
 field would break recovery without protecting anything.
 
+**Blockers.** `fleet.devices` reports whether this host can deploy and why not, and the
+deployment verbs enforce the same answer: `prepare`, `start`, `authenticate` and `resume`
+refuse `deploy_blocked` carrying the blockers. A disabled button is a rendering, not a
+boundary. `cancel` is never blocked — an operator must be able to stop a deployment on a
+host that may no longer start one — and a `setup` is exempt from `no_ca_key` alone, because
+the first local fleet is what creates that key.
+
 **Authorization.** Every verb here needs an administrator once identities are configured —
 the network inventory as much as the mutations, because a tailnet inventory is every machine
 on an operator's private network. A non-administrator sees `fleet.status`'s membership

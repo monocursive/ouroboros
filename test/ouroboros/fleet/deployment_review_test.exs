@@ -31,6 +31,14 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
     File.chmod!(root, 0o700)
     fake_dir = Path.join(root, "bin")
 
+    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
+    # enforces that rather than only reporting it. These suites deploy onto other machines,
+    # so they are issuers.
+    File.mkdir_p!(Path.join(root, "fleet"))
+    ca = Path.join([root, "fleet", "ca-key.pem"])
+    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    File.chmod!(ca, 0o600)
+
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
     previous_web = Application.get_env(:ouroboros, :web)
     previous_ouro = System.get_env("OUROBOROS_PROCESS_ID_HELPER")

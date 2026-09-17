@@ -26,6 +26,14 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
     fake_dir = Path.join(root, "bin")
 
+    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
+    # enforces that rather than only reporting it. These suites deploy onto other machines,
+    # so they are issuers.
+    File.mkdir_p!(Path.join(root, "fleet"))
+    ca = Path.join([root, "fleet", "ca-key.pem"])
+    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    File.chmod!(ca, 0o600)
+
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
     previous_ouro = System.get_env("OUROBOROS_PROCESS_ID_HELPER")
     previous_web = Application.get_env(:ouroboros, :web)
@@ -151,6 +159,10 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
     test "a runtime with no CA key cannot deploy, and says which reasons apply", context do
       arrange_devices(context, ~s({"devices": []}\n))
+
+      # The suite's setup makes this host an issuer, because almost every case here deploys
+      # onto another machine. This one is about the machine that cannot.
+      File.rm!(Path.join([context.root, "fleet", "ca-key.pem"]))
 
       assert {:ok, %{"host" => host}} = Deployment.devices()
 

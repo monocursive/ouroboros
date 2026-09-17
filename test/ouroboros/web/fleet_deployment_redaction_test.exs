@@ -44,6 +44,14 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     File.chmod!(root, 0o700)
     fake_dir = Path.join(root, "bin")
 
+    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
+    # enforces that rather than only reporting it. These suites deploy onto other machines,
+    # so they are issuers.
+    File.mkdir_p!(Path.join(root, "fleet"))
+    ca = Path.join([root, "fleet", "ca-key.pem"])
+    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    File.chmod!(ca, 0o600)
+
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
     previous_ouro = System.get_env("OUROBOROS_PROCESS_ID_HELPER")
     Application.put_env(:ouroboros, :data_dir, root)
@@ -316,6 +324,58 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
 
       broker = :sys.get_state(Process.whereis(Ouroboros.Fleet.Deployment))
       refute inspect(broker, limit: :infinity, printable_limit: :infinity) =~ secret
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The browser surface is held to the same boundary
+
+  describe "deploy blockers through Web.Call" do
+    test "a cleartext bind refuses the credential path before any worker hears of it",
+         context do
+      arrange_worker(context)
+
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      on_exit(fn -> Application.delete_env(:ouroboros, :web) end)
+
+      secret = "blocked-secret-#{System.unique_integer([:positive])}"
+
+      log =
+        capture_log(fn ->
+          assert {:error, code, _message, data} =
+                   Call.call(
+                     :operate,
+                     "fleet.deployment.prepare",
+                     %{"target" => %{"address" => "100.64.12.44"}, "ssh_user" => "deploy"},
+                     session: "web-session-1"
+                   )
+
+          assert code == -32_003
+          assert data["reason"] == "deploy_blocked"
+          assert "cleartext_web_bind" in data["blockers"]
+
+          # And the credential verb itself, which is the one that matters: this is the
+          # decision the spec makes on the bind, so it has to hold where the secret is.
+          assert {:error, -32_003, _m, blocked} =
+                   Call.call(
+                     :operate,
+                     @method,
+                     %{
+                       "operation_id" => "00aa11bb22cc33dd",
+                       "challenge" => "pw",
+                       "secret" => secret
+                     },
+                     session: "web-session-1"
+                   )
+
+          assert blocked["reason"] == "deploy_blocked"
+        end)
+
+      # The refusal is still a redacted line: being blocked is no reason to start logging it.
+      refute log =~ secret
+      assert log =~ "params=redacted"
+      refute_receive {:fake_worker, _frame}, 300
     end
   end
 

@@ -401,7 +401,50 @@ defmodule Ouroboros.Fleet.Deployment do
   """
   @spec prepare(map(), binding()) :: {:ok, map()} | {:error, term()}
   def prepare(request, binding) when is_map(request) and is_map(binding) do
-    GenServer.call(__MODULE__, {:prepare, request, binding}, @call_timeout)
+    with :ok <- unblocked(request["kind"]) do
+      GenServer.call(__MODULE__, {:prepare, request, binding}, @call_timeout)
+    end
+  end
+
+  @doc """
+  Whether this host may deploy at all, for the kind of operation being asked for.
+
+  `fleet.devices` already answers this as `capabilities.deploy` so a surface can disable the
+  action, but a disabled button is a *rendering*, not a boundary: a client that never drew
+  it, or that ignores what it drew, reached `prepare` anyway and got as far as being asked
+  for a password on a cleartext bind. The blockers are therefore checked here too, where the
+  decision actually is.
+
+  `setup` is exempt from `no_ca_key` and from that alone. The first local fleet is what
+  *creates* the CA key, so refusing it for not having one yet would make the one operation
+  that fixes the blocker impossible; every other blocker still applies to it, including the
+  cleartext bind, because a setup is asked for no credential but still writes a fleet.
+
+  Checked in the caller's process, so a refusal costs the broker nothing.
+  """
+  @spec unblocked(String.t() | nil) :: :ok | {:error, {:deploy_blocked, [String.t()]}}
+  def unblocked(kind) do
+    dir = data_dir()
+
+    case dir |> deploy_blockers(issuer?(dir)) |> exempt(kind) do
+      [] -> :ok
+      blockers -> {:error, {:deploy_blocked, blockers}}
+    end
+  end
+
+  defp exempt(blockers, "setup"), do: blockers -- ["no_ca_key"]
+  defp exempt(blockers, _other), do: blockers
+
+  # The kind an operation already has, from the journal the worker writes when it opens one.
+  # Durable, so it answers for an operation whose worker is long gone — which is exactly when
+  # `resume` needs it.
+  defp operation_kind(operation) do
+    with dir when is_binary(dir) <- data_dir(),
+         {:ok, document} <- Journal.read(dir, operation) do
+      document["kind"]
+    else
+      _unknown -> nil
+    end
   end
 
   @doc """
@@ -431,6 +474,7 @@ defmodule Ouroboros.Fleet.Deployment do
     # the plan could never be approved again (review F4). Claiming last keeps the claim
     # atomic against a second caller racing this one.
     with :ok <- Journal.validate_operation(operation),
+         :ok <- unblocked(operation_kind(operation)),
          {:ok, pid} <- client(operation),
          :fresh <- peek(operation, idempotency_key),
          {:ok, challenge} <- review_challenge(pid),
@@ -469,7 +513,8 @@ defmodule Ouroboros.Fleet.Deployment do
           {:ok, map()} | {:error, term()}
   def authenticate(operation, challenge, secret, binding)
       when is_binary(challenge) and is_binary(secret) do
-    with {:ok, pid} <- client(operation) do
+    with :ok <- unblocked(operation_kind(operation)),
+         {:ok, pid} <- client(operation) do
       Client.respond(pid, challenge, ["password", "passphrase"], %{"secret" => secret}, binding)
     end
   end
@@ -519,7 +564,8 @@ defmodule Ouroboros.Fleet.Deployment do
   @spec resume(String.t(), binding(), boolean()) :: {:ok, map()} | {:error, term()}
   def resume(operation, binding, takeover? \\ false)
       when is_binary(operation) and is_map(binding) and is_boolean(takeover?) do
-    with :ok <- Journal.validate_operation(operation) do
+    with :ok <- Journal.validate_operation(operation),
+         :ok <- unblocked(operation_kind(operation)) do
       GenServer.call(__MODULE__, {:resume, operation, binding, takeover?}, @call_timeout)
     end
   end

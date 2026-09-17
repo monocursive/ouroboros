@@ -329,6 +329,9 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     operation_state_unknown:
       {:upstream_error, "that operation's journal does not record a state to resume from"},
     worker_refused: {:upstream_error, "the deployment worker refused the request"},
+    deploy_blocked:
+      {:scope_denied,
+       "this host cannot deploy right now; `fleet.devices` reports the same blockers under capabilities.reasons"},
     worker_attaching:
       {:unavailable,
        "that operation's worker is still being attached to; read its status in a moment"},
@@ -374,6 +377,12 @@ defmodule Ouroboros.Gateway.Methods.Safe do
   # hiding the only part of the answer an operator can act on.
   defp normalize_deployment({:worker_refused, reason, detail}) when is_binary(reason) do
     {:worker_refused, %{"worker_reason" => reason, "detail" => bounded(detail)}}
+  end
+
+  # The blockers travel as a list under their own key rather than as prose: a surface renders
+  # one sentence per blocker, and the same list is what `fleet.devices` already answers with.
+  defp normalize_deployment({:deploy_blocked, blockers}) when is_list(blockers) do
+    {:deploy_blocked, %{"blockers" => blockers}}
   end
 
   defp normalize_deployment({:ouro_failed, status, output}) do
