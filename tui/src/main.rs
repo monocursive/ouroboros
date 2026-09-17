@@ -1248,6 +1248,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             }
             Ok(())
         }
+        FleetCommand::Helper => ouro::fleet_helper::serve(paths.data_dir.clone()),
         FleetCommand::Create {
             name,
             from,

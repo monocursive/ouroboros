@@ -30,6 +30,8 @@ use rcgen::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use x509_parser::certification_request::X509CertificationRequest;
+use x509_parser::prelude::FromDer;
 use x509_parser::{extensions::GeneralName, pem::parse_x509_pem};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -383,8 +385,10 @@ impl Ports {
 /// production port spaces — the dist range plus the derived EPMD and gateway spaces —
 /// because a live same-host lab legitimately occupies them. OS-assigned ports are
 /// screened against all three so a test never collides with that lab.
-#[cfg(test)]
-pub(crate) fn ephemeral_ports() -> Ports {
+/// Public so `tui/tests/` can honour the same rule: an integration test that creates a
+/// fleet chooses its ports here rather than letting `create` derive production ones.
+#[doc(hidden)]
+pub fn ephemeral_ports() -> Ports {
     let mut held = Vec::new();
     let mut ports = Vec::new();
     while ports.len() < 3 {
@@ -2070,6 +2074,7 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<Vec<String>> {
     let mut present = Vec::new();
     let mut names = Vec::new();
     let mut cluster_directory = None;
+    let mut receipts_directory = None;
     let unknown = unrecognized_fleet_entries(dir)?;
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
@@ -2079,6 +2084,9 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<Vec<String>> {
         };
         if name == CLUSTER_DIRECTORY_DIR {
             cluster_directory = Some(entry.path());
+            names.push(name.to_string());
+        } else if name == RECEIPTS_DIR {
+            receipts_directory = Some(entry.path());
             names.push(name.to_string());
         } else if known.contains(name) || retired_revocation_file(name) {
             present.push(entry.path());
@@ -2102,6 +2110,10 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<Vec<String>> {
         .as_deref()
         .map(validate_cluster_directory)
         .transpose()?;
+    let receipt_files = receipts_directory
+        .as_deref()
+        .map(validate_receipts_directory)
+        .transpose()?;
 
     for path in present {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -2110,6 +2122,11 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<Vec<String>> {
         (cluster_directory.as_deref(), checkpoint_files)
     {
         remove_validated_cluster_directory(cluster_directory, checkpoint_files)?;
+    }
+    if let (Some(receipts_directory), Some(receipt_files)) =
+        (receipts_directory.as_deref(), receipt_files)
+    {
+        remove_validated_receipts_directory(receipts_directory, receipt_files)?;
     }
     fs::remove_dir(dir).with_context(|| format!("removing empty {}", dir.display()))?;
     sync_parent(dir)?;
@@ -2131,7 +2148,11 @@ fn unrecognized_fleet_entries(dir: &Path) -> Result<Vec<String>> {
             unknown.push(name.to_string_lossy().into_owned());
             continue;
         };
-        if name == CLUSTER_DIRECTORY_DIR || known.contains(name) || retired_revocation_file(name) {
+        if name == CLUSTER_DIRECTORY_DIR
+            || name == RECEIPTS_DIR
+            || known.contains(name)
+            || retired_revocation_file(name)
+        {
             continue;
         }
         unknown.push(name.to_string());
@@ -2789,6 +2810,27 @@ fn validate_tls_identity(
     ca_key_pem: Option<&str>,
     description: &str,
 ) -> Result<()> {
+    validate_tls_materials(
+        member,
+        ca_cert_pem,
+        node_cert_pem,
+        Some(node_key_pem),
+        ca_key_pem,
+        description,
+    )
+}
+
+/// The same check, for the one caller that legitimately holds no private key: an issuer
+/// validating a leaf it just minted for a key that lives on another machine. Every rule
+/// below applies to both; only the private-key half is conditional.
+fn validate_tls_materials(
+    member: &Member,
+    ca_cert_pem: &str,
+    node_cert_pem: &str,
+    node_key_pem: Option<&str>,
+    ca_key_pem: Option<&str>,
+    description: &str,
+) -> Result<()> {
     let (ca_remaining, ca_pem) = parse_x509_pem(ca_cert_pem.as_bytes())
         .map_err(|_| anyhow!("{description} CA certificate is not valid PEM"))?;
     if ca_pem.label != "CERTIFICATE" || !ca_remaining.iter().all(u8::is_ascii_whitespace) {
@@ -2911,10 +2953,12 @@ fn validate_tls_identity(
         );
     }
 
-    let node_key = KeyPair::from_pem(node_key_pem)
-        .with_context(|| format!("{description} node private key is invalid"))?;
-    if node_key.public_key_der() != node.tbs_certificate.subject_pki.raw {
-        bail!("{description} node private key does not match its certificate");
+    if let Some(node_key_pem) = node_key_pem {
+        let node_key = KeyPair::from_pem(node_key_pem)
+            .with_context(|| format!("{description} node private key is invalid"))?;
+        if node_key.public_key_der() != node.tbs_certificate.subject_pki.raw {
+            bail!("{description} node private key does not match its certificate");
+        }
     }
     if let Some(ca_key_pem) = ca_key_pem {
         let ca_key = KeyPair::from_pem(ca_key_pem)
@@ -4614,6 +4658,1523 @@ fn uncontrolled_path_text(path: &Path) -> Result<&str> {
         bail!("path contains a control character: {}", path.display());
     }
     Ok(text)
+}
+
+// ---------------------------------------------------------------------------
+// Admission: giving a machine an identity without moving the authority to mint one.
+//
+// `create_from` above is the file-based floor: an operator copies a whole fleet
+// directory, so the CA key, the source machine's own node key and the cookie all
+// travel, and the joiner signs itself. The proposal's secure path
+// (`docs/proposals/fleet-network-onboarding.md`, "Enrollment, rosters, and
+// interrupted work") splits that into three steps that each keep a private key on
+// the machine that generated it:
+//
+//   `prepare_admission`        on the target: generate its key, keep it in a private
+//                              per-operation staging directory, and emit a CSR bound
+//                              to the prepared identity and the operation id.
+//   `issue_member_certificate` on the machine that holds the CA key: verify the
+//                              request and mint one leaf for exactly the approved
+//                              node name and address.
+//   `install_admission`        back on the target: bind the issued leaf to the key
+//                              that never left, then publish the fleet directory
+//                              with a single rename.
+//
+// The CA key is read only by the middle step, on the machine it already lives on.
+// The target's key is written only by the first step, into a directory the last
+// step promotes. No step reads another member's private key at all.
+// ---------------------------------------------------------------------------
+
+/// Per-operation receipts, inside the fleet directory once one exists.
+pub const RECEIPTS_DIR: &str = "receipts";
+
+/// The private per-operation staging namespace.
+///
+/// Deliberately *not* under [`STAGING_PREFIX`]: `recover_orphan_staging` deletes
+/// everything in that namespace on the way into every lifecycle lock, which is right
+/// for an interrupted `create` and wrong for a pending admission whose key the next
+/// step still needs. A name here is owned by its operation and removed by its
+/// operation.
+const ADMISSION_PREFIX: &str = ".fleet.admission.";
+const ADMISSION_SCHEMA: u8 = 1;
+/// The public record of what a `prepare` produced, removed when `install` promotes
+/// the directory: a fleet directory holds only credentials and receipts.
+const ADMISSION_REQUEST_FILE: &str = "request.json";
+const MAX_RECEIPT_STEPS: usize = 64;
+const MAX_RECEIPT_TEXT: usize = 200;
+const MAX_ADMISSION_PEM_BYTES: usize = 16 * 1024;
+const MAX_ADMISSION_ROSTER: usize = 64;
+
+/// A refusal with a stable machine-readable reason.
+///
+/// The helper turns these into `{"ok": false, "reason": "...", "detail": "..."}`;
+/// an orchestrator branches on `reason` and shows `detail`. Carried through
+/// `anyhow` so the library functions keep one error type and callers that do not
+/// care see an ordinary message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmissionError {
+    pub reason: &'static str,
+    pub detail: String,
+    /// The roster revision this machine actually holds, for `roster_conflict`.
+    pub roster_revision: Option<u64>,
+}
+
+impl std::fmt::Display for AdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for AdmissionError {}
+
+impl AdmissionError {
+    fn new(reason: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+            roster_revision: None,
+        }
+    }
+}
+
+/// The stable reason behind an error, when one was declared.
+pub fn admission_error(error: &anyhow::Error) -> Option<&AdmissionError> {
+    error.downcast_ref::<AdmissionError>()
+}
+
+fn refuse<T>(reason: &'static str, detail: impl Into<String>) -> Result<T> {
+    Err(AdmissionError::new(reason, detail).into())
+}
+
+/// A validation failure from an existing fleet check, given a reason code.
+fn refusing(reason: &'static str, error: anyhow::Error) -> anyhow::Error {
+    AdmissionError::new(reason, format!("{error:#}")).into()
+}
+
+/// What a target asks for. Every field is public information: a certificate signing
+/// request, the identity it is for, and the fingerprint of the public key inside it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionRequest {
+    pub schema: u8,
+    pub operation: String,
+    pub machine: String,
+    pub host: String,
+    pub node: String,
+    /// `sha256:<64 hex>` over the DER SubjectPublicKeyInfo the CSR carries.
+    pub key_fingerprint: String,
+    pub csr_pem: String,
+}
+
+/// What an issuer sends back.
+///
+/// There is no field for a CA key or for another machine's node key, and
+/// `deny_unknown_fields` means a sender that adds one is refused rather than
+/// silently ignored — a target should notice being handed authority it must not
+/// hold. The cookie is the one secret here; it is the fleet's shared secret by
+/// construction, and it is zeroized on drop and redacted from `Debug`.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionMaterials {
+    pub schema: u8,
+    pub operation: String,
+    pub fleet_id: String,
+    pub fleet_name: String,
+    pub machine: String,
+    pub host: String,
+    pub node: String,
+    pub ca_cert_pem: String,
+    pub node_cert_pem: String,
+    pub cookie: String,
+    pub epmd_port: u16,
+    pub dist_port_min: u16,
+    pub dist_port_max: u16,
+    pub members: Vec<Member>,
+    #[serde(default)]
+    pub tombstones: Vec<Member>,
+    pub roster_revision: u64,
+    pub key_fingerprint: String,
+}
+
+impl Drop for AdmissionMaterials {
+    fn drop(&mut self) {
+        self.cookie.zeroize();
+    }
+}
+
+/// Hand-written so the cookie cannot reach a log, a panic message or an error chain
+/// through a derived `Debug`.
+impl std::fmt::Debug for AdmissionMaterials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmissionMaterials")
+            .field("operation", &self.operation)
+            .field("fleet_id", &self.fleet_id)
+            .field("node", &self.node)
+            .field("cookie", &"<redacted>")
+            .field("roster_revision", &self.roster_revision)
+            .field("key_fingerprint", &self.key_fingerprint)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One durable step of one operation. Names, times, outcomes and public
+/// fingerprints; never key material, a cookie or a token.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptStep {
+    pub step: String,
+    pub outcome: String,
+    /// RFC 3339 UTC, to the second.
+    pub at: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+}
+
+/// `<data dir>/fleet/receipts/<operation id>.json`: what this machine did, in order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    pub schema: u8,
+    pub operation: String,
+    pub machine: String,
+    pub host: String,
+    pub node: String,
+    #[serde(default)]
+    pub key_fingerprint: Option<String>,
+    pub steps: Vec<ReceiptStep>,
+}
+
+impl Receipt {
+    pub fn has_step(&self, step: &str) -> bool {
+        self.steps
+            .iter()
+            .any(|entry| entry.step == step && entry.outcome == "ok")
+    }
+}
+
+/// The identity a receipt is opened with, so a step never has to guess one.
+struct ReceiptSeed {
+    operation: String,
+    machine: String,
+    host: String,
+    node: String,
+    key_fingerprint: Option<String>,
+}
+
+/// The non-secret shape of a machine, for an orchestrator deciding what to do next.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct InspectedFleet {
+    pub machine: String,
+    pub host: String,
+    pub node: String,
+    pub fleet_id: String,
+    pub name: String,
+    pub roster_revision: u64,
+    pub members: Vec<String>,
+    pub tombstones: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Inspection {
+    pub os: String,
+    pub arch: String,
+    pub data_dir: String,
+    /// True when this data directory has a live published runtime.
+    pub runtime_running: bool,
+    pub fleet: Option<InspectedFleet>,
+    pub pending_operations: Vec<String>,
+}
+
+/// A roster edit carrying the revision the operator computed it against.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RosterChange {
+    Add {
+        machine: String,
+        host: String,
+        #[serde(default)]
+        node: Option<String>,
+    },
+    Remove {
+        machine: String,
+    },
+    Forget {
+        machine: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RosterOutcome {
+    pub roster_revision: u64,
+    pub changed: bool,
+    pub member: Member,
+}
+
+fn admission_dir(data_dir: &Path, operation: &str) -> PathBuf {
+    data_dir.join(format!("{ADMISSION_PREFIX}{operation}"))
+}
+
+/// `<data dir>/fleet/receipts/`: where receipts live once this machine has a fleet.
+pub fn receipts_dir(data_dir: &Path) -> PathBuf {
+    fleet_dir(data_dir).join(RECEIPTS_DIR)
+}
+
+/// An operation id names a directory and a file, so it is checked before it is used
+/// as either: lowercase ASCII alphanumerics and single hyphens, bounded length, no
+/// leading or trailing hyphen. `.`, `/` and `..` cannot survive this.
+fn validate_operation_id(operation: &str) -> Result<()> {
+    let shaped = (8..=64).contains(&operation.len())
+        && operation
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !operation.starts_with('-')
+        && !operation.ends_with('-')
+        && !operation.contains("--");
+    if !shaped {
+        return refuse(
+            "invalid_request",
+            format!(
+                "`{operation}` is not an operation id: 8 to 64 characters of lowercase letters, digits and single hyphens, not starting or ending with one"
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Short free text from a remote peer, on its way into a durable file.
+fn validate_receipt_text(value: &str, field: &str, limit: usize) -> Result<()> {
+    if value.is_empty() || value.len() > limit {
+        return refuse(
+            "invalid_request",
+            format!("receipt {field} must be 1 to {limit} characters"),
+        );
+    }
+    if value.chars().any(char::is_control) {
+        return refuse(
+            "invalid_request",
+            format!("receipt {field} must not contain control characters"),
+        );
+    }
+    Ok(())
+}
+
+/// `sha256:<64 hex>` over DER bytes, for naming a public key without printing it.
+fn public_fingerprint(der: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, der);
+    let mut text = String::with_capacity(7 + 64);
+    text.push_str("sha256:");
+    for byte in digest.as_ref() {
+        use std::fmt::Write as _;
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
+}
+
+fn utc_timestamp() -> Result<String> {
+    let seconds: libc::time_t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("the system clock is before the Unix epoch")?
+        .as_secs()
+        .try_into()
+        .context("the current time does not fit the platform clock")?;
+    // SAFETY: both pointers name initialized storage for the duration of the call;
+    // `gmtime_r` writes only the supplied `tm` and has no shared static result.
+    let mut calendar: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&seconds, &mut calendar) }.is_null() {
+        bail!("the operating system could not convert the current UTC time");
+    }
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        calendar.tm_year + 1900,
+        calendar.tm_mon + 1,
+        calendar.tm_mday,
+        calendar.tm_hour,
+        calendar.tm_min,
+        calendar.tm_sec
+    ))
+}
+
+/// Operation ids with a private staging directory in this data directory.
+///
+/// A name in this namespace that is not a valid operation id is a hard error for the
+/// same reason an invalid `.fleet.setup.` name is: this code will not guess about
+/// private data it did not write.
+fn scan_admission(data_dir: &Path) -> Result<Vec<String>> {
+    let mut pending = Vec::new();
+    let entries = match fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(pending),
+        Err(error) => return Err(error).context(format!("reading {}", data_dir.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(operation) = name.strip_prefix(ADMISSION_PREFIX) else {
+            continue;
+        };
+        if validate_operation_id(operation).is_err() {
+            return refuse(
+                "invalid_staging",
+                format!(
+                    "{} uses Ouroboros's private admission namespace but does not name an operation; inspect it manually before retrying",
+                    entry.path().display()
+                ),
+            );
+        }
+        pending.push(operation.to_string());
+    }
+    pending.sort();
+    Ok(pending)
+}
+
+/// The certificate signing request a prepared identity asks for.
+///
+/// Identical in every field that reaches the issued certificate to the parameters
+/// `signed_node_with` uses for a locally signed leaf, because the issuer builds those
+/// parameters itself and this is what the target will be checked against.
+fn certificate_request(local: &Member, key: &KeyPair) -> Result<String> {
+    let mut params = CertificateParams::new(vec![local.host.clone()])
+        .context("using the machine address as a certificate name")?;
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, local.node.clone());
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
+    params
+        .serialize_request(key)
+        .context("building the certificate signing request")?
+        .pem()
+        .context("encoding the certificate signing request")
+}
+
+/// Generate this machine's own key and ask to be admitted under one operation id.
+///
+/// The key is written to `<data dir>/.fleet.admission.<operation id>/node-key.pem`
+/// and nowhere else; the CSR that comes back proves possession of it by being signed
+/// with it. Repeating the call with the same operation id returns the same request —
+/// the stored one, not a new key — so a lost connection costs a round trip and not an
+/// identity. A different operation id while one is pending is refused: two prepared
+/// keys for one machine is exactly the duplicate identity the proposal's recovery
+/// table exists to prevent.
+pub fn prepare_admission(
+    data_dir: &Path,
+    operation: &str,
+    machine: &str,
+    host: &str,
+) -> Result<AdmissionRequest> {
+    validate_operation_id(operation)?;
+    validate_machine(machine).map_err(|error| refusing("invalid_request", error))?;
+    validate_host(host).map_err(|error| refusing("invalid_request", error))?;
+    ensure_usable_ipv4_resolution(host).map_err(|error| refusing("unusable_host", error))?;
+    ensure_data_dir(data_dir)?;
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet helper prepare")?;
+
+    let final_dir = fleet_dir(data_dir);
+    if final_dir
+        .try_exists()
+        .with_context(|| format!("inspecting {}", final_dir.display()))?
+    {
+        return refuse(
+            "fleet_exists",
+            format!(
+                "this machine already has fleet state in {}; admission mints an identity for a machine that has none. Run `ouro fleet status` there, or stop the runtime and run `ouro fleet leave` first",
+                final_dir.display()
+            ),
+        );
+    }
+
+    for pending in scan_admission(data_dir)? {
+        if pending != operation {
+            return refuse(
+                "operation_in_progress",
+                format!(
+                    "operation {pending} is already preparing an identity on this machine; finish or remove it before starting {operation}"
+                ),
+            );
+        }
+    }
+
+    let local = member(machine, host);
+    let dir = admission_dir(data_dir, operation);
+    if dir
+        .try_exists()
+        .with_context(|| format!("inspecting {}", dir.display()))?
+    {
+        ensure_private_dir(&dir)?;
+        let request_path = dir.join(ADMISSION_REQUEST_FILE);
+        if !request_path
+            .try_exists()
+            .with_context(|| format!("inspecting {}", request_path.display()))?
+        {
+            return refuse(
+                "install_in_progress",
+                format!(
+                    "operation {operation} is past preparation on this machine; rerun `install` with its materials instead"
+                ),
+            );
+        }
+        let existing: AdmissionRequest =
+            serde_json::from_str(&read_private(&request_path, "admission request")?)
+                .with_context(|| format!("reading {}", request_path.display()))?;
+        if existing.node != local.node {
+            return refuse(
+                "identity_mismatch",
+                format!(
+                    "operation {operation} already prepared {} on this machine, not {}; a prepared identity is not reassigned",
+                    existing.node, local.node
+                ),
+            );
+        }
+        // The stored request is only an answer if the key it names is still the staged
+        // one. Anything else is a directory this code did not finish writing.
+        let staged = Zeroizing::new(read_private(&dir.join(NODE_KEY_FILE), "staged node key")?);
+        let key = KeyPair::from_pem(&staged).context("reading the staged node key")?;
+        if public_fingerprint(key.public_key_der().as_ref()) != existing.key_fingerprint {
+            return refuse(
+                "identity_mismatch",
+                format!(
+                    "the staged key for operation {operation} is not the one its request names; remove {} and prepare again",
+                    dir.display()
+                ),
+            );
+        }
+        return Ok(existing);
+    }
+
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .with_context(|| format!("creating private admission directory {}", dir.display()))?;
+    let result = (|| {
+        let key = KeyPair::generate().context("generating this machine's node key")?;
+        let key_pem = Zeroizing::new(key.serialize_pem());
+        write_private_new(&dir.join(NODE_KEY_FILE), key_pem.as_bytes(), "node key")?;
+        let request = AdmissionRequest {
+            schema: ADMISSION_SCHEMA,
+            operation: operation.to_string(),
+            machine: machine.to_string(),
+            host: host.to_string(),
+            node: local.node.clone(),
+            key_fingerprint: public_fingerprint(key.public_key_der().as_ref()),
+            csr_pem: certificate_request(&local, &key)?,
+        };
+        write_private_new(
+            &dir.join(ADMISSION_REQUEST_FILE),
+            &serde_json::to_vec_pretty(&request).context("encoding the admission request")?,
+            "admission request",
+        )?;
+        record_step(
+            &dir.join(RECEIPTS_DIR),
+            &ReceiptSeed {
+                operation: operation.to_string(),
+                machine: machine.to_string(),
+                host: host.to_string(),
+                node: local.node.clone(),
+                key_fingerprint: Some(request.key_fingerprint.clone()),
+            },
+            "prepare",
+            "ok",
+            None,
+            Some(request.key_fingerprint.clone()),
+        )?;
+        Ok(request)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    result
+}
+
+/// Check everything about a request that does not need this machine's fleet.
+fn validate_admission_request(request: &AdmissionRequest) -> Result<()> {
+    if request.schema != ADMISSION_SCHEMA {
+        return refuse(
+            "invalid_request",
+            format!(
+                "admission request schema {} is not supported by this ouro (supports {ADMISSION_SCHEMA})",
+                request.schema
+            ),
+        );
+    }
+    validate_operation_id(&request.operation)?;
+    validate_machine(&request.machine).map_err(|error| refusing("invalid_request", error))?;
+    validate_host(&request.host).map_err(|error| refusing("invalid_request", error))?;
+    let expected = member(&request.machine, &request.host);
+    if request.node != expected.node {
+        return refuse(
+            "invalid_request",
+            format!(
+                "machine `{}` at `{}` is node {}, not {}; a node name is always `ouro-<machine>@<host>`",
+                request.machine, request.host, expected.node, request.node
+            ),
+        );
+    }
+    if request.csr_pem.len() > MAX_ADMISSION_PEM_BYTES {
+        return refuse(
+            "csr_invalid",
+            format!(
+                "a certificate signing request over {MAX_ADMISSION_PEM_BYTES} bytes is not read"
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Verify proof of possession and the requested identity, and return the public key.
+///
+/// Parsed with `x509-parser` rather than `rcgen::CertificateSigningRequestParams`
+/// deliberately: that constructor refuses a request carrying an extension it does not
+/// model, which would make "the issuer ignores caller-requested extensions" true only
+/// for the extensions rcgen happens to know. Here a hostile request parses, its
+/// signature is checked, its name and address are compared, and every extension it
+/// asked for is simply never read again.
+fn verify_admission_csr(request: &AdmissionRequest) -> Result<Vec<u8>> {
+    let (remaining, pem) = parse_x509_pem(request.csr_pem.as_bytes())
+        .map_err(|_| AdmissionError::new("csr_invalid", "the request is not valid PEM"))?;
+    if pem.label != "CERTIFICATE REQUEST" || !remaining.iter().all(u8::is_ascii_whitespace) {
+        return refuse(
+            "csr_invalid",
+            "the request must contain exactly one CERTIFICATE REQUEST PEM block",
+        );
+    }
+    let (rest, csr) = X509CertificationRequest::from_der(&pem.contents).map_err(|_| {
+        AdmissionError::new("csr_invalid", "the request is not a valid PKCS#10 request")
+    })?;
+    if !rest.is_empty() {
+        return refuse(
+            "csr_invalid",
+            "the request has trailing bytes after its PKCS#10 structure",
+        );
+    }
+    csr.verify_signature().map_err(|_| {
+        AdmissionError::new(
+            "csr_signature_invalid",
+            "the request is not signed by the key it carries, so it proves possession of nothing",
+        )
+    })?;
+
+    let info = &csr.certification_request_info;
+    let mut common_names = info.subject.iter_common_name();
+    let common_name = common_names
+        .next()
+        .and_then(|name| name.as_str().ok())
+        .ok_or_else(|| AdmissionError::new("csr_identity_mismatch", "the request names no node"))?;
+    if common_name != request.node || common_names.next().is_some() {
+        return refuse(
+            "csr_identity_mismatch",
+            format!(
+                "the request asks for a certificate named `{common_name}`, and the approved node is {}",
+                request.node
+            ),
+        );
+    }
+
+    let mut names = Vec::new();
+    if let Some(extensions) = csr.requested_extensions() {
+        for extension in extensions {
+            if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) = extension
+            {
+                names.extend(san.general_names.iter());
+            }
+        }
+    }
+    if names.len() != 1 || !general_name_matches_host(names[0], &request.host) {
+        return refuse(
+            "csr_identity_mismatch",
+            format!(
+                "the request must ask for exactly one machine address and it must be {}; it asked for {}",
+                request.host,
+                names.len()
+            ),
+        );
+    }
+
+    Ok(info.subject_pki.raw.to_vec())
+}
+
+/// The host half of the identity rule `validate_tls_identity` applies to a leaf.
+fn general_name_matches_host(name: &GeneralName<'_>, host: &str) -> bool {
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            matches!(name, GeneralName::IPAddress(bytes) if *bytes == address.octets())
+        }
+        Ok(IpAddr::V6(_)) => false,
+        Err(_) => {
+            matches!(name, GeneralName::DNSName(dns) if dns.eq_ignore_ascii_case(host))
+        }
+    }
+}
+
+/// Mint one leaf under this machine's CA, for a key this machine does not hold.
+///
+/// Every parameter that reaches the certificate is set here. The request supplies a
+/// public key and nothing else, so `CA:true`, a key usage that would let the holder
+/// sign, and an extra certificate name are not "stripped" — they are never consulted.
+fn issue_leaf(
+    member: &Member,
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+    public_key_der: &[u8],
+) -> Result<String> {
+    let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)
+        .context("reading this machine's fleet CA certificate")?;
+    let ca_key = KeyPair::from_pem(ca_key_pem).context("reading this machine's fleet CA key")?;
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .context("binding the fleet CA certificate to its key for signing")?;
+    let public_key = rcgen::SubjectPublicKeyInfo::from_der(public_key_der)
+        .map_err(|error| AdmissionError::new("csr_invalid", format!("{error}")))?;
+
+    let year = current_utc_year()?;
+    let mut params = CertificateParams::new(vec![member.host.clone()])
+        .context("using the machine address as a certificate name")?;
+    params.not_before = date_time_ymd(year - 1, 1, 1);
+    params.not_after = date_time_ymd(year + 5, 1, 1);
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, member.node.clone());
+    params.key_usages = vec![
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::KeyEncipherment,
+    ];
+    params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
+    Ok(params
+        .signed_by(&public_key, &ca_cert, &ca_key)
+        .context("signing the member certificate")?
+        .pem())
+}
+
+/// The DER SubjectPublicKeyInfo a certificate carries.
+fn certificate_public_key(pem: &str, description: &str) -> Result<Vec<u8>> {
+    let (_, block) =
+        parse_x509_pem(pem.as_bytes()).map_err(|_| anyhow!("{description} is not valid PEM"))?;
+    let certificate = block
+        .parse_x509()
+        .map_err(|_| anyhow!("{description} is not valid X.509"))?;
+    Ok(certificate.tbs_certificate.subject_pki.raw.to_vec())
+}
+
+/// Issue one member certificate, on the machine whose fleet directory holds the CA key.
+///
+/// Nothing is sent anywhere and no listener is opened: the caller moves the returned
+/// materials over whatever authenticated channel it already has. The roster is not
+/// edited here — adding the newcomer on this machine and on every other member is an
+/// explicit reviewed roster change, which is [`apply_roster_change`].
+pub fn issue_member_certificate(
+    data_dir: &Path,
+    request: &AdmissionRequest,
+) -> Result<AdmissionMaterials> {
+    validate_admission_request(request)?;
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet admission issue")?;
+
+    let profile = load(data_dir)?.ok_or_else(|| {
+        AdmissionError::new(
+            "no_fleet",
+            "this machine is standalone; only a machine with a fleet can admit another",
+        )
+    })?;
+    let root = fleet_dir(data_dir);
+    if !root
+        .join(CA_KEY_FILE)
+        .try_exists()
+        .with_context(|| format!("inspecting {}", root.join(CA_KEY_FILE).display()))?
+    {
+        return refuse(
+            "no_ca_key",
+            "this machine holds the fleet CA certificate but not its key, so it cannot admit a machine; run this on the machine that created the fleet",
+        );
+    }
+
+    let admitted = member(&request.machine, &request.host);
+    if let Some(existing) = profile
+        .members
+        .iter()
+        .chain(profile.tombstones.iter())
+        .find(|entry| entry.machine == request.machine || entry.node == admitted.node)
+    {
+        return refuse(
+            "machine_known",
+            format!(
+                "this machine's roster already names `{}` as {}; admission mints an identity that is not in it yet and will not reissue an existing one",
+                existing.machine, existing.node
+            ),
+        );
+    }
+    ensure_admission_not_recorded(data_dir, request)?;
+
+    let public_key_der = verify_admission_csr(request)?;
+    if public_fingerprint(&public_key_der) != request.key_fingerprint {
+        return refuse(
+            "csr_identity_mismatch",
+            "the request's key fingerprint does not describe the key inside it",
+        );
+    }
+
+    let ca_cert_pem = read_private(&root.join(CA_CERT_FILE), "fleet CA certificate")?;
+    let ca_key_pem = Zeroizing::new(read_private(&root.join(CA_KEY_FILE), "fleet CA key")?);
+    let node_cert_pem = issue_leaf(&admitted, &ca_cert_pem, &ca_key_pem, &public_key_der)?;
+    // The same check the runtime runs before every boot, minus the private key half,
+    // which lives on the machine this certificate is for.
+    validate_tls_materials(
+        &admitted,
+        &ca_cert_pem,
+        &node_cert_pem,
+        None,
+        None,
+        "newly issued member credentials",
+    )?;
+    if certificate_public_key(&node_cert_pem, "newly issued member certificate")? != public_key_der
+    {
+        bail!("the issued certificate does not carry the key the request proved possession of");
+    }
+
+    let cookie = Zeroizing::new(read_private(&root.join(COOKIE_FILE), "fleet cookie")?);
+    validate_cookie(&cookie, &root.join(COOKIE_FILE).display().to_string())?;
+
+    let mut members = profile.members.clone();
+    members.push(admitted.clone());
+    members.sort_by(|left, right| left.node.cmp(&right.node));
+    if members.len() > MAX_ADMISSION_ROSTER {
+        return refuse(
+            "roster_too_large",
+            format!("a roster over {MAX_ADMISSION_ROSTER} members is not transferred"),
+        );
+    }
+
+    let materials = AdmissionMaterials {
+        schema: ADMISSION_SCHEMA,
+        operation: request.operation.clone(),
+        fleet_id: profile.fleet_id.clone(),
+        fleet_name: profile.name.clone(),
+        machine: request.machine.clone(),
+        host: request.host.clone(),
+        node: admitted.node.clone(),
+        ca_cert_pem,
+        node_cert_pem,
+        cookie: cookie.to_string(),
+        epmd_port: profile.epmd_port,
+        dist_port_min: profile.dist_port_min,
+        dist_port_max: profile.dist_port_max,
+        members,
+        tombstones: profile.tombstones.clone(),
+        // The newcomer's own roster is one revision past the one it was cut from, the
+        // same step `create_from` takes for a copied directory.
+        roster_revision: profile.roster_revision.saturating_add(1),
+        key_fingerprint: request.key_fingerprint.clone(),
+    };
+
+    // Durable before the materials leave this function: a caller that dies holding
+    // them must not be able to ask for a second certificate for the same machine.
+    record_step(
+        &receipts_dir(data_dir),
+        &ReceiptSeed {
+            operation: request.operation.clone(),
+            machine: request.machine.clone(),
+            host: request.host.clone(),
+            node: admitted.node.clone(),
+            key_fingerprint: Some(request.key_fingerprint.clone()),
+        },
+        "issue",
+        "ok",
+        Some(format!("issued by {}", profile.node)),
+        Some(public_fingerprint(&public_key_der)),
+    )?;
+
+    Ok(materials)
+}
+
+/// Refuse an operation id this machine already answered, and a machine it already
+/// issued a certificate for under any operation id.
+fn ensure_admission_not_recorded(data_dir: &Path, request: &AdmissionRequest) -> Result<()> {
+    for receipt in read_receipts(data_dir)? {
+        if receipt.operation == request.operation {
+            return refuse(
+                "operation_replayed",
+                format!(
+                    "operation {} is already recorded on this machine; read its receipt rather than repeating it",
+                    request.operation
+                ),
+            );
+        }
+        if receipt.machine == request.machine && receipt.has_step("issue") {
+            return refuse(
+                "machine_already_issued",
+                format!(
+                    "this machine already issued a certificate for `{}` under operation {}; a second identity for one machine is a duplicate, not a retry",
+                    request.machine, receipt.operation
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Every receipt this machine holds, in operation-id order.
+fn read_receipts(data_dir: &Path) -> Result<Vec<Receipt>> {
+    let home = receipts_dir(data_dir);
+    let entries = match fs::read_dir(&home) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context(format!("reading {}", home.display())),
+    };
+    let mut receipts = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+            continue;
+        };
+        if validate_operation_id(name).is_err() {
+            continue;
+        }
+        let text = read_private(&entry.path(), "operation receipt")?;
+        let receipt: Receipt = serde_json::from_str(&text)
+            .with_context(|| format!("reading {}", entry.path().display()))?;
+        receipts.push(receipt);
+    }
+    receipts.sort_by(|left, right| left.operation.cmp(&right.operation));
+    Ok(receipts)
+}
+
+/// Reject materials that carry a private key in a field that must hold none.
+///
+/// `deny_unknown_fields` already refuses a `ca_key_pem` field; this is the other
+/// half, for a key appended to a certificate field by a sender that knows the shape.
+fn refuse_private_key_material(field: &str, text: &str) -> Result<()> {
+    if text.contains("PRIVATE KEY") {
+        return refuse(
+            "materials_carry_private_key",
+            format!(
+                "admission materials field `{field}` contains private key material; a target is sent a CA certificate, its own certificate and the cookie, and never a private key"
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn validate_admission_materials(materials: &AdmissionMaterials) -> Result<()> {
+    if materials.schema != ADMISSION_SCHEMA {
+        return refuse(
+            "materials_invalid",
+            format!(
+                "admission materials schema {} is not supported by this ouro (supports {ADMISSION_SCHEMA})",
+                materials.schema
+            ),
+        );
+    }
+    validate_operation_id(&materials.operation)?;
+    refuse_private_key_material("ca_cert_pem", &materials.ca_cert_pem)?;
+    refuse_private_key_material("node_cert_pem", &materials.node_cert_pem)?;
+    if materials.ca_cert_pem.len() > MAX_ADMISSION_PEM_BYTES
+        || materials.node_cert_pem.len() > MAX_ADMISSION_PEM_BYTES
+    {
+        return refuse(
+            "materials_invalid",
+            format!("a certificate over {MAX_ADMISSION_PEM_BYTES} bytes is not read"),
+        );
+    }
+    validate_machine(&materials.machine).map_err(|error| refusing("materials_invalid", error))?;
+    validate_host(&materials.host).map_err(|error| refusing("materials_invalid", error))?;
+    let local = member(&materials.machine, &materials.host);
+    if materials.node != local.node {
+        return refuse(
+            "materials_invalid",
+            format!(
+                "admission materials name node {}, and machine `{}` at `{}` is {}",
+                materials.node, materials.machine, materials.host, local.node
+            ),
+        );
+    }
+    validate_cookie(&materials.cookie, "the admission materials' fleet cookie")
+        .map_err(|error| refusing("materials_invalid", error))?;
+    if materials.fleet_id.len() != 24 || !materials.fleet_id.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return refuse(
+            "materials_invalid",
+            "admission materials have an invalid fleet id",
+        );
+    }
+    validate_fleet_name(&materials.fleet_name)
+        .map_err(|error| refusing("materials_invalid", error))?;
+    if materials.members.len() > MAX_ADMISSION_ROSTER
+        || materials.tombstones.len() > MAX_ADMISSION_ROSTER
+    {
+        return refuse(
+            "materials_invalid",
+            format!("a roster over {MAX_ADMISSION_ROSTER} entries is not installed"),
+        );
+    }
+    if materials.roster_revision == 0 {
+        return refuse(
+            "materials_invalid",
+            "admission materials have no roster revision",
+        );
+    }
+    Ok(())
+}
+
+/// The profile a target writes from its materials.
+fn admitted_profile(
+    materials: &AdmissionMaterials,
+    local: &Member,
+    ports: Ports,
+) -> Result<Profile> {
+    let mut members = materials.members.clone();
+    if !members.iter().any(|entry| entry.node == local.node) {
+        members.push(local.clone());
+    }
+    members.sort_by(|left, right| left.node.cmp(&right.node));
+    let (dist_port_min, dist_port_max) = match ports.dist {
+        Some(_) => dist_ports(ports.dist),
+        None => (materials.dist_port_min, materials.dist_port_max),
+    };
+    let profile = Profile {
+        tags: empty_tags(),
+        schema: PROFILE_SCHEMA,
+        fleet_id: materials.fleet_id.clone(),
+        name: materials.fleet_name.clone(),
+        machine: materials.machine.clone(),
+        host: materials.host.clone(),
+        node: local.node.clone(),
+        role: "core".to_string(),
+        members,
+        tombstones: materials.tombstones.clone(),
+        roster_revision: materials.roster_revision,
+        gateway_port: ports
+            .gateway
+            .unwrap_or_else(|| default_gateway_port(&materials.fleet_id, &materials.machine)),
+        epmd_port: ports.epmd.unwrap_or(materials.epmd_port),
+        dist_port_min,
+        dist_port_max,
+    };
+    validate_profile(&profile).map_err(|error| refusing("materials_invalid", error))?;
+    Ok(profile)
+}
+
+/// Install issued materials against the key this machine prepared and never sent.
+///
+/// One commit point: every file is written inside the operation's private staging
+/// directory, and the directory then *becomes* `<data dir>/fleet/` with a single
+/// rename. A crash before that rename leaves a staging directory and no fleet, and
+/// rerunning with the same materials rewrites and finishes it; a crash after it
+/// leaves a complete fleet, and rerunning returns the installed profile. There is no
+/// in-between state in which the BEAM could adopt half a set of credentials.
+pub fn install_admission(
+    data_dir: &Path,
+    materials: &AdmissionMaterials,
+    ports: Ports,
+) -> Result<Profile> {
+    validate_admission_materials(materials)?;
+    validate_ports(ports).map_err(|error| refusing("invalid_request", error))?;
+    ensure_usable_ipv4_resolution(&materials.host)
+        .map_err(|error| refusing("unusable_host", error))?;
+    ensure_data_dir(data_dir)?;
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet helper install")?;
+    ensure_local_bind_address(&materials.host).map_err(|error| refusing("unusable_host", error))?;
+
+    let local = member(&materials.machine, &materials.host);
+    let final_dir = fleet_dir(data_dir);
+    if final_dir
+        .try_exists()
+        .with_context(|| format!("inspecting {}", final_dir.display()))?
+    {
+        return finished_install(data_dir, materials, &local);
+    }
+
+    let dir = admission_dir(data_dir, &materials.operation);
+    if !dir
+        .try_exists()
+        .with_context(|| format!("inspecting {}", dir.display()))?
+    {
+        return refuse(
+            "staging_missing",
+            format!(
+                "this machine has no prepared key for operation {}; run `prepare` there first, and never install materials for a key this machine did not generate",
+                materials.operation
+            ),
+        );
+    }
+    ensure_private_dir(&dir)?;
+    let node_key_pem = Zeroizing::new(read_private(&dir.join(NODE_KEY_FILE), "staged node key")?);
+    // Binds the issued leaf to the CA, to the approved identity, and to the key that
+    // never left this machine. A leaf for someone else's key fails here.
+    validate_tls_identity(
+        &local,
+        &materials.ca_cert_pem,
+        &materials.node_cert_pem,
+        &node_key_pem,
+        None,
+        "issued fleet credentials",
+    )
+    .map_err(|error| refusing("materials_invalid", error))?;
+
+    let profile = admitted_profile(materials, &local, ports)?;
+    ensure_epmd_port_available(&materials.host, profile.epmd_port)?;
+    ensure_runtime_ports_available(&profile)?;
+
+    let seed = ReceiptSeed {
+        operation: materials.operation.clone(),
+        machine: materials.machine.clone(),
+        host: materials.host.clone(),
+        node: local.node.clone(),
+        key_fingerprint: Some(materials.key_fingerprint.clone()),
+    };
+    record_step(
+        &dir.join(RECEIPTS_DIR),
+        &seed,
+        "install_staged",
+        "ok",
+        Some(format!("fleet {}", materials.fleet_id)),
+        None,
+    )?;
+
+    write_private_atomic(&dir.join(COOKIE_FILE), materials.cookie.as_bytes())?;
+    write_private_atomic(&dir.join(CA_CERT_FILE), materials.ca_cert_pem.as_bytes())?;
+    write_private_atomic(
+        &dir.join(NODE_CERT_FILE),
+        materials.node_cert_pem.as_bytes(),
+    )?;
+    // Generated from the *final* paths, exactly as `install_new_profile` does: the
+    // policy names where these files will be, not where they are being written.
+    let (tls, vm_args) = generated_runtime_files(data_dir, &profile)?;
+    write_private_atomic(&dir.join(TLS_OPTFILE), tls.as_bytes())?;
+    write_private_atomic(&dir.join(VM_ARGS_FILE), vm_args.as_bytes())?;
+    write_private_atomic(
+        &dir.join(PROFILE_FILE),
+        &serde_json::to_vec_pretty(&profile).context("encoding fleet profile")?,
+    )?;
+    prune_admission_staging(&dir)?;
+
+    fs::rename(&dir, &final_dir)
+        .with_context(|| format!("publishing fleet profile at {}", final_dir.display()))?;
+    sync_parent(&final_dir)?;
+    validate_materials(data_dir, false)
+        .context("the installed credentials do not describe a startable machine")?;
+    record_step(
+        &receipts_dir(data_dir),
+        &seed,
+        "install",
+        "ok",
+        Some(format!("node {}", local.node)),
+        None,
+    )?;
+    Ok(profile)
+}
+
+/// Leave the staging directory holding exactly what a fleet directory may hold.
+///
+/// This runs immediately before the rename that makes it one, because after that
+/// rename every entry is judged by `unrecognized_fleet_entries`, and an entry it does
+/// not recognize is a fleet directory `ouro fleet leave` will refuse to remove. Two
+/// entries are expected and removed here: the request record, whose job ended when the
+/// materials arrived, and any `write_private_atomic` temporary a killed earlier attempt
+/// left behind. Anything else fails closed — this code does not promote a directory
+/// whose contents it cannot account for.
+fn prune_admission_staging(dir: &Path) -> Result<()> {
+    let known = known_fleet_files();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            AdmissionError::new(
+                "invalid_staging",
+                format!(
+                    "{} contains a non-UTF-8 entry; nothing was published",
+                    dir.display()
+                ),
+            )
+        })?;
+        if name == RECEIPTS_DIR || known.contains(name) {
+            continue;
+        }
+        if name == ADMISSION_REQUEST_FILE || is_generated_staging_temp(name, &known) {
+            fs::remove_file(entry.path())
+                .with_context(|| format!("removing {}", entry.path().display()))?;
+            continue;
+        }
+        return refuse(
+            "invalid_staging",
+            format!(
+                "{} contains unknown entry `{name}`; nothing was published. Inspect it manually before retrying",
+                dir.display()
+            ),
+        );
+    }
+    sync_parent(&dir.join(PROFILE_FILE))
+}
+
+/// A fleet directory already exists when `install` runs: either this operation
+/// finished and the caller lost the answer, or this machine belongs somewhere else.
+fn finished_install(
+    data_dir: &Path,
+    materials: &AdmissionMaterials,
+    local: &Member,
+) -> Result<Profile> {
+    let refusal = || {
+        AdmissionError::new(
+            "fleet_exists",
+            format!(
+                "this machine already has fleet state in {}; run `ouro fleet status` instead, or stop the runtime and run `ouro fleet leave` before joining a different cluster",
+                fleet_dir(data_dir).display()
+            ),
+        )
+    };
+    let profile = load(data_dir)?.ok_or_else(refusal)?;
+    if profile.fleet_id != materials.fleet_id || profile.node != local.node {
+        return Err(refusal().into());
+    }
+    let Some(receipt) = read_receipt(data_dir, &materials.operation)? else {
+        return Err(refusal().into());
+    };
+    if !receipt.has_step("install_staged") && !receipt.has_step("install") {
+        return Err(refusal().into());
+    }
+    // A crash between the rename and the closing receipt step leaves a complete fleet
+    // whose receipt does not say so. Finish the record rather than refuse the retry.
+    if !receipt.has_step("install") {
+        record_step(
+            &receipts_dir(data_dir),
+            &ReceiptSeed {
+                operation: materials.operation.clone(),
+                machine: materials.machine.clone(),
+                host: materials.host.clone(),
+                node: local.node.clone(),
+                key_fingerprint: Some(materials.key_fingerprint.clone()),
+            },
+            "install",
+            "ok",
+            Some(format!("node {}", local.node)),
+            None,
+        )?;
+    }
+    Ok(profile)
+}
+
+/// Apply one roster edit, refusing a change computed against a stale revision.
+///
+/// The revision check is what keeps an operator from getting a lost update dressed up
+/// as a successful admission: a caller states the revision it read, and a roster that
+/// has moved on refuses with `roster_conflict` and the revision it actually holds.
+///
+/// The check is made before the edit rather than inside it, because the edit takes the
+/// same lifecycle lock this function would have to hold and that lock is not
+/// re-entrant. The window is one uncontended call wide, and the outcome reports the
+/// revision the roster actually reached, so a caller that lost a race sees it.
+pub fn apply_roster_change(
+    data_dir: &Path,
+    operation: &str,
+    expected_revision: u64,
+    change: &RosterChange,
+) -> Result<RosterOutcome> {
+    validate_operation_id(operation)?;
+    let before = load(data_dir)?.ok_or_else(|| {
+        AdmissionError::new(
+            "no_fleet",
+            "this machine is standalone; there is no cluster roster to edit",
+        )
+    })?;
+    if before.roster_revision != expected_revision {
+        return Err(AdmissionError {
+            reason: "roster_conflict",
+            detail: format!(
+                "this machine's roster is at revision {}, and this change was computed against {expected_revision}; re-read the roster and decide again",
+                before.roster_revision
+            ),
+            roster_revision: Some(before.roster_revision),
+        }
+        .into());
+    }
+
+    let (member, step) = match change {
+        RosterChange::Add {
+            machine,
+            host,
+            node,
+        } => (
+            add_member(data_dir, machine, host, node.as_deref())
+                .map_err(|error| refusing("roster_refused", error))?,
+            "roster_add",
+        ),
+        RosterChange::Remove { machine } => (
+            remove_member(data_dir, machine).map_err(|error| refusing("roster_refused", error))?,
+            "roster_remove",
+        ),
+        RosterChange::Forget { machine } => (
+            forget_machine(data_dir, machine).map_err(|error| refusing("roster_refused", error))?,
+            "roster_forget",
+        ),
+    };
+
+    let after = load(data_dir)?.ok_or_else(|| {
+        anyhow!("this machine's fleet profile disappeared while its roster was edited")
+    })?;
+    record_step(
+        &receipts_dir(data_dir),
+        &ReceiptSeed {
+            operation: operation.to_string(),
+            machine: after.machine.clone(),
+            host: after.host.clone(),
+            node: after.node.clone(),
+            key_fingerprint: None,
+        },
+        step,
+        "ok",
+        Some(format!(
+            "{} at revision {}",
+            member.node, after.roster_revision
+        )),
+        None,
+    )?;
+    Ok(RosterOutcome {
+        roster_revision: after.roster_revision,
+        changed: after.roster_revision != before.roster_revision,
+        member,
+    })
+}
+
+/// What this machine is, without a single secret.
+///
+/// Deliberately not a health check: `ouro fleet doctor` is that, and it needs a live
+/// runtime for half of its answers. This is what an orchestrator reads before deciding
+/// whether a machine can be admitted at all.
+pub fn inspect_local(data_dir: &Path) -> Result<Inspection> {
+    let fleet = load(data_dir)?.map(|profile| InspectedFleet {
+        machine: profile.machine.clone(),
+        host: profile.host.clone(),
+        node: profile.node.clone(),
+        fleet_id: profile.fleet_id.clone(),
+        name: profile.name.clone(),
+        roster_revision: profile.roster_revision,
+        members: profile
+            .members
+            .iter()
+            .map(|entry| entry.machine.clone())
+            .collect(),
+        tombstones: profile
+            .tombstones
+            .iter()
+            .map(|entry| entry.machine.clone())
+            .collect(),
+    });
+    Ok(Inspection {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        data_dir: data_dir.display().to_string(),
+        runtime_running: runtime::read_live_publication(data_dir)?.is_some()
+            || runtime::read_live_runtime_owner(data_dir)?.is_some(),
+        fleet,
+        pending_operations: scan_admission(data_dir)?,
+    })
+}
+
+/// Where this machine keeps the receipt for one operation, if it keeps one.
+///
+/// Before a fleet exists the receipt lives inside the operation's staging directory,
+/// and `install` moves it into the fleet directory with everything else it promotes,
+/// so the durable record survives the one rename that commits the identity.
+fn receipt_home(data_dir: &Path, operation: &str) -> Result<Option<PathBuf>> {
+    let installed = receipts_dir(data_dir).join(format!("{operation}.json"));
+    if installed
+        .try_exists()
+        .with_context(|| format!("inspecting {}", installed.display()))?
+    {
+        return Ok(Some(receipts_dir(data_dir)));
+    }
+    let staged = admission_dir(data_dir, operation)
+        .join(RECEIPTS_DIR)
+        .join(format!("{operation}.json"));
+    if staged
+        .try_exists()
+        .with_context(|| format!("inspecting {}", staged.display()))?
+    {
+        return Ok(Some(admission_dir(data_dir, operation).join(RECEIPTS_DIR)));
+    }
+    Ok(None)
+}
+
+/// Read one operation's receipt, wherever this machine is keeping it.
+pub fn read_receipt(data_dir: &Path, operation: &str) -> Result<Option<Receipt>> {
+    validate_operation_id(operation)?;
+    let Some(home) = receipt_home(data_dir, operation)? else {
+        return Ok(None);
+    };
+    let path = home.join(format!("{operation}.json"));
+    let text = read_private(&path, "operation receipt")?;
+    let receipt: Receipt =
+        serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(receipt))
+}
+
+/// Append one step to an operation this machine already knows about.
+pub fn append_receipt_step(
+    data_dir: &Path,
+    operation: &str,
+    step: &str,
+    outcome: &str,
+    detail: Option<&str>,
+) -> Result<Receipt> {
+    validate_operation_id(operation)?;
+    validate_receipt_text(step, "step", 64)?;
+    validate_receipt_text(outcome, "outcome", 64)?;
+    if let Some(detail) = detail {
+        validate_receipt_text(detail, "detail", MAX_RECEIPT_TEXT)?;
+    }
+    let Some(home) = receipt_home(data_dir, operation)? else {
+        return refuse(
+            "unknown_operation",
+            format!("this machine holds no receipt for operation {operation}"),
+        );
+    };
+    let path = home.join(format!("{operation}.json"));
+    let existing: Receipt = serde_json::from_str(&read_private(&path, "operation receipt")?)
+        .with_context(|| format!("reading {}", path.display()))?;
+    record_step(
+        &home,
+        &ReceiptSeed {
+            operation: operation.to_string(),
+            machine: existing.machine.clone(),
+            host: existing.host.clone(),
+            node: existing.node.clone(),
+            key_fingerprint: existing.key_fingerprint.clone(),
+        },
+        step,
+        outcome,
+        detail.map(str::to_string),
+        None,
+    )
+}
+
+/// Write one step, creating the receipt from the seed identity if this is the first.
+fn record_step(
+    home: &Path,
+    seed: &ReceiptSeed,
+    step: &str,
+    outcome: &str,
+    detail: Option<String>,
+    fingerprint: Option<String>,
+) -> Result<Receipt> {
+    if home
+        .try_exists()
+        .with_context(|| format!("inspecting {}", home.display()))?
+    {
+        ensure_private_dir(home)?;
+    } else {
+        DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(home)
+            .with_context(|| format!("creating private receipts directory {}", home.display()))?;
+    }
+    let path = home.join(format!("{}.json", seed.operation));
+    let mut receipt = if path
+        .try_exists()
+        .with_context(|| format!("inspecting {}", path.display()))?
+    {
+        let existing: Receipt = serde_json::from_str(&read_private(&path, "operation receipt")?)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if existing.node != seed.node || existing.operation != seed.operation {
+            return refuse(
+                "identity_mismatch",
+                format!(
+                    "the receipt at {} records {} for operation {}; this step is for {}",
+                    path.display(),
+                    existing.node,
+                    existing.operation,
+                    seed.node
+                ),
+            );
+        }
+        existing
+    } else {
+        Receipt {
+            schema: ADMISSION_SCHEMA,
+            operation: seed.operation.clone(),
+            machine: seed.machine.clone(),
+            host: seed.host.clone(),
+            node: seed.node.clone(),
+            key_fingerprint: seed.key_fingerprint.clone(),
+            steps: Vec::new(),
+        }
+    };
+    if receipt.steps.len() >= MAX_RECEIPT_STEPS {
+        return refuse(
+            "receipt_full",
+            format!(
+                "the receipt for operation {} already holds {MAX_RECEIPT_STEPS} steps",
+                seed.operation
+            ),
+        );
+    }
+    receipt.steps.push(ReceiptStep {
+        step: step.to_string(),
+        outcome: outcome.to_string(),
+        at: utc_timestamp()?,
+        detail,
+        fingerprint,
+    });
+    write_private_atomic(
+        &path,
+        &serde_json::to_vec_pretty(&receipt).context("encoding the operation receipt")?,
+    )?;
+    Ok(receipt)
+}
+
+/// Validate the recognized receipts directory before `leave` removes anything.
+fn validate_receipts_directory(path: &Path) -> Result<Vec<PathBuf>> {
+    ensure_private_dir(path)
+        .with_context(|| format!("validating recognized {}", path.display()))?;
+    let mut files = Vec::new();
+    let mut unknown = Vec::new();
+    for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let recognized = name.to_str().is_some_and(|name| {
+            name.strip_suffix(".json")
+                .is_some_and(|operation| validate_operation_id(operation).is_ok())
+        });
+        if recognized {
+            ensure_private_file(&entry.path(), "operation receipt")?;
+            files.push(entry.path());
+        } else {
+            unknown.push(name.to_string_lossy().into_owned());
+        }
+    }
+    if !unknown.is_empty() {
+        unknown.sort();
+        bail!(
+            "{} contains unknown receipt entries ({}); no fleet credential was removed",
+            path.display(),
+            unknown.join(", ")
+        );
+    }
+    Ok(files)
+}
+
+fn remove_validated_receipts_directory(path: &Path, receipts: Vec<PathBuf>) -> Result<()> {
+    for receipt in receipts {
+        fs::remove_file(&receipt)
+            .with_context(|| format!("removing receipt {}", receipt.display()))?;
+    }
+    fs::remove_dir(path).with_context(|| format!("removing empty {}", path.display()))?;
+    sync_parent(path)
 }
 
 #[cfg(test)]
@@ -6752,5 +8313,862 @@ mod tests {
         assert!(stopped
             .text
             .contains("live remote compatibility and connectivity were not checked"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Admission. The property under every test here is a boundary: the CA key stays
+    // on the issuer, the issuer's own node key stays in its own directory, the
+    // target's key stays on the target, and the cookie travels but is never written
+    // anywhere a reader other than the BEAM would look.
+    // -----------------------------------------------------------------------
+
+    fn issuer_fleet(label: &str) -> PathBuf {
+        let data = scratch(label);
+        create(
+            &data,
+            Some("the lab"),
+            "studio",
+            "127.0.0.1",
+            ephemeral_ports(),
+        )
+        .unwrap();
+        data
+    }
+
+    /// A request built the way `prepare_admission` builds one, with the certificate
+    /// parameters opened up so a test can ask for something it must not get.
+    fn crafted_request(
+        operation: &str,
+        machine: &str,
+        host: &str,
+        mutate: impl FnOnce(&mut CertificateParams),
+    ) -> AdmissionRequest {
+        let local = member(machine, host);
+        let mut params = CertificateParams::new(vec![local.host.clone()]).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, local.node.clone());
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        mutate(&mut params);
+        let key = KeyPair::generate().unwrap();
+        let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+        AdmissionRequest {
+            schema: ADMISSION_SCHEMA,
+            operation: operation.to_string(),
+            machine: machine.to_string(),
+            host: host.to_string(),
+            node: local.node.clone(),
+            key_fingerprint: public_fingerprint(key.public_key_der().as_ref()),
+            csr_pem,
+        }
+    }
+
+    fn pem_block(label: &str, der: &[u8]) -> String {
+        use base64::Engine as _;
+        let body = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut text = format!("-----BEGIN {label}-----\r\n");
+        for chunk in body.as_bytes().chunks(64) {
+            text.push_str(std::str::from_utf8(chunk).unwrap());
+            text.push_str("\r\n");
+        }
+        text.push_str(&format!("-----END {label}-----\r\n"));
+        text
+    }
+
+    fn reason_of(error: &anyhow::Error) -> &str {
+        admission_error(error)
+            .map(|declared| declared.reason)
+            .unwrap_or_else(|| panic!("an admission refusal must declare a reason: {error:#}"))
+    }
+
+    /// The whole path, and the four boundaries it exists to keep.
+    ///
+    /// The target generates its key and keeps it; the issuer signs a certificate for a
+    /// key it does not hold; the materials that travel carry no private key at all; and
+    /// what lands on the target is a machine the boot path will start.
+    #[test]
+    fn a_machine_is_admitted_without_any_private_key_crossing_its_boundary() {
+        let issuer = issuer_fleet("issuer-admits");
+        let target = scratch("target-admitted");
+        let operation = "op-2026-09-17-a1";
+
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        assert_eq!(request.node, "ouro-vps@127.0.0.1");
+
+        // The target's key is on the target, at 0600, and in exactly one place.
+        let staging = admission_dir(&target, operation);
+        ensure_private_file(&staging.join(NODE_KEY_FILE), "staged node key").unwrap();
+        let staged_key = read_private(&staging.join(NODE_KEY_FILE), "staged node key").unwrap();
+        assert!(staged_key.contains("PRIVATE KEY"));
+        assert!(
+            !request.csr_pem.contains("PRIVATE KEY"),
+            "a signing request carries a public key and a signature over it, never the key"
+        );
+        assert!(
+            !serde_json::to_string(&request)
+                .unwrap()
+                .contains("PRIVATE KEY"),
+            "nothing that leaves the target carries the key it just generated"
+        );
+
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        let wire = serde_json::to_string(&materials).unwrap();
+        assert!(
+            !wire.contains("PRIVATE KEY"),
+            "the materials carry the CA certificate, the new leaf and the cookie, and no key"
+        );
+        assert!(
+            !wire.contains("ca_key_pem"),
+            "there is no field on the wire that could hold the authority to sign"
+        );
+        let issuer_node_key = read_private(
+            &fleet_dir(&issuer).join(NODE_KEY_FILE),
+            "the issuer's node key",
+        )
+        .unwrap();
+        assert!(
+            !wire.contains(issuer_node_key.trim()),
+            "the issuer's own node key is not part of anything it sends"
+        );
+        let ca_key =
+            read_private(&fleet_dir(&issuer).join(CA_KEY_FILE), "the fleet CA key").unwrap();
+        assert!(
+            !wire.contains(ca_key.trim()),
+            "the CA key stays on the machine that minted it"
+        );
+        assert!(
+            !wire.contains(&staged_key),
+            "the target's key never travels"
+        );
+
+        let profile = install_admission(&target, &materials, ephemeral_ports()).unwrap();
+        assert_eq!(profile.node, "ouro-vps@127.0.0.1");
+        assert_eq!(profile.fleet_id, load(&issuer).unwrap().unwrap().fleet_id);
+        assert_eq!(
+            profile
+                .members
+                .iter()
+                .map(|member| member.machine.as_str())
+                .collect::<Vec<_>>(),
+            vec!["studio", "vps"],
+            "the newcomer installs the complete agreed roster, itself included"
+        );
+
+        // The admitted machine holds no authority to admit a third.
+        assert!(
+            !fleet_dir(&target).join(CA_KEY_FILE).try_exists().unwrap(),
+            "an admitted machine is given a CA certificate, never the CA key"
+        );
+        assert!(
+            !staging.try_exists().unwrap(),
+            "the operation's staging directory is gone once the fleet directory is complete"
+        );
+        // And it is a machine the boot path will actually start.
+        validate_materials(&target, false).unwrap();
+        assert!(runtime_env(&target).unwrap().is_some());
+        // The cookie it boots with is the fleet's.
+        assert_eq!(
+            read_private(&fleet_dir(&target).join(COOKIE_FILE), "cookie").unwrap(),
+            read_private(&fleet_dir(&issuer).join(COOKIE_FILE), "cookie").unwrap()
+        );
+    }
+
+    /// Repeating a `prepare` answers with what was already prepared, and a second
+    /// operation on a machine with one pending is refused rather than minting a
+    /// second identity nobody will be able to tell from the first.
+    #[test]
+    fn preparing_twice_answers_once_and_a_second_operation_is_refused() {
+        let target = scratch("target-repeat-prepare");
+        let operation = "op-repeat-0001";
+
+        let first = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let second = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        assert_eq!(
+            first, second,
+            "an interrupted answer costs a round trip, not an identity"
+        );
+
+        let other = prepare_admission(&target, "op-repeat-0002", "vps", "127.0.0.1").unwrap_err();
+        assert_eq!(reason_of(&other), "operation_in_progress");
+
+        let renamed = prepare_admission(&target, operation, "laptop", "127.0.0.1").unwrap_err();
+        assert_eq!(
+            reason_of(&renamed),
+            "identity_mismatch",
+            "a prepared identity is not quietly reassigned to another machine name"
+        );
+
+        let installed = issuer_fleet("target-already-in-a-fleet");
+        let refused =
+            prepare_admission(&installed, "op-already-0001", "vps", "127.0.0.1").unwrap_err();
+        assert_eq!(reason_of(&refused), "fleet_exists");
+    }
+
+    /// A request asking for authority, for a name it was not approved for, or signed
+    /// by a key it does not hold.
+    ///
+    /// The privilege case is deliberately *not* a refusal: the issuer builds every
+    /// parameter of the certificate itself, so a request may ask for `CA:true` and for
+    /// the right to sign certificates and simply not receive them. The name cases are
+    /// refusals, because a request for a name that will not be issued is a request
+    /// whose sender is about to be surprised.
+    #[test]
+    fn a_hostile_request_gets_no_authority_no_extra_name_and_no_certificate_at_all() {
+        let issuer = issuer_fleet("issuer-hostile");
+
+        let greedy = crafted_request("op-hostile-0001", "vps", "127.0.0.1", |params| {
+            params
+                .custom_extensions
+                .push(rcgen::CustomExtension::from_oid_content(
+                    // basicConstraints: SEQUENCE { BOOLEAN TRUE }
+                    &[2, 5, 29, 19],
+                    vec![0x30, 0x03, 0x01, 0x01, 0xff],
+                ));
+            params.key_usages = vec![
+                KeyUsagePurpose::KeyCertSign,
+                KeyUsagePurpose::CrlSign,
+                KeyUsagePurpose::DigitalSignature,
+            ];
+        });
+        // The request really does ask for both, or the assertions below would pass
+        // against a request that never asked for anything.
+        let (_, asked) = parse_x509_pem(greedy.csr_pem.as_bytes()).unwrap();
+        let (_, parsed) = X509CertificationRequest::from_der(&asked.contents).unwrap();
+        let requested: Vec<_> = parsed
+            .requested_extensions()
+            .expect("a request carrying extensions")
+            .collect();
+        assert!(
+            requested.iter().any(|extension| matches!(
+                extension,
+                x509_parser::extensions::ParsedExtension::BasicConstraints(constraints)
+                    if constraints.ca
+            )),
+            "the request must actually ask to be a certificate authority"
+        );
+        assert!(
+            requested.iter().any(|extension| matches!(
+                extension,
+                x509_parser::extensions::ParsedExtension::KeyUsage(usage)
+                    if usage.key_cert_sign()
+            )),
+            "and must actually ask for the right to sign certificates"
+        );
+
+        let materials = issue_member_certificate(&issuer, &greedy).unwrap();
+        let (_, block) = parse_x509_pem(materials.node_cert_pem.as_bytes()).unwrap();
+        let issued = block.parse_x509().unwrap();
+        assert!(
+            !issued.is_ca(),
+            "a request that asks to be a CA is answered with a leaf"
+        );
+        let usage = issued.key_usage().unwrap().unwrap();
+        assert!(
+            !usage.value.key_cert_sign() && !usage.value.crl_sign(),
+            "the issuer sets the key usages, so a request cannot ask for the right to sign"
+        );
+        assert!(usage.value.digital_signature() && usage.value.key_encipherment());
+
+        let issuer = issuer_fleet("issuer-hostile-names");
+        for (label, request) in [
+            (
+                "an extra certificate name",
+                crafted_request("op-hostile-0002", "vps", "127.0.0.1", |params| {
+                    params.subject_alt_names.push(rcgen::SanType::DnsName(
+                        "studio.internal".try_into().unwrap(),
+                    ));
+                }),
+            ),
+            (
+                "another machine's node name",
+                crafted_request("op-hostile-0003", "vps", "127.0.0.1", |params| {
+                    params.distinguished_name = DistinguishedName::new();
+                    params
+                        .distinguished_name
+                        .push(DnType::CommonName, "ouro-studio@127.0.0.1");
+                }),
+            ),
+            (
+                "another machine's address",
+                crafted_request("op-hostile-0004", "vps", "127.0.0.1", |params| {
+                    params.subject_alt_names =
+                        vec![rcgen::SanType::IpAddress("10.0.0.9".parse().unwrap())];
+                }),
+            ),
+        ] {
+            let error = issue_member_certificate(&issuer, &request).unwrap_err();
+            assert_eq!(
+                reason_of(&error),
+                "csr_identity_mismatch",
+                "{label} must be refused"
+            );
+        }
+
+        // Proof of possession: a request whose signature is not the key's.
+        let mut forged = crafted_request("op-hostile-0005", "vps", "127.0.0.1", |_| {});
+        let (_, block) = parse_x509_pem(forged.csr_pem.as_bytes()).unwrap();
+        let mut der = block.contents.clone();
+        let last = der.len() - 1;
+        der[last] ^= 0xff;
+        forged.csr_pem = pem_block("CERTIFICATE REQUEST", &der);
+        let error = issue_member_certificate(&issuer, &forged).unwrap_err();
+        assert_eq!(reason_of(&error), "csr_signature_invalid");
+
+        // And a request whose fingerprint describes a different key than it carries.
+        let mut mislabelled = crafted_request("op-hostile-0006", "vps", "127.0.0.1", |_| {});
+        mislabelled.key_fingerprint = public_fingerprint(b"not this key");
+        let error = issue_member_certificate(&issuer, &mislabelled).unwrap_err();
+        assert_eq!(reason_of(&error), "csr_identity_mismatch");
+    }
+
+    /// One machine, one identity: not twice under one operation id, not twice under
+    /// two, and never for a name the roster or its tombstones already spent.
+    #[test]
+    fn an_issuer_refuses_a_replay_a_second_identity_and_a_name_it_already_knows() {
+        let issuer = issuer_fleet("issuer-replay");
+        let target = scratch("target-replay");
+
+        let request = prepare_admission(&target, "op-replay-0001", "vps", "127.0.0.1").unwrap();
+        issue_member_certificate(&issuer, &request).unwrap();
+
+        let replayed = issue_member_certificate(&issuer, &request).unwrap_err();
+        assert_eq!(reason_of(&replayed), "operation_replayed");
+
+        let again = crafted_request("op-replay-0002", "vps", "127.0.0.1", |_| {});
+        let error = issue_member_certificate(&issuer, &again).unwrap_err();
+        assert_eq!(
+            reason_of(&error),
+            "machine_already_issued",
+            "a second identity for one machine is a duplicate, not a retry"
+        );
+
+        add_member(&issuer, "laptop", "127.0.0.1", None).unwrap();
+        let known = crafted_request("op-replay-0003", "laptop", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &known).unwrap_err()),
+            "machine_known"
+        );
+
+        forget_machine(&issuer, "laptop").unwrap();
+        let gone = crafted_request("op-replay-0004", "laptop", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &gone).unwrap_err()),
+            "machine_known",
+            "a machine declared gone for good does not come back through admission"
+        );
+
+        // A machine that never had a fleet cannot admit anything.
+        let standalone = scratch("standalone-issuer");
+        let nothing = crafted_request("op-replay-0005", "vps", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&standalone, &nothing).unwrap_err()),
+            "no_fleet"
+        );
+    }
+
+    /// The target's half of the boundary: materials that would hand it authority, or
+    /// a certificate for someone else's key, are refused before anything is written.
+    #[test]
+    fn install_refuses_materials_carrying_a_key_an_unknown_field_or_a_foreign_certificate() {
+        let issuer = issuer_fleet("issuer-bad-materials");
+        let target = scratch("target-bad-materials");
+        let request = prepare_admission(&target, "op-materials-001", "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+
+        // A sender that adds the CA key as a field is refused by the shape itself: a
+        // target must notice being handed authority rather than quietly drop it.
+        let mut wire = serde_json::to_value(&materials).unwrap();
+        wire.as_object_mut().unwrap().insert(
+            "ca_key_pem".to_string(),
+            Value::String("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".into()),
+        );
+        let error = serde_json::from_value::<AdmissionMaterials>(wire).unwrap_err();
+        assert!(
+            error.to_string().contains("ca_key_pem"),
+            "the refusal must name the field that does not belong: {error}"
+        );
+
+        // And a sender that hides one inside a field that does belong.
+        let mut smuggled = materials.clone();
+        smuggled.ca_cert_pem = format!(
+            "{}-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+            smuggled.ca_cert_pem
+        );
+        assert_eq!(
+            reason_of(&install_admission(&target, &smuggled, ephemeral_ports()).unwrap_err()),
+            "materials_carry_private_key"
+        );
+
+        // A certificate for a key this machine did not prepare cannot be installed
+        // against the key it did.
+        let other = scratch("target-other-key");
+        let other_request =
+            prepare_admission(&other, "op-materials-002", "vps", "127.0.0.1").unwrap();
+        let other_materials =
+            issue_member_certificate(&issuer_fleet("issuer-other-key"), &other_request).unwrap();
+        let mut foreign = materials.clone();
+        foreign.node_cert_pem = other_materials.node_cert_pem.clone();
+        assert_eq!(
+            reason_of(&install_admission(&target, &foreign, ephemeral_ports()).unwrap_err()),
+            "materials_invalid",
+            "a leaf minted for another machine's key is not this machine's identity"
+        );
+        assert!(
+            !fleet_dir(&target).try_exists().unwrap(),
+            "nothing is published while the materials are still being checked"
+        );
+
+        // And a target that never prepared has no key to bind a certificate to.
+        let empty = scratch("target-never-prepared");
+        assert_eq!(
+            reason_of(&install_admission(&empty, &materials, ephemeral_ports()).unwrap_err()),
+            "staging_missing"
+        );
+    }
+
+    /// The one commit point, from both sides of it.
+    ///
+    /// A crash before the rename leaves a staging directory holding some of the final
+    /// files; rerunning with the same materials rewrites them and finishes. A crash
+    /// after the rename leaves a complete fleet whose receipt has not been closed;
+    /// rerunning returns the installed profile and closes it. Neither leaves a second
+    /// identity, and neither needs the issuer again.
+    #[test]
+    fn an_interrupted_install_is_finished_by_repeating_it_with_the_same_materials() {
+        let issuer = issuer_fleet("issuer-crash");
+        let target = scratch("target-crash");
+        let operation = "op-crash-000001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+
+        // The state a crash between the first write and the rename leaves behind: the
+        // cookie and the CA certificate landed, nothing else did.
+        let staging = admission_dir(&target, operation);
+        write_private_atomic(&staging.join(COOKIE_FILE), materials.cookie.as_bytes()).unwrap();
+        write_private_atomic(
+            &staging.join(CA_CERT_FILE),
+            materials.ca_cert_pem.as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            !fleet_dir(&target).try_exists().unwrap(),
+            "a half-written staging directory is not a fleet"
+        );
+        assert!(
+            load(&target).unwrap().is_none(),
+            "and nothing reads it as one"
+        );
+
+        let ports = ephemeral_ports();
+        let profile = install_admission(&target, &materials, ports).unwrap();
+        validate_materials(&target, false).unwrap();
+
+        // The state a crash between the rename and the closing receipt leaves behind.
+        let receipt_path = receipts_dir(&target).join(format!("{operation}.json"));
+        let mut receipt: Receipt =
+            serde_json::from_str(&read_private(&receipt_path, "receipt").unwrap()).unwrap();
+        receipt.steps.retain(|step| step.step != "install");
+        write_private_atomic(&receipt_path, &serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+        let again = install_admission(&target, &materials, ports).unwrap();
+        assert_eq!(again, profile, "a finished install repeats its own answer");
+        assert!(
+            read_receipt(&target, operation)
+                .unwrap()
+                .unwrap()
+                .has_step("install"),
+            "and closes the record the crash left open"
+        );
+
+        let third = install_admission(&target, &materials, ports).unwrap();
+        assert_eq!(third, profile);
+
+        // A machine that belongs to a different fleet is not overwritten by materials
+        // that happen to name the same operation.
+        let stranger = scratch("target-stranger");
+        create(&stranger, None, "vps", "127.0.0.1", ephemeral_ports()).unwrap();
+        assert_eq!(
+            reason_of(&install_admission(&stranger, &materials, ephemeral_ports()).unwrap_err()),
+            "fleet_exists"
+        );
+    }
+
+    /// What gets promoted is a fleet directory and nothing else.
+    ///
+    /// The rename that commits an identity is also what turns this directory into one
+    /// `ouro fleet leave` has to be able to remove, and that command refuses a
+    /// directory holding an entry it does not recognize. A killed earlier attempt can
+    /// leave a half-written temporary behind, and the request record has no business
+    /// surviving either.
+    #[test]
+    fn promotion_carries_no_leftover_of_the_attempt_that_was_interrupted() {
+        let issuer = issuer_fleet("issuer-prune");
+        let target = scratch("target-prune");
+        let operation = "op-prune-0000001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        let staging = admission_dir(&target, operation);
+
+        // Exactly what a SIGKILL between `write_private_atomic`'s create and its
+        // rename leaves in the directory.
+        let orphan = staging.join(format!(
+            ".{COOKIE_FILE}.{}.0123456789ab.tmp",
+            std::process::id()
+        ));
+        write_private_new(&orphan, b"half a cookie", "interrupted write").unwrap();
+        assert!(staging.join(ADMISSION_REQUEST_FILE).try_exists().unwrap());
+
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+
+        let root = fleet_dir(&target);
+        assert!(unrecognized_fleet_entries(&root).unwrap().is_empty());
+        assert!(!root.join(ADMISSION_REQUEST_FILE).try_exists().unwrap());
+        assert!(!root.join(orphan.file_name().unwrap()).try_exists().unwrap());
+        // Which is to say: this machine can be retired again.
+        leave(&target).unwrap().expect("a retired machine");
+
+        // An entry this code cannot account for stops the promotion instead.
+        let second = scratch("target-prune-unknown");
+        let request = prepare_admission(&second, operation, "vps", "127.0.0.1").unwrap();
+        let materials =
+            issue_member_certificate(&issuer_fleet("issuer-prune-2"), &request).unwrap();
+        write_private_new(
+            &admission_dir(&second, operation).join("somebody-elses-file"),
+            b"not ours",
+            "a planted file",
+        )
+        .unwrap();
+        let error = install_admission(&second, &materials, ephemeral_ports()).unwrap_err();
+        assert_eq!(reason_of(&error), "invalid_staging");
+        assert!(
+            !fleet_dir(&second).try_exists().unwrap(),
+            "nothing was published"
+        );
+    }
+
+    /// A roster edit states the revision it was computed against, so an operator whose
+    /// view is stale is told rather than silently overwriting a later edit.
+    #[test]
+    fn a_roster_change_against_a_stale_revision_is_refused_with_the_revision_it_needs() {
+        let data = issuer_fleet("roster-conflict");
+        let start = load(&data).unwrap().unwrap().roster_revision;
+
+        let outcome = apply_roster_change(
+            &data,
+            "op-roster-00001",
+            start,
+            &RosterChange::Add {
+                machine: "vps".to_string(),
+                host: "127.0.0.1".to_string(),
+                node: None,
+            },
+        )
+        .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.roster_revision, start + 1);
+        assert_eq!(outcome.member.node, "ouro-vps@127.0.0.1");
+
+        // The same change replayed against the revision it was computed from.
+        let error = apply_roster_change(
+            &data,
+            "op-roster-00002",
+            start,
+            &RosterChange::Remove {
+                machine: "vps".to_string(),
+            },
+        )
+        .unwrap_err();
+        let declared = admission_error(&error).expect("a declared refusal");
+        assert_eq!(declared.reason, "roster_conflict");
+        assert_eq!(
+            declared.roster_revision,
+            Some(start + 1),
+            "the refusal carries the revision the caller has to re-read"
+        );
+        assert_eq!(
+            load(&data).unwrap().unwrap().members.len(),
+            2,
+            "a refused change changes nothing"
+        );
+
+        let removed = apply_roster_change(
+            &data,
+            "op-roster-00003",
+            start + 1,
+            &RosterChange::Remove {
+                machine: "vps".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(removed.roster_revision, start + 2);
+
+        let forgotten = apply_roster_change(
+            &data,
+            "op-roster-00004",
+            start + 2,
+            &RosterChange::Add {
+                machine: "laptop".to_string(),
+                host: "127.0.0.1".to_string(),
+                node: Some("ouro-laptop@127.0.0.1".to_string()),
+            },
+        )
+        .unwrap();
+        let gone = apply_roster_change(
+            &data,
+            "op-roster-00005",
+            forgotten.roster_revision,
+            &RosterChange::Forget {
+                machine: "laptop".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load(&data).unwrap().unwrap().tombstones[0].machine,
+            "laptop"
+        );
+        assert!(gone.changed);
+
+        // An edit the roster refuses on its own terms keeps its own explanation.
+        let error = apply_roster_change(
+            &data,
+            "op-roster-00006",
+            load(&data).unwrap().unwrap().roster_revision,
+            &RosterChange::Remove {
+                machine: "nobody".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(reason_of(&error), "roster_refused");
+
+        let standalone = scratch("roster-standalone");
+        assert_eq!(
+            reason_of(
+                &apply_roster_change(
+                    &standalone,
+                    "op-roster-00007",
+                    1,
+                    &RosterChange::Remove {
+                        machine: "vps".to_string(),
+                    },
+                )
+                .unwrap_err()
+            ),
+            "no_fleet"
+        );
+    }
+
+    /// Receipts are the durable record a lost connection is reconciled from, and the
+    /// one file in this feature a person is most likely to read. They carry step
+    /// names, times, outcomes and public fingerprints, and nothing else.
+    #[test]
+    fn receipts_record_every_step_and_never_a_cookie_a_key_or_a_token() {
+        let issuer = issuer_fleet("issuer-receipts");
+        let target = scratch("target-receipts");
+        let operation = "op-receipt-0001";
+
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        // Before the fleet exists the record lives with the key it describes.
+        let staged = read_receipt(&target, operation).unwrap().unwrap();
+        assert!(staged.has_step("prepare"));
+        assert_eq!(
+            staged.key_fingerprint.as_deref(),
+            Some(request.key_fingerprint.as_str())
+        );
+
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        let issued = read_receipt(&issuer, operation).unwrap().unwrap();
+        assert!(issued.has_step("issue"));
+
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+        let receipt_path = receipts_dir(&target).join(format!("{operation}.json"));
+        ensure_private_file(&receipt_path, "operation receipt").unwrap();
+        let text = read_private(&receipt_path, "operation receipt").unwrap();
+        let installed: Receipt = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            installed
+                .steps
+                .iter()
+                .map(|step| step.step.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prepare", "install_staged", "install"],
+            "the record survives the rename that commits the identity"
+        );
+        assert!(installed.steps.iter().all(|step| step.at.ends_with('Z')));
+
+        let cookie = read_private(&fleet_dir(&target).join(COOKIE_FILE), "cookie").unwrap();
+        assert!(
+            !text.contains(&cookie),
+            "a receipt never carries the cookie"
+        );
+        assert!(
+            !text.contains("PRIVATE KEY"),
+            "a receipt never carries key material"
+        );
+        assert!(
+            text.contains(&request.key_fingerprint),
+            "it carries the public fingerprint that names the key instead"
+        );
+
+        // An operation this machine never saw has no receipt to append to.
+        assert!(read_receipt(&target, "op-receipt-9999").unwrap().is_none());
+        assert_eq!(
+            reason_of(
+                &append_receipt_step(&target, "op-receipt-9999", "started", "ok", None)
+                    .unwrap_err()
+            ),
+            "unknown_operation"
+        );
+
+        let appended =
+            append_receipt_step(&target, operation, "service_started", "ok", Some("by hand"))
+                .unwrap();
+        assert_eq!(appended.steps.len(), 4);
+        for hostile in ["", "a\nb"] {
+            assert_eq!(
+                reason_of(
+                    &append_receipt_step(&target, operation, hostile, "ok", None).unwrap_err()
+                ),
+                "invalid_request"
+            );
+        }
+        // The file is bounded: a peer cannot grow it without limit.
+        for index in 0..MAX_RECEIPT_STEPS {
+            let step = format!("filler-{index}");
+            if append_receipt_step(&target, operation, &step, "ok", None).is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            reason_of(
+                &append_receipt_step(&target, operation, "one-more", "ok", None).unwrap_err()
+            ),
+            "receipt_full"
+        );
+    }
+
+    /// An operation id names a directory and a file on a machine an operator does not
+    /// have a shell on, so it is checked before it is either.
+    #[test]
+    fn an_operation_id_cannot_name_a_path() {
+        for hostile in [
+            "../../etc/passwd",
+            "op/../../root",
+            "op.with.dots",
+            "OP-UPPERCASE1",
+            "short",
+            "-leading-hyphen",
+            "trailing-hyphen-",
+            "double--hyphen",
+            "",
+        ] {
+            assert!(
+                validate_operation_id(hostile).is_err(),
+                "`{hostile}` must not be usable as an operation id"
+            );
+        }
+        validate_operation_id("op-2026-09-17-a1").unwrap();
+        validate_operation_id("0123456789abcdef").unwrap();
+    }
+
+    /// Inspection is what an orchestrator reads before it decides anything, so it
+    /// answers for a standalone machine, one with an operation pending, and one that
+    /// has been admitted — and it answers with no secret at all.
+    #[test]
+    fn inspection_reports_identity_and_pending_work_and_no_secret() {
+        let target = scratch("target-inspect");
+        let blank = inspect_local(&target).unwrap();
+        assert!(blank.fleet.is_none());
+        assert!(blank.pending_operations.is_empty());
+        assert!(!blank.runtime_running);
+        assert_eq!(blank.data_dir, target.display().to_string());
+        assert_eq!(blank.os, std::env::consts::OS);
+
+        let operation = "op-inspect-0001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        assert_eq!(
+            inspect_local(&target).unwrap().pending_operations,
+            vec![operation.to_string()]
+        );
+
+        let issuer = issuer_fleet("issuer-inspect");
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+
+        let admitted = inspect_local(&target).unwrap();
+        assert!(admitted.pending_operations.is_empty());
+        let fleet = admitted.fleet.expect("an admitted machine has a fleet");
+        assert_eq!(fleet.node, "ouro-vps@127.0.0.1");
+        assert_eq!(fleet.members, vec!["studio".to_string(), "vps".to_string()]);
+        let rendered = serde_json::to_string(&inspect_local(&target).unwrap()).unwrap();
+        let cookie = read_private(&fleet_dir(&target).join(COOKIE_FILE), "cookie").unwrap();
+        assert!(!rendered.contains(&cookie));
+        assert!(!rendered.contains("PRIVATE KEY"));
+    }
+
+    /// Materials hold the fleet's cookie, so the one way they could leak it is a
+    /// derived `Debug` in a panic message or an error chain. There is not one.
+    #[test]
+    fn admission_materials_redact_their_cookie_when_printed() {
+        let issuer = issuer_fleet("issuer-debug");
+        let target = scratch("target-debug");
+        let request = prepare_admission(&target, "op-debug-000001", "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+
+        let printed = format!("{materials:?}");
+        assert!(!printed.contains(&materials.cookie));
+        assert!(printed.contains("<redacted>"));
+        assert!(printed.contains(&materials.operation));
+    }
+
+    /// `ouro fleet leave` retires a machine that was admitted, receipts and all. The
+    /// receipts directory is a recognized entry, not an unknown one that would make
+    /// the command refuse to remove a single credential.
+    #[test]
+    fn leave_retires_an_admitted_machine_together_with_its_receipts() {
+        let issuer = issuer_fleet("issuer-leave");
+        let target = scratch("target-leave");
+        let request = prepare_admission(&target, "op-leave-0000001", "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+
+        assert!(doctor(&target)
+            .text
+            .lines()
+            .all(|line| !line.contains("unknown entries")));
+
+        let removal = leave(&target)
+            .unwrap()
+            .expect("an admitted machine to retire");
+        assert!(removal.removed.iter().any(|name| name == RECEIPTS_DIR));
+        assert!(!fleet_dir(&target).try_exists().unwrap());
+
+        // An unknown entry beside the receipts is still a refusal.
+        let other = scratch("target-leave-unknown");
+        create(&other, None, "vps", "127.0.0.1", ephemeral_ports()).unwrap();
+        fs::create_dir(fleet_dir(&other).join(RECEIPTS_DIR)).unwrap();
+        fs::set_permissions(
+            fleet_dir(&other).join(RECEIPTS_DIR),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        write_private_atomic(
+            &fleet_dir(&other).join(RECEIPTS_DIR).join("notes.txt"),
+            b"hand written",
+        )
+        .unwrap();
+        let error = leave(&other).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unknown receipt entries"),
+            "{error:#}"
+        );
+        assert!(fleet_dir(&other).join(COOKIE_FILE).try_exists().unwrap());
     }
 }

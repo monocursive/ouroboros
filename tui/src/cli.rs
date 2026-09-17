@@ -1598,6 +1598,15 @@ pub enum FleetCommand {
 
     /// Remove this machine's cluster credentials after its runtime is stopped.
     Leave,
+
+    /// Answer the fleet setup protocol on this process's own stdin and stdout.
+    ///
+    /// Never run by hand: an issuer starts it over SSH as a fixed command and speaks
+    /// one JSON object per line to it. It opens no listener, starts no subprocess, and
+    /// takes no flags — everything variable, including which machine is being admitted
+    /// and which paths are touched, arrives inside a frame and is validated as data.
+    #[command(hide = true)]
+    Helper,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1954,6 +1963,14 @@ mod tests {
                 "secret",
             ],
             vec!["fleet", "protocol", "--token", "secret"],
+            // The setup helper carries a cookie and a certificate, and it takes them
+            // on stdin inside a frame. No flag here may name one, or name a file, a
+            // machine or an operation that a `ps` line would then publish.
+            vec!["fleet", "helper", "--token", "secret"],
+            vec!["fleet", "helper", "--cookie", "secret"],
+            vec!["fleet", "helper", "--materials", "/tmp/materials.json"],
+            vec!["fleet", "helper", "--operation", "op-1234abcd"],
+            vec!["fleet", "helper", "--data-dir", "/tmp/data"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied())).is_err(),
