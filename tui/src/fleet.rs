@@ -589,6 +589,16 @@ pub fn tags(
 /// failed gateway call asks the runtime again rather than refusing.
 pub fn forget_machine(data_dir: &Path, machine: &str) -> Result<Member> {
     let _lock = lock_live_fleet_update(data_dir, "ouro fleet sessions forget")?;
+    forget_machine_locked(data_dir, machine)
+}
+
+/// The edit itself, for a caller that already holds the lifecycle lock.
+///
+/// Admission reads the roster revision and then edits against it, and the two have to
+/// happen under one lock or the read is only a guess. The lock is not re-entrant — it
+/// is a same-user pid claim, and a second claim sees the first as a live holder — so
+/// the locking entry point above and this one are the same edit, split at the lock.
+fn forget_machine_locked(data_dir: &Path, machine: &str) -> Result<Member> {
     let mut profile = load(data_dir)?.context(
         "this machine is standalone; there is no cluster roster to declare a machine gone in",
     )?;
@@ -672,8 +682,23 @@ pub fn add_member(
     host: &str,
     node: Option<&str>,
 ) -> Result<Member> {
+    // Checked before the lock is taken, so a typo never waits on another lifecycle
+    // command; `add_member_locked` checks the same things again for the caller that
+    // arrives already holding it.
     validate_machine(machine)?;
     validate_host(host)?;
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet members add")?;
+    add_member_locked(data_dir, machine, host, node)
+}
+
+/// The edit itself, for a caller that already holds the lifecycle lock. See
+/// [`forget_machine_locked`] for why the split exists.
+fn add_member_locked(
+    data_dir: &Path,
+    machine: &str,
+    host: &str,
+    node: Option<&str>,
+) -> Result<Member> {
     let added = member(machine, host);
     if let Some(node) = node {
         if node != added.node {
@@ -683,7 +708,6 @@ pub fn add_member(
             );
         }
     }
-    let _lock = lock_live_fleet_update(data_dir, "ouro fleet members add")?;
     let mut profile = load(data_dir)?.context(
         "this machine is standalone; `ouro fleet create` gives it a cluster identity before it can have a roster",
     )?;
@@ -733,6 +757,12 @@ pub fn add_member(
 /// is `ouro fleet sessions forget`.
 pub fn remove_member(data_dir: &Path, machine: &str) -> Result<Member> {
     let _lock = lock_live_fleet_update(data_dir, "ouro fleet members remove")?;
+    remove_member_locked(data_dir, machine)
+}
+
+/// The edit itself, for a caller that already holds the lifecycle lock. See
+/// [`forget_machine_locked`] for why the split exists.
+fn remove_member_locked(data_dir: &Path, machine: &str) -> Result<Member> {
     let mut profile = load(data_dir)?
         .context("this machine is standalone; there is no cluster roster to edit")?;
     if machine == profile.machine || machine == profile.node {
@@ -1450,6 +1480,23 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
             "interrupted fleet setup cannot be recovered safely: {error:#}"
         ))),
     }
+    // A pending admission holds this machine's prepared private key, and once `install`
+    // has begun writing it holds the fleet cookie too. It lives in its own namespace
+    // precisely so that orphan-staging recovery cannot delete it between two steps of
+    // one operation — which means nothing sweeps it either, and an abandoned operation
+    // is durable private key material that no command has ever mentioned.
+    match scan_admission(data_dir) {
+        Ok(pending) if pending.is_empty() => {}
+        Ok(pending) => checks.push(problem(format!(
+            "{} fleet admission{} pending on this machine ({}). Each holds a private key this machine generated, and one that reached `install` holds the fleet cookie. Finish it with the same materials, or run `ouro fleet leave` to retire it",
+            pending.len(),
+            if pending.len() == 1 { "" } else { "s" },
+            pending.join(", ")
+        ))),
+        Err(error) => checks.push(problem(format!(
+            "a pending fleet admission cannot be inspected safely: {error:#}"
+        ))),
+    }
     // `ouro fleet leave` is the only command that removes this directory and it refuses
     // one holding an entry it does not recognize. Naming them here is what keeps that
     // refusal from being a silent dead end.
@@ -1847,12 +1894,25 @@ fn leave_with_epmd_program(
     ensure_data_dir(data_dir)?;
     let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet leave")?;
 
+    // A pending admission is private key material, and on a machine that got as far as
+    // `install` it is the fleet cookie as well. `leave` is the command that retires this
+    // machine's credentials, so it retires those too — validated the way interrupted
+    // setup is validated, and never guessed at.
+    let retired = retire_pending_admissions(data_dir)?;
+
     let dir = fleet_dir(data_dir);
     if !dir
         .try_exists()
         .with_context(|| format!("inspecting {}", dir.display()))?
     {
-        return Ok(None);
+        if retired.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(Removal {
+            machine: None,
+            profile_readable: false,
+            removed: retired,
+        }));
     }
     // An unreadable profile must not lock the operator out of the one command that
     // cleans up: every other surface refuses such a directory, so refusing here too
@@ -1860,7 +1920,9 @@ fn leave_with_epmd_program(
     // `None` and then trusts only the ownership marker and its lock.
     let profile = load(data_dir).unwrap_or_default();
     retire_epmd_before_profile_removal(data_dir, profile.as_ref(), epmd_program)?;
-    let removed = remove_recognized_fleet_dir(&dir)?;
+    let mut removed = remove_recognized_fleet_dir(&dir)?;
+    removed.extend(retired);
+    removed.sort();
     Ok(Some(Removal {
         machine: profile.as_ref().map(|profile| profile.machine.clone()),
         profile_readable: profile.is_some(),
@@ -2148,11 +2210,17 @@ fn unrecognized_fleet_entries(dir: &Path) -> Result<Vec<String>> {
             unknown.push(name.to_string_lossy().into_owned());
             continue;
         };
-        if name == CLUSTER_DIRECTORY_DIR
-            || name == RECEIPTS_DIR
-            || known.contains(name)
-            || retired_revocation_file(name)
-        {
+        if name == RECEIPTS_DIR {
+            // Recognized, but not wholesale: `leave` validates this directory entry by
+            // entry and refuses the whole fleet directory over one stray file, so a
+            // stray file has to be nameable here or that refusal is a dead end nothing
+            // reports.
+            for stray in unrecognized_receipt_entries(&entry.path())? {
+                unknown.push(format!("{RECEIPTS_DIR}/{stray}"));
+            }
+            continue;
+        }
+        if name == CLUSTER_DIRECTORY_DIR || known.contains(name) || retired_revocation_file(name) {
             continue;
         }
         unknown.push(name.to_string());
@@ -3103,6 +3171,36 @@ fn validate_host(host: &str) -> Result<()> {
         bail!(
             "host `{host}` must be an IP address or DNS name every fleet machine can reach (a Tailscale/MagicDNS name is recommended)"
         );
+    }
+    if host.parse::<IpAddr>().is_err() {
+        // Everything that reaches here is being treated as a DNS name, and a name is
+        // what goes into the certificate as a DNS subject-alternative name. The
+        // resolver is more permissive than that: `127.1`, `2130706433` and `0x7f.0.0.1`
+        // are all `127.0.0.1` to `getaddrinfo`, so a host spelled that way would be
+        // dialed as an address and certified as a name, and two members could spell one
+        // address two ways and be two node names for one machine. RFC 1123 already
+        // forbids an all-numeric top label; this refuses those spellings by that rule,
+        // along with the empty labels a leading or trailing dot produces.
+        let mut labels = host.split('.').peekable();
+        let mut last = "";
+        while let Some(label) = labels.next() {
+            if label.is_empty() {
+                bail!(
+                    "host `{host}` has an empty name label; write the address or name without a leading, trailing or doubled `.`"
+                );
+            }
+            if labels.peek().is_none() {
+                last = label;
+            }
+        }
+        if last.bytes().all(|byte| byte.is_ascii_digit())
+            || last.starts_with("0x")
+            || last.starts_with("0X")
+        {
+            bail!(
+                "host `{host}` is neither a dotted-quad IPv4 address nor a DNS name: its last label is numeric, and a resolver would read the whole host as an address written another way. Use the dotted-quad spelling, such as 127.0.0.1"
+            );
+        }
     }
     Ok(())
 }
@@ -4922,6 +5020,56 @@ pub fn receipts_dir(data_dir: &Path) -> PathBuf {
     fleet_dir(data_dir).join(RECEIPTS_DIR)
 }
 
+/// Do two names denote the same machine?
+///
+/// `validate_machine` has always accepted upper case, and every identity comparison in
+/// this file was a byte comparison, so `Vps` was a different machine from `vps` to the
+/// roster, to the tombstones and to the ledger of machines already issued for. That is
+/// not a spelling difference: it is one machine holding two identities, or a machine
+/// the operator declared gone for good coming back under a shift key. Admission mints
+/// only lower-case names (see [`validate_admission_machine`]), and every comparison
+/// against a name that is *already* on disk — written by an older `ouro fleet members
+/// add`, which still accepts either case — folds case so the existing entry shadows.
+fn same_name(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+/// The machine names admission is willing to mint.
+///
+/// Stricter than [`validate_machine`] on purpose, and only for the new path: an
+/// operator's existing mixed-case roster entry keeps working, and nothing new joins it.
+fn validate_admission_machine(machine: &str) -> Result<()> {
+    validate_machine(machine).map_err(|error| refusing("invalid_request", error))?;
+    if machine.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return refuse(
+            "invalid_request",
+            format!(
+                "machine name `{machine}` must be lower case here: `{}` and `{machine}` would be two identities for one machine, and admission mints one",
+                machine.to_ascii_lowercase()
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// The one spelling of a host this code will put in a certificate.
+///
+/// A DNS name is case-insensitive and may carry the trailing root dot, so `LOCALHOST`,
+/// `localhost.` and `localhost` are one host written three ways — and three different
+/// node names, if the spelling the operator typed is the spelling that gets minted.
+/// `validate_host` separately refuses the numeric spellings of an IPv4 literal that a
+/// resolver would accept. What comes back here is what the roster, the node name, the
+/// certificate's common name and its subject-alternative name all use.
+pub fn canonical_host(host: &str) -> Result<String> {
+    let trimmed = host.trim();
+    let canonical = trimmed
+        .strip_suffix('.')
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    validate_host(&canonical).map_err(|error| refusing("invalid_request", error))?;
+    Ok(canonical)
+}
+
 /// An operation id names a directory and a file, so it is checked before it is used
 /// as either: lowercase ASCII alphanumerics and single hyphens, bounded length, no
 /// leading or trailing hyphen. `.`, `/` and `..` cannot survive this.
@@ -4942,6 +5090,18 @@ fn validate_operation_id(operation: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Clip a detail this code generated to the length a receipt accepts.
+fn truncated_detail(detail: &str) -> String {
+    let mut clipped = String::new();
+    for character in detail.chars().filter(|character| !character.is_control()) {
+        if clipped.len() + character.len_utf8() > MAX_RECEIPT_TEXT {
+            break;
+        }
+        clipped.push(character);
+    }
+    clipped
 }
 
 /// Short free text from a remote peer, on its way into a durable file.
@@ -5076,8 +5236,8 @@ pub fn prepare_admission(
     host: &str,
 ) -> Result<AdmissionRequest> {
     validate_operation_id(operation)?;
-    validate_machine(machine).map_err(|error| refusing("invalid_request", error))?;
-    validate_host(host).map_err(|error| refusing("invalid_request", error))?;
+    validate_admission_machine(machine)?;
+    let host = &canonical_host(host)?;
     ensure_usable_ipv4_resolution(host).map_err(|error| refusing("unusable_host", error))?;
     ensure_data_dir(data_dir)?;
     let _lock = lock_live_fleet_update(data_dir, "ouro fleet helper prepare")?;
@@ -5129,7 +5289,7 @@ pub fn prepare_admission(
         let existing: AdmissionRequest =
             serde_json::from_str(&read_private(&request_path, "admission request")?)
                 .with_context(|| format!("reading {}", request_path.display()))?;
-        if existing.node != local.node {
+        if !same_name(&existing.node, &local.node) {
             return refuse(
                 "identity_mismatch",
                 format!(
@@ -5211,8 +5371,17 @@ fn validate_admission_request(request: &AdmissionRequest) -> Result<()> {
         );
     }
     validate_operation_id(&request.operation)?;
-    validate_machine(&request.machine).map_err(|error| refusing("invalid_request", error))?;
-    validate_host(&request.host).map_err(|error| refusing("invalid_request", error))?;
+    validate_admission_machine(&request.machine)?;
+    let canonical = canonical_host(&request.host)?;
+    if canonical != request.host {
+        return refuse(
+            "invalid_request",
+            format!(
+                "host `{}` is spelled `{canonical}` here; one address written two ways is two node names for one machine",
+                request.host
+            ),
+        );
+    }
     let expected = member(&request.machine, &request.host);
     if request.node != expected.node {
         return refuse(
@@ -5408,7 +5577,9 @@ pub fn issue_member_certificate(
         .members
         .iter()
         .chain(profile.tombstones.iter())
-        .find(|entry| entry.machine == request.machine || entry.node == admitted.node)
+        .find(|entry| {
+            same_name(&entry.machine, &request.machine) || same_name(&entry.node, &admitted.node)
+        })
     {
         return refuse(
             "machine_known",
@@ -5418,7 +5589,7 @@ pub fn issue_member_certificate(
             ),
         );
     }
-    ensure_admission_not_recorded(data_dir, request)?;
+    let record_warnings = ensure_admission_not_recorded(data_dir, request)?;
 
     let public_key_der = verify_admission_csr(request)?;
     if public_fingerprint(&public_key_der) != request.key_fingerprint {
@@ -5483,29 +5654,52 @@ pub fn issue_member_certificate(
 
     // Durable before the materials leave this function: a caller that dies holding
     // them must not be able to ask for a second certificate for the same machine.
+    let seed = ReceiptSeed {
+        operation: request.operation.clone(),
+        machine: request.machine.clone(),
+        host: request.host.clone(),
+        node: admitted.node.clone(),
+        key_fingerprint: Some(request.key_fingerprint.clone()),
+    };
     record_step(
         &receipts_dir(data_dir),
-        &ReceiptSeed {
-            operation: request.operation.clone(),
-            machine: request.machine.clone(),
-            host: request.host.clone(),
-            node: admitted.node.clone(),
-            key_fingerprint: Some(request.key_fingerprint.clone()),
-        },
+        &seed,
         "issue",
         "ok",
         Some(format!("issued by {}", profile.node)),
         Some(public_fingerprint(&public_key_der)),
     )?;
+    // A receipt this machine could not read weakened the replay check above, and that
+    // belongs in the record rather than only in this process's memory.
+    if let Some(first) = record_warnings.first() {
+        record_step(
+            &receipts_dir(data_dir),
+            &seed,
+            "records_unreadable",
+            "warning",
+            Some(truncated_detail(&format!(
+                "{} of this machine's receipts could not be read; first: {first}",
+                record_warnings.len()
+            ))),
+            None,
+        )?;
+    }
 
     Ok(materials)
 }
 
 /// Refuse an operation id this machine already answered, and a machine it already
 /// issued a certificate for under any operation id.
-fn ensure_admission_not_recorded(data_dir: &Path, request: &AdmissionRequest) -> Result<()> {
-    for receipt in read_receipts(data_dir)? {
-        if receipt.operation == request.operation {
+fn ensure_admission_not_recorded(
+    data_dir: &Path,
+    request: &AdmissionRequest,
+) -> Result<Vec<String>> {
+    let ReadReceipts {
+        receipts,
+        unreadable,
+    } = read_receipts(data_dir)?;
+    for receipt in receipts {
+        if same_name(&receipt.operation, &request.operation) {
             return refuse(
                 "operation_replayed",
                 format!(
@@ -5514,7 +5708,7 @@ fn ensure_admission_not_recorded(data_dir: &Path, request: &AdmissionRequest) ->
                 ),
             );
         }
-        if receipt.machine == request.machine && receipt.has_step("issue") {
+        if same_name(&receipt.machine, &request.machine) && receipt.has_step("issue") {
             return refuse(
                 "machine_already_issued",
                 format!(
@@ -5524,34 +5718,67 @@ fn ensure_admission_not_recorded(data_dir: &Path, request: &AdmissionRequest) ->
             );
         }
     }
-    Ok(())
+    Ok(unreadable
+        .into_iter()
+        .map(|name| {
+            format!(
+                "receipt {name}.json could not be read, so this machine cannot say whether it already answered that operation"
+            )
+        })
+        .collect())
 }
 
-/// Every receipt this machine holds, in operation-id order.
-fn read_receipts(data_dir: &Path) -> Result<Vec<Receipt>> {
+/// Every receipt this machine holds, in operation-id order, and the ones it could not
+/// read.
+///
+/// A receipt that does not parse must not brick admission. It is a record, not an
+/// authority: the checks it feeds — "have I answered this operation", "have I already
+/// issued for this machine" — become weaker without it, and that is a warning an
+/// operator can act on. Failing the whole call instead would mean one file dropped into
+/// this directory stops a fleet ever admitting anything again.
+struct ReadReceipts {
+    receipts: Vec<Receipt>,
+    unreadable: Vec<String>,
+}
+
+fn read_receipts(data_dir: &Path) -> Result<ReadReceipts> {
     let home = receipts_dir(data_dir);
     let entries = match fs::read_dir(&home) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ReadReceipts {
+                receipts: Vec::new(),
+                unreadable: Vec::new(),
+            })
+        }
         Err(error) => return Err(error).context(format!("reading {}", home.display())),
     };
     let mut receipts = Vec::new();
+    let mut unreadable = Vec::new();
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+            unreadable.push(name.to_string_lossy().into_owned());
             continue;
         };
         if validate_operation_id(name).is_err() {
+            unreadable.push(name.to_string());
             continue;
         }
-        let text = read_private(&entry.path(), "operation receipt")?;
-        let receipt: Receipt = serde_json::from_str(&text)
-            .with_context(|| format!("reading {}", entry.path().display()))?;
-        receipts.push(receipt);
+        let parsed = read_private(&entry.path(), "operation receipt")
+            .and_then(|text| serde_json::from_str::<Receipt>(&text).map_err(Into::into));
+        match parsed {
+            Ok(receipt) => receipts.push(receipt),
+            Err(_) => unreadable.push(name.to_string()),
+        }
     }
     receipts.sort_by(|left, right| left.operation.cmp(&right.operation));
-    Ok(receipts)
+    unreadable.sort();
+    Ok(ReadReceipts {
+        receipts,
+        unreadable,
+    })
 }
 
 /// Reject materials that carry a private key in a field that must hold none.
@@ -5591,8 +5818,19 @@ fn validate_admission_materials(materials: &AdmissionMaterials) -> Result<()> {
             format!("a certificate over {MAX_ADMISSION_PEM_BYTES} bytes is not read"),
         );
     }
-    validate_machine(&materials.machine).map_err(|error| refusing("materials_invalid", error))?;
-    validate_host(&materials.host).map_err(|error| refusing("materials_invalid", error))?;
+    validate_admission_machine(&materials.machine)
+        .map_err(|error| refusing("materials_invalid", error))?;
+    let canonical =
+        canonical_host(&materials.host).map_err(|error| refusing("materials_invalid", error))?;
+    if canonical != materials.host {
+        return refuse(
+            "materials_invalid",
+            format!(
+                "admission materials spell the host `{}`, and its one spelling here is `{canonical}`",
+                materials.host
+            ),
+        );
+    }
     let local = member(&materials.machine, &materials.host);
     if materials.node != local.node {
         return refuse(
@@ -5614,12 +5852,10 @@ fn validate_admission_materials(materials: &AdmissionMaterials) -> Result<()> {
     }
     validate_fleet_name(&materials.fleet_name)
         .map_err(|error| refusing("materials_invalid", error))?;
-    if materials.members.len() > MAX_ADMISSION_ROSTER
-        || materials.tombstones.len() > MAX_ADMISSION_ROSTER
-    {
+    if materials.tombstones.len() > MAX_ADMISSION_ROSTER {
         return refuse(
             "materials_invalid",
-            format!("a roster over {MAX_ADMISSION_ROSTER} entries is not installed"),
+            format!("over {MAX_ADMISSION_ROSTER} tombstones are not installed"),
         );
     }
     if materials.roster_revision == 0 {
@@ -5642,6 +5878,17 @@ fn admitted_profile(
         members.push(local.clone());
     }
     members.sort_by(|left, right| left.node.cmp(&right.node));
+    // Counted *after* the local member joins them: a roster of exactly the maximum plus
+    // this machine is one over it, and checking the sent list alone installed 65.
+    if members.len() > MAX_ADMISSION_ROSTER {
+        return refuse(
+            "materials_invalid",
+            format!(
+                "this machine would make {} members, and a roster over {MAX_ADMISSION_ROSTER} is not installed",
+                members.len()
+            ),
+        );
+    }
     let (dist_port_min, dist_port_max) = match ports.dist {
         Some(_) => dist_ports(ports.dist),
         None => (materials.dist_port_min, materials.dist_port_max),
@@ -5677,11 +5924,37 @@ fn admitted_profile(
 /// rerunning with the same materials rewrites and finishes it; a crash after it
 /// leaves a complete fleet, and rerunning returns the installed profile. There is no
 /// in-between state in which the BEAM could adopt half a set of credentials.
+/// Install issued materials against the key this machine prepared and never sent.
+///
+/// See [`install_admission_reporting`], which this is the two-value-free form of.
 pub fn install_admission(
     data_dir: &Path,
     materials: &AdmissionMaterials,
     ports: Ports,
 ) -> Result<Profile> {
+    install_admission_reporting(data_dir, materials, ports).map(|(profile, _warnings)| profile)
+}
+
+/// Install issued materials, and say what went wrong *after* the machine was admitted.
+///
+/// One commit point: every file is written inside the operation's private staging
+/// directory, and the directory then *becomes* `<data dir>/fleet/` with a single
+/// rename. A crash before that rename leaves a staging directory and no fleet, and
+/// rerunning with the same materials rewrites and finishes it; a crash after it leaves
+/// a complete fleet, and rerunning returns the installed profile. There is no in-between
+/// state in which the BEAM could adopt half a set of credentials.
+///
+/// Nothing after that rename may turn this into an error. The machine *is* admitted at
+/// that point — it holds the cookie, the CA certificate and its own leaf — and an
+/// orchestrator told "it failed" would go and admit it again somewhere else, or leave an
+/// operator believing a machine that is in the fleet is not. So the closing record, and
+/// the last re-read of what was written, come back as warnings on a successful return.
+/// Every check that can refuse runs before the first byte is written.
+pub fn install_admission_reporting(
+    data_dir: &Path,
+    materials: &AdmissionMaterials,
+    ports: Ports,
+) -> Result<(Profile, Vec<String>)> {
     validate_admission_materials(materials)?;
     validate_ports(ports).map_err(|error| refusing("invalid_request", error))?;
     ensure_usable_ipv4_resolution(&materials.host)
@@ -5692,11 +5965,29 @@ pub fn install_admission(
 
     let local = member(&materials.machine, &materials.host);
     let final_dir = fleet_dir(data_dir);
-    if final_dir
-        .try_exists()
-        .with_context(|| format!("inspecting {}", final_dir.display()))?
-    {
-        return finished_install(data_dir, materials, &local);
+    // `symlink_metadata`, because `try_exists` follows a link: a `fleet` symlink
+    // pointing anywhere would read as absent and the rename would then fail with
+    // whatever the filesystem said, under the catch-all reason. This is a state an
+    // orchestrator has to be able to branch on.
+    match fs::symlink_metadata(&final_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            return finished_install(data_dir, materials, &local).map(|profile| (profile, Vec::new()))
+        }
+        Ok(metadata) => {
+            return refuse(
+                "fleet_exists",
+                format!(
+                    "{} already exists and is not a directory (symlink={}); nothing was installed. Inspect it, then move it aside",
+                    final_dir.display(),
+                    metadata.file_type().is_symlink()
+                ),
+            )
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::from(error)
+                .context(format!("inspecting {}", final_dir.display())))
+        }
     }
 
     let dir = admission_dir(data_dir, &materials.operation);
@@ -5714,6 +6005,20 @@ pub fn install_admission(
     }
     ensure_private_dir(&dir)?;
     let node_key_pem = Zeroizing::new(read_private(&dir.join(NODE_KEY_FILE), "staged node key")?);
+    // The materials name a key by fingerprint. If that is not the key this machine
+    // prepared, then whatever else is true, these are not this operation's materials.
+    let staged_key = KeyPair::from_pem(&node_key_pem)
+        .map_err(|error| refusing("materials_invalid", anyhow!("{error}")))?;
+    let staged_fingerprint = public_fingerprint(staged_key.public_key_der().as_ref());
+    if staged_fingerprint != materials.key_fingerprint {
+        return refuse(
+            "materials_invalid",
+            format!(
+                "the materials name key {} and this machine prepared {staged_fingerprint}",
+                materials.key_fingerprint
+            ),
+        );
+    }
     // Binds the issued leaf to the CA, to the approved identity, and to the key that
     // never left this machine. A leaf for someone else's key fails here.
     validate_tls_identity(
@@ -5737,6 +6042,16 @@ pub fn install_admission(
         node: local.node.clone(),
         key_fingerprint: Some(materials.key_fingerprint.clone()),
     };
+    // Both remaining lifecycle steps have to fit before the first credential is
+    // written. A peer can fill this file with the helper's own `receipt append`, and a
+    // cap reached between the rename and the closing step would mean a machine that is
+    // admitted, healthy, and reported as failed for ever.
+    reserve_receipt_steps(&dir.join(RECEIPTS_DIR), &materials.operation, 2)?;
+    // And the directory has to be one that may be promoted *before* the fleet cookie is
+    // written into it: a refusal after that write leaves the cookie in a private
+    // directory on a machine that never joined.
+    prune_admission_staging(&dir)?;
+
     record_step(
         &dir.join(RECEIPTS_DIR),
         &seed,
@@ -5761,22 +6076,155 @@ pub fn install_admission(
         &dir.join(PROFILE_FILE),
         &serde_json::to_vec_pretty(&profile).context("encoding fleet profile")?,
     )?;
+    // A re-check under the lock, immediately before the rename. The scan above already
+    // decided this directory may be promoted and removed what it writes, so nothing a
+    // test can produce reaches this one: deleting it fails no test, and it is here for
+    // the entry that appears while the six writes above are happening.
     prune_admission_staging(&dir)?;
 
     fs::rename(&dir, &final_dir)
         .with_context(|| format!("publishing fleet profile at {}", final_dir.display()))?;
-    sync_parent(&final_dir)?;
-    validate_materials(data_dir, false)
-        .context("the installed credentials do not describe a startable machine")?;
-    record_step(
+
+    // ---- past the commit point: this machine is admitted -------------------
+    Ok((
+        profile.clone(),
+        close_install_record(data_dir, &seed, &profile),
+    ))
+}
+
+/// Everything `install` does after the rename that commits the identity.
+///
+/// Separate because of what it must never do: return an error. The machine holds the
+/// cookie, the CA certificate and its own leaf by the time this runs, and an
+/// orchestrator told "the install failed" would admit it a second time somewhere else,
+/// or leave an operator believing a machine that is in the fleet is not. Each of these
+/// can still fail on a full or hostile disk, and each failure comes back as a sentence
+/// rather than as a refusal.
+fn close_install_record(data_dir: &Path, seed: &ReceiptSeed, profile: &Profile) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Err(error) = sync_parent(&fleet_dir(data_dir)) {
+        warnings.push(format!(
+            "this machine was admitted but its fleet directory was not synced to disk: {error:#}"
+        ));
+    }
+    if let Err(error) = validate_materials(data_dir, false) {
+        warnings.push(format!(
+            "this machine was admitted but its credentials do not read back as a startable machine: {error:#}"
+        ));
+    }
+    if let Err(error) = record_step(
         &receipts_dir(data_dir),
-        &seed,
+        seed,
         "install",
         "ok",
-        Some(format!("node {}", local.node)),
+        Some(format!("node {}", profile.node)),
         None,
-    )?;
-    Ok(profile)
+    ) {
+        warnings.push(format!(
+            "this machine was admitted but its receipt does not record the step: {error:#}"
+        ));
+    }
+    warnings
+}
+
+/// Retire every pending admission on this machine, naming what was removed.
+///
+/// Called with the lifecycle lock held. Each directory is validated before a byte is
+/// unlinked, the way `validate_staging_entries` validates interrupted setup: same user,
+/// mode 0700, and nothing inside but the files this code writes, each a private
+/// single-link regular file. Anything else is a hard refusal — this removes what it can
+/// prove it wrote, and an operator inspects the rest.
+fn retire_pending_admissions(data_dir: &Path) -> Result<Vec<String>> {
+    let uid = unsafe { libc::geteuid() };
+    let known = known_fleet_files();
+    let mut retired = Vec::new();
+    for operation in scan_admission(data_dir)? {
+        let dir = admission_dir(data_dir, &operation);
+        ensure_private_dir(&dir)?;
+        let metadata = fs::symlink_metadata(&dir)
+            .with_context(|| format!("inspecting pending admission {}", dir.display()))?;
+        if metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+            bail!(
+                "pending admission {} is not a same-user mode-0700 directory (uid={}, mode={:o}); it was not removed",
+                dir.display(),
+                metadata.uid(),
+                metadata.mode() & 0o777
+            );
+        }
+        let mut files = Vec::new();
+        let mut receipts = None;
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                anyhow!(
+                    "pending admission {} contains a non-UTF-8 entry; it was not removed",
+                    dir.display()
+                )
+            })?;
+            if name == RECEIPTS_DIR {
+                receipts = Some(entry.path());
+                continue;
+            }
+            if !known.contains(name)
+                && name != ADMISSION_REQUEST_FILE
+                && !is_generated_staging_temp(name, &known)
+            {
+                bail!(
+                    "pending admission {} contains unknown entry `{name}`; it was not removed. Inspect it, then remove the directory by hand",
+                    dir.display()
+                );
+            }
+            ensure_private_file(&entry.path(), "pending admission file")?;
+            let file = fs::symlink_metadata(entry.path())?;
+            if file.nlink() != 1 {
+                bail!(
+                    "pending admission file {} has {} links; it was not removed",
+                    entry.path().display(),
+                    file.nlink()
+                );
+            }
+            files.push(entry.path());
+        }
+        let receipt_files = receipts
+            .as_deref()
+            .map(validate_receipts_directory)
+            .transpose()?;
+        for path in files {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        if let (Some(receipts), Some(receipt_files)) = (receipts.as_deref(), receipt_files) {
+            remove_validated_receipts_directory(receipts, receipt_files)?;
+        }
+        fs::remove_dir(&dir).with_context(|| format!("removing empty {}", dir.display()))?;
+        sync_parent(&dir)?;
+        retired.push(format!("{ADMISSION_PREFIX}{operation}"));
+    }
+    retired.sort();
+    Ok(retired)
+}
+
+/// Refuse now if the receipt cannot hold the steps this operation still has to write.
+fn reserve_receipt_steps(home: &Path, operation: &str, needed: usize) -> Result<()> {
+    let path = home.join(format!("{operation}.json"));
+    if !path
+        .try_exists()
+        .with_context(|| format!("inspecting {}", path.display()))?
+    {
+        return Ok(());
+    }
+    let receipt: Receipt = serde_json::from_str(&read_private(&path, "operation receipt")?)
+        .with_context(|| format!("reading {}", path.display()))?;
+    if receipt.steps.len() + needed > MAX_RECEIPT_STEPS {
+        return refuse(
+            "receipt_full",
+            format!(
+                "the receipt for operation {operation} holds {} of {MAX_RECEIPT_STEPS} steps and this needs {needed} more; nothing was installed. Start the machine on a fresh operation id",
+                receipt.steps.len()
+            ),
+        );
+    }
+    Ok(())
 }
 
 /// Leave the staging directory holding exactly what a fleet directory may hold.
@@ -5838,12 +6286,32 @@ fn finished_install(
         )
     };
     let profile = load(data_dir)?.ok_or_else(refusal)?;
-    if profile.fleet_id != materials.fleet_id || profile.node != local.node {
+    if profile.fleet_id != materials.fleet_id || !same_name(&profile.node, &local.node) {
         return Err(refusal().into());
     }
     let Some(receipt) = read_receipt(data_dir, &materials.operation)? else {
         return Err(refusal().into());
     };
+    // Same operation, same fleet, same node — and still possibly a different set of
+    // credentials, because an idempotent answer that ignores what it was handed would
+    // report success for materials this machine never installed. Compare the three
+    // things that are on disk against the three that arrived.
+    let root = fleet_dir(data_dir);
+    let installed_cookie = Zeroizing::new(read_private(&root.join(COOKIE_FILE), "fleet cookie")?);
+    let installed_ca = read_private(&root.join(CA_CERT_FILE), "fleet CA certificate")?;
+    let installed_leaf = read_private(&root.join(NODE_CERT_FILE), "node certificate")?;
+    if installed_cookie.as_str() != materials.cookie
+        || installed_ca != materials.ca_cert_pem
+        || installed_leaf != materials.node_cert_pem
+    {
+        return refuse(
+            "materials_differ",
+            format!(
+                "operation {} is already installed on this machine with different credentials; nothing was changed. Read its receipt rather than reinstalling",
+                materials.operation
+            ),
+        );
+    }
     if !receipt.has_step("install_staged") && !receipt.has_step("install") {
         return Err(refusal().into());
     }
@@ -5872,12 +6340,11 @@ fn finished_install(
 ///
 /// The revision check is what keeps an operator from getting a lost update dressed up
 /// as a successful admission: a caller states the revision it read, and a roster that
-/// has moved on refuses with `roster_conflict` and the revision it actually holds.
-///
-/// The check is made before the edit rather than inside it, because the edit takes the
-/// same lifecycle lock this function would have to hold and that lock is not
-/// re-entrant. The window is one uncontended call wide, and the outcome reports the
-/// revision the roster actually reached, so a caller that lost a race sees it.
+/// has moved on refuses with `roster_conflict` and the revision it actually holds. The
+/// read and the edit happen under one hold of the lifecycle lock — the `*_locked`
+/// variants of the roster editors exist for exactly this — so "the revision I checked"
+/// and "the revision I edited" are the same revision, and two callers racing one
+/// revision cannot both win.
 pub fn apply_roster_change(
     data_dir: &Path,
     operation: &str,
@@ -5885,6 +6352,36 @@ pub fn apply_roster_change(
     change: &RosterChange,
 ) -> Result<RosterOutcome> {
     validate_operation_id(operation)?;
+    let machine = match change {
+        RosterChange::Add { machine, .. }
+        | RosterChange::Remove { machine }
+        | RosterChange::Forget { machine } => machine,
+    };
+    validate_admission_machine(machine)?;
+    if let RosterChange::Add { host, node, .. } = change {
+        let canonical = canonical_host(host)?;
+        if &canonical != host {
+            return refuse(
+                "invalid_request",
+                format!("host `{host}` is spelled `{canonical}` here"),
+            );
+        }
+        let expected = member(machine, &canonical);
+        if let Some(node) = node {
+            if node != &expected.node {
+                return refuse(
+                    "invalid_request",
+                    format!(
+                        "machine `{machine}` at `{canonical}` is node {}, not {node}",
+                        expected.node
+                    ),
+                );
+            }
+        }
+    }
+
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet helper roster")
+        .map_err(|error| refusing("lock_unavailable", error))?;
     let before = load(data_dir)?.ok_or_else(|| {
         AdmissionError::new(
             "no_fleet",
@@ -5902,23 +6399,54 @@ pub fn apply_roster_change(
         }
         .into());
     }
+    // A name that differs from one already on disk only by case is the same machine,
+    // and the roster editors below compare bytes. Without this, `add Studio` on a
+    // machine whose roster says `studio` is a second entry for one machine.
+    if let RosterChange::Add { .. } = change {
+        for entry in before
+            .members
+            .iter()
+            .chain(before.tombstones.iter())
+            .chain(std::iter::once(&member(&before.machine, &before.host)))
+        {
+            if same_name(&entry.machine, machine) && entry.machine != *machine {
+                return refuse(
+                    "roster_refused",
+                    format!(
+                        "this machine's roster already spells that machine `{}`; `{machine}` would be a second entry for one machine",
+                        entry.machine
+                    ),
+                );
+            }
+        }
+    }
+
+    // The other direction of the same rule: a roster written by an older `ouro fleet
+    // members add` may spell a machine `Vps`, and a lower-case request to remove or
+    // forget it names the same machine. Resolve to the spelling on disk so the editors
+    // below, which compare bytes, see the entry the operator meant.
+    let on_disk = before
+        .members
+        .iter()
+        .chain(before.tombstones.iter())
+        .find(|entry| same_name(&entry.machine, machine))
+        .map(|entry| entry.machine.clone());
+    let named = on_disk.as_deref().unwrap_or(machine);
 
     let (member, step) = match change {
-        RosterChange::Add {
-            machine,
-            host,
-            node,
-        } => (
-            add_member(data_dir, machine, host, node.as_deref())
+        RosterChange::Add { host, node, .. } => (
+            add_member_locked(data_dir, machine, host, node.as_deref())
                 .map_err(|error| refusing("roster_refused", error))?,
             "roster_add",
         ),
-        RosterChange::Remove { machine } => (
-            remove_member(data_dir, machine).map_err(|error| refusing("roster_refused", error))?,
+        RosterChange::Remove { .. } => (
+            remove_member_locked(data_dir, named)
+                .map_err(|error| refusing("roster_refused", error))?,
             "roster_remove",
         ),
-        RosterChange::Forget { machine } => (
-            forget_machine(data_dir, machine).map_err(|error| refusing("roster_refused", error))?,
+        RosterChange::Forget { .. } => (
+            forget_machine_locked(data_dir, named)
+                .map_err(|error| refusing("roster_refused", error))?,
             "roster_forget",
         ),
     };
@@ -6090,7 +6618,9 @@ fn record_step(
     {
         let existing: Receipt = serde_json::from_str(&read_private(&path, "operation receipt")?)
             .with_context(|| format!("reading {}", path.display()))?;
-        if existing.node != seed.node || existing.operation != seed.operation {
+        if !same_name(&existing.node, &seed.node)
+            || !same_name(&existing.operation, &seed.operation)
+        {
             return refuse(
                 "identity_mismatch",
                 format!(
@@ -6137,6 +6667,36 @@ fn record_step(
     Ok(receipt)
 }
 
+/// Is this the name of a receipt this code wrote?
+fn recognized_receipt_file(name: &str) -> bool {
+    name.strip_suffix(".json")
+        .is_some_and(|operation| validate_operation_id(operation).is_ok())
+}
+
+/// Entries under `<data dir>/fleet/receipts/` that no command recognizes.
+///
+/// The same predicate [`validate_receipts_directory`] refuses on, so what `doctor`
+/// names and what `leave` refuses over are the same set by construction.
+fn unrecognized_receipt_entries(path: &Path) -> Result<Vec<String>> {
+    let mut unknown = Vec::new();
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(unknown),
+        Err(error) => return Err(error).context(format!("reading {}", path.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        match name.to_str() {
+            Some(name) if recognized_receipt_file(name) => {}
+            Some(name) => unknown.push(name.to_string()),
+            None => unknown.push(name.to_string_lossy().into_owned()),
+        }
+    }
+    unknown.sort();
+    Ok(unknown)
+}
+
 /// Validate the recognized receipts directory before `leave` removes anything.
 fn validate_receipts_directory(path: &Path) -> Result<Vec<PathBuf>> {
     ensure_private_dir(path)
@@ -6146,10 +6706,7 @@ fn validate_receipts_directory(path: &Path) -> Result<Vec<PathBuf>> {
     for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
         let entry = entry?;
         let name = entry.file_name();
-        let recognized = name.to_str().is_some_and(|name| {
-            name.strip_suffix(".json")
-                .is_some_and(|operation| validate_operation_id(operation).is_ok())
-        });
+        let recognized = name.to_str().is_some_and(recognized_receipt_file);
         if recognized {
             ensure_private_file(&entry.path(), "operation receipt")?;
             files.push(entry.path());
@@ -9166,9 +9723,738 @@ mod tests {
         .unwrap();
         let error = leave(&other).unwrap_err();
         assert!(
-            format!("{error:#}").contains("unknown receipt entries"),
+            format!("{error:#}").contains("receipts/notes.txt"),
             "{error:#}"
         );
         assert!(fleet_dir(&other).join(COOKIE_FILE).try_exists().unwrap());
+        // And `doctor` names the same entry, by the same predicate: a refusal nothing
+        // reports is a dead end an operator cannot get out of.
+        let report = doctor(&other);
+        assert!(!report.healthy);
+        assert!(
+            report.text.contains("receipts/notes.txt"),
+            "doctor must name what leave refuses over:\n{}",
+            report.text
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial review of the first commit. Each test below is one of the
+    // reviewer's exploits with its assertion turned the other way up.
+    // -----------------------------------------------------------------------
+
+    /// One machine is one identity, however it is spelled.
+    ///
+    /// Every identity comparison here used to be a byte comparison while
+    /// `validate_machine` accepted upper case, so `Vps` was a different machine from
+    /// `vps` to the roster, to the tombstones and to the ledger of machines already
+    /// issued for. A machine the operator had declared gone for good came back under a
+    /// shift key, with the fleet cookie, and `ouro fleet doctor` called it healthy.
+    #[test]
+    fn a_second_spelling_of_a_machine_name_is_the_same_machine() {
+        let issuer = issuer_fleet("issuer-case");
+
+        // Nothing new is minted under a name that is not lower case.
+        let target = scratch("target-case");
+        for spelling in ["Vps", "VPS", "vPs"] {
+            let error =
+                prepare_admission(&target, "op-case-0000001", spelling, "127.0.0.1").unwrap_err();
+            assert_eq!(reason_of(&error), "invalid_request", "{spelling}");
+            assert!(
+                format!("{error:#}").contains("lower case"),
+                "the refusal has to say what to do instead: {error:#}"
+            );
+        }
+        let request = prepare_admission(&target, "op-case-0000001", "vps", "127.0.0.1").unwrap();
+        issue_member_certificate(&issuer, &request).unwrap();
+
+        // A roster written by an older `ouro fleet members add`, which still accepts
+        // either case, still shadows: the entry on disk wins whichever way it is spelled.
+        let legacy = issuer_fleet("issuer-case-legacy");
+        add_member(&legacy, "Vps", "127.0.0.1", None).unwrap();
+        let hand_crafted = crafted_request("op-case-0000002", "vps", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&legacy, &hand_crafted).unwrap_err()),
+            "machine_known",
+            "a lower-case request must not slip past a mixed-case roster entry"
+        );
+        forget_machine(&legacy, "Vps").unwrap();
+        assert_eq!(
+            reason_of(&issue_member_certificate(&legacy, &hand_crafted).unwrap_err()),
+            "machine_known",
+            "and a machine declared gone for good stays gone under any spelling"
+        );
+
+        // The same rule inside the issuer's own ledger of what it has issued.
+        let upper = crafted_request("op-case-0000003", "VPS", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &upper).unwrap_err()),
+            "invalid_request"
+        );
+        let mut folded = crafted_request("op-case-0000004", "vps", "127.0.0.1", |_| {});
+        folded.machine = "vps".to_string();
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &folded).unwrap_err()),
+            "machine_already_issued"
+        );
+
+        // And the issuer's own name is not available as a second spelling.
+        let its_own = crafted_request("op-case-0000005", "studio", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &its_own).unwrap_err()),
+            "machine_known"
+        );
+    }
+
+    /// One address is one node name, however it is spelled.
+    ///
+    /// A resolver reads `127.1`, `2130706433` and `0x7f.0.0.1` as `127.0.0.1`, and this
+    /// code used to read all three as DNS names — so a member could be dialed at an
+    /// address and certified under a name, and two members could spell one address two
+    /// ways and be two node names for one machine.
+    #[test]
+    fn a_second_spelling_of_an_address_is_the_same_address() {
+        for numeric in ["127.1", "2130706433", "0x7f.0.0.1", "0x7f000001"] {
+            let error = validate_host(numeric).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("dotted-quad"),
+                "`{numeric}` must be refused as an address written another way: {error:#}"
+            );
+        }
+        for empty_label in ["127.0.0.1.", ".127.0.0.1", "studio..internal"] {
+            assert!(
+                validate_host(empty_label).is_err(),
+                "`{empty_label}` has an empty label"
+            );
+        }
+
+        // What survives canonicalises, and the canonical spelling is what gets minted.
+        assert_eq!(canonical_host("LOCALHOST").unwrap(), "localhost");
+        assert_eq!(canonical_host("localhost.").unwrap(), "localhost");
+        assert_eq!(canonical_host("127.0.0.1.").unwrap(), "127.0.0.1");
+        assert_eq!(
+            canonical_host("Studio.Tailnet.TS.net").unwrap(),
+            "studio.tailnet.ts.net"
+        );
+
+        let target = scratch("target-host-case");
+        let request = prepare_admission(&target, "op-host-0000001", "vps", "127.0.0.1.").unwrap();
+        assert_eq!(
+            request.node, "ouro-vps@127.0.0.1",
+            "the trailing root dot is not part of a node name"
+        );
+        assert_eq!(request.host, "127.0.0.1");
+
+        // An issuer will not accept a request that spells the host another way, even
+        // when the spelling is one a resolver would accept.
+        let issuer = issuer_fleet("issuer-host-case");
+        let mut uncanonical = crafted_request("op-host-0000002", "vps", "127.0.0.1", |_| {});
+        uncanonical.host = "127.0.0.1.".to_string();
+        uncanonical.node = "ouro-vps@127.0.0.1.".to_string();
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &uncanonical).unwrap_err()),
+            "invalid_request"
+        );
+    }
+
+    /// The receipt cannot be filled up to make a completed install report failure.
+    ///
+    /// A peer drives `receipt append` itself, so it can put the file one step from its
+    /// cap and then ask for the install. The rename used to land and the closing step
+    /// used to fail, so the machine was admitted, `doctor`-healthy, and reported as
+    /// failed — for ever, because every retry died on the same cap. Both remaining
+    /// lifecycle steps are now reserved before the first credential is written.
+    #[test]
+    fn a_full_receipt_refuses_the_install_before_a_credential_is_written() {
+        let issuer = issuer_fleet("issuer-receipt-cap");
+        let target = scratch("target-receipt-cap");
+        let operation = "op-cap-00000001";
+
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        // `prepare` wrote one step; pad to 63, one short of the cap.
+        for index in 0..62 {
+            append_receipt_step(&target, operation, &format!("probe-{index}"), "ok", None).unwrap();
+        }
+        assert_eq!(
+            read_receipt(&target, operation)
+                .unwrap()
+                .unwrap()
+                .steps
+                .len(),
+            63
+        );
+
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        let error = install_admission(&target, &materials, ephemeral_ports()).unwrap_err();
+        assert_eq!(reason_of(&error), "receipt_full");
+        assert!(
+            !fleet_dir(&target).try_exists().unwrap(),
+            "a refusal means the machine was not admitted, and this one was refused"
+        );
+        assert!(
+            !admission_dir(&target, operation)
+                .join(COOKIE_FILE)
+                .try_exists()
+                .unwrap(),
+            "and no credential was written on the way to that refusal"
+        );
+
+        // Exactly two steps of headroom is enough, and one fewer is not.
+        let second = scratch("target-receipt-edge");
+        let request = prepare_admission(&second, operation, "vps", "127.0.0.1").unwrap();
+        for index in 0..61 {
+            append_receipt_step(&second, operation, &format!("probe-{index}"), "ok", None).unwrap();
+        }
+        assert_eq!(
+            read_receipt(&second, operation)
+                .unwrap()
+                .unwrap()
+                .steps
+                .len(),
+            62
+        );
+        let materials = issue_member_certificate(&issuer_fleet("issuer-edge"), &request).unwrap();
+        let (profile, warnings) =
+            install_admission_reporting(&second, &materials, ephemeral_ports()).unwrap();
+        assert_eq!(profile.node, "ouro-vps@127.0.0.1");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let receipt = read_receipt(&second, operation).unwrap().unwrap();
+        assert_eq!(receipt.steps.len(), MAX_RECEIPT_STEPS);
+        assert!(receipt.has_step("install"));
+    }
+
+    /// Nothing after the rename may turn an admitted machine into a failure.
+    ///
+    /// By the time the rename has happened the machine holds the cookie, the CA
+    /// certificate and its own leaf. If the closing record cannot be written — a full
+    /// disk, a receipts directory somebody chmodded — the answer is still "admitted",
+    /// with the problem said out loud.
+    #[test]
+    fn a_record_that_cannot_be_closed_is_a_warning_and_never_a_failure() {
+        let issuer = issuer_fleet("issuer-close");
+        let target = scratch("target-close");
+        let operation = "op-close-0000001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+
+        // Exactly the state a hostile or broken filesystem leaves: the record is there
+        // and cannot be read back at the mode this code requires.
+        let receipt_path = receipts_dir(&target).join(format!("{operation}.json"));
+        fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let profile = load(&target).unwrap().unwrap();
+        let warnings = close_install_record(
+            &target,
+            &ReceiptSeed {
+                operation: operation.to_string(),
+                machine: profile.machine.clone(),
+                host: profile.host.clone(),
+                node: profile.node.clone(),
+                key_fingerprint: Some(materials.key_fingerprint.clone()),
+            },
+            &profile,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("was admitted"),
+            "the warning must say the machine is in the fleet: {warnings:?}"
+        );
+    }
+
+    /// A refused promotion leaves no credential behind, and what it does leave is named.
+    ///
+    /// The fleet cookie used to be written into the staging directory before the
+    /// directory had been proven promotable, so a refusal left the cookie in a private
+    /// namespace that `doctor`, `leave` and orphan-staging recovery all ignored.
+    #[test]
+    fn a_refused_promotion_writes_no_credential_and_the_residue_is_reported_and_retired() {
+        let issuer = issuer_fleet("issuer-residue");
+        let target = scratch("target-residue");
+        let operation = "op-residue-00001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+
+        let staging = admission_dir(&target, operation);
+        write_private_new(&staging.join("notes.txt"), b"planted\n", "a planted file").unwrap();
+        let error = install_admission(&target, &materials, ephemeral_ports()).unwrap_err();
+        assert_eq!(reason_of(&error), "invalid_staging");
+        assert!(
+            !staging.join(COOKIE_FILE).try_exists().unwrap(),
+            "the cookie must not be written before the directory may be promoted"
+        );
+        assert!(
+            !staging.join(CA_CERT_FILE).try_exists().unwrap()
+                && !staging.join(NODE_CERT_FILE).try_exists().unwrap()
+        );
+
+        // What is left is this machine's own prepared key, and doctor says so.
+        let report = doctor(&target);
+        assert!(!report.healthy);
+        assert!(
+            report.text.contains(operation),
+            "doctor must name the pending operation:\n{}",
+            report.text
+        );
+
+        // `leave` is the command that retires this machine's credentials, and a pending
+        // admission is one — but not while it holds something this code did not write.
+        let refused = leave(&target).unwrap_err();
+        assert!(format!("{refused:#}").contains("notes.txt"), "{refused:#}");
+        assert!(staging.join(NODE_KEY_FILE).try_exists().unwrap());
+
+        fs::remove_file(staging.join("notes.txt")).unwrap();
+        let removal = leave(&target)
+            .unwrap()
+            .expect("a pending admission to retire");
+        assert_eq!(
+            removal.removed,
+            vec![format!("{ADMISSION_PREFIX}{operation}")]
+        );
+        assert!(
+            !staging.try_exists().unwrap(),
+            "the prepared key is gone with it"
+        );
+        assert!(
+            !doctor(&target).text.contains(operation),
+            "and doctor has nothing left to name"
+        );
+    }
+
+    /// One unreadable receipt must not stop a fleet ever admitting anything again.
+    ///
+    /// The replay ledger is a directory of files. Reading it used to be fatal to
+    /// `issue_member_certificate`, so a single file dropped in there bricked admission
+    /// for every operation; the weakened check is a warning in the record instead.
+    #[test]
+    fn an_unreadable_receipt_weakens_the_ledger_and_says_so_rather_than_bricking_it() {
+        let issuer = issuer_fleet("issuer-bad-receipt");
+        let target = scratch("target-bad-receipt");
+        let receipts = receipts_dir(&issuer);
+        DirBuilder::new().mode(0o700).create(&receipts).unwrap();
+        write_private_atomic(&receipts.join("op-corrupt-00001.json"), b"{not json").unwrap();
+
+        let request = prepare_admission(&target, "op-ledger-000001", "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request)
+            .expect("one unreadable record must not stop this machine issuing for another machine");
+        assert_eq!(materials.node, "ouro-vps@127.0.0.1");
+
+        let receipt = read_receipt(&issuer, "op-ledger-000001").unwrap().unwrap();
+        let warning = receipt
+            .steps
+            .iter()
+            .find(|step| step.step == "records_unreadable")
+            .expect("the weakened check is recorded");
+        assert_eq!(warning.outcome, "warning");
+        assert!(warning.detail.as_deref().unwrap().contains("op-corrupt"));
+    }
+
+    /// Two roster edits computed against one revision cannot both apply.
+    ///
+    /// The revision was read outside the lifecycle lock and the edit took it
+    /// afterwards, so two callers could both read revision 1, both pass the check and
+    /// both apply — which is the lost update the check exists to prevent.
+    #[test]
+    fn two_roster_changes_against_one_revision_cannot_both_apply() {
+        for attempt in 0..8 {
+            let data = Arc::new(issuer_fleet(&format!("roster-race-{attempt}")));
+            let revision = load(&data).unwrap().unwrap().roster_revision;
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+
+            let handles: Vec<_> = ["alpha", "beta"]
+                .into_iter()
+                .map(|machine| {
+                    let data = Arc::clone(&data);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        let change = RosterChange::Add {
+                            machine: machine.to_string(),
+                            host: "127.0.0.1".to_string(),
+                            node: None,
+                        };
+                        barrier.wait();
+                        apply_roster_change(
+                            &data,
+                            &format!("op-race-{machine}-01"),
+                            revision,
+                            &change,
+                        )
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+
+            let winners = results.iter().filter(|result| result.is_ok()).count();
+            assert_eq!(
+                winners,
+                1,
+                "exactly one edit may win a revision, attempt {attempt}: {:?}",
+                results
+                    .iter()
+                    .map(|result| result
+                        .as_ref()
+                        .map(|outcome| outcome.roster_revision)
+                        .map_err(|error| reason_of(error).to_string()))
+                    .collect::<Vec<_>>()
+            );
+            for error in results.iter().filter_map(|result| result.as_ref().err()) {
+                assert!(
+                    matches!(reason_of(error), "roster_conflict" | "lock_unavailable"),
+                    "the loser is told which of the two happened: {}",
+                    reason_of(error)
+                );
+            }
+            assert_eq!(
+                load(&data).unwrap().unwrap().roster_revision,
+                revision + 1,
+                "and the roster moved exactly one revision"
+            );
+        }
+    }
+
+    /// The roster will not hold two spellings of one machine either.
+    #[test]
+    fn a_roster_change_refuses_a_second_spelling_and_finds_the_first() {
+        let data = issuer_fleet("roster-case");
+        let revision = load(&data).unwrap().unwrap().roster_revision;
+
+        // A legacy entry, written by the command that still accepts either case.
+        add_member(&data, "Vps", "127.0.0.1", None).unwrap();
+        let revision = revision + 1;
+        assert_eq!(load(&data).unwrap().unwrap().roster_revision, revision);
+
+        let error = apply_roster_change(
+            &data,
+            "op-roster-case-1",
+            revision,
+            &RosterChange::Add {
+                machine: "vps".to_string(),
+                host: "127.0.0.1".to_string(),
+                node: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(reason_of(&error), "roster_refused");
+        assert_eq!(
+            load(&data).unwrap().unwrap().members.len(),
+            2,
+            "a refused change changes nothing"
+        );
+
+        // Naming it in lower case still finds the entry that is there.
+        let removed = apply_roster_change(
+            &data,
+            "op-roster-case-2",
+            revision,
+            &RosterChange::Remove {
+                machine: "vps".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(removed.member.machine, "Vps");
+
+        // And an upper-case name is never accepted from the wire at all.
+        assert_eq!(
+            reason_of(
+                &apply_roster_change(
+                    &data,
+                    "op-roster-case-3",
+                    removed.roster_revision,
+                    &RosterChange::Add {
+                        machine: "Laptop".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        node: None,
+                    },
+                )
+                .unwrap_err()
+            ),
+            "invalid_request"
+        );
+    }
+
+    /// Materials name a key by fingerprint, and it has to be the key this machine has.
+    #[test]
+    fn install_refuses_materials_that_name_a_key_this_machine_did_not_prepare() {
+        let issuer = issuer_fleet("issuer-fingerprint");
+        let target = scratch("target-fingerprint");
+        let operation = "op-print-0000001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+
+        let mut lying = materials.clone();
+        lying.key_fingerprint = public_fingerprint(b"some other key");
+        let error = install_admission(&target, &lying, ephemeral_ports()).unwrap_err();
+        assert_eq!(reason_of(&error), "materials_invalid");
+        assert!(!fleet_dir(&target).try_exists().unwrap());
+
+        // The honest ones still install.
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+        assert_eq!(
+            read_receipt(&target, operation)
+                .unwrap()
+                .unwrap()
+                .key_fingerprint
+                .as_deref(),
+            Some(materials.key_fingerprint.as_str()),
+            "and the record names the key that was really used"
+        );
+    }
+
+    /// An idempotent answer that ignores what it was handed is not idempotent.
+    ///
+    /// Repeating an install is how a lost connection is resolved, so it answers `ok` —
+    /// but only for the credentials that are actually installed. A second set under the
+    /// same operation id is a different question with the same name.
+    #[test]
+    fn repeating_an_install_with_different_credentials_is_refused() {
+        let issuer = issuer_fleet("issuer-differ");
+        let target = scratch("target-differ");
+        let operation = "op-differ-000001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+        let ports = ephemeral_ports();
+        install_admission(&target, &materials, ports).unwrap();
+        install_admission(&target, &materials, ports).expect("the same materials repeat");
+
+        for (label, mutate) in [
+            (
+                "a different cookie",
+                Box::new(|materials: &mut AdmissionMaterials| {
+                    materials.cookie = "0".repeat(64);
+                }) as Box<dyn Fn(&mut AdmissionMaterials)>,
+            ),
+            (
+                "a different CA",
+                Box::new(|materials: &mut AdmissionMaterials| {
+                    let other = issuer_fleet("issuer-differ-other");
+                    materials.ca_cert_pem =
+                        read_private(&fleet_dir(&other).join(CA_CERT_FILE), "a CA").unwrap();
+                }),
+            ),
+        ] {
+            let mut different = materials.clone();
+            mutate(&mut different);
+            let error = install_admission(&target, &different, ports).unwrap_err();
+            assert_eq!(reason_of(&error), "materials_differ", "{label}");
+        }
+
+        // A machine that belongs to another fleet is not answered for at all.
+        let elsewhere = issuer_fleet("issuer-elsewhere");
+        let stranger = scratch("target-elsewhere");
+        let its_request = prepare_admission(&stranger, operation, "vps", "127.0.0.1").unwrap();
+        let its_materials = issue_member_certificate(&elsewhere, &its_request).unwrap();
+        assert_eq!(
+            reason_of(&install_admission(&target, &its_materials, ports).unwrap_err()),
+            "fleet_exists",
+            "materials for another fleet under this operation id are not this machine's"
+        );
+    }
+
+    /// The guards the mutation harness could reach but no test could.
+    ///
+    /// Each block below is one deleted check made observable: a request naming two
+    /// nodes, a machine holding the CA certificate but not its key, an issuer whose own
+    /// CA is not one this build would accept, a request whose node name does not follow
+    /// from its machine and host, a staged key swapped under a prepared operation, and a
+    /// receipt that belongs to another machine.
+    #[test]
+    fn every_issuer_guard_refuses_something_a_test_can_produce() {
+        let issuer = issuer_fleet("issuer-guards");
+
+        // M03: two common names, the second of which is the approved one.
+        let two_names = crafted_request("op-guard-0000001", "vps", "127.0.0.1", |params| {
+            params.distinguished_name.push(
+                DnType::CustomDnType(vec![2, 5, 4, 3]),
+                "ouro-studio@127.0.0.1",
+            );
+        });
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &two_names).unwrap_err()),
+            "csr_identity_mismatch",
+            "a certificate with two names is a certificate for two machines"
+        );
+
+        // M15: a node name that does not follow from the machine and the host.
+        let mut renamed = crafted_request("op-guard-0000002", "vps", "127.0.0.1", |_| {});
+        renamed.node = "ouro-studio@127.0.0.1".to_string();
+        assert_eq!(
+            reason_of(&issue_member_certificate(&issuer, &renamed).unwrap_err()),
+            "invalid_request"
+        );
+
+        // M11: a machine given the CA certificate and not the key cannot admit.
+        let joiner = scratch("joiner-no-ca-key");
+        let copy = scratch("joiner-copy").join("fleet");
+        copy_fleet_dir(&fleet_dir(&issuer), &copy);
+        create_from(&joiner, &copy, "vps", "127.0.0.1", ephemeral_ports()).unwrap();
+        assert!(!fleet_dir(&joiner).join(CA_KEY_FILE).try_exists().unwrap());
+        let asking = crafted_request("op-guard-0000003", "laptop", "127.0.0.1", |_| {});
+        assert_eq!(
+            reason_of(&issue_member_certificate(&joiner, &asking).unwrap_err()),
+            "no_ca_key"
+        );
+
+        // M13: the issuer validates what it just minted with the rules the runtime
+        // applies, so a CA this build would refuse at boot cannot be used to admit.
+        let hostile = issuer_fleet("issuer-hostile-ca");
+        let year = current_utc_year().unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.not_before = date_time_ymd(year - 1, 1, 1);
+        // Twenty years: longer than `validate_tls_identity` will accept from anyone.
+        ca_params.not_after = date_time_ymd(year + 19, 1, 1);
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params.distinguished_name = DistinguishedName::new();
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "a CA nobody should accept");
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        write_private_atomic(
+            &fleet_dir(&hostile).join(CA_CERT_FILE),
+            ca_cert.pem().as_bytes(),
+        )
+        .unwrap();
+        write_private_atomic(
+            &fleet_dir(&hostile).join(CA_KEY_FILE),
+            ca_key.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+        let asking = crafted_request("op-guard-0000004", "vps", "127.0.0.1", |_| {});
+        let error = issue_member_certificate(&hostile, &asking).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unreasonably long"),
+            "the issuer must check its own work: {error:#}"
+        );
+
+        // The same statement about the key rather than the certificate: the leaf that
+        // comes back carries exactly the key the request proved possession of. The
+        // issuer signs the key it was handed, so no input can make this false; the
+        // check inside `issue_member_certificate` is an assertion about rcgen, not a
+        // guard against a caller, and deleting it fails no test. Asserted, not provoked.
+        let honest = crafted_request("op-guard-0000005", "vps", "127.0.0.1", |_| {});
+        let materials = issue_member_certificate(&issuer, &honest).unwrap();
+        let (_, block) = parse_x509_pem(honest.csr_pem.as_bytes()).unwrap();
+        let (_, parsed) = X509CertificationRequest::from_der(&block.contents).unwrap();
+        assert_eq!(
+            certificate_public_key(&materials.node_cert_pem, "the issued leaf").unwrap(),
+            parsed.certification_request_info.subject_pki.raw.to_vec()
+        );
+    }
+
+    /// The guards on the target's side of the same list.
+    #[test]
+    fn every_target_guard_refuses_something_a_test_can_produce() {
+        // One issuer per block: an issuer mints one identity per machine name, which is
+        // the point of `machine_already_issued` and not what these blocks are about.
+        // M30: the staged key is swapped under a prepared operation.
+        let target = scratch("target-swapped-key");
+        let operation = "op-guard-0000010";
+        let first = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let replacement = KeyPair::generate().unwrap();
+        write_private_atomic(
+            &admission_dir(&target, operation).join(NODE_KEY_FILE),
+            replacement.serialize_pem().as_bytes(),
+        )
+        .unwrap();
+        let error = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap_err();
+        assert_eq!(
+            reason_of(&error),
+            "identity_mismatch",
+            "a request is only an answer while the key it names is the staged one"
+        );
+        let _ = &first;
+
+        // M34: a receipt that records another machine is not this operation's receipt.
+        let other = scratch("target-foreign-receipt");
+        let operation = "op-guard-0000011";
+        let request = prepare_admission(&other, operation, "vps", "127.0.0.1").unwrap();
+        let path = admission_dir(&other, operation)
+            .join(RECEIPTS_DIR)
+            .join(format!("{operation}.json"));
+        let mut receipt: Receipt =
+            serde_json::from_str(&read_private(&path, "receipt").unwrap()).unwrap();
+        receipt.node = "ouro-laptop@127.0.0.1".to_string();
+        write_private_atomic(&path, &serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        let materials =
+            issue_member_certificate(&issuer_fleet("issuer-foreign-receipt"), &request).unwrap();
+        assert_eq!(
+            reason_of(&install_admission(&other, &materials, ephemeral_ports()).unwrap_err()),
+            "identity_mismatch"
+        );
+
+        // M26: a fleet on disk whose receipt does not say this operation installed it.
+        let third = scratch("target-no-evidence");
+        let operation = "op-guard-0000012";
+        let request = prepare_admission(&third, operation, "vps", "127.0.0.1").unwrap();
+        let materials =
+            issue_member_certificate(&issuer_fleet("issuer-no-evidence"), &request).unwrap();
+        let ports = ephemeral_ports();
+        install_admission(&third, &materials, ports).unwrap();
+        let path = receipts_dir(&third).join(format!("{operation}.json"));
+        let mut receipt: Receipt =
+            serde_json::from_str(&read_private(&path, "receipt").unwrap()).unwrap();
+        receipt
+            .steps
+            .retain(|step| step.step != "install" && step.step != "install_staged");
+        write_private_atomic(&path, &serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        assert_eq!(
+            reason_of(&install_admission(&third, &materials, ports).unwrap_err()),
+            "fleet_exists",
+            "without a record of this operation installing it, the fleet here is somebody else's"
+        );
+
+        // M25: the same operation id, a different fleet, an already-installed machine.
+        let fourth = scratch("target-other-fleet");
+        let operation = "op-guard-0000013";
+        let request = prepare_admission(&fourth, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer_fleet("issuer-fourth"), &request).unwrap();
+        install_admission(&fourth, &materials, ephemeral_ports()).unwrap();
+        let elsewhere = issuer_fleet("issuer-other-fleet");
+        let elsewhere_target = scratch("target-other-fleet-src");
+        let its_request =
+            prepare_admission(&elsewhere_target, operation, "vps", "127.0.0.1").unwrap();
+        let its_materials = issue_member_certificate(&elsewhere, &its_request).unwrap();
+        assert_eq!(
+            reason_of(&install_admission(&fourth, &its_materials, ephemeral_ports()).unwrap_err()),
+            "fleet_exists"
+        );
+    }
+
+    /// M20: the spec names the stopped-runtime lock, and `install` takes it.
+    ///
+    /// A running BEAM holds the credentials in this directory open. Replacing them
+    /// under it is how a node ends up with a profile its own runtime disagrees with.
+    #[test]
+    fn install_refuses_while_a_runtime_is_using_the_data_directory() {
+        let issuer = issuer_fleet("issuer-live");
+        let target = scratch("target-live");
+        let operation = "op-live-00000001";
+        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
+        let materials = issue_member_certificate(&issuer, &request).unwrap();
+
+        // The same live-runtime shape `stopped_mutations_share_the_runtime_lock_and_
+        // refuse_every_live_owner_shape` plants for `create`.
+        write_private_atomic(
+            &target.join(runtime::PUBLICATION_FILE),
+            format!(
+                r#"{{"port":47001,"protocol":1,"node":"ouro-vps@127.0.0.1","pid":{},"scope":"operate"}}"#,
+                std::process::id()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let error = install_admission(&target, &materials, ephemeral_ports()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("still using this data directory"),
+            "install must take the lock that proves the runtime is stopped: {error:#}"
+        );
+        assert!(!fleet_dir(&target).try_exists().unwrap());
+
+        fs::remove_file(target.join(runtime::PUBLICATION_FILE)).unwrap();
+        install_admission(&target, &materials, ephemeral_ports()).unwrap();
     }
 }

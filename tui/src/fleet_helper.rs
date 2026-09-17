@@ -16,6 +16,11 @@
 //! "reason":"<stable_snake_case>","detail":"<human>"}`. `reason` is what an
 //! orchestrator branches on and it does not change; `detail` is for a person.
 //!
+//! Seam C3 note, for the issuer that writes the other half: a request object with the
+//! same key twice is **last wins**, because that is what `serde_json` does and this
+//! makes no attempt to reject it. An issuer that builds frames by concatenation must
+//! therefore not assume the first spelling of a field is the one that takes effect.
+//!
 //! No listener is opened, no subprocess is started, and stdout carries frames and
 //! nothing else — diagnostics go to stderr, because the process on the other end of
 //! this pipe is parsing every byte of stdout.
@@ -28,6 +33,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
+use zeroize::Zeroizing;
 
 use crate::fleet;
 
@@ -84,6 +90,13 @@ fn run(
     loop {
         match receiver.recv_timeout(idle) {
             Ok(Frame::Line(line)) => {
+                // An `install` frame carries the fleet cookie, so the line it arrived on
+                // is treated as the secret it is: zeroized when this iteration ends
+                // rather than left in a freed allocation. This is not perfect erasure —
+                // `serde_json` makes its own copies while parsing and the kernel pipe
+                // buffer is not ours — and the cookie is on its way to a mode-0600 file
+                // either way. It is the part this code can actually do.
+                let line = Zeroizing::new(line);
                 let (reply, keep_going) = helper.handle(&line);
                 writeln!(output, "{reply}").context("writing a helper reply")?;
                 output.flush().context("flushing a helper reply")?;
@@ -280,7 +293,7 @@ impl Helper {
 
     /// Answer one request line. The flag is false exactly when the helper should exit.
     pub fn handle(&self, line: &str) -> (String, bool) {
-        let value: Value = match serde_json::from_str(line) {
+        let mut value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(error) => {
                 return (
@@ -294,7 +307,7 @@ impl Helper {
                 )
             }
         };
-        let Some(object) = value.as_object() else {
+        let Some(object) = value.as_object_mut() else {
             return (
                 refusal(
                     Value::Null,
@@ -431,7 +444,7 @@ impl Helper {
         Ok(value)
     }
 
-    fn prepare(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+    fn prepare(&self, data_dir: &Path, object: &mut Map<String, Value>) -> Result<Value> {
         let operation = required_str(object, "operation")?;
         let machine = required_str(object, "machine")?;
         let host = required_str(object, "host")?;
@@ -439,12 +452,14 @@ impl Helper {
         serde_json::to_value(&request).context("encoding the admission request")
     }
 
-    fn install(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+    fn install(&self, data_dir: &Path, object: &mut Map<String, Value>) -> Result<Value> {
         let operation = required_str(object, "operation")?;
-        let Some(raw) = object.get("materials") else {
+        let Some(raw) = object.get_mut("materials") else {
             anyhow::bail!("`materials` is required");
         };
-        let materials: fleet::AdmissionMaterials = serde_json::from_value(raw.clone())
+        // Taken, not cloned: the request `Value` stops holding the cookie here, and the
+        // only copy left is the one inside `AdmissionMaterials`, which zeroizes on drop.
+        let materials: fleet::AdmissionMaterials = serde_json::from_value(raw.take())
             .map_err(|error| anyhow::anyhow!("`materials` is not admission materials: {error}"))?;
         if materials.operation != operation {
             anyhow::bail!(
@@ -453,7 +468,7 @@ impl Helper {
             );
         }
         // Port overrides stay available because a second machine on one host, or an
-        // operator with a занятый range, needs them; they are numbers, validated the
+        // operator with an occupied range, needs them; they are numbers, validated the
         // same way `ouro fleet create --gateway-port` is.
         let ports = match object.get("ports") {
             None | Some(Value::Null) => fleet::Ports::DEFAULT,
@@ -464,7 +479,7 @@ impl Helper {
             },
             Some(_) => anyhow::bail!("`ports` must be an object"),
         };
-        let profile = fleet::install_admission(data_dir, &materials, ports)?;
+        let (profile, warnings) = fleet::install_admission_reporting(data_dir, &materials, ports)?;
         Ok(json!({
             "operation": operation,
             "machine": profile.machine,
@@ -476,10 +491,16 @@ impl Helper {
                 .iter()
                 .map(|member| member.machine.clone())
                 .collect::<Vec<_>>(),
+            // Additive. Empty on a clean install. Non-empty means the machine IS
+            // admitted — the rename that commits an identity already happened — and
+            // something afterwards did not finish, most usefully the closing receipt
+            // step. An orchestrator treats this as "admitted, record incomplete", never
+            // as a reason to admit the machine again somewhere else.
+            "warnings": warnings,
         }))
     }
 
-    fn roster(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+    fn roster(&self, data_dir: &Path, object: &mut Map<String, Value>) -> Result<Value> {
         let operation = required_str(object, "operation")?;
         let expected = required_u64(object, "expected_revision")?;
         let Some(raw) = object.get("change") else {
@@ -500,7 +521,7 @@ impl Helper {
         }))
     }
 
-    fn receipt(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+    fn receipt(&self, data_dir: &Path, object: &mut Map<String, Value>) -> Result<Value> {
         let operation = required_str(object, "operation")?;
         match object.get("append") {
             None | Some(Value::Null) => {

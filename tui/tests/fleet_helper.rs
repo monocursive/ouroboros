@@ -779,3 +779,163 @@ fn a_refused_install_never_quotes_the_secrets_it_was_handed() {
     );
     helper.ok(json!({"op": "bye"}));
 }
+
+/// The two headline findings of the adversarial review, over the real pipe.
+///
+/// H1: a machine the operator declared gone for good asked again as `Vps` and the wire
+/// prepared it without complaint; the issuer minted for it, it installed, and
+/// `ouro fleet doctor` called it a healthy member. H2: the peer filled its own receipt
+/// with `receipt append` frames, and the install then renamed the fleet directory into
+/// place and reported `receipt_full` — for ever, on every retry, with the machine
+/// admitted and healthy the whole time.
+#[test]
+fn a_banned_machine_cannot_come_back_under_a_shift_key_and_a_full_receipt_admits_nobody() {
+    let _ports = fleet_ports();
+    let issuer = issuer_fleet("headline-issuer");
+
+    // H1. Admit `vps` normally, then declare it gone for good.
+    let first = scratch("headline-target-1");
+    let mut helper = Session::start(&first);
+    let prepared = helper.ok(json!({
+        "op": "prepare", "operation": "op-head-00000001",
+        "machine": "vps", "host": "127.0.0.1",
+    }));
+    let request = admission_request(&prepared);
+    ouro::fleet::issue_member_certificate(&issuer, &request).expect("issued once");
+    ouro::fleet::add_member(&issuer, "vps", "127.0.0.1", None).expect("the roster add");
+    ouro::fleet::forget_machine(&issuer, "vps").expect("a tombstone");
+    helper.ok(json!({"op": "bye"}));
+
+    let second = scratch("headline-target-2");
+    let mut helper = Session::start(&second);
+    let refusal = helper.refused(json!({
+        "op": "prepare", "operation": "op-head-00000002",
+        "machine": "Vps", "host": "127.0.0.1",
+    }));
+    assert_eq!(refusal["reason"], json!("invalid_request"));
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("lower case"),
+        "{refusal}"
+    );
+    // And the lower-case spelling is refused by the issuer, because the tombstone is
+    // about the machine and not about how it was typed.
+    let prepared = helper.ok(json!({
+        "op": "prepare", "operation": "op-head-00000002",
+        "machine": "vps", "host": "127.0.0.1",
+    }));
+    let request = admission_request(&prepared);
+    let error = ouro::fleet::issue_member_certificate(&issuer, &request)
+        .expect_err("a machine declared gone for good does not come back");
+    assert_eq!(
+        ouro::fleet::admission_error(&error)
+            .expect("a declared refusal")
+            .reason,
+        "machine_known"
+    );
+    helper.ok(json!({"op": "bye"}));
+
+    // One address is one node name too.
+    let third = scratch("headline-target-3");
+    let mut helper = Session::start(&third);
+    let prepared = helper.ok(json!({
+        "op": "prepare", "operation": "op-head-00000003",
+        "machine": "vps", "host": "LOCALHOST",
+    }));
+    assert_eq!(
+        prepared["node"],
+        json!("ouro-vps@localhost"),
+        "the spelling that gets minted is the canonical one"
+    );
+    assert_eq!(prepared["host"], json!("localhost"));
+    assert_eq!(
+        helper.reason(json!({
+            "op": "prepare", "operation": "op-head-00000004",
+            "machine": "vps", "host": "127.1",
+        })),
+        "invalid_request",
+        "and a spelling only a resolver would recognise is not a host"
+    );
+    helper.ok(json!({"op": "bye"}));
+
+    // H2. The peer pads its own receipt to one step short of the cap and asks to install.
+    let target = scratch("headline-target-4");
+    let operation = "op-head-00000005";
+    let mut helper = Session::start(&target);
+    let prepared = helper.ok(json!({
+        "op": "prepare", "operation": operation,
+        "machine": "vps", "host": "127.0.0.1",
+    }));
+    let request = admission_request(&prepared);
+    for index in 0..62 {
+        helper.ok(json!({
+            "op": "receipt", "operation": operation,
+            "append": {"step": format!("probe-{index}"), "outcome": "ok"},
+        }));
+    }
+    let materials =
+        ouro::fleet::issue_member_certificate(&issuer_fleet("headline-issuer-2"), &request)
+            .expect("issued materials");
+    let encoded = serde_json::to_value(&materials).expect("encodable materials");
+    let refusal = helper.refused(json!({
+        "op": "install", "operation": operation,
+        "materials": encoded,
+        "ports": ephemeral_ports_value(),
+    }));
+    assert_eq!(refusal["reason"], json!("receipt_full"));
+
+    // A refusal means the machine was not admitted, and this one was refused.
+    let inspected = helper.ok(json!({"op": "inspect"}));
+    assert_eq!(inspected["fleet"], Value::Null);
+    let (healthy, text) = doctor(&target);
+    assert!(
+        !healthy && text.contains(operation),
+        "and doctor names the operation that is still pending:\n{text}"
+    );
+    helper.ok(json!({"op": "bye"}));
+}
+
+/// A clean install says so, and says it in a field an orchestrator can read.
+#[test]
+fn the_install_reply_carries_an_empty_warning_list_when_nothing_went_wrong() {
+    let _ports = fleet_ports();
+    let issuer = issuer_fleet("warnings-issuer");
+    let target = scratch("warnings-target");
+    let operation = "op-warn-00000001";
+    let mut helper = Session::start(&target);
+
+    let prepared = helper.ok(json!({
+        "op": "prepare", "operation": operation,
+        "machine": "vps", "host": "127.0.0.1",
+    }));
+    let request = admission_request(&prepared);
+    let materials =
+        ouro::fleet::issue_member_certificate(&issuer, &request).expect("issued materials");
+    let installed = helper.ok(json!({
+        "op": "install", "operation": operation,
+        "materials": serde_json::to_value(&materials).expect("encodable materials"),
+        "ports": ephemeral_ports_value(),
+    }));
+    assert_eq!(
+        installed["warnings"],
+        json!([]),
+        "an empty list is the difference between `nothing went wrong` and `this helper \
+         is too old to tell you`: {installed}"
+    );
+
+    // A roster change naming a machine in anything but lower case is refused here too.
+    let revision = installed["roster_revision"]
+        .as_u64()
+        .expect("a roster revision");
+    assert_eq!(
+        helper.reason(json!({
+            "op": "roster", "operation": "op-warn-00000002",
+            "expected_revision": revision,
+            "change": {"kind": "add", "machine": "Laptop", "host": "127.0.0.1"},
+        })),
+        "invalid_request"
+    );
+    helper.ok(json!({"op": "bye"}));
+}
