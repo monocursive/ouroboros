@@ -43,6 +43,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   on_mount {Ouroboros.Web.NeedsYou, :bell}
 
   alias Ouroboros.Fleet.Deployment
+  alias Ouroboros.Fleet.Deployment.Journal
   alias Ouroboros.Web.Call
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Layouts
@@ -62,6 +63,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # A worker that has just died leaves the broker a moment behind it, and during that moment
   # a status read answers `worker_unavailable` rather than the journal. Bounded, so an
   # operation whose record really is unreadable stops rather than polling forever.
+  # How many stopped operations this page draws. A journal directory holds two hundred, and
+  # every one of them was once a row an operator had to scroll past the inventory to reach.
+  @max_stopped 10
+
   @status_retries 8
   @status_retry_after 150
 
@@ -69,12 +74,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   def mount(_params, _session, socket) do
     {:ok,
      socket
-     # Once, in mount, and kept. Seam S4 binds a challenge to the session that was attached
-     # when it was issued, and the session cookie is one id every tab in this browser
-     # shares — so the binding that makes "a second tab cannot answer the first tab's
-     # prompt" true has to be per *view*. `Ouroboros.Web.Call.view_session/0` mints it.
-     |> assign(:view_session, Call.view_session())
+     |> assign(:view_session, tab_session(socket))
      |> assign(:page_title, "Devices")
+     |> assign(:refusal, nil)
+     |> assign(:announced, 0)
      |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
      |> assign(:query, "")
      |> assign(:filter, "all")
@@ -83,16 +86,58 @@ defmodule Ouroboros.Web.Live.DevicesLive do
      |> load()}
   end
 
+  @doc """
+  The id a deployment's credential challenges are bound to: **this browser tab's**.
+
+  Seam S4 binds a challenge to the session that was attached when it was issued, and the two
+  obvious ids are both wrong. The cookie's is one id every tab in the browser shares, so
+  binding to it makes "a second tab cannot answer the first tab's prompt" false. A freshly
+  minted per-*mount* id makes it too true: a refresh, a dropped socket, this page's own
+  `?operation=` reload and — worst — the restart the first local setup performs on the
+  runtime serving this page all remount, and every pending challenge becomes
+  `challenge_not_bound` with nothing the operator can press.
+
+  So the id belongs to the tab. `app.js` keeps one in `sessionStorage`, which is per tab by
+  definition, and sends it as a connect parameter; this reads it, holds it to the shape it
+  minted, and falls back to a fresh one when it is absent — a browser that refuses storage,
+  or the dead render, which answers no events anyway. A tab that cannot be recognised is
+  back where this page started rather than broken.
+
+  Not trusted for anything but *which pending challenge this tab may answer*: the identity
+  is the audited subject's and the gateway's, and a client-chosen id cannot widen it.
+  """
+  @spec tab_session(Phoenix.LiveView.Socket.t()) :: String.t()
+  def tab_session(socket) do
+    if connected?(socket) do
+      socket |> get_connect_params() |> tab_id() || Call.view_session()
+    else
+      Call.view_session()
+    end
+  end
+
+  defp tab_id(%{"_ouro_tab" => id}) when is_binary(id) do
+    if String.match?(id, ~r/\A[0-9a-f]{32}\z/), do: id
+  end
+
+  defp tab_id(_absent), do: nil
+
   # ------------------------------------------------------------------------------------
   # Params
   # ------------------------------------------------------------------------------------
 
   @impl true
   def handle_params(%{"operation" => operation}, _uri, socket) when is_binary(operation) do
-    if socket.assigns.drawer && socket.assigns.drawer.operation == operation do
-      {:noreply, socket}
-    else
-      {:noreply, attach(socket, operation, nil)}
+    cond do
+      socket.assigns.drawer && socket.assigns.drawer.operation == operation ->
+        {:noreply, socket}
+
+      # An address bar is a text box. An id this runtime could not be holding is said so,
+      # rather than carried into a status read and a `push_patch/2` that raises on it.
+      operation_id(operation) != :ok ->
+        {:noreply, refuse(socket, "That is not an operation this machine could be holding.")}
+
+      true ->
+        {:noreply, attach(socket, operation, nil)}
     end
   end
 
@@ -118,23 +163,46 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # The drawer
   # ------------------------------------------------------------------------------------
 
+  # Every mutating event below asks `allowed?/2` first, and none of them relies on the `:if`
+  # that decided whether its control was drawn. A `phx-click` is a message a browser sends,
+  # not a button a browser pressed: a console one-liner, a hostile page, a stale tab and a
+  # rebuilt DOM all send the same frame, and the review proved this one — a hand-sent
+  # `deploy-manual` plus `connect` started a real deployment and reached a real password
+  # field on a cleartext `0.0.0.0` bind whose whole page said credential entry was refused.
+  #
+  # The gate is the same question the render asks, asked again where it cannot be skipped.
+  # The gateway refuses these verbs on its own side too, and that is the boundary that
+  # matters; this is the surface keeping its own word.
   def handle_event("deploy", %{"address" => address}, socket) do
-    device = Enum.find(devices(socket), &(&1["address"] == address))
-    {:noreply, open_drawer(socket, device, "add")}
+    with :ok <- allowed?(socket, :add),
+         {:ok, device} <- deployable(socket, address) do
+      {:noreply, open_drawer(socket, device, "add")}
+    else
+      {:refused, sentence} -> {:noreply, refuse(socket, sentence)}
+    end
   end
 
-  def handle_event("deploy-manual", _params, socket),
-    do: {:noreply, open_drawer(socket, nil, "add")}
+  def handle_event("deploy-manual", _params, socket) do
+    case allowed?(socket, :add) do
+      :ok -> {:noreply, open_drawer(socket, nil, "add")}
+      {:refused, sentence} -> {:noreply, refuse(socket, sentence)}
+    end
+  end
 
   # "Set up this device": the first local fleet. No SSH, no account and no credential — this
   # machine configures itself, which is what the proposal's sixth observed state asks for.
-  def handle_event("setup-device", %{"address" => address}, socket) do
-    device = Enum.find(devices(socket), &(&1["address"] == address))
-    {:noreply, open_drawer(socket, device, "setup")}
+  #
+  # And *this* device: the event carries an address, so it is held to the row whose state is
+  # `this_device_without_profile`. Aimed at a peer it would ask the worker to set that peer
+  # up locally — a local setup bound to somebody else's address.
+  def handle_event("setup-device", params, socket) do
+    with :ok <- allowed?(socket, :setup),
+         {:ok, device} <- local_target(socket, params["address"]) do
+      {:noreply, open_drawer(socket, device, "setup")}
+    else
+      {:refused, sentence} -> {:noreply, refuse(socket, sentence)}
+    end
   end
-
-  def handle_event("setup-device", _params, socket),
-    do: {:noreply, open_drawer(socket, local_device(socket), "setup")}
 
   def handle_event("drawer-close", _params, socket) do
     {:noreply,
@@ -151,15 +219,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     socket =
       update_drawer(socket, &%{&1 | form: form(params, &1.form), error: nil, busy: :prepare})
 
-    case operate(socket, @prepare, prepare_params(socket.assigns.drawer)) do
-      {:ok, %{"operation_id" => operation}} ->
-        {:noreply,
-         socket
-         |> attach(operation, socket.assigns.drawer.device)
-         |> push_patch(to: "/devices?operation=#{operation}", replace: true)}
-
-      refused ->
-        {:noreply, drawer_refusal(socket, refused)}
+    with :ok <- allowed?(socket, drawer_gate(socket)),
+         :ok <- local_setup_target(socket) do
+      start_inspection(socket)
+    else
+      {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
     end
   end
 
@@ -184,19 +248,28 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         %{assigns: %{drawer: %{operation: operation}}} = socket
       )
       when is_binary(operation) and is_binary(challenge) and is_binary(secret) do
-    result =
-      operate(socket, @authenticate, %{
-        "operation_id" => operation,
-        "challenge" => challenge,
-        "secret" => secret
-      })
+    case allowed?(socket, drawer_gate(socket)) do
+      {:refused, sentence} ->
+        {:noreply, drawer_refused(socket, sentence)}
 
-    socket =
-      socket
-      |> update_drawer(&%{&1 | secret_nonce: &1.secret_nonce + 1, busy: nil})
-      |> answered(result, "The credential was sent to the deployment worker.")
+      :ok ->
+        result =
+          operate(socket, @authenticate, %{
+            "operation_id" => operation,
+            "challenge" => challenge,
+            "secret" => secret
+          })
 
-    {:noreply, reload(socket)}
+        # `reload/1` first, then `answered/3`. The other order is what the review proved:
+        # reload's success clause sets `error: nil`, so a refusal set a moment earlier was
+        # wiped before it could be drawn, and the only thing left saying a credential had
+        # been rejected was the 1×1 pixel live region.
+        {:noreply,
+         socket
+         |> update_drawer(&%{&1 | secret_nonce: &1.secret_nonce + 1, busy: nil})
+         |> reload()
+         |> answered(result, "The credential was sent to the deployment worker.")}
+    end
   end
 
   def handle_event("authenticate", _params, socket), do: {:noreply, socket}
@@ -207,33 +280,49 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         %{assigns: %{drawer: %{operation: operation}}} = socket
       )
       when is_binary(operation) do
-    result =
-      operate(socket, @confirm_host, %{
-        "operation_id" => operation,
-        "challenge" => challenge,
-        "accept" => accept == "true"
-      })
+    case allowed?(socket, drawer_gate(socket)) do
+      {:refused, sentence} ->
+        {:noreply, drawer_refused(socket, sentence)}
 
-    said =
-      if accept == "true",
-        do: "This host key is now trusted for this operation.",
-        else: "The host was not trusted, and this attempt was refused."
+      :ok ->
+        result =
+          operate(socket, @confirm_host, %{
+            "operation_id" => operation,
+            "challenge" => challenge,
+            "accept" => accept == "true"
+          })
 
-    {:noreply, socket |> answered(result, said) |> reload()}
+        said =
+          if accept == "true",
+            do: "This host key is now trusted for this operation.",
+            else: "The host was not trusted, and this attempt was refused."
+
+        {:noreply, socket |> reload() |> answered(result, said)}
+    end
   end
 
-  def handle_event("approve", %{"digest" => digest}, socket)
-      when is_binary(digest) and digest != "" do
+  def handle_event("trust-host", _params, socket), do: {:noreply, socket}
+
+  def handle_event("approve", %{"digest" => digest}, socket) when is_binary(digest) do
     drawer = socket.assigns.drawer
 
-    result =
-      operate(socket, @start, %{
-        "operation_id" => drawer.operation,
-        "plan_digest" => digest,
-        "idempotency_key" => drawer.approval_key
-      })
+    with :ok <- allowed?(socket, drawer_gate(socket)),
+         :ok <- approvable(socket, digest) do
+      result =
+        operate(socket, @start, %{
+          "operation_id" => drawer.operation,
+          "plan_digest" => digest,
+          "idempotency_key" => drawer.approval_key
+        })
 
-    {:noreply, socket |> answered(result, "The plan was approved.") |> reload()}
+      {:noreply,
+       socket
+       |> update_drawer(&%{&1 | approved: digest})
+       |> reload()
+       |> answered(result, "The plan was approved.")}
+    else
+      {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
+    end
   end
 
   def handle_event("approve", _params, socket), do: {:noreply, socket}
@@ -242,11 +331,18 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       when is_binary(op) do
     case operate(socket, @cancel, %{"operation_id" => op}) do
       {:ok, reply} when is_map(reply) ->
+        # The worker answered, so this page knows how the operation ended even if nothing
+        # else ever tells it: the broker releases the socket once a cancel has been
+        # acknowledged, and a fake or an old worker may leave no journal to read afterwards.
+        # What is recorded here is what was observed — the worker said it was stopping — and
+        # not a state invented on its behalf.
         {:noreply,
          socket
-         |> update_drawer(&%{&1 | residue: List.wrap(reply["residue"]), error: nil})
-         |> announce("The setup was asked to stop at a safe boundary.")
-         |> reload()}
+         |> update_drawer(
+           &%{&1 | residue: List.wrap(reply["residue"]), error: nil, cancelled?: true}
+         )
+         |> reload()
+         |> announce("The setup was asked to stop at a safe boundary.")}
 
       refused ->
         {:noreply, drawer_refusal(socket, refused)}
@@ -257,48 +353,31 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   def handle_event("resume", %{"operation" => operation} = params, socket)
       when is_binary(operation) do
-    takeover? = params["takeover"] == "true"
-
-    result =
-      operate(socket, @resume, %{"operation_id" => operation, "takeover" => takeover?})
-
-    socket =
-      socket
-      |> attach(operation, nil)
-      |> push_patch(to: "/devices?operation=#{operation}", replace: true)
-
-    case {result, reason(result)} do
-      {{:ok, _reply}, _reason} ->
-        said =
-          if takeover?,
-            do:
-              "This setup was taken over. Every credential prompt from here on is bound to " <>
-                "this session, and the takeover is in this runtime's log.",
-            else: "A new deployment worker was started for this operation."
-
-        {:noreply, socket |> update_drawer(&%{&1 | takeover: nil}) |> announce(said)}
-
-      # Never silently. The operation belongs to another identity, and continuing it means
-      # inheriting their credential prompt — so this asks, out loud, with the consequence
-      # written next to the button.
-      {_refused, "operation_not_yours"} ->
-        {:noreply,
-         socket
-         |> update_drawer(&%{&1 | takeover: operation, error: nil})
-         |> announce("This setup was started by another identity.")}
-
-      {refused, _reason} ->
-        {:noreply, drawer_refusal(socket, refused)}
+    with :ok <- operation_id(operation),
+         :ok <- allowed?(socket, drawer_gate(socket)) do
+      resume(socket, operation, params["takeover"] == "true")
+    else
+      {:refused, sentence} -> {:noreply, drawer_refused(socket, sentence)}
     end
   end
 
+  def handle_event("resume", _params, socket), do: {:noreply, socket}
+
   def handle_event("open-operation", %{"operation" => operation}, socket)
       when is_binary(operation) do
-    {:noreply,
-     socket
-     |> attach(operation, nil)
-     |> push_patch(to: "/devices?operation=#{operation}", replace: true)}
+    case operation_id(operation) do
+      :ok ->
+        {:noreply,
+         socket
+         |> attach(operation, nil)
+         |> push_patch(to: "/devices?operation=#{operation}", replace: true)}
+
+      {:refused, sentence} ->
+        {:noreply, refuse(socket, sentence)}
+    end
   end
+
+  def handle_event("open-operation", _params, socket), do: {:noreply, socket}
 
   # ------------------------------------------------------------------------------------
   # Worker events
@@ -307,7 +386,18 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   @impl true
   def handle_info({:ouroboros_fleet_deployment, operation, event}, socket) do
     if socket.assigns.drawer && socket.assigns.drawer.operation == operation do
-      {:noreply, socket |> announce(said(event)) |> reload()}
+      # Read, then speak. The client broadcasts `disconnected` from its own `terminate/2`,
+      # and it terminates normally the moment a cancel has been answered or an operation has
+      # finished — so a page that announced the disconnect first replaced "asked to stop at a
+      # safe boundary" with "the result is unknown", about a stop the operator had just asked
+      # for and been told had happened.
+      socket = reload(socket)
+
+      cond do
+        event["event"] != "disconnected" -> {:noreply, announce(socket, said(event))}
+        lost?(socket.assigns.drawer) -> {:noreply, announce(socket, said(event))}
+        true -> {:noreply, socket}
+      end
     else
       {:noreply, socket}
     end
@@ -318,11 +408,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         %{assigns: %{drawer: drawer}} = socket
       )
       when is_map(drawer) and drawer.monitor == reference do
-    {:noreply,
-     socket
-     |> update_drawer(&%{&1 | monitor: nil})
-     |> announce(said(%{"event" => "disconnected"}))
-     |> reload()}
+    # Read first, then decide what to say. A connection ending is not by itself bad news: the
+    # broker releases the socket as soon as a cancel has been answered, and a finished
+    # operation's worker exits too, so announcing "the result is unknown" on every `:DOWN`
+    # overwrites the outcome an operator has just been given with a worry about it.
+    socket = socket |> update_drawer(&%{&1 | monitor: nil}) |> reload()
+
+    if lost?(socket.assigns.drawer) do
+      {:noreply, announce(socket, said(%{"event" => "disconnected"}))}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:devices_reload, operation}, socket) do
@@ -362,12 +458,60 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   defp said(_other), do: ""
 
+  defp start_inspection(socket) do
+    case operate(socket, @prepare, prepare_params(socket.assigns.drawer)) do
+      {:ok, %{"operation_id" => operation}} ->
+        {:noreply,
+         socket
+         |> attach(operation, socket.assigns.drawer.device)
+         |> push_patch(to: "/devices?operation=#{operation}", replace: true)}
+
+      refused ->
+        {:noreply, drawer_refusal(socket, refused)}
+    end
+  end
+
+  defp resume(socket, operation, takeover?) do
+    result =
+      operate(socket, @resume, %{"operation_id" => operation, "takeover" => takeover?})
+
+    socket =
+      socket
+      |> attach(operation, nil)
+      |> push_patch(to: "/devices?operation=#{operation}", replace: true)
+
+    case {result, reason(result)} do
+      {{:ok, _reply}, _reason} ->
+        said =
+          if takeover?,
+            do:
+              "This setup was taken over. Every credential prompt from here on is bound to " <>
+                "this session, and the takeover is in this runtime's log.",
+            else: "A new deployment worker was started for this operation."
+
+        {:noreply, socket |> update_drawer(&%{&1 | takeover: nil, rebind: nil}) |> announce(said)}
+
+      # Never silently. The operation belongs to another identity, and continuing it means
+      # inheriting their credential prompt — so this asks, out loud, with the consequence
+      # written next to the button.
+      {_refused, "operation_not_yours"} ->
+        {:noreply,
+         socket
+         |> update_drawer(&%{&1 | takeover: operation, error: nil})
+         |> announce("This setup was started by another identity.")}
+
+      {refused, _reason} ->
+        {:noreply, drawer_refusal(socket, refused)}
+    end
+  end
+
   # ------------------------------------------------------------------------------------
   # Loading
   # ------------------------------------------------------------------------------------
 
   defp load(socket) do
     socket
+    |> assign(:refusal, nil)
     |> load_fleet()
     |> load_inventory()
   end
@@ -449,6 +593,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       residue: [],
       busy: nil,
       takeover: nil,
+      rebind: nil,
+      cancelled?: false,
+      approved: nil,
       reloads: 0,
       monitor: nil,
       advanced?: false,
@@ -472,10 +619,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
        when is_binary(operation) do
     _ = Deployment.unsubscribe(operation)
     demonitor(drawer.monitor)
-    assign(socket, :drawer, nil)
+    forget_drawer(socket)
   end
 
-  defp close_drawer(socket), do: assign(socket, :drawer, nil)
+  defp close_drawer(socket), do: forget_drawer(socket)
+
+  # The live region belongs to the drawer, and a closed drawer has nothing to say. Left
+  # behind, the last sentence of the last deployment is read out again the moment the next
+  # drawer opens.
+  defp forget_drawer(socket) do
+    socket |> assign(:drawer, nil) |> assign(:announcement, "") |> assign(:announced, 0)
+  end
 
   defp demonitor(nil), do: :ok
   defp demonitor(reference), do: Process.demonitor(reference, [:flush])
@@ -567,22 +721,202 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   defp update_drawer(socket, _fun), do: socket
 
-  defp drawer_refusal(socket, refused) do
-    update_drawer(socket, &%{&1 | error: Presentation.refusal(refused), busy: nil})
+  # ------------------------------------------------------------------------------------
+  # The gate
+  # ------------------------------------------------------------------------------------
+
+  @doc """
+  Whether this endpoint may start or continue work of this kind, right now.
+
+  The same two questions the render asks — the deployment host's own `capabilities`, and
+  whether this scope and identity may run the verb — asked where an event cannot skip them.
+  `:setup` drops `no_ca_key` for the reason `setup?/1` gives: the first local setup is what
+  creates that key.
+  """
+  @spec allowed?(Phoenix.LiveView.Socket.t(), :add | :setup) :: :ok | {:refused, String.t()}
+  def allowed?(socket, :setup) do
+    if setup?(socket), do: :ok, else: {:refused, setup_blocked(socket)}
   end
 
-  defp answered(socket, {:ok, _reply}, said), do: announce(socket, said)
+  def allowed?(socket, _add) do
+    if deploy?(socket), do: :ok, else: {:refused, deploy_blocked(socket)}
+  end
+
+  # Which gate the open drawer answers to. A setup drawer is a local operation on a machine
+  # that may hold no CA key yet; everything else is an SSH deployment.
+  defp drawer_gate(%{assigns: %{drawer: %{kind: "setup"}}}), do: :setup
+  defp drawer_gate(_socket), do: :add
+
+  # The row a `deploy` may be aimed at: one this listing says nothing has inspected. The
+  # event carries an address, and an address is a string a client chose.
+  defp deployable(socket, address) do
+    case Enum.find(devices(socket), &(&1["address"] == address)) do
+      device when is_map(device) ->
+        if Devices.deployable?(device),
+          do: {:ok, device},
+          else: {:refused, "That device is not one this machine can deploy to."}
+
+      _unknown ->
+        {:refused, "This machine's inventory does not list that address."}
+    end
+  end
+
+  # And the row a `setup-device` may be aimed at: this machine's own, and only while it has
+  # no fleet profile. An address naming any other row is a request to set up *that* device
+  # locally, which is not a thing this verb does.
+  defp local_target(socket, address) when is_binary(address) do
+    case Enum.find(devices(socket), &(&1["address"] == address)) do
+      device when is_map(device) ->
+        if Devices.setup?(device),
+          do: {:ok, device},
+          else:
+            {:refused,
+             "Set up this device configures the machine this runtime is on. That address " <>
+               "is another device — deploy to it instead."}
+
+      _unknown ->
+        {:refused, "This machine's inventory does not list that address."}
+    end
+  end
+
+  defp local_target(socket, _absent), do: {:ok, local_device(socket)}
+
+  # The same check again at submission, because the form's own address field is editable and
+  # a setup drawer opened on the right row can still be submitted with the wrong one.
+  defp local_setup_target(%{assigns: %{drawer: %{kind: "setup"} = drawer}} = socket) do
+    case trimmed(drawer.form["address"]) do
+      nil ->
+        :ok
+
+      address ->
+        case Enum.find(devices(socket), &(&1["address"] == address)) do
+          device when is_map(device) ->
+            if Devices.setup?(device),
+              do: :ok,
+              else:
+                {:refused,
+                 "That address belongs to another device. A local setup binds this " <>
+                   "machine's own address."}
+
+          # An address the inventory does not list is this machine's to answer for: a
+          # network client that cannot see may still know what this host binds.
+          _unlisted ->
+            :ok
+        end
+    end
+  end
+
+  defp local_setup_target(_socket), do: :ok
+
+  # The digest is the only thing approval says about the plan, so it is checked against the
+  # plan on the screen rather than forwarded because a click carried it.
+  defp approvable(socket, digest) do
+    drawer = socket.assigns.drawer
+    plan = Devices.metadata(challenge(drawer, ["review"]))["plan"]
+
+    cond do
+      # The same digest again. A repeated approval is the point of the idempotency key — the
+      # broker replays the recorded answer rather than starting a second deployment — and
+      # refusing it here because the review challenge has been consumed would turn a double
+      # click into a refusal. This is a digest this page already vouched for.
+      drawer.approved == digest ->
+        :ok
+
+      not Devices.digest?(digest) ->
+        {:refused,
+         "That is not a plan digest. Approval sends a sha256 — sixty-four lowercase hex " <>
+           "characters — and this page will not send anything else."}
+
+      is_nil(Devices.plan_digest(plan)) ->
+        {:refused,
+         "This page could not compute a digest for the plan it is showing, so it cannot " <>
+           "check that the one it is about to send is that plan's. Cancel this setup and " <>
+           "start it again."}
+
+      Devices.plan_digest(plan) != digest ->
+        {:refused,
+         "The digest this operation offered is not this page's own sha256 of the plan it " <>
+           "showed you. Nothing was approved. Cancel this setup and start it again."}
+
+      true ->
+        :ok
+    end
+  end
+
+  # An operation id reaches `push_patch/2`, which builds a URL out of it — and
+  # `Phoenix.LiveView` raises on one it cannot put in an address, which takes the whole view
+  # down. The journal's own validator is the right shape to hold it to: hex, because the id
+  # also names a file and a Unix socket.
+  defp operation_id(operation) do
+    case Journal.validate_operation(operation) do
+      :ok ->
+        :ok
+
+      {:error, :invalid_operation} ->
+        {:refused, "That is not an operation this machine could be holding."}
+    end
+  end
+
+  # A refusal with no drawer to put it in: it belongs to the page.
+  defp refuse(socket, sentence), do: socket |> assign(:refusal, sentence) |> announce(sentence)
+
+  # And one with a drawer: the visible `role="alert"` box inside it.
+  defp drawer_refused(socket, sentence) do
+    socket |> update_drawer(&%{&1 | error: sentence, busy: nil}) |> announce(sentence)
+  end
+
+  defp drawer_refusal(socket, refused) do
+    update_drawer(socket, &%{&1 | error: refusal_words(socket, refused), busy: nil})
+  end
+
+  # The broker enforces the deployment host's blockers on its own side, and names them. When
+  # it does, the page says the same sentence it would have said itself rather than the
+  # generic "the runtime refused this": one blocker, one wording, whichever side caught it.
+  defp refusal_words(socket, refused) do
+    case {reason(refused), blocker_of(refused)} do
+      {"deploy_blocked", blocker} when is_binary(blocker) ->
+        Devices.deploy_blocker(blocker, posture(socket))
+
+      _other ->
+        Presentation.refusal(refused)
+    end
+  end
+
+  defp blocker_of({:error, _code, _message, %{"blockers" => [first | _rest]}}), do: first
+  defp blocker_of(_other), do: nil
+
+  defp answered(socket, {:ok, _reply}, said) do
+    socket |> update_drawer(&%{&1 | rebind: nil}) |> announce(said)
+  end
 
   defp answered(socket, refused, _said) do
-    message = Presentation.refusal(refused)
+    message = refusal_words(socket, refused)
 
     socket
-    |> update_drawer(&%{&1 | error: message, busy: nil})
+    |> update_drawer(&%{&1 | error: message, busy: nil, rebind: rebind(socket, refused)})
     |> announce(message)
   end
 
+  # `challenge_not_bound` used to be a dead end: the prompt stayed on screen and the only
+  # button under it was the one that had just been refused. With the binding per tab
+  # (`tab_session/1`) a refresh or a reconnect in this tab keeps answering, so what is left
+  # is the case the binding exists for — the prompt belongs to a *different* tab — and this
+  # offers the one move that is actually available rather than nothing.
+  defp rebind(socket, refused) do
+    if reason(refused) == "challenge_not_bound", do: socket.assigns.drawer.operation
+  end
+
   defp announce(socket, ""), do: socket
-  defp announce(socket, said), do: assign(socket, :announcement, said)
+  defp announce(socket, nil), do: socket
+
+  # A live region announces a *change*. Two identical sentences in a row — two steps with the
+  # same name on two machines, a credential refused twice — are one change to the DOM and
+  # therefore silence, which is exactly the repetition an operator most needs to hear. The
+  # counter changes the text node without changing what it says.
+  defp announce(socket, said) do
+    count = socket.assigns[:announced] || 0
+    socket |> assign(:announced, count + 1) |> assign(:announcement, said)
+  end
 
   defp form(params, previous) when is_map(params) do
     Map.merge(previous, Map.take(params, Map.keys(previous)))
@@ -727,8 +1061,22 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp deploy_blocked(socket) do
     case blockers(socket) do
       [] -> unavailable(socket, @prepare)
-      [first | _rest] -> Devices.deploy_blocker(first)
+      [first | _rest] -> Devices.deploy_blocker(first, posture(socket))
     end
+  end
+
+  # Whether this machine is in a fleet at all. `no_ca_key` means two different things either
+  # side of that line — a joiner that should go to the issuer, and a machine nobody has set
+  # up — and only one of them has a machine to send an operator to.
+  #
+  # Read from the inventory's own rows rather than from `fleet.status`: the row for this
+  # machine is `this_device_without_profile` exactly when it has no fleet profile, which is
+  # the fact `ouro` used to decide the row. A second source could disagree with the button
+  # the page is drawing.
+  defp posture(socket) do
+    if Enum.any?(devices(socket), &(&1["state"] == "this_device_without_profile")),
+      do: :standalone,
+      else: :fleet
   end
 
   defp blockers(socket) do
@@ -757,7 +1105,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp setup_blocked(socket) do
     case Enum.reject(blockers(socket), &(&1 == "no_ca_key")) do
       [] -> unavailable(socket, @prepare)
-      [first | _rest] -> Devices.deploy_blocker(first)
+      [first | _rest] -> Devices.deploy_blocker(first, posture(socket))
     end
   end
 
@@ -783,11 +1131,12 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       |> assign(:deploy_blocked, deploy_blocked(assigns_socket(assigns)))
       |> assign(:setup?, setup?(assigns_socket(assigns)))
       |> assign(:setup_blocked, setup_blocked(assigns_socket(assigns)))
+      |> assign(:setup?, setup?(assigns_socket(assigns)))
+      |> assign(:setup_blocked, setup_blocked(assigns_socket(assigns)))
       |> assign(:rows, rows(assigns))
-      |> assign(
-        :unfinished,
-        Enum.filter(assigns[:operations] || [], &Devices.unfinished?(&1["state"]))
-      )
+      |> assign(:unfinished, unfinished(assigns))
+      |> assign(:waiting, Enum.filter(unfinished(assigns), &Devices.waiting?(&1["state"])))
+      |> assign(:stopped, Enum.reject(unfinished(assigns), &Devices.waiting?(&1["state"])))
 
     ~H"""
     <div>
@@ -815,9 +1164,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
         <p :if={@inventory_error} class="ouro-refusal">{@inventory_error}</p>
 
+        <%!-- A refusal with no drawer to live in: an event this endpoint may not run, or one
+              aimed at a device the inventory does not offer it for. --%>
+        <p :if={@refusal} id="ouro-devices-refusal" class="ouro-refusal" role="alert">
+          {@refusal}
+        </p>
+
         <.operations
           :if={@availability == :available and @unfinished != []}
-          operations={@unfinished}
+          waiting={@waiting}
+          stopped={@stopped}
         />
 
         <section :if={@inventory} class="ouro-panel">
@@ -888,9 +1244,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
           <p :if={not @deploy?} class="ouro-devices-blocked">{@deploy_blocked}</p>
 
-          <p :if={@deploy?} class="ouro-devices-manual">
+          <p class="ouro-devices-manual">
             A device that is not listed can be named directly.
-            <button type="button" class="ouro-quiet-button" phx-click="deploy-manual">
+            <button
+              type="button"
+              class={["ouro-quiet-button", not @deploy? && "ouro-devices-unavailable"]}
+              disabled={not @deploy?}
+              aria-disabled={to_string(not @deploy?)}
+              title={not @deploy? && @deploy_blocked}
+              phx-click={@deploy? && "deploy-manual"}
+            >
               Deploy to an address
             </button>
           </p>
@@ -926,6 +1289,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     }
   end
 
+  defp unfinished(assigns) do
+    Enum.filter(assigns[:operations] || [], &Devices.unfinished?(&1["state"]))
+  end
+
   defp rows(assigns) do
     devices =
       case assigns[:inventory] do
@@ -951,7 +1318,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     ~H"""
     <p :if={@host} class="ouro-devices-host" data-ouro-deployment-host>
       <strong>
-        Deploying from {@host["hostname"] || Devices.this_device()} · local user {@host["user"] ||
+        Deploying from {Devices.plain(@host["hostname"], 96) || Devices.this_device()} · local user {Devices.plain(
+          @host["user"],
+          64
+        ) ||
           "not reported"}
       </strong>
       <span>
@@ -1027,7 +1397,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <strong>{@headline}</strong>
       <span :if={@guidance != ""}>{@guidance}</span>
       <span :if={@discovery && @discovery["detail"]} class="ouro-devices-detail">
-        {@discovery["detail"]}
+        {Devices.plain(@discovery["detail"])}
       </span>
     </p>
     """
@@ -1058,11 +1428,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           data-operation-state={latest_operation(@operations, device)["state"]}
           data-address={device["address"]}
         >
-          <span class="ouro-devices-name">{device["name"] || Devices.this_device()}</span>
+          <span class="ouro-devices-name">{Devices.plain(device["name"], 96) || Devices.this_device()}</span>
           <span class="ouro-devices-facts ouro-mono">
-            <span>{device["os"] || "operating system not reported"}</span>
+            <span>{Devices.plain(device["os"], 48) || "operating system not reported"}</span>
             <span>·</span>
-            <span>{device["address"] || "no private address reported"}</span>
+            <span>{Devices.plain(device["address"], 64) || "no private address reported"}</span>
           </span>
           <span class="ouro-devices-presence">
             <span class="ouro-visually-hidden">Network presence:</span>
@@ -1085,23 +1455,33 @@ defmodule Ouroboros.Web.Live.DevicesLive do
             >
               {label}
             </button>
+            <%!-- An action a blocker stands in front of is drawn as unavailable rather than
+                  as a button that refuses when pressed. The control keeps its name — an
+                  operator needs to know what is not available, not to find a gap where it
+                  used to be — and carries the reason as its own description rather than only
+                  as a paragraph somewhere under the row. --%>
             <button
-              :if={
-                is_nil(operation_for(@operations, device)) and @deploy? and
-                  Devices.deployable?(device)
-              }
+              :if={is_nil(operation_for(@operations, device)) and Devices.deployable?(device)}
               type="button"
-              class="ouro-button"
-              phx-click="deploy"
+              class={["ouro-button", not @deploy? && "ouro-devices-unavailable"]}
+              disabled={not @deploy?}
+              aria-disabled={to_string(not @deploy?)}
+              title={not @deploy? && @blocked}
+              aria-describedby={not @deploy? && "#{@id}-blocked-#{device["address"]}"}
+              phx-click={@deploy? && "deploy"}
               phx-value-address={device["address"]}
             >
               Deploy Ouroboros
             </button>
             <button
-              :if={is_nil(operation_for(@operations, device)) and @setup? and Devices.setup?(device)}
+              :if={is_nil(operation_for(@operations, device)) and Devices.setup?(device)}
               type="button"
-              class="ouro-button"
-              phx-click="setup-device"
+              class={["ouro-button", not @setup? && "ouro-devices-unavailable"]}
+              disabled={not @setup?}
+              aria-disabled={to_string(not @setup?)}
+              title={not @setup? && @setup_blocked}
+              aria-describedby={not @setup? && "#{@id}-blocked-#{device["address"]}"}
+              phx-click={@setup? && "setup-device"}
               phx-value-address={device["address"]}
             >
               Set up this device
@@ -1122,6 +1502,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
               is_nil(operation_for(@operations, device)) and Devices.deployable?(device) and
                 not @deploy?
             }
+            id={"#{@id}-blocked-#{device["address"]}"}
             class="ouro-devices-blocked"
           >
             {@blocked}
@@ -1132,6 +1513,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
               is_nil(operation_for(@operations, device)) and Devices.setup?(device) and
                 not @setup?
             }
+            id={"#{@id}-blocked-#{device["address"]}"}
             class="ouro-devices-blocked"
           >
             {@setup_blocked}
@@ -1161,10 +1543,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     end)
   end
 
+  # Address, or roster identity. Never the peer's own `name`: that field is what a *device*
+  # calls itself, and a device that calls itself by a roster machine's name would otherwise
+  # inherit that machine's operation — its row, its state, and a Continue setup button
+  # pointing at somebody else's deployment. `machine` is set by this machine's roster, which
+  # is the identity a peer cannot choose.
   defp same_device?(target, device) when is_map(target) and is_map(device) do
     matches?(target["address"], device["address"]) or
-      matches?(target["machine"], device["machine"]) or
-      matches?(target["machine"], device["name"])
+      matches?(target["machine"], device["machine"])
   end
 
   defp same_device?(_target, _device), do: false
@@ -1200,9 +1586,20 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   defp matches?(_left, _right), do: false
 
-  attr :operations, :list, required: true
+  attr :waiting, :list, required: true
+  attr :stopped, :list, required: true
 
+  # Two different things, and this panel used to draw them as one list of every journal the
+  # data directory has ever held. A deployment waiting for a credential is a thing to do
+  # *now*; one that failed in March is a thing to clean up, and two hundred of them push the
+  # inventory off the screen. So: what is waiting first, short by construction, and
+  # everything stopped behind a disclosure with a cap.
   defp operations(assigns) do
+    assigns =
+      assigns
+      |> assign(:shown, Enum.take(assigns.stopped, @max_stopped))
+      |> assign(:hidden, max(length(assigns.stopped) - @max_stopped, 0))
+
     ~H"""
     <section class="ouro-panel" aria-labelledby="devices-operations-title">
       <div class="ouro-panel-head">
@@ -1211,36 +1608,56 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <p>
         This machine is holding these deployments. Closing the page did not cancel them.
       </p>
-      <ul class="ouro-devices-list">
-        <li
-          :for={operation <- @operations}
-          class="ouro-devices-row"
-          data-operation={operation["operation"]}
-          data-state={operation["state"]}
-        >
-          <span class="ouro-devices-name ouro-mono">{operation["operation"]}</span>
-          <span class="ouro-devices-state">
-            <span class="ouro-visually-hidden">Deployment state:</span>
-            {Devices.operation_state(operation["state"])}
-          </span>
-          <span class="ouro-devices-presence">
-            {if operation["attached"],
-              do: "a worker is attached",
-              else: "no worker is attached; this is what the journal recorded"}
-          </span>
-          <span class="ouro-devices-action">
-            <button
-              type="button"
-              class="ouro-button"
-              phx-click="open-operation"
-              phx-value-operation={operation["operation"]}
-            >
-              Continue setup
-            </button>
-          </span>
-        </li>
+
+      <h3 :if={@waiting != []} class="ouro-devices-section-title">Waiting for you</h3>
+      <ul :if={@waiting != []} class="ouro-devices-list">
+        <.operation_row :for={operation <- @waiting} operation={operation} />
       </ul>
+
+      <details :if={@shown != []} class="ouro-devices-advanced" open={@waiting == []}>
+        <summary>Stopped or interrupted ({length(@stopped)})</summary>
+        <ul class="ouro-devices-list">
+          <.operation_row :for={operation <- @shown} operation={operation} />
+        </ul>
+        <p :if={@hidden > 0} class="ouro-devices-quiet">
+          {@hidden} more are recorded on this machine and are not drawn here. They are in
+          this data directory's deployment journals.
+        </p>
+      </details>
     </section>
+    """
+  end
+
+  attr :operation, :map, required: true
+
+  defp operation_row(assigns) do
+    ~H"""
+    <li
+      class="ouro-devices-row"
+      data-operation={@operation["operation"]}
+      data-state={@operation["state"]}
+    >
+      <span class="ouro-devices-name ouro-mono">{@operation["operation"]}</span>
+      <span class="ouro-devices-state">
+        <span class="ouro-visually-hidden">Deployment state:</span>
+        {Devices.operation_state(@operation["state"])}
+      </span>
+      <span class="ouro-devices-presence">
+        {if @operation["attached"],
+          do: "a worker is attached",
+          else: "no worker is attached; this is what the journal recorded"}
+      </span>
+      <span class="ouro-devices-action">
+        <button
+          type="button"
+          class="ouro-button"
+          phx-click="open-operation"
+          phx-value-operation={@operation["operation"]}
+        >
+          Continue setup
+        </button>
+      </span>
+    </li>
     """
   end
 
@@ -1306,8 +1723,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         </p>
 
         <p :if={@drawer.device} class="ouro-devices-target">
-          To <strong>{@drawer.device["name"]}</strong>
-          <span class="ouro-mono">{@drawer.device["address"]}</span>
+          To <strong>{Devices.plain(@drawer.device["name"], 96)}</strong>
+          <span class="ouro-mono">{Devices.plain(@drawer.device["address"], 64)}</span>
         </p>
 
         <%!-- The operation id, wherever the drawer is. It is what a row, a log line, this
@@ -1332,6 +1749,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         </p>
 
         <.takeover :if={taken_over?(@drawer)} drawer={@drawer} />
+        <.rebind :if={@drawer.rebind && @drawer.rebind == @drawer.operation} drawer={@drawer} />
 
         <.setup_step :if={@step == :select and @drawer.kind == "setup"} drawer={@drawer} />
         <.connect_step :if={@step == :select and @drawer.kind != "setup"} drawer={@drawer} />
@@ -1374,6 +1792,38 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   attr :drawer, :map, required: true
 
+  # What a refused answer leaves an operator: a way forward, or a sentence saying where the
+  # way forward is. Not the same button again.
+  defp rebind(assigns) do
+    ~H"""
+    <div
+      class="ouro-devices-takeover"
+      role="group"
+      aria-labelledby="ouro-deploy-rebind-title"
+      data-ouro-rebind
+    >
+      <h3 id="ouro-deploy-rebind-title">This prompt belongs to another tab</h3>
+      <p id="ouro-deploy-rebind-hint">
+        A credential prompt is answered by the tab it was issued to, so that a second tab
+        cannot answer the first one's. Answer it in the tab that started this setup, or
+        reconnect it here — which starts a fresh worker for this operation and asks again. A
+        setup another tab is still holding cannot be reconnected until that tab lets go.
+      </p>
+      <button
+        type="button"
+        class="ouro-button"
+        phx-click="resume"
+        phx-value-operation={@drawer.operation}
+        aria-describedby="ouro-deploy-rebind-hint"
+      >
+        Reconnect this setup to this tab
+      </button>
+    </div>
+    """
+  end
+
+  attr :drawer, :map, required: true
+
   # Never silent, and never a button that simply works: an operation another identity
   # started is another identity's credential prompt, and continuing it means inheriting it.
   defp takeover(assigns) do
@@ -1405,10 +1855,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   end
 
   defp residue_line(entry) when is_map(entry),
-    do: entry["detail"] || entry["name"] || inspect(entry, limit: 5)
+    do: Devices.plain(entry["detail"] || entry["name"] || entry)
 
-  defp residue_line(entry) when is_binary(entry), do: entry
-  defp residue_line(entry), do: inspect(entry, limit: 5)
+  defp residue_line(entry) when is_binary(entry), do: Devices.plain(entry)
+  defp residue_line(entry), do: Devices.plain(entry)
 
   # Which step the drawer is on. Challenges first, because an open challenge is the runtime
   # waiting for this operator and outranks whatever the last state event said.
@@ -1422,6 +1872,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       challenge(drawer, ["review"]) -> :review
       state_of(drawer) in ["completed", "failed", "cancelled", "interrupted"] -> :finish
       is_map(done_of(drawer)) -> :finish
+      drawer.cancelled? -> :finish
       true -> :progress
     end
   end
@@ -1437,6 +1888,15 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp state_of(drawer), do: (drawer.status || %{})["state"]
 
   defp done_of(drawer), do: (drawer.status || %{})["done"]
+
+  # Whether a worker going away leaves a question. A terminal state, a `done` frame, or a
+  # cancel this page asked for and the worker acknowledged is an answer; anything else with
+  # no worker behind it is not.
+  defp lost?(drawer) when is_map(drawer) do
+    Devices.unfinished?(state_of(drawer)) and is_nil(done_of(drawer)) and not drawer.cancelled?
+  end
+
+  defp lost?(_absent), do: false
 
   # Whether *this* operation is one another identity owns. Both fields are nil on a drawer
   # that has not prepared anything yet, and comparing them directly made `nil == nil` true —
@@ -1740,15 +2200,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         </div>
         <div class="ouro-fact">
           <dt>Account</dt>
-          <dd class="ouro-mono">{@facts["user"] || @drawer.form["ssh_user"]}</dd>
+          <dd class="ouro-mono">{Devices.plain(@facts["user"], 64) || @drawer.form["ssh_user"]}</dd>
         </div>
         <div class="ouro-fact">
           <dt>Key algorithm</dt>
-          <dd class="ouro-mono">{@facts["algorithm"] || "not reported"}</dd>
+          <dd class="ouro-mono">{Devices.plain(@facts["algorithm"], 48) || "not reported"}</dd>
         </div>
         <div class="ouro-fact">
           <dt>SHA256 fingerprint</dt>
-          <dd class="ouro-mono">{@facts["sha256_fingerprint"] || "not reported"}</dd>
+          <dd class="ouro-mono">
+            {Devices.plain(@facts["sha256_fingerprint"], 96) || "not reported"}
+          </dd>
         </div>
       </dl>
 
@@ -1805,7 +2267,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         {Devices.attempt(@challenge)}
       </p>
       <p :if={@facts["public_fingerprint"]} class="ouro-devices-quiet">
-        Public fingerprint <span class="ouro-mono">{@facts["public_fingerprint"]}</span>
+        Public fingerprint
+        <span class="ouro-mono">{Devices.plain(@facts["public_fingerprint"], 96)}</span>
       </p>
 
       <%!-- No `phx-change`. A change event on this form would stream every keystroke of a
@@ -1827,7 +2290,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
             name="secret"
             value=""
             required
-            autocomplete="off"
+            autocomplete="new-password"
             spellcheck="false"
             data-ouro-secret
             aria-describedby="ouro-deploy-auth-hint"
@@ -1964,7 +2427,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # to arrive is still whatever the operation was doing when it stopped. A `done` frame
       # *is* the end of the operation and `ok` says which way, so it settles the reading
       # where the state has not — without overruling a state that already said so.
-      |> assign(:state, final_state(status, done))
+      |> assign(:state, final_state(status, done, assigns.drawer))
       |> assign(:done, done)
       |> assign(:finished?, done["ok"] == true)
       |> assign(:readiness, readiness)
@@ -1978,19 +2441,19 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     <section class="ouro-devices-step" aria-labelledby="ouro-deploy-finish-title">
       <h3 id="ouro-deploy-finish-title">{Devices.operation_state(@state)}</h3>
 
-      <p :if={@summary}>{@summary}</p>
+      <p :if={@summary}>{Devices.plain(@summary)}</p>
       <p :if={@cause} class="ouro-refusal">{@cause}</p>
 
       <%!-- "the next thing to do, which the proposal requires the final display to name"
             — the worker's own words, not this page's guess at them. --%>
-      <p :if={@next} class="ouro-devices-note"><strong>Next:</strong> {@next}</p>
+      <p :if={@next} class="ouro-devices-note"><strong>Next:</strong> {Devices.plain(@next)}</p>
 
       <p :if={@finished?}>{@readiness}</p>
 
       <div :if={@unknown != []} class="ouro-devices-note">
         <strong>What this operation could not establish:</strong>
         <ul>
-          <li :for={fact <- @unknown}>{plain(fact)}</li>
+          <li :for={fact <- @unknown}>{Devices.plain(fact)}</li>
         </ul>
       </div>
 
@@ -2028,11 +2491,12 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   @terminal ~w(completed failed cancelled interrupted)
 
-  defp final_state(status, done) do
+  defp final_state(status, done, drawer) do
     cond do
       status["state"] in @terminal -> status["state"]
       done["ok"] == false -> "failed"
       done["ok"] == true -> "completed"
+      drawer.cancelled? -> "cancelled"
       true -> status["state"]
     end
   end
@@ -2043,9 +2507,6 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp cause(status, done) do
     Presentation.refusal(status["last_error"] || done["detail"])
   end
-
-  defp plain(value) when is_binary(value), do: value
-  defp plain(value), do: inspect(value, limit: 5)
 
   attr :drawer, :map, required: true
 
@@ -2083,11 +2544,12 @@ defmodule Ouroboros.Web.Live.DevicesLive do
               else: elem(Devices.outcome(stage_outcome(steps)), 0)}
           </span>
           <span :for={step <- steps} class="ouro-devices-detail">
-            {Devices.step_label(step["step"])}{if step["machine"], do: " on #{step["machine"]}"} — {elem(
+            {Devices.step_label(step["step"])}{if step["machine"],
+              do: " on #{Devices.plain(step["machine"], 64)}"} — {elem(
               Devices.outcome(step["outcome"]),
               0
             )}{if step["detail"],
-              do: ": #{step["detail"]}"}
+              do: ": #{Devices.plain(step["detail"])}"}
           </span>
         </li>
       </ol>
@@ -2095,20 +2557,23 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <ul :if={@extra != []} class="ouro-devices-steps">
         <li :for={step <- @extra} data-step={step["step"]} data-outcome={step["outcome"]}>
           <span class="ouro-devices-step-name">
-            {Devices.step_label(step["step"])}{if step["machine"], do: " on #{step["machine"]}"}
+            {Devices.step_label(step["step"])}{if step["machine"],
+              do: " on #{Devices.plain(step["machine"], 64)}"}
           </span>
           <span class="ouro-devices-step-outcome">
             <span class="ouro-visually-hidden">Outcome:</span>
             {elem(Devices.outcome(step["outcome"]), 0)}
           </span>
-          <span :if={step["detail"]} class="ouro-devices-detail">{step["detail"]}</span>
+          <span :if={step["detail"]} class="ouro-devices-detail">{Devices.plain(step["detail"])}</span>
         </li>
       </ul>
 
       <details :if={@log != []} class="ouro-devices-advanced">
         <summary>What the worker reported</summary>
         <ul class="ouro-devices-log">
-          <li :for={line <- @log} class="ouro-mono">{line["line"] || inspect(line, limit: 5)}</li>
+          <li :for={line <- @log} class="ouro-mono">
+            {Devices.plain(line["line"]) || Devices.plain(line)}
+          </li>
         </ul>
       </details>
     </section>

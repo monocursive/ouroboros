@@ -185,7 +185,9 @@ test("the whole deployment: host trust, a masked credential, review, progress, f
   await expect(drawer).toContainText("ouro 0.1.8 (x86_64-unknown-linux-gnu)");
   await expect(drawer).toContainText("/usr/local/bin/ouro");
   await expect(drawer).toContainText("What approving this grants");
-  await expect(page.locator("[data-ouro-plan-digest]")).toHaveText("sha256:fixture-plan-digest");
+  // Sixty-four lowercase hex, and the page's own sha256 of the plan above it — approval is
+  // not offered for anything else.
+  await expect(page.locator("[data-ouro-plan-digest]")).toHaveText(/^[0-9a-f]{64}$/);
 
   // The password is gone from the page the moment its step is over: not in any input, and
   // not anywhere in the rendered document.
@@ -207,8 +209,12 @@ test("the whole deployment: host trust, a masked credential, review, progress, f
       new Promise(resolve => {
         const region = document.getElementById("ouro-deploy-live");
         const seen = [];
+        // The sentence is the region's first text node; the counter beside it is what makes
+        // two identical sentences two announcements rather than one silent no-op, and it is
+        // not part of what is said.
+        const said = () => ((region.firstChild && region.firstChild.textContent) || "").trim();
         const observer = new MutationObserver(() => {
-          const text = (region.textContent || "").trim();
+          const text = said();
           if (text && seen[seen.length - 1] !== text) seen.push(text);
           if (/^Completed\.$/.test(text)) {
             observer.disconnect();

@@ -29,6 +29,10 @@ defmodule Ouroboros.Web.Live.Devices do
 
   @this_device "this machine"
 
+  # How much of one peer-controlled string this page will draw. The CLI's own sanitizer caps
+  # at 300 for the same reason: one runaway remote must not own the screen.
+  @max_text 300
+
   # The proposal's table, in its order, as written. `{observed state, primary action}`.
   @observed_states [
     {"Discovered peer; Ouroboros installation unknown",
@@ -52,6 +56,7 @@ defmodule Ouroboros.Web.Live.Devices do
   @state_words %{
     "discovered_installation_unknown" => "Discovered peer; Ouroboros installation unknown",
     "fleet_member" => "Known compatible fleet member",
+    "fleet_member_connected" => "Known compatible fleet member",
     "fleet_member_not_visible" => "Known member disconnected from this runtime",
     "peer_offline" => "Peer offline",
     "unsupported_platform" => "Unsupported platform for any Ouroboros release",
@@ -63,6 +68,7 @@ defmodule Ouroboros.Web.Live.Devices do
   @state_actions %{
     "discovered_installation_unknown" => "Deploy Ouroboros",
     "fleet_member" => "View device",
+    "fleet_member_connected" => "View device",
     "fleet_member_not_visible" => "Diagnose",
     "peer_offline" => "Refresh or inspect",
     "unsupported_platform" => "Nothing to deploy",
@@ -73,10 +79,61 @@ defmodule Ouroboros.Web.Live.Devices do
 
   # The two sections of the inventory. A code this build does not know is filed under
   # "Available on this network", which is the side that makes no claim about membership.
-  @fleet_states ~w(this_device this_device_without_profile fleet_member fleet_member_not_visible)
+  @fleet_states ~w(this_device this_device_without_profile fleet_member fleet_member_connected
+                   fleet_member_not_visible)
 
   # The blockers that must disable deployment while they stand (the table's fifth row).
   @blocked_states ~w(peer_offline unsupported_platform no_usable_ipv4)
+
+  @doc """
+  One string that came from somewhere this runtime does not control, made safe to read.
+
+  HEEx escapes markup, which stops injection and nothing else. What it does not stop is a
+  peer *lying about what it is called*: `U+202E` reverses the characters after it, a
+  zero-width space splits a name into two that read as one, and a tab or a newline inside a
+  table cell rearranges the row. A device names itself, and this page puts that name next to
+  a Deploy button.
+
+  So the same rule the CLI applies to remote text (`sanitize_remote_text/2` in
+  `tui/src/fleet_setup/mod.rs`): whitespace collapses to single spaces, every control and
+  format code point is dropped — C0, DEL, C1, the bidi overrides and isolates, the
+  zero-width set, the soft hyphen and the byte-order mark — and the whole thing is capped.
+
+  `nil` in, `nil` out, so a caller can keep testing for absence. A string that was *only*
+  invisible characters comes back empty, which every reader here already treats as absent.
+  """
+  @spec plain(term()) :: String.t() | nil
+  @spec plain(term(), pos_integer()) :: String.t() | nil
+  def plain(value, limit \\ @max_text)
+
+  def plain(value, limit) when is_binary(value) do
+    value
+    |> String.split()
+    |> Enum.map(&visible/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+    |> cap(limit)
+  end
+
+  def plain(value, _limit) when is_number(value) or is_boolean(value), do: to_string(value)
+  def plain(nil, _limit), do: nil
+  def plain(value, limit), do: value |> inspect(limit: 5) |> plain(limit)
+
+  defp visible(word) do
+    word |> String.to_charlist() |> Enum.reject(&invisible?/1) |> List.to_string()
+  end
+
+  # Control and format code points, by range rather than by name: a table of names is a
+  # table somebody has to remember to extend.
+  defp invisible?(point) do
+    point < 0x20 or point == 0x7F or point in 0x80..0x9F or point == 0xAD or point == 0x61C or
+      point in 0x200B..0x200F or point in 0x202A..0x202E or point in 0x2060..0x2064 or
+      point in 0x2066..0x2069 or point == 0xFEFF
+  end
+
+  defp cap(text, limit) do
+    if String.length(text) <= limit, do: text, else: String.slice(text, 0, limit) <> "…"
+  end
 
   @doc "The proposal's observed-state table, verbatim, as `{observed state, primary action}`."
   @spec observed_states() :: [{String.t(), String.t()}]
@@ -131,6 +188,10 @@ defmodule Ouroboros.Web.Live.Devices do
   """
   @spec presence(map()) :: String.t()
   def presence(device) when is_map(device) do
+    [network_presence(device) | member_facts(device)] |> Enum.join(" · ")
+  end
+
+  defp network_presence(device) do
     case device["online"] do
       true -> "Connected now · " <> path_words(device["path"])
       false -> "Not connected · " <> last_seen(device["last_seen"])
@@ -138,7 +199,46 @@ defmodule Ouroboros.Web.Live.Devices do
     end
   end
 
-  defp last_seen(seen) when is_binary(seen) and seen != "", do: "last seen " <> seen
+  # A member row carries facts the network client knows nothing about: whether this runtime
+  # is actually talking to it, whether their builds agree, whether its runtime is up, and
+  # when it last answered. Each is `nil` where this build could not establish it, and `nil`
+  # is said as nothing at all rather than read as "no".
+  defp member_facts(device) do
+    [
+      fact(device, "connected", "connected to this runtime", "not connected to this runtime"),
+      fact(device, "compatible", "compatible build", "incompatible build"),
+      fact(device, "runtime_running", "its runtime is running", "its runtime is not running"),
+      probe(device)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp fact(device, key, yes, no) do
+    case Map.fetch(device, key) do
+      {:ok, true} -> yes
+      {:ok, false} -> no
+      {:ok, nil} -> nil
+      :error -> nil
+      {:ok, other} -> "#{key} reported as #{plain(other, 32)}"
+    end
+  end
+
+  # When this runtime last had an answer from that machine — the cluster's own observation,
+  # which is a different question from when the network client last saw the device.
+  defp probe(device) do
+    case plain(device["last_probe"], 64) do
+      at when is_binary(at) and at != "" -> "last answered this runtime at " <> at
+      _unreported -> nil
+    end
+  end
+
+  defp last_seen(seen) when is_binary(seen) and seen != "" do
+    case plain(seen, 64) do
+      "" -> "the client did not say when it last saw this device"
+      when_seen -> "last seen " <> when_seen
+    end
+  end
+
   defp last_seen(_absent), do: "the client did not say when it last saw this device"
 
   @doc "How the network client reached a device, where it observed a path at all."
@@ -158,8 +258,8 @@ defmodule Ouroboros.Web.Live.Devices do
   def name_conflict(device) when is_map(device) do
     case device["name_conflicts_with_roster"] do
       machine when is_binary(machine) and machine != "" ->
-        "This device calls itself #{machine}, which is the name of a machine in this " <>
-          "fleet at a different address. It is not that machine."
+        "This device calls itself #{plain(machine, 64)}, which is the name of a machine in " <>
+          "this fleet at a different address. It is not that machine."
 
       _none ->
         nil
@@ -221,33 +321,48 @@ defmodule Ouroboros.Web.Live.Devices do
 
   The reason codes arrive in a fixed order and the surface says the first one, because the
   first is the one an operator has to deal with before any of the others can matter.
+
+  `posture` is `:standalone` for a machine in no fleet at all and `:fleet` for one that is.
+  It changes exactly one sentence; see `no_ca_key` below.
   """
-  @spec deploy_blocker(term()) :: String.t()
-  def deploy_blocker("no_data_dir") do
+  @spec deploy_blocker(term(), :standalone | :fleet | nil) :: String.t()
+  def deploy_blocker(code, posture \\ nil)
+
+  def deploy_blocker("no_data_dir", _posture) do
     "This runtime serves no durable data directory, so it has nowhere to record a deployment."
   end
 
-  def deploy_blocker("no_ca_key") do
+  # The one blocker whose sentence depends on a second fact. Holding no CA key means two
+  # completely different things: a machine that is in a fleet somebody else issues for is a
+  # joiner and should go to the issuer, and a machine in no fleet at all has simply not been
+  # set up — and the control it needs is on its own row. Telling a standalone operator to
+  # "open Devices on the machine that created the fleet" names a machine that does not exist.
+  def deploy_blocker("no_ca_key", :standalone) do
+    "This machine is not set up yet — use Set up this device. It holds no fleet of its own, " <>
+      "so there is no certificate authority here to admit another machine with."
+  end
+
+  def deploy_blocker("no_ca_key", _in_a_fleet) do
     "This machine does not hold the fleet's certificate authority key, so it can describe " <>
       "the fleet but cannot admit a member. Open Devices on the machine that created the fleet."
   end
 
-  def deploy_blocker("ouro_path_unknown") do
+  def deploy_blocker("ouro_path_unknown", _posture) do
     "This runtime cannot say where its own `ouro` executable is, so it cannot start a " <>
       "deployment worker. Start Ouroboros through its launcher and reload this page."
   end
 
-  def deploy_blocker("cleartext_web_bind") do
+  def deploy_blocker("cleartext_web_bind", _posture) do
     "This web endpoint is published on a non-loopback address with no TLS of its own, so " <>
       "credential entry is refused here. Reach it through a loopback bind, or through " <>
       "`tailscale serve` in front of one."
   end
 
-  def deploy_blocker(code) when is_binary(code) do
-    "This runtime reported that deployment is unavailable here: #{code}."
+  def deploy_blocker(code, _posture) when is_binary(code) do
+    "This runtime reported that deployment is unavailable here: #{plain(code, 64)}."
   end
 
-  def deploy_blocker(_absent) do
+  def deploy_blocker(_absent, _posture) do
     "This runtime did not say why deployment is unavailable here."
   end
 
@@ -478,7 +593,7 @@ defmodule Ouroboros.Web.Live.Devices do
   """
   @spec secret_label(map()) :: String.t()
   def secret_label(%{"kind" => "passphrase"} = challenge) do
-    case metadata(challenge)["key_label"] do
+    case plain(metadata(challenge)["key_label"], 96) do
       label when is_binary(label) and label != "" -> "Passphrase for the key #{label}"
       _unnamed -> "Passphrase for the selected key"
     end
@@ -487,11 +602,11 @@ defmodule Ouroboros.Web.Live.Devices do
   def secret_label(challenge) when is_map(challenge) do
     facts = metadata(challenge)
 
-    case {facts["user"], facts["target"]} do
-      {user, target} when is_binary(user) and is_binary(target) ->
+    case {plain(facts["user"], 64), plain(facts["target"], 96)} do
+      {user, target} when is_binary(user) and user != "" and is_binary(target) and target != "" ->
         "Password for #{user}@#{target}"
 
-      {user, _target} when is_binary(user) ->
+      {user, _target} when is_binary(user) and user != "" ->
         "Password for #{user}"
 
       _unnamed ->
@@ -545,7 +660,7 @@ defmodule Ouroboros.Web.Live.Devices do
 
       {"skipped", _finished?} ->
         {"Readiness was not established from here. " <>
-           (step["detail"] || "The steps below say what was and was not checked."), true}
+           (plain(step["detail"]) || "The steps below say what was and was not checked."), true}
 
       {_unreported, true} ->
         {"The deployment finished. Readiness was not reported, so this page does not claim it.",
@@ -613,6 +728,59 @@ defmodule Ouroboros.Web.Live.Devices do
   @plan_fields ~w(schema operation kind deployment_host target release service members restart
                   grants build)
 
+  @doc """
+  Whether a digest is the shape seam S6 fixes: sha256, lowercase hex, sixty-four characters.
+
+  A digest is the *only* thing approval sends about the plan, so a surface that forwarded
+  whatever string arrived would be offering an operator a button whose meaning it had not
+  checked. Anything else is refused before Approve is drawn.
+  """
+  @spec digest?(term()) :: boolean()
+  def digest?(digest) when is_binary(digest), do: String.match?(digest, ~r/\A[0-9a-f]{64}\z/)
+  def digest?(_other), do: false
+
+  @doc """
+  This runtime's own sha256 of a plan, computed the way the worker computes it.
+
+  `Plan::digest/0` in `tui/src/fleet_setup/plan.rs` is sha256 over `canonical_json` of the
+  plan document (`tui/src/fleet_setup/mod.rs`): every object's keys sorted at every depth,
+  arrays in order, scalars as `serde_json` writes them, and no whitespace anywhere. This is
+  that, in Elixir, so approval can check that the digest it is about to send is a digest *of
+  the plan on the screen* rather than a string the worker asked it to repeat. That the two
+  agree is proved against a real worker in
+  `test/ouroboros/web/live/devices_plan_digest_test.exs`.
+
+  Returns `nil` for a plan this build cannot canonicalise, which is a reason to say so
+  rather than to approve.
+  """
+  @spec plan_digest(term()) :: String.t() | nil
+  def plan_digest(plan) when is_map(plan) do
+    :crypto.hash(:sha256, canonical(plan)) |> Base.encode16(case: :lower)
+  rescue
+    _unencodable -> nil
+  end
+
+  def plan_digest(_absent), do: nil
+
+  # `JSON.encode!` is the same encoder the rest of this tree uses, and it writes exactly what
+  # `serde_json` writes for a scalar. What it does not do is sort keys, so objects are walked
+  # and rebuilt in order; everything else is encoded whole.
+  defp canonical(value) when is_map(value) do
+    body =
+      value
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map_join(",", fn {key, field} ->
+        JSON.encode!(to_string(key)) <> ":" <> canonical(field)
+      end)
+
+    "{" <> body <> "}"
+  end
+
+  defp canonical(value) when is_list(value),
+    do: "[" <> Enum.map_join(value, ",", &canonical/1) <> "]"
+
+  defp canonical(value), do: JSON.encode!(value)
+
   @doc "Every top-level key of a plan this build does not read, so nothing is cut in silence."
   @spec plan_unread(term()) :: [String.t()]
   def plan_unread(plan) when is_map(plan),
@@ -666,10 +834,12 @@ defmodule Ouroboros.Web.Live.Devices do
 
   defp present?(value), do: is_binary(value) and value != ""
 
-  defp text(value) when is_binary(value), do: if(value == "", do: nil, else: value)
+  # Every value in a plan came from a worker quoting a remote machine, so it goes through
+  # the same sanitizer a step detail does.
+  defp text(value) when is_binary(value), do: if(value == "", do: nil, else: plain(value))
   defp text(value) when is_number(value) or is_boolean(value), do: to_string(value)
   defp text(nil), do: nil
-  defp text(value), do: inspect(value, limit: 5)
+  defp text(value), do: value |> inspect(limit: 5) |> plain()
 
   @doc "The word for a device nobody named, used wherever a row has no name of its own."
   @spec this_device() :: String.t()

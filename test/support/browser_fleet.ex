@@ -159,8 +159,6 @@ defmodule Ouroboros.Test.BrowserFleet do
     }
   end
 
-  @digest "sha256:fixture-plan-digest"
-
   # Ten identical uninspected peers. A deployment leaves a journal behind, and a journal is
   # what makes a row stop reading as an untouched peer — correctly, and permanently for the
   # life of this fixture runtime. Playwright runs this spec once per project against one
@@ -345,7 +343,7 @@ defmodule Ouroboros.Test.BrowserFleet do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_review"})
 
     FleetWorkerFake.challenge(state.serving, "fixture-review", "review", %{
-      "metadata" => %{"plan" => plan(request(state)), "plan_digest" => @digest}
+      "metadata" => %{"plan" => plan(request(state)), "plan_digest" => digest(request(state))}
     })
 
     {:noreply, state}
@@ -483,6 +481,13 @@ defmodule Ouroboros.Test.BrowserFleet do
   end
 
   defp machine_of(request), do: request["machine"] || request["address"] || "the target"
+
+  # A real worker sends the sha256 of the plan it built (`Plan::digest/0`), and the page
+  # refuses to approve anything else — so a fixture that made a digest up would be a fixture
+  # that could not get past the review step. That the Elixir side of this agrees with the
+  # Rust side is proved separately, against a real worker, in
+  # `test/ouroboros/web/live/devices_plan_digest_test.exs`.
+  defp digest(request), do: Ouroboros.Web.Live.Devices.plan_digest(plan(request))
 
   # The newest worker that has an attachment and is not the one already being served. The
   # fake records the attachment while handling the very frame it forwarded here, so by the

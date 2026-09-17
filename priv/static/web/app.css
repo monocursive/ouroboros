@@ -5189,6 +5189,16 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   line-height: 1.5;
 }
 
+/* An action a blocker stands in front of. It keeps its name — a control that vanished
+   tells an operator nothing — and reads as unavailable rather than pressable. Not colour
+   alone: it is also `disabled`, `aria-disabled`, and carries the reason as its title. */
+.ouro-devices-unavailable {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--tertiary);
+  cursor: not-allowed;
+}
+
 .ouro-devices-quiet {
   color: var(--tertiary);
   font-size: 0.8rem;

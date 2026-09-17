@@ -884,8 +884,41 @@
 
   var sessionMenuFocus = new WeakMap();
 
+  // One id per browser tab, minted here and kept in `sessionStorage` — which is per tab by
+  // definition and dies with it. The Devices page binds a deployment's credential
+  // challenges to it (seam S4): the cookie is one id every tab shares, so binding to that
+  // makes "a second tab cannot answer the first tab's prompt" false, and binding to the
+  // LiveView mount makes it *too* true — a refresh, a dropped socket or the page's own
+  // `?operation=` reload would strand a pending challenge with no way to answer it.
+  //
+  // Every read and write is guarded: `sessionStorage` throws in a private window and under
+  // a block-site-data setting, and a page that cannot remember its tab id still works — it
+  // gets a fresh binding, which is the same posture as before this existed.
+  function tabId() {
+    var key = "ouroboros:tab";
+    try {
+      var stored = window.sessionStorage.getItem(key);
+      if (stored && /^[0-9a-f]{32}$/.test(stored)) return stored;
+    } catch (error) {
+      /* No storage: fall through and mint one for this page's lifetime. */
+    }
+    var bytes = new Uint8Array(16);
+    (window.crypto || window.msCrypto).getRandomValues(bytes);
+    var minted = Array.prototype.map
+      .call(bytes, function (byte) {
+        return ("0" + byte.toString(16)).slice(-2);
+      })
+      .join("");
+    try {
+      window.sessionStorage.setItem(key, minted);
+    } catch (error) {
+      /* Nothing to do: this tab simply will not be recognised after a reload. */
+    }
+    return minted;
+  }
+
   var liveSocket = new LiveSocket("/live", Socket, {
-    params: { _csrf_token: csrfToken },
+    params: { _csrf_token: csrfToken, _ouro_tab: tabId() },
     dom: {
       // LiveView deletes obsolete stream rows before element beforeUpdate hooks run.
       // Capture the reading anchor at patch start, while a repaired gap still exists.
