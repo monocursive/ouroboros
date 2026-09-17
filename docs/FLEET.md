@@ -457,20 +457,31 @@ A deployment is long, interruptible, and carries an SSH credential, so the work 
 happen inside the runtime that was asked for it. `Ouroboros.Fleet.Deployment` is a broker,
 not an executor:
 
-1. **It starts a worker it does not own.** `ouro fleet worker start --operation <id>
-   --data-dir <dir>` forks a detached worker into its own session and process group, with
-   its stdio on a private log, and prints one JSON line naming the worker's Unix socket and
-   its instance identity. The broker finds `ouro` at the absolute path the launcher exported
-   in `OUROBOROS_PROCESS_ID_HELPER` — never through `PATH`, because this is the process that
-   will be handed a password.
-2. **It connects, and proves it may.** The worker writes a 32-byte capability into a 0600
+1. **It states the request in a private file.** Which machine, which SSH account, which
+   port, which identity *reference*, which paths — written to
+   `<data dir>/fleet/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
+   (an exclusive temporary inode chmodded before the first byte, then renamed) and as
+   canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is
+   readable by every local account, and while a target hostname and an account name are not
+   secrets in the sense the list below means, publishing them to every shell on the box buys
+   nothing. The worker unlinks the file once it has read it; if the launch itself fails, the
+   broker takes it back, because nothing is coming to read it. A resume writes no request —
+   the worker already has its journal, and re-stating a target would be a second chance to
+   state a different one.
+2. **It starts a worker it does not own.** `ouro fleet worker start --operation <id>
+   --data-dir <dir>`, and nothing else on the command line, forks a detached worker into its
+   own session and process group, with its stdio on a private log, and prints one JSON line
+   naming the worker's Unix socket and its instance identity. The broker finds `ouro` at the
+   absolute path the launcher exported in `OUROBOROS_PROCESS_ID_HELPER` — never through
+   `PATH`, because this is the process that will be handed a password.
+3. **It connects, and proves it may.** The worker writes a 32-byte capability into a 0600
    file before its socket listens; the broker reads it — refusing a file anyone else could
    read — and presents it in the first frame, along with the audited identity and the client
    session. Frames are NDJSON, one per line, capped at 1 MiB in both directions; a worker
    that writes past that cap loses its connection and nothing else.
-3. **It reconnects by instance, not by path.** A socket that exists is not evidence that the
+4. **It reconnects by instance, not by path.** A socket that exists is not evidence that the
    worker which printed it is the process listening on it.
-4. **It reads the journal when no worker is alive.** `<data dir>/fleet/deploy/<id>.json` is
+5. **It reads the journal when no worker is alive.** `<data dir>/fleet/deploy/<id>.json` is
    the operation's durable authority, written by the worker before and after every
    externally visible step. The broker opens it read-only and sanitizes what it returns; it
    never writes one, because a broker that repaired a journal would be inventing steps the

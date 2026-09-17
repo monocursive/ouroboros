@@ -12,9 +12,15 @@ defmodule Ouroboros.Test.FleetOuroFake do
   `<data dir>/fleet/deploy/`, records the id where the fake worker can read it, and prints
   the one JSON line naming the socket and the instance.
 
+  It also stands in for the worker's side of the request file (seam S2): it records that
+  file's mode and contents where a test can read them and then **unlinks it**, which is the
+  real worker's job. That is what makes "gone after a successful launch" an assertion about
+  the contract rather than about this script — and `keep_request: true` turns the unlink off,
+  so a test can also prove the broker does *not* remove a file it has handed over.
+
   Every argument it was run with is recorded in a sibling `argv` file, one per line, so a
-  test can assert what the broker actually exec'd — including that nothing on that command
-  line is a secret.
+  test can assert what the broker actually exec'd — which, since that decision, is only the
+  operation id and the data directory.
   """
 
   @doc """
@@ -29,6 +35,8 @@ defmodule Ouroboros.Test.FleetOuroFake do
     * `:devices` — the JSON `fleet devices --json` prints.
     * `:sleep` — seconds `fleet devices --json` sleeps first, for the ceiling test.
     * `:exit_status` — the status every subcommand exits with instead of 0.
+    * `:keep_request` — true leaves the request file in place instead of unlinking it, the
+      way a worker that died before reading it would.
   """
   @spec write!(Path.t(), keyword()) :: Path.t()
   def write!(dir, opts \\ []) do
@@ -47,6 +55,16 @@ defmodule Ouroboros.Test.FleetOuroFake do
     sleep = Keyword.get(opts, :sleep, 0)
     cap = Keyword.get(opts, :cap)
     cap_mode = Keyword.get(opts, :cap_mode, 0o600)
+    request_mode_file = Path.join(dir, "request-mode")
+    request_body_file = Path.join(dir, "request-body")
+
+    request_unlink =
+      if Keyword.get(opts, :keep_request, false),
+        do: "      :\n",
+        else: "      rm -f \"$request\"\n"
+
+    _ = File.rm(request_mode_file)
+    _ = File.rm(request_body_file)
 
     capability =
       if cap && cap_mode do
@@ -84,6 +102,12 @@ defmodule Ouroboros.Test.FleetOuroFake do
           esac
         done
         printf '%s' "$operation" > #{shell_quote(operation_file)}
+        request="$data_dir/fleet/deploy/$operation.request.json"
+        if [ -f "$request" ]; then
+          ( stat -f '%Lp' "$request" 2>/dev/null || stat -c '%a' "$request" 2>/dev/null ) \
+            > #{shell_quote(request_mode_file)}
+          cat "$request" > #{shell_quote(request_body_file)}
+    #{request_unlink}    fi
     #{capability}    cat #{shell_quote(spawn_file)}
         ;;
       *)
@@ -109,6 +133,24 @@ defmodule Ouroboros.Test.FleetOuroFake do
     case File.read(Path.join(dir, "argv")) do
       {:ok, body} -> String.split(body, "\n", trim: true)
       {:error, _reason} -> []
+    end
+  end
+
+  @doc "The mode the request file had when the fake read it, as an octal string, or nil."
+  @spec request_mode(Path.t()) :: String.t() | nil
+  def request_mode(dir) do
+    case File.read(Path.join(dir, "request-mode")) do
+      {:ok, body} -> String.trim(body)
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc "The exact bytes of the request file the fake read, or nil when there was none."
+  @spec request_body(Path.t()) :: String.t() | nil
+  def request_body(dir) do
+    case File.read(Path.join(dir, "request-body")) do
+      {:ok, body} -> body
+      {:error, _reason} -> nil
     end
   end
 

@@ -230,35 +230,88 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert context.root in rest
     end
 
-    test "the request reaches the worker as argv and carries no credential", context do
+    test "the argv carries only the operation id and the data directory", context do
       arrange_worker(context)
 
-      assert {:ok, _} =
-               Deployment.prepare(
-                 %{
-                   "target" => %{"address" => "100.64.12.44"},
-                   "ssh_user" => "deploy",
-                   "port" => 2222,
-                   "identity" => %{"kind" => "key", "ref" => "~/.ssh/id_ed25519"},
-                   "install_path" => nil,
-                   "data_dir" => nil,
-                   "service" => true
-                 },
-                 bound()
-               )
+      assert {:ok, %{"operation_id" => operation}} =
+               Deployment.prepare(detailed_request(), bound())
 
-      argv = FleetOuroFake.argv(context.fake_dir)
-      assert "--request-json" in argv
-      request = argv |> Enum.at(Enum.find_index(argv, &(&1 == "--request-json")) + 1)
-      decoded = JSON.decode!(request)
+      # `ps` is readable by every local account on both platforms this ships to. A target
+      # hostname and an SSH account name are not secrets in the sense the spec's one list
+      # means, but publishing them to every shell on the box buys nothing, so the command
+      # line is the operation and the directory and nothing else.
+      assert FleetOuroFake.argv(context.fake_dir) ==
+               ["fleet", "worker", "start", "--operation", operation, "--data-dir", context.root]
+    end
+
+    test "the request reaches the worker as a private file it then unlinks", context do
+      arrange_worker(context)
+
+      assert {:ok, %{"operation_id" => operation}} =
+               Deployment.prepare(detailed_request(), bound())
+
+      # What the worker actually saw: a 0600 file, whole, with the request in it.
+      assert FleetOuroFake.request_mode(context.fake_dir) == "600"
+      body = FleetOuroFake.request_body(context.fake_dir)
+      decoded = JSON.decode!(body)
 
       assert decoded["ssh_user"] == "deploy"
       assert decoded["port"] == 2222
       assert decoded["identity"] == %{"kind" => "key", "ref" => "~/.ssh/id_ed25519"}
+      assert decoded["target"] == %{"address" => "100.64.12.44"}
 
-      # An identity is a reference. Nothing that could be key material is on this argv.
-      refute request =~ "BEGIN"
-      refute request =~ "secret"
+      # An identity is a reference. Nothing that could be key material is in this file.
+      refute body =~ "BEGIN"
+      refute body =~ "secret"
+
+      # Canonical: sorted keys, no whitespace, so the same request twice is the same bytes.
+      assert body == JSON.encode!(JSON.decode!(body)) |> canonical_of()
+      assert String.starts_with?(body, ~s({"data_dir":))
+
+      # And it is the worker's to consume: gone once the launch succeeded.
+      refute File.exists?(Journal.request_path(context.root, operation))
+    end
+
+    test "a file the worker never read is left for it, not reclaimed", context do
+      arrange_worker(context, keep_request: true)
+
+      assert {:ok, %{"operation_id" => operation}} =
+               Deployment.prepare(detailed_request(), bound())
+
+      # The launch succeeded, so the request belongs to the worker even if it has not got
+      # to it yet. A broker that tidied here would be racing the process it just started.
+      assert File.exists?(Journal.request_path(context.root, operation))
+
+      assert File.stat!(Journal.request_path(context.root, operation)).mode |> Bitwise.band(0o777) ==
+               0o600
+    end
+
+    test "a launch that fails leaves no request behind", context do
+      arrange_worker(context, exit_status: 3, keep_request: true)
+
+      assert {:error, {:worker_spawn_failed, {:ouro_failed, 3, _output}}} =
+               Deployment.prepare(detailed_request(), bound())
+
+      # Nothing is coming to read it, so the broker takes it back. The deploy directory
+      # holds no request file at all afterwards.
+      deploy = Journal.deploy_dir(context.root)
+      assert File.ls!(deploy) |> Enum.filter(&String.ends_with?(&1, ".request.json")) == []
+    end
+
+    test "a resume writes no request at all", context do
+      operation = plant_journal(context.root, "interrupted")
+      arrange_worker(context, keep_request: true)
+
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      # The worker already has its journal. Re-stating a target here would be a second
+      # chance to state a different one.
+      refute File.exists?(Journal.request_path(context.root, operation))
+      assert FleetOuroFake.request_body(context.fake_dir) == nil
+
+      assert FleetOuroFake.argv(context.fake_dir) ==
+               ["fleet", "worker", "start", "--operation", operation, "--data-dir", context.root]
     end
 
     test "refuses to attach when the worker's instance is not the one that was printed",
@@ -734,6 +787,41 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   # Helpers
 
   defp bound, do: %{subject: "adele", session: "session-one"}
+
+  defp detailed_request do
+    %{
+      "target" => %{"address" => "100.64.12.44"},
+      "ssh_user" => "deploy",
+      "port" => 2222,
+      "identity" => %{"kind" => "key", "ref" => "~/.ssh/id_ed25519"},
+      "install_path" => nil,
+      "data_dir" => nil,
+      "service" => true
+    }
+  end
+
+  # Re-encoding a decoded document through the same sorting rule the launcher uses. If the
+  # file were not canonical, this would differ from it.
+  defp canonical_of(json) do
+    json |> JSON.decode!() |> canonical() |> IO.iodata_to_binary()
+  end
+
+  defp canonical(value) when is_map(value) do
+    inner =
+      value
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map(fn {key, inner} ->
+        [JSON.encode_to_iodata!(to_string(key)), ?:, canonical(inner)]
+      end)
+      |> Enum.intersperse(?,)
+
+    [?{, inner, ?}]
+  end
+
+  defp canonical(value) when is_list(value),
+    do: [?[, value |> Enum.map(&canonical/1) |> Enum.intersperse(?,), ?]]
+
+  defp canonical(value), do: JSON.encode_to_iodata!(value)
 
   defp request do
     %{

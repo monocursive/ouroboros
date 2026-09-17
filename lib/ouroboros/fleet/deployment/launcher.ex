@@ -20,7 +20,14 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
 
   import Bitwise
 
+  alias Ouroboros.Fleet.Deployment.Journal
+
   @helper_env "OUROBOROS_PROCESS_ID_HELPER"
+
+  # A handful of strings: a host, an account, a port, two paths and an identity reference.
+  # A request past this is a caller this build refuses rather than one it hands to another
+  # process.
+  @max_request_bytes 64 * 1024
 
   @typedoc "Why this runtime cannot name an `ouro` to run."
   @type path_error ::
@@ -93,22 +100,34 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   returns that line decoded; it does not connect, and it holds nothing of the worker's
   lifetime — the worker outlives this runtime by design.
 
-  ## `--request-json`, and why it is argv
+  ## The request travels in a private file, not on argv
 
-  Seam S2 fixes `--operation` and `--data-dir`, and seam S3's client operations are a closed
-  list with no verb that describes a target. The request an operator made — which machine,
-  which SSH account, which port, which identity *reference*, which paths — therefore has to
-  reach the worker some third way, and this passes it as one argument of canonical JSON.
+  Seam S2 fixes the argv at `--operation` and `--data-dir`, and seam S3's client operations
+  are a closed list with no verb that describes a target. The request an operator made —
+  which machine, which SSH account, which port, which identity *reference*, which paths —
+  therefore has to reach the worker some third way, and it goes in
+  `<data dir>/fleet/deploy/<operation>.request.json`.
 
-  That is a deliberate choice rather than an oversight. The spec's own retention list makes
-  host, user, port, identity reference and paths the things a deployment is *allowed* to
-  keep; the one list of places a secret may never appear names command arguments first, and
-  nothing in this object is a secret — an identity is referred to by name, never by key
-  material, and a password or passphrase only ever travels inside a `respond` frame on the
-  socket. An argv the operator can read in `ps` is a feature for a non-secret request.
+  Not on the command line, and the reason is `ps`. An argv is readable by every local user
+  on both platforms this ships to; a target hostname and an SSH account name are not
+  secrets in the sense the spec's one list means, but they are exactly the reconnaissance
+  that makes the next attempt cheaper, and there is no reason to publish them to a shell
+  account that has no business with this deployment. The file is 0600 in a 0700 directory,
+  written whole before the worker exists, and the worker unlinks it once it has read it.
 
-  A resume passes `nil`: the worker already has its journal, and re-stating a target would be
-  a second chance to state a different one.
+  Written atomically — an exclusive temporary inode chmodded before a byte goes in, then
+  renamed into place — so the worker never opens a half-written request, and never a
+  request whose mode was briefly the umask's idea. Canonical JSON with sorted keys, so the
+  same request twice is the same bytes twice. Bounded at 64 KiB: this is a handful of
+  strings, and a request larger than that is a caller this build should refuse rather than
+  hand to another process.
+
+  When the launch itself fails — a nonzero exit, a crash, a ceiling — this removes the file
+  again, because nothing is coming to read it. When the launch succeeds the file is the
+  worker's, even if this runtime cannot then parse what it printed.
+
+  A resume passes `nil` and writes nothing: the worker already has its journal, and
+  re-stating a target would be a second chance to state a different one.
   """
   @spec spawn_worker(String.t(), Path.t(), map() | nil, pos_integer()) ::
           {:ok, %{socket: Path.t(), instance: String.t()}}
@@ -116,19 +135,98 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
           | {:error, {:worker_spawn_failed, term()}}
   def spawn_worker(operation, data_dir, request, timeout)
       when is_binary(operation) and is_binary(data_dir) and (is_map(request) or is_nil(request)) do
-    args =
-      ["fleet", "worker", "start", "--operation", operation, "--data-dir", data_dir] ++
-        request_args(request)
+    args = ["fleet", "worker", "start", "--operation", operation, "--data-dir", data_dir]
+    path = Journal.request_path(data_dir, operation)
 
-    case run(args, timeout) do
-      {:ok, output} -> decode_spawn(output)
-      {:error, {:ouro_path_unknown, _detail} = reason} -> {:error, reason}
-      {:error, reason} -> {:error, {:worker_spawn_failed, reason}}
+    with :ok <- publish_request(path, request) do
+      case run(args, timeout) do
+        {:ok, output} ->
+          decode_spawn(output)
+
+        {:error, {:ouro_path_unknown, _detail} = reason} ->
+          discard_request(path, request)
+          {:error, reason}
+
+        {:error, reason} ->
+          discard_request(path, request)
+          {:error, {:worker_spawn_failed, reason}}
+      end
     end
   end
 
-  defp request_args(nil), do: []
-  defp request_args(request), do: ["--request-json", JSON.encode!(request)]
+  defp publish_request(_path, nil), do: :ok
+
+  defp publish_request(path, request) do
+    bytes = canonical(request) |> IO.iodata_to_binary()
+
+    cond do
+      byte_size(bytes) > @max_request_bytes ->
+        {:error, {:worker_spawn_failed, :request_too_large}}
+
+      true ->
+        with :ok <- private_deploy_dir(Path.dirname(path)) do
+          write_private_atomic(path, bytes)
+        end
+    end
+  end
+
+  defp discard_request(_path, nil), do: :ok
+  # The removal's own failure is not the caller's problem: the launch already failed, and
+  # a request file this could not unlink is a private file in a private directory that
+  # nothing will read.
+  defp discard_request(path, _request) do
+    _ = File.rm(path)
+    :ok
+  end
+
+  # `chmod` rather than a refusal, uniquely here: 0700 only ever *removes* access, the
+  # directory is this uid's own, and both the broker and the worker create it. Narrowing is
+  # the one direction a privacy repair is safe in without asking an operator first.
+  defp private_deploy_dir(dir) do
+    with :ok <- File.mkdir_p(dir), :ok <- File.chmod(dir, 0o700) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:worker_spawn_failed, {:deploy_dir_unwritable, reason}}}
+    end
+  end
+
+  # Exclusive temporary inode, chmodded before the first byte, then renamed. The rename is
+  # what makes it atomic for the reader; the chmod-before-write is what keeps the umask from
+  # deciding who may read a target hostname for the length of one write.
+  defp write_private_atomic(path, bytes) do
+    tmp = path <> ".tmp-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+    with {:ok, io} <- File.open(tmp, [:write, :exclusive, :binary]),
+         :ok <- File.chmod(tmp, 0o600),
+         :ok <- IO.binwrite(io, bytes),
+         :ok <- File.close(io),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      {:error, reason} ->
+        _ = File.rm(tmp)
+        {:error, {:worker_spawn_failed, {:request_unwritable, reason}}}
+    end
+  end
+
+  # Sorted keys, no whitespace. Two identical requests produce two identical files, which is
+  # what lets a duplicate `prepare` be recognised as one by looking rather than by guessing.
+  defp canonical(value) when is_map(value) do
+    inner =
+      value
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map(fn {key, inner} ->
+        [JSON.encode_to_iodata!(to_string(key)), ?:, canonical(inner)]
+      end)
+      |> Enum.intersperse(?,)
+
+    [?{, inner, ?}]
+  end
+
+  defp canonical(value) when is_list(value),
+    do: [?[, value |> Enum.map(&canonical/1) |> Enum.intersperse(?,), ?]]
+
+  defp canonical(value), do: JSON.encode_to_iodata!(value)
 
   # The worker prints exactly one line. Anything else — an empty stdout, a second line, a
   # socket path that is not absolute — is a worker this build cannot talk to, and saying so

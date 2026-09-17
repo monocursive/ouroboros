@@ -50,6 +50,18 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     do: Path.join(deploy_dir(data_dir), operation <> ".json")
 
   @doc """
+  Where the broker leaves the request that starts one operation (seam S2).
+
+  A sibling of the journal rather than part of it: the broker writes this one file and the
+  worker consumes and unlinks it, which is the opposite ownership from the journal next to
+  it. `.request.json` rather than `.request` so that the two are obviously the same family
+  when an operator lists the directory.
+  """
+  @spec request_path(Path.t(), String.t()) :: Path.t()
+  def request_path(data_dir, operation) when is_binary(operation),
+    do: Path.join(deploy_dir(data_dir), operation <> ".request.json")
+
+  @doc """
   Reads one operation's journal, sanitized.
 
   `{:error, :unknown_operation}` covers both a data directory with no deploy directory and

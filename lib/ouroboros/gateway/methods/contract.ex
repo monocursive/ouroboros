@@ -524,7 +524,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
            {"service", {:optional, true}, :boolean,
             "whether to install an Ouroboros-owned startup service on the target"}
          ],
-         "forks the deployment worker for a new operation and attaches to it, then answers. Inspection, host verification and authentication all happen behind the returned `operation_id` rather than inside this call: the worker is detached, so closing the page and stopping this runtime both leave it running. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
+         "forks the deployment worker for a new operation and attaches to it, then answers. Inspection, host verification and authentication all happen behind the returned `operation_id` rather than inside this call: the worker is detached, so closing the page and stopping this runtime both leave it running. These parameters reach it in a private 0600 file under the data directory rather than on its command line, because `ps` is readable by every local account and a target hostname is nobody else's business; the worker unlinks that file once it has read it. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
       handler: :handle_fleet_deployment_prepare
     },
     "fleet.deployment.status" => %{
