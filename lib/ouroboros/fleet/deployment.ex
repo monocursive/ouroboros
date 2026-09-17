@@ -164,12 +164,15 @@ defmodule Ouroboros.Fleet.Deployment do
   # `runtime.activity` already uses — rather than flowing into a reply whose shape nobody
   # here has checked.
   defp inventory(document, data_dir) do
+    listed = operations(data_dir)
+
     %{
       "host" => host(data_dir),
       "discovery" => Journal.scrub_value(document["discovery"]),
       "devices" => Journal.scrub_value(document["devices"]) || [],
       "fleet_protocol_revision" => document["fleet_protocol_revision"],
-      "operations" => operations(data_dir),
+      "operations" => elem(listed, 0),
+      "operations_total" => elem(listed, 1),
       "unknown" =>
         document
         |> Map.keys()
@@ -287,18 +290,17 @@ defmodule Ouroboros.Fleet.Deployment do
   with a previous runtime is still an operation, and it is exactly the one `resume/2` exists
   for.
   """
-  @spec operations(Path.t() | nil) :: [map()]
+  @spec operations(Path.t() | nil) :: {[map()], non_neg_integer()}
   def operations(data_dir \\ nil) do
     case data_dir || data_dir() do
       nil ->
-        []
+        {[], 0}
 
       dir ->
         attached = attached_operations()
+        {summaries, total} = Journal.list(dir)
 
-        dir
-        |> Journal.list()
-        |> Enum.map(&Map.put(&1, "attached", &1["operation"] in attached))
+        {Enum.map(summaries, &Map.put(&1, "attached", &1["operation"] in attached)), total}
     end
   end
 

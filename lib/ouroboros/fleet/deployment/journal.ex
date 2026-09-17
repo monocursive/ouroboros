@@ -100,29 +100,49 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   end
 
   @doc """
-  Every operation this data directory has a journal for, newest first.
+  Every operation this data directory has a journal for, newest first, and how many there are.
 
-  Bounded by `@max_list`, and an unreadable journal is listed as one rather than skipped:
-  an operation whose record this build cannot read is exactly the operation an operator
-  needs to be told about.
+  `{operations, total}`. The list is cut to `@max_list`; `total` is what it was cut from, so
+  a surface can say "and 40 older" rather than quietly showing a prefix.
+
+  The cut happens **after** reading and sorting, which is the whole point. Sorting the file
+  names and taking the first 200 read the 200 lexically smallest ids — and an operation id is
+  random hex, so past 200 journals that was an arbitrary sample of the operations an operator
+  had ever run, presented as the current ones. It is ordered by `created_at` now, with the id
+  breaking ties so the order is total and stable rather than dependent on how the filesystem
+  happened to list the directory.
+
+  An unreadable journal is listed as one rather than skipped: an operation whose record this
+  build cannot read is exactly the operation an operator needs to be told about. It sorts
+  last, because it has no `created_at` to place it by.
   """
-  @spec list(Path.t()) :: [map()]
+  @spec list(Path.t()) :: {[map()], non_neg_integer()}
   def list(data_dir) when is_binary(data_dir) do
     case File.ls(deploy_dir(data_dir)) do
       {:ok, names} ->
-        names
-        |> Enum.filter(&String.ends_with?(&1, ".json"))
-        |> Enum.map(&String.replace_suffix(&1, ".json", ""))
-        |> Enum.filter(&(validate_operation(&1) == :ok))
-        |> Enum.sort()
-        |> Enum.take(@max_list)
-        |> Enum.map(&summary(data_dir, &1))
-        |> Enum.sort_by(& &1["updated_at"], :desc)
+        summaries =
+          names
+          |> Enum.filter(&String.ends_with?(&1, ".json"))
+          |> Enum.map(&String.replace_suffix(&1, ".json", ""))
+          |> Enum.filter(&(validate_operation(&1) == :ok))
+          |> Enum.map(&summary(data_dir, &1))
+          |> Enum.sort_by(&order/1, :desc)
+
+        {Enum.take(summaries, @max_list), length(summaries)}
 
       {:error, _reason} ->
-        []
+        {[], 0}
     end
   end
+
+  # Newest first by when the worker opened the journal, then by id. `created_at` is ISO-8601
+  # from the worker, which sorts correctly as a string; a row without one sorts below every
+  # row that has one rather than above them.
+  defp order(%{"created_at" => created_at, "operation" => operation})
+       when is_binary(created_at),
+       do: {created_at, operation}
+
+  defp order(%{"operation" => operation}), do: {"", operation}
 
   @summary_fields ~w(operation owner kind state created_at updated_at plan_digest)
 

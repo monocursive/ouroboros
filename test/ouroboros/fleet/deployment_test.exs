@@ -571,7 +571,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert Process.whereis(Ouroboros.Fleet.Deployment) == broker
 
       # And the broker still answers, which is the part a crash would have taken away.
-      assert Deployment.operations(context.root) == []
+      assert Deployment.operations(context.root) == {[], 0}
     end
 
     test "the frame cap is enforced on the way out as well", _context do
@@ -637,12 +637,55 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       end
     end
 
+    test "past the cap, the newest are kept rather than the lexically smallest", context do
+      # Operation ids are random hex. Sorting the *file names* and taking the first 200 read
+      # an arbitrary sample of every operation this machine had ever run and presented it as
+      # the current ones — so this plants ids whose lexical order is the reverse of their
+      # ages, which is the case that told the two apart.
+      total = 220
+
+      newest =
+        for index <- 1..total do
+          # `f…` sorts last and is oldest; `0…` sorts first and is newest.
+          operation =
+            (index
+             |> Integer.to_string(16)
+             |> String.downcase()
+             |> String.pad_leading(15, "0")) <>
+              if(index <= 20, do: "f", else: "0")
+
+          created =
+            "2026-09-#{String.pad_leading(Integer.to_string(rem(index, 28) + 1), 2, "0")}T" <>
+              "#{String.pad_leading(Integer.to_string(rem(index, 24)), 2, "0")}:00:00Z"
+
+          write_journal(context.root, operation, %{
+            "operation" => operation,
+            "owner" => "adele",
+            "kind" => "add",
+            "state" => "interrupted",
+            "created_at" => created
+          })
+
+          {created, operation}
+        end
+        |> Enum.sort(:desc)
+        |> Enum.take(200)
+        |> Enum.map(&elem(&1, 1))
+
+      {listed, reported} = Deployment.operations(context.root)
+
+      assert reported == total, "the total must count what was cut, not what was kept"
+      assert length(listed) == 200
+      assert Enum.map(listed, & &1["operation"]) == newest
+    end
+
     test "the operations listing names every journal, readable or not", context do
       readable = plant_journal(context.root, "interrupted")
       broken = random_operation()
       File.write!(Journal.path(context.root, broken), "{ this is not json")
 
-      listed = Deployment.operations(context.root)
+      {listed, total} = Deployment.operations(context.root)
+      assert total == 2
 
       assert Enum.find(listed, &(&1["operation"] == readable))["readable"] == true
       assert Enum.find(listed, &(&1["operation"] == readable))["attached"] == false

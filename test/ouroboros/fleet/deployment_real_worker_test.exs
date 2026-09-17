@@ -79,7 +79,9 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       on_exit(fn ->
         # The worker outlives this runtime by design, so a case that leaves one running would
         # leave it running past the suite. Ask each one to stop, then take the directory.
-        Enum.each(Deployment.operations(root), fn %{"operation" => operation} ->
+        {operations, _total} = Deployment.operations(root)
+
+        Enum.each(operations, fn %{"operation" => operation} ->
           _ = Deployment.cancel(operation, bound())
         end)
 
