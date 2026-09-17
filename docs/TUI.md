@@ -2660,7 +2660,12 @@ username — required, and never inferred from the network client's owner — wi
 identity and paths as advanced fields. **Set up this device** is the same flow with none
 of them: `fleet.deployment.prepare {kind: "setup"}` takes a machine name and this host's
 own overlay address, because the spec is explicit that a machine configures itself
-without SSH to itself. Its plan is reviewed exactly like any other, and the runtime
+without SSH to itself. It answers to a shorter blocker list than Deploy — every reason
+except `no_ca_key`, because a machine with no fleet has no certificate authority and is
+exactly the machine first setup exists for. Gating it on that made the action impossible
+on the only kind of machine that needs it, and a machine with no profile reads
+"This machine is not set up yet — use Set up this device" rather than being sent to open
+Devices on a machine that does hold the key. Its plan is reviewed exactly like any other, and the runtime
 restart it needs arrives here as an interruption that reconnects and reloads by operation
 id rather than as an operation that vanished.
 
@@ -2669,9 +2674,13 @@ polled about once a second, its `state` names the stage, and its open challenge 
 question. `host_trust` shows the algorithm, the SHA256 fingerprint and the address, port
 and account it belongs to, with an explicit `t` and `n` and the line saying to verify the
 fingerprint independently; `Enter` is not an answer. `password` and `passphrase` are
-separate prompts labelled from their own metadata — read out of the `metadata` object
-`worker::challenge_event` nests them in, which is a shape a drift test pins by calling
-the real builders rather than by agreeing with a fake.
+separate prompts labelled from their own metadata, read where the *broker* leaves it.
+Seam S4 describes those fields as fields of the challenge, the worker sends them one
+level down under `metadata`, and `Fleet.Deployment.Client.challenge_metadata/1` lifts
+them back up — so `challenge["plan_digest"]` is the read that runs, with the worker's own
+nested spelling kept as a fallback so a broker that stopped lifting would not empty every
+prompt in silence. A drift test pins both by calling the real builders rather than by
+agreeing with a fake.
 
 **The plan is decoded here, not handed to the local renderer.** `PlanView` reads the
 document into fields that are already scrubbed and bounded and holds both digests to 64
@@ -2693,6 +2702,14 @@ attached the view to a deployment against another and the password prompt that f
 appeared under the wrong machine's name. The header takes its machine from the
 operation's own target, never from the row that was pressed. An operation whose journal
 names no target is listed above the list and attached to no row.
+
+What the row offers is the operation's own state rather than a single "in progress":
+**Continue setup** while it is running or waiting, **Setup failed · Retry** for a
+failure, and **Setup cancelled · Deploy again** for a cancellation. Retry is a resume by
+operation id, which is what makes it safe to offer after a failure — the worker inspects
+again and puts the plan up for review again, so a stale failure cannot apply anything
+nobody has read. Deploy again is a *fresh* operation, because the broker's own terminal
+set is `completed` and `cancelled` and a resume of either answers `operation_finished`.
 
 Continuing is a mutation like any other and passes the same three gates as Deploy — the
 runtime's `capabilities.deploy`, the method being served, and the listener's scope —
@@ -2720,7 +2737,13 @@ all. Both fall back to `fleet.status`'s membership subset with a sentence saying
 happened. A read-scope listener sees the inventory and is told it cannot start a
 deployment. A runtime whose `capabilities.deploy` is false explains the first reason in
 words (`no_ca_key`, `ouro_path_unknown`, `no_data_dir`, `cleartext_web_bind`) rather than
-drawing an action that would fail when pressed.
+drawing an action that would fail when pressed — and its rows read **Deploy unavailable
+here** rather than carrying a label the gate will refuse.
+
+**Nothing is refused in silence.** Every refused Enter writes its sentence to the hint
+line, which is the one row always on the page: the notice at the foot of the inventory
+is below the fold on a real screen, so a refusal that went only there was a keypress that
+visibly did nothing.
 
 **Screen-reader mode** numbers the rows and the menu answers and *answers to those
 numbers* — host trust, the takeover question, the review and the connect form each route

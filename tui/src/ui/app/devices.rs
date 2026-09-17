@@ -194,6 +194,32 @@ impl DeploymentHost {
         )
     }
 
+    /// The reasons a *local first setup* is blocked.
+    ///
+    /// Every blocker a deployment has except one: `no_ca_key`. A machine with no fleet
+    /// certificate authority is exactly the machine "Set up this device" exists for, so
+    /// gating first setup on holding a CA key means the action can never work on the one
+    /// kind of machine that needs it — which is what a live run found it doing. Read
+    /// scope, a non-administrator, an absent method, a cleartext web bind, an unknown
+    /// `ouro` path and a missing data directory all still block it: those are reasons
+    /// this runtime cannot run *any* deployment, including one against itself.
+    pub fn setup_reasons(&self) -> Vec<String> {
+        self.reasons
+            .iter()
+            .filter(|reason| reason.as_str() != "no_ca_key")
+            .cloned()
+            .collect()
+    }
+
+    /// The first reason a local first setup is unavailable, in words.
+    pub fn setup_blocker(&self) -> Option<String> {
+        Self {
+            reasons: self.setup_reasons(),
+            ..self.clone()
+        }
+        .blocker()
+    }
+
     /// The first reason Deploy is unavailable, in words.
     ///
     /// The codes are the broker's and stay in the data; these are the sentences. An
@@ -339,6 +365,12 @@ pub enum Primary {
     Deploy,
     View,
     Continue,
+    /// A setup that failed, offered again — as a resume, which reviews before it applies.
+    Retry,
+    /// A setup that was cancelled, offered as a new one.
+    DeployAgain,
+    /// A device this runtime could deploy to, on a runtime that cannot deploy.
+    DeployUnavailable,
     Diagnose,
     SetUpThisDevice,
     Blocked,
@@ -350,6 +382,9 @@ impl Primary {
             Self::Deploy => "Deploy Ouroboros",
             Self::View => "View device",
             Self::Continue => "Continue setup",
+            Self::Retry => "Setup failed \u{b7} Retry",
+            Self::DeployAgain => "Setup cancelled \u{b7} Deploy again",
+            Self::DeployUnavailable => "Deploy unavailable here",
             Self::Diagnose => "Diagnose",
             Self::SetUpThisDevice => "Set up this device",
             Self::Blocked => "Refresh or details",
@@ -373,6 +408,21 @@ pub struct OperationSummary {
     pub target: Option<OperationTarget>,
     pub attached: bool,
     pub readable: bool,
+}
+
+/// What a row offers for an operation that has not finished cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumption {
+    /// Still going, or waiting on a person: pick it up where it is.
+    Continue,
+    /// It failed. Resuming re-inspects and re-reviews, so this is a retry rather than a
+    /// second attempt at applying a plan nobody looked at again.
+    Retry,
+    /// It was cancelled, which the broker will not resume. A fresh operation, reviewed
+    /// from the beginning.
+    DeployAgain,
+    /// Finished. The row goes back to describing the device.
+    None,
 }
 
 /// Enough of an operation's target to put it on the row it belongs to.
@@ -448,16 +498,26 @@ impl OperationSummary {
     /// Whether this operation can still be continued. A journal nobody can read is
     /// *not* finished — it is unknown — and it is offered for continuation so the
     /// operator hears about it rather than having it quietly filtered away.
+    /// What an operator can do about this operation from its device's row.
+    ///
+    /// The three answers are different verbs on purpose. The spec's step 5 asks a failure
+    /// to show its completed steps, its cause, and **Retry** — and a retry here is a
+    /// resume, which re-inspects and re-reviews, so a stale failure cannot apply anything
+    /// nobody has read. A cancelled operation is not resumable at all (the broker's own
+    /// terminal set is `completed` and `cancelled`, answering `operation_finished`), so
+    /// its verb is a fresh deployment rather than a call that would be refused.
+    pub fn resumption(&self) -> Resumption {
+        match self.state.as_deref() {
+            Some("completed") => Resumption::None,
+            Some("cancelled") => Resumption::DeployAgain,
+            Some("failed") => Resumption::Retry,
+            _still_going => Resumption::Continue,
+        }
+    }
+
+    /// Whether this operation is still something the row should say anything about.
     pub fn open(&self) -> bool {
-        // `failed` joins the two the broker calls terminal. The broker would accept a
-        // resume of one — its own terminal set is narrower — but a deployment that failed
-        // is retried by reviewing a fresh plan, not by attaching a worker to the wreck,
-        // and a row that offered "Continue setup" for a week-old failure would be
-        // offering the operator the wrong verb forever.
-        !matches!(
-            self.state.as_deref(),
-            Some("completed") | Some("cancelled") | Some("failed")
-        )
+        self.resumption() != Resumption::None
     }
 }
 
@@ -664,6 +724,39 @@ impl Inventory {
         })
     }
 
+    /// Whether this machine has no fleet profile at all.
+    ///
+    /// The self row says so — it is the one row whose state is about this machine rather
+    /// than about a peer — and it changes what "Deploy is unavailable" means. On a
+    /// machine with no fleet, `no_ca_key` is not a misconfiguration to go and fix
+    /// somewhere else; it is the ordinary state of a machine that has not been set up,
+    /// and the thing to do about it is on this screen.
+    pub fn standalone(&self) -> bool {
+        self.devices
+            .iter()
+            .any(|row| row.parsed_state() == Some(DeviceState::ThisDeviceWithoutProfile))
+    }
+
+    /// Why deployment is unavailable, in the words that are true of *this* machine.
+    pub fn deploy_blocker(&self) -> Option<String> {
+        if self.host.deploy {
+            return None;
+        }
+
+        if self.standalone() && self.host.reasons.iter().any(|r| r == "no_ca_key") {
+            // Every other blocker still gets its own sentence; this is only about the
+            // one that a first setup answers.
+            return Some(match self.host.setup_blocker() {
+                Some(other) => other,
+                None => {
+                    "This machine is not set up yet \u{2014} use Set up this device.".to_string()
+                }
+            });
+        }
+
+        self.host.blocker()
+    }
+
     /// Every open operation, for the line above the list that says one is running.
     pub fn open_operations(&self) -> Vec<&OperationSummary> {
         self.operations
@@ -747,23 +840,26 @@ impl Challenge {
         })
     }
 
-    /// The worker's own metadata object.
+    /// One metadata field, from where the broker actually leaves it.
     ///
-    /// `fleet_setup::worker::challenge_event` nests what the metadata builders produced
-    /// under a `metadata` key, and the broker stores the frame minus `v`/`event`/
-    /// `bound_to` and overwrites `challenge`/`kind`/`expires_at` on top — so what arrives
-    /// is `{challenge, kind, expires_at, operation, metadata: {…}}` and the fields this
-    /// view draws are one level down. The flat form is read as a fallback rather than
-    /// instead: it is what a future builder that stopped nesting would send, and reading
-    /// both cannot be wrong for either.
+    /// Seam S4 describes a challenge's kind-specific fields as fields *of the challenge*:
+    /// a `password` carries `{target, user, port, attempt, max_attempts}`. The worker
+    /// sends them one level down, under `metadata`, and the broker's
+    /// `challenge_metadata/1` **lifts** them back to the top before a client ever sees
+    /// them — so `challenge["plan_digest"]` is where the seam says it is, and that is the
+    /// read that runs in production.
+    ///
+    /// The nested form is kept as a fallback because it is what the worker puts on its
+    /// own socket, and a broker that stopped lifting would otherwise empty every prompt
+    /// on this screen in silence. Reading both cannot be wrong for either.
     fn meta(&self) -> Option<&Value> {
         self.frame.get("metadata").filter(|value| value.is_object())
     }
 
     fn lookup(&self, key: &str) -> Option<&Value> {
-        self.meta()
-            .and_then(|meta| meta.get(key))
-            .or_else(|| self.frame.get(key))
+        self.frame
+            .get(key)
+            .or_else(|| self.meta().and_then(|meta| meta.get(key)))
     }
 
     fn field(&self, key: &str) -> Option<String> {
@@ -1422,6 +1518,9 @@ pub struct DevicesState {
     /// A sentence about the last thing that happened, shown in the view rather than in
     /// the global notice line so it is where the operator is looking.
     pub notice: Option<String>,
+    /// The last refused action, drawn in the hint line — the one row that is always on
+    /// the page whatever the list is doing.
+    pub refusal_line: Option<String>,
 }
 
 impl DevicesState {
@@ -1472,6 +1571,7 @@ impl App {
         }
 
         self.devices.notice = None;
+        self.devices.refusal_line = None;
         // Re-read on every open: the whole point of an inventory is that it is what is
         // there now, and a cached list of machines is a list of machines that were. An
         // operation this view was following is re-read for the same reason — coming back
@@ -1844,7 +1944,7 @@ impl App {
 
     /// The takeover question's gate, applied before the answer rather than after it.
     fn devices_takeover_refused(&mut self) -> bool {
-        let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume") else {
+        let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume", false) else {
             return false;
         };
 
@@ -1860,6 +1960,18 @@ impl App {
             .operation
             .as_ref()
             .is_some_and(|current| current.id == operation)
+    }
+
+    /// A refused action, said where the operator is looking.
+    ///
+    /// The notice alone was not enough: it draws at the *foot* of the inventory, below
+    /// the device rows and the no-SSH sentence, and on a real screen with the cursor near
+    /// the top that is off the page. A live run pressed Enter on "Set up this device" and
+    /// saw nothing happen at all — no form, no sentence, no change. Whatever else a
+    /// refusal does, it says so on the one row that is always drawn.
+    fn devices_refuse(&mut self, sentence: String) {
+        self.devices.refusal_line = Some(sentence.clone());
+        self.devices.notice = Some(sentence);
     }
 
     fn devices_form_error(&mut self, sentence: &str) {
@@ -1943,6 +2055,7 @@ impl App {
                 self.devices.inventory.invalidate();
                 self.devices.fallback.invalidate();
                 self.devices.notice = None;
+                self.devices.refusal_line = None;
                 self.poll_devices();
             }
             KeyCode::Char('/') => {
@@ -1984,9 +2097,18 @@ impl App {
             return;
         };
 
-        // Only the row this operation is actually about continues it.
+        // Only the row this operation is actually about acts on it, and which verb it is
+        // depends on how the operation ended.
         if let Some(open) = inventory.open_operation_for(&row).cloned() {
-            self.devices_continue(&open);
+            match open.resumption() {
+                // A resume re-inspects and re-reviews, which is what makes offering it
+                // after a failure safe: nothing is applied that has not been read again.
+                Resumption::Continue | Resumption::Retry => self.devices_continue(&open),
+                // The broker refuses to resume a cancelled operation, so this is a new
+                // one rather than a call that would come back `operation_finished`.
+                Resumption::DeployAgain => self.devices_begin_deploy(&row),
+                Resumption::None => {}
+            }
             return;
         }
 
@@ -2003,13 +2125,20 @@ impl App {
                 ));
             }
             Primary::Blocked => {
-                self.devices.notice = Some(format!(
+                let sentence = format!(
                     "{} cannot be deployed to: {}. Press r to look again.",
                     row.name,
                     row.state_label()
-                ));
+                );
+                self.devices_refuse(sentence);
             }
-            Primary::Continue => {}
+            // `row.primary()` never answers with these four: the first three come from
+            // an operation on the row, and that branch is taken above, and the fourth is
+            // the label the renderer substitutes when the gate is closed.
+            Primary::Continue
+            | Primary::Retry
+            | Primary::DeployAgain
+            | Primary::DeployUnavailable => {}
         }
     }
 
@@ -2019,20 +2148,27 @@ impl App {
     /// continue path did not, so an operation in the journal was a way around all three —
     /// a read-scope listener issued `resume`, and a runtime holding no CA key attached a
     /// worker it had already said it could not run.
-    fn devices_deploy_refusal(&self, method: &str) -> Option<String> {
-        let host = self
-            .devices
-            .inventory
-            .value
-            .as_ref()
+    fn devices_deploy_refusal(&self, method: &str, setup: bool) -> Option<String> {
+        let inventory = self.devices.inventory.value.as_ref();
+        let host = inventory
             .map(|inventory| inventory.host.clone())
             .unwrap_or_default();
 
-        if !host.deploy {
-            return Some(
-                host.blocker()
+        // First setup answers to a shorter list: see `DeploymentHost::setup_reasons`.
+        let blocker = if setup {
+            host.setup_blocker()
+        } else if host.deploy {
+            None
+        } else {
+            Some(
+                inventory
+                    .and_then(Inventory::deploy_blocker)
                     .unwrap_or_else(|| "This runtime cannot deploy from here.".into()),
-            );
+            )
+        };
+
+        if let Some(blocker) = blocker {
+            return Some(blocker);
         }
 
         if !self.hello.serves(method) {
@@ -2050,8 +2186,8 @@ impl App {
     }
 
     fn devices_begin_deploy(&mut self, row: &DeviceRow) {
-        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare") {
-            self.devices.notice = Some(refusal);
+        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", false) {
+            self.devices_refuse(refusal);
             return;
         }
 
@@ -2066,8 +2202,8 @@ impl App {
     /// same plan — with the SSH fields gone, because this machine does not reach itself
     /// over SSH. The spec is explicit about that, and the method now says so too.
     fn devices_begin_setup(&mut self, row: &DeviceRow) {
-        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare") {
-            self.devices.notice = Some(refusal);
+        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", true) {
+            self.devices_refuse(refusal);
             return;
         }
 
@@ -2089,9 +2225,12 @@ impl App {
         let mut operation = Operation::new(open.operation.clone(), device);
 
         // A journal with no worker behind it needs one before it can be answered, and a
-        // resume is a mutation like any other: the same three gates.
+        // resume is a mutation like any other: the same three gates. A failed operation
+        // always takes this path — its worker is gone by definition — which is how
+        // "Retry" becomes a fresh inspection and a fresh review rather than a second go
+        // at a plan nobody re-read.
         if !open.attached {
-            if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume") {
+            if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume", false) {
                 self.devices.notice = Some(refusal);
                 return;
             }
@@ -2604,6 +2743,51 @@ impl App {
     /// Not a second `start` under a new key. A failed deployment is resumed or begun
     /// again from a fresh review, and which of the two it is belongs to the journal.
     fn devices_retry(&mut self) {
+        let state = self
+            .devices
+            .operation
+            .as_ref()
+            .and_then(|operation| operation.snapshot.value.as_ref())
+            .map(|snapshot| snapshot.state.clone())
+            .unwrap_or_default();
+
+        // A failure is resumed by its own id: the worker inspects again and puts the plan
+        // up for review again, so pressing this cannot apply anything unreviewed. Only a
+        // *cancelled* or *completed* operation goes back to the list, because the broker
+        // will not resume either.
+        if state == "failed" {
+            if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume", false) {
+                if let Some(operation) = self.devices.operation.as_mut() {
+                    operation.error = Some(refusal);
+                }
+                return;
+            }
+
+            let Some(operation) = self.devices.operation.as_mut() else {
+                return;
+            };
+
+            if operation.submitting {
+                return;
+            }
+
+            operation.submitting = true;
+            operation.error = None;
+            operation.takeover = None;
+            let id = operation.id.clone();
+            self.devices.scroll = 0;
+
+            self.issue(Call::new(
+                Tag::Devices(DevicesTag::Resume {
+                    operation: id.clone(),
+                }),
+                "fleet.deployment.resume",
+                json!({ "operation_id": id }),
+            ));
+
+            return;
+        }
+
         self.devices.forget_secret();
         self.devices.operation = None;
         self.devices.inventory.invalidate();
@@ -2694,14 +2878,16 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
         ),
     ]));
 
-    if !inventory.host.deploy {
-        if let Some(blocker) = inventory.host.blocker() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                access::speakable(&format!("Deploy is unavailable here. {blocker}")),
-                Style::default().fg(theme::warn()),
-            )));
-        }
+    if let Some(blocker) = inventory.deploy_blocker() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            access::speakable(&if inventory.standalone() {
+                blocker
+            } else {
+                format!("Deploy is unavailable here. {blocker}")
+            }),
+            Style::default().fg(theme::warn()),
+        )));
     }
 
     for open in inventory.open_operations() {
@@ -2831,11 +3017,23 @@ fn row_lines(
     lines: &mut Vec<Line<'static>>,
 ) {
     let selected = app.devices.cursor == index;
-    // Only the row this operation is about offers to continue it.
-    let primary = if inventory.open_operation_for(row).is_some() {
-        Primary::Continue
-    } else {
-        row.primary()
+    // Only the row this operation is about says anything about it, and what it says is
+    // the operation's own state: a failure reads as a failure rather than as something
+    // in progress.
+    let primary = match inventory
+        .open_operation_for(row)
+        .map(OperationSummary::resumption)
+    {
+        Some(Resumption::Continue) => Primary::Continue,
+        Some(Resumption::Retry) => Primary::Retry,
+        Some(Resumption::DeployAgain) => Primary::DeployAgain,
+        Some(Resumption::None) | None => match row.primary() {
+            // The label follows the gate. A row reading "Deploy Ouroboros" on a runtime
+            // that has already said it cannot deploy is the inert action acceptance 10
+            // rules out — said twice on one screen, in two directions.
+            Primary::Deploy if !inventory.host.deploy => Primary::DeployUnavailable,
+            other => other,
+        },
     };
 
     let marker = if selected { "> " } else { "  " };
@@ -3585,7 +3783,13 @@ fn finish_lines(app: &App, snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) 
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "R  Retry or continue setup      b  back to the device list",
+        match snapshot.state.as_str() {
+            "failed" | "interrupted" => {
+                "R  Retry \u{2014} inspects again and puts the plan up for review      \
+                 b  back to the device list"
+            }
+            _finished => "b  back to the device list",
+        },
         Style::default().fg(theme::action_colour()),
     )));
 }
@@ -3593,6 +3797,12 @@ fn finish_lines(app: &App, snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) 
 /// The footer hint, which is different on every screen because the keys are.
 pub fn devices_hint_line(app: &App) -> String {
     let state = &app.devices;
+
+    // A refused action wins the row. The keys are discoverable again the moment anything
+    // else happens; a refusal nobody saw is the failure this exists to prevent.
+    if let Some(refusal) = state.refusal_line.as_ref() {
+        return refusal.clone();
+    }
 
     if let Some(operation) = state.operation.as_ref() {
         if operation.takeover.is_some() {
@@ -3988,9 +4198,27 @@ mod tests {
             host_trust_metadata, passphrase_metadata, password_metadata,
         };
 
-        // Exactly `worker::challenge_event`: the builders' object under `metadata`, with
-        // the id, the kind and the expiry written over the top by the broker.
+        // What a client is actually handed: `challenge_metadata/1` merges the worker's
+        // nested object up into the challenge, and `challenge_view/1` writes the id, the
+        // kind and the expiry over the top.
         fn wire(id: &str, kind: &str, metadata: Value) -> Value {
+            let mut frame = json!({
+                "operation": "abcdef0123456789",
+                "challenge": id,
+                "kind": kind,
+                "expires_at": 4_102_444_800u64,
+            });
+
+            for (key, value) in metadata.as_object().expect("an object") {
+                frame[key] = value.clone();
+            }
+
+            frame
+        }
+
+        // And the worker's own spelling, straight off its socket, which the fallback
+        // reads so a broker that stopped lifting does not empty every prompt silently.
+        fn nested(id: &str, kind: &str, metadata: Value) -> Value {
             json!({
                 "operation": "abcdef0123456789",
                 "challenge": id,
@@ -4043,14 +4271,16 @@ mod tests {
             assert_eq!(trust.field(key).as_deref(), Some(value), "{key} drifted");
         }
 
-        // And the flat spelling still reads, so a builder that stopped nesting would not
-        // silently empty every prompt on this screen.
-        let flat = Challenge::decode(&json!({
-            "challenge": "c-pw", "kind": "password", "user": "deploy"
-        }))
-        .expect("a decodable flat challenge");
+        // The worker's own nested spelling reads too, through the fallback.
+        let unlifted = Challenge::decode(&nested(
+            "c-pw",
+            "password",
+            password_metadata("100.64.12.44", "deploy", 22, 1, 3),
+        ))
+        .expect("a decodable unlifted challenge");
 
-        assert_eq!(flat.field("user").as_deref(), Some("deploy"));
+        assert_eq!(unlifted.field("user").as_deref(), Some("deploy"));
+        assert_eq!(unlifted.field("target").as_deref(), Some("100.64.12.44"));
     }
 
     /// The review challenge's plan, and the digest computed over it, are the worker's.
@@ -4070,14 +4300,13 @@ mod tests {
             "grants": ["broad fleet trust between every member"]
         });
 
-        // `engine.rs` issues the review challenge with exactly these two keys.
+        // `engine.rs` issues the review challenge with exactly these two keys, and the
+        // broker lifts them to the top of the challenge.
         let wire = json!({
             "challenge": "c-review",
             "kind": "review",
-            "metadata": {
-                "plan": document,
-                "plan_digest": sha256_hex(canonical_json(&document).as_bytes()),
-            }
+            "plan": document,
+            "plan_digest": sha256_hex(canonical_json(&document).as_bytes()),
         });
 
         let challenge = Challenge::decode(&wire).expect("a decodable review challenge");
@@ -4820,23 +5049,27 @@ mod tests {
         );
     }
 
-    /// An operation that finished is not offered for continuation.
+    /// Each way an operation can end has its own verb, and the broker would accept it.
     #[test]
     fn only_an_unfinished_operation_can_be_continued() {
-        for (state, open) in [
-            ("completed", false),
-            ("cancelled", false),
-            // A failed deployment is retried by reviewing a fresh plan, not by attaching
-            // a worker to the wreck, so its row keeps its own action.
-            ("failed", false),
-            ("interrupted", true),
-            ("deploying", true),
+        for (state, resumption) in [
+            ("completed", Resumption::None),
+            // Not resumable: the broker's terminal set is `completed` and `cancelled`,
+            // so offering a resume here would be offering `operation_finished`.
+            ("cancelled", Resumption::DeployAgain),
+            // Resumable, and a resume re-inspects and re-reviews — which is what makes
+            // Retry after a failure safe rather than a second go at an unread plan.
+            ("failed", Resumption::Retry),
+            ("interrupted", Resumption::Continue),
+            ("deploying", Resumption::Continue),
+            ("awaiting_auth", Resumption::Continue),
         ] {
             let summary = OperationSummary::decode(&json!({
                 "operation": "abc123", "state": state, "attached": false
             }));
 
-            assert_eq!(summary.open(), open, "{state}");
+            assert_eq!(summary.resumption(), resumption, "{state}");
+            assert_eq!(summary.open(), resumption != Resumption::None, "{state}");
         }
 
         // A journal nobody can read is unknown, not finished.

@@ -168,10 +168,15 @@ fn prose(app: &mut App) -> String {
 }
 
 /// Every primary action the observed-state table can put on a row.
-const ACTIONS: [&str; 6] = [
+const ACTIONS: [&str; 9] = [
     "Deploy Ouroboros",
     "View device",
     "Continue setup",
+    // A failure and a cancellation are their own verbs on a row, not "in progress".
+    "Setup failed",
+    "Setup cancelled",
+    // And a runtime that cannot deploy labels the row that way rather than offering it.
+    "Deploy unavailable here",
     "Diagnose",
     "Set up this device",
     "Refresh or details",
@@ -1279,9 +1284,15 @@ fn a_failed_setup_shows_its_cause_and_residue_and_offers_a_retry() {
         text.contains("a partial archive at /home/deploy/.cache/ouro"),
         "{text}"
     );
-    assert!(text.contains("Retry or continue setup"), "{text}");
+    assert!(text.contains("Retry"), "{text}");
+    assert!(
+        text.contains("puts the plan up for review"),
+        "the screen does not say what Retry does:\n{text}"
+    );
 
-    // Retry goes back to the list and re-reads it, rather than resending `start`.
+    // Retry resumes this operation by its id. That is what makes it safe to offer after
+    // a failure: a resume re-inspects and puts the plan up for review, so nothing is
+    // applied that has not been read again — and it is never a second `start`.
     app.apply(key(KeyCode::Char('R')));
     let calls = drained(&mut app);
 
@@ -1291,7 +1302,97 @@ fn a_failed_setup_shows_its_cause_and_residue_and_offers_a_retry() {
             .any(|call| call.method == "fleet.deployment.start"),
         "retry resent an approval"
     );
-    assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
+
+    let resume = call_for(&calls, "fleet.deployment.resume");
+    assert_eq!(resume.params, json!({ "operation_id": "abcdef0123456789" }));
+    assert!(
+        resume.params.get("takeover").is_none(),
+        "retry took an operation over without asking"
+    );
+}
+
+/// The proposal's step 5 on the row: a failure offers Retry and reads as a failure.
+#[test]
+fn a_failed_setup_offers_retry_on_its_row_and_a_cancelled_one_offers_a_fresh_deployment() {
+    let _mode = normal();
+
+    for (state, label, method) in [
+        (
+            "failed",
+            "Setup failed \u{b7} Retry",
+            Some("fleet.deployment.resume"),
+        ),
+        (
+            "interrupted",
+            "Continue setup",
+            Some("fleet.deployment.resume"),
+        ),
+        // The broker's own terminal set is completed and cancelled: a resume of one
+        // answers `operation_finished`, so the row offers a new operation instead of a
+        // call that would be refused.
+        ("cancelled", "Setup cancelled \u{b7} Deploy again", None),
+    ] {
+        let mut reply = populated();
+        reply["operations"] = json!([{
+            "operation": "abcdef0123456789", "state": state, "kind": "add",
+            "owner": "local-owner", "attached": false, "readable": true,
+            "target": { "machine": "build-linux", "address": "100.64.12.44",
+                        "ssh_user": "deploy", "port": 22 }
+        }]);
+
+        let mut app = with_inventory(reply);
+        let _settled = drained(&mut app);
+
+        let drawn = screen(&mut app);
+        let row = device_row(&drawn, "build-linux").to_string();
+        drop(drawn);
+
+        assert!(row.contains(label), "{state}: {row:?}");
+        assert!(
+            !row.contains("Deploy Ouroboros"),
+            "{state} lost its operation: {row:?}"
+        );
+
+        activate(&mut app, "build-linux");
+        let calls = drained(&mut app);
+
+        match method {
+            Some(expected) => {
+                assert_eq!(
+                    call_for(&calls, expected).params,
+                    json!({ "operation_id": "abcdef0123456789" }),
+                    "{state}"
+                );
+            }
+            None => {
+                assert!(
+                    !calls
+                        .iter()
+                        .any(|call| call.method.starts_with("fleet.deployment.")),
+                    "{state} issued a call the broker would refuse: {:?}",
+                    calls.iter().map(|call| &call.method).collect::<Vec<_>>()
+                );
+                // It opens the ordinary connect form: a new operation, reviewed from the
+                // beginning.
+                assert!(prose(&mut app).contains("ssh username"), "{state}");
+            }
+        }
+    }
+
+    // A completed operation says nothing at all; the row describes the device again.
+    let mut reply = populated();
+    reply["operations"] = json!([{
+        "operation": "abcdef0123456789", "state": "completed", "kind": "add",
+        "owner": "local-owner", "attached": false, "readable": true,
+        "target": { "machine": "build-linux", "address": "100.64.12.44",
+                    "ssh_user": "deploy", "port": 22 }
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+    let drawn = screen(&mut app);
+
+    assert!(device_row(&drawn, "build-linux").contains("Deploy Ouroboros"));
 }
 
 /// Cancel stops at a boundary and says what it does not claim.
@@ -2717,4 +2818,159 @@ fn a_challenge_with_no_id_is_never_drawn_as_a_prompt() {
             .contains(SECRET)),
         "the secret left the client anyway"
     );
+}
+
+/// The live-run failure: a machine with no fleet could never set itself up.
+///
+/// `capabilities.deploy` is false with `no_ca_key` on exactly the machine "Set up this
+/// device" exists for — it has no fleet, so it has no certificate authority — and gating
+/// the setup path on it meant pressing Enter did nothing at all. Found by driving the
+/// packaged client against a real runtime, which is the only place the two facts appear
+/// together.
+#[test]
+fn a_machine_with_no_fleet_can_still_set_itself_up() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["host"] = host(false, &["no_ca_key"]);
+    reply["devices"] = json!([{
+        "name": "studio", "machine": Value::Null, "os": "macos",
+        "address": "100.64.12.21", "online": true,
+        "state": "this_device_without_profile", "action": "set up this device",
+        "name_conflicts_with_roster": Value::Null,
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    // The page says what is true of *this* machine, not "go and open Devices somewhere
+    // else": there is nowhere else, and the thing to do is on this screen.
+    let text = prose(&mut app);
+    assert!(
+        text.contains("This machine is not set up yet"),
+        "the standalone case still reads as a CA-key misconfiguration:\n{text}"
+    );
+    assert!(
+        !text.contains("Open Devices on the machine that does"),
+        "the page sent the operator to a machine that does not exist:\n{text}"
+    );
+
+    let drawn = screen(&mut app);
+    assert!(device_row(&drawn, "studio").contains("Set up this device"));
+    drop(drawn);
+
+    // Enter opens the setup form rather than refusing.
+    activate(&mut app, "studio");
+
+    let text = prose(&mut app);
+    assert!(
+        text.contains("machine name"),
+        "Enter on Set up this device did nothing:\n{text}"
+    );
+    assert!(!text.contains("ssh username"), "{text}");
+
+    // And it submits `kind: "setup"`.
+    focus_inspect(&mut app);
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    let prepare = call_for(&calls, "fleet.deployment.prepare");
+
+    assert_eq!(prepare.params["kind"], json!("setup"));
+    assert_eq!(prepare.params["machine"], json!("studio"));
+    assert_eq!(prepare.params["address"], json!("100.64.12.21"));
+    assert!(
+        prepare.params.get("ssh_user").is_none(),
+        "{}",
+        prepare.params
+    );
+}
+
+/// Every other blocker still stops a first setup, because those are reasons this runtime
+/// cannot run any deployment at all — including one against itself.
+#[test]
+fn a_first_setup_is_still_stopped_by_every_blocker_but_the_missing_ca_key() {
+    let _mode = normal();
+
+    for (reason, expected) in [
+        ("cleartext_web_bind", "credential entry is refused"),
+        (
+            "ouro_path_unknown",
+            "cannot say where its own ouro executable is",
+        ),
+        ("no_data_dir", "serves no durable data directory"),
+    ] {
+        let mut reply = populated();
+        reply["host"] = host(false, &["no_ca_key", reason]);
+        reply["devices"] = json!([{
+            "name": "studio", "machine": Value::Null, "os": "macos",
+            "address": "100.64.12.21", "online": true,
+            "state": "this_device_without_profile", "action": "set up this device",
+            "name_conflicts_with_roster": Value::Null,
+        }]);
+
+        let mut app = with_inventory(reply);
+        let _settled = drained(&mut app);
+
+        activate(&mut app, "studio");
+
+        let text = prose(&mut app);
+        assert!(
+            !text.contains("machine name"),
+            "{reason} let a setup form open:\n{text}"
+        );
+        assert!(text.contains(expected), "{reason}:\n{text}");
+        assert!(drained(&mut app).is_empty(), "{reason} issued a call");
+    }
+}
+
+/// No action is ever refused in silence.
+///
+/// The notice draws at the foot of the inventory, under the rows and the no-SSH
+/// sentence, which on a real screen is below the fold — so a refusal that only went
+/// there was a keypress that visibly did nothing. The hint line is the one row always on
+/// the page, and every refusal says so there.
+#[test]
+fn a_refused_action_always_says_so_on_a_row_that_is_on_the_page() {
+    let _mode = normal();
+
+    // A row nothing can be done with.
+    let mut reply = populated();
+    reply["devices"] = json!([{
+        "name": "pocket-phone", "machine": Value::Null, "os": "iOS",
+        "address": "100.64.12.31", "online": true,
+        "state": "unsupported_platform", "action": "nothing to deploy",
+        "name_conflicts_with_roster": Value::Null,
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    let before = ouro::ui::app::devices_hint_line(&app);
+    activate(&mut app, "pocket-phone");
+    let after = ouro::ui::app::devices_hint_line(&app);
+
+    assert_ne!(before, after, "the hint line did not change on a refusal");
+    assert!(
+        after.contains("cannot be deployed to"),
+        "the refusal is not on the hint line: {after:?}"
+    );
+
+    // And a blocked deployment says its blocker there too.
+    let mut reply = populated();
+    reply["host"] = host(false, &["cleartext_web_bind"]);
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    activate(&mut app, "build-linux");
+    let hint = ouro::ui::app::devices_hint_line(&app);
+
+    assert!(
+        hint.contains("credential entry is refused"),
+        "the blocker is not on the hint line: {hint:?}"
+    );
+
+    // `r` puts the keys back.
+    app.apply(key(KeyCode::Char('r')));
+    assert!(ouro::ui::app::devices_hint_line(&app).contains("r refresh"));
 }
