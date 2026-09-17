@@ -355,7 +355,11 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     test "refuses when the worker has published no capability at all", context do
       arrange_worker(context, cap_mode: nil)
 
-      assert {:error, :capability_missing} = Deployment.prepare(request(), bound())
+      # Retried for a bounded moment first — the capability and the socket are written in an
+      # order this side does not control — and the refusal carries the worker's own log, which
+      # is the only place the reason for it can be.
+      assert {:error, {:capability_missing, detail}} = Deployment.prepare(request(), bound())
+      assert detail =~ ".log"
     end
 
     test "a worker that prints nothing readable is not connected to", context do

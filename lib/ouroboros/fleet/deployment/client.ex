@@ -51,7 +51,13 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   alias Ouroboros.Fleet.Deployment.Frame
   alias Ouroboros.Fleet.Deployment.Journal
 
-  @connect_timeout 5_000
+  # Per attempt, not in total: the whole handshake is bounded by `@attach_budget` below, and
+  # an attempt that sits on a connect for five seconds would eat the budget by itself.
+  @connect_timeout 2_000
+  # The whole of connect-and-handshake, retries included, as a deadline in monotonic time.
+  @attach_budget 5_000
+  @first_backoff 100
+  @max_backoff 1_000
   @attach_timeout 10_000
   @request_timeout 30_000
   # Enough to render the tail of an operation without turning this process into a log store.
@@ -170,15 +176,83 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
   @impl true
   def handle_continue(:attach, state) do
-    with {:ok, socket} <- connect(state.socket_path),
-         {:ok, reply} <- attach(socket, state.cap, state) do
-      :ok = :inet.setopts(socket, active: :once)
+    try_attach(state, System.monotonic_time(:millisecond) + @attach_budget, @first_backoff)
+  end
 
-      # The capability has been presented; there is no reason to keep it.
-      {:noreply, adopt_attach(%{state | socket: socket, cap: nil}, reply)}
-    else
-      {:error, reason} -> {:stop, {:shutdown, {:attach_failed, reason}}, %{state | cap: nil}}
+  # Connect, handshake, and **retry** — because there is a window between the worker binding
+  # its socket and listening on it, and a single attempt that lands in it gets
+  # `:econnrefused` (or `:enoent`, if the file is not there yet) and used to kill the client
+  # outright. Nothing retried afterwards, so the operation was orphaned: a worker running
+  # with a socket nobody would ever connect to, and a row that said `attaching` forever. It
+  # reproduced about one run in four.
+  #
+  # Retried on transport refusals only. An `:instance_mismatch` is the worker on the other
+  # end being *the wrong worker*, and a `{:refused, reason}` is it having considered this
+  # capability and said no; neither gets better by asking again, and retrying a refusal is
+  # how a bounded wait becomes a spin.
+  #
+  # The wait is a real deadline in monotonic time rather than a sum of sleeps, because each
+  # attempt's own connect timeout counts against it too. And it is a timer rather than a
+  # `Process.sleep`, so this process keeps answering `status` while it waits: a row that says
+  # `attaching` is only honest if something can still read it.
+  defp try_attach(state, deadline, backoff) do
+    case connect_and_attach(state) do
+      {:ok, socket, reply, events} ->
+        :ok = :inet.setopts(socket, active: :once)
+
+        # The capability has been presented; there is no reason to keep it.
+        adopted = adopt_attach(%{state | socket: socket, cap: nil}, reply)
+
+        {:noreply, Enum.reduce(events, adopted, &receive_frame(&2, &1))}
+
+      {:error, reason} ->
+        now = System.monotonic_time(:millisecond)
+
+        if retryable?(reason) and now + backoff < deadline do
+          Process.send_after(self(), {:attach_retry, deadline, next_backoff(backoff)}, backoff)
+          {:noreply, state}
+        else
+          {:stop, {:shutdown, {:attach_failed, give_up(reason)}}, %{state | cap: nil}}
+        end
     end
+  end
+
+  defp connect_and_attach(state) do
+    with {:ok, socket} <- connect(state.socket_path) do
+      case attach(socket, state.cap, state) do
+        {:ok, reply, events} ->
+          {:ok, socket, reply, events}
+
+        {:error, reason} ->
+          :gen_tcp.close(socket)
+          {:error, reason}
+      end
+    end
+  end
+
+  defp next_backoff(backoff), do: min(backoff * 2, @max_backoff)
+
+  # The socket not being there yet, and the worker not listening on it yet, are the same
+  # fact seen a moment apart.
+  defp retryable?({:socket_unreadable, :enoent}), do: true
+
+  defp retryable?(reason)
+       when reason in [
+              :econnrefused,
+              :enoent,
+              :etimedout,
+              :timeout,
+              :closed,
+              :attach_not_answered
+            ],
+       do: true
+
+  defp retryable?(_definitive), do: false
+
+  # A stable code for "this worker could not be reached", carrying what actually went wrong
+  # so an operator is not left with the word alone. A definitive refusal keeps its own name.
+  defp give_up(reason) do
+    if retryable?(reason), do: {:worker_unreachable, reason}, else: reason
   end
 
   defp default_clock, do: System.system_time(:second)
@@ -255,12 +329,40 @@ defmodule Ouroboros.Fleet.Deployment.Client do
     }
 
     with {:ok, line} <- Frame.encode(frame),
-         :ok <- :gen_tcp.send(socket, line),
-         {:ok, raw} <- :gen_tcp.recv(socket, 0, @attach_timeout),
-         {:ok, reply} <- Frame.decode(raw) do
-      verify_attach(reply, state)
-    else
-      {:error, reason} -> {:error, reason}
+         :ok <- :gen_tcp.send(socket, line) do
+      read_attach_reply(socket, state, [], System.monotonic_time(:millisecond) + @attach_timeout)
+    end
+  end
+
+  # Read until the frame that answers *this* attach, keeping any events that arrive first.
+  #
+  # The first line on the connection is not guaranteed to be the reply. The worker asks its
+  # first question before anything can attach to it, so a `state` or `challenge` it already
+  # had can be written ahead of the answer — and a handshake that read one line and judged it
+  # reported `attach_not_answered` against a worker that was answering perfectly well. That
+  # was the remaining one-in-four flake, after the connect retry took the other half.
+  #
+  # The events are not discarded either. They are the operation's own beginning, and they go
+  # through the ordinary event path once the connection is adopted.
+  defp read_attach_reply(socket, state, events, deadline) do
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    with {:ok, raw} <- :gen_tcp.recv(socket, 0, timeout),
+         {:ok, frame} <- Frame.decode(raw) do
+      cond do
+        Frame.event?(frame) ->
+          read_attach_reply(socket, state, [frame | events], deadline)
+
+        frame["id"] == "attach" ->
+          with {:ok, reply} <- verify_attach(frame, state) do
+            {:ok, reply, Enum.reverse(events)}
+          end
+
+        # A reply to something this connection never sent. Nothing to do with it but keep
+        # waiting for the one that is ours.
+        true ->
+          read_attach_reply(socket, state, events, deadline)
+      end
     end
   end
 
@@ -275,8 +377,8 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   # trusting that whatever is listening on this path is the process that printed it.
   defp verify_attach(%{"ok" => true}, _state), do: {:error, :instance_mismatch}
 
-  defp verify_attach(%{"ok" => false, "reason" => reason}, _state),
-    do: {:error, {:refused, reason}}
+  defp verify_attach(%{"ok" => false} = frame, _state),
+    do: {:error, {:refused, frame["reason"] || "unknown"}}
 
   defp verify_attach(_frame, _state), do: {:error, :attach_not_answered}
 
@@ -372,6 +474,9 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
   def handle_info({:tcp_closed, socket}, %{socket: socket} = state),
     do: {:stop, {:shutdown, :worker_disconnected}, state}
+
+  def handle_info({:attach_retry, deadline, backoff}, %{socket: nil} = state),
+    do: try_attach(state, deadline, backoff)
 
   def handle_info({:request_timeout, id}, state) do
     case pop_in(state.pending[id]) do

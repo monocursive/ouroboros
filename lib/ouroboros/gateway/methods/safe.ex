@@ -290,7 +290,9 @@ defmodule Ouroboros.Gateway.Methods.Safe do
       {:unavailable,
        "no deployment worker is attached for that operation; read its status, then resume it"},
     worker_unavailable: {:unavailable, "the deployment worker is no longer connected"},
-    worker_unreachable: {:unavailable, "the deployment worker's socket could not be written to"},
+    worker_unreachable:
+      {:unavailable,
+       "the deployment worker's socket could not be reached; its log is beside its journal in the data directory"},
     worker_timeout: {:upstream_timeout, "the deployment worker did not answer in time"},
     worker_answered_nothing:
       {:upstream_error, "the deployment worker answered a frame this build cannot read"},
@@ -300,7 +302,8 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     worker_spawn_failed: {:upstream_error, "the deployment worker could not be started"},
     attach_failed: {:upstream_error, "this runtime could not attach to the deployment worker"},
     capability_missing:
-      {:unavailable, "the deployment worker has not published its capability file yet"},
+      {:unavailable,
+       "the deployment worker never published its capability file; its log is beside its journal"},
     capability_unusable:
       {:upstream_error,
        "the deployment worker's capability file is not a private 0600 file holding a capability"},

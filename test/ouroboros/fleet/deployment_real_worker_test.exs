@@ -178,14 +178,21 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
 
       assert {:ok, %{"operation_id" => operation}} = prepare(unreachable_add())
 
-      # Either source may answer by the time this settles — the worker exits as soon as it
-      # has failed, and `status` falls back to the journal the moment it does. The wait is
-      # therefore on the state alone, and what is asserted afterwards is chosen by the
-      # source that actually answered.
+      # No wait for an attach, and that is a finding rather than an omission: a worker whose
+      # target refuses a host-key scan is finished in well under a second, so it can be gone
+      # — capability file and all — before this runtime connects. `prepare` still answers
+      # with the operation id, because the journal it left is the record of what happened.
+      #
+      # Either source may therefore answer here. The state event and the `done` frame are two
+      # frames and the first can arrive without the second, so this waits until the answer is
+      # complete: the worker has said `done`, or it is gone and the journal is answering.
       settled =
         await(
           operation,
-          &(&1["state"] in ["failed", "cancelled", "interrupted"]),
+          fn snapshot ->
+            snapshot["state"] in ["failed", "cancelled", "interrupted"] and
+              (snapshot["source"] == "journal" or is_map(snapshot["done"]))
+          end,
           "the operation to settle"
         )
 
@@ -245,7 +252,8 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
                )
 
       assert wait_until(fn -> not File.exists?(socket) and not File.exists?(cap) end),
-             "the worker left #{inspect(File.ls!(deploy))} behind after a cancel"
+             "the worker left #{inspect(File.ls!(deploy))} behind after a cancel\n" <>
+               worker_log(operation)
 
       # The journal survives it — that is the point of the journal.
       assert {:ok, journal} = Journal.read(context.root, operation)
@@ -319,9 +327,7 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
               snapshot
 
             System.monotonic_time(:millisecond) > deadline ->
-              flunk(
-                "waited #{@step}ms for #{what}; last snapshot: #{inspect(snapshot, limit: 20)}"
-              )
+              flunk(timed_out(operation, what, snapshot))
 
             true ->
               Process.sleep(100)
@@ -330,9 +336,38 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
 
         {:error, reason} ->
           if System.monotonic_time(:millisecond) > deadline,
-            do: flunk("waited #{@step}ms for #{what}; last answer: #{inspect(reason)}"),
+            do: flunk(timed_out(operation, what, reason)),
             else: false
       end)
+    end
+
+    # The worker is a separate process with its own log, and a timeout here is almost always
+    # something *it* said rather than something this side did. Printing the tail of that log
+    # is the difference between a reproducible failure and a rerun.
+    defp timed_out(operation, what, last) do
+      """
+      waited #{@step}ms for #{what}
+      last answer: #{inspect(last, limit: 20, printable_limit: 400)}
+      #{worker_log(operation)}
+      """
+    end
+
+    defp worker_log(operation) do
+      deploy = Journal.deploy_dir(Application.get_env(:ouroboros, :data_dir))
+      path = Path.join(deploy, operation <> ".log")
+
+      case File.read(path) do
+        {:ok, ""} -> "#{path}: empty"
+        {:ok, body} -> "#{path}, last 40 lines:\n" <> tail(body, 40)
+        {:error, reason} -> "#{path}: unreadable (#{inspect(reason)})"
+      end
+    end
+
+    defp tail(body, count) do
+      body
+      |> String.split("\n")
+      |> Enum.take(-count)
+      |> Enum.map_join("\n", &("  " <> &1))
     end
 
     defp await_challenge(operation, kind) do
@@ -346,23 +381,21 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       Enum.find(snapshot["challenges"], &(&1["kind"] == kind))
     end
 
+    # `Enum.reduce_while`, not `Enum.find_value`: a `find_value` whose callback answers `nil`
+    # past the deadline keeps iterating, because `nil` is what "not found" looks like to it.
+    # The previous version of this spun until the whole test timed out at three minutes
+    # instead of failing in thirty seconds with a reason — a bug in the test, which is the
+    # kind that costs the most to diagnose because it looks like a bug in the code.
     defp wait_until(predicate) do
       deadline = System.monotonic_time(:millisecond) + @step
 
-      Stream.repeatedly(fn -> predicate.() end)
-      |> Enum.find_value(fn
-        true ->
-          true
-
-        false ->
-          if System.monotonic_time(:millisecond) > deadline do
-            true_or_nil = nil
-            true_or_nil
-          else
-            Process.sleep(100)
-            false
-          end
-      end) || predicate.()
+      Enum.reduce_while(Stream.cycle([:tick]), false, fn _tick, _acc ->
+        cond do
+          predicate.() -> {:halt, true}
+          System.monotonic_time(:millisecond) > deadline -> {:halt, false}
+          true -> Process.sleep(100) && {:cont, false}
+        end
+      end)
     end
 
     # Seam S3: the directory is 0700 and every file in it is 0600. Asserted against what the

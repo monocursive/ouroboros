@@ -66,6 +66,12 @@ defmodule Ouroboros.Fleet.Deployment do
   @max_devices 4
   @max_failures 32
 
+  # How long `prepare` waits for the worker to publish its capability, and the backoff it
+  # waits with. Same shape as the client's connect retry, and the same reasoning.
+  @capability_budget 5_000
+  @first_backoff 25
+  @max_backoff 500
+
   # A journal state the operation cannot be continued from.
   @terminal ~w(completed cancelled)
 
@@ -343,8 +349,12 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
+  # The client's own give-up reason, passed through rather than wrapped when it is already a
+  # stable code. A handshake that ran out of retries answers `worker_unreachable` carrying
+  # what went wrong on the last attempt; anything else keeps `attach_failed`.
   defp attach_failure(operation) do
     case GenServer.call(__MODULE__, {:failure, operation}, @call_timeout) do
+      {:ok, {:worker_unreachable, _last} = reason} -> {:error, reason}
       {:ok, reason} -> {:error, {:attach_failed, reason}}
       :error -> {:error, :unknown_operation}
     end
@@ -485,8 +495,16 @@ defmodule Ouroboros.Fleet.Deployment do
   def cancel(operation, binding) when is_binary(operation) and is_map(binding) do
     with {:ok, pid} <- client(operation),
          {:ok, snapshot} <- Client.snapshot(pid),
-         :ok <- owned_by?(snapshot["owner"], binding) do
-      Client.cancel(pid)
+         :ok <- owned_by?(snapshot["owner"], binding),
+         {:ok, reply} <- Client.cancel(pid) do
+      # And then let go of the socket. A finished worker stays reachable for a minute so an
+      # attached client can read its result, and it leaves as soon as nothing is attached —
+      # so a broker that kept the connection after asking it to stop is the reason it would
+      # sit there for the full minute with its socket and capability still on disk.
+      #
+      # The reply is already in hand, which is the result that linger exists to deliver.
+      _ = GenServer.stop(pid, :normal, 5_000)
+      {:ok, reply}
     end
   end
 
@@ -752,17 +770,35 @@ defmodule Ouroboros.Fleet.Deployment do
         end
 
       {:error, reason} ->
-        # It cannot. A capability this runtime refused to *use* is one it must not present
-        # either — that refusal is the whole point of checking the file's mode — so the
-        # honest thing is to say a worker was left running and let its own bounded idle
-        # timeout end it. Silence here is what the review found (F8); this is the part of it
-        # that can be fixed without handing out the capability anyway.
-        Logger.warning(
-          "fleet deployment left a worker for #{operation} running: its capability could not " <>
-            "be used, so it cannot be cancelled and will exit on its own idle timeout"
-        )
+        case Journal.read(dir, operation) do
+          {:ok, document} ->
+            # The worker finished before this could attach — an operation that fails fast
+            # enough never publishes a capability at all, or removes it on the way out. It
+            # still *happened*, and its journal says what happened, so refusing here would
+            # throw away the only record of it and hand the caller no id to read it by.
+            #
+            # Found by driving the real worker: an `add` whose target refuses a host-key scan
+            # is done in well under a second.
+            {:reply,
+             {:ok,
+              %{
+                "operation_id" => operation,
+                "instance" => instance,
+                "state" => document["state"] || "unknown"
+              }}, state}
 
-        {:reply, {:error, reason}, state}
+          {:error, _no_journal} ->
+            # No capability and no journal: nothing to attach to and nothing to read. A
+            # capability this runtime refused to *use* is also one it must not present, so a
+            # worker that is somehow still running cannot be cancelled either — which is said
+            # out loud rather than left silent (review F8).
+            Logger.warning(
+              "fleet deployment could not adopt the worker for #{operation} and it left no " <>
+                "journal: #{inspect(reason)}"
+            )
+
+            {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -849,7 +885,61 @@ defmodule Ouroboros.Fleet.Deployment do
   # exits. Both facts are checked: a capability file anybody on this machine can read is not
   # a capability, and this refuses to present one rather than quietly accepting a weaker
   # boundary than the worker promised.
+  # Retried, because the capability file and the socket are written in an order this side
+  # does not control. The worker currently writes the capability *after* it binds, and
+  # `worker start` returns once it has bound — so a read that happens immediately can land in
+  # between and report `capability_missing` against a worker that publishes one a moment
+  # later. Only a genuinely absent file is retried: a file that is there and wrong is a
+  # refusal that will not improve by asking again.
+  #
+  # This sleeps in the broker's own call, which is the one thing review F12 was about. It is
+  # bounded, and it only sleeps on the rare path — the ordinary read succeeds first time and
+  # costs nothing. If that stops being true this belongs in the client beside the connect
+  # retry, where waiting costs nobody else anything.
   defp read_capability(data_dir, operation) do
+    deadline = System.monotonic_time(:millisecond) + @capability_budget
+    attempt_capability(data_dir, operation, deadline, @first_backoff)
+  end
+
+  defp attempt_capability(data_dir, operation, deadline, backoff) do
+    case capability(data_dir, operation) do
+      {:error, :capability_missing} ->
+        now = System.monotonic_time(:millisecond)
+
+        if now + backoff < deadline do
+          Process.sleep(backoff)
+          attempt_capability(data_dir, operation, deadline, min(backoff * 2, @max_backoff))
+        else
+          {:error, {:capability_missing, worker_log_tail(data_dir, operation)}}
+        end
+
+      settled ->
+        settled
+    end
+  end
+
+  # The worker's own log, bounded, for the one refusal an operator cannot otherwise explain:
+  # the file this runtime was waiting for never appeared, and the reason is in the log beside
+  # it rather than anywhere this process can see.
+  defp worker_log_tail(data_dir, operation) do
+    path = Path.join(Journal.deploy_dir(data_dir), operation <> ".log")
+
+    case File.read(path) do
+      {:ok, ""} -> "its log #{path} is empty"
+      {:ok, body} -> "its log #{path} ends: " <> tail(body)
+      {:error, _reason} -> "its log #{path} could not be read"
+    end
+  end
+
+  defp tail(body) do
+    body
+    |> String.split("\n", trim: true)
+    |> Enum.take(-5)
+    |> Enum.join(" / ")
+    |> String.slice(0, 1_000)
+  end
+
+  defp capability(data_dir, operation) do
     path = Path.join(Journal.deploy_dir(data_dir), operation <> ".cap")
 
     with {:ok, %File.Stat{type: :regular, mode: mode, size: size}} when size <= 256 <-

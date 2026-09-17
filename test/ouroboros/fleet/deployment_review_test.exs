@@ -391,11 +391,12 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
       end)
 
     # This runtime refused to *use* that capability because anyone on the machine could read
-    # it; presenting it anyway to send a cancel would be the same disclosure. So the leak is
-    # reported rather than hidden, and the worker's own bounded idle timeout ends it. The
+    # it; presenting it anyway to send a cancel would be the same disclosure. The worker also
+    # left no journal, so there is no operation to hand back either. The leak is therefore
+    # reported rather than hidden, and the worker's own bounded idle timeout ends it — the
     # finding was the silence, and the silence is what is fixed.
-    assert log =~ "left a worker for"
-    assert log =~ "will exit on its own idle timeout"
+    assert log =~ "could not adopt the worker for"
+    assert log =~ "left no journal"
     refute_received {:fake_worker, %{"op" => "cancel"}}
   end
 
@@ -688,6 +689,96 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
 
     assert password["attempt"] == 1
     assert password["max_attempts"] == 3
+  end
+
+  # ---------------------------------------------------------------------------
+  # F14. Not from the review either: found by the integration gate, one run in four. The
+  # worker binds its socket and then listens, and a broker that connected exactly once in
+  # the window between the two got `:econnrefused`, killed the client, and left the
+  # operation orphaned — a worker running with a socket nobody would ever connect to.
+
+  describe "F14 a worker that is not listening yet" do
+    test "is waited for, not given up on", context do
+      cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+      instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+      socket_path = Path.join([context.root, "deploy", "late.sock"])
+
+      ouro =
+        FleetOuroFake.write!(context.fake_dir,
+          spawn_line: JSON.encode!(%{"socket" => socket_path, "instance" => instance}) <> "\n",
+          cap: cap
+        )
+
+      System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+
+      # Nothing is listening on that path yet, which is exactly the window.
+      refute File.exists?(socket_path)
+
+      assert {:ok, %{"operation_id" => operation, "state" => "attaching"}} =
+               Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
+
+      # The row says `attaching`, and it says it *answerably* — the client is waiting on a
+      # timer rather than sleeping, so a surface polling the operation still gets replies.
+      assert {:ok, %{"attached" => false, "state" => "attaching"}} =
+               Deployment.status(operation, bound())
+
+      # The worker starts listening a moment later, as a real one does.
+      Process.sleep(300)
+
+      start_supervised!(
+        {FleetWorkerFake,
+         [
+           socket_path: socket_path,
+           cap: cap,
+           instance: instance,
+           operation_file: FleetOuroFake.operation_file(context.fake_dir),
+           owner: self()
+         ]},
+        id: {FleetWorkerFake, System.unique_integer([:positive])}
+      )
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      assert {:ok, pid} = await_client(operation)
+      assert Process.alive?(pid)
+    end
+
+    test "and a worker that never listens gives up with a stable reason", context do
+      instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+
+      ouro =
+        FleetOuroFake.write!(context.fake_dir,
+          spawn_line:
+            JSON.encode!(%{
+              "socket" => Path.join([context.root, "deploy", "never.sock"]),
+              "instance" => instance
+            }) <> "\n",
+          cap: Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+        )
+
+      System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+
+      assert {:ok, %{"operation_id" => operation}} =
+               Call.call(:operate, "fleet.deployment.prepare", request(), session: "tab-a")
+
+      # Bounded: it stops trying, and the row stops saying `attaching` and starts saying
+      # why. An orphan is a row that never changes its mind.
+      assert {:error, code, _message, data} =
+               Enum.reduce_while(1..200, nil, fn _attempt, _acc ->
+                 case Call.call(
+                        :operate,
+                        "fleet.deployment.status",
+                        %{"operation_id" => operation},
+                        session: "tab-a"
+                      ) do
+                   {:error, _c, _m, _d} = failure -> {:halt, failure}
+                   _not_yet -> Process.sleep(100) && {:cont, nil}
+                 end
+               end)
+
+      assert code == -32_004
+      assert data["reason"] == "worker_unreachable"
+      assert is_binary(data["detail"]) and data["detail"] != ""
+    end
   end
 
   # ---------------------------------------------------------------------------
