@@ -1,10 +1,14 @@
 # Fleet onboarding over Tailscale
 
-Status: proposed; no implementation or deployment implied. Originally written
-2026-09-14 against `dev` at `af782a4b`; refreshed 2026-09-17 against `dev` at
-`826a4c51` (source version `0.1.8`). This revision updates the implementation plan
-for current source behavior and brings the Devices UI and SSH authentication
-experience into v1; it does not establish installed or hosted behavior.
+Status: implemented on the branch `codex/fleet-onboarding` (2026-09-17, from `dev` at
+`826a4c51`, source version `0.1.8`), not yet merged or released. Originally written
+2026-09-14 against `dev` at `af782a4b`; refreshed 2026-09-17. Slices 1–6 below landed,
+each with an adversarial review and a fix wave; slice 7 landed only as far as a local
+packaged build and run allow. Of the release acceptance list, items 12–16 were exercised
+on one Mac (see "What has been exercised" in [FLEET.md](../FLEET.md)); items 1, 2, 4,
+8, 9 and 11 have not been run, item 3 only in its loopback form, item 5 only for macOS,
+and item 6 only through the test suites. Implementation departures from the text below
+are listed under "Implementation notes" at the end.
 
 The outcome is that an operator can add their own Mac or Linux machine to a small
 fleet, run a remote agent, and recover from a network interruption without manually
@@ -874,3 +878,33 @@ revision only when implementation lands.
 The release claim is: **discover devices and deploy a small trusted Ouroboros fleet
 from the web UI, TUI or CLI over an existing Tailscale or Headscale network**, with
 guided SSH authentication, resumable setup and explicit service prerequisites.
+
+## Implementation notes
+
+Where the branch departs from the text above, the code is the record and this list
+says why:
+
+- The cooperative removal verb is `fleet leave --machine NAME --user USER`; the member's
+  executable is taken from its admission record, with `--remote-executable` to override.
+- A CSR that asks for names beyond the approved host is refused, not narrowed; the issuer
+  never copies a requested extension.
+- The operation namespace is `<data dir>/deploy/` (journal, socket, capability, request
+  file, log), because `fleet/` is committed by one atomic rename and a setup journal has
+  to exist before the fleet does.
+- The broker lifts a challenge's kind-specific facts to the challenge itself; surfaces
+  read `challenge["sha256_fingerprint"]`, not a nested object.
+- The web binding is per browser tab (an id the page keeps in `sessionStorage` and sends
+  on connect), so a reload or reconnect in the same tab keeps answering its challenges
+  while a second tab is refused; the listener binding is per connection.
+- `capabilities.deploy` is enforced by the broker (`deploy_blocked` with the blocker
+  list), not only by which controls a page draws; a first local setup is exempt from the
+  missing-CA-key blocker alone.
+- `fleet.devices` member rows carry the runtime's live view (`connected`, `compatible`,
+  `runtime_running`, `last_probe`) beside the network client's, and the journal list is
+  ordered by creation time with a `total`.
+- Readiness on a newly admitted member is reported unknown until a gateway method can
+  ask that owner about its providers and models; `runtime.providers`/`runtime.models`
+  describe the local runtime only.
+- `runtime.activity` counts in-flight operate-scope method invocations and each
+  session's own idle fence, with a 250 ms cache on the read verb and a fresh walk for
+  the gate; `runtime.shutdown` refuses unknown parameters.

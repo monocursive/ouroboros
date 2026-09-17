@@ -184,8 +184,11 @@ is refused rather than made.
 `--json` prints the operation's result with stable reason codes; incomplete setup exits
 non-zero even when some steps succeeded.
 
-Not yet shipped: the Devices views in web and TUI, and the gateway methods that drive
-this engine from them. The commands above are the whole of what works today.
+On this branch the Devices views (the web page at `/devices`, the terminal client's
+`ctrl+x D`) and the `fleet.devices` / `fleet.deployment.*` gateway methods drive this
+same engine through a detached worker; none of it is in a tagged release yet. "What has
+been exercised" below says which parts have run against real programs and which rest
+on tests alone.
 
 ## Two machines, by hand
 
@@ -643,6 +646,37 @@ subset in Devices instead. Credential entry is additionally decided on the web e
 the browser is local or arrives through `tailscale serve`, and a non-loopback bind under
 `OUROBOROS_WEB_ALLOW_REMOTE=1` is cleartext by definition and refuses it. Forwarded and
 proxy headers play no part in that decision.
+
+## What has been exercised
+
+Everything in this section was run on 2026-09-17 on one Mac (macOS 15, arm64) with
+both data directories on that machine, so it establishes the mechanics and not the
+cross-network behaviour.
+
+- `ouro fleet setup` against a *running* packaged runtime: the runtime was stopped
+  through `runtime.shutdown`'s idle gate, the fleet was created, a LaunchAgent was
+  installed and the runtime restarted under it; a terminal client attached throughout
+  refreshed its Devices view from the restarted runtime.
+- `ouro fleet add` over OpenSSH to a non-root `sshd` on loopback with key
+  authentication: unknown-host verification with the fingerprint prompt, plan review,
+  prepare/issue/install on the target, the roster update on the issuer, and the
+  member's runtime connecting afterwards (`fleet doctor` reported it connected and
+  compatible). The private known-hosts store, receipts and journals were inspected for
+  secret residue and held none.
+- The web Devices page and the terminal Devices view against the real gateway, broker
+  and `fleet devices` discovery; the deploy drawer and overlays against a scripted
+  worker; the broker against the real worker in
+  `test/ouroboros/fleet/deployment_real_worker_test.exs`.
+- Passphrase entry through the real askpass bridge with real `ssh`. Password entry only
+  through a fake `ssh` that invokes `$SSH_ASKPASS` the way OpenSSH does: an
+  unprivileged `sshd` cannot authenticate passwords, so a real password login has not
+  been observed.
+
+Not exercised: Linux and systemd (the unit text and every `systemctl`/`loginctl`
+call are proven against goldens and counting fakes only), Headscale, any target on
+another machine or network (the tailnet's Linux peer was listed by discovery and never
+contacted), relayed paths, a real release-origin download (the loopback harness only),
+`--run-test-task` against a model, hosted CI on this branch. Windows is not supported.
 
 ## Trust
 
