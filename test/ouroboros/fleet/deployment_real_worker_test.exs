@@ -197,12 +197,13 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       if settled["source"] == "worker" do
         done = settled["done"]
         assert done["ok"] == false
-        assert String.match?(done["reason"], ~r/\A[a-z][a-z0-9_]*\z/), inspect(done)
-        assert done["detail"] =~ "port 1"
 
-        # The observed reason on this machine, recorded so a change to it shows up in a diff
-        # rather than being absorbed by a loose assertion.
+        # The reason code is the contract, so it is pinned: a rename should show up here as
+        # a diff rather than be absorbed by a shape check. The sentence beside it is not —
+        # `detail` is written for a person and may be reworded at any time, so this asserts
+        # only that there is one.
         assert done["reason"] == "host_scan_failed"
+        assert is_binary(done["detail"]) and done["detail"] != ""
       end
 
       # The durable half, which is what an operator reads after the worker is gone. This is
@@ -210,7 +211,7 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       assert {:ok, journal} = Journal.read(context.root, operation)
       assert journal["state"] == "failed"
 
-      assert is_binary(journal["last_error"]) and journal["last_error"] =~ "port 1",
+      assert is_binary(journal["last_error"]) and journal["last_error"] != "",
              "the journal does not say why: #{inspect(journal["last_error"])}"
 
       assert_cookie_absent(context.root, operation)
