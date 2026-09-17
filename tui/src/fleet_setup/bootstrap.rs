@@ -221,8 +221,18 @@ pub fn upload_frame(
 ) -> Result<Vec<u8>> {
     validate_asset_name(asset)?;
     validate_install_path(install_path)?;
-    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return refuse("invalid_request", "an artifact digest is 64 hex characters");
+    // Lower-case hex, exactly what the remote `case "$sum" in *[!0-9a-f]*` accepts.
+    // `is_ascii_hexdigit` also accepts `A`-`F`, and an upper-case digest would have been
+    // sent — the whole executable — and then refused on the target.
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return refuse(
+            "invalid_request",
+            "an artifact digest is 64 lower-case hex characters",
+        );
     }
     let header = format!(
         "ouroboros-bootstrap-1\n{asset}\n{}\n{sha256}\n{install_path}\n\n",

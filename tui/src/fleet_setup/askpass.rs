@@ -24,8 +24,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -43,6 +43,10 @@ const MAX_PROMPT_BYTES: usize = 4 * 1024;
 
 /// How long the accept loop sleeps between polls while nothing is connecting.
 const POLL: Duration = Duration::from_millis(20);
+
+/// How long one connection may take to send its prompt. OpenSSH's helper connects and
+/// writes at once; anything slower is not it.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the bridge knows about the connection `ssh` is making, so it can describe the
 /// question without quoting the remote.
@@ -91,6 +95,24 @@ pub fn classify(prompt: &str) -> Prompt {
 }
 
 /// The worker/CLI half: a private socket that answers one `ssh` process at a time.
+/// The arming window, as a value that closes itself.
+///
+/// Arming used to be two calls, and one path (the framed helper session) made the first
+/// and never the second: from the first helper session to the end of the operation the
+/// socket answered *any* same-uid caller with a real password challenge, and handed over
+/// what the operator typed. A guard cannot be forgotten — the window closes when the
+/// child it was opened for is dropped.
+#[must_use = "the askpass bridge stays armed until this guard is dropped"]
+pub struct Armed {
+    bridge: Arc<Bridge>,
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        self.bridge.disarm();
+    }
+}
+
 pub struct Bridge {
     socket: PathBuf,
     /// The short private directory the socket lives in, removed with the bridge.
@@ -98,11 +120,18 @@ pub struct Bridge {
     /// The two-line launcher `SSH_ASKPASS` names.
     launcher: PathBuf,
     armed: Arc<AtomicBool>,
+    /// The process group of the `ssh` child the window is open for. A connecting peer
+    /// has to belong to it.
+    armed_group: Arc<AtomicI32>,
     stop: Arc<AtomicBool>,
     attempts: Arc<AtomicU32>,
     /// The number of prompts this bridge actually served, for tests and for the journal
     /// line that says how many attempts an authentication took.
     served: Arc<AtomicU32>,
+    /// The key labels a passphrase has already been asked for on this connection. A
+    /// second prompt for the same key is a server that keeps asking, not an operator who
+    /// mistyped.
+    passphrases: Arc<Mutex<Vec<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -168,28 +197,26 @@ impl Bridge {
             .context("configuring the askpass socket")?;
 
         let armed = Arc::new(AtomicBool::new(false));
+        let armed_group = Arc::new(AtomicI32::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU32::new(0));
         let served = Arc::new(AtomicU32::new(0));
+        let passphrases = Arc::new(Mutex::new(Vec::<String>::new()));
 
         let thread = {
-            let armed = Arc::clone(&armed);
-            let stop = Arc::clone(&stop);
-            let attempts = Arc::clone(&attempts);
-            let served = Arc::clone(&served);
+            let state = AcceptState {
+                armed: Arc::clone(&armed),
+                armed_group: Arc::clone(&armed_group),
+                stop: Arc::clone(&stop),
+                attempts: Arc::clone(&attempts),
+                served: Arc::clone(&served),
+                passphrases: Arc::clone(&passphrases),
+                context,
+                conversation,
+            };
             std::thread::Builder::new()
                 .name("ouro-askpass".to_string())
-                .spawn(move || {
-                    accept_loop(
-                        listener,
-                        armed,
-                        stop,
-                        attempts,
-                        served,
-                        context,
-                        conversation,
-                    )
-                })
+                .spawn(move || accept_loop(listener, state))
                 .context("starting the askpass bridge")?
         };
 
@@ -198,9 +225,11 @@ impl Bridge {
             home,
             launcher,
             armed,
+            armed_group,
             stop,
             attempts,
             served,
+            passphrases,
             thread: Some(thread),
         })
     }
@@ -224,15 +253,35 @@ impl Bridge {
         ]
     }
 
-    /// Allow prompts for the duration of one `ssh` invocation, and reset the per-
-    /// connection password attempt counter.
-    pub fn arm(&self) {
+    /// Open the prompt window for one `ssh` child, and reset the per-connection attempt
+    /// counters. The window closes when the returned guard is dropped.
+    ///
+    /// `group` is that child's process group. Every `ssh` this module starts is a group
+    /// leader (`process_group(0)`), and the askpass helper OpenSSH forks inherits the
+    /// group — so "is this caller part of the connection we armed for?" is a question
+    /// the kernel can answer, rather than "is this caller the same account as us?",
+    /// which every process of this operator's would pass.
+    pub fn arm(self: &Arc<Self>, group: i32) -> Armed {
         self.attempts.store(0, Ordering::SeqCst);
+        self.passphrases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.armed_group.store(group, Ordering::SeqCst);
         self.armed.store(true, Ordering::SeqCst);
+        Armed {
+            bridge: Arc::clone(self),
+        }
     }
 
-    pub fn disarm(&self) {
+    fn disarm(&self) {
         self.armed.store(false, Ordering::SeqCst);
+        self.armed_group.store(0, Ordering::SeqCst);
+    }
+
+    /// Whether the window is open, for the tests that assert it closes.
+    pub fn armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
     }
 
     /// How many prompts this bridge has answered, in total.
@@ -253,67 +302,98 @@ impl Drop for Bridge {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn accept_loop(
-    listener: UnixListener,
+/// What the accept loop and every connection it serves share.
+#[derive(Clone)]
+struct AcceptState {
     armed: Arc<AtomicBool>,
+    armed_group: Arc<AtomicI32>,
     stop: Arc<AtomicBool>,
     attempts: Arc<AtomicU32>,
     served: Arc<AtomicU32>,
+    passphrases: Arc<Mutex<Vec<String>>>,
     context: PromptContext,
     conversation: Arc<dyn Conversation>,
-) {
-    while !stop.load(Ordering::SeqCst) {
+}
+
+fn accept_loop(listener: UnixListener, state: AcceptState) {
+    let mut serving = Vec::new();
+    while !state.stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                let _ = serve_one(stream, &armed, &attempts, &served, &context, &conversation);
+                // Each connection gets its own thread. Serving them one at a time let a
+                // single same-uid process connect, say nothing, and hold the bridge for
+                // its whole read timeout — denying the real `ssh` its password for
+                // longer than any step deadline the engine has.
+                let state = state.clone();
+                serving.retain(|thread: &std::thread::JoinHandle<()>| !thread.is_finished());
+                if let Ok(thread) = std::thread::Builder::new()
+                    .name("ouro-askpass-conn".to_string())
+                    .spawn(move || {
+                        let _ = serve_one(stream, &state);
+                    })
+                {
+                    serving.push(thread);
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(POLL);
             }
-            Err(_) => return,
+            Err(_) => break,
         }
+    }
+    for thread in serving {
+        let _ = thread.join();
     }
 }
 
-fn serve_one(
-    stream: UnixStream,
-    armed: &AtomicBool,
-    attempts: &AtomicU32,
-    served: &AtomicU32,
-    context: &PromptContext,
-    conversation: &Arc<dyn Conversation>,
-) -> Result<()> {
+fn serve_one(stream: UnixStream, state: &AcceptState) -> Result<()> {
     // The listener polls, so it is non-blocking, and an accepted socket inherits that on
     // macOS. Reading the prompt must block for it, not fail because it has not arrived
     // in the same instant as the connection.
     stream
         .set_nonblocking(false)
         .context("configuring the askpass connection")?;
+    // Short: OpenSSH runs the helper and it connects and speaks immediately. A caller
+    // that connects and then waits is not that helper.
     stream
-        .set_read_timeout(Some(Duration::from_secs(300)))
+        .set_read_timeout(Some(CONNECTION_READ_TIMEOUT))
         .context("bounding the askpass read")?;
     stream
         .set_write_timeout(Some(Duration::from_secs(30)))
         .context("bounding the askpass write")?;
 
     let mut writer = stream.try_clone().context("cloning the askpass socket")?;
-    let peer = peer_uid(&stream)?;
-    let own = unsafe { libc::geteuid() };
-    if peer != own {
+    let (peer_uid, peer_pid) = peer_credentials(&stream)?;
+    if !same_account(peer_uid) {
         return deny(
             &mut writer,
             "peer_uid_mismatch",
             "this socket answers only the account that owns the operation",
         );
     }
-    if !armed.load(Ordering::SeqCst) {
+    if !state.armed.load(Ordering::SeqCst) {
         return deny(
             &mut writer,
             "not_authenticating",
             "no authentication attempt is in flight for this operation",
         );
     }
+    // Same account is not enough: every process this operator runs would pass it. The
+    // caller has to belong to the `ssh` this bridge was armed for.
+    let group = state.armed_group.load(Ordering::SeqCst);
+    if !belongs_to(peer_pid, group) {
+        return deny(
+            &mut writer,
+            "peer_not_in_connection",
+            "this socket answers only the SSH connection this operation started",
+        );
+    }
+    let (attempts, served, context, conversation) = (
+        state.attempts.as_ref(),
+        state.served.as_ref(),
+        &state.context,
+        &state.conversation,
+    );
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -342,16 +422,45 @@ fn serve_one(
     let prompt = request.get("prompt").and_then(Value::as_str).unwrap_or("");
 
     let (kind, metadata) = match classify(prompt) {
-        Prompt::Passphrase => (
-            ChallengeKind::Passphrase,
-            passphrase_metadata(
-                context.key_label.as_deref().unwrap_or("the selected key"),
-                context
-                    .key_fingerprint
-                    .as_deref()
-                    .unwrap_or("fingerprint unknown"),
-            ),
-        ),
+        Prompt::Passphrase => {
+            // Capped like a password, and once per key: OpenSSH asks for a key's
+            // passphrase once per connection, so a second request for the same key is
+            // the far end asking, not this client retrying.
+            let label = context
+                .key_label
+                .clone()
+                .unwrap_or_else(|| "the selected key".to_string());
+            let mut asked = state
+                .passphrases
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if asked.contains(&label) {
+                return deny(
+                    &mut writer,
+                    "too_many_attempts",
+                    "this connection has already been given that key's passphrase",
+                );
+            }
+            if asked.len() as u32 >= super::MAX_PASSWORD_ATTEMPTS {
+                return deny(
+                    &mut writer,
+                    "too_many_attempts",
+                    "this connection has already used its passphrase attempts",
+                );
+            }
+            asked.push(label.clone());
+            drop(asked);
+            (
+                ChallengeKind::Passphrase,
+                passphrase_metadata(
+                    &label,
+                    context
+                        .key_fingerprint
+                        .as_deref()
+                        .unwrap_or("fingerprint unknown"),
+                ),
+            )
+        }
         Prompt::Password => {
             let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if attempt > super::MAX_PASSWORD_ATTEMPTS {
@@ -408,16 +517,35 @@ fn serve_one(
 }
 
 fn answer_with(writer: &mut UnixStream, secret: &Zeroizing<String>) -> Result<()> {
-    // Built by hand rather than through `serde_json::to_string` on a struct holding the
-    // secret, so the only heap copy of it that exists here is this one buffer.
-    let mut frame = Zeroizing::new(String::with_capacity(secret.len() + 32));
-    frame.push_str("{\"ok\":true,\"response\":");
-    frame.push_str(&Value::String(secret.to_string()).to_string());
-    frame.push_str("}\n");
+    // Escaped *into* the zeroized buffer. Going through `Value::String(secret.clone())`
+    // and `.to_string()` left two heap copies of the secret behind — the `Value`'s own
+    // `String` and the rendering — neither of which anything wipes.
+    let mut frame = Zeroizing::new(String::with_capacity(secret.len() * 2 + 32));
+    frame.push_str("{\"ok\":true,\"response\":\"");
+    escape_into(&mut frame, secret);
+    frame.push_str("\"}\n");
     writer
         .write_all(frame.as_bytes())
         .context("answering an askpass request")?;
     writer.flush().context("flushing an askpass answer")
+}
+
+/// JSON-escape `text` onto the end of `out`, allocating nothing of its own.
+fn escape_into(out: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if control.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", control as u32);
+            }
+            other => out.push(other),
+        }
+    }
 }
 
 fn deny(writer: &mut UnixStream, reason: &'static str, detail: &str) -> Result<()> {
@@ -430,28 +558,48 @@ fn deny(writer: &mut UnixStream, reason: &'static str, detail: &str) -> Result<(
     refuse(reason, detail.to_string())
 }
 
+/// Who is on the other end: the account, and the process.
+///
+/// The uid answers "is this this operator?", which every process of theirs passes. The
+/// pid is what lets the bridge ask the narrower question the arming window is for: is
+/// this the SSH connection this operation started?
 #[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> Result<u32> {
+fn peer_credentials(stream: &UnixStream) -> Result<(u32, i32)> {
     use std::os::fd::AsRawFd as _;
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
     // SAFETY: the descriptor is owned by `stream` for the duration of the call, and both
     // out-pointers name initialized local storage.
-    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    if result != 0 {
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
         return Err(std::io::Error::last_os_error()).context("reading the askpass peer's uid");
     }
-    Ok(uid)
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: the descriptor is owned by `stream`; the option buffer and its length
+    // describe initialized local storage of exactly that size.
+    if unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast::<libc::c_void>(),
+            &mut length,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("reading the askpass peer's pid");
+    }
+    Ok((uid, pid))
 }
 
 #[cfg(target_os = "linux")]
-fn peer_uid(stream: &UnixStream) -> Result<u32> {
+fn peer_credentials(stream: &UnixStream) -> Result<(u32, i32)> {
     use std::os::fd::AsRawFd as _;
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     // SAFETY: the descriptor is owned by `stream`, and the option buffer and its length
     // describe initialized local storage of exactly that size.
-    let result = unsafe {
+    if unsafe {
         libc::getsockopt(
             stream.as_raw_fd(),
             libc::SOL_SOCKET,
@@ -459,11 +607,39 @@ fn peer_uid(stream: &UnixStream) -> Result<u32> {
             (&raw mut credentials).cast::<libc::c_void>(),
             &mut length,
         )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error()).context("reading the askpass peer's uid");
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("reading the askpass peer's credentials");
     }
-    Ok(credentials.uid)
+    Ok((credentials.uid, credentials.pid))
+}
+
+/// Whether a peer is this account.
+///
+/// A named decision rather than an inline comparison, so it can be tested: the socket
+/// lives in a directory only this account can open, and this is the check that makes
+/// that a boundary rather than a convention.
+pub(crate) fn same_account(peer: u32) -> bool {
+    // SAFETY: `geteuid` reads this process's own identity and writes nothing.
+    peer == unsafe { libc::geteuid() }
+}
+
+/// Whether a process belongs to the armed `ssh`'s process group.
+///
+/// Every `ssh` this module starts is a process-group leader, so its group id is its own
+/// pid, and the askpass helper OpenSSH forks inherits that group. Being the child itself
+/// also passes, for an OpenSSH that ever asks in-process.
+fn belongs_to(peer: i32, group: i32) -> bool {
+    if group == 0 || peer <= 0 {
+        return false;
+    }
+    if peer == group {
+        return true;
+    }
+    // SAFETY: `getpgid` reads process table state for a pid and writes nothing.
+    let peer_group = unsafe { libc::getpgid(peer) };
+    peer_group == group
 }
 
 // ---------------------------------------------------------------- the client half
@@ -570,6 +746,46 @@ mod tests {
                 "an unrecognized prompt is never answered: {hostile}"
             );
         }
+    }
+
+    /// The answer frame is JSON, escaped into the one buffer that gets wiped.
+    #[test]
+    fn a_secret_is_escaped_into_its_zeroized_buffer() {
+        for secret in [
+            "plain",
+            "with \"quotes\" and \\backslash",
+            "new\nline\ttab",
+            "\u{1}control",
+            "üñîçø∂é",
+        ] {
+            let mut rendered = Zeroizing::new(String::new());
+            escape_into(&mut rendered, secret);
+            let decoded: Value = serde_json::from_str(&format!("\"{}\"", rendered.as_str()))
+                .unwrap_or_else(|error| panic!("`{secret}` did not escape to JSON: {error}"));
+            assert_eq!(decoded.as_str(), Some(secret));
+        }
+    }
+
+    /// The two checks that decide whether a caller is answered at all. Neither can be
+    /// exercised end to end from one account, so they are decisions with names.
+    #[test]
+    fn a_caller_is_this_account_and_this_connection_or_it_is_refused() {
+        let own = unsafe { libc::geteuid() };
+        assert!(same_account(own));
+        assert!(!same_account(own + 1), "another account is not this one");
+        assert!(!same_account(0) || own == 0, "root is not this account");
+
+        // Belonging: the process itself, or a member of its group. Never "no group".
+        let us = std::process::id() as i32;
+        let our_group = unsafe { libc::getpgrp() };
+        assert!(belongs_to(us, us), "the child itself belongs");
+        assert!(belongs_to(us, our_group), "so does a member of its group");
+        assert!(!belongs_to(us, 0), "an unarmed bridge belongs to nobody");
+        assert!(!belongs_to(0, our_group));
+        assert!(!belongs_to(-1, our_group));
+        // A pid that is not in the group does not belong. pid 1 is init, whose group is
+        // its own.
+        assert!(!belongs_to(1, our_group) || our_group == 1);
     }
 
     /// A passphrase prompt must not be read as a password prompt, because the two are

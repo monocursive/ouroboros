@@ -109,6 +109,10 @@ pub struct PlanMember {
     /// `local` or `ssh`.
     pub reached_by: String,
     pub change: String,
+    /// `user@address port N` for a member this operation will connect to, so the review
+    /// names every machine it is about to authenticate to rather than only the target.
+    #[serde(default)]
+    pub ssh: Option<String>,
 }
 
 /// What the operation intends to do about startup.
@@ -238,6 +242,9 @@ impl Plan {
                     "{} ({}, {}, via {})\n",
                     member.machine, member.host, member.change, member.reached_by
                 ));
+                if let Some(ssh) = &member.ssh {
+                    text.push_str(&format!("               ssh {ssh}\n"));
+                }
             }
         }
         if let Some(restart) = &self.restart {
@@ -306,6 +313,7 @@ mod tests {
                 host: "100.64.0.1".into(),
                 reached_by: "local".into(),
                 change: "add buildbox".into(),
+                ssh: None,
             }],
             restart: None,
             grants: vec![admission_grant()],
@@ -366,6 +374,26 @@ mod tests {
         }
         assert!(!rendered.to_lowercase().contains("cookie"));
         assert!(!rendered.to_lowercase().contains("password"));
+    }
+
+    /// A member this operation will connect to is shown with the account it will
+    /// authenticate as. The review is where an operator learns which machines are about
+    /// to be contacted, and "via ssh" without an account is not that.
+    #[test]
+    fn a_member_reached_over_ssh_shows_the_account_it_is_reached_as() {
+        let mut plan = plan();
+        plan.members.push(PlanMember {
+            machine: "vps".into(),
+            host: "100.64.0.3".into(),
+            reached_by: "ssh".into(),
+            change: "add buildbox".into(),
+            ssh: Some("me@100.64.0.3 port 22".into()),
+        });
+        let rendered = plan.render();
+        assert!(
+            rendered.contains("ssh me@100.64.0.3 port 22"),
+            "every machine this operation authenticates to is named:\n{rendered}"
+        );
     }
 
     /// A plan that needs an install names the exact artifact and flags a non-official

@@ -45,19 +45,27 @@ pub fn helper_command(executable: &str, data_dir: Option<&str>) -> String {
 /// An open helper conversation over one `ssh` child.
 pub struct Session {
     child: std::process::Child,
+    /// The askpass window this connection opened. Dropped with the session, so a prompt
+    /// can only arrive while the `ssh` it belongs to is alive.
+    armed: Option<super::askpass::Armed>,
     input: Option<std::process::ChildStdin>,
     replies: Receiver<String>,
     stderr: Arc<Mutex<Vec<u8>>>,
     next_id: u64,
     label: String,
+    executable: String,
     finished: bool,
 }
 
 impl Session {
     /// Start `ssh <dest> <helper command>` and hold its pipes.
+    ///
+    /// `executable` is remembered so a refusal can name *which* `ouro` answered: the
+    /// commonest way this fails is an older release at that path, and "unrecognized
+    /// subcommand 'helper'" plus a usage dump is not an answer an operator can act on.
     pub fn open(runner: &Runner, executable: &str, data_dir: Option<&str>) -> Result<Self> {
         let command = helper_command(executable, data_dir);
-        let mut child = runner.spawn(&command)?;
+        let (mut child, armed) = runner.spawn(&command)?;
         let input = child
             .stdin
             .take()
@@ -115,11 +123,13 @@ impl Session {
 
         Ok(Self {
             child,
+            armed,
             input: Some(input),
             replies,
             stderr,
             next_id: 0,
             label: runner.destination.label(),
+            executable: executable.to_string(),
             finished: false,
         })
     }
@@ -220,14 +230,27 @@ impl Session {
                 )
             }
             Err(RecvTimeoutError::Disconnected) => {
+                let diagnostics = self.diagnostics();
+                // An `ouro` too old to speak this protocol answers with clap's
+                // "unrecognized subcommand" and a usage page. That is a specific,
+                // actionable situation — upgrade that machine — and it deserves a
+                // reason of its own rather than a wall of remote usage text.
+                if looks_unsupported(&diagnostics) {
+                    return refuse(
+                        "helper_unsupported",
+                        format!(
+                            "{} answered `{}` with `unrecognized subcommand`: the Ouroboros there is too old to run fleet setup verbs. Upgrade that machine's Ouroboros, or point this command at the right executable with --remote-executable",
+                            self.label, self.executable
+                        ),
+                    );
+                }
                 return refuse(
                     "helper_unavailable",
                     format!(
-                        "{} closed the setup protocol before answering `{op}`. {}",
+                        "{} closed the setup protocol before answering `{op}`. {diagnostics}",
                         self.label,
-                        self.diagnostics()
                     ),
-                )
+                );
             }
         };
         let value: Value = serde_json::from_str(&reply).map_err(|error| {
@@ -279,7 +302,10 @@ impl Session {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(_)) => {
+                    self.armed = None;
+                    return;
+                }
                 Ok(None) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -292,6 +318,9 @@ impl Session {
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
         let _ = self.child.wait();
+        // Last, so the window is open for as long as the connection is and not a moment
+        // longer.
+        self.armed = None;
     }
 }
 
@@ -305,6 +334,18 @@ impl SetupError {
     fn into_anyhow(self) -> anyhow::Error {
         self.into()
     }
+}
+
+/// Whether a remote's diagnostics are an `ouro` that does not know this subcommand.
+///
+/// clap's own wording, matched on the part that does not change with the locale or the
+/// binary's name. The usage page that follows it is exactly the remote output
+/// [`sanitize_remote_text`] exists for and is deliberately not repeated at an operator.
+fn looks_unsupported(diagnostics: &str) -> bool {
+    let lowered = diagnostics.to_ascii_lowercase();
+    lowered.contains("unrecognized subcommand")
+        || lowered.contains("unrecognised subcommand")
+        || (lowered.contains("usage: ouro") && lowered.contains("error:"))
 }
 
 /// Map a reason string that arrived from a remote onto one this client declares.
@@ -340,6 +381,7 @@ fn known_reason(reason: &str) -> &'static str {
         // An idempotent `install` replay whose materials are not the ones already
         // installed. A reconciliation refusal, never an overwrite.
         "materials_differ",
+        "helper_unsupported",
         "runtime_running",
         "unsupported_action",
         "unsupported_platform",
@@ -380,6 +422,19 @@ mod tests {
             !hostile.contains("; rm -rf ~ "),
             "the metacharacters stay inside the quotes: {hostile}"
         );
+    }
+
+    /// An `ouro` too old to have `fleet helper` is a specific situation with a specific
+    /// repair, not a generic "the helper went away".
+    #[test]
+    fn an_old_remote_ouro_is_recognized_rather_than_quoted_at_the_operator() {
+        assert!(looks_unsupported(
+            "error: unrecognized subcommand 'helper' Usage: ouro [OPTIONS] [COMMAND]"
+        ));
+        assert!(looks_unsupported("error: unrecognised subcommand 'helper'"));
+        assert!(!looks_unsupported("bash: ouro: command not found"));
+        assert!(!looks_unsupported("Permission denied (publickey)."));
+        assert!(!looks_unsupported(""));
     }
 
     /// A remote decides which branch this client takes, so its reason is matched against

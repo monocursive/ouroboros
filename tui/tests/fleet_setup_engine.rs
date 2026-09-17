@@ -1052,6 +1052,20 @@ fn a_dry_run_prints_the_plan_and_writes_nothing() {
     );
     assert!(!ouro::fleet_setup::request_path(&lab.issuer, "op-000000003300").exists());
     assert!(!ouro::fleet_setup::scratch_dir(&lab.issuer, "op-000000003300").exists());
+    // And nothing else either. This test seeds the namespace itself (recording trust is
+    // what creates it), so the shape of the assertion is "exactly what I put there" —
+    // `a_dry_run_does_not_create_the_deployment_namespace` covers the machine that has
+    // never deployed at all.
+    let mut left: Vec<String> = std::fs::read_dir(ouro::fleet_setup::deploy_dir(&lab.issuer))
+        .expect("the namespace this test seeded")
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["known_hosts".to_string()],
+        "a dry run wrote {left:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(&store).expect("a trust record"),
         trusted_before,
@@ -1130,4 +1144,310 @@ fn setup_on_a_configured_machine_inspects_and_changes_nothing() {
         .expect("a profile");
     assert_eq!(after.fleet_id, before.fleet_id, "the identity is untouched");
     assert_eq!(after.roster_revision, before.roster_revision);
+}
+
+/// An acceptance is written to this operation's private store and nowhere else.
+///
+/// No shipped test set `user_known_hosts`, so a mutation that wrote the acceptance into
+/// the operator's own `~/.ssh/known_hosts` — editing a file this command has no business
+/// editing — passed every suite.
+#[test]
+fn an_accepted_host_key_never_reaches_the_operators_own_known_hosts() {
+    let lab = Lab::new("ukh", "studio");
+    let target = data_dir("ukh-t");
+
+    // A stand-in for the operator's own file, with content of its own.
+    let mine = scratch("ukh-user").join("known_hosts");
+    std::fs::create_dir_all(mine.parent().expect("a parent")).expect("a directory");
+    std::fs::write(&mine, "# the operator's own file\n").expect("a user store");
+    let before = std::fs::read_to_string(&mine).expect("a user store");
+
+    let outcome = Engine {
+        user_known_hosts: Some(mine.clone()),
+        ..lab.engine(
+            lab.request("op-000000005500", "vps", &target),
+            Operator::new(),
+            gateway(&["studio", "vps"]),
+            services(),
+        )
+    }
+    .run()
+    .expect("an admitted machine");
+    assert_eq!(outcome.state, OperationState::Completed);
+
+    assert_eq!(
+        std::fs::read_to_string(&mine).expect("a user store"),
+        before,
+        "the operator's own known_hosts is honoured and never written"
+    );
+    let private = std::fs::read_to_string(ouro::fleet_setup::known_hosts_path(&lab.issuer))
+        .expect("the private store");
+    assert!(
+        private.contains("ssh-"),
+        "the acceptance went to this operation's own store: {private}"
+    );
+}
+
+/// A changed host key blocks the *operation*, not only a bare `ssh`.
+///
+/// The engine's own `Trust::Changed` arm had no test: `check_access` covered OpenSSH's
+/// refusal, and a mutation that made the engine proceed on a changed key survived.
+#[test]
+fn the_engine_refuses_a_changed_host_key_before_it_connects() {
+    let mut lab = Lab::new("chg", "studio");
+    let target = data_dir("chg-t");
+
+    // Trust the rig as it is now.
+    let store = ouro::fleet_setup::known_hosts_path(&lab.issuer);
+    let scan = scratch("chgscan");
+    let tools = Tools {
+        keyscan: PathBuf::from("/usr/bin/ssh-keyscan"),
+        keygen: PathBuf::from("/usr/bin/ssh-keygen"),
+    };
+    let ouro::fleet_setup::trust::Trust::Unknown { keys } = ouro::fleet_setup::trust::examine(
+        &tools,
+        std::slice::from_ref(&store),
+        "127.0.0.1",
+        lab.rig.port,
+        &scan,
+    )
+    .expect("a scan") else {
+        panic!("a fresh store knows nothing");
+    };
+    ouro::fleet_setup::trust::accept(&store, &keys[0]).expect("recording trust");
+
+    // The machine is reinstalled, or somebody else answers on that address.
+    lab.rig.rotate_host_key();
+
+    let refused = lab
+        .engine(
+            lab.request("op-000000005600", "vps", &target),
+            Operator::new(),
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .expect_err("a changed host key blocks");
+    assert_eq!(reason_of(&refused), Some("host_key_changed"), "{refused:#}");
+    // The engine's own refusal, not OpenSSH's: it names the keys the destination
+    // actually presented, which is what an operator needs in order to decide whether the
+    // machine was reinstalled or replaced. A refusal without them is `ssh` having caught
+    // it one layer down, after the connection was attempted.
+    assert!(
+        format!("{refused}").contains("SHA256:"),
+        "the refusal names the key that was presented, so it came from the trust check rather than from the connection: {refused:#}"
+    );
+    assert!(
+        fleet::load(&target).expect("a readable target").is_none(),
+        "nothing was delivered"
+    );
+}
+
+/// A roster that moved is refused *as* a roster change, separately from a changed plan.
+///
+/// The shipped test accepted either reason, so a mutation that deleted the roster
+/// comparison entirely was caught only by the digest check — and a mutation that deleted
+/// the digest check was caught only by the roster comparison. Each is tested alone here.
+#[test]
+fn a_moved_roster_and_a_changed_plan_are_two_separate_refusals() {
+    // The roster comparison, with the plan digest deliberately left matching.
+    let lab = Lab::new("recon", "studio");
+    let target = data_dir("recon-t");
+    let stopper = Operator::stopping_after("prepare");
+    let _ = lab
+        .engine(
+            lab.request("op-000000005700", "vps", &target),
+            stopper,
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .expect_err("cancelled at the prepare boundary");
+
+    // A roster edit that does not change any fact the plan carries: the plan's member
+    // list is rendered from the profile, so this is the case where only the recorded
+    // snapshot can notice.
+    fleet::add_member(&lab.issuer, "laptop", "127.0.0.2", None).expect("an unrelated edit");
+
+    let refused = lab
+        .engine(
+            lab.request("op-000000005700", "vps", &target),
+            Operator::new(),
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .expect_err("the source roster moved");
+    assert_eq!(
+        reason_of(&refused),
+        Some("roster_changed"),
+        "a moved roster is reconciled under its own name: {refused:#}"
+    );
+}
+
+/// A resumed operation is bound to the plan that was approved.
+#[test]
+fn a_resumed_operation_refuses_a_plan_that_is_not_the_one_approved() {
+    let lab = Lab::new("bind", "studio");
+    let target = data_dir("bind-t");
+
+    let stopper = Operator::stopping_after("prepare");
+    let _ = lab
+        .engine(
+            lab.request("op-000000005800", "vps", &target),
+            stopper,
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .expect_err("cancelled at the prepare boundary");
+
+    // The same operation, resumed with a different *plan*: a different startup choice is
+    // a different plan, and the roster has not moved at all.
+    let mut changed = lab.request("op-000000005800", "vps", &target);
+    changed.service = true;
+    let refused = lab
+        .engine(changed, Operator::new(), gateway(&["studio"]), services())
+        .run()
+        .expect_err("the plan is not the one that was approved");
+    assert_eq!(reason_of(&refused), Some("plan_changed"), "{refused:#}");
+}
+
+/// Credentials that left the issuer are never reissued under the same operation.
+///
+/// This is the recovery table's "credentials delivered; profile not installed" row. The
+/// materials carry the fleet cookie and are deliberately never written down, so they
+/// cannot be produced again — and the issuer refuses to mint a second certificate for
+/// one operation. What the operation owes the operator is that sentence, not a replay
+/// refusal from three layers down.
+#[test]
+fn an_operation_that_issued_credentials_never_issues_them_again() {
+    use ouro::fleet_setup::journal::Journal;
+
+    let lab = Lab::new("issue", "studio");
+    let target = data_dir("issue-t");
+    let operation = "op-000000005900";
+
+    // Exactly the durable state a crash between `issue` and `install` leaves behind.
+    {
+        let mut journal =
+            Journal::open(&lab.issuer, operation, OperationKind::Add).expect("a journal");
+        journal
+            .finish_step("vps", "prepare", "ok", None, None)
+            .expect("a prepare step");
+        journal
+            .finish_step("vps", "issue", "ok", Some("issued for vps".into()), None)
+            .expect("an issue step");
+    }
+
+    let refused = lab
+        .engine(
+            lab.request(operation, "vps", &target),
+            Operator::new(),
+            gateway(&["studio"]),
+            services(),
+        )
+        .run()
+        .expect_err("credentials that left the issuer cannot be reissued");
+    assert_eq!(
+        reason_of(&refused),
+        Some("credentials_unrecoverable"),
+        "{refused:#}"
+    );
+    assert!(
+        format!("{refused}").contains("cannot be reissued"),
+        "and says what to do instead: {refused}"
+    );
+    assert!(
+        fleet::load(&target).expect("a readable target").is_none(),
+        "and nothing was delivered on this attempt"
+    );
+}
+
+/// The release origin is loopback-only and the checksum decides.
+#[test]
+fn the_release_origin_and_its_checksum_are_both_enforced() {
+    use ouro::update::release::{checksum_for, checksums, fetch_verified, Origin};
+
+    for hostile in [
+        "http://example.invalid",
+        "https://github.com/monocursive/ouroboros/releases/download",
+        "http://127.0.0.1:8080/path",
+        "http://localhost:8080",
+    ] {
+        assert!(
+            Origin::loopback(hostile).is_err(),
+            "{hostile} must not be accepted as a release origin"
+        );
+    }
+
+    let version = "0.9.8";
+    let asset = "ouro-0.9.8-test";
+    let bytes = vec![3_u8; 64 * 1024];
+    let server = ReleaseServer::start(version, asset, bytes.clone());
+    let origin = Origin::loopback(&server.base).expect("a loopback origin");
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let manifest = checksums(&origin, version, &cancelled).expect("a manifest");
+    let expected = checksum_for(&manifest, asset).expect("a digest");
+
+    // The digest the manifest records is what decides; a different one is refused even
+    // though the bytes arrived whole.
+    let wrong = fetch_verified(&origin, version, asset, &"b".repeat(64), &cancelled)
+        .expect_err("a digest that does not describe these bytes");
+    assert!(
+        format!("{wrong:#}").contains("hashes to"),
+        "the refusal names both digests: {wrong:#}"
+    );
+    assert_eq!(
+        fetch_verified(&origin, version, asset, &expected, &cancelled).expect("verified bytes"),
+        bytes
+    );
+}
+
+/// A dry run that *accepts* an unknown host key records nothing durable.
+///
+/// The two other dry-run tests cannot see this: one pre-seeds the trust store (so the
+/// host is already known and nothing is ever accepted), and the other has no terminal to
+/// accept with. This one accepts, and then looks.
+#[test]
+fn a_dry_run_that_accepts_a_host_key_keeps_it_for_that_run_only() {
+    let lab = Lab::new("dtrust", "studio");
+    let target = data_dir("dtrust-t");
+    let store = ouro::fleet_setup::known_hosts_path(&lab.issuer);
+    assert!(!store.exists(), "this machine trusts nothing yet");
+
+    let mut request = lab.request("op-000000006100", "vps", &target);
+    request.dry_run = true;
+    let operator = Operator::new();
+    let outcome = lab
+        .engine(request, operator.clone(), gateway(&["studio"]), services())
+        .run()
+        .expect("a dry run against an unknown host");
+
+    assert_eq!(outcome.state, OperationState::AwaitingReview);
+    assert!(
+        operator.asked().contains(&ChallengeKind::HostTrust),
+        "the host key was an explicit question even in a dry run: {:?}",
+        operator.asked()
+    );
+    assert!(
+        !store.exists(),
+        "and the acceptance was not recorded: {} exists",
+        store.display()
+    );
+    assert!(
+        !ouro::fleet_setup::deploy_dir(&lab.issuer).exists(),
+        "nor was the namespace it would live in created"
+    );
+    // The plan still names the key that was accepted for this run, so the operator can
+    // see what they agreed to.
+    let plan = outcome.plan.as_ref().expect("a plan");
+    assert!(
+        plan.target
+            .host_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint.starts_with("SHA256:")),
+        "{:?}",
+        plan.target.host_fingerprint
+    );
 }

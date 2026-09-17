@@ -558,6 +558,14 @@ pub fn ensure_deploy_dir(data_dir: &Path) -> Result<PathBuf> {
     Ok(deploy)
 }
 
+/// [`ensure_private_subdir`], for the hardening suite: what protects the bridge's own
+/// directory is that a foreign or loose one is refused rather than adopted, and that is
+/// worth a test of its own.
+#[doc(hidden)]
+pub fn ensure_private_subdir_for_tests(path: &Path) -> Result<()> {
+    ensure_private_subdir(path)
+}
+
 pub(crate) fn ensure_private_subdir(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {

@@ -69,7 +69,9 @@ impl Origin {
             None => rest.split(':').next().unwrap_or_default().to_string(),
         };
         let host = host.as_str();
-        if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        // Literals only. `localhost` is a name, and what a name resolves to is not this
+        // check's to decide.
+        if !matches!(host, "127.0.0.1" | "[::1]") {
             bail!(
                 "{BASE_URL_ENV} may only name a loopback host (127.0.0.1, localhost or [::1]); it named `{host}`. Release artifacts are fetched from the official repository"
             );
@@ -92,6 +94,11 @@ impl Origin {
     fn curl(&self) -> Curl {
         Curl {
             allow_http: self.loopback_http,
+            // A harness origin follows no redirect. Otherwise "loopback only" checks the
+            // first hop and nothing else: a redirector on 127.0.0.1 could serve the
+            // executable *and* the SHA256SUMS that certify it from any host on the
+            // internet, and the checksum check would pass because both came from there.
+            max_redirects: if self.is_official() { 5 } else { 0 },
             ..Curl::default()
         }
     }
@@ -176,11 +183,26 @@ mod tests {
     #[test]
     fn the_origin_override_accepts_only_a_bare_loopback_origin() {
         assert!(Origin::loopback("http://127.0.0.1:8080").is_ok());
-        assert!(Origin::loopback("https://localhost:9443/").is_ok());
+        assert!(Origin::loopback("https://127.0.0.1:9443/").is_ok());
         assert!(Origin::loopback("http://[::1]:8080").is_ok());
+        assert_eq!(
+            Origin::loopback("http://127.0.0.1:8080")
+                .expect("a loopback origin")
+                .curl()
+                .max_redirects,
+            0,
+            "a harness origin follows no redirect off loopback"
+        );
+        assert_eq!(
+            Origin::official().curl().max_redirects,
+            5,
+            "the official origin still follows the release host's own redirects"
+        );
 
         for hostile in [
             "http://evil.example",
+            // A name, not a literal: what it resolves to is not this check's to decide.
+            "http://localhost:8080",
             "https://github.com/monocursive/ouroboros/releases/download",
             "http://127.0.0.1:8080/path",
             "http://user@127.0.0.1:8080",

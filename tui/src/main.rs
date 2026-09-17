@@ -1701,6 +1701,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             key,
             agent,
             ask_password,
+            remote_executable,
             common,
         } => {
             fleet_setup::cli::leave_machine(
@@ -1712,6 +1713,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     key,
                     agent,
                     ask_password,
+                    remote_executable,
                     common: setup_common(common),
                 },
             )

@@ -213,11 +213,27 @@ impl Engine {
         Ok(())
     }
 
+    /// The operation's private workspace.
+    ///
+    /// A dry run gets one outside the data directory entirely. `--dry-run` says it
+    /// changes nothing, and creating `<data dir>/deploy/` — the namespace a real
+    /// operation journals into — is a change: on a machine that has never deployed, an
+    /// inspection would leave that directory behind.
     fn scratch(&self) -> Result<PathBuf> {
-        let path = super::scratch_dir(&self.data_dir, &self.request.operation);
-        super::ensure_deploy_dir(&self.data_dir)?;
+        let path = if self.request.dry_run {
+            self.dry_run_scratch()
+        } else {
+            super::ensure_deploy_dir(&self.data_dir)?;
+            super::scratch_dir(&self.data_dir, &self.request.operation)
+        };
         super::ensure_private_subdir(&path)?;
         Ok(path)
+    }
+
+    /// Deterministic, so every step of one dry run shares it, and outside the data
+    /// directory, so the dry run leaves nothing there.
+    fn dry_run_scratch(&self) -> PathBuf {
+        std::env::temp_dir().join(format!("ouro-dry-{}", self.request.operation))
     }
 
     /// The private host key stores this operation trusts against, in the order OpenSSH
@@ -354,6 +370,16 @@ impl Engine {
             scratch,
         )? {
             Trust::Known { fingerprint, .. } => Ok(fingerprint),
+            Trust::Revoked {
+                algorithm,
+                fingerprint,
+            } => refuse(
+                "host_key_revoked",
+                format!(
+                    "{} presents a {algorithm} host key this deployment host has revoked ({fingerprint}). A revocation is the strongest statement a known_hosts file makes; nothing was sent",
+                    destination.address
+                ),
+            ),
             Trust::Changed { presented, .. } => refuse(
                 "host_key_changed",
                 format!(
@@ -382,10 +408,17 @@ impl Engine {
                 match answer {
                     Answer::Trust(true) => {
                         trust::accept(&store, key)?;
-                        self.note(format!(
-                            "recorded trust for {} {}",
-                            destination.address, key.fingerprint
-                        ));
+                        self.note(if self.request.dry_run {
+                            format!(
+                                "trusting {} {} for this run only; a dry run records nothing",
+                                destination.address, key.fingerprint
+                            )
+                        } else {
+                            format!(
+                                "recorded trust for {} {}",
+                                destination.address, key.fingerprint
+                            )
+                        });
                         Ok(key.fingerprint.clone())
                     }
                     _ => refuse(
@@ -510,8 +543,7 @@ impl Engine {
             OperationKind::Setup => self.plan_setup()?,
             OperationKind::Leave => self.plan_leave()?.0,
         };
-        let _ =
-            std::fs::remove_dir_all(super::scratch_dir(&self.data_dir, &self.request.operation));
+        let _ = std::fs::remove_dir_all(self.dry_run_scratch());
         Ok(Outcome {
             operation: self.request.operation.clone(),
             state: OperationState::AwaitingReview,
@@ -598,16 +630,7 @@ impl Engine {
         let members: Vec<PlanMember> = profile
             .members
             .iter()
-            .map(|member| PlanMember {
-                machine: member.machine.clone(),
-                host: member.host.clone(),
-                reached_by: if member.machine == profile.machine {
-                    "local".to_string()
-                } else {
-                    "ssh".to_string()
-                },
-                change: format!("add {machine}"),
-            })
+            .map(|member| self.plan_member(&profile, member, &format!("add {machine}")))
             .collect();
 
         let plan = Plan {
@@ -669,16 +692,59 @@ impl Engine {
     /// patterns the remote bootstrap script uses. An absolute path names an existing
     /// installation the operator chose; it is used and never written to.
     fn remote_executable(&self, preflight: &super::bootstrap::Preflight) -> Result<String> {
-        let requested = self
-            .request
-            .install_path
-            .clone()
-            .unwrap_or_else(|| super::bootstrap::DEFAULT_INSTALL_PATH.to_string());
-        if requested.starts_with('/') {
-            return Ok(requested);
+        self.remote_executable_for(&self.request.machine, preflight)
+    }
+
+    /// The same, for a named machine, preferring what this machine wrote down when it
+    /// admitted that one.
+    ///
+    /// A member was installed at a path this operator chose, and that path is in the
+    /// journal of the operation that admitted it. Falling straight through to
+    /// `$HOME/.local/bin/ouro` meant a later `leave` ran whatever `ouro` the login
+    /// shell's PATH happened to find — which on a machine deployed to a custom path is a
+    /// different, older installation that does not speak this protocol at all.
+    fn remote_executable_for(
+        &self,
+        machine: &str,
+        preflight: &super::bootstrap::Preflight,
+    ) -> Result<String> {
+        // An explicit request always wins: it is what the operator just typed.
+        if let Some(requested) = self.request.install_path.clone() {
+            if requested.starts_with('/') {
+                return Ok(requested);
+            }
+            super::bootstrap::validate_install_path(&requested)?;
+            return Ok(preflight.install_path(&requested));
         }
-        super::bootstrap::validate_install_path(&requested)?;
-        Ok(preflight.install_path(&requested))
+        if let Some(recorded) = self.recorded_executable(machine) {
+            return Ok(recorded);
+        }
+        Ok(preflight.install_path(super::bootstrap::DEFAULT_INSTALL_PATH))
+    }
+
+    /// Where this machine's own journals say `ouro` was installed on `machine`.
+    ///
+    /// Only an operation that *completed* counts: a half-finished admission's intended
+    /// path is an intention, not an installation.
+    fn recorded_executable(&self, machine: &str) -> Option<String> {
+        let mut found = None;
+        for operation in Journal::list(&self.data_dir).ok()? {
+            let Ok(Some(record)) = Journal::read(&self.data_dir, &operation) else {
+                continue;
+            };
+            if record.kind != OperationKind::Add
+                || record.state != OperationState::Completed
+                || record.target.as_ref().map(|target| target.machine.as_str()) != Some(machine)
+            {
+                continue;
+            }
+            if let Some(path) = record.paths.install_path.clone() {
+                // Journals are listed in id order, so a later admission of the same name
+                // — a machine removed and added again — wins.
+                found = Some(path);
+            }
+        }
+        found
     }
 
     /// Whether a usable `ouro` is already at the selected path. A non-default install
@@ -724,8 +790,12 @@ impl Engine {
                 sha256: release.sha256.clone(),
             })?;
         }
-        self.bind_plan(journal, &plan)?;
+        // The roster first. Its members are part of the plan, so a moved roster also
+        // changes the digest — and `plan_changed` is the vaguer answer to a question
+        // this machine can answer precisely: the roster moved, re-run so the change is
+        // reconciled rather than overwritten.
         self.ensure_roster_unchanged(journal, &prepared.profile)?;
+        self.bind_plan(journal, &plan)?;
 
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
@@ -1160,7 +1230,8 @@ impl Engine {
                     super::bootstrap::validate_install_path(path)?;
                     preflight.install_path(path)
                 }
-                None => self.remote_executable(&preflight)?,
+                // Each member's own admission record, not the target's path.
+                None => self.remote_executable_for(&member.machine, &preflight)?,
             };
             let mut session =
                 helper::Session::open(&connection.runner, &executable, access.data_dir.as_deref())
@@ -1332,6 +1403,35 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// One row of the plan's member table, naming how this operation will reach it.
+    fn plan_member(
+        &self,
+        profile: &fleet::Profile,
+        member: &fleet::Member,
+        change: &str,
+    ) -> PlanMember {
+        let local = member.machine == profile.machine;
+        let access = self.request.members.get(&member.machine).cloned();
+        PlanMember {
+            machine: member.machine.clone(),
+            host: member.host.clone(),
+            reached_by: if local { "local".into() } else { "ssh".into() },
+            change: change.to_string(),
+            ssh: (!local).then(|| {
+                let access = access.unwrap_or_default();
+                format!(
+                    "{}@{} port {}",
+                    access
+                        .ssh_user
+                        .or_else(|| self.request.ssh_user.clone())
+                        .unwrap_or_else(|| "<account not given>".into()),
+                    member.host,
+                    access.ssh_port.or(self.request.ssh_port).unwrap_or(22)
+                )
+            }),
+        }
     }
 
     /// The operation id the issuer's own roster edit is receipted under. See
@@ -1615,6 +1715,7 @@ impl Engine {
                 host: parsed.to_string(),
                 reached_by: "local".into(),
                 change: "create this fleet".into(),
+                ssh: None,
             }],
             restart,
             grants: vec![admission_grant()],
@@ -1667,12 +1768,18 @@ impl Engine {
             self.notify_state(OperationState::RestartingHost);
             journal.set_state(OperationState::RestartingHost)?;
             let stopped = gateway::stop_require_idle(&self.data_dir, &self.token_file)?;
+            let outcome = match stopped {
+                gateway::StopOutcome::NotRunning => "skipped",
+                _ => "ok",
+            };
             journal.finish_step(
                 &machine,
                 "stop_runtime",
-                "ok",
+                outcome,
                 Some(match stopped {
-                    gateway::StopOutcome::NotRunning => "no runtime was running".to_string(),
+                    gateway::StopOutcome::NotRunning => {
+                        "no runtime was running here, so there was nothing to stop".to_string()
+                    }
                     gateway::StopOutcome::RemovedStale { pid } => {
                         format!("removed a stale publication for pid {pid}")
                     }
@@ -1682,7 +1789,7 @@ impl Engine {
                 }),
                 None,
             )?;
-            self.step_event(&machine, "stop_runtime", "ok", None);
+            self.step_event(&machine, "stop_runtime", outcome, None);
         }
 
         journal.set_state(OperationState::Deploying)?;
@@ -1774,6 +1881,23 @@ impl Engine {
                 "`ouro fleet leave --machine` takes another machine's name. To retire this one, stop its runtime and run `ouro fleet leave`",
             );
         }
+        // Refused *before* the plan is shown. Discovering it in `deploying` cost an
+        // operator a review they had already approved, and recorded a failed operation.
+        if self
+            .request
+            .ssh_user
+            .as_deref()
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .is_none()
+        {
+            return refuse(
+                "ssh_user_required",
+                format!(
+                    "removing {machine} from here connects to it over SSH, and that needs its account name: `ouro fleet leave --machine {machine} --user <account>`"
+                ),
+            );
+        }
         let Some(member) = profile
             .members
             .iter()
@@ -1786,21 +1910,29 @@ impl Engine {
             );
         };
 
-        let members: Vec<PlanMember> = profile
+        let mut members: Vec<PlanMember> = profile
             .members
             .iter()
             .filter(|entry| entry.machine != machine)
-            .map(|entry| PlanMember {
-                machine: entry.machine.clone(),
-                host: entry.host.clone(),
-                reached_by: if entry.machine == profile.machine {
-                    "local".into()
-                } else {
-                    "ssh".into()
-                },
-                change: format!("remove {machine}"),
-            })
+            .map(|entry| self.plan_member(&profile, entry, &format!("remove {machine}")))
             .collect();
+        // The member being removed is contacted too, and is not in that list: the
+        // review has to name every machine this operation will authenticate to.
+        members.insert(
+            0,
+            PlanMember {
+                machine: machine.clone(),
+                host: member.host.clone(),
+                reached_by: "ssh".into(),
+                change: "stop, retire credentials, leave".into(),
+                ssh: Some(format!(
+                    "{}@{} port {}",
+                    self.request.ssh_user.clone().unwrap_or_default(),
+                    member.host,
+                    self.request.ssh_port.unwrap_or(22)
+                )),
+            },
+        );
 
         let plan = Plan {
             schema: super::SCHEMA,
@@ -1844,8 +1976,8 @@ impl Engine {
         if journal.record().roster.is_none() {
             journal.set_roster(self.roster_snapshot(&profile))?;
         }
-        self.bind_plan(journal, &plan)?;
         self.ensure_roster_unchanged(journal, &profile)?;
+        self.bind_plan(journal, &plan)?;
 
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;

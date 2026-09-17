@@ -130,7 +130,7 @@ fn trust_now(rig: &Sshd, store: &Path, scratch: &Path) -> String {
             key.fingerprint
         }
         Trust::Known { fingerprint, .. } => fingerprint,
-        Trust::Changed { .. } => panic!("a fresh store cannot hold a different key"),
+        other => panic!("a fresh store cannot hold anything else: {other:?}"),
     }
 }
 

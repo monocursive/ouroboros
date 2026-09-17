@@ -58,6 +58,13 @@ pub struct ScannedKey {
 /// What the stores say about this destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Trust {
+    /// A store marks one of the keys this destination presented `@revoked`. The
+    /// strongest statement a `known_hosts` file can make about a key, and the one that
+    /// must never be read as trust.
+    Revoked {
+        algorithm: String,
+        fingerprint: String,
+    },
     /// A store already holds one of the keys this destination presented.
     Known {
         algorithm: String,
@@ -108,24 +115,53 @@ pub fn examine(
     for store in stores {
         stored.extend(stored_entries(tools, store, &spec)?);
     }
+    Ok(decide(stored, presented))
+}
+
+/// What a set of stored entries says about the keys a destination presented.
+///
+/// Split out so the decision can be tested without a server: it is the whole of what
+/// "does this machine trust this host?" means.
+fn decide(stored: Vec<StoredEntry>, presented: Vec<ScannedKey>) -> Trust {
+    // Revocation is checked first and against every presented key: a store that both
+    // trusts and revokes a key has revoked it.
+    for key in &presented {
+        if stored.iter().any(|entry| {
+            entry.marker.as_deref() == Some("@revoked")
+                && entry.algorithm == key.algorithm
+                && entry.key == key.key
+        }) {
+            return Trust::Revoked {
+                algorithm: key.algorithm.clone(),
+                fingerprint: key.fingerprint.clone(),
+            };
+        }
+    }
+    // `@cert-authority` names a CA that may *sign* host keys; it is not itself a key
+    // this destination could present, and reading it as one would call an unknown host
+    // known.
+    let stored: Vec<StoredEntry> = stored
+        .into_iter()
+        .filter(|entry| entry.marker.is_none())
+        .collect();
     if stored.is_empty() {
-        return Ok(Trust::Unknown { keys: presented });
+        return Trust::Unknown { keys: presented };
     }
     for key in &presented {
         if stored
             .iter()
             .any(|entry| entry.algorithm == key.algorithm && entry.key == key.key)
         {
-            return Ok(Trust::Known {
+            return Trust::Known {
                 algorithm: key.algorithm.clone(),
                 fingerprint: key.fingerprint.clone(),
-            });
+            };
         }
     }
-    Ok(Trust::Changed {
+    Trust::Changed {
         stored: stored.into_iter().map(|entry| entry.algorithm).collect(),
         presented,
-    })
+    }
 }
 
 /// Append an accepted key to the private store, creating it at 0600.
@@ -153,9 +189,13 @@ pub fn accept(store: &Path, key: &ScannedKey) -> Result<()> {
         .with_context(|| format!("flushing {}", store.display()))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredEntry {
     algorithm: String,
     key: String,
+    /// `@revoked` or `@cert-authority`, when the line carried one. Stripping it and
+    /// reading the rest as an ordinary entry turns a revocation into trust.
+    marker: Option<String>,
 }
 
 /// `ssh-keygen -F <spec> -f <store>` prints the matching entries, and understands a
@@ -211,8 +251,13 @@ fn parse_known_hosts_line(line: &str) -> Option<StoredEntry> {
     }
     let mut fields = line.split_whitespace().peekable();
     // A marker line (`@cert-authority`, `@revoked`) puts one extra field in front of
-    // the host patterns, shifting everything after it by one.
-    if fields.peek().is_some_and(|first| first.starts_with('@')) {
+    // the host patterns, shifting everything after it by one. It is *kept*: what the
+    // marker says is the whole meaning of the line.
+    let marker = fields
+        .peek()
+        .filter(|first| first.starts_with('@'))
+        .map(|first| first.to_ascii_lowercase());
+    if marker.is_some() {
         fields.next();
     }
     let _hosts = fields.next()?;
@@ -221,6 +266,7 @@ fn parse_known_hosts_line(line: &str) -> Option<StoredEntry> {
     Some(StoredEntry {
         algorithm: algorithm.to_string(),
         key: key.to_string(),
+        marker,
     })
 }
 
@@ -325,9 +371,75 @@ mod tests {
         assert_eq!(hashed.algorithm, "ssh-rsa");
         assert_eq!(hashed.key, "AAAAB3blob");
 
-        let marked =
+        // The marker is the meaning of the line, so it is carried rather than stripped.
+        let revoked =
             parse_known_hosts_line("@revoked host ssh-ed25519 AAAAC3blob").expect("a marker entry");
-        assert_eq!(marked.algorithm, "ssh-ed25519");
-        assert_eq!(marked.key, "AAAAC3blob");
+        assert_eq!(revoked.algorithm, "ssh-ed25519");
+        assert_eq!(revoked.key, "AAAAC3blob");
+        assert_eq!(revoked.marker.as_deref(), Some("@revoked"));
+
+        let authority =
+            parse_known_hosts_line("@cert-authority * ssh-rsa AAAAB3ca").expect("a CA entry");
+        assert_eq!(authority.marker.as_deref(), Some("@cert-authority"));
+    }
+
+    /// A revoked key is not a trusted key, and a CA entry is not a host key. Both read
+    /// as trust while the marker was stripped and forgotten.
+    #[test]
+    fn a_marker_decides_what_a_stored_entry_means() {
+        let presented = vec![ScannedKey {
+            algorithm: "ssh-ed25519".into(),
+            key: "AAAAC3blob".into(),
+            line: "[127.0.0.1]:22 ssh-ed25519 AAAAC3blob".into(),
+            fingerprint: "SHA256:abc".into(),
+        }];
+        let entry = |algorithm: &str, key: &str, marker: Option<&str>| StoredEntry {
+            algorithm: algorithm.into(),
+            key: key.into(),
+            marker: marker.map(str::to_string),
+        };
+
+        assert!(matches!(
+            decide(
+                vec![entry("ssh-ed25519", "AAAAC3blob", Some("@revoked"))],
+                presented.clone()
+            ),
+            Trust::Revoked { .. }
+        ));
+        assert!(
+            matches!(
+                decide(
+                    vec![entry("ssh-ed25519", "AAAAC3blob", Some("@cert-authority"))],
+                    presented.clone()
+                ),
+                Trust::Unknown { .. }
+            ),
+            "a CA entry says nothing about this host's own key"
+        );
+        // Both at once: revoked wins.
+        assert!(matches!(
+            decide(
+                vec![
+                    entry("ssh-ed25519", "AAAAC3blob", None),
+                    entry("ssh-ed25519", "AAAAC3blob", Some("@revoked")),
+                ],
+                presented.clone()
+            ),
+            Trust::Revoked { .. }
+        ));
+        assert!(matches!(
+            decide(
+                vec![entry("ssh-ed25519", "AAAAC3blob", None)],
+                presented.clone()
+            ),
+            Trust::Known { .. }
+        ));
+        assert!(
+            matches!(
+                decide(vec![entry("ssh-rsa", "AAAAB3other", None)], presented),
+                Trust::Changed { .. }
+            ),
+            "a different key of a different type is a changed host, not an unknown one"
+        );
     }
 }

@@ -138,11 +138,13 @@ ouro fleet setup --machine studio
 #    device's owner.
 ouro fleet add me@100.64.0.2 --machine buildbox
 
-# See exactly what it would do, and change nothing — no journal, no credentials, no
-# installation, no roster edit, and no recorded host trust:
+# See exactly what it would do, and change nothing — not the data directory, not a
+# journal, not a credential, not a roster, and not a recorded host key:
 ouro fleet add me@100.64.0.2 --machine buildbox --dry-run
 
-# Take a reachable member out of the fleet again, from here:
+# Take a reachable member out of the fleet again, from here. `--user` is required: the
+# member is reached over SSH and the account is never inferred. Its `ouro` is found from
+# this machine's record of admitting it, and `--remote-executable` overrides that.
 ouro fleet leave --machine buildbox --user me
 ```
 
@@ -167,10 +169,17 @@ command line is readable by every process on the host:
 
 An unknown host key is always a separate explicit question showing its algorithm and
 SHA256 fingerprint; `--yes` accepts a reviewed plan but never a host key, never a
-password, and never a busy runtime. A changed host key blocks. Without a terminal, every
-one of those questions is a refusal with a stable reason rather than a prompt nobody will
-see, so noninteractive use needs pre-established host trust and key or agent
-authentication.
+password, and never a busy runtime. A changed host key blocks, and a key this machine has
+marked `@revoked` blocks under its own name. Without a terminal, every one of those
+questions is a refusal with a stable reason rather than a prompt nobody will see, so
+noninteractive use needs pre-established host trust and key or agent authentication.
+
+Every invocation also pins the options that decide *what a host key means* and *who signs
+for a connection* — `KnownHostsCommand`, `GlobalKnownHostsFile`, `RevokedHostKeys`,
+`CertificateFile`, `PKCS11Provider` and `IdentityAgent` — because each of them is settable
+in `~/.ssh/config` and each can supply host keys or signatures from somewhere this
+operation did not choose. If `ssh -G` reports any of them still in force, the connection
+is refused rather than made.
 
 `--json` prints the operation's result with stable reason codes; incomplete setup exits
 non-zero even when some steps succeeded.

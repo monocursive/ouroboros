@@ -70,6 +70,8 @@ pub struct LeaveArgs {
     pub key: Option<PathBuf>,
     pub agent: Option<String>,
     pub ask_password: bool,
+    /// An explicit override for where `ouro` lives on that member.
+    pub remote_executable: Option<String>,
     pub common: CommonArgs,
 }
 
@@ -268,6 +270,7 @@ pub async fn leave_machine(paths: &Paths, args: LeaveArgs) -> Result<()> {
     request.ssh_user = args.user.clone();
     request.ssh_port = args.port;
     request.identity = identity_choice(&args.key, &args.agent, args.ask_password)?;
+    request.install_path = args.remote_executable.clone();
     request.dry_run = args.common.dry_run;
     request.assume_yes = args.common.yes;
     // The member's address comes from this machine's roster, which the engine reads.

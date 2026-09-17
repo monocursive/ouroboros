@@ -167,6 +167,49 @@ fn number(metadata: &Value, field: &str) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+/// SIGINT and SIGTERM held back for the length of a masked prompt, and restored — and
+/// therefore delivered — when this is dropped.
+struct BlockedSignals {
+    previous: libc::sigset_t,
+    blocked: bool,
+}
+
+impl BlockedSignals {
+    fn around_prompt() -> Self {
+        // SAFETY: every pointer names initialized local storage, and `sigprocmask` on a
+        // set this thread owns touches nothing else.
+        unsafe {
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            let mut previous: libc::sigset_t = std::mem::zeroed();
+            if libc::sigemptyset(&mut mask) != 0
+                || libc::sigaddset(&mut mask, libc::SIGINT) != 0
+                || libc::sigaddset(&mut mask, libc::SIGTERM) != 0
+                || libc::sigprocmask(libc::SIG_BLOCK, &mask, &mut previous) != 0
+            {
+                return Self {
+                    previous,
+                    blocked: false,
+                };
+            }
+            Self {
+                previous,
+                blocked: true,
+            }
+        }
+    }
+}
+
+impl Drop for BlockedSignals {
+    fn drop(&mut self) {
+        if self.blocked {
+            // SAFETY: `previous` is the mask this thread had before, captured above.
+            unsafe {
+                libc::sigprocmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
 /// Whether there is a person on the other side of stdin.
 pub fn interactive() -> bool {
     // SAFETY: `isatty` reads only the descriptor number it is given.
@@ -221,6 +264,13 @@ pub fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
     if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &quiet) } != 0 {
         return Err(std::io::Error::last_os_error()).context("turning off terminal echo");
     }
+
+    // Ctrl-C at a masked prompt used to leave the terminal with echo off: the default
+    // SIGINT disposition kills this process before anything restores `termios`, and the
+    // operator's shell inherits an invisible one. Blocking the two signals across the
+    // read means they are *delivered* after the terminal is put back — the prompt is a
+    // few hundred microseconds of work, and the signal is not lost.
+    let _blocked = BlockedSignals::around_prompt();
 
     let mut out = std::io::stderr();
     let _ = write!(out, "{prompt}");

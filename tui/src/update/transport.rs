@@ -19,6 +19,11 @@ pub(crate) struct Curl {
     /// (see [`super::release::Origin`]). Production is `https` and nothing else; the
     /// checksum check is unchanged either way.
     pub allow_http: bool,
+    /// How many redirects to follow. The updater's own origin is the official release
+    /// host and follows the few GitHub emits; a harness origin follows none, because
+    /// "loopback" would otherwise constrain the first hop only and a redirector could
+    /// serve both the artifact *and* the checksums that certify it from anywhere.
+    pub max_redirects: u32,
 }
 
 impl Default for Curl {
@@ -27,6 +32,7 @@ impl Default for Curl {
             program: "curl".into(),
             timeout: Duration::from_secs(600),
             allow_http: false,
+            max_redirects: 5,
         }
     }
 }
@@ -34,6 +40,7 @@ impl Default for Curl {
 impl Curl {
     fn command(&self, url: &str, head: bool) -> Command {
         let mut command = Command::new(&self.program);
+        let redirects = self.max_redirects.to_string();
         command.args([
             "--disable",
             "--fail",
@@ -54,7 +61,7 @@ impl Curl {
             },
             "--tlsv1.2",
             "--max-redirs",
-            "5",
+            &redirects,
             "--connect-timeout",
             "15",
             "--max-time",

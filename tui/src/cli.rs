@@ -1703,12 +1703,19 @@ pub enum FleetCommand {
     Leave {
         /// The member to take out of the fleet from here. Omitted, this machine's own
         /// credentials are removed after its runtime is stopped, as before.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", requires = "user")]
         machine: Option<String>,
 
-        /// The SSH account on that member. Required with `--machine`.
+        /// The SSH account on that member. Required with `--machine`, and enforced
+        /// here: discovering it is missing after the plan has been approved wastes the
+        /// operator's review and leaves an operation recorded as failed.
         #[arg(long, value_name = "USER", requires = "machine")]
         user: Option<String>,
+
+        /// Where `ouro` lives on that member, when it is not where this machine's
+        /// record of its admission says. Normally unnecessary.
+        #[arg(long, value_name = "PATH", requires = "machine")]
+        remote_executable: Option<String>,
 
         /// That member's SSH port. Default 22.
         #[arg(long, value_name = "PORT", requires = "machine")]
@@ -3109,6 +3116,13 @@ mod tests {
         assert!(
             Cli::try_parse_from(["ouro", "fleet", "leave", "--user", "me"]).is_err(),
             "an SSH account without a machine names nothing to reach"
+        );
+        // And the other way round: a member is reached over SSH, and the account is
+        // never inferred. Finding that out after the plan was approved is what the live
+        // run did.
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "leave", "--machine", "buildbox"]).is_err(),
+            "a cooperative removal without an SSH account is refused at parse time"
         );
     }
 }

@@ -34,10 +34,23 @@ use super::{refuse, ChallengeRequest, Conversation, Event, OperationRequest, Ope
 /// file is — so an environment variable is the right place for it.
 pub const INSTANCE_ENV: &str = "OUROBOROS_DEPLOY_INSTANCE";
 
-/// How long `start` waits for the child to listen before reporting a failure.
+/// How long `start` waits for the child to answer before reporting a failure.
 const LISTEN_DEADLINE: Duration = Duration::from_secs(20);
+/// How long one readiness probe may take. It is a round trip over a local socket.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a finished worker stays reachable so an attached client can read the result.
 const DONE_LINGER: Duration = Duration::from_secs(60);
+/// How long one broadcast may take to reach one client before that client is dropped.
+const BROADCAST_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// What `sockaddr_un` will hold, with room for the platform's own accounting.
+const MAX_SOCKET_PATH: usize = 100;
+/// A worker nobody attaches to in this long exits and cleans up.
+///
+/// The broker cannot cancel a worker whose capability file it refused to read — reading
+/// it is what would disclose the capability — so a worker that is never attached to has
+/// to bound its own life. The fifteen-minute abandonment timeout is for a worker that
+/// *was* attached and then was not; this is for one that never was.
+pub const ATTACH_DEADLINE: Duration = Duration::from_secs(60);
 
 /// What `ouro fleet worker start` prints.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,19 +121,31 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
+            // Everything above stdio, closed. A worker started from inside the BEAM
+            // inherits whatever descriptors that process left without CLOEXEC — sockets,
+            // journals, a half-written file — and holds them for the life of an
+            // operation that outlives its spawner on purpose. There is no `closefrom` on
+            // macOS, so this is the loop.
+            let highest = libc::getdtablesize();
+            for descriptor in 3..highest {
+                libc::close(descriptor);
+            }
             Ok(())
         });
     }
     let mut child = command.spawn().context("starting the deployment worker")?;
 
+    let log = super::log_path(data_dir, operation);
     let deadline = Instant::now() + LISTEN_DEADLINE;
     loop {
-        if socket
-            .try_exists()
-            .with_context(|| format!("waiting for {}", socket.display()))?
-        {
-            // The child has read its request and is listening; the document has served
-            // its purpose and does not outlive the handoff.
+        // Readiness is a round trip, not a path. `UnixListener::bind` creates the socket
+        // file and then calls `listen`, so the path exists for a moment during which a
+        // connect is refused — and a broker that connects once in that moment gives up
+        // on a worker that is about to be perfectly fine. This asks the worker a
+        // question and waits for its answer.
+        if answers(&socket) {
+            // The child has read its request and is serving; the document has served its
+            // purpose and does not outlive the handoff.
             OperationRequest::consume(data_dir, operation)?;
             return Ok(Started { socket, instance });
         }
@@ -128,8 +153,9 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
             return refuse(
                 "worker_failed",
                 format!(
-                    "the deployment worker exited before it listened ({status}); its log is {}",
-                    super::log_path(data_dir, operation).display()
+                    "the deployment worker exited before it was serving ({status}); its log is {}{}",
+                    log.display(),
+                    log_tail(&log)
                 ),
             );
         }
@@ -137,13 +163,73 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
             return refuse(
                 "worker_failed",
                 format!(
-                    "the deployment worker did not listen within {} seconds; its log is {}",
+                    "the deployment worker did not answer within {} seconds; its log is {}{}",
                     LISTEN_DEADLINE.as_secs(),
-                    super::log_path(data_dir, operation).display()
+                    log.display(),
+                    log_tail(&log)
                 ),
             );
         }
         std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Ask the worker one question and see whether it answers.
+///
+/// Deliberately a frame the worker refuses: seam S3's first frame is always `attach`, so
+/// `status` comes back `not_attached` — which is a *complete* round trip through the
+/// accept loop, the uid check and the frame reader, and therefore the only honest answer
+/// to "is it serving yet?".
+fn answers(socket: &Path) -> bool {
+    let Ok(stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(PROBE_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(PROBE_TIMEOUT)).is_err()
+    {
+        return false;
+    }
+    let mut writer = match stream.try_clone() {
+        Ok(writer) => writer,
+        Err(_) => return false,
+    };
+    if writeln!(writer, "{}", json!({"v": 1, "id": "probe", "op": "status"}))
+        .and_then(|()| writer.flush())
+        .is_err()
+    {
+        return false;
+    }
+    let mut line = String::new();
+    if BufReader::new(stream).read_line(&mut line).unwrap_or(0) == 0 {
+        return false;
+    }
+    serde_json::from_str::<Value>(line.trim())
+        .ok()
+        .and_then(|frame| {
+            frame
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|reason| reason == "not_attached")
+        })
+        .unwrap_or(false)
+}
+
+/// The end of the worker's own log, for a failure an operator would otherwise have to go
+/// and read a file to understand.
+fn log_tail(path: &Path) -> String {
+    const TAIL: usize = 600;
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut start = text.len().saturating_sub(TAIL);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = super::sanitize_remote_text(&text[start..], TAIL);
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" and ends: {tail}")
     }
 }
 
@@ -171,6 +257,10 @@ struct Shared {
     subscribers: Mutex<Vec<Subscriber>>,
     last_activity: Mutex<Instant>,
     cancelled: AtomicBool,
+    /// Whether any client has ever completed an `attach`. A bare connection is not one:
+    /// the parent's own readiness probe connects, asks one question and leaves, and that
+    /// must not count as somebody taking charge of the operation.
+    attached_ever: AtomicBool,
     finished: Mutex<Option<Value>>,
 }
 
@@ -209,16 +299,61 @@ impl Shared {
             .map(|subscriber| subscriber.binding.clone())
     }
 
+    /// Send one event to every attached client.
+    ///
+    /// The writes happen *outside* the subscribers lock and against a write deadline.
+    /// Holding the lock across a blocking `write_all` meant one attached client that
+    /// stopped reading wedged the engine thread the first time it reported progress —
+    /// and every `status`, `respond` and `attach` behind it. A client that cannot keep
+    /// up is dropped; the journal is the durable record it can come back to.
     fn broadcast(&self, event: Value) {
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|p| p.into_inner());
         let line = format!("{event}\n");
-        subscribers.retain_mut(|subscriber| {
-            subscriber
-                .writer
+        let targets: Vec<(u64, UnixStream)> = {
+            let subscribers = self.subscribers.lock().unwrap_or_else(|p| p.into_inner());
+            subscribers
+                .iter()
+                .filter_map(|subscriber| {
+                    subscriber
+                        .writer
+                        .try_clone()
+                        .ok()
+                        .map(|writer| (subscriber.id, writer))
+                })
+                .collect()
+        };
+        let mut wedged = Vec::new();
+        for (id, mut writer) in targets {
+            let _ = writer.set_write_timeout(Some(BROADCAST_WRITE_TIMEOUT));
+            if writer
                 .write_all(line.as_bytes())
-                .and_then(|()| subscriber.writer.flush())
-                .is_ok()
+                .and_then(|()| writer.flush())
+                .is_err()
+            {
+                wedged.push(id);
+            }
+        }
+        if !wedged.is_empty() {
+            let mut subscribers = self.subscribers.lock().unwrap_or_else(|p| p.into_inner());
+            subscribers.retain(|subscriber| !wedged.contains(&subscriber.id));
+        }
+    }
+
+    /// Drop every subscriber whose subject is not this one, closing their sockets.
+    ///
+    /// Used by `takeover`: recording the handover and leaving the previous owner
+    /// attached left them reading every event — including the metadata of challenges
+    /// issued to their successor — and able to cancel the operation.
+    fn evict_other_subjects(&self, owner: &str) -> usize {
+        let mut subscribers = self.subscribers.lock().unwrap_or_else(|p| p.into_inner());
+        let before = subscribers.len();
+        subscribers.retain(|subscriber| {
+            if subscriber.binding.subject == owner {
+                return true;
+            }
+            let _ = subscriber.writer.shutdown(std::net::Shutdown::Both);
+            false
         });
+        before - subscribers.len()
     }
 
     fn status(&self) -> Value {
@@ -316,6 +451,20 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
     super::write_private_atomic(&capability_path, capability.as_bytes())?;
 
     let socket_path = super::socket_path(&data_dir, operation);
+    // Named before it is attempted: `sockaddr_un` caps a path at about a hundred bytes,
+    // and a data directory plus a 64-character operation id passes that. Failing here
+    // says which path and why; failing at `bind` left the caller with "the worker exited
+    // before it listened" and a log file to go and read.
+    if socket_path.as_os_str().len() > MAX_SOCKET_PATH {
+        return refuse(
+            "socket_path_too_long",
+            format!(
+                "{} is {} bytes and a Unix socket path cannot exceed about {MAX_SOCKET_PATH}. Use a shorter data directory or a shorter operation id",
+                socket_path.display(),
+                socket_path.as_os_str().len()
+            ),
+        );
+    }
     let _ = std::fs::remove_file(&socket_path);
     // Created private and *stays* private: the umask closes the window between `bind`
     // and `set_permissions` in which a socket would otherwise exist at 0777 & ~umask,
@@ -347,6 +496,7 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
         subscribers: Mutex::new(Vec::new()),
         last_activity: Mutex::new(Instant::now()),
         cancelled: AtomicBool::new(false),
+        attached_ever: AtomicBool::new(false),
         finished: Mutex::new(None),
     });
 
@@ -393,6 +543,8 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
 
     let mut next_subscriber = 0_u64;
     let mut done_at: Option<Instant> = None;
+    let started_at = Instant::now();
+    let mut never_attached = false;
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -423,6 +575,16 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
             if shared.attached() == 0 || at.elapsed() >= DONE_LINGER {
                 break;
             }
+        } else if !shared.attached_ever.load(Ordering::SeqCst)
+            && started_at.elapsed() >= ATTACH_DEADLINE
+        {
+            // Nobody ever came. Stop the engine and let it unwind; the journal is
+            // written after it has, so its own "the challenge expired" does not
+            // overwrite the reason that actually matters.
+            never_attached = true;
+            shared.cancelled.store(true, Ordering::SeqCst);
+            shared.registry.invalidate_all();
+            break;
         } else {
             let idle = shared
                 .last_activity
@@ -442,8 +604,21 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
 
     shared.registry.invalidate_all();
     let result = engine_thread.join();
+    if never_attached {
+        let _ = shared.journal.fail(
+            OperationState::Interrupted,
+            format!(
+                "never_attached: no client attached within {} seconds of this worker starting",
+                ATTACH_DEADLINE.as_secs()
+            ),
+        );
+    }
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&capability_path);
+    // A worker that exits without its parent having consumed the request — the
+    // never-attached case, or a crash between `bind` and the socket line — takes the
+    // document describing the target with it.
+    let _ = OperationRequest::consume(&data_dir, operation);
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error),
@@ -494,7 +669,7 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
     // Seam S3: the peer must be this same account. A capability file is a secret; the
     // uid check is the boundary that makes it one.
     let peer = peer_uid(&stream)?;
-    if peer != unsafe { libc::geteuid() } {
+    if !super::askpass::same_account(peer) {
         let _ = write_reply(
             &mut writer,
             &Value::Null,
@@ -591,6 +766,18 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
                 // carry a secret.
                 let challenge = frame.get("challenge").and_then(Value::as_str).unwrap_or("");
                 let response = frame.get("response").cloned().unwrap_or(Value::Null);
+                if !owns(&shared, id) {
+                    let _ = write_reply(
+                        &mut writer,
+                        &id_value,
+                        false,
+                        json!({
+                            "reason": "not_owner",
+                            "detail": "this operation belongs to another subject now",
+                        }),
+                    );
+                    continue;
+                }
                 let binding = subscriber_binding(&shared, id);
                 match shared
                     .registry
@@ -613,6 +800,20 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
                 }
             }
             "cancel" => {
+                // Only the operation's current owner may stop it. A session that has
+                // been taken over keeps neither its challenges nor this.
+                if !owns(&shared, id) {
+                    let _ = write_reply(
+                        &mut writer,
+                        &id_value,
+                        false,
+                        json!({
+                            "reason": "not_owner",
+                            "detail": "this operation belongs to another subject now",
+                        }),
+                    );
+                    continue;
+                }
                 shared.cancelled.store(true, Ordering::SeqCst);
                 shared.registry.invalidate_all();
                 let _ = write_reply(&mut writer, &id_value, true, json!({"cancelling": true}));
@@ -690,8 +891,11 @@ fn attach(
         Some(existing) if takeover => {
             takeover_step = Some(shared.journal.note_takeover(Some(existing), &subject)?);
             // Whatever the previous owner left pending is theirs no longer, and no
-            // unconsumed secret of theirs survives the handover.
+            // unconsumed secret of theirs survives the handover — and neither does their
+            // connection: a session that kept reading would see every challenge issued
+            // to its successor.
             shared.registry.invalidate_all();
+            shared.evict_other_subjects(&subject);
         }
         Some(existing) => {
             return refuse(
@@ -704,6 +908,7 @@ fn attach(
         }
     }
 
+    shared.attached_ever.store(true, Ordering::SeqCst);
     let binding = Binding { subject, session };
     shared
         .subscribers
@@ -741,6 +946,25 @@ fn detach(shared: &Arc<Shared>, id: u64) {
         // unconsumed secret. The step then waits for a fresh one.
         drop(subscribers);
         shared.registry.invalidate_all();
+    }
+}
+
+/// Whether this connection speaks for the operation's current owner.
+///
+/// The second of two gates, and the one no ordinary sequence of frames reaches: a
+/// takeover evicts every other subject before this is ever consulted, and a client of
+/// another subject cannot attach without taking over. It is here for the case eviction
+/// cannot cover — `shutdown` on a socket can fail, and then the old session is off the
+/// subscriber list but still connected, which is exactly when "who owns this operation"
+/// has to be asked again rather than assumed. Mutating it away therefore survives the
+/// suite; that is a statement about reachability, not about whether it should be here.
+fn owns(shared: &Arc<Shared>, id: u64) -> bool {
+    match (subscriber_binding(shared, id), shared.journal.owner()) {
+        (Some(binding), Some(owner)) => binding.subject == owner,
+        // An operation with no recorded owner has not been claimed by anyone, so the
+        // attached client is as entitled as any.
+        (Some(_), None) => true,
+        _ => false,
     }
 }
 
@@ -816,5 +1040,55 @@ mod tests {
                 "instance": "ff00"
             })
         );
+    }
+
+    /// Readiness is an answer, not a path.
+    ///
+    /// A socket file exists from the moment `bind` returns — before `listen`, before the
+    /// accept loop, and for as long after a worker dies as nobody unlinks it. Each of
+    /// these is a path that exists and a worker that is not serving.
+    #[test]
+    fn a_socket_that_exists_is_not_a_worker_that_answers() {
+        let dir = std::env::temp_dir().join(format!("o-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+
+        let missing = dir.join("absent.sock");
+        assert!(!answers(&missing), "nothing there answers nothing");
+
+        // A path that exists and is not a socket at all.
+        let regular = dir.join("regular.sock");
+        std::fs::write(&regular, b"not a socket").expect("a written file");
+        assert!(regular.try_exists().unwrap_or(false));
+        assert!(!answers(&regular), "a file is not a listener");
+
+        // Bound, listening, and never accepting: the connect succeeds and the write
+        // lands in the backlog, so only waiting for the reply tells the truth.
+        let deaf = dir.join("deaf.sock");
+        let _listener = UnixListener::bind(&deaf).expect("a bound socket");
+        assert!(deaf.try_exists().unwrap_or(false));
+        assert!(!answers(&deaf), "a listener that never speaks is not ready");
+
+        // And one that answers the way the worker does.
+        let live = dir.join("live.sock");
+        let listener = UnixListener::bind(&live).expect("a bound socket");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("a connection");
+            let mut writer = stream.try_clone().expect("a cloned socket");
+            let mut line = String::new();
+            BufReader::new(stream)
+                .read_line(&mut line)
+                .expect("a probe frame");
+            writeln!(
+                writer,
+                "{}",
+                json!({"v": 1, "id": "probe", "ok": false, "reason": "not_attached"})
+            )
+            .expect("a written reply");
+        });
+        assert!(answers(&live), "the worker's own refusal is the greeting");
+        server.join().expect("the server thread");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

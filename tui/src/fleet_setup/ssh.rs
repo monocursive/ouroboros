@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use super::askpass::Bridge;
+use super::askpass::{Armed, Bridge};
 use super::{refuse, sanitize_remote_text, IdentityChoice};
 
 /// Seam S7's connect bound.
@@ -180,6 +180,41 @@ impl Completed {
     }
 }
 
+/// The options that decide what a host key means and who answers for one, set to their
+/// inert values on every invocation.
+///
+/// `ssh -G` reports each of these, so [`Runner::inspect_effective_config`] can assert
+/// afterwards that what this command line set is what is actually in force.
+pub const NEUTRALIZED_OPTIONS: &[&str] = &[
+    "KnownHostsCommand=none",
+    "GlobalKnownHostsFile=/dev/null",
+    "RevokedHostKeys=none",
+    "CertificateFile=none",
+    "PKCS11Provider=none",
+];
+
+/// The `ssh -G` keys whose effective value this client insists on, and the value it
+/// insists on. An `ssh -G` that reports anything else means the command line did not
+/// win, and the connection is refused rather than made.
+const REQUIRED_EFFECTIVE: &[(&str, &str)] = &[
+    ("knownhostscommand", "none"),
+    ("globalknownhostsfile", "/dev/null"),
+    ("revokedhostkeys", "none"),
+    ("certificatefile", "none"),
+    ("pkcs11provider", "none"),
+    ("stricthostkeychecking", "true"),
+    ("controlmaster", "false"),
+    ("forwardagent", "no"),
+];
+
+/// Quote one value for `ssh -o`, whose parser splits on whitespace unless quoted.
+pub fn quote_option_value(value: &str) -> String {
+    // OpenSSH's tokenizer understands double quotes and has no escape inside them, so a
+    // value containing one cannot be expressed. That is a refusal the caller makes, not
+    // something to paper over here.
+    format!("\"{value}\"")
+}
+
 impl Runner {
     /// The normalized option set, exactly as seam S7 states it.
     ///
@@ -192,7 +227,11 @@ impl Runner {
             if !known_hosts.is_empty() {
                 known_hosts.push(' ');
             }
-            known_hosts.push_str(&store.display().to_string());
+            // Quoted, because `ssh` tokenizes this value on whitespace: a data directory
+            // or a `$HOME` with a space in it (`~/Library/Application Support/…` is the
+            // ordinary macOS case) would otherwise become two paths that do not exist,
+            // and the private trust store would be silently empty forever.
+            known_hosts.push_str(&quote_option_value(&store.display().to_string()));
         }
         let mut options = vec![
             "ForwardAgent=no".to_string(),
@@ -214,19 +253,57 @@ impl Runner {
             // every prompt into an immediate failure instead.
             "BatchMode=no".to_string(),
         ];
+        // Neutralising the options that decide *what a host key means* and *who answers
+        // for a key*. `UserKnownHostsFile` alone is not the trust boundary: an operator's
+        // `KnownHostsCommand` supplies host keys from a program and is consulted in
+        // addition to the files, a `GlobalKnownHostsFile` adds a second trusted set, and
+        // `RevokedHostKeys`/`CertificateFile` change which keys count. `IdentityAgent`
+        // and `PKCS11Provider` decide which process is asked to sign. Every one of them
+        // is settable in `~/.ssh/config`, and this command line is what makes the
+        // reviewed trust store the only one in force.
+        for neutral in NEUTRALIZED_OPTIONS {
+            options.push((*neutral).to_string());
+        }
         match &self.identity {
             ResolvedIdentity::Password => {
                 // Explicit selection, so an agent does not spend the server's retry
                 // budget offering keys before the password is ever tried.
                 options.push("PreferredAuthentications=password".to_string());
                 options.push("PubkeyAuthentication=no".to_string());
+                options.push("IdentityAgent=none".to_string());
             }
-            ResolvedIdentity::Agent { .. } | ResolvedIdentity::Key { .. } => {
+            ResolvedIdentity::Key { .. } => {
                 options.push("PreferredAuthentications=publickey".to_string());
+                options.push("IdentityAgent=none".to_string());
             }
-            ResolvedIdentity::Default => {}
+            ResolvedIdentity::Agent { .. } => {
+                options.push("PreferredAuthentications=publickey".to_string());
+                options.push(self.identity_agent());
+            }
+            // The default identity still names its methods. Leaving them open puts
+            // keyboard-interactive and gssapi on the menu, and a far end that is allowed
+            // to run keyboard-interactive composes the prompt text the askpass bridge
+            // then has to classify — which is how a hostile destination gets a locally
+            // rendered "passphrase for your key" question in front of an operator.
+            ResolvedIdentity::Default => {
+                options.push("PreferredAuthentications=publickey".to_string());
+                options.push(self.identity_agent());
+            }
         }
         options
+    }
+
+    /// The agent this invocation may talk to, named rather than inherited.
+    fn identity_agent(&self) -> String {
+        match &self.programs.agent_socket {
+            Some(socket) => format!(
+                "IdentityAgent={}",
+                quote_option_value(&socket.display().to_string())
+            ),
+            // The literal OpenSSH understands as "the agent this process was started
+            // with", which is the deployment host's own — never one a config chose.
+            None => "IdentityAgent=SSH_AUTH_SOCK".to_string(),
+        }
     }
 
     fn base_command(&self) -> Command {
@@ -314,19 +391,15 @@ impl Runner {
         let mut command = self.base_command();
         command.arg(&self.destination.address);
         command.arg(remote);
-        if let Some(bridge) = &self.bridge {
-            bridge.arm();
-        }
-        let completed = run_bounded(command, stdin, timeout);
-        if let Some(bridge) = &self.bridge {
-            bridge.disarm();
-        }
-        completed
+        run_bounded_for(command, stdin, timeout, self.bridge.as_ref())
     }
 
     /// Start `ssh <dest> <remote>` with piped stdin and stdout, for the framed helper
-    /// session. The caller owns the child and must reap it.
-    pub fn spawn(&self, remote: &str) -> Result<std::process::Child> {
+    /// session.
+    ///
+    /// The caller owns the child *and* the arming guard, and must keep them together:
+    /// the prompt window belongs to this connection and closes when it does.
+    pub fn spawn(&self, remote: &str) -> Result<(std::process::Child, Option<Armed>)> {
         let mut command = self.base_command();
         command.arg(&self.destination.address);
         command.arg(remote);
@@ -335,12 +408,14 @@ impl Runner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        if let Some(bridge) = &self.bridge {
-            bridge.arm();
-        }
-        command
+        let child = command
             .spawn()
-            .with_context(|| format!("starting ssh to {}", self.destination.label()))
+            .with_context(|| format!("starting ssh to {}", self.destination.label()))?;
+        let armed = self
+            .bridge
+            .as_ref()
+            .map(|bridge| bridge.arm(child.id() as i32));
+        Ok((child, armed))
     }
 
     /// Inspect what OpenSSH will actually do with this destination, before connecting.
@@ -365,6 +440,24 @@ impl Runner {
             );
         }
         let config = EffectiveConfig::parse(&String::from_utf8_lossy(&completed.stdout));
+
+        // What the command line asked for has to be what is in force. OpenSSH takes the
+        // first value it obtains and the command line is read first, so this should
+        // always hold — and if a future OpenSSH ever changes that, this operation stops
+        // rather than trusting a host key store it did not choose.
+        for (key, required) in REQUIRED_EFFECTIVE {
+            if let Some(actual) = config.value(key) {
+                if !actual.eq_ignore_ascii_case(required) {
+                    return refuse(
+                        "unsafe_ssh_option",
+                        format!(
+                            "this deployment host's SSH configuration sets `{key}` to `{}`, and fleet setup requires `{required}`. That option decides which host keys are trusted or which process signs for this connection, so the connection was not made",
+                            sanitize_remote_text(actual, 120)
+                        ),
+                    );
+                }
+            }
+        }
 
         if let Some(routing) = config.routing() {
             return refuse(
@@ -686,10 +779,17 @@ const STDERR_CAP: usize = 256 * 1024;
 /// The child is placed in its own process group and the group is killed if the deadline
 /// passes or this function is unwound, so an `ssh` that hangs on a dead network does not
 /// outlive the step that started it.
-pub fn run_bounded(
+pub fn run_bounded(command: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<Completed> {
+    run_bounded_for(command, stdin, timeout, None)
+}
+
+/// The same, with the askpass window opened for exactly this child and closed when it
+/// is reaped.
+fn run_bounded_for(
     mut command: Command,
     stdin: Option<&[u8]>,
     timeout: Duration,
+    bridge: Option<&Arc<Bridge>>,
 ) -> Result<Completed> {
     use std::io::Write as _;
 
@@ -706,6 +806,10 @@ pub fn run_bounded(
     let child = command
         .spawn()
         .with_context(|| format!("starting {:?}", command.get_program()))?;
+    // Held for exactly as long as this child: the window a prompt may arrive through is
+    // this connection's, and it closes with it on every path out of this function,
+    // including an early `?`.
+    let _armed = bridge.map(|bridge| bridge.arm(child.id() as i32));
     let mut guard = ChildGuard::new(child);
 
     if let Some(bytes) = stdin {
@@ -842,6 +946,12 @@ fn drain(pipe: &mut impl io::Read, sink: &mut Vec<u8>, cap: usize) -> Result<boo
 /// The order matters: a changed key and an unknown key both end with "host key
 /// verification failed", and only the banner above it says which one happened.
 fn classify_ssh_failure(lowered: &str) -> Option<&'static str> {
+    // Revocation first: OpenSSH's revoked-key refusal also ends in "host key
+    // verification failed", and calling it "unknown" would invite an operator to accept
+    // the very key their own store has revoked.
+    if lowered.contains("revoked") {
+        return Some("host_key_revoked");
+    }
     if lowered.contains("remote host identification has changed")
         || lowered.contains("host key for") && lowered.contains("has changed")
     {
@@ -924,7 +1034,9 @@ mod tests {
             "ControlMaster=no",
             "ControlPath=none",
             "StrictHostKeyChecking=yes",
-            "UserKnownHostsFile=/data/deploy/known_hosts /home/me/.ssh/known_hosts",
+            // Each store quoted: `ssh` splits this value on whitespace, so a path with a
+            // space in it becomes two paths that do not exist.
+            "UserKnownHostsFile=\"/data/deploy/known_hosts\" \"/home/me/.ssh/known_hosts\"",
             "IdentitiesOnly=yes",
             "NumberOfPasswordPrompts=1",
             "ConnectTimeout=15",
@@ -943,6 +1055,85 @@ mod tests {
                     || option.contains("StrictHostKeyChecking=accept-new")),
             "host checking is never relaxed"
         );
+
+        // The options that decide *what a host key means* and *who signs*. Asserted by
+        // name rather than as a literal list: a future OpenSSH option that reopens this
+        // door is a change to `NEUTRALIZED_OPTIONS`, and this is what makes it visible.
+        for dangerous in [
+            "KnownHostsCommand",
+            "GlobalKnownHostsFile",
+            "RevokedHostKeys",
+            "CertificateFile",
+            "PKCS11Provider",
+            "IdentityAgent",
+        ] {
+            let neutralised = options
+                .iter()
+                .find(|option| option.starts_with(&format!("{dangerous}=")))
+                .unwrap_or_else(|| panic!("`{dangerous}` is not neutralised: {options:?}"));
+            assert!(
+                neutralised.ends_with("=none")
+                    || neutralised.ends_with("=/dev/null")
+                    || neutralised.ends_with("=SSH_AUTH_SOCK"),
+                "`{dangerous}` must be inert or explicitly this host's own: {neutralised}"
+            );
+        }
+    }
+
+    /// Every path handed to `ssh -o` survives the option parser's own tokenizer.
+    #[test]
+    fn a_store_path_with_a_space_stays_one_path() {
+        let mut runner = runner();
+        runner.known_hosts = vec![PathBuf::from(
+            "/Users/me/Library/Application Support/deploy/kh",
+        )];
+        runner.user_known_hosts = None;
+        let value = runner
+            .options()
+            .into_iter()
+            .find(|option| option.starts_with("UserKnownHostsFile="))
+            .expect("the store option");
+        assert_eq!(
+            value,
+            "UserKnownHostsFile=\"/Users/me/Library/Application Support/deploy/kh\"",
+            "an unquoted value would be two paths that do not exist, and the private store would be silently empty forever"
+        );
+        assert_eq!(quote_option_value("/a b/c"), "\"/a b/c\"");
+    }
+
+    /// Every identity names its authentication methods. Leaving the default open put
+    /// keyboard-interactive on the menu, and a far end that may run it composes the
+    /// prompt text the askpass bridge then has to classify.
+    #[test]
+    fn every_identity_constrains_the_authentication_methods() {
+        let mut runner = runner();
+        for identity in [
+            ResolvedIdentity::Default,
+            ResolvedIdentity::Key {
+                path: PathBuf::from("/home/me/.ssh/id_ed25519"),
+                label: "id_ed25519".into(),
+                fingerprint: None,
+            },
+            ResolvedIdentity::Agent {
+                public_key_file: PathBuf::from("/tmp/agent.pub"),
+                label: "work".into(),
+                fingerprint: "SHA256:a".into(),
+            },
+            ResolvedIdentity::Password,
+        ] {
+            let described = identity.describe();
+            runner.identity = identity;
+            let options = runner.options();
+            let preferred = options
+                .iter()
+                .find(|option| option.starts_with("PreferredAuthentications="))
+                .unwrap_or_else(|| panic!("no method list for {described}"));
+            assert!(
+                preferred == "PreferredAuthentications=publickey"
+                    || preferred == "PreferredAuthentications=password",
+                "only the two methods this product supports: {preferred}"
+            );
+        }
     }
 
     /// A password attempt names the method explicitly so the agent cannot spend the
@@ -1066,6 +1257,13 @@ mod tests {
         assert_eq!(
             classify_ssh_failure("me@host: permission denied (publickey,password)."),
             Some("ssh_auth_failed")
+        );
+        assert_eq!(
+            classify_ssh_failure(
+                "@@@ warning: revoked host key detected! @@@ ... host key verification failed."
+            ),
+            Some("host_key_revoked"),
+            "a revoked key is never reported as merely unknown"
         );
         assert_eq!(classify_ssh_failure("connection timed out"), None);
     }

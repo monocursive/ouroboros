@@ -14,6 +14,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -70,6 +71,26 @@ impl Client {
                 return frame;
             }
         }
+    }
+
+    /// Whether this connection has been closed by the worker.
+    fn closed(&mut self) -> bool {
+        use std::io::Read as _;
+        if writeln!(
+            self.writer,
+            "{}",
+            json!({"v": 1, "id": "probe", "op": "status"})
+        )
+        .is_err()
+            || self.writer.flush().is_err()
+        {
+            return true;
+        }
+        let _ = self
+            .writer
+            .set_read_timeout(Some(Duration::from_millis(500)));
+        let mut byte = [0_u8; 1];
+        matches!(self.writer.read(&mut byte), Ok(0) | Err(_))
     }
 
     fn read_frame(&mut self) -> Value {
@@ -377,19 +398,25 @@ fn the_worker_outlives_its_spawner_and_finishes_the_operation() {
     let detail = takeover.detail.clone().unwrap_or_default();
     assert!(detail.contains("somebody-else"), "{detail}");
     assert!(detail.contains("operator"), "{detail}");
-    assert_eq!(successor.ask("bye", json!({}))["ok"], json!(true));
-    // `stranger` never attached, so it has nothing to say goodbye to: seam S3's first
-    // frame is always `attach`, and it stays refused until one succeeds.
+    // The takeover evicted both of the previous owner's sessions: their sockets are
+    // closed, so they have nothing left to say goodbye with.
+    for evicted in [&mut client, &mut intruder] {
+        assert!(
+            evicted.closed(),
+            "a taken-over session is disconnected, not merely recorded"
+        );
+    }
+    // `stranger` never attached, so it has nothing to say goodbye to either: seam S3's
+    // first frame is always `attach`, and it stays refused until one succeeds.
     assert_eq!(
         stranger.ask("bye", json!({}))["reason"],
         json!("not_attached")
     );
     drop(stranger);
 
-    // Both clients say goodbye; the worker exits once nothing is attached rather than
+    // The new owner says goodbye; the worker exits once nothing is attached rather than
     // waiting out its linger.
-    assert_eq!(client.ask("bye", json!({}))["ok"], json!(true));
-    assert_eq!(intruder.ask("bye", json!({}))["ok"], json!(true));
+    assert_eq!(successor.ask("bye", json!({}))["ok"], json!(true));
 
     // The worker cleans up after itself.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -489,5 +516,304 @@ fn the_askpass_helper_is_useless_without_its_operation() {
     assert!(
         stderr.contains("OUROBOROS_ASKPASS_SOCKET"),
         "the refusal says why: {stderr}"
+    );
+}
+
+/// The worker's socket and capability file are private, and its namespace is 0700.
+///
+/// The broker `lstat`s both before it connects, and refuses anything else; nothing was
+/// checking that this side actually produces them.
+#[test]
+fn the_worker_socket_and_capability_are_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let data = data_dir("wmode");
+    let operation = "op-000000009003";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+
+    let spawner = spawn_detached(&data, operation);
+    let mode = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(&spawner.socket), 0o600, "the socket is private");
+    assert_eq!(
+        mode(&ouro::fleet_setup::capability_path(&data, operation)),
+        0o600,
+        "the capability file is private"
+    );
+    assert_eq!(
+        mode(&ouro::fleet_setup::deploy_dir(&data)),
+        0o700,
+        "and so is the namespace they live in"
+    );
+    assert_eq!(
+        mode(&ouro::fleet_setup::log_path(&data, operation)),
+        0o600,
+        "the worker's log is private too"
+    );
+
+    // Tidy up: the worker is waiting for a review nobody will give it.
+    unsafe {
+        libc::kill(-spawner.pid, libc::SIGKILL);
+    }
+    let _ = std::fs::remove_file(&spawner.socket);
+}
+
+/// A worker nobody attaches to exits on its own and cleans up.
+///
+/// The broker cannot cancel a worker whose capability file it refused to read — reading
+/// it is what would disclose the capability — so a worker that is never attached to has
+/// to bound its own life.
+#[test]
+fn a_worker_nobody_attaches_to_gives_up_and_cleans_up() {
+    let data = data_dir("wdead");
+    let operation = "op-000000009004";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    // No `--yes`: the operation stops at its review and waits for a client that never
+    // comes.
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+
+    let spawner = spawn_detached(&data, operation);
+    assert!(spawner.socket.exists());
+
+    let deadline =
+        Instant::now() + ouro::fleet_setup::worker::ATTACH_DEADLINE + Duration::from_secs(45);
+    while spawner.socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        !spawner.socket.exists(),
+        "a worker nobody attached to must exit within {}s, not hold its socket for the abandonment timeout",
+        ouro::fleet_setup::worker::ATTACH_DEADLINE.as_secs()
+    );
+    assert!(!ouro::fleet_setup::capability_path(&data, operation).exists());
+    assert!(!ouro::fleet_setup::request_path(&data, operation).exists());
+
+    let record = Journal::read(&data, operation)
+        .expect("a readable journal")
+        .expect("a written journal");
+    assert_eq!(record.state, OperationState::Interrupted);
+    assert!(
+        record
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("never_attached")),
+        "and it says why: {:?}",
+        record.last_error
+    );
+    assert!(
+        fleet::load(&data).expect("a readable data dir").is_none(),
+        "and it created nothing"
+    );
+}
+
+/// The detached worker holds no descriptor its spawner left open.
+///
+/// It inherits whatever the spawning process left without `CLOEXEC` — and the process
+/// that spawns it in production is the BEAM, whose sockets and journals it would then
+/// hold for the life of an operation that deliberately outlives its spawner.
+#[test]
+fn the_detached_worker_inherits_no_descriptor_from_its_spawner() {
+    let Some(lsof) = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+    else {
+        eprintln!("skipping: no lsof on this host to read another process's descriptors with");
+        return;
+    };
+
+    let data = data_dir("wfd");
+    let operation = "op-000000009005";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+
+    // A file the spawner holds open on two descriptors above stdio, exactly as the
+    // review's evidence did.
+    let leak = data.join("leaked-by-the-spawner");
+    std::fs::write(&leak, b"").expect("a file to leak");
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "exec 9>{leak} ; exec 8<{leak} ; exec {ouro} fleet worker start --operation {operation} --data-dir {dir}",
+            leak = leak.display(),
+            ouro = OURO,
+            dir = data.display()
+        ))
+        .env("OUROBOROS_DATA_DIR", &data)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built ouro binary");
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().expect("a piped stdout"))
+        .read_line(&mut line)
+        .expect("the socket line");
+    let _ = child.wait();
+    let started: Value =
+        serde_json::from_str(line.trim()).unwrap_or_else(|error| panic!("{error}: {line}"));
+    let socket = PathBuf::from(started["socket"].as_str().expect("a socket"));
+
+    // Find the worker: it is the process listening on that socket, and it is not this
+    // test's child any more.
+    let worker = std::process::Command::new(&lsof)
+        .args(["-t", "--"])
+        .arg(&socket)
+        .output()
+        .expect("lsof");
+    let worker: i32 = String::from_utf8_lossy(&worker.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .unwrap_or_else(|_| panic!("lsof found no process holding {}", socket.display()));
+
+    let held = std::process::Command::new(&lsof)
+        .args(["-p", &worker.to_string()])
+        .output()
+        .expect("lsof");
+    let held = String::from_utf8_lossy(&held.stdout);
+    assert!(
+        !held.contains("leaked-by-the-spawner"),
+        "the worker inherited a descriptor from its spawner:\n{held}"
+    );
+
+    unsafe {
+        libc::kill(worker, libc::SIGKILL);
+    }
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// Twenty clients that connect the instant `start` returns, and twenty answers.
+///
+/// `start` used to wait for the socket *path*, which appears between `bind` and
+/// `listen`: a broker that connected in that window got `ECONNREFUSED` from a worker
+/// that was about to be perfectly fine, and one run in four hung with a journal saying
+/// the worker had started. Readiness is now a round trip the worker itself completes, so
+/// by the time the socket line is printed every connect must be served — not eventually,
+/// on the first try.
+#[test]
+fn every_connect_the_instant_start_returns_is_answered() {
+    const CLIENTS: usize = 20;
+
+    let data = data_dir("wrace");
+    let operation = "op-000000009005";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+
+    let spawner = spawn_detached(&data, operation);
+
+    let gate = Arc::new(Barrier::new(CLIENTS));
+    let clients: Vec<_> = (0..CLIENTS)
+        .map(|n| {
+            let socket = spawner.socket.clone();
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || -> Result<Value, String> {
+                gate.wait();
+                // One connect. No retry: the point is that none is needed.
+                let stream = UnixStream::connect(&socket)
+                    .map_err(|error| format!("client {n} was refused the socket: {error}"))?;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .map_err(|error| format!("client {n}: {error}"))?;
+                let mut writer = stream
+                    .try_clone()
+                    .map_err(|error| format!("client {n}: {error}"))?;
+                writeln!(writer, "{}", json!({"v": 1, "id": "race", "op": "status"}))
+                    .and_then(|()| writer.flush())
+                    .map_err(|error| format!("client {n} could not speak: {error}"))?;
+                let mut line = String::new();
+                BufReader::new(stream)
+                    .read_line(&mut line)
+                    .map_err(|error| format!("client {n} was not answered: {error}"))?;
+                if line.trim().is_empty() {
+                    return Err(format!("client {n} was connected and then ignored"));
+                }
+                serde_json::from_str(line.trim())
+                    .map_err(|error| format!("client {n} got {line:?}: {error}"))
+            })
+        })
+        .collect();
+
+    for client in clients {
+        let frame = client
+            .join()
+            .expect("a client thread")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            frame["reason"],
+            json!("not_attached"),
+            "every connection is answered by the worker: {frame}"
+        );
+    }
+
+    unsafe {
+        libc::kill(-spawner.pid, libc::SIGKILL);
+    }
+    let _ = std::fs::remove_file(&spawner.socket);
+}
+
+/// When the worker dies before it serves, `start` says what the worker said.
+///
+/// The failure named the log file and left the operator to go and read it; the reason is
+/// in the last lines of that file and belongs in the refusal.
+#[test]
+fn a_worker_that_dies_before_it_serves_reports_its_own_last_words() {
+    // A data directory deep enough that the socket path cannot fit in `sockaddr_un`.
+    // The parent cannot know that — only the child, at `bind` — so this is a failure
+    // that can only be explained by the child's own log.
+    let root = data_dir("wtail");
+    let operation = "op-000000009006";
+    let bare = root
+        .join("deploy")
+        .join(format!("{operation}.sock"))
+        .as_os_str()
+        .len();
+    let padding = "d".repeat(110usize.saturating_sub(bare).max(1));
+    let data = root.join(padding);
+    std::fs::create_dir_all(&data).expect("a deep data directory");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700))
+            .expect("a private data directory");
+    }
+
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+
+    let (ok, stderr) = start_output(&data, operation);
+    assert!(!ok, "a worker that cannot bind does not start");
+    assert!(
+        stderr.contains(
+            &ouro::fleet_setup::log_path(&data, operation)
+                .display()
+                .to_string()
+        ),
+        "the refusal still names the log: {stderr}"
+    );
+    assert!(
+        stderr.contains("socket path"),
+        "and quotes what the worker itself said: {stderr}"
     );
 }
