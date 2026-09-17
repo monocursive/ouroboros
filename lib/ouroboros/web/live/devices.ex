@@ -446,14 +446,26 @@ defmodule Ouroboros.Web.Live.Devices do
   @doc """
   One challenge's kind-specific facts.
 
-  The worker nests them under `metadata` (`challenge_event/2` in
-  `tui/src/fleet_setup/worker.rs`), and the broker passes that object through untouched, so
-  this is where a surface reaches for them rather than at the challenge's top level. A
-  challenge whose metadata this build cannot read is an empty map, which makes every field
-  below read "not reported" instead of raising.
+  **The broker's snapshot is this page's contract, not the worker's wire.** The worker sends
+  a challenge's kind-specific fields one level down, under `metadata`
+  (`challenge_event/2` in `tui/src/fleet_setup/worker.rs`), and
+  `Ouroboros.Fleet.Deployment.Client` lifts them to the top of the challenge on the way
+  through — seam S4 describes them as fields *of the challenge*, so `challenge["port"]` is
+  where they are by the time a surface sees one. Reading them nested was reading the wrong
+  side of that seam, and drew a host-trust panel with every field empty.
+
+  The nested shape is still merged where it survives, so a snapshot from either side of
+  that fix renders the same; a challenge this build cannot read at all is an empty map,
+  which makes every field below read "not reported" rather than raising.
   """
   @spec metadata(term()) :: map()
-  def metadata(%{"metadata" => metadata}) when is_map(metadata), do: metadata
+  def metadata(challenge) when is_map(challenge) do
+    case challenge["metadata"] do
+      nested when is_map(nested) -> Map.merge(challenge, nested)
+      _lifted -> challenge
+    end
+  end
+
   def metadata(_absent), do: %{}
 
   @doc """

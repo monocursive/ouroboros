@@ -871,6 +871,15 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html = await(view, "SHA256:5s0mEfIngeRPrinT")
 
+      # The contract this page actually consumes is the *broker's* snapshot, not the
+      # worker's wire: the frame above goes through the real
+      # `Ouroboros.Fleet.Deployment.Client`, which lifts `metadata` to the top of the
+      # challenge (seam S4 calls these fields of the challenge) and drops the nesting. A
+      # page that read them nested drew this panel with every field empty.
+      [challenge] = :sys.get_state(view.pid).socket.assigns.drawer.status["challenges"]
+      assert challenge["sha256_fingerprint"] == "SHA256:5s0mEfIngeRPrinT"
+      refute Map.has_key?(challenge, "metadata")
+
       assert html =~ "Verify this host before continuing"
       assert html =~ "ssh-ed25519"
       assert html =~ "100.64.12.44"
@@ -1370,6 +1379,27 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   # ------------------------------------------------------------------------------------
   # The catalogue row
   # ------------------------------------------------------------------------------------
+
+  describe "a challenge's own facts" do
+    test "are read from the top of the challenge, and from a nested metadata too" do
+      # Both shapes, because the broker lifts and an older one did not. `metadata/1` is the
+      # one place that decision lives, so it is the one place worth pinning.
+      lifted = %{"challenge" => "c", "kind" => "password", "user" => "deploy", "port" => 22}
+      nested = %{"challenge" => "c", "kind" => "password", "metadata" => %{"user" => "deploy"}}
+
+      assert Devices.metadata(lifted)["user"] == "deploy"
+      assert Devices.metadata(lifted)["port"] == 22
+      assert Devices.metadata(nested)["user"] == "deploy"
+      assert Devices.metadata(nil) == %{}
+
+      # And the labels come out of whichever shape carried them.
+      assert Devices.secret_label(Map.put(lifted, "target", "100.64.0.9")) ==
+               "Password for deploy@100.64.0.9"
+
+      assert Devices.secret_label(%{"kind" => "passphrase", "key_label" => "~/.ssh/id"}) ==
+               "Passphrase for the key ~/.ssh/id"
+    end
+  end
 
   describe "the command row" do
     test "is offered where the inventory is, and not where it is not", context do
