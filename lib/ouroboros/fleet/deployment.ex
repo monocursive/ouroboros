@@ -165,11 +165,12 @@ defmodule Ouroboros.Fleet.Deployment do
   # here has checked.
   defp inventory(document, data_dir) do
     listed = operations(data_dir)
+    devices = Journal.scrub_value(document["devices"]) || []
 
     %{
       "host" => host(data_dir),
       "discovery" => Journal.scrub_value(document["discovery"]),
-      "devices" => Journal.scrub_value(document["devices"]) || [],
+      "devices" => merge_cluster(devices, cluster_facts()),
       "fleet_protocol_revision" => document["fleet_protocol_revision"],
       "operations" => elem(listed, 0),
       "operations_total" => elem(listed, 1),
@@ -282,6 +283,86 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   defp loopback_bind?(_absent), do: false
+
+  # `ouro fleet devices` merges this machine's roster with what the network client can see.
+  # Neither of those is the runtime's own answer to "is that machine *here*, now" — so a
+  # member whose runtime this one is connected to, and which `fleet doctor` reports as
+  # connected and compatible, still rendered as "in the fleet, not visible on this network"
+  # whenever the network client could not see it. Two different questions were being asked
+  # and only one was being answered.
+  #
+  # The live facts are merged onto member rows by roster name, and they are kept separate
+  # from discovery's: `online` and `path` stay the network's answer, `connected`,
+  # `compatible` and `runtime_running` are the cluster's. A row where they disagree is a real
+  # and useful thing to show — a machine reachable over BEAM but invisible to the network
+  # client is a different problem from one that is neither.
+  #
+  # `null` throughout where this runtime cannot establish a fact, which includes every row
+  # that is not a member: discovery sees devices that have never been in a fleet, and this
+  # says nothing about those rather than reporting them as disconnected.
+  defp merge_cluster(devices, facts) do
+    Enum.map(devices, fn device ->
+      case Map.fetch(facts, device["machine"]) do
+        {:ok, live} ->
+          device |> Map.merge(live) |> promote_state()
+
+        :error ->
+          Map.merge(device, %{
+            "connected" => nil,
+            "compatible" => nil,
+            "runtime_running" => nil,
+            "last_probe" => nil
+          })
+      end
+    end)
+  end
+
+  # A member this runtime is connected to says so in its own state, rather than leaving the
+  # row on discovery's word alone.
+  defp promote_state(%{"connected" => true, "state" => state} = device)
+       when state in ["fleet_member", "fleet_member_not_visible"],
+       do: Map.put(device, "state", "fleet_member_connected")
+
+  defp promote_state(device), do: device
+
+  defp cluster_facts do
+    %{machines: machines} = Ouroboros.Cluster.fleet_status()
+
+    machines
+    |> Enum.sort_by(&liveness/1)
+    |> Map.new(fn machine ->
+      {machine[:machine],
+       %{
+         "connected" => machine[:state] in [:connected, :local],
+         "compatible" => compatible(machine[:compatibility]),
+         "runtime_running" => machine[:runtime_running?],
+         "last_probe" => machine[:last_seen_at]
+       }}
+    end)
+  rescue
+    # A runtime with no cluster surface answers about its network and says nothing about the
+    # BEAM, which is the honest shape: `null`, not `false`.
+    _unavailable -> %{}
+  catch
+    _kind, _reason -> %{}
+  end
+
+  # A name can appear more than once — a roster entry the monitor also sees as a live node —
+  # and `Map.new/2` keeps whichever came last. Sorted so the liveliest entry is last and
+  # therefore wins: a machine that is answering is not offline because a second row about it
+  # says so.
+  defp liveness(machine) do
+    case machine[:state] do
+      :local -> 2
+      :connected -> 1
+      _other -> 0
+    end
+  end
+
+  defp compatible(:compatible), do: true
+  defp compatible(:local), do: true
+  defp compatible(:incompatible), do: false
+  defp compatible(_unknown), do: nil
 
   @doc """
   Every operation this data directory holds a journal for, with whether a worker is attached.

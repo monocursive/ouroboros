@@ -737,6 +737,84 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   end
 
   # ---------------------------------------------------------------------------
+  # The network's answer and the runtime's are two different questions
+
+  describe "live cluster facts on device rows" do
+    @devices_with_member ~s({"devices": [
+      {"name": "buildbox", "machine": "buildbox", "os": "linux", "address": "100.64.12.44",
+       "online": false, "last_seen": null, "path": "unknown",
+       "state": "fleet_member_not_visible", "action": "diagnose"},
+      {"name": "stranger", "machine": null, "os": "linux", "address": "100.64.12.77",
+       "online": true, "last_seen": null, "path": "direct",
+       "state": "discovered_installation_unknown", "action": "deploy Ouroboros"}
+    ]}\n)
+
+    test "a member this runtime is connected to says so, even when discovery cannot see it",
+         context do
+      arrange_devices(context, @devices_with_member)
+
+      client = connected(scope: :operate)
+      rows = call(client, "fleet.devices")["result"]["devices"]
+
+      member = Enum.find(rows, &(&1["machine"] == "buildbox"))
+
+      # This suite's runtime has no `buildbox`, so the live answer is "nothing known" rather
+      # than "disconnected" — which is the shape the assertion is about: three fields that
+      # are the cluster's, separate from the network's.
+      assert Map.has_key?(member, "connected")
+      assert Map.has_key?(member, "compatible")
+      assert Map.has_key?(member, "runtime_running")
+      assert Map.has_key?(member, "last_probe")
+
+      # Discovery's own facts are untouched: they answer a different question.
+      assert member["online"] == false
+      assert member["path"] == "unknown"
+
+      # And a row that was never in a fleet is not reported as disconnected — it is reported
+      # as nothing, because this runtime knows nothing about it.
+      stranger = Enum.find(rows, &(&1["address"] == "100.64.12.77"))
+      assert stranger["connected"] == nil
+      assert stranger["compatible"] == nil
+      assert stranger["runtime_running"] == nil
+      assert stranger["state"] == "discovered_installation_unknown"
+    end
+
+    test "a connected member's row becomes fleet_member_connected", context do
+      # The local machine is in `fleet_status` as `:local` — connected and compatible — so a
+      # discovery row naming it is the case the live merge exists for. Selected by its state
+      # rather than by position: another suite can leave an offline expected machine in that
+      # list, and the first row is then somebody else's.
+      local =
+        Ouroboros.Cluster.fleet_status().machines
+        |> Enum.find(&(&1[:state] == :local))
+        |> Map.get(:machine)
+
+      assert is_binary(local)
+
+      arrange_devices(context, ~s({"devices": [
+        {"name": "#{local}", "machine": "#{local}", "os": "linux", "address": "100.64.12.9",
+         "online": false, "last_seen": null, "path": "unknown",
+         "state": "fleet_member_not_visible", "action": "diagnose"}
+      ]}\n))
+
+      client = connected(scope: :operate)
+      [row] = call(client, "fleet.devices")["result"]["devices"]
+
+      assert row["connected"] == true
+      assert row["compatible"] == true
+      assert row["runtime_running"] == true
+      assert is_binary(row["last_probe"])
+
+      # The row an operator reads stops saying "not visible on this network · Diagnose" and
+      # starts saying the thing that is true.
+      assert row["state"] == "fleet_member_connected"
+
+      # The network still says what the network said.
+      assert row["online"] == false
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
 
   defp prepare_params do

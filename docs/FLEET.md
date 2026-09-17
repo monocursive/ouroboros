@@ -543,7 +543,7 @@ Nothing here deletes a file on the lost machine.
 | `fleet.doctor` | read | per-node checks with guidance, and the non-answers named |
 | `fleet.tags` | operate | add / remove / list advisory tags on a connected machine |
 | `fleet.forget_session_owner` | operate | the irreversible local retirement above |
-| `fleet.devices` | read, administrator | the Devices inventory: this deployment host, what its network client can see, and whether it may deploy at all |
+| `fleet.devices` | read, administrator | the Devices inventory: this deployment host, what its network client can see, what this runtime knows about each member as a BEAM peer, and whether it may deploy at all |
 | `fleet.deployment.status` | read, administrator | one deployment operation, from its worker or from its journal |
 | `fleet.deployment.prepare` / `.start` / `.authenticate` / `.confirm_host` / `.cancel` / `.resume` | operate, administrator | the deployment lifecycle below |
 
