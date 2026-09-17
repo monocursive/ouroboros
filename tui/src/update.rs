@@ -1,7 +1,8 @@
 //! Explicit self-update for standalone releases. This module never discovers,
 //! starts, or stops a runtime and has no production override for its release host.
 mod install;
-mod transport;
+pub mod release;
+pub(crate) mod transport;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use semver::Version;
 use install::{hex, Destination, HashWriter};
 use transport::{capture, check_cancelled, Curl, BINARY_CAP, MANIFEST_CAP};
 
-const REPOSITORY: &str = "https://github.com/monocursive/ouroboros";
+pub(crate) const REPOSITORY: &str = "https://github.com/monocursive/ouroboros";
 const ELIGIBLE: bool = cfg!(all(official_release, embedded_release, feature = "embed"));
 
 #[derive(Debug, PartialEq, Eq)]
@@ -255,7 +256,7 @@ fn latest_version(url: &str) -> Result<Version> {
     Ok(version)
 }
 
-fn checksum(manifest: &[u8], asset: &str) -> Result<String> {
+pub(crate) fn checksum(manifest: &[u8], asset: &str) -> Result<String> {
     let text = std::str::from_utf8(manifest).context("checksum manifest is not UTF-8")?;
     let mut found = None;
     for line in text.lines() {
@@ -323,7 +324,12 @@ fn native_target(cancelled: &AtomicBool) -> Result<String> {
     select_target(std::env::consts::OS, &arch, &version, rosetta)
 }
 
-fn select_target(os: &str, arch: &str, system_version: &str, rosetta: bool) -> Result<String> {
+pub(crate) fn select_target(
+    os: &str,
+    arch: &str,
+    system_version: &str,
+    rosetta: bool,
+) -> Result<String> {
     let arch = match arch {
         "x86_64" | "amd64" if !(os == "macos" && rosetta) => "x86_64",
         "x86_64" | "amd64" | "arm64" | "aarch64" => "aarch64",

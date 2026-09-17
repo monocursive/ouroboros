@@ -50,7 +50,8 @@ use ouro::transport::{
 use ouro::ui::boot::{Boot, BootEvent, BootProgress, Progress};
 use ouro::ui::{self, App, Mode, Quit, Screen};
 use ouro::{
-    fleet, fleet_network, fleet_protocol, fleet_service, proto, runtime, status, transport,
+    fleet, fleet_network, fleet_protocol, fleet_service, fleet_setup, proto, runtime, status,
+    transport,
 };
 
 /// How long a runtime is given to stop before it is killed. `System.stop/0` and a
@@ -1221,6 +1222,26 @@ fn fleet_protocol_command(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The shared deployment flags, in the shape the engine's CLI layer takes them.
+fn setup_common(args: ouro::cli::FleetSetupArgs) -> fleet_setup::cli::CommonArgs {
+    fleet_setup::cli::CommonArgs {
+        dry_run: args.dry_run,
+        yes: args.yes,
+        json: args.json,
+        no_service: args.no_service,
+        operation: args.operation,
+    }
+}
+
+/// The worker subcommands name their data directory explicitly, because the broker
+/// starts them from inside a runtime whose environment is not the operator's.
+fn worker_paths(paths: &Paths, data_dir: PathBuf) -> Paths {
+    Paths {
+        data_dir,
+        ..paths.clone()
+    }
+}
+
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
     paths.ensure_private_data_dir()?;
 
@@ -1618,7 +1639,85 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             }
         },
         FleetCommand::Service { command } => fleet_service_command(paths, command),
-        FleetCommand::Leave => {
+        FleetCommand::Setup {
+            machine,
+            address,
+            common,
+        } => {
+            fleet_setup::cli::setup(
+                paths,
+                fleet_setup::cli::SetupArgs {
+                    machine,
+                    address,
+                    common: setup_common(common),
+                },
+            )
+            .await
+        }
+        FleetCommand::Add {
+            destination,
+            machine,
+            port,
+            key,
+            agent,
+            ask_password,
+            install_path,
+            remote_data_dir,
+            run_test_task,
+            common,
+        } => {
+            fleet_setup::cli::add(
+                paths,
+                fleet_setup::cli::AddArgs {
+                    destination,
+                    machine,
+                    port,
+                    key,
+                    agent,
+                    ask_password,
+                    install_path,
+                    remote_data_dir,
+                    run_test_task,
+                    common: setup_common(common),
+                },
+            )
+            .await
+        }
+        FleetCommand::Worker { command } => match command {
+            ouro::cli::FleetWorkerCommand::Start {
+                operation,
+                data_dir,
+            } => fleet_setup::cli::worker_start(&worker_paths(paths, data_dir), &operation),
+            ouro::cli::FleetWorkerCommand::Run {
+                operation,
+                data_dir,
+            } => fleet_setup::cli::worker_run(&worker_paths(paths, data_dir), &operation),
+        },
+        FleetCommand::Askpass { prompt } => fleet_setup::cli::askpass(prompt),
+        FleetCommand::Leave {
+            machine: Some(machine),
+            user,
+            port,
+            key,
+            agent,
+            ask_password,
+            common,
+        } => {
+            fleet_setup::cli::leave_machine(
+                paths,
+                fleet_setup::cli::LeaveArgs {
+                    machine,
+                    user,
+                    port,
+                    key,
+                    agent,
+                    ask_password,
+                    common: setup_common(common),
+                },
+            )
+            .await
+        }
+        FleetCommand::Leave { .. } => {
             let fleet_exists = fleet::fleet_dir(&paths.data_dir)
                 .try_exists()
                 .context("inspecting the fleet directory before leave")?;

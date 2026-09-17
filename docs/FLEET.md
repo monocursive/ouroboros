@@ -121,6 +121,63 @@ The command answers before a data directory is discovered. It is what an onboard
 preflight calls on a machine that has no Ouroboros state, so it neither requires that
 state nor creates it.
 
+## Two machines, over SSH
+
+`ouro fleet setup` and `ouro fleet add` do the same work as the manual recipe below
+without copying the CA key anywhere. The operator machine keeps the fleet's CA and is the
+only one that issues; the machine being added generates its own private key and never
+sees anyone else's.
+
+```sh
+# 1. On the operator machine. Its private-network address is read from the network
+#    client's report about this device; --address overrides that.
+ouro fleet setup --machine studio
+
+# 2. Add a machine. The destination is its SSH account and its private address (or the
+#    name the network client reports for it). Nothing is inferred from the network
+#    device's owner.
+ouro fleet add me@100.64.0.2 --machine buildbox
+
+# See exactly what it would do, and change nothing — no journal, no credentials, no
+# installation, no roster edit, and no recorded host trust:
+ouro fleet add me@100.64.0.2 --machine buildbox --dry-run
+
+# Take a reachable member out of the fleet again, from here:
+ouro fleet leave --machine buildbox --user me
+```
+
+What `add` does, in order: inspect the effective SSH configuration (proxy and jump
+routing are refused in v1), verify the host key, authenticate, inspect the target,
+install the exact matching official release if it has no `ouro`, read every current
+member's roster, then prepare, issue and install credentials, update every member's
+roster, arrange startup, and report what it observed. Each externally visible step is
+written to a secret-free journal in `<data dir>/deploy/` before and after it happens, so
+an interrupted operation resumes from its boundary rather than issuing a second
+certificate: rerun the same command with `--operation <id>`.
+
+Authentication is explicit and never takes a value on the command line, because a
+command line is readable by every process on the host:
+
+| Flag | What it selects |
+|---|---|
+| *(none)* | the deployment host's own default SSH identities |
+| `--key <PATH>` | one private key file on the deployment host, checked for ownership and mode. An encrypted key is asked for its passphrase in a masked prompt |
+| `--agent <FINGERPRINT>` | one identity held by this machine's SSH agent, pinned so the agent offers nothing else. No agent is forwarded and no key is exported |
+| `--ask-password` | the target account's password, typed into a masked prompt and used for that operation only |
+
+An unknown host key is always a separate explicit question showing its algorithm and
+SHA256 fingerprint; `--yes` accepts a reviewed plan but never a host key, never a
+password, and never a busy runtime. A changed host key blocks. Without a terminal, every
+one of those questions is a refusal with a stable reason rather than a prompt nobody will
+see, so noninteractive use needs pre-established host trust and key or agent
+authentication.
+
+`--json` prints the operation's result with stable reason codes; incomplete setup exits
+non-zero even when some steps succeeded.
+
+Not yet shipped: the Devices views in web and TUI, and the gateway methods that drive
+this engine from them. The commands above are the whole of what works today.
+
 ## Two machines, by hand
 
 Nothing below contacts a machine. An operator copies one directory, types four commands,

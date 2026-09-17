@@ -18,6 +18,7 @@ pub mod fleet_helper;
 pub mod fleet_network;
 pub mod fleet_protocol;
 pub mod fleet_service;
+pub mod fleet_setup;
 pub mod image_upload;
 pub mod images;
 pub mod keymap;

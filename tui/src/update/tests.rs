@@ -29,6 +29,7 @@ impl Fixture {
             curl: Curl {
                 program,
                 timeout: Duration::from_secs(5),
+                allow_http: false,
             },
         };
         fixture.payload(version_script("0.2.0").as_bytes(), "0.2.0");

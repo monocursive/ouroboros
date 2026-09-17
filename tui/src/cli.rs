@@ -1619,8 +1619,135 @@ pub enum FleetCommand {
         command: FleetServiceCommand,
     },
 
-    /// Remove this machine's cluster credentials after its runtime is stopped.
-    Leave,
+    /// Give this machine its cluster identity from its own private-network address, and
+    /// arrange for it to start.
+    ///
+    /// On a machine that already has one this is an inspection: it reports what is there
+    /// and names the repair, and changes nothing.
+    Setup {
+        /// A short label people will recognize, such as studio-mini. Lower-cased.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// This machine's private-network IPv4. Omitted, it is read from the network
+        /// client's report about this device.
+        #[arg(long, value_name = "ADDRESS")]
+        address: Option<String>,
+
+        #[command(flatten)]
+        common: FleetSetupArgs,
+    },
+
+    /// Add another machine to this fleet over SSH, from this machine's CA.
+    ///
+    /// Contacts only the destination given here and the machines already in this
+    /// machine's roster. Host verification and authentication are explicit steps.
+    Add {
+        /// The target as `user@address`, where address is its private-network IPv4 or
+        /// the name its network client reports. The account is never inferred from the
+        /// network device's owner.
+        #[arg(value_name = "USER@ADDRESS")]
+        destination: Option<String>,
+
+        /// The new machine's short name. Required when the destination is an address.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// The target's SSH port. Default 22.
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+
+        /// Authenticate with this private key file on *this* machine. Validated for
+        /// ownership and permissions; never copied, and an encrypted key is asked for
+        /// its passphrase when OpenSSH needs one.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["agent", "ask_password"])]
+        key: Option<PathBuf>,
+
+        /// Authenticate with one identity held by this machine's SSH agent, named by its
+        /// public SHA256 fingerprint. No agent is forwarded and no key is exported.
+        #[arg(long, value_name = "FINGERPRINT", conflicts_with_all = ["key", "ask_password"])]
+        agent: Option<String>,
+
+        /// Ask for the target account's password when the connection needs one. The
+        /// password is typed into a masked prompt; there is deliberately no flag that
+        /// takes one, because a command line is readable by every process on the host.
+        #[arg(long, conflicts_with_all = ["key", "agent"])]
+        ask_password: bool,
+
+        /// Where `ouro` should live on the target, relative to that account's home
+        /// directory. Default `.local/bin/ouro`.
+        #[arg(long, value_name = "PATH")]
+        install_path: Option<String>,
+
+        /// The target's data directory, when it is not that account's default.
+        #[arg(long, value_name = "PATH")]
+        remote_data_dir: Option<String>,
+
+        /// After the machine is connected, start one planning session on it through this
+        /// machine's runtime and report what it said. A real model call happens only
+        /// when this is given, and a planning session reads and reasons but edits
+        /// nothing.
+        #[arg(long)]
+        run_test_task: bool,
+
+        #[command(flatten)]
+        common: FleetSetupArgs,
+    },
+
+    /// Remove cluster credentials: this machine's own, or — with `--machine` — a
+    /// reachable member's, cooperatively and from every remaining roster.
+    Leave {
+        /// The member to take out of the fleet from here. Omitted, this machine's own
+        /// credentials are removed after its runtime is stopped, as before.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// The SSH account on that member. Required with `--machine`.
+        #[arg(long, value_name = "USER", requires = "machine")]
+        user: Option<String>,
+
+        /// That member's SSH port. Default 22.
+        #[arg(long, value_name = "PORT", requires = "machine")]
+        port: Option<u16>,
+
+        /// Authenticate to that member with this private key file on this machine.
+        #[arg(long, value_name = "PATH", requires = "machine", conflicts_with_all = ["agent", "ask_password"])]
+        key: Option<PathBuf>,
+
+        /// Authenticate to that member with one agent identity, by public fingerprint.
+        #[arg(long, value_name = "FINGERPRINT", requires = "machine", conflicts_with_all = ["key", "ask_password"])]
+        agent: Option<String>,
+
+        /// Ask for that member's account password in a masked prompt when needed.
+        #[arg(long, requires = "machine", conflicts_with_all = ["key", "agent"])]
+        ask_password: bool,
+
+        #[command(flatten)]
+        common: FleetSetupArgs,
+    },
+
+    /// Run one deployment operation as a process that outlives whatever started it.
+    ///
+    /// Never run by hand. The operation's parameters live in a private file beside its
+    /// journal, which is why nothing here names a target, an account or a port: a
+    /// command line is readable by every process on the host.
+    #[command(hide = true)]
+    Worker {
+        #[command(subcommand)]
+        command: FleetWorkerCommand,
+    },
+
+    /// Answer one OpenSSH password or passphrase prompt over this operation's private
+    /// socket.
+    ///
+    /// Never run by hand: OpenSSH runs it as `SSH_ASKPASS`, and it finds its socket in
+    /// the environment. It takes no flag that could name a secret.
+    #[command(hide = true)]
+    Askpass {
+        /// The prompt OpenSSH composed. Read from stdin when absent.
+        #[arg(value_name = "PROMPT")]
+        prompt: Option<String>,
+    },
 
     /// Answer the fleet setup protocol on this process's own stdin and stdout.
     ///
@@ -1630,6 +1757,58 @@ pub enum FleetCommand {
     /// and which paths are touched, arrives inside a frame and is validated as data.
     #[command(hide = true)]
     Helper,
+}
+
+/// The flags `setup`, `add` and cooperative `leave` share.
+#[derive(Args, Debug, Default)]
+pub struct FleetSetupArgs {
+    /// Inspect and print the concrete plan, and change nothing: no journal, no
+    /// credentials, no installation, no roster edit, and no recorded host trust. An
+    /// unknown host key is still an explicit question — a dry run cannot inspect a host
+    /// it refuses to connect to — but the acceptance lasts only for this run.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Accept the resolved plan without a confirmation prompt. It never accepts an
+    /// unknown or changed host key, never answers a password prompt, and never makes a
+    /// busy runtime idle.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Machine-readable result on stdout, with stable reason codes. Incomplete setup
+    /// still exits non-zero.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Explicitly labelled manual startup instead of a managed user service.
+    #[arg(long)]
+    pub no_service: bool,
+
+    /// Resume (or name) one operation instead of starting a new one. An operation id is
+    /// 8 to 64 characters of lowercase letters, digits and single hyphens.
+    #[arg(long, value_name = "ID")]
+    pub operation: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetWorkerCommand {
+    /// Fork the detached worker and print the socket it listens on.
+    Start {
+        #[arg(long, value_name = "ID")]
+        operation: String,
+
+        #[arg(long, value_name = "DIR")]
+        data_dir: PathBuf,
+    },
+
+    /// Serve one operation in the foreground. The detached form execs this.
+    Run {
+        #[arg(long, value_name = "ID")]
+        operation: String,
+
+        #[arg(long, value_name = "DIR")]
+        data_dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2138,6 +2317,42 @@ mod tests {
             vec!["fleet", "helper", "--materials", "/tmp/materials.json"],
             vec!["fleet", "helper", "--operation", "op-1234abcd"],
             vec!["fleet", "helper", "--data-dir", "/tmp/data"],
+            // The deployment surfaces. `--ask-password` is a boolean on purpose: the
+            // password is typed into a masked prompt, and there is no spelling of this
+            // command line that carries one.
+            vec!["fleet", "setup", "--token", "secret"],
+            vec!["fleet", "setup", "--password", "secret"],
+            vec!["fleet", "setup", "--passphrase", "secret"],
+            vec!["fleet", "setup", "--ask-password", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--token", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--password", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--passphrase", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--key-passphrase", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--ask-password", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--cookie", "secret"],
+            vec![
+                "fleet",
+                "leave",
+                "--machine",
+                "buildbox",
+                "--password",
+                "secret",
+            ],
+            vec![
+                "fleet",
+                "leave",
+                "--machine",
+                "buildbox",
+                "--passphrase",
+                "secret",
+            ],
+            vec!["fleet", "worker", "start", "--token", "secret"],
+            vec!["fleet", "worker", "start", "--password", "secret"],
+            vec!["fleet", "worker", "run", "--cap", "deadbeef"],
+            vec!["fleet", "worker", "run", "--secret", "s"],
+            vec!["fleet", "askpass", "--password", "secret"],
+            vec!["fleet", "askpass", "--token", "secret"],
+            vec!["fleet", "askpass", "--socket", "/tmp/s"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied())).is_err(),
@@ -2873,11 +3088,23 @@ mod tests {
             "irreversible local evidence loss must require an explicit acknowledgement"
         );
 
+        // Bare `fleet leave` still retires this machine; `--machine` is the
+        // cooperative form and is the only thing that makes it reach another host.
         assert!(matches!(
             parse(&["fleet", "leave"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Leave
+                command: FleetCommand::Leave { machine: None, .. }
             })
         ));
+        assert!(matches!(
+            parse(&["fleet", "leave", "--machine", "buildbox", "--user", "me"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Leave { machine: Some(machine), user: Some(user), .. }
+            }) if machine == "buildbox" && user == "me"
+        ));
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "leave", "--user", "me"]).is_err(),
+            "an SSH account without a machine names nothing to reach"
+        );
     }
 }

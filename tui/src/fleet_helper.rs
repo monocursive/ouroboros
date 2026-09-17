@@ -391,6 +391,8 @@ impl Helper {
             "receipt" => self.receipt(&data_dir, object),
             // W2-C
             "service" => self.service(&data_dir, object),
+            // W2-A: cooperative removal's last step on the member itself.
+            "leave" => self.leave(&data_dir, object),
             _ => {
                 return (
                     refusal(
@@ -518,6 +520,65 @@ impl Helper {
                 "host": outcome.member.host,
                 "node": outcome.member.node,
             },
+        }))
+    }
+
+    // W2-A: `ouro fleet leave --machine NAME` run from an issuer ends here, on the
+    // machine that is leaving. It is the same `fleet::leave` the local command runs —
+    // the profile-stopped lock, the EPMD retirement check, and the removal of only the
+    // recognized private files — so a member retired from elsewhere is retired exactly
+    // the way one retired in person is. Sessions, workspaces and attachments are not
+    // touched, and no tombstone is written anywhere.
+    //
+    // `machine` is a cross-check, not a selector: the helper only ever retires the
+    // identity of the data directory it was started with, and a request naming a
+    // different machine is a sign the orchestrator is talking to the wrong host.
+    fn leave(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+        let operation = required_str(object, "operation")?;
+        let expected = match object.get("machine") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(machine)) => Some(machine.clone()),
+            Some(_) => anyhow::bail!("`machine` must be a string"),
+        };
+        let inspection = fleet::inspect_local(data_dir)?;
+        let Some(current) = inspection.fleet.as_ref() else {
+            return Ok(json!({
+                "operation": operation,
+                "machine": Value::Null,
+                "removed": Vec::<String>::new(),
+                "already_standalone": true,
+            }));
+        };
+        if let Some(expected) = &expected {
+            if *expected != current.machine {
+                return Err(fleet::AdmissionError {
+                    reason: "identity_mismatch",
+                    detail: format!(
+                        "this machine is `{}`, not `{expected}`; a leave is never applied to a machine the orchestrator did not mean",
+                        current.machine
+                    ),
+                    roster_revision: None,
+                }
+                .into());
+            }
+        }
+        if inspection.runtime_running {
+            return Err(fleet::AdmissionError {
+                reason: "runtime_running",
+                detail: "this machine's runtime is still using its data directory; stop it before its credentials are removed".to_string(),
+                roster_revision: None,
+            }
+            .into());
+        }
+        let removal = fleet::leave(data_dir)?;
+        Ok(json!({
+            "operation": operation,
+            "machine": removal.as_ref().and_then(|removal| removal.machine.clone()),
+            "removed": removal
+                .as_ref()
+                .map(|removal| removal.removed.clone())
+                .unwrap_or_default(),
+            "already_standalone": removal.is_none(),
         }))
     }
 
