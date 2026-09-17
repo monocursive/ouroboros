@@ -1,26 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- ouroboros-managed v1 data-dir=/Users/tester/.ouroboros content-sha256=31717851339f5549a8c4a95db3f52478ec7c56069e50a73bd5e85379940ec61b -->
+<!-- ouroboros-managed v1 data-dir=/srv/my%20data/%25h/a%22quoted%22/state content-sha256=8b8664eab89eaf11805b24f82e49f55fb8eed8cad21f7438d0efbee45ac5d2b0 -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>dev.ouroboros.runtime.0894aa2947bc</string>
+	<string>dev.ouroboros.runtime.9d7f79eb182e</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/ouro</string>
+		<string>/opt/my tools/100%/ouro</string>
 		<string>service-run</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
-		<string>/Users/tester</string>
+		<string>/home/my user</string>
 		<key>OUROBOROS_DATA_DIR</key>
-		<string>/Users/tester/.ouroboros</string>
+		<string>/srv/my data/%h/a"quoted"/state</string>
 		<key>PATH</key>
 		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>WorkingDirectory</key>
-	<string>/Users/tester/.ouroboros</string>
+	<string>/srv/my data/%h/a"quoted"/state</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -35,8 +35,8 @@
 	<key>ProcessType</key>
 	<string>Adaptive</string>
 	<key>StandardOutPath</key>
-	<string>/Users/tester/.ouroboros/service.out.log</string>
+	<string>/srv/my data/%h/a"quoted"/state/service.out.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/tester/.ouroboros/service.err.log</string>
+	<string>/srv/my data/%h/a"quoted"/state/service.err.log</string>
 </dict>
 </plist>

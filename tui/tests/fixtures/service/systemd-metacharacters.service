@@ -1,0 +1,24 @@
+# ouroboros-managed v1 data-dir=/srv/my%20data/%25h/a%22quoted%22/state content-sha256=a5050ae10ae52382bd5d1cd20643d20c277145e4e7b80c91b9d3bbdf1db55e8f
+[Unit]
+Description=Ouroboros runtime for /srv/my data/%%h/a"quoted"/state
+# No network ordering: `ouro service-run` waits for this machine's own private
+# interface to become bindable before it launches the BEAM, and reports that wait
+# in this unit's log. A user manager has no network-online.target to want.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart="/opt/my tools/100%%/ouro" service-run
+WorkingDirectory="/srv/my data/%%h/a\"quoted\"/state"
+Environment=HOME="/home/my user"
+Environment=OUROBOROS_DATA_DIR="/srv/my data/%%h/a\"quoted\"/state"
+Environment=PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/srv/my data/%%h/a"quoted"/state/service.out.log
+StandardError=append:/srv/my data/%%h/a"quoted"/state/service.err.log
+
+[Install]
+WantedBy=default.target

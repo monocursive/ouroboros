@@ -1799,7 +1799,7 @@ fn parse_forget_session_owner_result<'a>(
 /// runtime, and nothing here reads or writes a session.
 fn fleet_service_command(paths: &Paths, command: FleetServiceCommand) -> Result<()> {
     let plan = fleet_service::Plan::for_this_machine(&paths.data_dir)?;
-    let programs = fleet_service::Programs::from_env();
+    let programs = fleet_service::Programs::from_env()?;
     let (report, json) = match command {
         FleetServiceCommand::Install { adopt, json } => {
             (fleet_service::install(&plan, &programs, adopt)?, json)
@@ -3407,6 +3407,22 @@ where
     }
 
     if attached.hello.serves("runtime.shutdown") && attached.hello.operates() {
+        // A runtime that does not serve `runtime.activity` does not have the gate: it
+        // predates it. JSON-RPC says nothing about unknown parameters, and this one
+        // ignores `require_idle` and stops — which is indistinguishable, from here, from
+        // a runtime that checked and found itself idle. Refusing to send the request at
+        // all is the only honest answer, and the deployment engine depends on this flag
+        // meaning what it says before it restarts somebody's machine.
+        if require_idle && !attached.hello.serves("runtime.activity") {
+            attached.client.stop().await;
+            eprintln!(
+                "ouro stop --require-idle: the runtime on port {} does not serve `runtime.activity`, so it has no idle gate to apply and would have stopped without checking anything. Nothing was sent and nothing was changed. Upgrade that runtime, or stop it deliberately with a plain `ouro stop`",
+                publication.port
+            );
+            drop(lock);
+            std::process::exit(fleet_service::EXIT_IDLE_GATE_UNSUPPORTED.into());
+        }
+
         // Seam C2: without the parameter this is byte-for-byte the request `ouro stop`
         // has always sent, and the runtime's behaviour is unchanged.
         let params = if require_idle {
@@ -3417,14 +3433,26 @@ where
         match attached.client.call("runtime.shutdown", params).await {
             Ok(_result) => println!("the runtime accepted runtime.shutdown"),
             // The runtime stopping is exactly what was asked for, and it may stop before
-            // it can answer.
+            // it can answer — but only when nothing was being gated. Under
+            // `--require-idle` the answer *is* the gate's verdict, and a connection that
+            // closed instead of carrying one leaves an outcome nobody knows.
+            Err(ClientError::ConnectionClosed) if require_idle => {
+                attached.client.stop().await;
+                eprintln!(
+                    "ouro stop --require-idle: the connection closed before the runtime answered, so whether the idle gate passed, refused, or was never reached is unknown. pid {} may or may not be stopping; run `ouro fleet status` before assuming either",
+                    publication.pid
+                );
+                drop(lock);
+                std::process::exit(fleet_service::EXIT_IDLE_OUTCOME_UNKNOWN.into());
+            }
             Err(ClientError::ConnectionClosed) => {
                 println!("the runtime accepted runtime.shutdown and closed the connection")
             }
             Err(ClientError::Rpc(error))
-                if require_idle && fleet_service::stop_refusal(error.data.as_ref()).is_some() =>
+                if require_idle
+                    && fleet_service::stop_refusal(error.code, error.data.as_ref()).is_some() =>
             {
-                let refusal = fleet_service::stop_refusal(error.data.as_ref())
+                let refusal = fleet_service::stop_refusal(error.code, error.data.as_ref())
                     .expect("the refusal the guard just matched");
                 attached.client.stop().await;
                 eprintln!(

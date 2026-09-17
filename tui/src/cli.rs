@@ -236,8 +236,12 @@ pub enum Command {
         /// operator clients, and refuses if any of that is non-zero — or if it could
         /// not establish one of them, because unknown activity is not idleness. The
         /// refusals have their own exit codes so a script can tell them apart: 10 for
-        /// a busy runtime, 11 for activity it could not read. Without this flag `ouro
-        /// stop` behaves exactly as it always has.
+        /// a busy runtime, 11 for activity it could not read, 12 for a runtime that
+        /// does not serve `runtime.activity` and therefore has no gate to apply (the
+        /// request is not sent at all, because an older runtime ignores the parameter
+        /// and stops, which looks exactly like a pass), and 13 for a connection that
+        /// closed before any answer arrived. Without this flag `ouro stop` behaves
+        /// exactly as it always has.
         #[arg(long)]
         require_idle: bool,
     },

@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 use serde::Serialize;
@@ -114,6 +114,9 @@ pub struct Programs {
     pub launchctl: PathBuf,
     pub systemctl: PathBuf,
     pub loginctl: PathBuf,
+    /// How long any one manager command is given before its whole process group is
+    /// killed. A field rather than a constant so the deadline itself is testable.
+    pub deadline: Duration,
 }
 
 impl Default for Programs {
@@ -122,6 +125,7 @@ impl Default for Programs {
             launchctl: PathBuf::from("launchctl"),
             systemctl: PathBuf::from("systemctl"),
             loginctl: PathBuf::from("loginctl"),
+            deadline: MANAGER_TIMEOUT,
         }
     }
 }
@@ -130,20 +134,48 @@ impl Programs {
     /// The same three programs, with absolute overrides for an installation this
     /// lookup does not know about. Named for the same reason `OUROBOROS_TAILSCALE` is:
     /// a relative name would let the working directory decide which program runs.
-    pub fn from_env() -> Self {
+    ///
+    /// An override that is not an executable file is refused outright rather than
+    /// quietly falling back to `PATH`: an operator who named a program meant that one,
+    /// and a directory or a missing path is a mistake worth saying out loud.
+    pub fn from_env() -> Result<Self> {
         let default = Self::default();
-        Self {
-            launchctl: override_program("OUROBOROS_LAUNCHCTL").unwrap_or(default.launchctl),
-            systemctl: override_program("OUROBOROS_SYSTEMCTL").unwrap_or(default.systemctl),
-            loginctl: override_program("OUROBOROS_LOGINCTL").unwrap_or(default.loginctl),
-        }
+        Ok(Self {
+            launchctl: override_program("OUROBOROS_LAUNCHCTL")?.unwrap_or(default.launchctl),
+            systemctl: override_program("OUROBOROS_SYSTEMCTL")?.unwrap_or(default.systemctl),
+            loginctl: override_program("OUROBOROS_LOGINCTL")?.unwrap_or(default.loginctl),
+            deadline: default.deadline,
+        })
     }
 }
 
-fn override_program(name: &str) -> Option<PathBuf> {
-    let value = std::env::var_os(name)?;
+fn override_program(name: &str) -> Result<Option<PathBuf>> {
+    let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
     let path = PathBuf::from(&value);
-    (!value.is_empty() && path.is_absolute()).then_some(path)
+    if !path.is_absolute() {
+        return refuse(
+            "unusable_manager_program",
+            format!(
+                "{name} names `{}`, and a service-manager override must be an absolute path: a relative name would let the working directory decide which program runs",
+                path.display()
+            ),
+        );
+    }
+    let executable = fs::metadata(&path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false);
+    if !executable {
+        return refuse(
+            "unusable_manager_program",
+            format!(
+                "{name} names `{}`, which is not an executable file on this machine",
+                path.display()
+            ),
+        );
+    }
+    Ok(Some(path))
 }
 
 // ------------------------------------------------------------------- refusals by reason
@@ -230,8 +262,20 @@ impl Plan {
                 ),
             );
         }
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow!("this account has no home directory to install a unit into"))?;
+        // `$HOME` first, and `dirs::home_dir()` only as the fallback. A child process
+        // told where its home is must write its unit there: a test harness, a `sudo -u`
+        // and a service account all say so this way. `dirs` 6 happens to read `$HOME`
+        // itself on both platforms, so this branch is belt and braces rather than the
+        // thing that makes it work — the property is pinned by a test that runs this
+        // binary with a `HOME` of its own and checks where the unit landed.
+        let home = match std::env::var_os("HOME") {
+            Some(value) if !value.is_empty() && Path::new(&value).is_absolute() => {
+                PathBuf::from(value)
+            }
+            _ => dirs::home_dir().ok_or_else(|| {
+                anyhow!("this account has no home directory to install a unit into")
+            })?,
+        };
         let config_home = match std::env::var_os("XDG_CONFIG_HOME") {
             Some(value) if !value.is_empty() && Path::new(&value).is_absolute() => {
                 PathBuf::from(value)
@@ -245,6 +289,10 @@ impl Plan {
                 .context("resolving a relative data directory")?
                 .join(data_dir)
         };
+        // One directory is one service. `<dir>`, `<dir>/` and `<dir>/./` are the same
+        // directory, and without this each spelling minted its own label and its own
+        // RunAtLoad agent for the same runtime.
+        let data_dir = canonical_dir(&data_dir);
 
         Ok(Self {
             platform,
@@ -259,9 +307,9 @@ impl Plan {
 
     /// The short, stable digest of this data directory that names the unit. Two data
     /// directories on one account get two independent services; the same data directory
-    /// always gets the same one.
+    /// always gets the same one, whichever way it was spelled.
     pub fn digest(&self) -> String {
-        sha256_hex(self.data_dir.as_os_str().as_encoded_bytes())[..12].to_string()
+        sha256_hex(canonical_dir(&self.data_dir).as_os_str().as_encoded_bytes())[..12].to_string()
     }
 
     /// The launchd label, which is also the systemd unit's stem.
@@ -358,7 +406,7 @@ impl Plan {
 	<key>ExitTimeOut</key>
 	<integer>30</integer>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Adaptive</string>
 	<key>StandardOutPath</key>
 	<string>{out_log}</string>
 	<key>StandardErrorPath</key>
@@ -383,13 +431,20 @@ impl Plan {
                 )
             }
             Platform::Linux => {
+                // systemd splits `ExecStart=` and `Environment=` on whitespace and
+                // expands `%` specifiers in both, so an unescaped path with a space in
+                // it runs the wrong program with the wrong argv and a `%h` in it runs
+                // against somebody's home directory. Values are quoted and escaped per
+                // systemd.unit(5)'s documented grammar; `append:` takes the rest of its
+                // line and is therefore only specifier-escaped.
                 let mut environment_lines = String::new();
                 for (key, value) in environment {
-                    environment_lines.push_str(&format!("Environment={key}={value}\n"));
+                    environment_lines
+                        .push_str(&format!("Environment={key}={}\n", systemd_quoted(value)));
                 }
                 let body = format!(
                     r#"[Unit]
-Description=Ouroboros runtime for {data_dir}
+Description=Ouroboros runtime for {description}
 # No network ordering: `ouro service-run` waits for this machine's own private
 # interface to become bindable before it launches the BEAM, and reports that wait
 # in this unit's log. A user manager has no network-online.target to want.
@@ -399,7 +454,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart={executable} service-run
-WorkingDirectory={data_dir}
+WorkingDirectory={working_directory}
 {environment_lines}Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -409,10 +464,11 @@ StandardError=append:{err_log}
 [Install]
 WantedBy=default.target
 "#,
-                    executable = executable,
-                    data_dir = data_dir,
-                    out_log = out_log,
-                    err_log = err_log,
+                    description = systemd_literal(&data_dir),
+                    executable = systemd_quoted(&executable),
+                    working_directory = systemd_quoted(&data_dir),
+                    out_log = systemd_literal(&out_log),
+                    err_log = systemd_literal(&err_log),
                 );
                 (String::new(), body)
             }
@@ -422,12 +478,16 @@ WantedBy=default.target
         // removing that one line from the unit on disk reproduces exactly what was
         // hashed. An edit anywhere else — including the XML preamble — changes it.
         let content = sha256_hex(format!("{prefix}{body}").as_bytes());
+        // The data directory is percent-encoded, so the marker is one token per field
+        // whatever the path contains — a space, a `#`, a quote, a newline — and so the
+        // encoding can never produce the `--` that XML forbids inside a comment.
+        let encoded = marker_encode(&data_dir);
         let comment = match self.platform {
             Platform::MacOs => format!(
-                "<!-- {MARKER_TAG} {MARKER_VERSION} data-dir={data_dir} content-sha256={content} -->\n"
+                "<!-- {MARKER_TAG} {MARKER_VERSION} data-dir={encoded} content-sha256={content} -->\n"
             ),
             Platform::Linux => format!(
-                "# {MARKER_TAG} {MARKER_VERSION} data-dir={data_dir} content-sha256={content}\n"
+                "# {MARKER_TAG} {MARKER_VERSION} data-dir={encoded} content-sha256={content}\n"
             ),
         };
 
@@ -435,16 +495,67 @@ WantedBy=default.target
     }
 }
 
+/// The account this process actually runs as, from the password database rather than
+/// from `$USER`.
+///
+/// `$USER` is whatever the environment says, and it survives `su`, `sudo -E` and a
+/// service manager's inherited environment. The name here decides which account
+/// `loginctl show-user` is asked about, and therefore whose lingering — whose
+/// boot-and-logout persistence — is reported, so it has to be the real one.
 fn account_name() -> String {
-    std::env::var("USER")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            std::env::var("LOGNAME")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_else(|| unsafe { libc::geteuid() }.to_string())
+    let uid = unsafe { libc::geteuid() };
+    // SAFETY: `getpwuid` returns a pointer into a static buffer owned by libc, which is
+    // read here and copied out before anything else can call into libc on this thread.
+    unsafe {
+        let entry = libc::getpwuid(uid);
+        if !entry.is_null() && !(*entry).pw_name.is_null() {
+            if let Ok(name) = std::ffi::CStr::from_ptr((*entry).pw_name).to_str() {
+                if !name.trim().is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    uid.to_string()
+}
+
+/// A directory path reduced to one spelling: symlinks resolved and `.`/trailing
+/// separators dropped where the directory exists, and a lexical normalisation where it
+/// does not (so a plan for a directory that has not been created yet still has one
+/// stable label).
+pub fn canonical_dir(path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return resolved;
+    }
+    // The path does not exist yet — a unit directory about to be created, a data
+    // directory named before it is made. Resolve the deepest ancestor that does exist
+    // and keep the rest, so `/var/...` and `/private/var/...` are one answer either way.
+    let mut normalised = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            other => normalised.push(other.as_os_str()),
+        }
+    }
+    let mut tail = Vec::new();
+    let mut ancestor = normalised.as_path();
+    loop {
+        if let Ok(resolved) = fs::canonicalize(ancestor) {
+            let mut rebuilt = resolved;
+            for part in tail.iter().rev() {
+                rebuilt.push(part);
+            }
+            return rebuilt;
+        }
+        let Some(parent) = ancestor.parent() else {
+            return normalised;
+        };
+        let Some(name) = ancestor.file_name() else {
+            return normalised;
+        };
+        tail.push(name.to_os_string());
+        ancestor = parent;
+    }
 }
 
 /// A path that can be written into a unit and into an ownership marker without
@@ -456,15 +567,80 @@ fn plain_path(path: &Path, description: &str) -> Result<String> {
             format!("the {description} {} is not valid UTF-8", path.display()),
         )
     })?;
-    if text.chars().any(|c| c.is_control()) || text.contains("-->") {
+    if text.chars().any(|c| c.is_control()) {
         return refuse(
             "unusable_path",
             format!(
-                "the {description} `{text}` contains a character a service unit and its ownership marker cannot carry"
+                "the {description} `{text}` contains a control character, which no service unit format can carry"
             ),
         );
     }
     Ok(text.to_string())
+}
+
+/// A value for a systemd directive that expands `%` specifiers and splits on
+/// whitespace: doubled specifiers, and the whole thing in double quotes with `\` and
+/// `"` escaped, per systemd.unit(5) "Quoting".
+fn systemd_quoted(value: &str) -> String {
+    let escaped = value
+        .replace('%', "%%")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// A value for a directive that takes the rest of its line (`Description=`,
+/// `StandardOutput=append:…`): nothing is split, so only the specifier needs doubling.
+fn systemd_literal(value: &str) -> String {
+    value.replace('%', "%%")
+}
+
+/// Bytes a marker field may carry unencoded. Everything else becomes `%XX`, and a `-`
+/// that would follow another `-` is encoded too, because XML forbids `--` inside a
+/// comment and the plist's marker is one.
+fn marker_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'/' | b':' | b'+' | b'@')
+}
+
+fn marker_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(value.len());
+    let mut previous_dash = false;
+    for byte in value.as_bytes() {
+        if *byte == b'-' && !previous_dash {
+            encoded.push('-');
+            previous_dash = true;
+            continue;
+        }
+        if marker_unreserved(*byte) {
+            encoded.push(*byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+        previous_dash = false;
+    }
+    encoded
+}
+
+fn marker_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let hex = value.get(index + 1..index + 3)?;
+                decoded.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 fn xml_escape(value: &str) -> String {
@@ -540,16 +716,38 @@ pub struct Marker {
     pub content_sha256: String,
 }
 
-/// Reads the ownership marker out of a unit's text, if it has one.
-pub fn read_marker(text: &str) -> Option<Marker> {
-    let line = text.lines().find(|line| line.contains(MARKER_TAG))?;
-    let line = line
-        .trim()
-        .trim_start_matches("<!--")
-        .trim_end_matches("-->")
-        .trim()
-        .trim_start_matches('#')
-        .trim();
+/// The line the marker has to be on, for a unit of this platform's shape.
+///
+/// A marker accepted from anywhere in the file, in either comment syntax, is a marker
+/// that can be appended to somebody else's unit — or hidden below one. It is written at
+/// a fixed place by [`Plan::render`] and it is only read from that place.
+fn marker_line_index(platform: Platform) -> usize {
+    match platform {
+        // After the XML declaration and the DOCTYPE, which are a fixed two lines.
+        Platform::MacOs => 2,
+        Platform::Linux => 0,
+    }
+}
+
+/// Reads the ownership marker out of a unit's text, if it has one, in the one place and
+/// the one comment syntax this platform's units carry it.
+///
+/// The marker is not a security boundary and cannot be: anything that can write the unit
+/// path can compute the digest, because the digest is over the file and has no secret in
+/// it. What it distinguishes is an accident from a deliberate act — another tool's unit,
+/// a hand-written one, an older copy of ours — not an adversary who already has write
+/// access to this account's service directory. `docs/FLEET.md` says so where an operator
+/// will read it.
+pub fn read_marker(platform: Platform, text: &str) -> Option<Marker> {
+    let line = text.lines().nth(marker_line_index(platform))?;
+    let line = match platform {
+        Platform::MacOs => line
+            .trim()
+            .strip_prefix("<!--")?
+            .strip_suffix("-->")?
+            .trim(),
+        Platform::Linux => line.trim().strip_prefix('#')?.trim(),
+    };
     let mut fields = line.split_whitespace();
     if fields.next()? != MARKER_TAG || fields.next()? != MARKER_VERSION {
         return None;
@@ -557,27 +755,44 @@ pub fn read_marker(text: &str) -> Option<Marker> {
     let mut data_dir = None;
     let mut content_sha256 = None;
     for field in fields {
-        if let Some(value) = field.strip_prefix("data-dir=") {
-            data_dir = Some(value.to_string());
-        } else if let Some(value) = field.strip_prefix("content-sha256=") {
-            content_sha256 = Some(value.to_string());
+        // Parsed by field name, and a repeated or unknown field makes the whole marker
+        // unreadable rather than letting the last one win.
+        let (name, value) = field.split_once('=')?;
+        let slot = match name {
+            "data-dir" => &mut data_dir,
+            "content-sha256" => &mut content_sha256,
+            _ => return None,
+        };
+        if slot.is_some() {
+            return None;
         }
+        *slot = Some(value.to_string());
+    }
+    let content_sha256 = content_sha256?;
+    if content_sha256.len() != 64 || !content_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
     }
     Some(Marker {
-        data_dir: data_dir?,
-        content_sha256: content_sha256?,
+        data_dir: marker_decode(&data_dir?)?,
+        content_sha256,
     })
 }
 
-/// What a marker's digest covers: the whole unit with the marker line taken out.
-fn marked_content(text: &str) -> Option<String> {
-    let start = text.find(MARKER_TAG)?;
-    let line_start = text[..start]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let line_end = text[start..].find('\n').map(|index| start + index + 1)?;
-    Some(format!("{}{}", &text[..line_start], &text[line_end..]))
+/// What a marker's digest covers: the whole unit with its one marker line taken out.
+fn marked_content(platform: Platform, text: &str) -> Option<String> {
+    let index = marker_line_index(platform);
+    let mut kept = String::with_capacity(text.len());
+    let mut lines = 0;
+    let mut rest = text;
+    while lines < index {
+        let end = rest.find('\n')? + 1;
+        kept.push_str(&rest[..end]);
+        rest = &rest[end..];
+        lines += 1;
+    }
+    let end = rest.find('\n')? + 1;
+    kept.push_str(&rest[end..]);
+    Some(kept)
 }
 
 /// What, if anything, is installed at this plan's unit path.
@@ -590,25 +805,22 @@ pub fn classify(plan: &Plan) -> Result<(Ownership, Option<String>)> {
         }
         Err(error) => return Err(error).with_context(|| format!("inspecting {}", path.display())),
     };
-    // A symlink where our unit goes is somebody else's arrangement: it is reported and
-    // left exactly as it is, and nothing follows it.
+    // A symlink or a directory where our unit goes is somebody else's arrangement: it is
+    // reported and left exactly as it is, and nothing follows it.
     if !metadata.file_type().is_file() {
         return Ok((Ownership::Foreign, None));
     }
     let text = fs::read_to_string(&path)
         .with_context(|| format!("reading the existing unit {}", path.display()))?;
-    let Some(marker) = read_marker(&text) else {
+    let Some(marker) = read_marker(plan.platform, &text) else {
         return Ok((Ownership::Foreign, Some(sha256_hex(text.as_bytes()))));
     };
-    let data_dir = plan
-        .data_dir
-        .to_str()
-        .map(str::to_string)
-        .unwrap_or_default();
-    if marker.data_dir != data_dir {
+    // A marker of ours for a *different* data directory is another runtime's unit that
+    // happens to sit at this path. It is not ours to rewrite or delete.
+    if canonical_dir(Path::new(&marker.data_dir)) != canonical_dir(&plan.data_dir) {
         return Ok((Ownership::Foreign, Some(sha256_hex(text.as_bytes()))));
     }
-    let content = marked_content(&text).unwrap_or_default();
+    let content = marked_content(plan.platform, &text).unwrap_or_default();
     let digest = sha256_hex(content.as_bytes());
     if digest == marker.content_sha256 {
         Ok((Ownership::Ours, Some(marker.content_sha256)))
@@ -690,7 +902,7 @@ pub fn detect_as(platform: Option<Platform>, user: &str, programs: &Programs) ->
 fn detect_launchd(programs: &Programs) -> Supervisor {
     let uid = unsafe { libc::geteuid() };
     let domain = format!("gui/{uid}");
-    match run(&programs.launchctl, &["print", domain.as_str()]) {
+    match run(&programs.launchctl, &["print", domain.as_str()], programs.deadline) {
         Ok(outcome) if outcome.status == Some(0) => Supervisor {
             code: SupervisorCode::LaunchdUserSession,
             platform: Some(Platform::MacOs),
@@ -726,7 +938,7 @@ const MACOS_PERSISTENCE: &str =
 
 fn detect_systemd(user: &str, programs: &Programs) -> Supervisor {
     let reachable = matches!(
-        run(&programs.systemctl, &["--user", "show", "--property=Version"]),
+        run(&programs.systemctl, &["--user", "show", "--property=Version"], programs.deadline),
         Ok(ref outcome) if outcome.status == Some(0)
     );
     if !reachable {
@@ -747,6 +959,7 @@ fn detect_systemd(user: &str, programs: &Programs) -> Supervisor {
     let linger = match run(
         &programs.loginctl,
         &["show-user", user, "--property=Linger"],
+        programs.deadline,
     ) {
         Ok(outcome) if outcome.status == Some(0) => {
             property(&outcome.stdout, "Linger").map(|value| value.eq_ignore_ascii_case("yes"))
@@ -786,6 +999,9 @@ pub struct Report {
     pub platform: Option<Platform>,
     pub supervisor: SupervisorCode,
     pub label: String,
+    /// The account this service belongs to, read from the password database. It is what
+    /// `loginctl` is asked about, so a reader can check it is the account they meant.
+    pub user: String,
     pub unit_path: String,
     pub executable: String,
     pub data_dir: String,
@@ -802,6 +1018,11 @@ pub struct Report {
     pub prerequisite: Option<String>,
     /// Exactly the manager commands this action issued, in order, argv by argv.
     pub commands: Vec<Vec<String>>,
+    /// Every externally visible step in the order it happened, manager calls and file
+    /// operations interleaved. The ordering matters — a unit unlinked before its manager
+    /// was told to stop supervising it is a different act from one unlinked after — and
+    /// `commands` alone cannot show it.
+    pub steps: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -812,6 +1033,7 @@ impl Report {
             platform: Some(plan.platform),
             supervisor: supervisor.code,
             label: plan.label(),
+            user: plan.user.clone(),
             unit_path: plan.unit_path().display().to_string(),
             executable: plan.executable.display().to_string(),
             data_dir: plan.data_dir.display().to_string(),
@@ -825,6 +1047,7 @@ impl Report {
             persistence: supervisor.persistence.clone(),
             prerequisite: supervisor.prerequisite.clone(),
             commands: Vec::new(),
+            steps: Vec::new(),
             notes: Vec::new(),
         }
     }
@@ -832,7 +1055,12 @@ impl Report {
     fn record(&mut self, program: &Path, args: &[&str]) {
         let mut argv = vec![program.display().to_string()];
         argv.extend(args.iter().map(|arg| (*arg).to_string()));
+        self.steps.push(format!("ran {}", argv.join(" ")));
         self.commands.push(argv);
+    }
+
+    fn step(&mut self, step: impl Into<String>) {
+        self.steps.push(step.into());
     }
 }
 
@@ -848,6 +1076,7 @@ pub fn render(report: &Report) -> String {
         report.supervisor.code()
     ));
     text.push_str(&format!("  label        {}\n", report.label));
+    text.push_str(&format!("  account      {}\n", report.user));
     text.push_str(&format!("  unit         {}\n", report.unit_path));
     text.push_str(&format!("  ownership    {}\n", report.ownership.code()));
     text.push_str(&format!(
@@ -896,6 +1125,66 @@ fn tri(value: Option<bool>) -> &'static str {
     }
 }
 
+// ------------------------------------------------------------------- the writing fence
+
+/// An absolute directory that every unit this process writes must live under.
+///
+/// A test harness sets it to its own scratch root. Nothing in production sets it, and
+/// the fence is then the account's own home directory. It exists because a test that
+/// builds a [`Plan`] from the *process* environment — the helper's `service` op does
+/// exactly that — writes wherever that environment points, and the only place that is
+/// never acceptable is the developer's real `~/Library/LaunchAgents`.
+pub const SERVICE_ROOT_ENV: &str = "OUROBOROS_SERVICE_ROOT";
+
+fn ensure_inside_service_root(path: &Path) -> Result<()> {
+    let Some(root) = std::env::var_os(SERVICE_ROOT_ENV).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    if !root.is_absolute() {
+        return refuse(
+            "outside_service_root",
+            format!(
+                "{SERVICE_ROOT_ENV} must be an absolute path; it names `{}`",
+                root.display()
+            ),
+        );
+    }
+    let root = canonical_dir(&root);
+    let parent = path.parent().unwrap_or(path);
+    if !canonical_dir(parent).starts_with(&root) {
+        return refuse(
+            "outside_service_root",
+            format!(
+                "{} is outside {SERVICE_ROOT_ENV} ({}), and this process may write a unit only inside it",
+                path.display(),
+                root.display()
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// The `Label` a launchd plist declares, read well enough to boot out the job it loaded.
+///
+/// Deliberately not a plist parser: it finds the `Label` key's string value, and
+/// accepts it only if it looks like a launchd label — printable, bounded, no
+/// whitespace — because the result becomes an argument to `launchctl`.
+fn launchd_label(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let key = text.find("<key>Label</key>")?;
+    let rest = &text[key..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")? + start;
+    let label = rest[start..end].trim();
+    let plausible = !label.is_empty()
+        && label.len() <= 256
+        && label
+            .chars()
+            .all(|c| c.is_ascii_graphic() && !matches!(c, '/' | '\\'));
+    plausible.then(|| label.to_string())
+}
+
 // ----------------------------------------------------------------------- the operations
 
 /// Generate the unit, write it, and hand it to the manager.
@@ -925,16 +1214,20 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
 
     let (ownership, digest) = classify(plan)?;
     report.ownership = ownership;
+    let mut replaced_label: Option<String> = None;
     match ownership {
         Ownership::Absent | Ownership::Ours => {}
         Ownership::Modified if adopt => report.notes.push(format!(
             "adopted an edited copy of this machine's own unit (body sha256 {}) and replaced it",
             digest.clone().unwrap_or_else(|| "unknown".to_string())
         )),
-        Ownership::Foreign if adopt => report.notes.push(format!(
-            "adopted a preexisting unit this code did not write (sha256 {}) and replaced it",
-            digest.clone().unwrap_or_else(|| "unknown".to_string())
-        )),
+        Ownership::Foreign if adopt => {
+            replaced_label = launchd_label(&plan.unit_path());
+            report.notes.push(format!(
+                "adopted a preexisting unit this code did not write (sha256 {}) and replaced it",
+                digest.clone().unwrap_or_else(|| "unknown".to_string())
+            ));
+        }
         Ownership::Modified => {
             return refuse(
                 "unit_modified",
@@ -956,13 +1249,63 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         }
     }
 
+    // A runtime already owning this directory is not a refusal — the unit is for the
+    // next start — but it is a fact the operator is owed, because the service will not
+    // take over until that process stops.
+    if let Ok(Some(owner)) = crate::runtime::read_live_runtime_owner(&plan.data_dir) {
+        report.notes.push(format!(
+            "a runtime already owns this data directory (pid {}); the service takes over only after it stops",
+            owner.pid
+        ));
+    }
+
     let text = plan.render()?;
+    let unit_path = plan.unit_path();
+    ensure_inside_service_root(&unit_path)?;
     prepare_log(&plan.out_log())?;
     prepare_log(&plan.err_log())?;
-    write_private_atomic(&plan.unit_path(), text.as_bytes())?;
+    write_private_atomic(&unit_path, text.as_bytes())?;
+    report.step(format!("wrote {}", unit_path.display()));
     report.installed = true;
     report.ownership = Ownership::Ours;
 
+    // If the manager will not take it, this call must not leave a RunAtLoad unit behind
+    // for the next login. Only what this call created is removed: a unit of ours that
+    // was already here is left, and the refusal names `remove`.
+    let handoff = hand_to_manager(
+        plan,
+        programs,
+        adopt,
+        replaced_label.as_deref(),
+        &mut report,
+    );
+    if let Err(error) = handoff {
+        if ownership == Ownership::Absent {
+            let _ = fs::remove_file(&unit_path);
+            report.step(format!("removed {}", unit_path.display()));
+            return Err(error.context(format!(
+                "the unit this call wrote was removed again, so nothing starts at the next login; {} is as it was",
+                unit_path.display()
+            )));
+        }
+        return Err(error.context(format!(
+            "{} is on disk and will be used at the next login; run `ouro fleet service remove` if that is not what you want",
+            unit_path.display()
+        )));
+    }
+
+    inspect_manager(plan, programs, &mut report)?;
+    Ok(report)
+}
+
+/// Hand the freshly written unit to the service manager.
+fn hand_to_manager(
+    plan: &Plan,
+    programs: &Programs,
+    adopt: bool,
+    replaced_label: Option<&str>,
+    report: &mut Report,
+) -> Result<()> {
     match plan.platform {
         Platform::MacOs => {
             let target = plan.manager_name();
@@ -971,14 +1314,37 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
             // copy of this file has to be booted out before the new one can replace it,
             // and a `bootout` of something that is not loaded is not an error here.
             report.record(&programs.launchctl, &["bootout", target.as_str()]);
-            let _ = run(&programs.launchctl, &["bootout", target.as_str()]);
+            let _ = run(
+                &programs.launchctl,
+                &["bootout", target.as_str()],
+                programs.deadline,
+            );
+            // The file being replaced may have loaded a job under its *own* label.
+            // Booting out only ours would leave that job running with no file behind it.
+            if adopt {
+                if let Some(label) = replaced_label {
+                    let orphan = format!("gui/{}/{label}", plan.uid);
+                    report.record(&programs.launchctl, &["bootout", orphan.as_str()]);
+                    let _ = run(
+                        &programs.launchctl,
+                        &["bootout", orphan.as_str()],
+                        programs.deadline,
+                    );
+                    report.notes.push(format!(
+                        "the unit replaced here had loaded the job `{label}`; it was booted out too, so nothing is left running without a file behind it"
+                    ));
+                }
+            }
             let plist = plan.unit_path();
             let plist = plist.to_str().ok_or_else(|| {
                 ServiceError::new("unusable_path", "the unit path is not valid UTF-8")
             })?;
             report.record(&programs.launchctl, &["bootstrap", domain.as_str(), plist]);
-            let outcome = run(&programs.launchctl, &["bootstrap", domain.as_str(), plist])
-                .map_err(|error| ServiceError::new("manager_unavailable", error.to_string()))?;
+            let outcome = run(
+                &programs.launchctl,
+                &["bootstrap", domain.as_str(), plist],
+                programs.deadline,
+            )?;
             if outcome.status != Some(0) {
                 return refuse(
                     "manager_refused",
@@ -997,8 +1363,7 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
                 vec!["--user", "enable", "--now", unit.as_str()],
             ] {
                 report.record(&programs.systemctl, &args);
-                let outcome = run(&programs.systemctl, &args)
-                    .map_err(|error| ServiceError::new("manager_unavailable", error.to_string()))?;
+                let outcome = run(&programs.systemctl, &args, programs.deadline)?;
                 if outcome.status != Some(0) {
                     return refuse(
                         "manager_refused",
@@ -1012,9 +1377,7 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
             }
         }
     }
-
-    inspect_manager(plan, programs, &mut report)?;
-    Ok(report)
+    Ok(())
 }
 
 /// What is installed and what the manager says about it. Changes nothing.
@@ -1037,6 +1400,19 @@ pub fn status(plan: &Plan, programs: &Programs) -> Result<Report> {
             plan.unit_path().display(),
             digest.unwrap_or_else(|| "unreadable".to_string())
         ));
+    }
+    // Units for the same data directory under another spelling. A plan is canonical
+    // now, but one written by an older `ouro` — or by hand from a path with a trailing
+    // slash — is a second RunAtLoad service for one runtime, and only a scan finds it.
+    for duplicate in duplicate_units(plan) {
+        report.notes.push(format!(
+            "{} is another managed unit for this same data directory; two of them supervise one runtime. Remove the one you do not want",
+            duplicate.display()
+        ));
+    }
+    // The manager appends to these and creates them at its own umask if they are gone.
+    if ownership.is_ours() {
+        relog(plan, &mut report);
     }
     if supervisor.code == SupervisorCode::Unsupported {
         report.notes.push(
@@ -1103,35 +1479,125 @@ pub fn remove(plan: &Plan, programs: &Programs) -> Result<Report> {
         Ownership::Ours | Ownership::Modified => {}
     }
 
+    if ownership == Ownership::Modified {
+        // Still ours — our marker, our data directory — so it goes. But an operator who
+        // edited it is owed the digest of what is about to be deleted.
+        report.notes.push(format!(
+            "the unit removed here no longer matched the digest in its own marker (body sha256 {}): it had been edited since this code wrote it",
+            digest.unwrap_or_else(|| "unreadable".to_string())
+        ));
+    }
+
     // Disabling first is the order the proposal asks for: a unit removed while its
     // manager still supervises it comes straight back.
-    if supervisor.code != SupervisorCode::Unsupported {
-        disable_with_manager(plan, programs, &mut report)?;
+    let disabled = if supervisor.code != SupervisorCode::Unsupported {
+        disable_with_manager(plan, programs, &mut report)
     } else {
         report.notes.push(
-            "no user supervisor answered, so only the unit file was removed; nothing was stopped"
+            "no user supervisor answered, so the unit file was removed and nothing was stopped"
                 .to_string(),
         );
+        Ok(())
+    };
+    // A manager that refuses the disable must not make the unit impossible to delete: a
+    // file left on disk comes back at the next login, which is the worse of the two
+    // outcomes. The file goes, and the operator is told exactly what is still loaded.
+    if let Err(error) = &disabled {
+        report.notes.push(format!(
+            "the service manager refused to stop this unit ({error}); the file was removed anyway, so nothing starts at the next login. Whatever is still loaded now has to be stopped by hand: `{}`",
+            match plan.platform {
+                Platform::MacOs => format!("launchctl bootout {}", plan.manager_name()),
+                Platform::Linux => format!("systemctl --user disable --now {}", plan.manager_name()),
+            }
+        ));
     }
 
     if ownership.is_ours() {
         let path = plan.unit_path();
+        ensure_inside_service_root(&path)?;
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        report
-            .notes
-            .push(format!("removed {}", plan.unit_path().display()));
+        report.step(format!("removed {}", path.display()));
+        report.notes.push(format!("removed {}", path.display()));
     }
     report.installed = false;
     report.ownership = Ownership::Absent;
 
-    if plan.platform == Platform::Linux && supervisor.code != SupervisorCode::Unsupported {
-        let args = ["--user", "daemon-reload"];
-        report.record(&programs.systemctl, &args);
-        let _ = run(&programs.systemctl, &args);
+    if plan.platform == Platform::Linux {
+        // `systemctl --user enable` installs a symlink under `default.target.wants`.
+        // Without a manager to tell, the symlink outlives the unit and the next
+        // `daemon-reload` reports a dangling want forever.
+        let wants = plan
+            .config_home
+            .join("systemd")
+            .join("user")
+            .join("default.target.wants")
+            .join(plan.manager_name());
+        if fs::symlink_metadata(&wants).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && fs::remove_file(&wants).is_ok()
+        {
+            report.step(format!("removed {}", wants.display()));
+            report.notes.push(format!("removed {}", wants.display()));
+        }
+        if supervisor.code != SupervisorCode::Unsupported {
+            let args = ["--user", "daemon-reload"];
+            report.record(&programs.systemctl, &args);
+            let _ = run(&programs.systemctl, &args, programs.deadline);
+        }
     }
     report.loaded = Some(false);
     report.running = Some(false);
     Ok(report)
+}
+
+/// Other units in this plan's own unit directory that carry our marker for the same
+/// data directory under a different spelling.
+fn duplicate_units(plan: &Plan) -> Vec<PathBuf> {
+    let unit_path = plan.unit_path();
+    let Some(directory) = unit_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let ours = canonical_dir(&plan.data_dir);
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == unit_path || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(marker) = read_marker(plan.platform, &text) else {
+            continue;
+        };
+        if canonical_dir(Path::new(&marker.data_dir)) == ours {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Put the service's own logs back if they are gone. Log rotation and an operator
+/// clearing space both remove them, and the manager recreates them at its own umask —
+/// which is how a private log becomes a world-readable one.
+fn relog(plan: &Plan, report: &mut Report) {
+    for path in [plan.out_log(), plan.err_log()] {
+        if path.exists() {
+            continue;
+        }
+        match prepare_log(&path) {
+            Ok(()) => report.notes.push(format!(
+                "{} was missing and has been recreated private; the service manager would have created it at its own umask",
+                path.display()
+            )),
+            Err(error) => report
+                .notes
+                .push(format!("{} could not be recreated: {error:#}", path.display())),
+        }
+    }
 }
 
 /// Start an installed unit through its manager.
@@ -1158,6 +1624,7 @@ pub fn start(plan: &Plan, programs: &Programs) -> Result<Report> {
             ),
         );
     }
+    relog(plan, &mut report);
     let (program, args) = match plan.platform {
         Platform::MacOs => (
             &programs.launchctl,
@@ -1174,7 +1641,7 @@ pub fn start(plan: &Plan, programs: &Programs) -> Result<Report> {
     };
     let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
     report.record(program, &borrowed);
-    let outcome = run(program, &borrowed)
+    let outcome = run(program, &borrowed, programs.deadline)
         .map_err(|error| ServiceError::new("manager_unavailable", error.to_string()))?;
     if outcome.status != Some(0) {
         return refuse(
@@ -1196,7 +1663,7 @@ fn disable_with_manager(plan: &Plan, programs: &Programs, report: &mut Report) -
             let target = plan.manager_name();
             let args = ["bootout", target.as_str()];
             report.record(&programs.launchctl, &args);
-            let outcome = run(&programs.launchctl, &args)
+            let outcome = run(&programs.launchctl, &args, programs.deadline)
                 .map_err(|error| ServiceError::new("manager_unavailable", error.to_string()))?;
             // `bootout` of something that is not loaded is the state that was asked for.
             if outcome.status != Some(0) && !not_loaded(&outcome) {
@@ -1213,7 +1680,7 @@ fn disable_with_manager(plan: &Plan, programs: &Programs, report: &mut Report) -
             let unit = plan.manager_name();
             let args = ["--user", "disable", "--now", unit.as_str()];
             report.record(&programs.systemctl, &args);
-            let outcome = run(&programs.systemctl, &args)
+            let outcome = run(&programs.systemctl, &args, programs.deadline)
                 .map_err(|error| ServiceError::new("manager_unavailable", error.to_string()))?;
             if outcome.status != Some(0) {
                 return refuse(
@@ -1236,7 +1703,7 @@ fn inspect_manager(plan: &Plan, programs: &Programs, report: &mut Report) -> Res
             let target = plan.manager_name();
             let args = ["print", target.as_str()];
             report.record(&programs.launchctl, &args);
-            match run(&programs.launchctl, &args) {
+            match run(&programs.launchctl, &args, programs.deadline) {
                 Ok(outcome) if outcome.status == Some(0) => {
                     let printed = parse_launchctl_print(&outcome.stdout);
                     report.loaded = Some(true);
@@ -1267,7 +1734,7 @@ fn inspect_manager(plan: &Plan, programs: &Programs, report: &mut Report) -> Res
                 "--property=UnitFileState",
             ];
             report.record(&programs.systemctl, &args);
-            match run(&programs.systemctl, &args) {
+            match run(&programs.systemctl, &args, programs.deadline) {
                 Ok(outcome) if outcome.status == Some(0) => {
                     let shown = parse_systemctl_show(&outcome.stdout);
                     report.loaded = shown.get("LoadState").map(|state| state == "loaded");
@@ -1344,14 +1811,39 @@ fn not_loaded(outcome: &Outcome) -> bool {
     text.contains("no such process") || text.contains("could not find service")
 }
 
+/// The manager's own words, made safe to print.
+///
+/// This text reaches a terminal and a `--json` document. A service manager's stderr is
+/// not a trusted string: it can carry ANSI escapes that rewrite the line above it, and
+/// on a bad day it can carry a megabyte. Control characters (C0, DEL and the C1 range)
+/// are dropped and the result is capped.
 fn first_line(stderr: &str, stdout: &str) -> String {
-    stderr
+    let line = stderr
         .lines()
         .chain(stdout.lines())
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or("the manager said nothing")
-        .to_string()
+        .unwrap_or("the manager said nothing");
+    sanitize_manager_text(line)
+}
+
+/// The longest run of a manager's own words this code will repeat.
+const MAX_MANAGER_LINE: usize = 500;
+
+fn sanitize_manager_text(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len().min(MAX_MANAGER_LINE));
+    for character in text.chars() {
+        if clean.chars().count() >= MAX_MANAGER_LINE {
+            clean.push('\u{2026}');
+            break;
+        }
+        // C0, DEL and the C1 block. `char::is_control` covers exactly these.
+        if character.is_control() {
+            continue;
+        }
+        clean.push(character);
+    }
+    clean
 }
 
 // ------------------------------------------------------------------------- running them
@@ -1367,17 +1859,31 @@ struct Outcome {
 ///
 /// Nothing from a request is ever a shell string: these are argv arrays built here from
 /// constants and from values this module derived, and there is no shell in the path.
-fn run(program: &Path, args: &[&str]) -> Result<Outcome> {
+fn run(program: &Path, args: &[&str], deadline: Duration) -> Result<Outcome> {
+    use std::os::unix::process::CommandExt;
+
     let mut command = Command::new(program);
     command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group, so the deadline below can end the whole tree. Killing the
+    // immediate child alone leaves anything it spawned holding the pipes, and the
+    // reader thread then blocks on a stdout that never closes — the deadline fires and
+    // the process stays resident anyway.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let child = command
         .spawn()
         .with_context(|| format!("starting {}", program.display()))?;
-    let pid = child.id();
+    let pid = child.id() as libc::pid_t;
 
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -1387,7 +1893,7 @@ fn run(program: &Path, args: &[&str]) -> Result<Outcome> {
         })
         .context("starting the reader for a service-manager command")?;
 
-    match receiver.recv_timeout(MANAGER_TIMEOUT) {
+    match receiver.recv_timeout(deadline) {
         Ok(Ok(output)) => Ok(Outcome {
             status: output.status.code(),
             stdout: bounded(&output.stdout),
@@ -1398,13 +1904,23 @@ fn run(program: &Path, args: &[&str]) -> Result<Outcome> {
         }
         Err(_) => {
             // The reader thread still owns the child, so the deadline is enforced by
-            // signalling the process rather than by dropping a handle we do not hold.
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-            bail!(
-                "{} did not answer within {} seconds",
-                program.display(),
-                MANAGER_TIMEOUT.as_secs()
+            // signalling the group rather than by dropping a handle we do not hold.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+            // Give the group a moment to die so the reader can finish, then leave it:
+            // a manager that ignores SIGKILL is not something this client waits on.
+            let _ = receiver.recv_timeout(Duration::from_secs(2));
+            Err(ServiceError::new(
+                "manager_unavailable",
+                format!(
+                    "{} stopped answering: it was given {} seconds and then its process group was killed. The service manager on this machine is not responding; nothing was changed",
+                    program.display(),
+                    deadline.as_secs()
+                ),
             )
+            .into())
         }
     }
 }
@@ -1421,6 +1937,8 @@ fn bounded(bytes: &[u8]) -> String {
 fn prepare_log(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
+            // An existing log is re-privatised rather than trusted: the manager may have
+            // created it at its own umask between two installs.
             if metadata.uid() != unsafe { libc::geteuid() } {
                 return refuse(
                     "unusable_path",
@@ -1430,6 +1948,13 @@ fn prepare_log(path: &Path) -> Result<()> {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
                 .with_context(|| format!("making {} private", path.display()))
         }
+        Ok(metadata) if metadata.file_type().is_symlink() => refuse(
+            "unusable_path",
+            format!(
+                "{} is a symbolic link, and a service log is never written through one; whatever it points at was not touched",
+                path.display()
+            ),
+        ),
         Ok(_) => refuse(
             "unusable_path",
             format!(
@@ -1438,6 +1963,12 @@ fn prepare_log(path: &Path) -> Result<()> {
             ),
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // `create_new` is `O_EXCL`, which already refuses an existing path of any
+            // kind, symlink included; `O_NOFOLLOW` is belt and braces beside it and
+            // cannot be provoked on its own from a test, because there is no path that
+            // reaches it which `O_EXCL` would not have refused first. It stays because
+            // the two flags fail closed on different kernels' edge cases, and removing
+            // one leaves the other carrying an assumption nobody wrote down.
             let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1466,6 +1997,10 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         std::process::id(),
         random_hex(6)?
     ));
+    // Same pairing as `prepare_log`: `create_new` is `O_EXCL` on a name nothing else
+    // knows, and `O_NOFOLLOW` beside it is belt and braces rather than a separately
+    // reachable check. The rename that follows replaces whatever is at `path` — a
+    // symlink included — as a link, never writing through it.
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1481,6 +2016,18 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     drop(file);
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
+        // A directory where a file goes is the one case worth its own code: `rename`
+        // reports `EISDIR`/`ENOTDIR` and an operator needs to be told what is there
+        // rather than shown an errno.
+        if path.is_dir() {
+            return refuse(
+                "unit_path_is_a_directory",
+                format!(
+                    "{} is a directory, and this code will not delete a directory to put a unit file there. Move it aside yourself",
+                    path.display()
+                ),
+            );
+        }
         return Err(error).with_context(|| format!("publishing {}", path.display()));
     }
     File::open(parent)
@@ -1498,6 +2045,14 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// the first must not retry the second without looking.
 pub const EXIT_RUNTIME_BUSY: u8 = 10;
 pub const EXIT_ACTIVITY_UNKNOWN: u8 = 11;
+/// The runtime does not serve the read method the gate is built on, so it cannot have
+/// checked anything. A stop that looked like an idle-gated stop and was not is worse
+/// than a refusal, because the deployment engine relies on this flag to decide it may
+/// restart a machine.
+pub const EXIT_IDLE_GATE_UNSUPPORTED: u8 = 12;
+/// The connection closed before the runtime answered an idle-gated stop. It may have
+/// stopped, it may have refused; a gate whose outcome is unknown is not a pass.
+pub const EXIT_IDLE_OUTCOME_UNKNOWN: u8 = 13;
 
 /// A `runtime.shutdown` refusal, rendered for a person and carrying its exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1509,7 +2064,16 @@ pub struct StopRefusal {
 
 /// Maps the C2 refusal into an exit code and a page. `None` for anything that is not
 /// one of the two idle refusals, which the caller then reports as an ordinary failure.
-pub fn stop_refusal(data: Option<&serde_json::Value>) -> Option<StopRefusal> {
+pub fn stop_refusal(
+    code: crate::proto::ErrorCode,
+    data: Option<&serde_json::Value>,
+) -> Option<StopRefusal> {
+    // Seam C2 names the code as well as the reason. A `reason` field on some other
+    // error — a method-not-found from an older runtime, say — is not this refusal, and
+    // reporting it as one would tell an operator their runtime is busy when it is not.
+    if code != crate::proto::ErrorCode::Unavailable {
+        return None;
+    }
     let data = data?;
     let reason = data.get("reason")?.as_str()?;
     let exit_code = match reason {
@@ -1653,6 +2217,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::bail;
 
     fn plan(platform: Platform) -> Plan {
         let home = match platform {
@@ -1688,7 +2253,7 @@ mod tests {
             text.contains("<key>ThrottleInterval</key>\n\t<integer>30</integer>"),
             "{text}"
         );
-        assert!(text.contains("<string>Background</string>"), "{text}");
+        assert!(text.contains("<string>Adaptive</string>"), "{text}");
         assert!(
             text.contains("<string>/Users/tester/.ouroboros/service.err.log</string>"),
             "{text}"
@@ -1701,7 +2266,7 @@ mod tests {
         let text = plan.render().expect("a rendered unit");
 
         assert!(
-            text.contains("ExecStart=/usr/local/bin/ouro service-run"),
+            text.contains("ExecStart=\"/usr/local/bin/ouro\" service-run"),
             "{text}"
         );
         assert!(text.contains("Restart=on-failure"), "{text}");
@@ -1710,9 +2275,19 @@ mod tests {
         assert!(text.contains("StartLimitBurst=5"), "{text}");
         assert!(text.contains("WantedBy=default.target"), "{text}");
         assert!(
-            text.contains("WorkingDirectory=/home/tester/.ouroboros"),
+            text.contains("WorkingDirectory=\"/home/tester/.ouroboros\""),
             "{text}"
         );
+    }
+
+    /// A plan whose every path carries something the two unit formats treat specially.
+    fn awkward_plan(platform: Platform) -> Plan {
+        let mut plan = plan(platform);
+        plan.home = PathBuf::from("/home/my user");
+        plan.data_dir = PathBuf::from("/srv/my data/%h/a\"quoted\"/state");
+        plan.executable = PathBuf::from("/opt/my tools/100%/ouro");
+        plan.config_home = plan.home.join(".config");
+        plan
     }
 
     /// Both units are generated from one host, so a golden for the other platform is a
@@ -1730,6 +2305,73 @@ mod tests {
             linux,
             include_str!("../tests/fixtures/service/systemd.service")
         );
+        assert_eq!(
+            awkward_plan(Platform::Linux).render().expect("a unit"),
+            include_str!("../tests/fixtures/service/systemd-metacharacters.service")
+        );
+        assert_eq!(
+            awkward_plan(Platform::MacOs).render().expect("a plist"),
+            include_str!("../tests/fixtures/service/launchagent-metacharacters.plist")
+        );
+    }
+
+    /// systemd splits on whitespace and expands `%`, so a path with either in it has to
+    /// leave the directive meaning one path and one program.
+    #[test]
+    fn systemd_directives_survive_a_space_a_specifier_and_a_quote() {
+        let text = awkward_plan(Platform::Linux).render().expect("a unit");
+
+        let exec = text
+            .lines()
+            .find(|line| line.starts_with("ExecStart="))
+            .expect("an ExecStart");
+        assert_eq!(
+            exec, "ExecStart=\"/opt/my tools/100%%/ouro\" service-run",
+            "the program is one quoted word and the specifier is doubled"
+        );
+        assert!(
+            text.contains("WorkingDirectory=\"/srv/my data/%%h/a\\\"quoted\\\"/state\""),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Environment=OUROBOROS_DATA_DIR=\"/srv/my data/%%h/a\\\"quoted\\\"/state\""
+            ),
+            "{text}"
+        );
+        // `append:` takes the rest of the line, so it is not quoted — but `%` still
+        // expands there, so it is still doubled.
+        let appended = text
+            .lines()
+            .find(|line| line.starts_with("StandardError="))
+            .expect("a StandardError");
+        assert_eq!(
+            appended,
+            "StandardError=append:/srv/my data/%%h/a\"quoted\"/state/service.err.log"
+        );
+        // No *directive* carries a single `%` that systemd would expand. Comments are
+        // not directives — the ownership marker is one, and it is percent-encoded for
+        // its own reasons.
+        for line in text
+            .lines()
+            .filter(|line| line.contains('%') && !line.starts_with('#') && line.contains('='))
+        {
+            assert!(
+                !line.replace("%%", "").contains('%'),
+                "an unescaped specifier survives: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_quoting_is_the_documented_grammar() {
+        assert_eq!(systemd_quoted("/plain/path"), "\"/plain/path\"");
+        assert_eq!(systemd_quoted("/a b"), "\"/a b\"");
+        assert_eq!(systemd_quoted("100%"), "\"100%%\"");
+        assert_eq!(systemd_quoted("a\"b"), "\"a\\\"b\"");
+        assert_eq!(systemd_quoted("a\\b"), "\"a\\\\b\"");
+        assert_eq!(systemd_literal("100%"), "100%%");
+        assert_eq!(systemd_literal("/a b"), "/a b");
     }
 
     #[test]
@@ -1774,10 +2416,10 @@ mod tests {
         for platform in [Platform::MacOs, Platform::Linux] {
             let plan = plan(platform);
             let text = plan.render().expect("a rendered unit");
-            let marker = read_marker(&text).expect("an ownership marker");
+            let marker = read_marker(platform, &text).expect("an ownership marker");
 
             assert_eq!(marker.data_dir, plan.data_dir.display().to_string());
-            let content = marked_content(&text).expect("a marked body");
+            let content = marked_content(platform, &text).expect("a marked body");
             assert_eq!(marker.content_sha256, sha256_hex(content.as_bytes()));
             assert_eq!(marker.content_sha256.len(), 64);
             assert!(!content.contains(MARKER_TAG), "{content}");
@@ -1789,25 +2431,168 @@ mod tests {
         let plan = plan(Platform::Linux);
         let text = plan.render().expect("a rendered unit");
         let edited = text.replace("RestartSec=5", "RestartSec=1");
-        let marker = read_marker(&edited).expect("the marker survives an edit");
-        let content = marked_content(&edited).expect("a body");
+        let marker = read_marker(Platform::Linux, &edited).expect("the marker survives an edit");
+        let content = marked_content(Platform::Linux, &edited).expect("a body");
 
         assert_ne!(sha256_hex(content.as_bytes()), marker.content_sha256);
     }
 
     #[test]
     fn a_unit_with_no_marker_is_not_ours() {
-        assert!(read_marker("[Unit]\nDescription=somebody else's\n").is_none());
-        assert!(read_marker("# ouroboros-managed v9 data-dir=/x content-sha256=ff").is_none());
-        assert!(read_marker("# ouroboros-managed v1 data-dir=/x").is_none());
+        let digest = "0".repeat(64);
+        let linux = Platform::Linux;
+        assert!(read_marker(linux, "[Unit]\nDescription=somebody else's\n").is_none());
+        assert!(read_marker(
+            linux,
+            &format!("# ouroboros-managed v9 data-dir=/x content-sha256={digest}")
+        )
+        .is_none());
+        assert!(read_marker(linux, "# ouroboros-managed v1 data-dir=/x").is_none());
+        // A digest that is not a digest is not a marker.
+        assert!(read_marker(
+            linux,
+            "# ouroboros-managed v1 data-dir=/x content-sha256=ff"
+        )
+        .is_none());
+        // A field nobody wrote, and a field written twice, make the whole line
+        // unreadable rather than letting the last one win.
+        assert!(read_marker(
+            linux,
+            &format!("# ouroboros-managed v1 data-dir=/a data-dir=/b content-sha256={digest}")
+        )
+        .is_none());
+        assert!(read_marker(
+            linux,
+            &format!("# ouroboros-managed v1 data-dir=/a content-sha256={digest} extra=1")
+        )
+        .is_none());
+        // The real one still reads.
+        assert_eq!(
+            read_marker(
+                linux,
+                &format!("# ouroboros-managed v1 data-dir=/a content-sha256={digest}")
+            )
+            .expect("a marker")
+            .data_dir,
+            "/a"
+        );
     }
 
+    /// The marker is read from the one line and the one comment syntax the platform's
+    /// units carry it on. Anywhere else is somebody appending to, or hiding under,
+    /// another tool's file.
     #[test]
-    fn a_path_that_would_break_its_own_marker_is_refused() {
-        let mut plan = plan(Platform::Linux);
-        plan.data_dir = PathBuf::from("/home/tester/-->evil");
-        let error = plan.render().expect_err("a marker-breaking path");
+    fn a_marker_is_only_read_where_this_code_writes_one() {
+        let digest = "0".repeat(64);
+        // A systemd-shaped marker inside a plist.
+        let cross =
+            format!("<plist/>\n# ouroboros-managed v1 data-dir=/nowhere content-sha256={digest}\n");
+        assert!(read_marker(Platform::MacOs, &cross).is_none(), "{cross}");
+        assert!(read_marker(Platform::Linux, &cross).is_none(), "{cross}");
+        // A real marker moved one line down.
+        let moved = format!(
+            "# nothing\n# ouroboros-managed v1 data-dir=/nowhere content-sha256={digest}\n"
+        );
+        assert!(read_marker(Platform::Linux, &moved).is_none(), "{moved}");
+        // And a plist marker anywhere but after the DOCTYPE.
+        let late = format!(
+            "<?xml version=\"1.0\"?>\n<!DOCTYPE plist>\n<plist/>\n<!-- ouroboros-managed v1 data-dir=/nowhere content-sha256={digest} -->\n"
+        );
+        assert!(read_marker(Platform::MacOs, &late).is_none(), "{late}");
+    }
 
+    /// Every path a real machine can have, through the marker and back.
+    #[test]
+    fn a_marker_round_trips_every_path_a_directory_can_be_called() {
+        for raw in [
+            "/Users/tester/.ouroboros",
+            "/Users/my tester/my data",
+            "/srv/a\u{a0}b/data",
+            "/srv/100%/data",
+            "/srv/#hash/data",
+            "/srv/a--b/data",
+            "/srv/a-b-c/data",
+            "/srv/quote\"here/data",
+            "/srv/back\\slash/data",
+            "/srv/héllo/データ",
+            "/srv/-->escape/data",
+        ] {
+            let encoded = marker_encode(raw);
+            assert!(
+                !encoded.contains(char::is_whitespace),
+                "`{raw}` encoded to `{encoded}`, which is not one token"
+            );
+            assert!(
+                !encoded.contains("--"),
+                "`{raw}` encoded to `{encoded}`, which XML forbids inside a comment"
+            );
+            assert_eq!(
+                marker_decode(&encoded).as_deref(),
+                Some(raw),
+                "`{raw}` did not survive `{encoded}`"
+            );
+        }
+        // A broken encoding is not a marker.
+        assert_eq!(marker_decode("%ZZ"), None);
+        assert_eq!(marker_decode("%2"), None);
+    }
+
+    /// The unit this code wrote reads back as its own, whatever the directory is called.
+    #[test]
+    fn a_unit_for_an_awkwardly_named_directory_is_still_ours() {
+        for name in [
+            "my data",
+            "a--b",
+            "100%",
+            "quote\"here",
+            "back\\slash",
+            "hash#tag",
+        ] {
+            for platform in [Platform::MacOs, Platform::Linux] {
+                let mut plan = plan(platform);
+                plan.data_dir = plan.home.join(name);
+                let text = plan.render().expect("a rendered unit");
+                let marker = read_marker(platform, &text).expect("our own marker");
+                assert_eq!(
+                    Path::new(&marker.data_dir),
+                    plan.data_dir,
+                    "`{name}` on {:?}",
+                    platform
+                );
+                assert_eq!(
+                    sha256_hex(marked_content(platform, &text).expect("a body").as_bytes()),
+                    marker.content_sha256
+                );
+            }
+        }
+    }
+
+    /// A path that would once have broken the file it was written into now survives it.
+    #[test]
+    fn a_path_that_could_break_a_unit_is_encoded_rather_than_refused() {
+        let mut plan = plan(Platform::MacOs);
+        plan.data_dir = PathBuf::from("/Users/tester/-->evil--data");
+        let text = plan.render().expect("a rendered plist");
+        let marker = text.lines().nth(2).expect("a marker line");
+
+        assert!(
+            !marker
+                .trim_start_matches("<!--")
+                .trim_end_matches("-->")
+                .contains("--"),
+            "XML forbids `--` inside a comment: {marker}"
+        );
+        assert_eq!(
+            read_marker(Platform::MacOs, &text)
+                .expect("our marker")
+                .data_dir,
+            "/Users/tester/-->evil--data"
+        );
+
+        // A control character has no encoding that keeps a unit file readable, so it
+        // stays a refusal.
+        plan.data_dir = PathBuf::from("/Users/tester/two\nlines");
+        let error = plan.render().expect_err("a control character");
         assert_eq!(
             service_error(&error).map(|declared| declared.reason),
             Some("unusable_path")
@@ -1888,35 +2673,41 @@ mod tests {
 
     #[test]
     fn the_two_idle_refusals_get_two_exit_codes_and_a_rendered_summary() {
-        let busy = stop_refusal(Some(&serde_json::json!({
-            "reason": "runtime_busy",
-            "activity": {
-                "idle": false,
-                "running_turns": 2,
-                "queued_turns": 1,
-                "attachment_transfers": 0,
-                "attachment_normalizations": 0,
-                "operator_clients": 1,
-                "unknown": []
-            }
-        })))
+        let busy = stop_refusal(
+            crate::proto::ErrorCode::Unavailable,
+            Some(&serde_json::json!({
+                "reason": "runtime_busy",
+                "activity": {
+                    "idle": false,
+                    "running_turns": 2,
+                    "queued_turns": 1,
+                    "attachment_transfers": 0,
+                    "attachment_normalizations": 0,
+                    "operator_clients": 1,
+                    "unknown": []
+                }
+            })),
+        )
         .expect("a mapped refusal");
         assert_eq!(busy.exit_code, EXIT_RUNTIME_BUSY);
         assert!(busy.rendered.contains("running turns"), "{}", busy.rendered);
         assert!(busy.rendered.contains('2'), "{}", busy.rendered);
 
-        let unknown = stop_refusal(Some(&serde_json::json!({
-            "reason": "activity_unknown",
-            "activity": {
-                "idle": null,
-                "running_turns": null,
-                "queued_turns": 0,
-                "attachment_transfers": null,
-                "attachment_normalizations": 0,
-                "operator_clients": 1,
-                "unknown": ["running_turns", "attachment_transfers"]
-            }
-        })))
+        let unknown = stop_refusal(
+            crate::proto::ErrorCode::Unavailable,
+            Some(&serde_json::json!({
+                "reason": "activity_unknown",
+                "activity": {
+                    "idle": null,
+                    "running_turns": null,
+                    "queued_turns": 0,
+                    "attachment_transfers": null,
+                    "attachment_normalizations": 0,
+                    "operator_clients": 1,
+                    "unknown": ["running_turns", "attachment_transfers"]
+                }
+            })),
+        )
         .expect("a mapped refusal");
         assert_eq!(unknown.exit_code, EXIT_ACTIVITY_UNKNOWN);
         assert_ne!(unknown.exit_code, busy.exit_code);
@@ -1929,10 +2720,62 @@ mod tests {
 
         // Anything else is not an idle refusal and is reported as the failure it is.
         assert_eq!(
-            stop_refusal(Some(&serde_json::json!({ "reason": "something_else" }))),
+            stop_refusal(
+                crate::proto::ErrorCode::Unavailable,
+                Some(&serde_json::json!({ "reason": "something_else" }))
+            ),
             None
         );
-        assert_eq!(stop_refusal(None), None);
+        assert_eq!(
+            stop_refusal(crate::proto::ErrorCode::Unavailable, None),
+            None
+        );
+        // The code is half the contract. A `reason` carried on some other error — a
+        // method-not-found from a runtime that never heard of the gate — is not this
+        // refusal, and must not be reported as a busy runtime.
+        for other in [
+            crate::proto::ErrorCode::MethodNotFound,
+            crate::proto::ErrorCode::InvalidParams,
+            crate::proto::ErrorCode::ScopeDenied,
+            crate::proto::ErrorCode::Other(-32004 + 1),
+        ] {
+            assert_eq!(
+                stop_refusal(
+                    other,
+                    Some(&serde_json::json!({
+                        "reason": "runtime_busy",
+                        "activity": { "running_turns": 1 }
+                    }))
+                ),
+                None,
+                "{other:?} is not -32004"
+            );
+        }
+        // Every exit code this command can end with is a different number.
+        let codes = [
+            EXIT_RUNTIME_BUSY,
+            EXIT_ACTIVITY_UNKNOWN,
+            EXIT_IDLE_GATE_UNSUPPORTED,
+            EXIT_IDLE_OUTCOME_UNKNOWN,
+        ];
+        let unique: std::collections::BTreeSet<u8> = codes.iter().copied().collect();
+        assert_eq!(unique.len(), codes.len(), "{codes:?}");
+        assert!(!codes.contains(&0) && !codes.contains(&1) && !codes.contains(&2));
+    }
+
+    /// The runtime's summary is data, not a promise about its shape.
+    #[test]
+    fn a_summary_that_is_not_a_summary_renders_as_unknown() {
+        for activity in [
+            serde_json::json!("not an object at all"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({ "running_turns": "lots" }),
+            serde_json::json!({ "unknown": "not a list" }),
+        ] {
+            let rendered = render_activity(Some(&activity));
+            assert!(rendered.contains("unknown"), "{activity}: {rendered}");
+        }
+        assert!(render_activity(None).contains("no summary"));
     }
 
     #[test]

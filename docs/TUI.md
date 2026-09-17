@@ -1075,8 +1075,13 @@ ouro stop [--require-idle]
                       rather than stopping a runtime that says it is working, or
                       one that could not establish what it is doing: exit 10 is
                       runtime_busy, exit 11 is activity_unknown, and both print
-                      the activity summary field by field. Plain `ouro stop` is
-                      byte-for-byte the request it has always sent
+                      the activity summary field by field. Exit 12 is a runtime
+                      that does not serve runtime.activity and therefore has no
+                      gate — nothing is sent, because an older runtime ignores the
+                      parameter and stops, which looks exactly like a pass. Exit
+                      13 is a connection that closed before any answer arrived, so
+                      the outcome is unknown. Plain `ouro stop` is byte-for-byte
+                      the request it has always sent
 ouro ledger [--fleet] [--since N] [--json] [--limit N]
          [--addr HOST:PORT] [--token-file PATH]
                       print the durable effect ledger as a table or NDJSON;

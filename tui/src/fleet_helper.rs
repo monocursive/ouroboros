@@ -623,11 +623,17 @@ impl Helper {
     // program or a unit, and nothing in it is executed. The data directory is the one
     // this helper was started with, so an issuer cannot point a remote machine's service
     // at somewhere else on it.
+    //
+    // `disable` and `remove` stop a runtime through its service manager, and the manager
+    // stops it with a signal: there is no idle gate on this path and there cannot be one,
+    // because a supervisor knows nothing about turns or transfers. An orchestrator that
+    // is taking a working machine out of a fleet gates first — `ouro stop --require-idle`
+    // against that machine's own gateway — and only then asks for `disable`.
     fn service(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
         let action = required_str(object, "action")?;
         let plan =
             crate::fleet_service::Plan::for_this_machine(data_dir).map_err(service_refusal)?;
-        let programs = crate::fleet_service::Programs::from_env();
+        let programs = crate::fleet_service::Programs::from_env().map_err(service_refusal)?;
         let report = match action.as_str() {
             "install" => crate::fleet_service::install(&plan, &programs, false),
             "status" => crate::fleet_service::status(&plan, &programs),

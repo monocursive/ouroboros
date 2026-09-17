@@ -361,7 +361,7 @@ ouro fleet service remove           # disable, then delete the one file this wro
 | Platform | What the service does, and what it does not |
 |---|---|
 | Linux with a reachable `systemctl --user` | A user unit with `Restart=on-failure`, `RestartSec=5` and a `StartLimitIntervalSec=300`/`StartLimitBurst=5` ceiling, wanted by `default.target`. Surviving logout and starting at boot requires lingering: `status` reports `loginctl show-user <you> --property=Linger` and, when it is off, says outright that this is a login-scoped service and names `loginctl enable-linger` as the administrator's step. When `loginctl` cannot be asked, lingering is reported as unknown rather than assumed. |
-| macOS with a logged-in user session | A LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad`, `KeepAlive` restricted to unsuccessful exits, and a 30 second `ThrottleInterval`. It starts at login and stops with the login session; there is **no pre-login execution**, so the machine is not reachable between a reboot and the next login. |
+| macOS with a logged-in user session | A LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad`, `KeepAlive` restricted to unsuccessful exits, and a 30 second `ThrottleInterval`. `ProcessType` is `Adaptive`, not `Background`: a Background job is held to a throttled I/O band, which is right for a backup agent and wrong for a runtime that answers an operator. It starts at login and stops with the login session; there is **no pre-login execution**, so the machine is not reachable between a reboot and the next login. |
 | Anything else | `install` refuses with the prerequisite named — log in to the desktop session, or provide a reachable systemd user manager — and installs nothing. Start the runtime with `ouro daemon` and supervise it yourself; nothing here claims persistent startup it cannot deliver. |
 
 **Only our own units.** Every generated unit begins with an ownership marker naming the
@@ -371,11 +371,39 @@ data directory it serves and a SHA-256 of the rest of the file:
 # ouroboros-managed v1 data-dir=/home/you/.ouroboros content-sha256=<64 hex>
 ```
 
-`status` and `remove` act only on a file carrying that marker for this data directory.
-Anything else at that path — somebody else's unit, or one of ours that has been edited
-since it was written — is reported with the digest of what is actually there and left
-untouched; `install --adopt` is the operator saying, explicitly and after seeing that
-digest, that it may be replaced. `remove` never adopts.
+The path is percent-encoded, so the marker is one token per field whatever the directory
+is called — a space, a `#`, a quote — and it is read back only from the line and the
+comment syntax this code writes it on. `status`, `disable` and `remove` act only on a
+file carrying that marker for this data directory. A unit that is somebody else's, or
+one of ours naming a *different* data directory, is reported with the digest of what is
+actually there and left untouched; `install --adopt` is the operator saying, explicitly
+and after seeing that digest, that it may be replaced, and `remove` never adopts. A unit
+of ours that has been edited since it was written is still ours: `install` refuses to
+overwrite it without `--adopt`, and `remove` does delete it — a file left behind comes
+back at the next login — while saying in its output that it no longer matched the digest
+in its own marker.
+
+When `--adopt` replaces a unit that was not ours, the job *that* file had loaded is
+booted out alongside ours, and named in the output: a replaced plist whose label nobody
+stopped leaves a job running with no file behind it.
+
+The marker is **not a security boundary**, and nothing here treats it as one. It is a
+plain digest over the file with no secret in it, so anything with write access to this
+account's service directory can compute one. What it distinguishes is an accident from a
+deliberate act — another tool's unit, a hand-written one, an older copy of ours — and an
+account whose service directory an attacker can write to has already lost, marker or no
+marker.
+
+If `status` finds a second unit in the same directory carrying our marker for the same
+data directory — one written by an older `ouro` from a path spelled with a trailing
+slash, say — it names it: two units for one runtime is two supervisors racing to start
+it, and only one of them can win.
+
+Paths inside the generated unit are escaped for the format they land in: XML escaping in
+the plist, and systemd's own quoting grammar in the unit file — quoted `ExecStart=`,
+`Environment=` and `WorkingDirectory=`, with `%` doubled everywhere a specifier would
+otherwise expand. A directory with a space or a `%` in its name therefore still names one
+directory and one program.
 
 The unit's environment is `HOME`, a fixed system `PATH` and `OUROBOROS_DATA_DIR`, and
 nothing else. The runtime's own environment — node name, cookie file, EPMD address,
@@ -384,7 +412,12 @@ never leaves a stale unit behind, and an `OUROBOROS_*`, `ERL_*` or `RELEASE_*` v
 exported in the shell that ran `install` reaches neither the unit nor the BEAM.
 
 Logs go to `<data dir>/service.out.log` and `service.err.log`, created 0600 before the
-manager can create them at its own umask.
+manager can create them at its own umask — and put back, still private, by `install`,
+`status` and `start` whenever rotation or a tidy-up has removed them.
+
+On Linux, `remove` also takes out the `default.target.wants` symlink `systemctl --user
+enable` installed, so a removal on a machine whose user manager is not answering does not
+leave a dangling want behind for the next `daemon-reload` to complain about.
 
 ### Waiting for the private interface
 
@@ -419,6 +452,12 @@ codes so a script can tell them apart:
 | 0 | the runtime accepted the stop and the pid it published is gone |
 | 10 | `runtime_busy` — the activity summary is printed, field by field |
 | 11 | `activity_unknown` — the runtime could not read one or more counters, and they are named |
+| 12 | the runtime does not serve `runtime.activity`, so it has no gate to apply. Nothing was sent: a runtime that predates the gate ignores the parameter and stops, which from the outside is indistinguishable from one that checked and found itself idle |
+| 13 | the connection closed before an answer arrived, so whether the gate passed, refused or was never reached is unknown |
+
+`remove` and `disable` have no idle gate and cannot have one: a service manager stops a
+process with a signal and knows nothing about turns or transfers. Gate first, with the
+command above, and take the supervisor down afterwards.
 
 Plain `ouro stop` is unchanged: it sends the same request it always has, with no
 parameter, and stops the runtime unconditionally.
