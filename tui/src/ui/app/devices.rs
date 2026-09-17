@@ -26,6 +26,16 @@
 //! What leaves this module is a single `fleet.deployment.authenticate` call whose
 //! parameters the gateway is documented to keep out of its audit digest.
 //!
+//! Three of those are pinned by tests: the `Debug`, the bullets, and that the buffer is
+//! empty after a submit, a cancel or a challenge being replaced. **The zeroizing itself
+//! is not.** An in-process test cannot observe that freed heap bytes were overwritten —
+//! reading them back is undefined behaviour, and a test that appeared to do it would be
+//! testing the allocator. What [`Zeroizing`] buys is that the overwrite happens on drop;
+//! what it does not buy, and what this module does not claim, is that no copy of those
+//! bytes exists anywhere else. `serde_json` copies the string into the request object,
+//! and the spec says as much: minimize and zeroize native buffers where possible, and do
+//! not promise perfect erasure.
+//!
 //! ## The broker is the authority, not this view
 //!
 //! After `prepare` answers an operation id, every screen after it is a rendering of one
@@ -42,6 +52,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::fleet_network::{human, DeviceState, DiscoveryCode, FIELD_COLUMNS, MESSAGE_COLUMNS};
+use crate::fleet_setup::{canonical_json, sha256_hex};
 
 use super::super::access;
 use super::super::theme;
@@ -204,7 +215,10 @@ impl DeploymentHost {
                                      non-loopback address with no TLS, so credential \
                                      entry is refused on this deployment host."
                 .to_string(),
-            other => format!("This runtime reports the blocker {other}."),
+            other => format!(
+                "This runtime reports the blocker {}.",
+                other.replace('_', " ")
+            ),
         })
     }
 }
@@ -354,8 +368,61 @@ pub struct OperationSummary {
     /// cannot attribute. Shown, because continuing somebody else's setup inherits their
     /// credential prompts and must never happen quietly.
     pub owner: Option<String>,
+    /// Which device the operation is about. `None` on a journal too old or too broken to
+    /// say — and an operation whose target is unknown is never silently attached to a row.
+    pub target: Option<OperationTarget>,
     pub attached: bool,
     pub readable: bool,
+}
+
+/// Enough of an operation's target to put it on the row it belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperationTarget {
+    pub machine: Option<String>,
+    pub address: Option<String>,
+    pub ssh_user: Option<String>,
+    pub port: Option<u64>,
+}
+
+impl OperationTarget {
+    fn decode(value: &Value) -> Option<Self> {
+        let target = value.as_object()?;
+        let decoded = Self {
+            machine: text(target.get("machine").map(|v| v as &Value)),
+            address: text(target.get("address").map(|v| v as &Value)),
+            ssh_user: text(target.get("ssh_user").map(|v| v as &Value)),
+            port: target.get("port").and_then(Value::as_u64),
+        };
+
+        // A target naming neither a machine nor an address identifies no row.
+        (decoded.machine.is_some() || decoded.address.is_some()).then_some(decoded)
+    }
+
+    /// Whether this target is the device in `row`.
+    ///
+    /// The address first, because that is what the worker actually talks to and what a
+    /// roster name can be made to collide with; the machine name only when both sides
+    /// have one.
+    pub fn is(&self, row: &DeviceRow) -> bool {
+        if let (Some(mine), Some(theirs)) = (self.address.as_deref(), row.address.as_deref()) {
+            if mine == theirs {
+                return true;
+            }
+        }
+
+        match (self.machine.as_deref(), row.machine.as_deref()) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _unnamed => false,
+        }
+    }
+
+    /// The device this operation is about, for a header.
+    pub fn label(&self) -> String {
+        self.machine
+            .clone()
+            .or_else(|| self.address.clone())
+            .unwrap_or_else(|| "a device this runtime could not name".into())
+    }
 }
 
 impl OperationSummary {
@@ -366,6 +433,7 @@ impl OperationSummary {
             kind: text(value.get("kind")),
             updated_at: text(value.get("updated_at")),
             owner: text(value.get("owner")),
+            target: value.get("target").and_then(OperationTarget::decode),
             attached: value
                 .get("attached")
                 .and_then(Value::as_bool)
@@ -381,7 +449,163 @@ impl OperationSummary {
     /// *not* finished — it is unknown — and it is offered for continuation so the
     /// operator hears about it rather than having it quietly filtered away.
     pub fn open(&self) -> bool {
-        !matches!(self.state.as_deref(), Some("completed") | Some("cancelled"))
+        // `failed` joins the two the broker calls terminal. The broker would accept a
+        // resume of one — its own terminal set is narrower — but a deployment that failed
+        // is retried by reviewing a fresh plan, not by attaching a worker to the wreck,
+        // and a row that offered "Continue setup" for a week-old failure would be
+        // offering the operator the wrong verb forever.
+        !matches!(
+            self.state.as_deref(),
+            Some("completed") | Some("cancelled") | Some("failed")
+        )
+    }
+}
+
+/// The reviewed plan, as *this view* reads it.
+///
+/// Deliberately not `fleet_setup::plan::Plan`. That type is the local one: its
+/// `Deserialize` accepts whatever a plan document says and its `render` is written for a
+/// plan this machine built, so it byte-slices `release.sha256` (`plan.rs`, the `install`
+/// line) and prints every field raw. A plan arriving over the wire is a document a
+/// *worker on another machine* wrote — and in the failure the broker is built around, one
+/// this runtime is meant to be suspicious of. Handing it to a renderer written for local
+/// data is how a multibyte `sha256` panics the client and how a `machine` with newlines
+/// forges an aligned row saying the grants are routine.
+///
+/// So the document is decoded here, into fields that are already scrubbed and bounded,
+/// with the digests held to hex. What cannot be decoded is refused rather than drawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanView {
+    pub kind: String,
+    pub host_name: String,
+    pub host_user: String,
+    pub host_issuer: bool,
+    pub machine: String,
+    pub address: String,
+    pub port: Option<u64>,
+    pub ssh_user: Option<String>,
+    pub identity: Option<String>,
+    pub install_path: Option<String>,
+    pub data_dir: Option<String>,
+    pub host_fingerprint: Option<String>,
+    pub node: Option<String>,
+    pub release: Option<PlanRelease>,
+    pub service: Option<String>,
+    pub members: Vec<PlanMember>,
+    pub restart: Option<String>,
+    pub grants: Vec<String>,
+    /// The sha256 of the canonical JSON of the document that produced this view — this
+    /// client's own arithmetic, never the challenge's claim about it.
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanRelease {
+    pub version: String,
+    pub target: String,
+    /// Held to 64 lowercase hex: a checksum is not free text, and the one place this is
+    /// abbreviated for the screen is safe to cut only because of that.
+    pub sha256: String,
+    pub official_origin: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanMember {
+    pub machine: String,
+    pub host: String,
+    pub reached_by: String,
+    pub change: String,
+}
+
+/// A sha256 as this client will accept one: exactly 64 lowercase hex characters.
+///
+/// Anything else is not a digest. Returning `None` rather than a lenient normalisation is
+/// the point — a "digest" this client cannot recognise is a plan it must not approve, and
+/// a string it must not slice.
+pub fn hex_digest(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+
+    (trimmed.len() == 64
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then(|| trimmed.to_string())
+}
+
+impl PlanView {
+    /// Decodes one plan document, or `None` when it is not one this client can read.
+    pub fn decode(document: &Value) -> Option<Self> {
+        let target = document.get("target")?;
+        let host = document.get("deployment_host")?;
+
+        // The digest is computed from the document as it arrived, before any of it is
+        // scrubbed for the screen: the worker's arithmetic is over the bytes it sent.
+        let digest = hex_digest(&sha256_hex(canonical_json(document).as_bytes()))?;
+
+        let release = match document.get("release") {
+            None | Some(Value::Null) => None,
+            Some(release) => Some(PlanRelease {
+                version: text(release.get("version")).unwrap_or_else(unknown),
+                target: text(release.get("target")).unwrap_or_else(unknown),
+                // A release whose checksum is not a checksum is not a release this client
+                // will draw an `install` line for.
+                sha256: release
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .and_then(hex_digest)?,
+                official_origin: release
+                    .get("official_origin")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }),
+        };
+
+        Some(Self {
+            kind: text(document.get("kind")).unwrap_or_else(|| "add".into()),
+            host_name: text(host.get("hostname")).unwrap_or_else(unknown),
+            host_user: text(host.get("user")).unwrap_or_else(unknown),
+            host_issuer: host.get("issuer").and_then(Value::as_bool).unwrap_or(false),
+            machine: text(target.get("machine")).unwrap_or_else(unknown),
+            address: text(target.get("address")).unwrap_or_else(unknown),
+            port: target.get("port").and_then(Value::as_u64),
+            ssh_user: text(target.get("ssh_user")),
+            identity: text(target.get("identity")),
+            install_path: text(target.get("install_path")),
+            data_dir: text(target.get("data_dir")),
+            host_fingerprint: text(target.get("host_fingerprint")),
+            node: text(target.get("node")),
+            release,
+            service: text(document.get("service")),
+            members: array(document.get("members"))
+                .iter()
+                .map(|member| PlanMember {
+                    machine: text(member.get("machine")).unwrap_or_else(unknown),
+                    host: text(member.get("host")).unwrap_or_else(unknown),
+                    reached_by: text(member.get("reached_by")).unwrap_or_else(unknown),
+                    change: sentence(member.get("change")).unwrap_or_else(unknown),
+                })
+                .collect(),
+            restart: sentence(document.get("restart")),
+            grants: array(document.get("grants"))
+                .iter()
+                .filter_map(|grant| sentence(Some(grant)))
+                .collect(),
+            digest,
+        })
+    }
+
+    /// The header the proposal requires, with the authority note the local renderer has.
+    pub fn header(&self) -> String {
+        let authority = match (self.kind.as_str(), self.host_issuer) {
+            (_, true) => "",
+            ("setup", false) => " \u{b7} this machine will hold the fleet's CA key",
+            (_, false) => " \u{b7} this machine does not hold the fleet's CA key",
+        };
+
+        format!(
+            "Deploying from {} \u{b7} local user {}{authority}",
+            self.host_name, self.host_user
+        )
     }
 }
 
@@ -422,14 +646,30 @@ impl Inventory {
         }
     }
 
-    /// The open operation for a device, matched by the machine name the journal records.
+    /// The open operation for one device, or `None`.
     ///
-    /// `None` for every row when no operation is open, which is the common case: a row
-    /// only says "Continue setup" when there is something to continue.
-    pub fn open_operation(&self) -> Option<&OperationSummary> {
+    /// Matched through `operations[].target`, which is why that field exists. Before it,
+    /// this answered "is *any* operation open" and every row in the list offered to
+    /// continue it — so pressing Continue on `alpha` attached the view to a deployment
+    /// against `bravo`, and the password prompt that followed appeared under a header
+    /// naming the wrong machine.
+    pub fn open_operation_for(&self, row: &DeviceRow) -> Option<&OperationSummary> {
+        self.operations.iter().find(|operation| {
+            operation.open()
+                && !operation.operation.is_empty()
+                && operation
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.is(row))
+        })
+    }
+
+    /// Every open operation, for the line above the list that says one is running.
+    pub fn open_operations(&self) -> Vec<&OperationSummary> {
         self.operations
             .iter()
-            .find(|operation| operation.open() && !operation.operation.is_empty())
+            .filter(|operation| operation.open() && !operation.operation.is_empty())
+            .collect()
     }
 }
 
@@ -485,30 +725,68 @@ impl Step {
 pub struct Challenge {
     pub id: String,
     pub kind: String,
-    pub metadata: Value,
+    /// The whole challenge object, as the broker's snapshot carries it.
+    pub frame: Value,
 }
 
 impl Challenge {
-    fn decode(value: &Value) -> Self {
-        Self {
-            id: text(value.get("challenge")).unwrap_or_default(),
-            kind: text(value.get("kind")).unwrap_or_default(),
-            metadata: value.clone(),
-        }
+    /// One open challenge, or `None` for a frame this client cannot answer.
+    ///
+    /// A challenge with no id is dropped here rather than drawn. The id is the whole of
+    /// how an answer is addressed: a question with none is one the worker cannot be told
+    /// about, and putting a masked field on the screen for it would be asking somebody to
+    /// type a password into a prompt whose answer goes nowhere.
+    fn decode(value: &Value) -> Option<Self> {
+        let id = text(value.get("challenge"))?;
+        let kind = text(value.get("kind"))?;
+
+        Some(Self {
+            id,
+            kind,
+            frame: value.clone(),
+        })
     }
 
-    /// One metadata field, bounded.
+    /// The worker's own metadata object.
     ///
-    /// The spec's rule for these: normalize the labels rather than rendering an
-    /// arbitrary remote prompt as trusted UI. The *shape* is normalized by this client
-    /// drawing its own headings and its own field names; what is left is the value, and
-    /// the value goes through [`human`] like every other remote string.
+    /// `fleet_setup::worker::challenge_event` nests what the metadata builders produced
+    /// under a `metadata` key, and the broker stores the frame minus `v`/`event`/
+    /// `bound_to` and overwrites `challenge`/`kind`/`expires_at` on top — so what arrives
+    /// is `{challenge, kind, expires_at, operation, metadata: {…}}` and the fields this
+    /// view draws are one level down. The flat form is read as a fallback rather than
+    /// instead: it is what a future builder that stopped nesting would send, and reading
+    /// both cannot be wrong for either.
+    fn meta(&self) -> Option<&Value> {
+        self.frame.get("metadata").filter(|value| value.is_object())
+    }
+
+    fn lookup(&self, key: &str) -> Option<&Value> {
+        self.meta()
+            .and_then(|meta| meta.get(key))
+            .or_else(|| self.frame.get(key))
+    }
+
     fn field(&self, key: &str) -> Option<String> {
-        self.metadata.get(key).and_then(|value| match value {
+        self.lookup(key).and_then(|value| match value {
             Value::String(_) => text(Some(value)),
             Value::Number(number) => Some(number.to_string()),
             _other => None,
         })
+    }
+
+    /// The plan this challenge carries, decoded and bounded by this view.
+    pub fn plan(&self) -> Option<PlanView> {
+        PlanView::decode(self.lookup("plan")?)
+    }
+
+    /// The digest the challenge *claims*, held to hex.
+    ///
+    /// Never approved on its own: [`review_lines`] draws it only to name the mismatch, and
+    /// what `start` carries is the digest this client computed over the plan it drew.
+    pub fn claimed_digest(&self) -> Option<String> {
+        self.lookup("plan_digest")
+            .and_then(Value::as_str)
+            .and_then(hex_digest)
     }
 }
 
@@ -526,11 +804,18 @@ pub struct Snapshot {
     pub log: Vec<String>,
     pub last_error: Option<String>,
     pub residue: Vec<String>,
+    /// The worker's own one-line summary of a finished operation, from its `done` frame.
+    pub summary: Option<String>,
+    /// What the worker says to do next — the field the proposal requires the final
+    /// display to name, written by the side that knows what actually happened.
+    pub next: Option<String>,
     pub challenges: Vec<Challenge>,
 }
 
 impl Snapshot {
     pub fn decode(value: &Value) -> Self {
+        let done = value.get("done").filter(|done| done.is_object());
+
         Self {
             source: text(value.get("source")).unwrap_or_else(|| "journal".into()),
             attached: value
@@ -544,15 +829,31 @@ impl Snapshot {
                 .iter()
                 .filter_map(|line| sentence(line.get("line")).or_else(|| sentence(Some(line))))
                 .collect(),
+            // Two sources, because there are two: a journal read carries `last_error` and
+            // `residue` at the top level (they are `Journal`'s own fields), and a live
+            // worker carries them inside the `done` frame the broker stored whole —
+            // `{ok, state, summary, next, residue, unknown}` on success and
+            // `{ok: false, reason, detail}` on a failure. Reading only the journal's
+            // spelling meant a running worker's residue and cause were never drawn.
             last_error: sentence(value.get("last_error"))
-                .or_else(|| sentence(value.get("last_error").and_then(|e| e.get("detail")))),
-            residue: array(value.get("residue"))
-                .iter()
-                .filter_map(|item| sentence(Some(item)))
-                .collect(),
+                .or_else(|| sentence(done.and_then(|done| done.get("detail"))))
+                .or_else(|| {
+                    done.and_then(|done| done.get("reason"))
+                        .and_then(Value::as_str)
+                        .map(reason_sentence)
+                }),
+            residue: match array(value.get("residue")) {
+                empty if empty.is_empty() => array(done.and_then(|done| done.get("residue"))),
+                journal => journal,
+            }
+            .iter()
+            .filter_map(|item| sentence(Some(item)))
+            .collect(),
+            summary: sentence(done.and_then(|done| done.get("summary"))),
+            next: sentence(done.and_then(|done| done.get("next"))),
             challenges: array(value.get("challenges"))
                 .iter()
-                .map(Challenge::decode)
+                .filter_map(Challenge::decode)
                 .collect(),
         }
     }
@@ -676,6 +977,8 @@ impl Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectField {
     User,
+    /// `setup` only: what this device calls itself in its own fleet.
+    Machine,
     Port,
     Identity,
     IdentityRef,
@@ -686,6 +989,7 @@ pub enum ConnectField {
 }
 
 impl ConnectField {
+    /// Every field, in the order an `add` draws them.
     pub const ALL: [Self; 8] = [
         Self::User,
         Self::Port,
@@ -697,9 +1001,15 @@ impl ConnectField {
         Self::Inspect,
     ];
 
+    /// What a first *local* setup draws: no account, no port, no identity, no install
+    /// path on another machine. This device is not reached over SSH, so none of the
+    /// fields that describe an SSH connection have anything to describe.
+    pub const SETUP: [Self; 3] = [Self::Machine, Self::Service, Self::Inspect];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::User => "ssh username",
+            Self::Machine => "machine name",
             Self::Port => "port",
             Self::Identity => "authenticate with",
             Self::IdentityRef => "identity",
@@ -717,6 +1027,15 @@ impl ConnectField {
             self,
             Self::Port | Self::IdentityRef | Self::InstallPath | Self::DataDir
         )
+    }
+
+    /// Whether digits typed into this field are content rather than a menu choice.
+    ///
+    /// Only the port. A10 numbers every row of this form in screen-reader mode and the
+    /// numbers have to select — but a port is digits, and a form where `2` jumps to
+    /// another field instead of typing `2` is a form that cannot express port 22.
+    pub fn takes_digits(self) -> bool {
+        matches!(self, Self::Port)
     }
 }
 
@@ -745,6 +1064,8 @@ impl IdentityKind {
 
     fn wire(self) -> Option<&'static str> {
         match self {
+            // Omitted: the method documents that as `default`, which is whatever this
+            // host's own ssh configuration selects.
             Self::Offered => None,
             Self::Agent => Some("agent"),
             Self::Key => Some("key"),
@@ -776,8 +1097,12 @@ pub struct ConnectForm {
     /// The row this is about, for the header and for `target`.
     pub device: String,
     pub address: Option<String>,
+    /// Whether this is the local first setup rather than a deployment over SSH.
+    pub setup: bool,
     pub field: ConnectField,
     pub user: String,
+    /// `setup` only: what this device calls itself in its own fleet.
+    pub machine: String,
     pub port: String,
     pub identity: IdentityKind,
     pub identity_ref: String,
@@ -789,12 +1114,15 @@ pub struct ConnectForm {
 }
 
 impl ConnectForm {
-    fn new(row: &DeviceRow) -> Self {
+    /// Step 1 for another machine: an SSH account and where to reach it.
+    fn deploy(row: &DeviceRow) -> Self {
         Self {
             device: row.name.clone(),
             address: row.address.clone(),
+            setup: false,
             field: ConnectField::User,
             user: String::new(),
+            machine: String::new(),
             port: "22".into(),
             identity: IdentityKind::default(),
             identity_ref: String::new(),
@@ -805,9 +1133,38 @@ impl ConnectForm {
         }
     }
 
+    /// Step 1 for *this* machine: a name, and whether to install a startup service.
+    fn setup(row: &DeviceRow) -> Self {
+        Self {
+            device: row.name.clone(),
+            address: row.address.clone(),
+            setup: true,
+            field: ConnectField::Machine,
+            user: String::new(),
+            machine: row.name.clone(),
+            port: String::new(),
+            identity: IdentityKind::default(),
+            identity_ref: String::new(),
+            install_path: String::new(),
+            data_dir: String::new(),
+            service: true,
+            error: None,
+        }
+    }
+
+    /// The fields this form draws, which depend on which of the two it is.
+    pub fn fields(&self) -> &'static [ConnectField] {
+        if self.setup {
+            &ConnectField::SETUP
+        } else {
+            &ConnectField::ALL
+        }
+    }
+
     fn text_mut(&mut self) -> Option<&mut String> {
         match self.field {
             ConnectField::User => Some(&mut self.user),
+            ConnectField::Machine => Some(&mut self.machine),
             ConnectField::Port => Some(&mut self.port),
             ConnectField::IdentityRef => Some(&mut self.identity_ref),
             ConnectField::InstallPath => Some(&mut self.install_path),
@@ -819,6 +1176,7 @@ impl ConnectForm {
     pub fn value(&self, field: ConnectField) -> String {
         match field {
             ConnectField::User => self.user.clone(),
+            ConnectField::Machine => self.machine.clone(),
             ConnectField::Port => self.port.clone(),
             ConnectField::Identity => self.identity.label().to_string(),
             ConnectField::IdentityRef => self.identity_ref.clone(),
@@ -836,20 +1194,27 @@ impl ConnectForm {
     }
 
     fn move_field(&mut self, by: i32) {
-        let index = ConnectField::ALL
+        let fields = self.fields();
+        let index = fields
             .iter()
             .position(|field| *field == self.field)
             .unwrap_or(0) as i32;
-        let next = (index + by).rem_euclid(ConnectField::ALL.len() as i32) as usize;
-        self.field = ConnectField::ALL[next];
+        let next = (index + by).rem_euclid(fields.len() as i32) as usize;
+        self.field = fields[next];
     }
 
     /// The `fleet.deployment.prepare` parameters, or the inline error that stops them.
     ///
-    /// The username is required and is never inferred from the network client's owner:
-    /// the Tailscale account that owns a device says nothing about which local account
-    /// an operator may log into.
+    /// For `add`, the username is required and is never inferred from the network
+    /// client's owner: the Tailscale account that owns a device says nothing about which
+    /// local account an operator may log into. For `setup` there is no account at all —
+    /// this machine is not reached over SSH — so that refusal must not fire on a form
+    /// that has no username field to fill in.
     fn params(&self) -> Result<Value, (ConnectField, String)> {
+        if self.setup {
+            return self.setup_params();
+        }
+
         let user = self.user.trim();
         if user.is_empty() {
             return Err((
@@ -887,6 +1252,7 @@ impl ConnectForm {
         };
 
         let mut params = json!({
+            "kind": "add",
             "target": { "address": address },
             "ssh_user": user,
             "port": port,
@@ -894,8 +1260,22 @@ impl ConnectForm {
         });
 
         if let Some(kind) = self.identity.wire() {
-            let mut identity = json!({ "kind": kind });
             let reference = self.identity_ref.trim();
+
+            // `agent` and `key` name *which* identity, and the method requires it: an
+            // agent asked to offer everything is how a server's retry budget is spent.
+            if self.identity.reference_hint().is_some() && reference.is_empty() {
+                return Err((
+                    ConnectField::IdentityRef,
+                    format!(
+                        "Choosing {} means naming which one: {}.",
+                        self.identity.label(),
+                        self.identity.reference_hint().unwrap_or_default()
+                    ),
+                ));
+            }
+
+            let mut identity = json!({ "kind": kind });
 
             if !reference.is_empty() && self.identity.reference_hint().is_some() {
                 identity["ref"] = json!(reference);
@@ -911,6 +1291,25 @@ impl ConnectForm {
             if !value.is_empty() {
                 params[key] = json!(value);
             }
+        }
+
+        Ok(params)
+    }
+
+    /// `kind: "setup"` — no target, no account, no identity.
+    fn setup_params(&self) -> Result<Value, (ConnectField, String)> {
+        let mut params = json!({ "kind": "setup", "service": self.service });
+
+        let machine = self.machine.trim();
+        if !machine.is_empty() {
+            params["machine"] = json!(machine);
+        }
+
+        // The worker refuses `unresolved_address` rather than guessing, and the inventory
+        // is where this machine's own overlay address comes from, so it is passed when
+        // there is one and left out when there is not.
+        if let Some(address) = self.address.as_deref().filter(|a| !a.is_empty()) {
+            params["address"] = json!(address);
         }
 
         Ok(params)
@@ -990,7 +1389,13 @@ impl Operation {
     /// key per attempt would turn a timeout into `operation_in_progress`, which is the
     /// failure the key exists to prevent.
     fn idempotency_key(&self, digest: &str) -> String {
-        format!("{}-{}", self.id, &digest[..digest.len().min(16)])
+        // `digest` is a [`hex_digest`], so it is 64 ASCII bytes and this cut is on a
+        // character boundary by construction. It used to be `digest.len().min(16)` on
+        // whatever string the challenge carried, which panicked the whole client the
+        // first time a worker sent a multibyte one.
+        let short: String = digest.chars().take(16).collect();
+
+        format!("{}-{short}", self.id)
     }
 }
 
@@ -1185,7 +1590,7 @@ impl App {
                         Some(devices_refusal(&error, "fleet.devices", &self.hello));
                     self.devices
                         .inventory
-                        .failed(error.to_string(), ticks, INVENTORY_HOLD);
+                        .failed(clean(&error.to_string()), ticks, INVENTORY_HOLD);
                     self.poll_devices_fallback();
                 }
             },
@@ -1198,7 +1603,7 @@ impl App {
                 Err(error) => {
                     self.devices
                         .fallback
-                        .failed(error.to_string(), ticks, INVENTORY_HOLD)
+                        .failed(clean(&error.to_string()), ticks, INVENTORY_HOLD)
                 }
             },
             DevicesTag::Prepare => match result {
@@ -1302,6 +1707,14 @@ impl App {
             }
             DevicesTag::Resume { operation } => match result {
                 Ok(_resumed) => {
+                    // The same guard the error arm has. Without it, a success for an
+                    // operation this view walked away from ten minutes ago cleared the
+                    // takeover question standing on the screen for a *different* one —
+                    // and the question disappearing looks exactly like it being answered.
+                    if !self.devices_is_current(&operation) {
+                        return;
+                    }
+
                     self.devices.notice = None;
                     if let Some(current) = self.devices.operation.as_mut() {
                         current.submitting = false;
@@ -1389,6 +1802,12 @@ impl App {
 
     /// The only place `takeover: true` is ever sent, and only from an explicit answer.
     fn devices_take_over(&mut self) {
+        // The same three gates every other mutating verb passes, checked here rather than
+        // at the key, so there is no path to the send that skips them.
+        if self.devices_takeover_refused() {
+            return;
+        }
+
         let Some(operation) = self.devices.operation.as_mut() else {
             return;
         };
@@ -1408,6 +1827,32 @@ impl App {
             "fleet.deployment.resume",
             json!({ "operation_id": id, "takeover": true }),
         ));
+    }
+
+    /// Leaving another identity's setup alone: nothing is sent, and the buffer is gone.
+    fn devices_decline_takeover(&mut self) {
+        self.devices.forget_secret();
+        self.devices.operation = None;
+        self.devices.notice = Some(
+            "That setup was left alone. It is still running under the identity that \
+             started it."
+                .into(),
+        );
+        self.devices.inventory.invalidate();
+        self.poll_devices();
+    }
+
+    /// The takeover question's gate, applied before the answer rather than after it.
+    fn devices_takeover_refused(&mut self) -> bool {
+        let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume") else {
+            return false;
+        };
+
+        if let Some(operation) = self.devices.operation.as_mut() {
+            operation.error = Some(refusal);
+        }
+
+        true
     }
 
     fn devices_is_current(&self, operation: &str) -> bool {
@@ -1539,24 +1984,15 @@ impl App {
             return;
         };
 
-        // An operation already open is what "Continue setup" continues, whichever row
-        // the cursor is on: the journal knows the operation, and this view follows it.
-        if let Some(open) = inventory.open_operation().cloned() {
-            self.devices_continue(&open, &row.name);
+        // Only the row this operation is actually about continues it.
+        if let Some(open) = inventory.open_operation_for(&row).cloned() {
+            self.devices_continue(&open);
             return;
         }
 
         match row.primary() {
             Primary::Deploy => self.devices_begin_deploy(&row),
-            Primary::SetUpThisDevice => {
-                self.devices.notice = Some(
-                    "Setting up this machine happens on this machine, without SSH to \
-                     itself. This runtime's deployment methods take a target and an SSH \
-                     account, so run `ouro fleet setup` here first; then this view can \
-                     add the others."
-                        .into(),
-                );
-            }
+            Primary::SetUpThisDevice => self.devices_begin_setup(&row),
             Primary::View | Primary::Diagnose => {
                 self.devices.notice = Some(format!(
                     "{} \u{b7} {} \u{b7} {}. Nothing here has been contacted over SSH; \
@@ -1577,7 +2013,13 @@ impl App {
         }
     }
 
-    fn devices_begin_deploy(&mut self, row: &DeviceRow) {
+    /// The three gates every mutating deployment verb passes, in words.
+    ///
+    /// One function rather than three checks at each call site: `prepare` had them and the
+    /// continue path did not, so an operation in the journal was a way around all three —
+    /// a read-scope listener issued `resume`, and a runtime holding no CA key attached a
+    /// worker it had already said it could not run.
+    fn devices_deploy_refusal(&self, method: &str) -> Option<String> {
         let host = self
             .devices
             .inventory
@@ -1587,41 +2029,77 @@ impl App {
             .unwrap_or_default();
 
         if !host.deploy {
-            self.devices.notice = Some(
+            return Some(
                 host.blocker()
                     .unwrap_or_else(|| "This runtime cannot deploy from here.".into()),
             );
-            return;
         }
 
-        if !self.hello.serves("fleet.deployment.prepare") {
-            self.devices.notice = Some(
-                "This runtime does not serve fleet.deployment.prepare, so there is no \
-                 deployment worker behind a Deploy action here."
-                    .into(),
-            );
-            return;
+        if !self.hello.serves(method) {
+            return Some(format!(
+                "This runtime does not serve {method}, so there is no deployment worker \
+                 behind that action here."
+            ));
         }
 
         if self.hello.scope == "read" {
-            self.devices.notice = Some(Refusal::ReadScope.sentence());
+            return Some(Refusal::ReadScope.sentence());
+        }
+
+        None
+    }
+
+    fn devices_begin_deploy(&mut self, row: &DeviceRow) {
+        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare") {
+            self.devices.notice = Some(refusal);
             return;
         }
 
         self.devices.notice = None;
         self.devices.scroll = 0;
-        self.devices.connect = Some(Box::new(ConnectForm::new(row)));
+        self.devices.connect = Some(Box::new(ConnectForm::deploy(row)));
     }
 
-    fn devices_continue(&mut self, open: &OperationSummary, device: &str) {
-        let mut operation = Operation::new(open.operation.clone(), device.to_string());
+    /// "Set up this device": the first local fleet, which takes no target and no account.
+    ///
+    /// The same review and progress flow as a deployment — it is the same worker and the
+    /// same plan — with the SSH fields gone, because this machine does not reach itself
+    /// over SSH. The spec is explicit about that, and the method now says so too.
+    fn devices_begin_setup(&mut self, row: &DeviceRow) {
+        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare") {
+            self.devices.notice = Some(refusal);
+            return;
+        }
 
-        // A journal with no worker behind it needs one before it can be answered. The
-        // broker refuses a resume that would be a second worker, so asking is safe.
-        if !open.attached && self.hello.serves("fleet.deployment.resume") {
+        self.devices.notice = None;
+        self.devices.scroll = 0;
+        self.devices.connect = Some(Box::new(ConnectForm::setup(row)));
+    }
+
+    fn devices_continue(&mut self, open: &OperationSummary) {
+        // The header names the machine the *operation* is about, from its own target —
+        // never the row that was pressed. Those were the same thing only by accident, and
+        // when they were not, a password prompt appeared under another machine's name.
+        let device = open
+            .target
+            .as_ref()
+            .map(OperationTarget::label)
+            .unwrap_or_else(|| "a device this runtime could not name".into());
+
+        let mut operation = Operation::new(open.operation.clone(), device);
+
+        // A journal with no worker behind it needs one before it can be answered, and a
+        // resume is a mutation like any other: the same three gates.
+        if !open.attached {
+            if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.resume") {
+                self.devices.notice = Some(refusal);
+                return;
+            }
+
             operation.submitting = true;
             let id = operation.id.clone();
             self.devices.operation = Some(Box::new(operation));
+            self.devices.scroll = 0;
 
             self.issue(Call::new(
                 Tag::Devices(DevicesTag::Resume {
@@ -1635,6 +2113,7 @@ impl App {
         }
 
         self.devices.operation = Some(Box::new(operation));
+        self.devices.scroll = 0;
         self.poll_devices();
     }
 
@@ -1644,6 +2123,25 @@ impl App {
         let Some(form) = self.devices.connect.as_mut() else {
             return;
         };
+
+        // A10: the rows of this form are numbered in screen-reader mode, so the numbers
+        // select — except on the port, where a digit is the value somebody is typing.
+        // Selecting the submit row is pressing it: it is a button, not a field.
+        let digit = (access::screen_reader() && !form.field.takes_digits())
+            .then(|| access::row_for_digit(as_char(key.code)))
+            .flatten()
+            .and_then(|row| form.fields().get(row).copied());
+
+        if let Some(field) = digit {
+            form.field = field;
+            form.error = None;
+
+            if field == ConnectField::Inspect {
+                self.devices_prepare();
+            }
+
+            return;
+        }
 
         match key.code {
             KeyCode::Esc => {
@@ -1689,6 +2187,59 @@ impl App {
         }
     }
 
+    /// A bracketed paste, into whichever field this view has open.
+    ///
+    /// Returns whether anything took it, which is what decides the "nothing here is
+    /// taking text" notice. The secret buffer is preferred when a secret challenge is the
+    /// screen: that is the only field drawn at the time.
+    pub(super) fn devices_paste(&mut self, flattened: &str) -> bool {
+        let challenge = self
+            .devices
+            .operation
+            .as_ref()
+            .and_then(|operation| operation.snapshot.value.as_ref())
+            .and_then(Snapshot::challenge)
+            .cloned();
+
+        if let Some(challenge) = challenge {
+            if matches!(challenge.kind.as_str(), "password" | "passphrase") {
+                let Some(operation) = self.devices.operation.as_mut() else {
+                    return false;
+                };
+
+                if operation.submitting {
+                    return false;
+                }
+
+                // The same buffer discipline a typed character gets: a paste for one
+                // question never lands in the next one's field.
+                if operation.answering.as_deref() != Some(challenge.id.as_str()) {
+                    operation.secret.clear();
+                    operation.answering = Some(challenge.id.clone());
+                }
+
+                for character in flattened.chars() {
+                    operation.secret.push(character);
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        match self.devices.connect.as_mut() {
+            Some(form) => match form.text_mut() {
+                Some(text) => {
+                    text.push_str(flattened);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
     fn devices_prepare(&mut self) {
         let Some(form) = self.devices.connect.as_mut() else {
             return;
@@ -1721,19 +2272,20 @@ impl App {
             .as_ref()
             .is_some_and(|operation| operation.takeover.is_some())
         {
+            let digit = access::screen_reader()
+                .then(|| access::row_for_digit(as_char(key.code)))
+                .flatten();
+
             match key.code {
-                KeyCode::Char('t') => self.devices_take_over(),
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    self.devices.forget_secret();
-                    self.devices.operation = None;
-                    self.devices.notice = Some(
-                        "That setup was left alone. It is still running under the identity \
-                         that started it."
-                            .into(),
-                    );
-                    self.devices.inventory.invalidate();
-                    self.poll_devices();
+                // A10: a numbered menu answers to its numbers, in the mode that draws them.
+                _ if digit == Some(0) || matches!(key.code, KeyCode::Char('t')) => {
+                    self.devices_take_over()
                 }
+                _ if digit == Some(1) => self.devices_decline_takeover(),
+                KeyCode::Char('n') | KeyCode::Esc => self.devices_decline_takeover(),
+                // Enter is not an answer to this question. There is no default: the whole
+                // point of the prompt is that taking somebody else's setup is a decision
+                // somebody made on purpose.
                 _other => {}
             }
             return;
@@ -1799,6 +2351,20 @@ impl App {
             return;
         };
 
+        // A question whose answer is already on its way takes no more keystrokes. The
+        // guard used to be on the *submit* alone, so a second secret could be typed into
+        // a field whose answer was in flight — bytes with nowhere to go, in a buffer
+        // whose whole purpose is to hold as little as possible for as short a time as
+        // possible. Esc still works: leaving is always available.
+        if operation.submitting && !matches!(key.code, KeyCode::Esc) {
+            return;
+        }
+
+        // The same belt-and-braces as the submit guard above, and untestable for the same
+        // reason: the snapshot arm already clears the buffer the moment the open
+        // challenge id changes, so by the time a keystroke arrives the rebinding has
+        // nothing left to clear. Kept because it is what makes this function correct on
+        // its own terms rather than by relying on its caller having run first.
         if operation.answering.as_deref() != Some(challenge.id.as_str()) {
             operation.secret.clear();
             operation.answering = Some(challenge.id.clone());
@@ -1828,6 +2394,14 @@ impl App {
             return;
         };
 
+        // Redundant with the guard in `devices_secret_key` and the one in
+        // `devices_paste`, which between them stop the buffer being filled at all while
+        // an answer is in flight — so no input reaches here with both `submitting` and a
+        // non-empty buffer, and no test can distinguish this line being present from it
+        // being absent (the review's mutation of it survives, and that is why). It stays
+        // because it is the last line before the send: a path added later that fills the
+        // buffer some other way should meet a closed door here rather than a second
+        // `authenticate` for one question.
         if operation.submitting {
             return;
         }
@@ -1862,10 +2436,17 @@ impl App {
     fn devices_host_trust_key(&mut self, key: crossterm::event::KeyEvent, challenge: &Challenge) {
         use crossterm::event::KeyCode;
 
+        let digit = access::screen_reader()
+            .then(|| access::row_for_digit(as_char(key.code)))
+            .flatten();
+
         match key.code {
             // Trust is typed in full. There is no default answer and no Enter that
             // accepts: a host key is confirmed by an operator who read the fingerprint.
+            // A10: in the mode that numbers the two answers, the numbers answer.
+            _ if digit == Some(0) => self.devices_confirm_host(challenge, true),
             KeyCode::Char('t') => self.devices_confirm_host(challenge, true),
+            _ if digit == Some(1) => self.devices_confirm_host(challenge, false),
             KeyCode::Char('n') | KeyCode::Esc => self.devices_confirm_host(challenge, false),
             _other => {}
         }
@@ -1901,7 +2482,20 @@ impl App {
     fn devices_review_key(&mut self, key: crossterm::event::KeyEvent, challenge: &Challenge) {
         use crossterm::event::KeyCode;
 
+        // The mismatch screen draws one answer, `c`, and numbers it first; the ordinary
+        // screen draws `a` then `c`. The digit means the row it is next to on the screen
+        // the operator is actually reading.
+        let approvable = challenge.plan().is_some_and(|plan| {
+            challenge.claimed_digest().as_deref() == Some(plan.digest.as_str())
+        });
+        let digit = access::screen_reader()
+            .then(|| access::row_for_digit(as_char(key.code)))
+            .flatten();
+
         match key.code {
+            _ if digit == Some(0) && approvable => self.devices_approve(challenge),
+            _ if digit == Some(0) => self.devices_cancel(),
+            _ if digit == Some(1) && approvable => self.devices_cancel(),
             KeyCode::Char('a') => self.devices_approve(challenge),
             KeyCode::Char('c') => self.devices_cancel(),
             KeyCode::Esc => self.close_devices(),
@@ -1924,16 +2518,33 @@ impl App {
     /// a plan that changed between review and approval comes back `plan_changed` rather
     /// than as a deployment nobody read.
     fn devices_approve(&mut self, challenge: &Challenge) {
-        let Some(digest) = challenge.field("plan_digest") else {
+        // What is approved is the digest of the plan that was *drawn*, computed here.
+        // Taking the challenge's claim would approve a number with no established
+        // relationship to anything on the screen: swap the plan under a challenge that
+        // keeps its digest and the operator reviews one deployment and authorises
+        // another, with nothing to notice.
+        let Some(plan) = challenge.plan() else {
             if let Some(operation) = self.devices.operation.as_mut() {
                 operation.error = Some(
-                    "The review question carries no plan digest, so there is no reviewed \
-                     plan to approve."
+                    "This client could not read the plan this operation is holding, so \
+                     there is nothing here it can approve."
                         .into(),
                 );
             }
             return;
         };
+
+        if challenge.claimed_digest().as_deref() != Some(plan.digest.as_str()) {
+            if let Some(operation) = self.devices.operation.as_mut() {
+                operation.error = Some(
+                    "The plan on this screen is not the plan the runtime is asking you to \
+                     approve: the two digests disagree. Nothing was sent. Cancel the setup \
+                     and start it again."
+                        .into(),
+                );
+            }
+            return;
+        }
 
         let Some(operation) = self.devices.operation.as_mut() else {
             return;
@@ -1947,7 +2558,7 @@ impl App {
         operation.error = None;
 
         let id = operation.id.clone();
-        let key = operation.idempotency_key(&digest);
+        let key = operation.idempotency_key(&plan.digest);
 
         self.issue(Call::new(
             Tag::Devices(DevicesTag::Answer {
@@ -1957,7 +2568,7 @@ impl App {
             "fleet.deployment.start",
             json!({
                 "operation_id": id,
-                "plan_digest": digest,
+                "plan_digest": plan.digest,
                 "idempotency_key": key,
             }),
         ));
@@ -2093,10 +2704,14 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
         }
     }
 
-    if let Some(open) = inventory.open_operation() {
+    for open in inventory.open_operations() {
         lines.push(Line::from(Span::styled(
             format!(
-                "a setup is open: {} \u{b7} {} \u{b7} {} \u{b7} started by {}",
+                "a setup is open on {}: {} \u{b7} {} \u{b7} {} \u{b7} started by {}",
+                open.target
+                    .as_ref()
+                    .map(OperationTarget::label)
+                    .unwrap_or_else(|| "a device this runtime could not name".into()),
                 open.operation,
                 open.state.as_deref().unwrap_or("state not recorded"),
                 if open.attached {
@@ -2113,7 +2728,6 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     }
 
     let rows = state.visible(inventory);
-    let continuing = inventory.open_operation().is_some();
 
     for (heading, wanted) in [
         ("Fleet devices", true),
@@ -2144,7 +2758,7 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
                 .iter()
                 .position(|candidate| std::ptr::eq(*candidate, *row))
                 .unwrap_or(0);
-            row_lines(app, row, index, continuing, lines);
+            row_lines(app, inventory, row, index, lines);
         }
     }
 
@@ -2197,26 +2811,39 @@ fn empty_sentence(app: &App, fleet_section: bool) -> String {
     }
 }
 
+/// How many columns a device's own name may occupy.
+///
+/// Narrow on purpose, and followed by an explicit separator. A name is the one field on
+/// the row that an attacker chooses outright, and a wide one runs into the column beside
+/// it: `hostile-names.json` carries a name whose text is a forged device row, and the
+/// answer is that the name column *ends*, visibly, well before anything this client
+/// wrote. What follows the separator is always this build's words.
+const NAME_COLUMNS: usize = 28;
+
+/// How many columns a device's other fields may occupy. Also a device's choice.
+const ROW_FIELD_COLUMNS: usize = 44;
+
 fn row_lines(
     app: &App,
+    inventory: &Inventory,
     row: &DeviceRow,
     index: usize,
-    continuing: bool,
     lines: &mut Vec<Line<'static>>,
 ) {
     let selected = app.devices.cursor == index;
-    let primary = if continuing {
+    // Only the row this operation is about offers to continue it.
+    let primary = if inventory.open_operation_for(row).is_some() {
         Primary::Continue
     } else {
         row.primary()
     };
 
     let marker = if selected { "> " } else { "  " };
-    let name = access::numbered(index, &row.name);
+    let name = access::numbered(index, &scrub(&row.name, NAME_COLUMNS));
 
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{marker}{name}"),
+            format!("{marker}{name:<width$}", width = NAME_COLUMNS + 4),
             if selected {
                 Style::default()
                     .fg(theme::accent())
@@ -2225,8 +2852,11 @@ fn row_lines(
                 Style::default()
             },
         ),
+        // The separator, always drawn, so the column boundary is a thing on the screen
+        // rather than an alignment a long name can push out of the way.
+        Span::styled("\u{b7} ", Style::default().fg(theme::muted())),
         Span::styled(
-            format!("   {}", primary.label()),
+            primary.label().to_string(),
             Style::default().fg(theme::action_colour()),
         ),
     ]));
@@ -2239,7 +2869,7 @@ fn row_lines(
     ] {
         lines.push(Line::from(vec![
             Span::styled(format!("      {label:<12}"), theme::label()),
-            Span::styled(value, Style::default()),
+            Span::styled(scrub(&value, ROW_FIELD_COLUMNS), Style::default()),
         ]));
     }
 
@@ -2249,8 +2879,9 @@ fn row_lines(
     if let Some(machine) = row.name_conflict.as_ref() {
         lines.push(Line::from(Span::styled(
             format!(
-                "      [note] this device calls itself {machine}, which is the name of a \
-                 machine in this fleet at a different address. It is not that machine."
+                "      [note] this device calls itself {}, which is the name of a machine \
+                 in this fleet at a different address. It is not that machine.",
+                scrub(machine, NAME_COLUMNS)
             ),
             Style::default().fg(theme::warn()),
         )));
@@ -2296,18 +2927,35 @@ fn fallback_lines(app: &App, lines: &mut Vec<Line<'static>>) {
 
 fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(Span::styled(
-        format!(
-            "Deploy Ouroboros to {} \u{b7} {}",
-            form.device,
-            form.address.clone().unwrap_or_else(unknown)
-        ),
+        if form.setup {
+            format!(
+                "Set up this device \u{b7} {}",
+                form.address.clone().unwrap_or_else(unknown)
+            )
+        } else {
+            format!(
+                "Deploy Ouroboros to {} \u{b7} {}",
+                scrub(&form.device, NAME_COLUMNS),
+                form.address.clone().unwrap_or_else(unknown)
+            )
+        },
         theme::heading(),
     )));
     lines.push(Line::from(""));
 
+    if form.setup {
+        lines.push(Line::from(Span::styled(
+            "This is the first fleet on this machine. It configures itself, without SSH \
+             to itself, so there is no account and no host key to verify here. The plan \
+             is reviewed exactly like any other.",
+            Style::default().fg(theme::muted()),
+        )));
+        lines.push(Line::from(""));
+    }
+
     let mut advanced_drawn = false;
 
-    for (index, field) in ConnectField::ALL.into_iter().enumerate() {
+    for (index, field) in form.fields().iter().copied().enumerate() {
         if field.advanced() && !advanced_drawn {
             advanced_drawn = true;
             lines.push(Line::from(""));
@@ -2320,7 +2968,17 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
         if field == ConnectField::Inspect {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("{marker}{}", access::numbered(index, field.label())),
+                format!(
+                    "{marker}{}",
+                    access::numbered(
+                        index,
+                        if form.setup {
+                            "[ set this device up ]"
+                        } else {
+                            field.label()
+                        }
+                    )
+                ),
                 if selected {
                     Style::default()
                         .fg(theme::accent())
@@ -2336,6 +2994,7 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
         let shown = if value.is_empty() {
             match field {
                 ConnectField::User => "(required)".to_string(),
+                ConnectField::Machine => "(this host's own name)".to_string(),
                 ConnectField::IdentityRef => form
                     .identity
                     .reference_hint()
@@ -2349,7 +3008,10 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
 
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{marker}{:<18}", field.label()),
+                format!(
+                    "{marker}{}",
+                    access::numbered(index, &format!("{:<18}", field.label()))
+                ),
                 if selected {
                     theme::label().add_modifier(Modifier::BOLD)
                 } else {
@@ -2369,9 +3031,14 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "The username is the account on the target. It is never taken from the network \
-         client's owner, and no password is typed on this screen: a credential is only \
-         ever answered to its own question.",
+        if form.setup {
+            "No password is typed on this screen. If this setup needs one, it is asked \
+             for as its own question."
+        } else {
+            "The username is the account on the target. It is never taken from the \
+             network client's owner, and no password is typed on this screen: a \
+             credential is only ever answered to its own question."
+        },
         Style::default().fg(theme::muted()),
     )));
 
@@ -2430,7 +3097,7 @@ fn operation_lines(app: &App, operation: &Operation, lines: &mut Vec<Line<'stati
             match snapshot.source.as_str() {
                 "worker" => "a live worker".to_string(),
                 "journal" => "the journal; no worker is attached".to_string(),
-                other => other.to_string(),
+                other => format!("something this client does not recognise ({other})"),
             },
             Style::default(),
         ),
@@ -2531,10 +3198,15 @@ fn steps_lines(snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(Span::styled("Steps", theme::label())));
 
     for step in &snapshot.steps {
+        // The five the engine actually writes: `ok`, `failed`, `skipped`, `started` and
+        // `running`. `skipped` is not a failure — a step that was not needed is a step
+        // that was not needed — and it used to be painted the same grey as "in progress".
         let colour = match step.outcome.as_str() {
             "ok" => theme::good(),
             "failed" => theme::bad(),
-            _running => theme::muted(),
+            "skipped" => theme::muted(),
+            "started" | "running" => theme::accent(),
+            _unknown => theme::muted(),
         };
 
         let machine = step
@@ -2674,38 +3346,147 @@ fn review_lines(challenge: &Challenge, lines: &mut Vec<Line<'static>>) {
         theme::heading(),
     )));
 
-    // The plan is rendered by the same code the CLI and the dry run print, from the
-    // document the worker put in the challenge: two surfaces reading one plan cannot
-    // describe it differently.
-    match challenge
-        .metadata
-        .get("plan")
-        .cloned()
-        .map(serde_json::from_value::<crate::fleet_setup::plan::Plan>)
-    {
-        Some(Ok(plan)) => {
-            for line in plan.render().lines() {
-                lines.push(Line::from(Span::styled(line.to_string(), Style::default())));
+    let Some(plan) = challenge.plan() else {
+        lines.push(Line::from(Span::styled(
+            "This client could not read the plan this operation is holding, so there is \
+             nothing here to review. Cancel the setup rather than approving a plan nobody \
+             has read.",
+            Style::default().fg(theme::bad()),
+        )));
+        return;
+    };
+
+    // Every row is built here, from a decoded field, rather than by splitting a rendered
+    // block on newlines: a `machine` carrying its own newlines and column padding is how
+    // a plan forges an aligned `grants  none, this is a routine update` row, and a plan
+    // that can add rows to its own review is a plan nobody has read.
+    lines.push(Line::from(Span::styled(
+        plan.header(),
+        Style::default().fg(theme::accent()),
+    )));
+    lines.push(Line::from(""));
+
+    let mut field = |label: &str, value: String| {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {label:<14}"), theme::label()),
+            Span::styled(value, Style::default()),
+        ]));
+    };
+
+    field("action", plan.kind.clone());
+    field("machine", plan.machine.clone());
+    field("address", plan.address.clone());
+
+    if let Some(user) = plan.ssh_user.as_ref() {
+        field(
+            "ssh",
+            format!("{user}@{} port {}", plan.address, plan.port.unwrap_or(22)),
+        );
+    }
+    if let Some(identity) = plan.identity.as_ref() {
+        field("identity", identity.clone());
+    }
+    if let Some(fingerprint) = plan.host_fingerprint.as_ref() {
+        field("host key", fingerprint.clone());
+    }
+    if let Some(node) = plan.node.as_ref() {
+        field("node", node.clone());
+    }
+    if let Some(path) = plan.install_path.as_ref() {
+        field("executable", path.clone());
+    }
+    if let Some(dir) = plan.data_dir.as_ref() {
+        field("data dir", dir.clone());
+    }
+
+    match plan.release.as_ref() {
+        Some(release) => {
+            // Safe to cut at sixteen because `PlanView::decode` refused anything that is
+            // not 64 lowercase hex: the characters are one byte each.
+            field(
+                "install",
+                format!(
+                    "ouro {} ({}) sha256 {}",
+                    release.version,
+                    release.target,
+                    &release.sha256[..16]
+                ),
+            );
+
+            if !release.official_origin {
+                field("origin", "not the official release".into());
             }
         }
-        _unreadable => {
-            lines.push(Line::from(Span::styled(
-                "This client could not read the plan this operation is holding, so there \
-                 is nothing here to review. Cancel the setup rather than approving a plan \
-                 nobody has read.",
-                Style::default().fg(theme::bad()),
-            )));
-            return;
+        None => field("install", "not needed; the target already has ouro".into()),
+    }
+
+    field(
+        "startup",
+        match plan.service.as_deref() {
+            Some("managed") => {
+                "propose a user service (starts at login; not a pre-login daemon)".into()
+            }
+            Some("manual") => "manual start, explicitly chosen".into(),
+            Some(other) => other.to_string(),
+            None => unknown(),
+        },
+    );
+
+    if plan.members.is_empty() {
+        field("members", "none".into());
+    } else {
+        for member in &plan.members {
+            field(
+                "member",
+                format!(
+                    "{} at {} ({}) \u{2014} {}",
+                    member.machine, member.host, member.reached_by, member.change
+                ),
+            );
         }
     }
 
-    lines.push(Line::from(vec![
-        Span::styled("  digest        ", theme::label()),
-        Span::styled(
-            challenge.field("plan_digest").unwrap_or_else(unknown),
-            Style::default(),
-        ),
-    ]));
+    if let Some(restart) = plan.restart.as_ref() {
+        field("restart", restart.clone());
+    }
+
+    if plan.grants.is_empty() {
+        field("grants", "none stated".into());
+    } else {
+        for grant in &plan.grants {
+            field("grant", grant.clone());
+        }
+    }
+
+    field("digest", plan.digest.clone());
+
+    // The digest this client computed over the document it drew, against the one the
+    // challenge claims. They are the same number in every honest case; when they are not,
+    // one of them describes a plan that is not on this screen, and neither is approved.
+    let claimed = challenge.claimed_digest();
+
+    if claimed.as_deref() != Some(plan.digest.as_str()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            access::speakable(&format!(
+                "This plan's digest does not match the one the runtime is asking you to \
+                 approve ({}). The plan on this screen is not the plan that would be \
+                 applied, so it cannot be approved from here. Cancel the setup and start \
+                 it again.",
+                claimed
+                    .as_deref()
+                    .unwrap_or("which it did not state as a digest")
+            )),
+            Style::default().fg(theme::bad()),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            access::numbered(0, "c  Cancel setup"),
+            Style::default().fg(theme::action_colour()),
+        )));
+        return;
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         access::numbered(0, "a  Deploy Ouroboros \u{2014} applies exactly this plan"),
@@ -2757,6 +3538,16 @@ fn finish_lines(app: &App, snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) 
              neither happened as part of this setup.",
             Style::default().fg(theme::muted()),
         )));
+
+        // The worker's own words about what to do next, when it wrote any. It ran the
+        // deployment; this client did not.
+        if let Some(next) = snapshot.next.as_ref() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  next          ", theme::label()),
+                Span::styled(next.clone(), Style::default()),
+            ]));
+        }
     } else {
         lines.push(Line::from(Span::styled(
             match snapshot.state.as_str() {
@@ -2844,27 +3635,68 @@ pub fn devices_hint_line(app: &App) -> String {
 
 // ------------------------------------------------------------------------- small parts
 
-/// A string field, bounded and stripped of everything a terminal would obey.
+/// Everything a terminal would obey, and everything a person cannot see.
 ///
-/// Every value in a `fleet.devices` reply and in a challenge's metadata is text some
-/// *other* machine chose: a device's hostname, a worker's prompt label, a remote path.
-/// `tui/tests/fixtures/tailscale/hostile-names.json` is a peer list whose names carry
-/// ANSI escapes, bidi overrides and a forged four-line device row, and the CLI's own row
-/// renderer already answers it with [`human`]. This is the same answer, so a name that
-/// cannot forge a row in `ouro fleet devices` cannot forge one here either.
+/// [`human`] already drops control characters, the C1 block and the bidi overrides, which
+/// is what stops an escape sequence from repainting the screen. It keeps the *invisible*
+/// characters — a zero-width space, a joiner, a soft hyphen — and those are how one device
+/// name is made to look like another's (`bui\u{200b}ld-linux` reads as `build-linux` and is
+/// a different string). Default-ignorable code points are removed before the bounding, so
+/// what reaches a `Line` is what a person can actually see.
+fn ignorable(character: char) -> bool {
+    matches!(character,
+        '\u{00ad}' | '\u{034f}' | '\u{061c}'
+        | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}'
+        | '\u{180b}'..='\u{180f}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}'
+        | '\u{3164}'
+        | '\u{fe00}'..='\u{fe0f}'
+        | '\u{feff}'
+        | '\u{ffa0}'
+        | '\u{fff0}'..='\u{fff8}'
+        | '\u{1d173}'..='\u{1d17a}'
+        | '\u{e0000}'..='\u{e0fff}')
+}
+
+/// One remote string, made safe to draw and bounded to `columns`.
+///
+/// **Every** string this view draws that some other machine chose goes through here: a
+/// device's hostname and address, a worker's step and prompt labels, a plan's fields, a
+/// gateway's refusal message. `tui/tests/fixtures/tailscale/hostile-names.json` is a peer
+/// list whose names carry ANSI escapes, bidi overrides and a forged four-line device row,
+/// and the CLI's own row renderer answers it with [`human`]; this adds the invisible
+/// characters that bounding alone leaves behind.
+pub fn scrub(raw: &str, columns: usize) -> String {
+    let visible: String = raw.chars().filter(|c| !ignorable(*c)).collect();
+
+    human(&visible, columns)
+}
+
+/// A string field of a reply, scrubbed and bounded.
 fn text(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
-        .map(|raw| human(raw, FIELD_COLUMNS))
+        .map(|raw| scrub(raw, FIELD_COLUMNS))
         .filter(|text| !text.is_empty())
 }
 
-/// A sentence rather than a field: longer, and bounded the same way.
+/// A sentence rather than a field: longer, and scrubbed the same way.
 fn sentence(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
-        .map(|raw| human(raw, MESSAGE_COLUMNS))
+        .map(|raw| scrub(raw, MESSAGE_COLUMNS))
         .filter(|text| !text.is_empty())
+}
+
+/// A sentence this client did not write, from a gateway message or an error.
+///
+/// The same scrubbing, for the strings that arrive as `String` rather than as JSON: an
+/// `RpcError`'s `message` is chosen by whatever answered the call, and a refusal drawn
+/// straight from one is a refusal that can repaint the screen.
+fn clean(raw: &str) -> String {
+    scrub(raw, MESSAGE_COLUMNS)
 }
 
 fn array(value: Option<&Value>) -> Vec<Value> {
@@ -2873,6 +3705,14 @@ fn array(value: Option<&Value>) -> Vec<Value> {
 
 fn unknown() -> String {
     "unknown".to_string()
+}
+
+/// The character a key event carries, or `\0` for a key that is not one.
+fn as_char(code: crossterm::event::KeyCode) -> char {
+    match code {
+        crossterm::event::KeyCode::Char(character) => character,
+        _not_a_character => '\0',
+    }
 }
 
 /// The snake_case state code, back to the enum that carries its words.
@@ -2930,12 +3770,14 @@ fn devices_refusal(error: &ClientError, method: &str, hello: &Hello) -> Refusal 
                 Refusal::ReadScope
             }
             ErrorCode::ScopeDenied => Refusal::NotAdministrator,
-            _other => Refusal::Other(rpc.message.clone()),
+            _other => Refusal::Other(clean(&rpc.message)),
         },
-        other => Refusal::Other(other.to_string()),
+        other => Refusal::Other(clean(&other.to_string())),
     }
 }
 
+/// Whether a -32003 on this method can be the listener's *scope* rather than the
+/// identity rule. Only the operate verbs; `fleet.deployment.status` is a read.
 fn method_mutates(method: &str) -> bool {
     method.starts_with("fleet.deployment.") && method != "fleet.deployment.status"
 }
@@ -2974,17 +3816,28 @@ fn devices_error_sentence(error: &ClientError, method: &str, hello: &Hello) -> S
                     ErrorCode::MethodNotFound => {
                         format!("This runtime does not serve {method}.")
                     }
+                    // Not the inventory's explanation. A -32003 arriving *during* a
+                    // deployment is this identity's authority being refused now — a read
+                    // scope it always had, or a revocation that has just happened — and
+                    // the operator's question is what happens to the operation, not why
+                    // the device list is unavailable.
+                    ErrorCode::ScopeDenied if method_mutates(method) => format!(
+                        "This runtime refused {method}: this listener or this identity is \
+                         not permitted to act on a deployment. The operation itself is \
+                         untouched and keeps whatever state it had; its next step waits \
+                         until somebody who is permitted answers."
+                    ),
                     ErrorCode::ScopeDenied => devices_refusal(error, method, hello).sentence(),
                     ErrorCode::UpstreamTimeout => format!(
                         "{method} outlived the gateway's ceiling, so its outcome is \
                          unknown here. The deployment host did not stop working; press r \
                          to read what it actually did."
                     ),
-                    _other => format!("{method} was refused: {}", rpc.message),
+                    _other => format!("{method} was refused: {}", clean(&rpc.message)),
                 },
             }
         }
-        other => format!("{method} could not be sent: {other}"),
+        other => format!("{method} could not be sent: {}", clean(&other.to_string())),
     }
 }
 
@@ -3044,7 +3897,11 @@ fn reason_sentence(reason: &str) -> String {
         "journal_unreadable" => "this operation's record on the deployment host could not \
                                  be read."
             .into(),
-        other => other.to_string(),
+        // A code this build predates, made readable rather than printed as an identifier.
+        // The words are the code's own — nothing is invented — so an operator can still
+        // quote it, and a screen full of `quantum_decoherence_detected` is not what a
+        // person is asked to act on.
+        other => format!("the runtime named the reason {}.", other.replace('_', " ")),
     }
 }
 
@@ -3115,6 +3972,204 @@ mod tests {
 
             assert_eq!(row.state_label(), state.label());
         }
+    }
+
+    /// The fence against the worker: every field this view draws is a field the real
+    /// metadata builders write, read out of the shape the real worker puts them in.
+    ///
+    /// `fleet_setup::challenge` is in this crate, so nothing here is a fake: the three
+    /// builders are called, wrapped the way `worker::challenge_event` wraps them, and
+    /// decoded by the same code the gateway's answers go through. The first version of
+    /// this view read the metadata *flat* and every test passed, because the tests and
+    /// the view agreed with each other and neither agreed with the worker.
+    #[test]
+    fn a_challenge_is_decoded_out_of_the_shape_the_real_worker_sends() {
+        use crate::fleet_setup::challenge::{
+            host_trust_metadata, passphrase_metadata, password_metadata,
+        };
+
+        // Exactly `worker::challenge_event`: the builders' object under `metadata`, with
+        // the id, the kind and the expiry written over the top by the broker.
+        fn wire(id: &str, kind: &str, metadata: Value) -> Value {
+            json!({
+                "operation": "abcdef0123456789",
+                "challenge": id,
+                "kind": kind,
+                "expires_at": 4_102_444_800u64,
+                "metadata": metadata,
+            })
+        }
+
+        let password = Challenge::decode(&wire(
+            "c-pw",
+            "password",
+            password_metadata("100.64.12.44", "deploy", 22, 2, 3),
+        ))
+        .expect("a decodable password challenge");
+
+        assert_eq!(password.field("target").as_deref(), Some("100.64.12.44"));
+        assert_eq!(password.field("user").as_deref(), Some("deploy"));
+        assert_eq!(password.field("port").as_deref(), Some("22"));
+        assert_eq!(password.field("attempt").as_deref(), Some("2"));
+        assert_eq!(password.field("max_attempts").as_deref(), Some("3"));
+
+        let passphrase = Challenge::decode(&wire(
+            "c-pp",
+            "passphrase",
+            passphrase_metadata("id_ed25519", "SHA256:bbb"),
+        ))
+        .expect("a decodable passphrase challenge");
+
+        assert_eq!(passphrase.field("key_label").as_deref(), Some("id_ed25519"));
+        assert_eq!(
+            passphrase.field("public_fingerprint").as_deref(),
+            Some("SHA256:bbb")
+        );
+
+        let trust = Challenge::decode(&wire(
+            "c-host",
+            "host_trust",
+            host_trust_metadata("100.64.12.44", 22, "ssh-ed25519", "SHA256:abc", "deploy"),
+        ))
+        .expect("a decodable host_trust challenge");
+
+        for (key, value) in [
+            ("address", "100.64.12.44"),
+            ("port", "22"),
+            ("algorithm", "ssh-ed25519"),
+            ("sha256_fingerprint", "SHA256:abc"),
+            ("user", "deploy"),
+        ] {
+            assert_eq!(trust.field(key).as_deref(), Some(value), "{key} drifted");
+        }
+
+        // And the flat spelling still reads, so a builder that stopped nesting would not
+        // silently empty every prompt on this screen.
+        let flat = Challenge::decode(&json!({
+            "challenge": "c-pw", "kind": "password", "user": "deploy"
+        }))
+        .expect("a decodable flat challenge");
+
+        assert_eq!(flat.field("user").as_deref(), Some("deploy"));
+    }
+
+    /// The review challenge's plan, and the digest computed over it, are the worker's.
+    #[test]
+    fn a_review_challenge_yields_the_plan_and_the_digest_the_worker_would_send() {
+        let document = json!({
+            "schema": 1,
+            "operation": "abcdef0123456789",
+            "kind": "add",
+            "deployment_host": { "hostname": "studio", "user": "ada",
+                                 "os": "darwin", "arch": "aarch64", "issuer": true },
+            "target": { "machine": "vps", "address": "100.64.0.9", "port": 22,
+                        "ssh_user": "deploy", "identity": "default",
+                        "install_path": "bin/ouro" },
+            "service": "managed",
+            "members": [],
+            "grants": ["broad fleet trust between every member"]
+        });
+
+        // `engine.rs` issues the review challenge with exactly these two keys.
+        let wire = json!({
+            "challenge": "c-review",
+            "kind": "review",
+            "metadata": {
+                "plan": document,
+                "plan_digest": sha256_hex(canonical_json(&document).as_bytes()),
+            }
+        });
+
+        let challenge = Challenge::decode(&wire).expect("a decodable review challenge");
+        let plan = challenge.plan().expect("a decodable plan");
+
+        assert_eq!(plan.machine, "vps");
+        assert_eq!(plan.address, "100.64.0.9");
+        assert_eq!(plan.ssh_user.as_deref(), Some("deploy"));
+        assert_eq!(plan.grants, vec!["broad fleet trust between every member"]);
+        assert_eq!(
+            challenge.claimed_digest(),
+            Some(plan.digest.clone()),
+            "the digest this client computes is not the one the worker sends"
+        );
+    }
+
+    /// Every step name the engine actually writes has words and a colour path here.
+    #[test]
+    fn every_step_the_engine_writes_is_decodable() {
+        for name in [
+            "inspect",
+            "install_binary",
+            "prepare",
+            "issue",
+            "install",
+            "roster",
+            "member_preflight",
+            "service",
+            "disable_service",
+            "connect",
+            "stop_runtime",
+            "create",
+            "verify_disconnected",
+            "leave",
+            "test_task",
+        ] {
+            for outcome in ["started", "running", "ok", "skipped", "failed"] {
+                let step = Step::decode(&json!({
+                    "machine": "vps", "step": name, "outcome": outcome,
+                    "detail": Value::Null
+                }));
+
+                assert_eq!(step.step, name);
+                assert_eq!(step.outcome, outcome);
+                assert_eq!(step.machine.as_deref(), Some("vps"));
+            }
+        }
+    }
+
+    /// A live worker's residue and cause live inside `done`; a journal's live at the top.
+    #[test]
+    fn residue_and_cause_are_read_from_both_places_they_are_written() {
+        // The worker's `done_frame`, as `worker.rs` builds it.
+        let worker = Snapshot::decode(&json!({
+            "source": "worker", "attached": true, "state": "failed",
+            "done": {
+                "ok": false, "state": "failed",
+                "reason": "host_key_changed",
+                "detail": "the key on 100.64.0.9 is not the one this fleet trusts"
+            }
+        }));
+
+        assert!(worker
+            .last_error
+            .as_deref()
+            .expect("a cause")
+            .contains("100.64.0.9"));
+
+        let finished = Snapshot::decode(&json!({
+            "source": "worker", "attached": true, "state": "completed",
+            "done": { "ok": true, "state": "completed",
+                      "summary": "vps joined the fleet",
+                      "next": "run a test task on vps",
+                      "residue": ["a partial archive at /tmp/ouro"] }
+        }));
+
+        assert_eq!(finished.summary.as_deref(), Some("vps joined the fleet"));
+        assert_eq!(finished.next.as_deref(), Some("run a test task on vps"));
+        assert_eq!(finished.residue, vec!["a partial archive at /tmp/ouro"]);
+
+        // The journal's own spelling, which is what a read with no worker answers.
+        let journal = Snapshot::decode(&json!({
+            "source": "journal", "attached": false, "state": "interrupted",
+            "last_error": "the connection dropped",
+            "residue": ["a half-written roster on studio"]
+        }));
+
+        assert_eq!(
+            journal.last_error.as_deref(),
+            Some("the connection dropped")
+        );
+        assert_eq!(journal.residue, vec!["a half-written roster on studio"]);
     }
 
     /// A code this build has never seen is named, not guessed at.
@@ -3203,10 +4258,11 @@ mod tests {
             "capabilities": { "deploy": false, "reasons": ["a_reason_from_the_future"] }
         }));
 
-        assert!(host
-            .blocker()
-            .expect("a sentence")
-            .contains("a_reason_from_the_future"));
+        // The code's own words, with the underscores gone: quotable by an operator, and
+        // not a snake_case identifier on a screen somebody is asked to act on.
+        let unknown = host.blocker().expect("a sentence");
+        assert!(unknown.contains("a reason from the future"), "{unknown}");
+        assert!(!unknown.contains("a_reason_from_the_future"), "{unknown}");
     }
 
     /// The masked buffer never prints what was typed, however it is formatted.
@@ -3250,7 +4306,7 @@ mod tests {
     /// A required username is a refusal with a field to go to, not a call.
     #[test]
     fn the_connect_form_refuses_an_empty_username() {
-        let form = ConnectForm::new(&DeviceRow {
+        let form = ConnectForm::deploy(&DeviceRow {
             name: "vps".into(),
             address: Some("100.64.0.9".into()),
             ..DeviceRow::default()
@@ -3264,7 +4320,7 @@ mod tests {
     /// The parameters carry a reference and never key material, and no secret at all.
     #[test]
     fn the_connect_form_sends_a_reference_and_no_secret() {
-        let mut form = ConnectForm::new(&DeviceRow {
+        let mut form = ConnectForm::deploy(&DeviceRow {
             name: "vps".into(),
             address: Some("100.64.0.9".into()),
             ..DeviceRow::default()
@@ -3294,7 +4350,7 @@ mod tests {
     /// A port that is not a port names the field it is in.
     #[test]
     fn the_connect_form_refuses_a_port_that_is_not_one() {
-        let mut form = ConnectForm::new(&DeviceRow {
+        let mut form = ConnectForm::deploy(&DeviceRow {
             address: Some("100.64.0.9".into()),
             ..DeviceRow::default()
         });
@@ -3309,7 +4365,7 @@ mod tests {
     /// sending a kind nobody chose.
     #[test]
     fn an_unchosen_identity_is_omitted_rather_than_guessed() {
-        let mut form = ConnectForm::new(&DeviceRow {
+        let mut form = ConnectForm::deploy(&DeviceRow {
             address: Some("100.64.0.9".into()),
             ..DeviceRow::default()
         });
@@ -3466,7 +4522,12 @@ mod tests {
             assert!(sentence.len() > 20, "{reason} has no explanation");
         }
 
-        assert_eq!(reason_sentence("from_the_future"), "from_the_future");
+        let unknown = reason_sentence("from_the_future");
+        assert!(unknown.contains("from the future"), "{unknown}");
+        assert!(
+            !unknown.contains("from_the_future"),
+            "an unrecognised code reached the screen as an identifier: {unknown}"
+        );
     }
 
     /// The worker's own refusal is what an operator can act on, so it wins over the
@@ -3625,6 +4686,120 @@ mod tests {
         }
     }
 
+    /// This machine, before it has a fleet, belongs under "Fleet devices".
+    ///
+    /// It has no roster name — there is no roster — so the `machine.is_some()` half of
+    /// the split says "available on this network", which is the one row where that is
+    /// exactly wrong: a device is not deployed to over SSH by itself.
+    #[test]
+    fn this_machine_without_a_profile_is_filed_under_the_fleet() {
+        let bare = DeviceRow {
+            name: "studio".into(),
+            machine: None,
+            state: "this_device_without_profile".into(),
+            ..DeviceRow::default()
+        };
+
+        assert!(bare.in_fleet(), "this machine was filed under the peers");
+        assert_eq!(bare.primary(), Primary::SetUpThisDevice);
+
+        let peer = DeviceRow {
+            name: "vps".into(),
+            machine: None,
+            state: "discovered_installation_unknown".into(),
+            ..DeviceRow::default()
+        };
+
+        assert!(!peer.in_fleet());
+    }
+
+    /// An operation is placed by its target, and one that names no device places nowhere.
+    #[test]
+    fn an_operation_is_matched_to_its_row_by_target() {
+        let inventory = Inventory::decode(&json!({
+            "devices": [
+                { "name": "alpha", "state": "discovered_installation_unknown",
+                  "address": "100.64.0.11" },
+                { "name": "bravo", "state": "discovered_installation_unknown",
+                  "address": "100.64.0.22" }
+            ],
+            "operations": [{
+                "operation": "op1", "state": "awaiting_auth", "attached": true,
+                "owner": "ada",
+                "target": { "machine": "bravo", "address": "100.64.0.22" }
+            }]
+        }));
+
+        let alpha = &inventory.devices[0];
+        let bravo = &inventory.devices[1];
+
+        assert!(inventory.open_operation_for(alpha).is_none());
+        assert_eq!(
+            inventory
+                .open_operation_for(bravo)
+                .map(|operation| operation.operation.as_str()),
+            Some("op1")
+        );
+
+        // A journal too old to say what it targets is listed, and attached to no row.
+        let untargeted = Inventory::decode(&json!({
+            "devices": [{ "name": "alpha", "state": "discovered_installation_unknown",
+                          "address": "100.64.0.11" }],
+            "operations": [{ "operation": "op2", "state": "awaiting_auth",
+                             "attached": true, "target": Value::Null }]
+        }));
+
+        assert!(untargeted
+            .open_operation_for(&untargeted.devices[0])
+            .is_none());
+        assert_eq!(untargeted.open_operations().len(), 1);
+    }
+
+    /// A digest is 64 lowercase hex characters, and nothing else is one.
+    #[test]
+    fn only_sixty_four_lowercase_hex_characters_are_a_digest() {
+        let good = "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef";
+        assert_eq!(hex_digest(good).as_deref(), Some(good));
+        assert_eq!(hex_digest(&format!("  {good}  ")).as_deref(), Some(good));
+
+        for bad in [
+            "",
+            "9f2c",
+            "9F2C1B7AE4D60358AA1F2C3D4E5F60718293A4B5C6D7E8F90123456789ABCDEF",
+            "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdeg",
+            // The one that panicked the client: multibyte, and shorter in characters
+            // than it is in bytes.
+            "\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}",
+        ] {
+            assert_eq!(hex_digest(bad), None, "{bad:?} was accepted as a digest");
+        }
+
+        // A plan whose release checksum is not one is not decodable at all.
+        let plan = json!({
+            "deployment_host": { "hostname": "studio", "user": "ada" },
+            "target": { "machine": "vps", "address": "100.64.0.9" },
+            "release": { "version": "0.1.8", "target": "linux",
+                         "sha256": "\u{30a2}\u{30fc}\u{30c6}", "official_origin": true }
+        });
+
+        assert_eq!(PlanView::decode(&plan), None);
+    }
+
+    /// Invisible characters are removed before a name is bounded.
+    #[test]
+    fn a_zero_width_character_never_reaches_the_screen() {
+        for hidden in ['\u{200b}', '\u{200d}', '\u{00ad}', '\u{feff}', '\u{2060}'] {
+            let name = format!("bui{hidden}ld-linux");
+            let drawn = scrub(&name, 28);
+
+            assert!(
+                !drawn.contains(hidden),
+                "{hidden:?} survived into a drawn name"
+            );
+            assert_eq!(drawn, "build-linux");
+        }
+    }
+
     /// A roster name conflict is a note on the row, never a merge into it.
     #[test]
     fn a_name_conflict_stays_a_note_on_its_own_row() {
@@ -3651,7 +4826,9 @@ mod tests {
         for (state, open) in [
             ("completed", false),
             ("cancelled", false),
-            ("failed", true),
+            // A failed deployment is retried by reviewing a fresh plan, not by attaching
+            // a worker to the wreck, so its row keeps its own action.
+            ("failed", false),
             ("interrupted", true),
             ("deploying", true),
         ] {

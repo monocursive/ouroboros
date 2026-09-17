@@ -693,6 +693,12 @@ impl App {
                 true
             }
             Some(Overlay::Prompt { buffer, .. }) => push_into(Some(buffer), &flattened),
+            // The Devices view has two kinds of field and both take a paste: a masked
+            // secret, which is exactly the thing an operator holds in a password manager
+            // rather than in their head, and the connect form's text fields. Dropping a
+            // pasted passphrase with a notice saying nothing takes text was telling
+            // somebody their terminal was broken while they tried to authenticate.
+            Some(Overlay::Devices) => self.devices_paste(&flattened),
             _ => false,
         };
 

@@ -114,6 +114,19 @@ fn refuse(app: &mut App, tag: Tag, code: ErrorCode, data: Option<Value>) {
     });
 }
 
+/// How many characters the masked field is drawing.
+///
+/// The one property of the secret buffer a test can actually see from outside it: the
+/// `Debug` is redacted by design, so an assertion about the `Debug` passes whether the
+/// bytes are there or not.
+fn bullets(app: &mut App) -> usize {
+    screen(app)
+        .rows
+        .iter()
+        .map(|row| row.matches('\u{2022}').count())
+        .sum()
+}
+
 fn screen(app: &mut App) -> Screen {
     render(app, 150, 60)
 }
@@ -728,10 +741,12 @@ fn activate(app: &mut App, name: &str) {
 fn focus_inspect(app: &mut App) {
     for _ in 0..12 {
         let drawn = screen(app);
-        let focused = drawn
-            .rows
-            .iter()
-            .any(|row| row.contains("[ inspect this device ]") && row.contains("> "));
+        // The two forms label their button differently — a local setup inspects nothing
+        // over SSH — so the helper looks for whichever one this form is drawing.
+        let focused = drawn.rows.iter().any(|row| {
+            (row.contains("[ inspect this device ]") || row.contains("[ set this device up ]"))
+                && row.contains("> ")
+        });
         drop(drawn);
 
         if focused {
@@ -840,6 +855,23 @@ fn snapshot(state: &str, challenges: Value, extra: Value) -> Value {
     reply
 }
 
+/// One challenge, in the shape the real worker puts on the wire.
+///
+/// `fleet_setup::worker::challenge_event` nests what the metadata builders produced under
+/// a `metadata` key, and the broker forwards that frame with `challenge`/`kind`/
+/// `expires_at` written over the top. Every challenge fixture in this file goes through
+/// here, so the shape these tests drive is the shape the worker sends — the first version
+/// of this file spelled the metadata flat and passed against a shape nothing produces.
+fn challenge(id: &str, kind: &str, metadata: Value) -> Value {
+    json!({
+        "operation": "abcdef0123456789",
+        "challenge": id,
+        "kind": kind,
+        "expires_at": 4102444800u64,
+        "metadata": metadata,
+    })
+}
+
 fn status_tag() -> Tag {
     Tag::Devices(DevicesTag::Status {
         operation: "abcdef0123456789".into(),
@@ -857,15 +889,15 @@ fn an_unknown_host_key_shows_its_fingerprint_and_is_trusted_only_on_purpose() {
         status_tag(),
         snapshot(
             "awaiting_host_trust",
-            json!([{
-                "challenge": "c-host",
-                "kind": "host_trust",
-                "address": "100.64.12.44",
+            json!([challenge(
+                "c-host",
+                "host_trust",
+                json!({ "address": "100.64.12.44",
                 "port": 22,
                 "algorithm": "ssh-ed25519",
                 "sha256_fingerprint": "SHA256:0Yp1rL8mQe3xTgH2vKd9NcZaWbXuJiOpQrStUvWxYz0",
-                "user": "deploy",
-            }]),
+                "user": "deploy" })
+            )]),
             json!({}),
         ),
     );
@@ -918,9 +950,12 @@ fn declining_an_unknown_host_refuses_it_explicitly() {
         status_tag(),
         snapshot(
             "awaiting_host_trust",
-            json!([{ "challenge": "c-host", "kind": "host_trust",
-                     "address": "100.64.12.44", "port": 22, "user": "deploy",
-                     "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:aaa" }]),
+            json!([challenge(
+                "c-host",
+                "host_trust",
+                json!({ "address": "100.64.12.44", "port": 22, "user": "deploy",
+                     "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:aaa" })
+            )]),
             json!({}),
         ),
     );
@@ -973,8 +1008,12 @@ fn both_secret_challenges_are_labelled_from_their_own_metadata() {
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-pw", "kind": "password", "target": "100.64.12.44",
-                     "user": "deploy", "port": 22, "attempt": 2, "max_attempts": 3 }]),
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44",
+                     "user": "deploy", "port": 22, "attempt": 2, "max_attempts": 3 })
+            )]),
             json!({}),
         ),
     );
@@ -997,8 +1036,11 @@ fn both_secret_challenges_are_labelled_from_their_own_metadata() {
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-pp", "kind": "passphrase",
-                     "key_label": "id_ed25519", "public_fingerprint": "SHA256:bbb" }]),
+            json!([challenge(
+                "c-pp",
+                "passphrase",
+                json!({ "key_label": "id_ed25519", "public_fingerprint": "SHA256:bbb" })
+            )]),
             json!({}),
         ),
     );
@@ -1020,44 +1062,49 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
     let _mode = normal();
     let mut app = deploying();
 
-    let digest = "3f786850e387550fdab836ed7e6dc881de23001b3f786850e387550fdab836ed";
+    let plan = json!({
+        "schema": 1,
+        "operation": "abcdef0123456789",
+        "kind": "add",
+        "deployment_host": {
+            "hostname": "studio", "user": "ada",
+            "os": "darwin", "arch": "aarch64-apple-darwin", "issuer": true
+        },
+        "target": {
+            "machine": "build-linux", "address": "100.64.12.44", "port": 22,
+            "ssh_user": "deploy", "identity": "agent: id_ed25519",
+            "install_path": "bin/ouro",
+            "host_fingerprint": "SHA256:0Yp1rL8m"
+        },
+        "release": {
+            "version": "0.1.8", "target": "x86_64-unknown-linux-gnu",
+            "asset": "ouro-linux.tar.gz",
+            "sha256": "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef",
+            "official_origin": true
+        },
+        "service": "managed",
+        "members": [
+            { "machine": "studio", "host": "100.64.12.21",
+              "reached_by": "local", "change": "add build-linux to the roster" }
+        ],
+        "grants": ["broad fleet trust between every member"]
+    });
+
+    // The digest the worker would send: sha256 over the canonical JSON of the document,
+    // computed here with the same two public helpers `Plan::digest` uses. A hand-written
+    // constant would be a test that only proves this client echoes whatever it is told.
+    let digest = ouro::fleet_setup::sha256_hex(ouro::fleet_setup::canonical_json(&plan).as_bytes());
+
     answer(
         &mut app,
         status_tag(),
         snapshot(
             "awaiting_review",
-            json!([{
-                "challenge": "c-review",
-                "kind": "review",
-                "plan_digest": digest,
-                "plan": {
-                    "schema": 1,
-                    "operation": "abcdef0123456789",
-                    "kind": "add",
-                    "deployment_host": {
-                        "hostname": "studio", "user": "ada",
-                        "os": "darwin", "arch": "aarch64-apple-darwin", "issuer": true
-                    },
-                    "target": {
-                        "machine": "build-linux", "address": "100.64.12.44", "port": 22,
-                        "ssh_user": "deploy", "identity": "agent: id_ed25519",
-                        "install_path": "bin/ouro",
-                        "host_fingerprint": "SHA256:0Yp1rL8m"
-                    },
-                    "release": {
-                        "version": "0.1.8", "target": "x86_64-unknown-linux-gnu",
-                        "asset": "ouro-linux.tar.gz",
-                        "sha256": "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef",
-                        "official_origin": true
-                    },
-                    "service": "managed",
-                    "members": [
-                        { "machine": "studio", "host": "100.64.12.21",
-                          "reached_by": "local", "change": "add build-linux to the roster" }
-                    ],
-                    "grants": ["broad fleet trust between every member"]
-                }
-            }]),
+            json!([challenge(
+                "c-review",
+                "review",
+                json!({ "plan_digest": digest, "plan": plan })
+            )]),
             json!({}),
         ),
     );
@@ -1079,12 +1126,17 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
         text.contains("broad fleet trust between every member"),
         "the grant is not stated:\n{text}"
     );
-    assert!(text.contains(digest), "the digest is not shown:\n{text}");
+    assert!(text.contains(&digest), "the digest is not shown:\n{text}");
+    assert!(
+        !text.contains("does not match"),
+        "an honest plan was reported as a mismatch:\n{text}"
+    );
 
     app.apply(key(KeyCode::Char('a')));
     let calls = drained(&mut app);
     let start = call_for(&calls, "fleet.deployment.start");
 
+    // What is approved is the digest this client computed over the plan it drew.
     assert_eq!(start.params["plan_digest"], json!(digest));
     assert_eq!(start.params["operation_id"], json!("abcdef0123456789"));
 
@@ -1107,8 +1159,11 @@ fn an_unreadable_plan_is_refused_rather_than_approved_blind() {
         status_tag(),
         snapshot(
             "awaiting_review",
-            json!([{ "challenge": "c-review", "kind": "review",
-                     "plan_digest": "abc", "plan": { "not": "a plan" } }]),
+            json!([challenge(
+                "c-review",
+                "review",
+                json!({ "plan_digest": "abc", "plan": { "not": "a plan" } })
+            )]),
             json!({}),
         ),
     );
@@ -1120,6 +1175,17 @@ fn an_unreadable_plan_is_refused_rather_than_approved_blind() {
     assert!(
         !text.contains("Deploy Ouroboros \u{2014} applies exactly this plan"),
         "an unreadable plan still offered approval:\n{text}"
+    );
+
+    // And pressing the key that would approve one sends nothing at all.
+    app.apply(key(KeyCode::Char('a')));
+    let calls = drained(&mut app);
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.method == "fleet.deployment.start"),
+        "a plan nobody could read was approved anyway: {:?}",
+        calls.iter().map(|call| &call.method).collect::<Vec<_>>()
     );
 }
 
@@ -1312,7 +1378,9 @@ fn a_fresh_client_finds_the_open_setup_on_the_row_and_continues_it_by_id() {
     reply["operations"] = json!([{
         "operation": "abcdef0123456789", "state": "deploying", "kind": "add",
         "owner": "local-owner", "attached": true, "readable": true,
-        "updated_at": "2026-09-17T08:00:00Z"
+        "updated_at": "2026-09-17T08:00:00Z",
+        "target": { "machine": "build-linux", "address": "100.64.12.44",
+                    "ssh_user": "deploy", "port": 22 }
     }]);
 
     let mut app = with_inventory(reply);
@@ -1350,7 +1418,9 @@ fn an_operation_with_no_worker_is_resumed_without_asking_for_a_takeover() {
         let mut reply = populated();
         reply["operations"] = json!([{
             "operation": "abcdef0123456789", "state": "interrupted", "kind": "add",
-            "owner": "local-owner", "attached": false, "readable": true
+            "owner": "local-owner", "attached": false, "readable": true,
+            "target": { "machine": "build-linux", "address": "100.64.12.44",
+                        "ssh_user": "deploy", "port": 22 }
         }]);
         reply
     });
@@ -1380,7 +1450,9 @@ fn taking_over_another_identitys_setup_is_an_explicit_answer_naming_its_owner() 
         let mut reply = populated();
         reply["operations"] = json!([{
             "operation": "abcdef0123456789", "state": "awaiting_auth", "kind": "add",
-            "owner": "grace", "attached": false, "readable": true
+            "owner": "grace", "attached": false, "readable": true,
+            "target": { "machine": "build-linux", "address": "100.64.12.44",
+                        "ssh_user": "deploy", "port": 22 }
         }]);
         reply
     });
@@ -1437,7 +1509,9 @@ fn declining_a_takeover_sends_nothing_and_says_so() {
         let mut reply = populated();
         reply["operations"] = json!([{
             "operation": "abcdef0123456789", "state": "awaiting_auth",
-            "owner": "grace", "attached": false, "readable": true
+            "owner": "grace", "attached": false, "readable": true,
+            "target": { "machine": "build-linux", "address": "100.64.12.44",
+                        "ssh_user": "deploy", "port": 22 }
         }]);
         reply
     });
@@ -1470,7 +1544,9 @@ fn an_operation_with_no_recorded_owner_still_asks_before_taking_over() {
         let mut reply = populated();
         reply["operations"] = json!([{
             "operation": "abcdef0123456789", "state": "interrupted",
-            "owner": Value::Null, "attached": false, "readable": true
+            "owner": Value::Null, "attached": false, "readable": true,
+            "target": { "machine": "build-linux", "address": "100.64.12.44",
+                        "ssh_user": "deploy", "port": 22 }
         }]);
         reply
     });
@@ -1621,10 +1697,11 @@ fn a_runtime_that_cannot_deploy_explains_the_blocker_instead_of_offering_deploy(
     }
 }
 
-/// Setting this machine up is named as a local step rather than offered as an SSH one.
+/// "Set up this device" is the first local fleet: no account, no host key, same review.
 #[test]
-fn this_machine_without_a_profile_is_told_to_set_itself_up_locally() {
+fn setting_up_this_machine_asks_for_no_ssh_and_prepares_a_setup_operation() {
     let _mode = normal();
+
     let mut reply = populated();
     reply["devices"] = json!([{
         "name": "studio", "machine": Value::Null, "os": "macos",
@@ -1636,14 +1713,136 @@ fn this_machine_without_a_profile_is_told_to_set_itself_up_locally() {
     let mut app = with_inventory(reply);
     let _settled = drained(&mut app);
 
-    assert!(device_row(&screen(&mut app), "studio").contains("Set up this device"));
+    let drawn = screen(&mut app);
+    assert!(device_row(&drawn, "studio").contains("Set up this device"));
+    drop(drawn);
+
     activate(&mut app, "studio");
 
+    // The form has a machine name and a service choice, and none of the SSH fields.
+    let text = prose(&mut app);
+    assert!(text.contains("Set up this device"), "{text}");
+    assert!(text.contains("machine name"), "{text}");
+    assert!(text.contains("startup service"), "{text}");
     assert!(
-        drained(&mut app).is_empty(),
-        "setting up this machine opened an SSH deployment to itself"
+        !text.contains("ssh username"),
+        "the local setup asked for an SSH account:\n{text}"
     );
-    assert!(prose(&mut app).contains("without SSH to itself"));
+    assert!(
+        text.contains("without SSH to itself"),
+        "the screen does not say why there is no account:\n{text}"
+    );
+
+    // And the required-username refusal does not fire on a form with no username.
+    focus_inspect(&mut app);
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    let prepare = call_for(&calls, "fleet.deployment.prepare");
+
+    assert_eq!(prepare.params["kind"], json!("setup"));
+    assert_eq!(prepare.params["machine"], json!("studio"));
+    assert_eq!(prepare.params["address"], json!("100.64.12.21"));
+    assert_eq!(prepare.params["service"], json!(true));
+    assert!(
+        prepare.params.get("ssh_user").is_none(),
+        "a local setup carried an SSH account: {}",
+        prepare.params
+    );
+    assert!(prepare.params.get("target").is_none(), "{}", prepare.params);
+    assert!(
+        prepare.params.get("identity").is_none(),
+        "{}",
+        prepare.params
+    );
+    assert!(
+        !prose(&mut app).contains("An SSH username is required"),
+        "the add-only refusal fired on a setup form"
+    );
+}
+
+/// A first local setup restarts the runtime this client is attached to.
+///
+/// The worker is detached, so the deployment does not stop when the runtime does — but
+/// this client's connection does. What the operator must not see is the operation
+/// vanishing: it is an interruption, it reconnects, and it comes back by its own id.
+#[test]
+fn the_hosting_runtimes_restart_is_an_interruption_that_reloads_by_operation_id() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["devices"] = json!([{
+        "name": "studio", "machine": Value::Null, "os": "macos",
+        "address": "100.64.12.21", "online": true,
+        "state": "this_device_without_profile", "action": "set up this device",
+        "name_conflicts_with_roster": Value::Null,
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+    activate(&mut app, "studio");
+    focus_inspect(&mut app);
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    answer(
+        &mut app,
+        call_for(&calls, "fleet.deployment.prepare").tag.clone(),
+        json!({ "operation_id": "abcdef0123456789" }),
+    );
+
+    // The runtime restarts itself as part of the plan.
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot("restarting_host", json!([]), json!({})),
+    );
+    let _polled = drained(&mut app);
+    assert!(prose(&mut app).contains("restarting this runtime"));
+
+    // The connection goes. The operation is not cancelled by that, and nothing is sent.
+    app.apply(Msg::Answer {
+        tag: status_tag(),
+        result: Err(ClientError::ConnectionClosed),
+    });
+    let during = drained(&mut app);
+    assert!(
+        !during.iter().any(|call| call.method.contains("cancel")),
+        "losing the connection cancelled the setup"
+    );
+
+    // It comes back as a journal read — no worker attached — and by the same id. The
+    // failed read backs off by the snapshot cadence, so the reconnect is a few ticks away
+    // rather than the next one.
+    for _ in 0..20 {
+        app.apply(Msg::Tick);
+    }
+    let calls = drained(&mut app);
+    let status = call_for(&calls, "fleet.deployment.status");
+    assert_eq!(status.params, json!({ "operation_id": "abcdef0123456789" }));
+
+    answer(
+        &mut app,
+        status_tag(),
+        json!({
+            "operation": "abcdef0123456789", "source": "journal", "attached": false,
+            "state": "interrupted", "owner": "local-owner",
+            "steps": [{ "machine": "studio", "step": "create", "outcome": "ok" }],
+            "log": [], "challenges": [],
+            "last_error": "the runtime this operation is running from restarted"
+        }),
+    );
+
+    let text = prose(&mut app);
+    assert!(text.contains("This setup was interrupted"), "{text}");
+    assert!(
+        text.contains("the journal; no worker is attached"),
+        "the source of the answer is not stated:\n{text}"
+    );
+    assert!(
+        text.contains("create"),
+        "the steps that did run are gone:\n{text}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1664,8 +1863,12 @@ fn a_typed_secret_is_masked_sent_once_and_retained_nowhere() {
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-pw", "kind": "password", "target": "100.64.12.44",
-                     "user": "deploy", "port": 22, "attempt": 1, "max_attempts": 3 }]),
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44",
+                     "user": "deploy", "port": 22, "attempt": 1, "max_attempts": 3 })
+            )]),
             json!({}),
         ),
     );
@@ -1749,8 +1952,11 @@ fn leaving_a_challenge_clears_what_was_typed_without_sending_it() {
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-pw", "kind": "password",
-                     "target": "100.64.12.44", "user": "deploy", "port": 22 }]),
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
             json!({}),
         ),
     );
@@ -1790,8 +1996,11 @@ fn a_new_challenge_never_inherits_the_previous_ones_buffer() {
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-first", "kind": "password",
-                     "target": "100.64.12.44", "user": "deploy", "port": 22 }]),
+            json!([challenge(
+                "c-first",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
             json!({}),
         ),
     );
@@ -1808,18 +2017,27 @@ fn a_new_challenge_never_inherits_the_previous_ones_buffer() {
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-second", "kind": "password",
-                     "target": "100.64.12.44", "user": "deploy", "port": 22,
-                     "attempt": 2, "max_attempts": 3 }]),
+            json!([challenge(
+                "c-second",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22,
+                     "attempt": 2, "max_attempts": 3 })
+            )]),
             json!({}),
         ),
     );
     let _polled = drained(&mut app);
 
-    assert!(
-        !format!("{:?}", app.devices).contains(SECRET),
+    // The Debug check alone is vacuous here: `SecretInput`'s `Debug` redacts, so it
+    // reads the same whether the buffer was cleared or not. What is actually observable
+    // is the field, which draws one bullet per character — and after the swap there are
+    // none, because there is nothing left to draw.
+    assert_eq!(
+        bullets(&mut app),
+        0,
         "the buffer survived its challenge being replaced"
     );
+    assert!(!format!("{:?}", app.devices).contains(SECRET));
 
     app.apply(key(KeyCode::Enter));
     let calls = drained(&mut app);
@@ -1846,8 +2064,11 @@ fn a_refused_answer_is_explained_in_the_place_the_answer_went() {
             status_tag(),
             snapshot(
                 "awaiting_auth",
-                json!([{ "challenge": "c-pw", "kind": "password",
-                         "target": "100.64.12.44", "user": "deploy", "port": 22 }]),
+                json!([challenge(
+                    "c-pw",
+                    "password",
+                    json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+                )]),
                 json!({}),
             ),
         );
@@ -1887,8 +2108,12 @@ fn a_plan_that_changed_since_review_is_reported_rather_than_applied() {
         status_tag(),
         snapshot(
             "awaiting_review",
-            json!([{ "challenge": "c-review", "kind": "review", "plan_digest": "abc",
-                     "plan": { "not": "a plan" } }]),
+            json!([challenge(
+                "c-review",
+                "review",
+                json!({ "plan_digest": "abc",
+                     "plan": { "not": "a plan" } })
+            )]),
             json!({}),
         ),
     );
@@ -1974,8 +2199,11 @@ fn screen_reader_mode_numbers_the_rows_drops_the_box_and_rings_for_a_question() 
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-pw", "kind": "password",
-                     "target": "100.64.12.44", "user": "deploy", "port": 22 }]),
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
             json!({}),
         ),
     );
@@ -1993,8 +2221,11 @@ fn screen_reader_mode_numbers_the_rows_drops_the_box_and_rings_for_a_question() 
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-pw", "kind": "password",
-                     "target": "100.64.12.44", "user": "deploy", "port": 22 }]),
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
             json!({}),
         ),
     );
@@ -2018,9 +2249,12 @@ fn screen_reader_mode_numbers_the_rows_drops_the_box_and_rings_for_a_question() 
         status_tag(),
         snapshot(
             "awaiting_auth",
-            json!([{ "challenge": "c-again", "kind": "password",
-                     "target": "100.64.12.44", "user": "deploy", "port": 22,
-                     "attempt": 2, "max_attempts": 3 }]),
+            json!([challenge(
+                "c-again",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22,
+                     "attempt": 2, "max_attempts": 3 })
+            )]),
             json!({}),
         ),
     );
@@ -2041,9 +2275,12 @@ fn a_host_trust_question_is_a_numbered_menu_in_screen_reader_mode() {
         status_tag(),
         snapshot(
             "awaiting_host_trust",
-            json!([{ "challenge": "c-host", "kind": "host_trust",
-                     "address": "100.64.12.44", "port": 22, "user": "deploy",
-                     "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:aaa" }]),
+            json!([challenge(
+                "c-host",
+                "host_trust",
+                json!({ "address": "100.64.12.44", "port": 22, "user": "deploy",
+                     "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:aaa" })
+            )]),
             json!({}),
         ),
     );
@@ -2052,4 +2289,432 @@ fn a_host_trust_question_is_a_numbered_menu_in_screen_reader_mode() {
     let text = prose(&mut app);
     assert!(text.contains("1. t Trust this host and continue"), "{text}");
     assert!(text.contains("2. n Cancel"), "{text}");
+}
+
+// ---------------------------------------------------------------------------------------
+// the properties the adversarial review's surviving mutations found nothing guarding
+// ---------------------------------------------------------------------------------------
+
+/// A second Enter while the first answer is in flight sends nothing — *because* of the
+/// in-flight guard, not because the buffer happens to be empty.
+///
+/// The earlier version of this could not tell those apart: it pressed Enter on an empty
+/// field and watched nothing happen. Here the field is refilled first, so the only thing
+/// standing between the second Enter and a second `authenticate` is the guard.
+#[test]
+fn a_second_answer_is_refused_while_the_first_is_still_in_flight() {
+    let _mode = normal();
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "awaiting_auth",
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
+            json!({}),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    for message in typed(SECRET) {
+        app.apply(message);
+    }
+    app.apply(key(KeyCode::Enter));
+    let first = drained(&mut app);
+    assert_eq!(
+        first
+            .iter()
+            .filter(|call| call.method == "fleet.deployment.authenticate")
+            .count(),
+        1
+    );
+
+    // Type a whole second secret and press Enter again, with the first still unanswered.
+    for message in typed("a-second-secret-entirely") {
+        app.apply(message);
+    }
+    assert_eq!(
+        bullets(&mut app),
+        0,
+        "a challenge with an answer in flight is still taking keystrokes"
+    );
+
+    app.apply(key(KeyCode::Enter));
+    let second = drained(&mut app);
+    assert!(
+        !second
+            .iter()
+            .any(|call| call.method == "fleet.deployment.authenticate"),
+        "a second answer was sent while the first was in flight: {:?}",
+        second.iter().map(|call| &call.method).collect::<Vec<_>>()
+    );
+}
+
+/// An empty field sends nothing, and says so rather than sending an empty secret.
+#[test]
+fn an_empty_secret_is_refused_rather_than_sent() {
+    let _mode = normal();
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "awaiting_auth",
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
+            json!({}),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    app.apply(key(KeyCode::Enter));
+    let calls = drained(&mut app);
+
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.method == "fleet.deployment.authenticate"),
+        "an empty secret was sent"
+    );
+    assert!(prose(&mut app).contains("Nothing was typed"));
+}
+
+/// Enter is not an answer to the takeover question. There is no default.
+#[test]
+fn enter_does_not_take_over_another_identitys_setup() {
+    let _mode = normal();
+    let mut app = asking_to_take_over();
+
+    app.apply(key(KeyCode::Enter));
+    let calls = drained(&mut app);
+
+    assert!(
+        !calls.iter().any(|call| call.method.contains("resume")),
+        "Enter answered the takeover question: {:?}",
+        calls.iter().map(|call| &call.method).collect::<Vec<_>>()
+    );
+    assert!(
+        prose(&mut app).contains("Take over this setup?"),
+        "Enter dismissed the question"
+    );
+}
+
+/// Declining a takeover, and closing the view, both forget what was typed.
+#[test]
+fn leaving_by_either_door_forgets_the_typed_secret() {
+    // Declining the takeover.
+    let _mode = normal();
+    let mut app = asking_to_take_over();
+    app.apply(key(KeyCode::Char('n')));
+    assert!(app.devices.operation.is_none());
+    assert_eq!(bullets(&mut app), 0);
+
+    // Closing the view on an open password question.
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "awaiting_auth",
+            json!([challenge(
+                "c-pw",
+                "password",
+                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+            )]),
+            json!({}),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    for message in typed(SECRET) {
+        app.apply(message);
+    }
+    assert_eq!(bullets(&mut app), SECRET.chars().count());
+
+    app.close_devices();
+    assert!(app.overlay.is_none());
+    assert!(
+        !format!("{:?}", app.devices).contains(SECRET),
+        "closing the view kept the secret in its state"
+    );
+
+    // Reopening draws an empty field rather than the one that was typed into.
+    app.open_devices();
+    let _polled = drained(&mut app);
+    assert_eq!(
+        bullets(&mut app),
+        0,
+        "the field came back with what was typed into it before"
+    );
+}
+
+/// An answer for another operation never lands on the one being followed.
+#[test]
+fn an_answer_for_another_operation_is_ignored() {
+    let _mode = normal();
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot("deploying", json!([]), json!({})),
+    );
+    let _polled = drained(&mut app);
+    assert!(prose(&mut app).contains("deploying"));
+
+    // A snapshot for a long-gone operation, in a state that would be very visible.
+    app.apply(Msg::Answer {
+        tag: Tag::Devices(DevicesTag::Status {
+            operation: "0000000000000000".into(),
+        }),
+        result: Ok(json!({
+            "operation": "0000000000000000", "source": "worker", "attached": true,
+            "state": "completed", "owner": "local-owner",
+            "steps": [], "log": [], "challenges": []
+        })),
+    });
+
+    let text = prose(&mut app);
+    assert!(
+        text.contains("deploying"),
+        "another operation's snapshot overwrote this one:\n{text}"
+    );
+    assert!(!text.contains("This device is set up"), "{text}");
+}
+
+/// Two open questions are answered in the order the snapshot lists them.
+#[test]
+fn the_first_open_challenge_is_the_one_answered() {
+    let _mode = normal();
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "awaiting_auth",
+            json!([
+                challenge(
+                    "c-aaa",
+                    "password",
+                    json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
+                ),
+                challenge(
+                    "c-zzz",
+                    "password",
+                    json!({ "target": "100.64.12.44", "user": "other", "port": 22 })
+                ),
+            ]),
+            json!({}),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    // The broker sorts its open challenges by id, so the first one listed is the one on
+    // the screen — and the one a typed answer is addressed to.
+    assert!(prose(&mut app).contains("deploy"));
+
+    for message in typed(SECRET) {
+        app.apply(message);
+    }
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    assert_eq!(
+        call_for(&calls, "fleet.deployment.authenticate").params["challenge"],
+        json!("c-aaa")
+    );
+}
+
+/// An operation another identity owns, with the takeover question on the screen.
+fn asking_to_take_over() -> App {
+    let mut reply = populated();
+    reply["operations"] = json!([{
+        "operation": "abcdef0123456789", "state": "awaiting_auth", "kind": "add",
+        "owner": "grace", "attached": false, "readable": true,
+        "target": { "machine": "build-linux", "address": "100.64.12.44",
+                    "ssh_user": "deploy", "port": 22 }
+    }]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+    activate(&mut app, "build-linux");
+
+    let calls = drained(&mut app);
+    refuse(
+        &mut app,
+        call_for(&calls, "fleet.deployment.resume").tag.clone(),
+        ErrorCode::ScopeDenied,
+        Some(json!({ "reason": "operation_not_yours" })),
+    );
+
+    app
+}
+
+/// A blocked runtime does not open the form, not merely skip the call.
+#[test]
+fn a_blocked_runtime_opens_no_connect_form_at_all() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["host"] = host(false, &["no_ca_key"]);
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    activate(&mut app, "build-linux");
+
+    let text = prose(&mut app);
+    assert!(
+        !text.contains("ssh username"),
+        "a form opened on a runtime that cannot deploy:\n{text}"
+    );
+    assert!(text.contains("Fleet devices"), "the list was left:\n{text}");
+    assert!(drained(&mut app).is_empty());
+
+    // And at read scope, the same.
+    let mut app = opened(read_hello(&[
+        "fleet.devices",
+        "fleet.status",
+        "fleet.deployment.prepare",
+        "runtime.status",
+    ]));
+    let calls = drained(&mut app);
+    answer(
+        &mut app,
+        call_for(&calls, "fleet.devices").tag.clone(),
+        populated(),
+    );
+    let _settled = drained(&mut app);
+
+    activate(&mut app, "build-linux");
+    let text = prose(&mut app);
+    assert!(
+        !text.contains("ssh username"),
+        "a form opened at read scope:\n{text}"
+    );
+    assert!(drained(&mut app).is_empty());
+}
+
+/// Enter walks the connect form and never submits from a field.
+#[test]
+fn enter_moves_through_the_connect_form_and_submits_only_from_its_button() {
+    let _mode = normal();
+    let mut app = with_inventory(populated());
+    let _settled = drained(&mut app);
+
+    activate(&mut app, "build-linux");
+    for message in typed("deploy") {
+        app.apply(message);
+    }
+
+    // Enter from every field but the last moves on and sends nothing.
+    for _ in 0..(ouro::ui::app::ConnectField::ALL.len() - 1) {
+        app.apply(key(KeyCode::Enter));
+        assert!(
+            drained(&mut app).is_empty(),
+            "Enter submitted the form from a field"
+        );
+    }
+
+    // Now the cursor is on the button, and Enter is the submission.
+    app.apply(key(KeyCode::Enter));
+    let calls = drained(&mut app);
+    assert_eq!(
+        call_for(&calls, "fleet.deployment.prepare").params["ssh_user"],
+        json!("deploy")
+    );
+}
+
+/// A runtime that does not serve the verb behind an action does not offer the action.
+///
+/// The three gates are separate questions and this is the one with no other symptom: a
+/// runtime holding the CA key, at operate scope, whose `hello.methods` simply does not
+/// list `fleet.deployment.prepare` because its `ouro` predates the worker.
+#[test]
+fn a_runtime_that_does_not_serve_the_verb_says_so_rather_than_opening_a_form() {
+    let _mode = normal();
+
+    let mut app = opened(support::hello(&[
+        "fleet.devices",
+        "fleet.status",
+        "runtime.status",
+    ]));
+    let calls = drained(&mut app);
+    answer(
+        &mut app,
+        call_for(&calls, "fleet.devices").tag.clone(),
+        populated(),
+    );
+    let _settled = drained(&mut app);
+
+    // The inventory is there — the gate is about the deployment verb, not the read.
+    assert!(screen(&mut app).contains("build-linux"));
+
+    activate(&mut app, "build-linux");
+
+    let text = prose(&mut app);
+    assert!(
+        !text.contains("ssh username"),
+        "a form opened for a verb this runtime does not serve:\n{text}"
+    );
+    assert!(
+        text.contains("does not serve fleet.deployment.prepare"),
+        "the missing method is not named:\n{text}"
+    );
+    assert!(drained(&mut app).is_empty());
+}
+
+/// A question with no id is not a question anybody can answer, so it is not drawn.
+#[test]
+fn a_challenge_with_no_id_is_never_drawn_as_a_prompt() {
+    let _mode = normal();
+    let mut app = deploying();
+
+    // The worker's own `pending` list has this shape — id and kind and nothing else —
+    // and a frame that lost its id in transit has it too. Either way there is nothing to
+    // address an answer to.
+    answer(
+        &mut app,
+        status_tag(),
+        json!({
+            "operation": "abcdef0123456789", "source": "worker", "attached": true,
+            "state": "awaiting_auth", "owner": "local-owner",
+            "steps": [], "log": [],
+            "challenges": [{ "kind": "password",
+                             "metadata": { "user": "deploy", "target": "100.64.12.44" } }]
+        }),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(
+        !text.contains("Password for this connection"),
+        "a prompt was drawn for a question with no id:\n{text}"
+    );
+    assert_eq!(bullets(&mut app), 0);
+
+    // And nothing typed at it goes anywhere.
+    for message in typed(SECRET) {
+        app.apply(message);
+    }
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.method == "fleet.deployment.authenticate"),
+        "an answer was addressed to a challenge with no id"
+    );
+    assert!(
+        !calls.iter().any(|call| serde_json::to_string(&call.params)
+            .unwrap()
+            .contains(SECRET)),
+        "the secret left the client anyway"
+    );
 }

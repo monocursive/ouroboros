@@ -4314,7 +4314,27 @@ fn devices(frame: &mut Frame, area: Rect, app: &App) {
     let lines = super::app::devices_lines(app);
     let height = rows[0].height as usize;
     let hidden = lines.len().saturating_sub(height);
-    let scroll = app.devices.scroll.min(hidden);
+
+    // The page follows its cursor. `PageUp`/`PageDown` move `scroll` and that is the
+    // operator's intent, but a selected row below the fold is a row `Enter` acts on and
+    // nobody can see — which on this screen means starting a deployment against a machine
+    // whose name is off the page. The marked line is found rather than counted, so the
+    // list, the connect form and the menus are all followed by the same three lines.
+    let mut scroll = app.devices.scroll.min(hidden);
+    let cursor = lines.iter().position(|line| {
+        line.spans
+            .first()
+            .is_some_and(|span| span.content.starts_with("> "))
+    });
+
+    if let Some(cursor) = cursor {
+        if cursor < scroll {
+            scroll = cursor;
+        } else if height > 0 && cursor >= scroll + height {
+            scroll = cursor + 1 - height;
+        }
+    }
+
     let visible = lines[scroll.min(lines.len())..].to_vec();
 
     frame.render_widget(Paragraph::new(visible).wrap(Wrap { trim: false }), rows[0]);

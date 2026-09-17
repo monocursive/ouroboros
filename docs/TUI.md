@@ -2647,29 +2647,61 @@ A device that adopts a roster machine's name is listed as itself with a note and
 merged into the member it is imitating. Every string a *device* supplies goes through
 `fleet_network::human`, the same bounding the CLI's row renderer applies, so a hostname
 carrying escapes, bidi overrides or a forged four-line row cannot draw one
-(`tests/fixtures/tailscale/hostile-names.json` is the capture that tries).
+(`tests/fixtures/tailscale/hostile-names.json` is the capture that tries). `scrub` adds
+what bounding alone leaves behind: the default-ignorable code points, so
+`bui<U+200B>ld-linux` is not a second device that reads as the first. The name column
+ends at a fixed width with a visible separator before the action, so a name cannot run
+into the column beside it and wear this build's words. The same scrubbing covers the
+strings that arrive as `String` rather than as JSON — a gateway's refusal `message` among
+them.
 
 **The deploy flow** is the proposal's five steps. Select and connect asks for the SSH
 username — required, and never inferred from the network client's owner — with port,
-identity and paths as advanced fields. Then the broker is the authority for every screen
-after it: `fleet.deployment.status` is polled about once a second, its `state` names the
-stage, and its open challenge names the question. `host_trust` shows the algorithm, the
-SHA256 fingerprint and the address, port and account it belongs to, with an explicit `t`
-and `n` and the line saying to verify the fingerprint independently; `Enter` is not an
-answer. `password` and `passphrase` are separate prompts labelled from their own
-metadata. `review` renders the plan with `Plan::render` — the same text the CLI and a dry
-run print — and `a` approves *that* digest under an idempotency key derived from the
-operation and the digest, so a lost answer replays rather than becoming a second
-intention.
+identity and paths as advanced fields. **Set up this device** is the same flow with none
+of them: `fleet.deployment.prepare {kind: "setup"}` takes a machine name and this host's
+own overlay address, because the spec is explicit that a machine configures itself
+without SSH to itself. Its plan is reviewed exactly like any other, and the runtime
+restart it needs arrives here as an interruption that reconnects and reloads by operation
+id rather than as an operation that vanished.
+
+Then the broker is the authority for every screen after it: `fleet.deployment.status` is
+polled about once a second, its `state` names the stage, and its open challenge names the
+question. `host_trust` shows the algorithm, the SHA256 fingerprint and the address, port
+and account it belongs to, with an explicit `t` and `n` and the line saying to verify the
+fingerprint independently; `Enter` is not an answer. `password` and `passphrase` are
+separate prompts labelled from their own metadata — read out of the `metadata` object
+`worker::challenge_event` nests them in, which is a shape a drift test pins by calling
+the real builders rather than by agreeing with a fake.
+
+**The plan is decoded here, not handed to the local renderer.** `PlanView` reads the
+document into fields that are already scrubbed and bounded and holds both digests to 64
+lowercase hex; a plan whose `release.sha256` is not one is refused rather than drawn,
+because `Plan::render` byte-slices that field and a multibyte one panicked the whole
+client. Every row of the review is built from a decoded field rather than by splitting a
+rendered block on newlines, so a `target.machine` carrying its own newlines and padding
+cannot forge an aligned `grants  none` row into its own review. And `a` approves the
+digest **this client computed** over the plan it drew, refusing when the challenge claims
+a different one: taking the claim on trust meant a plan could be swapped under a review
+with nothing on screen to notice.
 
 **Leaving never cancels.** `Esc` closes the view and stops nothing; the operation keeps
-running on the deployment host, the Devices row says a setup is open and names its owner,
-and its primary action becomes **Continue setup**. Reopening re-reads the operation by id.
-An operation whose worker is gone is resumed — and a resume of *another identity's*
-operation is refused `operation_not_yours` by the runtime, which this view turns into an
-explicit **Take over this setup?** naming the owner. `takeover: true` is sent from that
-answer and from nowhere else, because a resume attaches under the resuming identity and
-every later challenge binds to them: taking over a setup is taking over its credential
+running on the deployment host, and the row it is about says a setup is open, names its
+owner, and offers **Continue setup**. *That* row and no other: operations are matched to
+devices through `operations[].target`, which is why the field exists — before it, every
+row offered to continue whatever single operation was open, so pressing it on one machine
+attached the view to a deployment against another and the password prompt that followed
+appeared under the wrong machine's name. The header takes its machine from the
+operation's own target, never from the row that was pressed. An operation whose journal
+names no target is listed above the list and attached to no row.
+
+Continuing is a mutation like any other and passes the same three gates as Deploy — the
+runtime's `capabilities.deploy`, the method being served, and the listener's scope —
+which the continue path used to skip entirely. An operation whose worker is gone is
+resumed; a resume of *another identity's* operation is refused `operation_not_yours`,
+which this view turns into an explicit **Take over this setup?** naming the owner.
+`takeover: true` is sent from that answer and from nowhere else, and `Enter` is not that
+answer: there is no default, because a resume attaches under the resuming identity and
+every later challenge binds to them. Taking over a setup is taking over its credential
 prompts.
 
 **Where the secret is, and is not.** One field holds a typed secret: a `Zeroizing` buffer
@@ -2690,10 +2722,19 @@ deployment. A runtime whose `capabilities.deploy` is false explains the first re
 words (`no_ca_key`, `ouro_path_unknown`, `no_data_dir`, `cleartext_web_bind`) rather than
 drawing an action that would fail when pressed.
 
-**Screen-reader mode** numbers the rows and the menu answers, drops the box drawing, and
-rings the bell when the deployment stops for a person — once per question, through the
-existing `notify::Signal::NeedsInput` path, which resolves `auto` to the bell in this mode
-whether or not the terminal has focus.
+**Screen-reader mode** numbers the rows and the menu answers and *answers to those
+numbers* — host trust, the takeover question, the review and the connect form each route
+`access::row_for_digit`, except on the port field, where a digit is the value somebody is
+typing. It drops the box drawing, and rings the bell when the deployment stops for a
+person — once per question, through the existing `notify::Signal::NeedsInput` path, which
+resolves `auto` to the bell in this mode whether or not the terminal has focus.
+
+**The list follows its cursor.** `PageUp`/`PageDown` are the operator's own scrolling, but
+a selected row below the fold is a row `Enter` acts on and nobody can see, so the renderer
+keeps the marked line on the page. A bracketed paste reaches the masked field and the
+connect form's text fields, flattened to one line: a pasted passphrase is exactly what
+somebody keeps in a password manager, and dropping it with "nothing here is taking text"
+was this client telling them their terminal was broken while they tried to authenticate.
 
 ### Names on screen, never wire words (T2.8)
 
