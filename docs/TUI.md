@@ -151,7 +151,7 @@ existing file) because nobody named a source there to have gotten wrong.
 | `OUROBOROS_GATEWAY_TOKEN_FILE` | — | preferred: file (0600) containing ≥32-byte token; `Inspect`-redacted like the signer key |
 | `OUROBOROS_GATEWAY_TOKEN` | — | fallback for dev; discouraged in docs (env is visible to same-user processes) |
 | `OUROBOROS_GATEWAY_SCOPE` | `read` | `read` \| `operate`; mutating methods refused under `read` |
-| `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN` | unset | `1` additionally enables `runtime.shutdown` (spawner sets it; server operators generally don't) |
+| `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN` | unset | `1` additionally enables `runtime.shutdown` (spawner sets it; server operators generally don't). It is a permission, not an idle check: a caller that wants the node stopped only when it is not working sends `runtime.shutdown {"require_idle": true}` (§2.4) |
 | `OUROBOROS_GATEWAY_MAX_FRAME` | `1048576` | max inbound line bytes; oversized → typed error, connection closed |
 | `OUROBOROS_GATEWAY_QUEUE_LIMIT` | `1000` | per-connection **outbound** frame cap (see §2.6). The inbound bound — requests accepted and not yet dispatched — is a fixed constant (64) in `Gateway.Conn`, not this variable: one name for two queues is a name an operator cannot reason about |
 | `OUROBOROS_GATEWAY_EVENT_LEAF_BYTES` | `131072` | most bytes one string inside an event `payload` may put on the wire; beyond it the string is excerpted (§2.7). Floor 1024 |
@@ -310,6 +310,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | method | maps to |
 |---|---|
 | `runtime.status` | `Ouroboros.status/0` ([ouroboros.ex:13](../lib/ouroboros.ex)) |
+| `runtime.activity` `{}` | `Gateway.Methods.activity/1` — what this node is **doing**, for the idle gate below. `running_turns`/`queued_turns` come from this node's live native session processes, `attachment_transfers`/`attachment_normalizations` from `Ouroboros.Attachments`, `operator_clients` from this listener's own connection supervisor. A counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is. A session that exists and a port that is bound are not activity; neither is a connected client, which is why `idle` is decided by the four work counters alone — the caller is always one of the clients. Node-local: no fan-out, no `:erpc`, every source asked once under its own deadline |
 | `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task. The `native` entry's `details` carries **`sandbox`** (C5) — `"sandbox-exec"`, `"bwrap"`, or `"none"`, the OS sandbox backend the owning node actually detected — plus `sandbox_notes` (why, including Apple's deprecation of `sandbox-exec` and bubblewrap's missing seccomp) and `enforced`, a sentence naming what each mode holds. It is a string and never a boolean: "sandboxed" is not a fact, `"sandbox-exec"` is. **A footer may say "no OS sandbox" for a native session only when this reads `none`** — never inferred from the provider's name, and never from the absence of the key, which means "this runtime did not say" |
 | `runtime.models` | `Ouroboros.Models.list/0` — the packaged `llm_db` catalogue. Native combines its OpenAI, Anthropic, and xAI lanes and carries full ReqLLM specs such as `openai_codex:gpt-5.6-sol`, `anthropic:claude-sonnet-5`, and `xai:grok-4.6`, the configured direct default, context/output limits and public token pricing; non-secret credential readiness is reported separately by `runtime.providers`. |
 | `account.read` `{}` | `OpenAIAuth.read/1` — non-secret API-key/OAuth readiness, ChatGPT identity claims, and managed-login state. Tokens remain only in the runtime's private OAuth file and never cross the gateway. |
@@ -401,7 +402,7 @@ the new `account.*` methods are feature-detectable
 through `hello.methods`, but the envelope tightening and the structured-`input` capability
 are not — the compatibility bet, stated plainly, is that the only deployed client ships in
 this repository and moves in lockstep.
-| `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003`. Answered by the `Conn` rather than a task: the acknowledgement is written *and flushed to the socket* before the stop is called, because the client that asked is owed the ack |
+| `runtime.shutdown` `{require_idle?}` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003`. Answered by the `Conn` rather than a task: the acknowledgement is written *and flushed to the socket* before the stop is called, because the client that asked is owed the ack. With `require_idle: true` the connection first reads the summary `runtime.activity` answers with, and unless its `idle` is `true` it refuses `-32004` — before any acknowledgement is written and before any stop is scheduled — carrying `data.reason` `runtime_busy` (idle `false`) or `activity_unknown` (idle `null`) and `data.activity`. Unknown activity never authorizes a stop. The permission is still the first gate: without the flag the refusal is the same `-32003` with or without the parameter, and it says nothing about what the node is doing. Without the parameter, nothing about this verb changed |
 
 Every option a plane accepts is an atom, and none of them are built from client bytes:
 option keys come from one literal table in `Gateway.Methods` and enum values from the exact
@@ -921,6 +922,14 @@ and clustering keeps the existing posture.
   allowlist is `-32602` and creates no atom; `runtime.shutdown` is refused without
   `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` and, with it, stops the node only after the
   acknowledgement has been written.
+- **The idle gate:** `runtime.activity` counts a held turn as running and the follow-up
+  behind it as queued, counts an upload that has begun and a decoder task still running,
+  and counts this listener's own connections without letting them decide `idle`; a
+  session, an attachment service or a connection supervisor that does not answer is
+  `null` and named in `unknown`, and then `idle` is `null` too. `runtime.shutdown` with
+  `require_idle` stops an idle node, refuses a busy one `runtime_busy` and an unreadable
+  one `activity_unknown`, writes no acknowledgement and schedules no stop when it
+  refuses, and leaves the connection usable afterwards.
 - **Verifier:** Gateway-namespace artifact rejected.
 - **Golden fixtures:** `mix ouroboros.gateway.golden` regenerates
   `test/support/gateway_golden/*.json` from static, deterministic terms — no clock, no

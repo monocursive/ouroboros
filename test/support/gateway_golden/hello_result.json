@@ -81,6 +81,7 @@
       "policy.promote",
       "policy.replay",
       "policy.status",
+      "runtime.activity",
       "runtime.models",
       "runtime.providers",
       "runtime.shutdown",

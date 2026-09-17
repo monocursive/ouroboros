@@ -227,6 +227,11 @@ defmodule Ouroboros.Gateway.Conn do
       socket: Keyword.fetch!(opts, :socket),
       config: config,
       task_supervisor: Keyword.fetch!(opts, :task_supervisor),
+      # Named rather than discovered, because the one thing this process cannot ask a
+      # supervisor is who its supervisor is. It is here for `runtime.activity`'s
+      # `operator_clients`: the listener that started this connection is the listener
+      # whose clients the count is about.
+      conn_supervisor: Keyword.get(opts, :conn_supervisor, Ouroboros.Gateway.ConnSupervisor),
       method_invoker: Keyword.get(opts, :method_invoker, &Methods.invoke/2),
       peer: nil,
       client: nil,
@@ -563,7 +568,7 @@ defmodule Ouroboros.Gateway.Conn do
     case Map.fetch(@conn_methods, method) do
       {:ok, {:subscribe, plane}} -> subscribe(state, plane, id, params)
       {:ok, {:unsubscribe, plane}} -> unsubscribe(state, plane, id, params)
-      {:ok, {:shutdown, _plane}} -> shutdown(state, id)
+      {:ok, {:shutdown, _plane}} -> shutdown(state, id, params)
       :error -> accept(state, id, method, params, entry)
     end
   end
@@ -776,14 +781,16 @@ defmodule Ouroboros.Gateway.Conn do
     end
   end
 
-  defp shutdown(state, rpc_id) do
+  # The permission comes first and the runtime's state second. A listener that may not
+  # stop this node is told so without being told what the node is doing, which keeps the
+  # refusal a client already knows byte-for-byte what it was.
+  defp shutdown(state, rpc_id, params) do
     if state.config.allow_shutdown do
-      Logger.warning(
-        "gateway accepted runtime.shutdown from #{describe_peer(state.peer)}; this node is stopping"
-      )
-
-      state = respond(state, rpc_id, {:ok, %{"stopping" => true, "node" => node()}})
-      %{state | shutdown?: true}
+      case require_idle(params) do
+        {:ok, false} -> accept_shutdown(state, rpc_id)
+        {:ok, true} -> shutdown_if_idle(state, rpc_id)
+        {:invalid, message} -> respond_error(state, rpc_id, :invalid_params, message)
+      end
     else
       respond_error(
         state,
@@ -793,6 +800,74 @@ defmodule Ouroboros.Gateway.Conn do
           "operate scope: OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1 on the daemon"
       )
     end
+  end
+
+  # `handler: :connection` methods never reach `Contract.validate/2` — the connection
+  # answers them before dispatch — so the one parameter this verb has is checked here.
+  defp require_idle(params) do
+    case Map.fetch(params, "require_idle") do
+      :error -> {:ok, false}
+      {:ok, value} when is_boolean(value) -> {:ok, value}
+      {:ok, _other} -> {:invalid, "params.require_idle must be true or false"}
+    end
+  end
+
+  # Read in this process, before anything is written and before any stop is scheduled:
+  # the refusal has to be the whole of what this frame did. The summary is the one
+  # `runtime.activity` answers with, asked through the same function, so a client cannot
+  # be shown an idle runtime by one verb and refused by the other.
+  defp shutdown_if_idle(state, rpc_id) do
+    activity = Methods.activity(conn_supervisor: state.conn_supervisor)
+
+    case Map.get(activity, "idle") do
+      true ->
+        accept_shutdown(state, rpc_id)
+
+      false ->
+        refuse_shutdown(
+          state,
+          rpc_id,
+          activity,
+          "runtime_busy",
+          "this node is still working, and runtime.shutdown was sent with " <>
+            "require_idle: data.activity says what it is holding"
+        )
+
+      _unknown ->
+        refuse_shutdown(
+          state,
+          rpc_id,
+          activity,
+          "activity_unknown",
+          "this node could not establish what it is doing, and unknown activity does " <>
+            "not authorize a stop: data.activity names every counter it could not read " <>
+            "in `unknown`"
+        )
+    end
+  end
+
+  defp accept_shutdown(state, rpc_id) do
+    Logger.warning(
+      "gateway accepted runtime.shutdown from #{describe_peer(state.peer)}; this node is stopping"
+    )
+
+    state = respond(state, rpc_id, {:ok, %{"stopping" => true, "node" => node()}})
+    %{state | shutdown?: true}
+  end
+
+  # Named the same way the acceptance is, and by the same peer: a refused stop is an
+  # operator action somebody took, and the audit line above it carries the parameter
+  # digest that says which one.
+  defp refuse_shutdown(state, rpc_id, activity, reason, message) do
+    Logger.warning(
+      "gateway refused runtime.shutdown from #{describe_peer(state.peer)}: #{reason}"
+    )
+
+    respond(
+      state,
+      rpc_id,
+      {:error, Methods.code(:unavailable), message, %{"reason" => reason, "activity" => activity}}
+    )
   end
 
   defp coordinator_down(state, ref) do
@@ -951,10 +1026,12 @@ defmodule Ouroboros.Gateway.Conn do
     method_invoker = state.method_invoker
     identity = state.identity
     max_frame = state.config.max_frame
+    conn_supervisor = state.conn_supervisor
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         Process.put(:ouroboros_attachment_frame, max_frame)
+        Process.put(:ouroboros_gateway_conn_supervisor, conn_supervisor)
         Ouroboros.Audit.Identity.with_subject(identity, fn -> method_invoker.(method, params) end)
       end)
 

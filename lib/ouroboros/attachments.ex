@@ -52,6 +52,19 @@ defmodule Ouroboros.Attachments do
 
   def available?, do: Process.whereis(__MODULE__) != nil and Normalizer.available?()
 
+  @doc """
+  The two in-flight counts `runtime.activity` reports, computed in this process.
+
+  A transfer is an upload that has begun, has not been finished, and has not expired;
+  a normalization is a decoder task this process is holding open. Both are counts and
+  neither is a name, a byte, or a hash — this answers an idle check, not a listing.
+  """
+  @spec activity(GenServer.server()) :: %{
+          transfers: non_neg_integer(),
+          normalizations: non_neg_integer()
+        }
+  def activity(server \\ __MODULE__), do: GenServer.call(server, :activity)
+
   # Stable across credential rotation, but scoped to this store and the authenticated
   # principal. This is a cache namespace, never an authorization credential.
   def recovery_namespace(actor, server \\ __MODULE__) do
@@ -154,6 +167,20 @@ defmodule Ouroboros.Attachments do
   @impl true
   def handle_call({:recovery_namespace, actor}, _from, state) do
     {:reply, hash(state.recovery_id <> <<0>> <> actor), state}
+  end
+
+  # Deliberately does not sweep: an idle check must not be the thing that expires a
+  # record. An abandoned upload is counted until the periodic sweep removes it, which
+  # errs toward "busy" — the direction a shutdown gate has to err in.
+  def handle_call(:activity, _from, state) do
+    now = state.clock.()
+
+    transfers =
+      Enum.count(state.records, fn {_id, record} ->
+        record["state"] == "uploading" and record["expires_at"] > now
+      end)
+
+    {:reply, %{transfers: transfers, normalizations: map_size(state.workers)}, state}
   end
 
   def handle_call({:operation, op, params, actor}, _from, state) do

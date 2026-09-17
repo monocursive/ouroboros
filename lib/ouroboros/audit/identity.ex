@@ -115,7 +115,14 @@ defmodule Ouroboros.Audit.Identity do
         "release.",
         "forge.",
         "wasm.",
-        "account."
+        "account.",
+        # Deploying Ouroboros onto another machine grants that machine the fleet's trust
+        # and asks a human for the credential that gets it there. That is an
+        # administrator's decision in the same sense `credentials.` and `permissions.`
+        # are, and the prefix covers the whole family — inspection, start, the
+        # authentication response, host trust, cancel and resume — so a verb added to it
+        # later is gated the day it exists rather than the day somebody notices.
+        "fleet.deployment."
       ]) ->
         "administrator"
 
@@ -123,6 +130,15 @@ defmodule Ouroboros.Audit.Identity do
         "operator"
     end
   end
+
+  # The first read-scope method that is not an operator's to call. `fleet.devices` is a
+  # tailnet inventory: every machine on the operator's private network, its addresses and
+  # what has been observed about it. Reading is the whole of the sensitivity here — the
+  # deployment verbs are separately administrator-only under operate scope — so the rule
+  # lives on the read clause rather than being smuggled into a scope it does not have.
+  # `fleet.status` and the rest of the fleet summaries keep their existing read
+  # permissions: a non-admin reader still sees membership, just not the network.
+  defp required_role("fleet.devices", :read), do: "administrator"
 
   defp required_role(_, :read), do: "operator"
 

@@ -33,13 +33,17 @@ defmodule Ouroboros.Gateway.OperateTest do
         allow_shutdown: Map.get(context, :allow_shutdown, false)
       )
 
-    {client, conn} = connect(config)
+    # Named per case so a test can point a connection at a supervisor that is not there,
+    # which is how `runtime.activity` is made to answer `unknown` without a sleep.
+    conn_supervisor = Map.get(context, :conn_supervisor, :gateway_operate_test_conns)
+
+    {client, conn} = connect(config, conn_supervisor)
     on_exit(fn -> :gen_tcp.close(client) end)
 
     %{client: client, conn: conn, config: config}
   end
 
-  defp connect(config) do
+  defp connect(config, conn_supervisor \\ :gateway_operate_test_conns) do
     {:ok, listen} =
       :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
 
@@ -51,7 +55,11 @@ defmodule Ouroboros.Gateway.OperateTest do
     {:ok, conn} =
       DynamicSupervisor.start_child(
         :gateway_operate_test_conns,
-        {Conn, socket: server, config: config, task_supervisor: :gateway_operate_test_tasks}
+        {Conn,
+         socket: server,
+         config: config,
+         task_supervisor: :gateway_operate_test_tasks,
+         conn_supervisor: conn_supervisor}
       )
 
     :ok = :gen_tcp.controlling_process(server, conn)
@@ -592,6 +600,105 @@ defmodule Ouroboros.Gateway.OperateTest do
         end)
 
       assert log =~ "gateway accepted runtime.shutdown"
+    end
+  end
+
+  describe "runtime.shutdown require_idle" do
+    @tag allow_shutdown: true
+    test "an idle runtime still stops, and says the same thing it always did", %{client: client} do
+      test_pid = self()
+      Application.put_env(:ouroboros, :gateway_stop_mfa, {Kernel, :send, [test_pid, :node_stop]})
+      on_exit(fn -> Application.delete_env(:ouroboros, :gateway_stop_mfa) end)
+
+      assert hello(client)["result"]
+
+      # The gate this case is about: the node has to be idle for the stop to be the
+      # answer, so the summary the connection reads is asserted here rather than assumed.
+      assert call(client, "runtime.activity")["result"]["idle"] == true
+
+      response = call(client, "runtime.shutdown", %{"require_idle" => true})
+
+      assert response["result"]["stopping"] == true
+      assert response["result"]["node"] == Atom.to_string(node())
+      assert_receive :node_stop, @receive_timeout
+    end
+
+    # A connection whose supervisor does not exist cannot count the clients attached to
+    # it, which is one unreadable counter and therefore an unknown runtime. Unknown
+    # activity does not authorize a stop.
+    @tag allow_shutdown: true
+    @tag conn_supervisor: :operate_test_conns_that_never_started
+    test "unknown activity is refused, and nothing is written before the refusal", %{
+      client: client
+    } do
+      test_pid = self()
+      Application.put_env(:ouroboros, :gateway_stop_mfa, {Kernel, :send, [test_pid, :node_stop]})
+      on_exit(fn -> Application.delete_env(:ouroboros, :gateway_stop_mfa) end)
+
+      assert hello(client)["result"]
+
+      log =
+        capture_log(fn ->
+          response = call(client, "runtime.shutdown", %{"require_idle" => true})
+
+          assert response["error"]["code"] == -32004
+          assert response["error"]["data"]["reason"] == "activity_unknown"
+          assert response["error"]["data"]["activity"]["idle"] == nil
+          assert response["error"]["data"]["activity"]["unknown"] == ["operator_clients"]
+          assert response["error"]["data"]["activity"]["operator_clients"] == nil
+          refute Map.has_key?(response, "result")
+          refute_receive :node_stop, 200
+
+          # A refusal is not a closed socket: the connection is still this client's.
+          assert call(client, "runtime.status")["result"]
+        end)
+
+      assert log =~ "gateway refused runtime.shutdown"
+      assert log =~ "activity_unknown"
+      refute log =~ "gateway accepted runtime.shutdown"
+    end
+
+    @tag allow_shutdown: true
+    test "require_idle: false is the parameter being absent", %{client: client} do
+      test_pid = self()
+      Application.put_env(:ouroboros, :gateway_stop_mfa, {Kernel, :send, [test_pid, :node_stop]})
+      on_exit(fn -> Application.delete_env(:ouroboros, :gateway_stop_mfa) end)
+
+      assert hello(client)["result"]
+
+      response = call(client, "runtime.shutdown", %{"require_idle" => false})
+
+      assert response["result"]["stopping"] == true
+      assert_receive :node_stop, @receive_timeout
+    end
+
+    @tag allow_shutdown: true
+    test "a require_idle that is not a boolean is refused before anything is read", %{
+      client: client
+    } do
+      test_pid = self()
+      Application.put_env(:ouroboros, :gateway_stop_mfa, {Kernel, :send, [test_pid, :node_stop]})
+      on_exit(fn -> Application.delete_env(:ouroboros, :gateway_stop_mfa) end)
+
+      assert hello(client)["result"]
+
+      response = call(client, "runtime.shutdown", %{"require_idle" => "yes"})
+
+      assert response["error"]["code"] == -32602
+      assert response["error"]["message"] =~ "require_idle"
+      refute_receive :node_stop, 200
+    end
+
+    # The permission is still the first gate: a listener that may not stop this node is
+    # told that, and is told nothing about what the node is doing.
+    test "without the flag, require_idle changes nothing about the refusal", %{client: client} do
+      assert hello(client)["result"]
+
+      response = call(client, "runtime.shutdown", %{"require_idle" => true})
+
+      assert response["error"]["code"] == -32003
+      assert response["error"]["message"] =~ "OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1"
+      refute Map.has_key?(response["error"], "data")
     end
   end
 end

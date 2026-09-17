@@ -14,7 +14,8 @@ defmodule Ouroboros.Gateway.GoldenTest do
     "attachment.read",
     "attachment.status",
     "attachment.touch_draft",
-    "interactive.safe_status"
+    "interactive.safe_status",
+    "runtime.activity"
   ]
   @compatibility_hello Path.expand(
                          "../../support/gateway_compatibility/hello_before_safe_status.json",

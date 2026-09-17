@@ -1021,6 +1021,14 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          "node-local by construction and therefore without a `node` parameter: the promotion record and the corpus are where the decisions were made, so this asks the machine rather than routing to it. `tools` is one row per promoted `(tool, shape)` with `allowed` beside it, because a shape can be promoted and withdrawn and both facts are the answer. `evidence` is `Ouroboros.Control.PolicyEvidence.count/0`, bounded: a total, the two degraded counts, the **32 busiest tools** by count, and `other_tools`/`other_records` for the rest — the corpus is bounded by rows rather than by how many distinct tools those rows name. No verb serves a row of it: the corpus holds the exact request a policy component would have been shown, command lines and paths included. `durability` is how the record is kept — `ephemeral_checkpoint`, `synced_checkpoint`, `durable_checkpoint`, or `unavailable` when the authority itself did not answer, which is a different fact from an empty record and is why it is a value rather than a missing key"},
       handler: :handle_policy_status
     },
+    "runtime.activity" => %{
+      scope: :read,
+      timeout: @default_timeout,
+      params:
+        {:closed, [],
+         "what this node is *doing*, which is not what it *has*: a session that exists and a port that is bound are not activity. `running_turns` and `queued_turns` are read from this node's live native session processes — one running turn per session holding an active turn, plus each session's submitted-but-not-yet-started queue. `attachment_transfers` and `attachment_normalizations` are the uploads and decoder tasks the attachment service is holding. `operator_clients` is the connections this listener is serving, which includes the one asking. Every counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is, because an unknown runtime is not an idle one. `idle` is decided by the four work counters alone: a connected client is somebody watching, not work, and the caller is always one of them"},
+      handler: :handle_runtime_activity
+    },
     "runtime.models" => %{
       scope: :read,
       timeout: @default_timeout,
@@ -1037,7 +1045,11 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       scope: :operate,
       timeout: @default_timeout,
       params:
-        {:open, [],
+        {:open,
+         [
+           {"require_idle", {:optional, false}, :boolean,
+            "stop only an idle runtime. The connection reads the same summary `runtime.activity` answers with, and unless its `idle` is `true` it refuses `-32004` — before any acknowledgement is written or any stop scheduled — carrying `data.reason` `runtime_busy` or `activity_unknown` and `data.activity`. Unknown activity never authorizes a stop"}
+         ],
          "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope"},
       handler: :connection
     },
