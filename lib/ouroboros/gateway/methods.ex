@@ -867,10 +867,49 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # The worker is told what to inspect, and nothing it is told is a secret: a host, an
-  # account, a port, paths, and an identity named by *reference*. That is exactly the set the
-  # spec permits a deployment to retain.
+  # The worker is told what to inspect, in the shape its own `OperationRequest` reads
+  # (`tui/src/fleet_setup/mod.rs`), and nothing it is told is a secret: a machine name, an
+  # address, an account, a port, paths, and an identity named by *reference*. That is exactly
+  # the set the spec permits a deployment to retain. The worker refuses unknown keys, so this
+  # builds its fields rather than a shape of this side's own choosing.
   defp deployment_request(params) do
+    case deployment_kind(params) do
+      {:ok, "setup"} -> setup_request(params)
+      {:ok, "add"} -> add_request(params)
+      {:invalid, message} -> {:invalid, message}
+    end
+  end
+
+  defp deployment_kind(params) do
+    case Map.get(params, "kind") do
+      nil -> {:ok, "add"}
+      kind when kind in ["setup", "add"] -> {:ok, kind}
+      _other -> {:invalid, "params.kind must be setup or add"}
+    end
+  end
+
+  # The first local fleet, which the spec is explicit about: "Set up this device" configures
+  # *this* machine, without SSH to itself. So there is no target and no account — only what
+  # this machine should be called and the private address it will bind. Both are optional
+  # here because both have an answer this host can supply: the machine name defaults to this
+  # host's own, and an address the caller does not give is one the worker refuses to guess
+  # at, with `unresolved_address` and the command that shows it.
+  defp setup_request(params) do
+    with {:ok, machine} <- deployment_optional_string(params, "machine"),
+         {:ok, address} <- deployment_optional_string(params, "address"),
+         {:ok, service} <- deployment_service(params) do
+      {:ok,
+       prune(%{
+         "kind" => "setup",
+         "machine" => machine || Deployment.host_name(),
+         "address" => address,
+         "identity" => %{"kind" => "default"},
+         "service" => service
+       })}
+    end
+  end
+
+  defp add_request(params) do
     with {:ok, target} <- deployment_target(params),
          {:ok, ssh_user} <- fetch_string(params, "ssh_user"),
          {:ok, port} <- deployment_port(params),
@@ -879,29 +918,52 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, data_dir} <- deployment_optional_string(params, "data_dir"),
          {:ok, service} <- deployment_service(params) do
       {:ok,
-       %{
-         "target" => target,
+       prune(%{
+         "kind" => "add",
+         "machine" => target["machine"],
+         "address" => target["address"],
          "ssh_user" => ssh_user,
-         "port" => port,
+         "ssh_port" => port,
          "identity" => identity,
          "install_path" => install_path,
-         "data_dir" => data_dir,
+         "remote_data_dir" => data_dir,
          "service" => service
-       }}
+       })}
     end
   end
 
+  # An absent optional field is left out rather than sent as null: the worker's decoder takes
+  # either, and a file with only the fields somebody actually chose is a file an operator can
+  # read.
+  defp prune(request), do: :maps.filter(fn _key, value -> not is_nil(value) end, request)
+
+  # `address` is what reaches the worker — its request has no `peer_id` field, because a peer
+  # id is a network client's name for a device and the worker talks to addresses. A caller
+  # that has only a peer id has not resolved the device yet, and `fleet.devices` is where
+  # that resolution comes from, so this refuses rather than sending a name as an address.
   defp deployment_target(params) do
     case Map.get(params, "target") do
       %{} = target ->
-        peer = target["peer_id"]
         address = target["address"]
+        machine = target["machine"] || target["peer_id"] || address
 
         cond do
-          is_binary(peer) and peer != "" -> {:ok, %{"peer_id" => peer}}
-          is_binary(address) and address != "" -> {:ok, %{"address" => address}}
-          true -> {:invalid, "params.target must carry a nonempty peer_id or address"}
+          not (is_binary(address) and address != "") ->
+            {:invalid,
+             "params.target.address is required: a peer_id alone does not name a reachable " <>
+               "address, and fleet.devices answers with the address for a row"}
+
+          not is_binary(machine) ->
+            {:invalid, "params.target.machine must be a string when it is given"}
+
+          true ->
+            {:ok, %{"address" => address, "machine" => machine}}
         end
+
+      nil ->
+        {:invalid,
+         "params.target is required for an add; a setup takes no target, because it " <>
+           "configures this machine without SSH to itself"}
 
       _other ->
         {:invalid, "params.target must be an object"}
@@ -916,20 +978,25 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
+  # Translated into the worker's internally tagged enum rather than passed through: `ref`
+  # means a different thing for each kind — an agent identity's public fingerprint, a key
+  # file's path — and naming it as one field on this side while the worker names it as two
+  # would be a shape nobody could validate.
   defp deployment_identity(params) do
     case Map.get(params, "identity") do
-      nil ->
-        {:ok, nil}
+      nil -> {:ok, %{"kind" => "default"}}
+      %{"kind" => "password"} -> {:ok, %{"kind" => "password"}}
+      %{"kind" => "default"} -> {:ok, %{"kind" => "default"}}
+      %{"kind" => "agent"} = identity -> identity_ref(identity, "agent", "fingerprint")
+      %{"kind" => "key"} = identity -> identity_ref(identity, "key", "path")
+      _other -> {:invalid, "params.identity.kind must be one of default, agent, key, password"}
+    end
+  end
 
-      %{"kind" => kind} = identity when kind in ["agent", "key", "password"] ->
-        ref = identity["ref"]
-
-        if is_nil(ref) or (is_binary(ref) and ref != ""),
-          do: {:ok, %{"kind" => kind, "ref" => ref}},
-          else: {:invalid, "params.identity.ref must be a nonempty string when it is given"}
-
-      _other ->
-        {:invalid, "params.identity.kind must be one of agent, key, password"}
+  defp identity_ref(identity, kind, field) do
+    case identity["ref"] do
+      ref when is_binary(ref) and ref != "" -> {:ok, %{"kind" => kind, field => ref}}
+      _absent -> {:invalid, "params.identity.ref is required when identity.kind is #{kind}"}
     end
   end
 

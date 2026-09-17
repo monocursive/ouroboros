@@ -129,7 +129,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       error = call(client, "fleet.deployment.prepare", %{})["error"]
       assert error["code"] == -32_602
-      assert error["message"] =~ "params.target is required"
+      assert error["message"] =~ "params.target is required for an add"
     end
   end
 
@@ -399,6 +399,236 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       assert error["code"] == -32_602
       assert error["data"]["reason"] == "invalid_operation"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The first local fleet, and the request the worker actually reads
+
+  describe "prepare kinds" do
+    test "a setup takes no target and no account, because it is this device", context do
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      prepared = call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+      operation = prepared["operation_id"]
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      assert FleetWorkerFake.refusals(worker) == 0
+
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["kind"] == "setup"
+      assert request["operation"] == operation
+      assert request["schema"] == 1
+      assert request["identity"] == %{"kind" => "default"}
+
+      # The spec is explicit that this machine configures itself "without SSH to itself":
+      # there is no account on this request at all.
+      refute Map.has_key?(request, "ssh_user")
+      refute Map.has_key?(request, "ssh_port")
+
+      # And it is called what this device is already called, unless somebody says otherwise.
+      assert request["machine"] == Ouroboros.Fleet.Deployment.host_name()
+    end
+
+    test "a setup takes the machine, address and service the operator chose", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "kind" => "setup",
+               "machine" => "operator-laptop",
+               "address" => "100.64.12.21",
+               "service" => false
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["machine"] == "operator-laptop"
+      assert request["address"] == "100.64.12.21"
+      assert request["service"] == false
+    end
+
+    test "an add still requires the account, and a setup never did", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "target" => %{"address" => "100.64.12.44"}
+        })["error"]
+
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.ssh_user"
+
+      # The same call as a setup is not missing anything, because a setup has no account.
+      assert call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+    end
+
+    test "an add is refused a target that names no address", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "target" => %{"peer_id" => "nkBuildLinux"},
+          "ssh_user" => "deploy"
+        })["error"]
+
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.target.address is required"
+      assert error["message"] =~ "fleet.devices"
+    end
+
+    test "an add names the machine from the peer id when no machine is given", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "target" => %{"address" => "100.64.12.44", "peer_id" => "nkBuildLinux"},
+               "ssh_user" => "deploy"
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["machine"] == "nkBuildLinux"
+      assert request["address"] == "100.64.12.44"
+      assert request["ssh_port"] == 22
+    end
+
+    test "an identity is translated into the shape the worker names it by", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      for {given, expected} <- [
+            {%{"kind" => "agent", "ref" => "SHA256:abc"},
+             %{"kind" => "agent", "fingerprint" => "SHA256:abc"}},
+            {%{"kind" => "key", "ref" => "/home/a/.ssh/id_ed25519"},
+             %{"kind" => "key", "path" => "/home/a/.ssh/id_ed25519"}},
+            {%{"kind" => "password"}, %{"kind" => "password"}},
+            {%{"kind" => "default"}, %{"kind" => "default"}}
+          ] do
+        assert call(client, "fleet.deployment.prepare", %{
+                 "target" => %{"address" => "100.64.12.44"},
+                 "ssh_user" => "deploy",
+                 "identity" => given
+               })["result"]
+
+        assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+        request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+        assert request["identity"] == expected,
+               "#{inspect(given)} became #{inspect(request["identity"])}"
+      end
+    end
+
+    test "an agent or key identity with no reference is refused", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      for kind <- ["agent", "key"] do
+        error =
+          call(client, "fleet.deployment.prepare", %{
+            "target" => %{"address" => "100.64.12.44"},
+            "ssh_user" => "deploy",
+            "identity" => %{"kind" => kind}
+          })["error"]
+
+        assert error["code"] == -32_602
+        assert error["message"] =~ "identity.kind is #{kind}"
+      end
+    end
+
+    test "an unknown kind is refused before anything is forked", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error = call(client, "fleet.deployment.prepare", %{"kind" => "leave"})["error"]
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.kind must be setup or add"
+
+      refute_receive {:fake_worker, _frame}, 300
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # What a device row needs to know about an open operation
+
+  describe "the operations listing" do
+    test "names the device each open operation belongs to", context do
+      arrange_devices(context, ~s({"devices": []}\n))
+
+      write_journal(context.root, "aa11bb22cc33dd44", %{
+        "operation" => "aa11bb22cc33dd44",
+        "owner" => "adele",
+        "kind" => "add",
+        "state" => "awaiting_auth",
+        "created_at" => "2026-09-17T10:00:00Z",
+        "updated_at" => "2026-09-17T10:05:00Z",
+        "target" => %{
+          "machine" => "build-linux",
+          "address" => "100.64.12.44",
+          "ssh_user" => "deploy",
+          "port" => 2222,
+          "host_fingerprint" => "SHA256:abc",
+          "os" => "linux"
+        }
+      })
+
+      client = connected(scope: :operate)
+      [operation] = call(client, "fleet.devices")["result"]["operations"]
+
+      assert operation["operation"] == "aa11bb22cc33dd44"
+      assert operation["kind"] == "add"
+      assert operation["state"] == "awaiting_auth"
+      assert operation["owner"] == "adele"
+      assert operation["attached"] == false
+
+      # The four fields that put it on a row, and only those: a summary is not a journal,
+      # and a fingerprint or an architecture is not what a list needs.
+      assert operation["target"] == %{
+               "machine" => "build-linux",
+               "address" => "100.64.12.44",
+               "ssh_user" => "deploy",
+               "port" => 2222
+             }
+    end
+
+    test "an operation with no target, and one whose journal cannot be read, still render",
+         context do
+      arrange_devices(context, ~s({"devices": []}\n))
+
+      write_journal(context.root, "1122334455667788", %{
+        "operation" => "1122334455667788",
+        "kind" => "setup",
+        "state" => "inspecting"
+      })
+
+      File.write!(Path.join([context.root, "deploy", "99aabbccddeeff00.json"]), "{ not json")
+
+      client = connected(scope: :operate)
+      operations = call(client, "fleet.devices")["result"]["operations"]
+
+      setup = Enum.find(operations, &(&1["operation"] == "1122334455667788"))
+      assert setup["kind"] == "setup"
+      assert setup["target"] == nil
+      assert setup["owner"] == nil
+      assert setup["readable"] == true
+
+      broken = Enum.find(operations, &(&1["operation"] == "99aabbccddeeff00"))
+      assert broken["readable"] == false
+      assert broken["reason"] == "journal_unreadable"
+
+      # Every row carries every key a surface reads, null where it could not be established:
+      # a missing key and a null one are the same thing to a renderer and different things
+      # to a person reading the JSON.
+      for row <- operations do
+        for field <- ~w(operation owner kind state created_at updated_at target readable) do
+          assert Map.has_key?(row, field), "#{field} missing from #{inspect(row)}"
+        end
+      end
     end
   end
 

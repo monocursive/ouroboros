@@ -30,6 +30,11 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   # process.
   @max_request_bytes 64 * 1024
 
+  # `fleet_setup::SCHEMA`. The worker refuses a request whose schema it does not know and
+  # refuses unknown keys outright, so this number and that one moving apart is a broken
+  # deployment rather than a quiet one — which is the direction it should fail in.
+  @request_schema 1
+
   # What `ouro` may print into this runtime's heap before it is stopped. A device inventory
   # for a large tailnet is tens of kilobytes; half a megabyte is generous, and past it the
   # child is not answering the question that was asked.
@@ -151,7 +156,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
     args = ["fleet", "worker", "start", "--operation", operation, "--data-dir", data_dir]
     path = Journal.request_path(data_dir, operation)
 
-    with :ok <- publish_request(path, request) do
+    with :ok <- publish_request(path, operation, request) do
       case run(args, timeout) do
         {:ok, output} ->
           decode_spawn(output)
@@ -167,10 +172,14 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
     end
   end
 
-  defp publish_request(_path, nil), do: :ok
+  defp publish_request(_path, _operation, nil), do: :ok
 
-  defp publish_request(path, request) do
-    bytes = canonical(request) |> IO.iodata_to_binary()
+  defp publish_request(path, operation, request) do
+    # `schema` and `operation` are stamped here rather than by the caller: the operation id
+    # is minted by the broker a moment before this runs, and the schema is a fact about the
+    # wire rather than about the request somebody made.
+    document = Map.merge(request, %{"schema" => @request_schema, "operation" => operation})
+    bytes = canonical(document) |> IO.iodata_to_binary()
 
     cond do
       byte_size(bytes) > @max_request_bytes ->

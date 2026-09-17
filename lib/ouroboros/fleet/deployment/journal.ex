@@ -124,32 +124,50 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     end
   end
 
+  @summary_fields ~w(operation owner kind state created_at updated_at plan_digest)
+
+  # Enough to put an open operation on the row it belongs to, and no more.
+  #
+  # `target` is the reason this is not just a list of ids: a surface showing a device list
+  # has to say *which device* an interrupted operation is about, and without it every open
+  # operation looked the same. It is the journal's own target, cut to the four fields that
+  # name a row — the machine, where it is, and the account and port an `add` is using — and
+  # it goes through the same scrubbing as everything else out of here.
+  @target_fields ~w(machine address ssh_user port)
+
   defp summary(data_dir, operation) do
     case read(data_dir, operation) do
       {:ok, document} ->
         document
-        |> Map.take(~w(operation owner kind state created_at updated_at plan_digest))
+        |> Map.take(@summary_fields)
         |> Map.put("operation", operation)
-        |> Map.put_new("state", nil)
-        |> Map.put_new("owner", nil)
-        |> Map.put_new("kind", nil)
-        |> Map.put_new("created_at", nil)
-        |> Map.put_new("updated_at", nil)
+        |> Map.put("target", target_summary(document["target"]))
+        |> blanks()
         |> Map.put("readable", true)
 
       {:error, reason} ->
-        %{
-          "operation" => operation,
-          "owner" => nil,
-          "kind" => nil,
-          "state" => nil,
-          "created_at" => nil,
-          "updated_at" => nil,
-          "readable" => false,
-          "reason" => reason_code(reason)
-        }
+        %{"operation" => operation, "target" => nil}
+        |> blanks()
+        |> Map.put("readable", false)
+        |> Map.put("reason", reason_code(reason))
     end
   end
+
+  # Every field a surface reads is present on every row, `null` where this build could not
+  # establish it. A missing key and a null one are the same fact to a renderer, and only one
+  # of them is the same fact to a person reading the JSON.
+  defp blanks(summary) do
+    Enum.reduce(@summary_fields ++ ["target"], summary, &Map.put_new(&2, &1, nil))
+  end
+
+  defp target_summary(target) when is_map(target) do
+    case Map.take(target, @target_fields) do
+      empty when map_size(empty) == 0 -> nil
+      fields -> fields
+    end
+  end
+
+  defp target_summary(_absent), do: nil
 
   defp reason_code(:unknown_operation), do: "unknown_operation"
   defp reason_code({:journal_unreadable, _detail}), do: "journal_unreadable"

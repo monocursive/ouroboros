@@ -198,10 +198,20 @@ defmodule Ouroboros.Fleet.Deployment do
 
   # `:inet.gethostname/0` is specified to answer `{:ok, name}` and nothing else; matching it
   # is the honest shape rather than a fallback clause dialyzer can prove dead.
-  defp hostname do
+  @doc """
+  This host's own name, which is what a first local setup calls this device by default.
+
+  Public because `fleet.deployment.prepare` needs it for a `setup` the caller did not name a
+  machine for: the worker requires one, and the honest default for "set up *this* device" is
+  what this device is already called.
+  """
+  @spec host_name() :: String.t()
+  def host_name do
     {:ok, name} = :inet.gethostname()
     List.to_string(name)
   end
+
+  defp hostname, do: host_name()
 
   # The CA key is what an issuer has and a member does not (`tui/src/fleet.rs` writes
   # `ca-key.pem` only on the machine that created the fleet). `lstat` rather than `exists?`:

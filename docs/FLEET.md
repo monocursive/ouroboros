@@ -554,7 +554,10 @@ happen inside the runtime that was asked for it. `Ouroboros.Fleet.Deployment` is
 not an executor:
 
 1. **It states the request in a private file.** Which machine, which SSH account, which
-   port, which identity *reference*, which paths — written to
+   port, which identity *reference*, which paths — or, for the first *local* fleet, none of
+   those: `kind: "setup"` configures this machine without SSH to itself, so it carries only
+   what this device should be called and the private address its runtime will bind. Written
+   to
    `<data dir>/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
    (an exclusive temporary inode chmodded before the first byte, then renamed) and as
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is

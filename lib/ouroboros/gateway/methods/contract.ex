@@ -503,28 +503,39 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       params:
         {:closed,
          [
-           {"target", :required,
+           {"kind", {:optional, "add"}, {:enum, ["setup", "add"]},
+            "`add` deploys onto another machine over SSH. `setup` is the first **local** fleet — \"Set up this device\" — which the spec is explicit about: this machine configures itself, without SSH to itself, so it takes no target and no account"},
+           {"target", :optional,
             {:object,
              [
-               {"peer_id", :optional, :string, "the network client\'s own id for the device"},
-               {"address", :optional, :string, "its private overlay address"}
-             ]}, "one of the two; a name this machine\'s network client can resolve"},
-           {"ssh_user", :required, :string,
-            "the account on the target. Never inferred from the network client\'s owner"},
+               {"address", :required, :string,
+                "the private overlay address. Required, because the worker talks to addresses: a peer id is a network client\'s *name* for a device, and resolving one is what `fleet.devices` is for"},
+               {"machine", :optional, :string,
+                "the roster name for the new member; the peer id or the address when omitted"},
+               {"peer_id", :optional, :string,
+                "the network client\'s own id, used as the machine name when no `machine` is given"}
+             ]}, "required for `add`; unused by `setup`"},
+           {"machine", :optional, :string,
+            "`setup` only: what this device should be called in its own fleet. This host\'s own name when omitted"},
+           {"address", :optional, :string,
+            "`setup` only: this machine\'s private overlay address, the one its runtime will bind. The worker refuses `unresolved_address` rather than guessing when it is absent; `fleet.devices` reports it"},
+           {"ssh_user", :optional, :string,
+            "required for `add`: the account on the target. Never inferred from the network client\'s owner, and never used by `setup`"},
            {"port", {:optional, 22}, {:integer, 1, 65_535}, nil},
            {"identity", :optional,
             {:object,
              [
-               {"kind", :required, {:enum, ["agent", "key", "password"]}, nil},
+               {"kind", :required, {:enum, ["default", "agent", "key", "password"]}, nil},
                {"ref", :optional, :string,
-                "which agent identity or which key file — a reference, never key material"}
-             ]}, "how to authenticate; omitted lets the worker offer what this host has"},
+                "required for `agent` (the identity\'s public fingerprint) and for `key` (a path on this host) — a reference, never key material"}
+             ]},
+            "`add` only; omitted means `default`, which is whatever this host\'s own ssh configuration selects"},
            {"install_path", :optional, :string, "where `ouro` goes on the target"},
            {"data_dir", :optional, :string, "the target\'s durable directory"},
            {"service", {:optional, true}, :boolean,
             "whether to install an Ouroboros-owned startup service on the target"}
          ],
-         "forks the deployment worker for a new operation and attaches to it, then answers. Inspection, host verification and authentication all happen behind the returned `operation_id` rather than inside this call: the worker is detached, so closing the page and stopping this runtime both leave it running. These parameters reach it in a private 0600 file under the data directory rather than on its command line, because `ps` is readable by every local account and a target hostname is nobody else's business; the worker unlinks that file once it has read it. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
+         "forks the deployment worker for a new operation and attaches to it, then answers. Inspection, host verification and authentication all happen behind the returned `operation_id` rather than inside this call: the worker is detached, so closing the page and stopping this runtime both leave it running. These parameters reach it in a private 0600 file under the data directory rather than on its command line, because `ps` is readable by every local account and a target hostname is nobody else's business; the worker unlinks that file once it has read it. They are written in the worker's own request shape, which refuses a key it does not know, so what this method accepts and what the worker reads cannot drift apart silently. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
       handler: :handle_fleet_deployment_prepare
     },
     "fleet.deployment.status" => %{

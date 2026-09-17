@@ -256,9 +256,15 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       decoded = JSON.decode!(body)
 
       assert decoded["ssh_user"] == "deploy"
-      assert decoded["port"] == 2222
-      assert decoded["identity"] == %{"kind" => "key", "ref" => "~/.ssh/id_ed25519"}
-      assert decoded["target"] == %{"address" => "100.64.12.44"}
+      assert decoded["ssh_port"] == 2222
+      assert decoded["identity"] == %{"kind" => "key", "path" => "~/.ssh/id_ed25519"}
+      assert decoded["address"] == "100.64.12.44"
+      assert decoded["machine"] == "build-linux"
+
+      # Stamped by the launcher, which is the only thing that knows both: the id was minted
+      # a moment earlier, and the schema is a fact about the wire.
+      assert decoded["operation"] == operation
+      assert decoded["schema"] == 1
 
       # An identity is a reference. Nothing that could be key material is in this file.
       refute body =~ "BEGIN"
@@ -266,7 +272,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
       # Canonical: sorted keys, no whitespace, so the same request twice is the same bytes.
       assert body == JSON.encode!(JSON.decode!(body)) |> canonical_of()
-      assert String.starts_with?(body, ~s({"data_dir":))
+      assert String.starts_with?(body, ~s({"address":))
 
       # And it is the worker's to consume: gone once the launch succeeded.
       refute File.exists?(Journal.request_path(context.root, operation))
@@ -793,14 +799,17 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
   defp bound, do: %{subject: "adele", session: "session-one"}
 
+  # The shape `Ouroboros.Gateway.Methods` builds and `fleet_setup::OperationRequest` reads.
+  # The worker refuses unknown keys, so a test that invented its own shape here would be
+  # testing a file nothing can parse.
   defp detailed_request do
     %{
-      "target" => %{"address" => "100.64.12.44"},
+      "kind" => "add",
+      "machine" => "build-linux",
+      "address" => "100.64.12.44",
       "ssh_user" => "deploy",
-      "port" => 2222,
-      "identity" => %{"kind" => "key", "ref" => "~/.ssh/id_ed25519"},
-      "install_path" => nil,
-      "data_dir" => nil,
+      "ssh_port" => 2222,
+      "identity" => %{"kind" => "key", "path" => "~/.ssh/id_ed25519"},
       "service" => true
     }
   end
