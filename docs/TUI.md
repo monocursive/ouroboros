@@ -310,7 +310,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | method | maps to |
 |---|---|
 | `runtime.status` | `Ouroboros.status/0` ([ouroboros.ex:13](../lib/ouroboros.ex)) |
-| `runtime.activity` `{}` | `Gateway.Methods.activity/1` — what this node is **doing**, for the idle gate below. `running_turns`/`queued_turns` come from this node's live native session processes, `attachment_transfers`/`attachment_normalizations` from `Ouroboros.Attachments`, `operator_clients` from this listener's own connection supervisor. A counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is. A session that exists and a port that is bound are not activity; neither is a connected client, which is why `idle` is decided by the four work counters alone — the caller is always one of the clients. Node-local: no fan-out, no `:erpc`, every source asked once under its own deadline |
+| `runtime.activity` `{}` | `Gateway.Activity.summary/1` — the work this node is holding, for the idle gate below. `running_turns`, `queued_turns` and `busy_sessions` come from its live native session processes, and `busy_sessions` is each session's **own** idle predicate (the one that refuses a maintenance fence), so a compaction or an unresolved approval counts even with no turn running. `in_flight_methods` is the operate-scope calls this node is executing — `workspace.exec` and friends run in the caller's process, not in a session, and are invisible to every session counter. `attachment_transfers`/`attachment_normalizations` come from `Ouroboros.Attachments`, `operator_clients` from this listener's own connection supervisor, and `silent_sessions` is how many sessions did not answer. Not counted: another machine's work (node-local, no fan-out), a read-scope call, and a session or port that merely exists. A counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is. A connected client is not work, which is why `idle` is decided by the work counters alone — the caller is always one of the clients. The walk is concurrent and bounded (200ms a session, 500ms in all, 64 at a time); answers may be up to 250ms old, and the gate below reads freshly |
 | `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task. The `native` entry's `details` carries **`sandbox`** (C5) — `"sandbox-exec"`, `"bwrap"`, or `"none"`, the OS sandbox backend the owning node actually detected — plus `sandbox_notes` (why, including Apple's deprecation of `sandbox-exec` and bubblewrap's missing seccomp) and `enforced`, a sentence naming what each mode holds. It is a string and never a boolean: "sandboxed" is not a fact, `"sandbox-exec"` is. **A footer may say "no OS sandbox" for a native session only when this reads `none`** — never inferred from the provider's name, and never from the absence of the key, which means "this runtime did not say" |
 | `runtime.models` | `Ouroboros.Models.list/0` — the packaged `llm_db` catalogue. Native combines its OpenAI, Anthropic, and xAI lanes and carries full ReqLLM specs such as `openai_codex:gpt-5.6-sol`, `anthropic:claude-sonnet-5`, and `xai:grok-4.6`, the configured direct default, context/output limits and public token pricing; non-secret credential readiness is reported separately by `runtime.providers`. |
 | `account.read` `{}` | `OpenAIAuth.read/1` — non-secret API-key/OAuth readiness, ChatGPT identity claims, and managed-login state. Tokens remain only in the runtime's private OAuth file and never cross the gateway. |
@@ -923,13 +923,22 @@ and clustering keeps the existing posture.
   `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` and, with it, stops the node only after the
   acknowledgement has been written.
 - **The idle gate:** `runtime.activity` counts a held turn as running and the follow-up
-  behind it as queued, counts an upload that has begun and a decoder task still running,
-  and counts this listener's own connections without letting them decide `idle`; a
-  session, an attachment service or a connection supervisor that does not answer is
-  `null` and named in `unknown`, and then `idle` is `null` too. `runtime.shutdown` with
-  `require_idle` stops an idle node, refuses a busy one `runtime_busy` and an unreadable
-  one `activity_unknown`, writes no acknowledgement and schedules no stop when it
-  refuses, and leaves the connection usable afterwards.
+  behind it as queued, counts a compaction with no turn as a busy session, counts a
+  `workspace.exec` still running — through the gateway *and* through `Web.Call` — as an
+  in-flight method, counts an upload that has begun and a decoder task still running, and
+  counts this listener's own connections without letting them decide `idle`. An upload
+  past its TTL is not in flight; a read-scope call is not work; a killed dispatch task
+  leaves no entry behind. A session, a registry, an attachment service or a connection
+  supervisor that does not answer — or answers a shape this build does not understand —
+  is `null` and named in `unknown`, and then `idle` is `null` too; a walk that runs out of
+  budget is unknown rather than a partial total. Thirty sessions taking 25ms each are
+  still answered, in one session's time rather than thirty, and eight looping readers
+  cost one walk per cache window. `runtime.shutdown` with `require_idle` stops an idle
+  node, refuses a busy one `runtime_busy` and an unreadable one `activity_unknown`,
+  writes no acknowledgement and schedules no stop when it refuses, and leaves the
+  connection usable afterwards; a misspelled `requireIdle` is `-32602` naming the key and
+  never a stop; and with no parameter at all a busy node still stops, because the gate is
+  opt-in.
 - **Verifier:** Gateway-namespace artifact rejected.
 - **Golden fixtures:** `mix ouroboros.gateway.golden` regenerates
   `test/support/gateway_golden/*.json` from static, deterministic terms — no clock, no

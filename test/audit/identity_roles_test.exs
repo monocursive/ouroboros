@@ -94,6 +94,77 @@ defmodule Ouroboros.Audit.IdentityRolesTest do
 
       refute Identity.permits?(subject!("approver-token"), "fleet.deployment.start", :operate)
     end
+
+    # ADOPTED EXPLOIT (review of a97f2dfb, MEDIUM-1). Every call site passes the
+    # *method's declared scope* from the table, never the listener's, so a rule written on
+    # the `:operate` clause is a rule about how a verb happens to be declared. The
+    # proposal declares `fleet.deployment.status` at read scope, and an operate-only
+    # prefix handed that one to any operator.
+    test "the scope a deployment verb is declared at does not decide its role", %{root: root} do
+      operator = identity("olive", ["operator"], "operator-token")
+      administrator = identity("adele", ["administrator"], "administrator-token")
+      configure(root, [operator, administrator])
+
+      operator_subject = subject!("operator-token")
+      administrator_subject = subject!("administrator-token")
+
+      for scope <- [:read, :operate] do
+        refute Identity.permits?(operator_subject, "fleet.deployment.status", scope),
+               "fleet.deployment.status at #{scope} scope must need an administrator"
+
+        assert Identity.permits?(administrator_subject, "fleet.deployment.status", scope)
+      end
+    end
+
+    # ADOPTED EXPLOIT (MEDIUM-2). The `cond` below the prefix tests approval words first,
+    # so a deployment verb whose name contains `respond`/`approve` used to need an
+    # approver instead of an administrator — and `fleet.deployment.respond_challenge` is
+    # exactly the shape this family's `authenticate` verb invites.
+    test "an approval word in a deployment verb's name does not lower its role", %{root: root} do
+      operator = identity("olive", ["operator"], "operator-token")
+      approver = identity("avery", ["approver"], "approver-token")
+      administrator = identity("adele", ["administrator"], "administrator-token")
+      configure(root, [operator, approver, administrator])
+
+      for method <- [
+            "fleet.deployment.respond_challenge",
+            "fleet.deployment.approve_host",
+            "fleet.deployment.approval"
+          ] do
+        refute Identity.permits?(subject!("operator-token"), method, :operate), method
+        refute Identity.permits?(subject!("approver-token"), method, :operate), method
+        assert Identity.permits?(subject!("administrator-token"), method, :operate), method
+      end
+
+      # And the approval rule itself is untouched for everything that is not a deployment.
+      assert Identity.permits?(
+               subject!("approver-token"),
+               "interactive.respond_approval",
+               :operate
+             )
+    end
+
+    test "the prefix is a prefix, and the edges around it are not gated", %{root: root} do
+      configure(root, [identity("olive", ["operator"], "operator-token")])
+      operator = subject!("operator-token")
+
+      # None of these is `fleet.deployment.`, and none of them should become an
+      # administrator's by accident. Recorded so a later loosening to `String.contains?`
+      # or to `fleet.deployment` without the dot shows up here.
+      for method <- [
+            "fleet.deployment",
+            "fleet.deploymentX",
+            "fleet.deployments.start",
+            "interactive.fleet.deployment.start"
+          ] do
+        assert Identity.permits?(operator, method, :operate),
+               "#{method} is outside the prefix and is an operator's today"
+      end
+
+      # Case matters, in both directions: an upper-cased spelling is a different method.
+      assert Identity.permits?(operator, "Fleet.Deployment.Start", :operate)
+      assert Identity.permits?(operator, "FLEET.DEVICES", :read)
+    end
   end
 
   describe "tailnet inventory is administrator-only at read scope" do
@@ -106,6 +177,12 @@ defmodule Ouroboros.Audit.IdentityRolesTest do
 
       refute Identity.permits?(operator_subject, "fleet.devices", :read)
       assert Identity.permits?(subject!("administrator-token"), "fleet.devices", :read)
+
+      # ADOPTED EXPLOIT (MEDIUM-2): the rule was the exact name at the exact scope, so the
+      # same verb declared at operate scope was an operator's again. The declaration is
+      # not what makes an inventory sensitive.
+      refute Identity.permits?(operator_subject, "fleet.devices", :operate)
+      assert Identity.permits?(subject!("administrator-token"), "fleet.devices", :operate)
 
       # The rule is `fleet.devices`, not "anything read-scoped that says fleet": every
       # other read stays exactly where it was.

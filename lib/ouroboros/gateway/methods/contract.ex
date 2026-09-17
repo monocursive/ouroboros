@@ -1026,7 +1026,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: @default_timeout,
       params:
         {:closed, [],
-         "what this node is *doing*, which is not what it *has*: a session that exists and a port that is bound are not activity. `running_turns` and `queued_turns` are read from this node's live native session processes — one running turn per session holding an active turn, plus each session's submitted-but-not-yet-started queue. `attachment_transfers` and `attachment_normalizations` are the uploads and decoder tasks the attachment service is holding. `operator_clients` is the connections this listener is serving, which includes the one asking. Every counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is, because an unknown runtime is not an idle one. `idle` is decided by the four work counters alone: a connected client is somebody watching, not work, and the caller is always one of them"},
+         "the four kinds of work this node counts, and nothing else. `running_turns`, `queued_turns` and `busy_sessions` come from its live native session processes: an active turn, the turns it has accepted and not started, and the session's *own* idle predicate — the one that also refuses a maintenance fence, so a compaction or an unresolved approval is visible here even with no turn running. `in_flight_methods` is the operate-scope calls this node is executing, which is where `workspace.exec` and the other verbs that run in the caller's process rather than in a session are counted; read-scope calls are not. `attachment_transfers` and `attachment_normalizations` are the unexpired uploads and the decoder tasks the attachment service is holding. `operator_clients` is the connections this listener is serving, which includes the one asking. `silent_sessions` is how many live sessions did not answer inside their own deadline, which is the reason `unknown` names what it names. What is *not* counted: another machine's work (this is node-local — no fan-out), a read-scope call, and a session or a port that merely exists. Every counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is, because an unknown runtime is not an idle one. `idle` is decided by the work counters alone: a connected client is somebody watching, not work, and the caller is always one of them. Answers may be up to 250ms old; `runtime.shutdown`'s gate reads the same summary freshly instead"},
       handler: :handle_runtime_activity
     },
     "runtime.models" => %{
@@ -1045,12 +1045,12 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       scope: :operate,
       timeout: @default_timeout,
       params:
-        {:open,
+        {:closed,
          [
            {"require_idle", {:optional, false}, :boolean,
-            "stop only an idle runtime. The connection reads the same summary `runtime.activity` answers with, and unless its `idle` is `true` it refuses `-32004` — before any acknowledgement is written or any stop scheduled — carrying `data.reason` `runtime_busy` or `activity_unknown` and `data.activity`. Unknown activity never authorizes a stop"}
+            "stop only a runtime that is holding no work. The connection reads the same summary `runtime.activity` answers with, freshly rather than from its cache, and unless its `idle` is `true` it refuses `-32004` — before any acknowledgement is written or any stop scheduled — carrying `data.reason` `runtime_busy` or `activity_unknown` and `data.activity`. Unknown activity never authorizes a stop"}
          ],
-         "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope"},
+         "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope. Closed, unlike most connection-answered verbs, because the difference between this envelope's two shapes is a node that stops and a node that does not: a misspelled `requireIdle` must be a refusal naming the key, never an unconditional stop"},
       handler: :connection
     },
     "runtime.status" => %{

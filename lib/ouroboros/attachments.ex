@@ -169,9 +169,11 @@ defmodule Ouroboros.Attachments do
     {:reply, hash(state.recovery_id <> <<0>> <> actor), state}
   end
 
-  # Deliberately does not sweep: an idle check must not be the thing that expires a
-  # record. An abandoned upload is counted until the periodic sweep removes it, which
-  # errs toward "busy" — the direction a shutdown gate has to err in.
+  # Two decisions, both deliberate. It does not sweep, because an idle check must not be
+  # the thing that expires a record; and it counts only *unexpired* uploads, because an
+  # upload past its TTL is one this service has already decided to drop — the next sweep
+  # removes it and nothing is lost by stopping the node first. So a record that has
+  # expired and not yet been swept is not in flight, and is not counted.
   def handle_call(:activity, _from, state) do
     now = state.clock.()
 

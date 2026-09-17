@@ -75,6 +75,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Control.PolicyPromotion
+  alias Ouroboros.Gateway.Activity
   alias Ouroboros.Gateway.Methods.Browse
   alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Methods.Encode
@@ -91,7 +92,6 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Provider.XAIKey
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Replay
-  alias Ouroboros.Provider.Native.Session, as: NativeSession
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm.Surface, as: WasmSurface
@@ -121,16 +121,9 @@ defmodule Ouroboros.Gateway.Methods do
   # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
 
-  # `runtime.activity`'s two deadlines, and they are small because of who waits behind
-  # them: `Ouroboros.Gateway.Conn` reads this summary in its own process before deciding
-  # an idle-gated `runtime.shutdown`, so the whole answer has to arrive in well under a
-  # second or the socket it owns stops reading for longer than a client would forgive.
-  # The first bounds the *whole* walk of this node's live sessions rather than one
-  # question to one of them; the second bounds one question to one named process. A
-  # source that overruns is reported unknown, which refuses the shutdown — the safe
-  # direction, and the only one a summary with a hole in it can honestly point.
-  @activity_turn_budget_ms 500
-  @activity_call_budget_ms 250
+  # Read from the module that owns the ledger, so the two verbs that must not record
+  # themselves are named once.
+  @unledgered Activity.unledgered()
 
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
   # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
@@ -471,7 +464,7 @@ defmodule Ouroboros.Gateway.Methods do
              method,
              entry.scope
            ) do
-          invoke_recorded(method, params, entry)
+          ledgered(method, entry, fn -> invoke_recorded(method, params, entry) end)
         else
           {:error, code(:scope_denied), "This identity may not perform #{method}."}
         end
@@ -480,6 +473,25 @@ defmodule Ouroboros.Gateway.Methods do
         {:error, code(:method_not_found), "unknown method #{inspect(method)}"}
     end
   end
+
+  # This function is the one funnel every mutation this node performs goes through: the
+  # gateway's dispatch tasks and `Ouroboros.Web.Call` both arrive here. That is what
+  # makes it the place the idle gate can see `workspace.exec` from, because the shell it
+  # runs lives in *this* process and never in a session (`InteractiveSession.exec/2`).
+  #
+  # Read verbs are not recorded. A read that a stop interrupts can be read again, and a
+  # client polling `runtime.status` must not make the node look like it is working.
+  defp ledgered(method, %{scope: :operate}, fun) when method not in @unledgered do
+    token = Activity.enter(method)
+
+    try do
+      fun.()
+    after
+      Activity.leave(token)
+    end
+  end
+
+  defp ledgered(_method, _entry, fun), do: fun.()
 
   def invoke_as(subject, method, params),
     do: Ouroboros.Audit.Identity.with_subject(subject, fn -> invoke(method, params) end)
@@ -632,160 +644,26 @@ defmodule Ouroboros.Gateway.Methods do
       {:ok,
        activity(
          conn_supervisor:
-           Process.get(:ouroboros_gateway_conn_supervisor, Ouroboros.Gateway.ConnSupervisor)
+           Process.get(:ouroboros_gateway_conn_supervisor, Ouroboros.Gateway.ConnSupervisor),
+         max_age_ms: Activity.limits().cache_ms
        )}
     end)
   end
 
   @doc """
-  What this node is doing right now, counted rather than inferred.
+  What work this node is holding, counted rather than inferred.
 
-  This is the summary `runtime.activity` answers with and the one
-  `Ouroboros.Gateway.Conn` consults for `runtime.shutdown`'s `require_idle`, so the
-  method a client can read and the gate that refuses it cannot disagree.
+  The counting itself lives in `Ouroboros.Gateway.Activity`, which owns the bounds, the
+  in-flight ledger and the cache; this is the name the gateway and its tests call it by.
+  Read that module for what is counted and, just as importantly, for what is not.
 
-  Three sources, each asked once and each bounded:
-
-    * the live native session processes registered in `Ouroboros.SessionRegistry`, for
-      the turns they hold — an active turn is one running turn, and each session's
-      submitted queue is that many queued ones. A session that has retired between the
-      registry read and the question holds nothing; a session that does not answer
-      inside the whole enumeration's budget makes both counters unknown rather than
-      smaller.
-    * `Ouroboros.Attachments`, for the uploads and decoder tasks it is holding. An
-      absent service counts zero and not unknown: every transfer's staged chunks live
-      in that process's state and every normalizer task is its child, killed with it,
-      so there is nothing in flight for it to have lost. A service that is *there* and
-      does not answer is unknown, which is a different fact.
-    * the gateway's own connection supervisor, for the clients attached to this
-      listener. `:count_children` is asked directly rather than through
-      `DynamicSupervisor.count_children/1` because that function waits `:infinity`, and
-      nothing in an idle check may wait without a deadline.
-
-  `idle` is decided by the four work counters alone. A connected client is somebody
-  watching rather than work in flight — the caller of this function is always one of
-  them, and the proposal's own restart transition expects attached UIs to reconnect
-  afterwards. Its count is still reported, and an `operator_clients` this build could
-  not establish still makes `idle` unknown, because a summary with a hole in it is not
-  evidence that a node is quiet. A connection supervisor that is not there is therefore
-  unknown rather than zero, unlike an absent attachment service: the caller of the
-  `require_idle` gate is always a connection whose supervisor is its own parent, so a
-  missing one there is a broken listener and not an empty one. The cost is stated: asked
-  on a node whose gateway was never enabled — through `Ouroboros.Web.Call`, say — this
-  reports `operator_clients` unknown, and so reports the node unknown.
-
-  Node-local by construction: no cluster fan-out, no `:erpc`, nothing that another
-  machine's silence can hold open.
+  Options name the sources — `:session_registry`, `:attachments`, `:conn_supervisor` —
+  and `:max_age_ms` says how stale an answer the caller will take. It defaults to `0`,
+  a fresh walk, because the caller that matters most is the idle gate; the read verb
+  asks for a cached one explicitly.
   """
   @spec activity(keyword()) :: map()
-  def activity(opts \\ []) do
-    {running, queued} = turn_activity()
-
-    {transfers, normalizations} =
-      attachment_activity(Keyword.get(opts, :attachments, Ouroboros.Attachments))
-
-    clients =
-      operator_clients(Keyword.get(opts, :conn_supervisor, Ouroboros.Gateway.ConnSupervisor))
-
-    counters = [
-      {"running_turns", running},
-      {"queued_turns", queued},
-      {"attachment_transfers", transfers},
-      {"attachment_normalizations", normalizations},
-      {"operator_clients", clients}
-    ]
-
-    unknown = for {field, nil} <- counters, do: field
-
-    idle =
-      if unknown == [],
-        do: running + queued + transfers + normalizations == 0,
-        else: nil
-
-    counters
-    |> Map.new()
-    |> Map.put("idle", idle)
-    |> Map.put("unknown", unknown)
-  end
-
-  defp turn_activity do
-    deadline = System.monotonic_time(:millisecond) + @activity_turn_budget_ms
-
-    case live_session_runtimes() do
-      :unknown ->
-        {nil, nil}
-
-      pids ->
-        Enum.reduce_while(pids, {0, 0}, fn pid, {running, queued} ->
-          remaining = deadline - System.monotonic_time(:millisecond)
-
-          if remaining <= 0 do
-            {:halt, {nil, nil}}
-          else
-            count_session_turns(pid, remaining, running, queued)
-          end
-        end)
-    end
-  end
-
-  defp count_session_turns(pid, remaining, running, queued) do
-    case NativeSession.call(pid, :runtime_info, remaining) do
-      {:ok, %{active_turn_id: active, queued_turns: waiting}} when is_integer(waiting) ->
-        {:cont, {running + if(is_nil(active), do: 0, else: 1), queued + waiting}}
-
-      # It retired between the registry read and the question. A session that no longer
-      # exists is not work this node would lose.
-      {:error, :not_found} ->
-        {:cont, {running, queued}}
-
-      _unanswered ->
-        {:halt, {nil, nil}}
-    end
-  end
-
-  defp live_session_runtimes do
-    Registry.select(Ouroboros.SessionRegistry, [{{{:runtime, :_}, :"$1", :_}, [], [:"$1"]}])
-  rescue
-    ArgumentError -> :unknown
-  end
-
-  defp attachment_activity(server) do
-    case GenServer.whereis(server) do
-      nil ->
-        {0, 0}
-
-      pid ->
-        case GenServer.call(pid, :activity, @activity_call_budget_ms) do
-          %{transfers: transfers, normalizations: normalizations}
-          when is_integer(transfers) and is_integer(normalizations) ->
-            {transfers, normalizations}
-
-          _unrecognized ->
-            {nil, nil}
-        end
-    end
-  catch
-    :exit, _reason -> {nil, nil}
-  end
-
-  defp operator_clients(supervisor) do
-    case GenServer.whereis(supervisor) do
-      nil ->
-        nil
-
-      pid ->
-        case GenServer.call(pid, :count_children, @activity_call_budget_ms) do
-          counts when is_list(counts) -> active_children(Keyword.get(counts, :active))
-          %{active: active} -> active_children(active)
-          _unrecognized -> nil
-        end
-    end
-  catch
-    :exit, _reason -> nil
-  end
-
-  defp active_children(active) when is_integer(active) and active >= 0, do: active
-  defp active_children(_other), do: nil
+  def activity(opts \\ []), do: Activity.summary(opts)
 
   @doc false
   def handle_runtime_providers(_params) do

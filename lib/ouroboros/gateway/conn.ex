@@ -95,6 +95,7 @@ defmodule Ouroboros.Gateway.Conn do
 
   alias Ouroboros.Cluster
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Gateway.Writer
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
@@ -566,10 +567,27 @@ defmodule Ouroboros.Gateway.Conn do
 
   defp invoke(method, id, params, entry, state) do
     case Map.fetch(@conn_methods, method) do
-      {:ok, {:subscribe, plane}} -> subscribe(state, plane, id, params)
-      {:ok, {:unsubscribe, plane}} -> unsubscribe(state, plane, id, params)
-      {:ok, {:shutdown, _plane}} -> shutdown(state, id, params)
+      {:ok, conn_method} -> invoke_here(method, conn_method, id, params, state)
       :error -> accept(state, id, method, params, entry)
+    end
+  end
+
+  # A method answered here never reaches `Methods.invoke_handler/2`, which is where every
+  # dispatched method's parameter object meets `Contract.validate/2`. That gap is not a
+  # detail: `runtime.shutdown` declares one optional boolean, and without this an object
+  # carrying `requireIdle` — or any other near miss — was accepted, ignored, and answered
+  # with an unconditional stop. So the envelope is checked here, once, for all three.
+  defp invoke_here(method, conn_method, id, params, state) do
+    case Contract.validate(method, params) do
+      :ok ->
+        case conn_method do
+          {:subscribe, plane} -> subscribe(state, plane, id, params)
+          {:unsubscribe, plane} -> unsubscribe(state, plane, id, params)
+          {:shutdown, _plane} -> shutdown(state, id, params)
+        end
+
+      {:invalid, message} ->
+        respond_error(state, id, :invalid_params, message)
     end
   end
 
@@ -812,12 +830,18 @@ defmodule Ouroboros.Gateway.Conn do
     end
   end
 
-  # Read in this process, before anything is written and before any stop is scheduled:
-  # the refusal has to be the whole of what this frame did. The summary is the one
-  # `runtime.activity` answers with, asked through the same function, so a client cannot
-  # be shown an idle runtime by one verb and refused by the other.
+  # Read before anything is written and before any stop is scheduled: the refusal has to
+  # be the whole of what this frame did. The summary is the one `runtime.activity`
+  # answers with, asked through the same function, so a client cannot be shown an idle
+  # runtime by one verb and refused by the other — but asked *fresh*, because the read
+  # verb's quarter-second cache is a rate limit on a reader and a quarter-second-old
+  # picture of the node is not a thing a stop may be authorized by.
+  #
+  # The walk itself happens in `Ouroboros.Gateway.Activity`, not here: this process owns
+  # a socket and traps exits, and the concurrent probe belongs somewhere neither of those
+  # is true.
   defp shutdown_if_idle(state, rpc_id) do
-    activity = Methods.activity(conn_supervisor: state.conn_supervisor)
+    activity = Methods.activity(conn_supervisor: state.conn_supervisor, max_age_ms: 0)
 
     case Map.get(activity, "idle") do
       true ->

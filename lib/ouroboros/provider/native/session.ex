@@ -2266,6 +2266,7 @@ defmodule Ouroboros.Provider.Native.Session do
       active_turn_id: state.active_turn_id,
       queued_turn_ids: Enum.map(:queue.to_list(state.queue), &elem(&1, 0)),
       queued_turns: :queue.len(state.queue),
+      busy?: busy?(state),
       pending_approvals: length(approvals),
       approval_requests: approvals,
       output_high_water: Output.high_water(state.output),
@@ -2998,13 +2999,18 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  defp fence_idle(state) do
+  defp fence_idle(state), do: if(busy?(state), do: {:error, :native_session_busy}, else: :ok)
+
+  # The one place this session decides whether it is holding work, so the maintenance
+  # fence above and the `busy?` field `runtime_snapshot/1` publishes cannot drift apart.
+  # `Ouroboros.Gateway.Activity` reads that field for the idle gate: before it existed,
+  # a compaction or an unresolved approval was invisible to a `require_idle` shutdown
+  # while this predicate — over the very same terms — was refusing a fence.
+  defp busy?(state) do
     unresolved = map_size(state.approval_timers) + map_size(state.background_approvals)
 
-    if is_nil(state.loop) and state.active_turn_id == nil and :queue.is_empty(state.queue) and
-         unresolved == 0 and is_nil(state.compaction_operation),
-       do: :ok,
-       else: {:error, :native_session_busy}
+    not (is_nil(state.loop) and state.active_turn_id == nil and :queue.is_empty(state.queue) and
+           unresolved == 0 and is_nil(state.compaction_operation))
   end
 
   defp native_fence_snapshot(state, fence_generation) do
