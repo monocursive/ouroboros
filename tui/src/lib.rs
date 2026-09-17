@@ -14,6 +14,8 @@ pub mod clipboard;
 pub mod config;
 pub mod continuation;
 pub mod fleet;
+pub mod fleet_network;
+pub mod fleet_protocol;
 pub mod image_upload;
 pub mod images;
 pub mod keymap;

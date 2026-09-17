@@ -117,10 +117,36 @@ defmodule Ouroboros.MixProject do
         # both consumers take: a server deploy unpacks it, and `ouro` bakes it into the
         # client binary. Assembling without it would leave the packaging step to a
         # hand-written `tar` invocation whose contents nobody checks.
-        steps: [:assemble, :tar],
+        steps: [:assemble, &write_build_metadata/1, :tar],
         applications: [ouroboros: :permanent, runtime_tools: :permanent]
       ]
     ]
+  end
+
+  # `ouro fleet protocol --json` has to answer with the fleet protocol revision, the OTP
+  # release and the Elixir version *without starting a BEAM*, because it is the command an
+  # onboarding preflight calls before there is a runtime to ask. `ouro` is a Rust binary:
+  # it cannot derive any of that from the tarball it embeds. So the facts are recorded
+  # here, between `:assemble` and `:tar`, where they are facts — the ERTS that `mix
+  # release` just copied into this tree is the ERTS these versions describe — and the
+  # client reads this one file back out of the tarball. See `tui/src/fleet_protocol.rs`,
+  # and `scripts/release-smoke.py`, which asserts that the shipped client and this file
+  # still agree.
+  defp write_build_metadata(%Mix.Release{} = release) do
+    metadata = %{
+      schema: 1,
+      fleet_protocol_revision: Ouroboros.Cluster.fleet_protocol_revision(),
+      ouroboros_version: to_string(release.version),
+      otp_release: to_string(:erlang.system_info(:otp_release)),
+      elixir_version: System.version()
+    }
+
+    File.write!(
+      Path.join(release.version_path, "ouroboros-build.json"),
+      Jason.encode!(metadata) <> "\n"
+    )
+
+    release
   end
 
   # Run "mix help compile.app" to learn about applications.

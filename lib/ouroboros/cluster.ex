@@ -1119,6 +1119,16 @@ defmodule Ouroboros.Cluster do
   @fleet_protocol_revision 5
   @runtime_contract_keys [:fleet_protocol_revision, :ouroboros_version, :otp_release]
 
+  @doc """
+  The manual compatibility fence above, as a value.
+
+  Release packaging records it beside the boot scripts so `ouro fleet protocol` can
+  answer with it without starting a runtime; `tui/src/fleet_protocol.rs` carries the same
+  integer and a test that parses this file rather than trusting the copy.
+  """
+  @spec fleet_protocol_revision() :: pos_integer()
+  def fleet_protocol_revision, do: @fleet_protocol_revision
+
   @type role :: :core | :builder | :signer
   @type strategy :: :none | :epmd | :gossip | :dns
   @type posture :: %{node: node(), role: role(), running: boolean()}

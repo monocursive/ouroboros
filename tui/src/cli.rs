@@ -1506,7 +1506,13 @@ pub enum FleetCommand {
         command: FleetTagCommand,
     },
     /// Print the machine-management protocol revision, without starting a runtime.
-    Protocol,
+    Protocol {
+        /// Print this binary's whole build contract instead of the bare revision:
+        /// protocol revision, Ouroboros version, OTP and Elixir releases, and platform.
+        /// Still starts no runtime; unknown facts are null rather than guessed.
+        #[arg(long)]
+        json: bool,
+    },
     /// Give this machine its cluster identity: node name, private cookie, TLS materials
     /// and a private EPMD port.
     Create {
@@ -1550,10 +1556,33 @@ pub enum FleetCommand {
     },
 
     /// Show this machine's non-secret cluster identity and next action.
-    Status,
+    Status {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        /// Incomplete setup exits non-zero even when some steps succeeded.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Check local security plus live cluster connectivity and compatibility when running.
-    Doctor,
+    Doctor {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+
+        /// Additionally probe the private-network route to one visible device, by the
+        /// name its network client reports or by its private address. This contacts
+        /// that one device and nothing else.
+        #[arg(long, value_name = "NAME|ADDRESS")]
+        peer: Option<String>,
+    },
+
+    /// List this machine's fleet members alongside the devices its network client can
+    /// see. Contacts no device and inspects no installation.
+    Devices {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Edit this machine's view of which other machines are in the cluster.
     Members {
@@ -1906,6 +1935,25 @@ mod tests {
             vec!["daemon", "--token", "secret"],
             vec!["fleet", "join", "invite", "--token", "secret"],
             vec!["fleet", "service", "install", "--token", "secret"],
+            vec!["fleet", "devices", "--token", "secret"],
+            vec!["fleet", "devices", "--password", "secret"],
+            vec![
+                "fleet",
+                "doctor",
+                "--peer",
+                "buildbox",
+                "--password",
+                "secret",
+            ],
+            vec![
+                "fleet",
+                "doctor",
+                "--peer",
+                "buildbox",
+                "--passphrase",
+                "secret",
+            ],
+            vec!["fleet", "protocol", "--token", "secret"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied())).is_err(),

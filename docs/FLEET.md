@@ -89,9 +89,26 @@ compatibility is a manual fence — `@fleet_protocol_revision` in `cluster.ex`, 
 Ouroboros version and OTP release — so a mixed-revision cluster is named rather than
 silently trusted.
 
-The core reduction uses protocol revision **3**. Pre-reduction runtimes advertise
-revision **2** and expose remote APIs this build removed; upgrade peers to the same
-revision before placing work between them.
+This build uses protocol revision **5**, the `@fleet_protocol_revision` literal in
+`cluster.ex`. Machines on different revisions do not form a fleet: the contract is
+compared exactly, so upgrade peers to the same revision before placing work between them.
+
+`ouro fleet protocol` prints that number and starts no runtime, which is what makes it
+callable before a machine has one. It reads the revision from `tui/src/fleet_protocol.rs`,
+and a test there parses `cluster.ex` and fails the build if the two ever disagree.
+
+```sh
+ouro fleet protocol          # 5
+ouro fleet protocol --json   # the whole build contract
+```
+
+`--json` prints `fleet_protocol_revision`, `ouroboros_version`, `otp_release`,
+`elixir_version`, `os`, `arch` and `embedded_release`. The two runtime versions come from
+`releases/<version>/ouroboros-build.json`, which `mix release` writes into the release
+tree and the packaged client reads back out of the tarball it embeds — a Rust binary
+cannot derive an OTP release from bytes it never boots. A development build has no
+embedded release: it reports `null` for both and `embedded_release: false` rather than
+guessing at a number an operator would compare against a peer.
 
 ## Two machines, by hand
 
@@ -138,8 +155,52 @@ Then, from either machine:
 ```sh
 ouro fleet status     # this machine's identity, plus the live roster when a runtime answers
 ouro fleet doctor     # local security and, when running, live connectivity and compatibility
+ouro fleet devices    # the roster beside the devices this machine's network client sees
 ouro new --machine vps --workspace /absolute/path/on/vps/project
 ```
+
+## Seeing the private network
+
+`ouro fleet devices` merges this machine's roster with the peers the installed Tailscale
+client can see, so the two questions — *who is in my fleet* and *what is on this network* —
+are answered side by side. It runs `tailscale status --json` once, with a five second
+deadline and a bounded read. It contacts no device, opens no SSH connection, and writes
+nothing. A discovered peer's Ouroboros state is `discovered_installation_unknown`: nothing
+here has inspected one, so nothing here calls one uninstalled.
+
+The client is found on `$PATH`, then at the usual macOS and Linux locations. Set
+`OUROBOROS_TAILSCALE` to an absolute path to name a different one; an override that is not
+an executable file is a refusal rather than a quiet fall through to another program.
+
+Discovery has distinct outcomes, and `--json` reports each under a stable `code`:
+`client_missing`, `signed_out`, `permission_denied`, `unavailable` (with a `reason` such
+as `backend_stopped` or `timeout`), `no_visible_peers`, and `ok`. They are kept apart
+because they have five different repairs. Known roster members are listed even when
+discovery fails — a client that cannot answer is not evidence that the fleet has no
+members — and a member with no matching visible peer is `fleet_member_not_visible`, which
+is not the same fact as powered off.
+
+Tailscale is never identified by a `100.x` address prefix or a `.ts.net` suffix; Headscale
+issues its own ranges and suffix, and every decision here comes from the client's own
+reported fields. A connection path is reported only when it was observed: a peer's
+configured DERP region is inventory, not a claim that traffic is relayed through it.
+
+`ouro fleet status --json` and `ouro fleet doctor --json` print the same kind of document.
+Unavailable facts are `null`. `status --json` exits non-zero when this machine's setup is
+incomplete, even if some steps succeeded; the human `ouro fleet status` is unchanged and
+still exits 0.
+
+`ouro fleet doctor` gains a **network client** layer after its existing report: which
+client answered, its version, this device's private address, and whether that address is
+bindable here. A missing or signed-out client is a note rather than a failure, because a
+fleet configured by hand over a private LAN has no client to find.
+
+`ouro fleet doctor --peer NAME|ADDRESS` additionally probes the route to one visible
+device with a single `tailscale ping`, and reports `reachable`, `timed_out`, `unknown` or
+`peer_unknown`, with the path `direct`, `relayed` or `unknown` — only ever the one that
+was observed. A relay is a valid connection. An overlay probe does not establish that the
+distribution ports are open, so it is a separate layer from the runtime's own connectivity
+check, and a probe that was asked for and did not succeed exits non-zero.
 
 `create --from` refuses a directory that is not a complete copy of a fleet directory, and
 refuses a `--machine` name the copied roster already holds. It writes no `ca-key.pem` on the

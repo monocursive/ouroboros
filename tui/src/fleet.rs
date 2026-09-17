@@ -338,7 +338,7 @@ impl Profile {
 }
 
 /// Non-secret state suitable for Settings and status panes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Summary {
     pub profile: Option<Profile>,
     pub tls: bool,
@@ -1415,6 +1415,22 @@ pub struct DoctorReport {
     data_dir: PathBuf,
     checks: Vec<Check>,
     scope: String,
+}
+
+impl DoctorReport {
+    /// What this run covered, for a machine-readable form of the same report.
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// The checks as `(level, message)` in report order, where the level is the stable
+    /// code `[ok]`, `[note]` and `[fix]` stand for in the text.
+    pub fn entries(&self) -> Vec<(&'static str, &str)> {
+        self.checks
+            .iter()
+            .map(|check| (check.level.code(), check.message.as_str()))
+            .collect()
+    }
 }
 
 pub fn doctor(data_dir: &Path) -> DoctorReport {
@@ -3055,7 +3071,7 @@ fn ensure_usable_ipv4_resolution(host: &str) -> Result<()> {
 /// credentials. This uses an ephemeral port and immediately drops it; the distribution
 /// and gateway ports remain untouched. A split-DNS typo then fails at create/join rather
 /// than turning a generated recovery service into a boot loop.
-fn ensure_local_bind_address(host: &str) -> Result<Ipv4Addr> {
+pub(crate) fn ensure_local_bind_address(host: &str) -> Result<Ipv4Addr> {
     let address = resolve_fleet_ipv4(host)?;
     let listener = TcpListener::bind((address, 0)).with_context(|| {
         format!(
@@ -4454,6 +4470,15 @@ impl CheckLevel {
             Self::Ok => "[ok]",
             Self::Warn => "[note]",
             Self::Problem => "[fix]",
+        }
+    }
+
+    /// The same three levels as stable codes, for `--json`.
+    fn code(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warning",
+            Self::Problem => "problem",
         }
     }
 }

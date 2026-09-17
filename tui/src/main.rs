@@ -49,7 +49,7 @@ use ouro::transport::{
 };
 use ouro::ui::boot::{Boot, BootEvent, BootProgress, Progress};
 use ouro::ui::{self, App, Mode, Quit, Screen};
-use ouro::{fleet, proto, runtime, status, transport};
+use ouro::{fleet, fleet_network, fleet_protocol, proto, runtime, status, transport};
 
 /// How long a runtime is given to stop before it is killed. `System.stop/0` and a
 /// SIGTERM both run the same orderly shutdown, and a runtime with durable journals is
@@ -1234,8 +1234,18 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             }
             Ok(())
         }
-        FleetCommand::Protocol => {
-            println!("2");
+        FleetCommand::Protocol { json } => {
+            // The bare number is what scripts already read, so it stays a bare number.
+            // `--json` is the build contract an onboarding preflight compares, and both
+            // forms answer from this binary alone: no runtime is started either way.
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fleet_protocol::build_metadata())?
+                );
+            } else {
+                println!("{}", fleet_protocol::FLEET_PROTOCOL_REVISION);
+            }
             Ok(())
         }
         FleetCommand::Create {
@@ -1326,8 +1336,9 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             );
             Ok(())
         }
-        FleetCommand::Status => {
+        FleetCommand::Status { json } => {
             let mut rendered = None;
+            let mut live = None;
             if let Some(publication) = runtime::read_live_publication(&paths.data_dir)? {
                 let query = async {
                     let token = runtime::read_token(&paths.token_file())?;
@@ -1346,19 +1357,47 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 }
                 .await;
                 match query {
-                    Ok(value) => rendered = fleet::render_live_status(&paths.data_dir, &value),
+                    Ok(value) => {
+                        rendered = fleet::render_live_status(&paths.data_dir, &value);
+                        live = Some(value);
+                    }
+                    Err(error) if json => {
+                        // In the machine-readable form an unreachable runtime is a fact
+                        // in the document, not a line on someone's stderr.
+                        live = Some(json!({ "available": false, "detail": format!("{error:#}") }));
+                    }
                     Err(error) => eprintln!(
                         "ouro: live fleet details are temporarily unavailable ({error}); showing this machine's saved profile"
                     ),
                 }
             }
-            print!(
+            if !json {
+                print!(
+                    "{}",
+                    rendered.unwrap_or(fleet::render_status(&paths.data_dir)?)
+                );
+                return Ok(());
+            }
+
+            let summary = fleet::summary(&paths.data_dir);
+            let inventory = fleet_network::inventory().await;
+            println!(
                 "{}",
-                rendered.unwrap_or(fleet::render_status(&paths.data_dir)?)
+                serde_json::to_string_pretty(&fleet_network::status_json(
+                    &summary,
+                    &inventory,
+                    live.as_ref()
+                ))?
             );
-            Ok(())
+            if fleet_network::status_ready(&summary) {
+                Ok(())
+            } else {
+                // The proposal: incomplete setup exits non-zero even when some steps
+                // succeeded. The human form's exit code is unchanged.
+                bail!("fleet setup on this machine is incomplete")
+            }
         }
-        FleetCommand::Doctor => {
+        FleetCommand::Doctor { json, peer } => {
             let local = fleet::doctor(&paths.data_dir);
             let report = if let Some(publication) = runtime::read_live_publication(&paths.data_dir)?
             {
@@ -1385,12 +1424,53 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             } else {
                 fleet::doctor_stopped(local)
             };
-            print!("{}", report.text);
-            if report.healthy {
+
+            // Discovery is read-only and contacts nothing. The route probe contacts the
+            // one device the operator named on the command line, and only that one.
+            let inventory = fleet_network::inventory().await;
+            let probe = match peer.as_deref() {
+                Some(peer) => Some(fleet_network::probe_route(&inventory, peer).await),
+                None => None,
+            };
+            let healthy = fleet_network::doctor_healthy(&report, probe.as_ref());
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fleet_network::doctor_json(
+                        &report,
+                        &inventory,
+                        probe.as_ref()
+                    ))?
+                );
+            } else {
+                print!("{}", report.text);
+                print!(
+                    "{}",
+                    fleet_network::render_doctor_layers(&inventory, probe.as_ref())
+                );
+            }
+
+            if healthy {
                 Ok(())
             } else {
                 bail!("fleet doctor found setup problems")
             }
+        }
+        FleetCommand::Devices { json } => {
+            let summary = fleet::summary(&paths.data_dir);
+            let inventory = fleet_network::inventory().await;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fleet_network::devices_json(
+                        &summary, &inventory
+                    ))?
+                );
+            } else {
+                print!("{}", fleet_network::render_devices(&summary, &inventory));
+            }
+            Ok(())
         }
         FleetCommand::Members { command } => match command {
             FleetMembersCommand::Add {

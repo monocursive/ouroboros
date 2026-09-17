@@ -90,6 +90,25 @@ def smoke(binary, version, target, *, require_self_update=False):
             doctor = json.loads(run(str(helpers[0]), "doctor"))
             if doctor["usable"] is not True or doctor["target"] != target:
                 raise ValueError("helper cannot run or has the wrong architecture")
+            # One fleet protocol revision, and one set of runtime versions. The client
+            # reports these without starting a BEAM, so nothing but this check would
+            # catch a packaged binary answering for a release it does not carry.
+            metadata = list((release / "releases").glob("*/ouroboros-build.json"))
+            if len(metadata) != 1:
+                raise ValueError("expected exactly one release build metadata file")
+            recorded = json.loads(metadata[0].read_text())
+            reported = json.loads(run(str(installed), "fleet", "protocol", "--json"))
+            for field in ("fleet_protocol_revision", "ouroboros_version",
+                          "otp_release", "elixir_version"):
+                if reported[field] != recorded[field]:
+                    raise ValueError(
+                        f"packaged `ouro fleet protocol --json` reports {field}="
+                        f"{reported[field]!r}; its release records {recorded[field]!r}")
+            if reported["embedded_release"] is not True:
+                raise ValueError("a packaged binary must report an embedded release")
+            if run(str(installed), "fleet", "protocol").strip() != str(
+                    recorded["fleet_protocol_revision"]):
+                raise ValueError("`ouro fleet protocol` and `--json` disagree")
             # macOS runners contain Homebrew libraries a user's machine may not have.
             # Inspect every Mach-O, including crypto/sqlite NIFs, for such dependencies.
             if target.endswith("apple-darwin"):

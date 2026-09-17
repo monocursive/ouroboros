@@ -1095,10 +1095,28 @@ ouro fleet sessions restore NAME
 ouro fleet tag add|remove TAG [--machine NAME]
 ouro fleet tag list [--machine NAME]
                       edit local or connected target tags; visible next probe
-ouro fleet status     expected/connected/offline machines, OS/arch, tags and TLS
-                      posture, and the machines this roster declares gone
-ouro fleet doctor     actionable profile/network/runtime checks, including any
-                      fleet-directory entry `leave` would refuse to remove
+ouro fleet protocol [--json]
+                      the fleet protocol revision this build speaks, without
+                      starting a runtime. --json adds the Ouroboros version, the
+                      OTP and Elixir releases recorded by release packaging, the
+                      platform, and whether a release is embedded; unknown
+                      versions are null rather than guessed
+ouro fleet status [--json]
+                      expected/connected/offline machines, OS/arch, tags and TLS
+                      posture, and the machines this roster declares gone.
+                      --json adds the build contract and this machine's network
+                      inventory, and exits non-zero on incomplete setup
+ouro fleet devices [--json]
+                      the roster beside the devices the installed Tailscale
+                      client can see. One `tailscale status --json`, bounded and
+                      deadlined; contacts no device and inspects no installation,
+                      so a discovered peer is never labelled uninstalled
+ouro fleet doctor [--json] [--peer NAME|ADDRESS]
+                      actionable profile/network/runtime checks, including any
+                      fleet-directory entry `leave` would refuse to remove, plus
+                      the network-client layer. --peer probes the route to one
+                      visible device with a single overlay ping and reports only
+                      the path it observed
 ouro fleet leave      remove this stopped machine's cluster credentials safely,
                       including a directory whose profile.json never landed
 ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
