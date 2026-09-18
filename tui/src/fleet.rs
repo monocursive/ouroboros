@@ -3108,7 +3108,7 @@ pub fn validate_machine(machine: &str) -> Result<()> {
     Ok(())
 }
 
-fn local_hostname() -> Result<String> {
+pub fn local_hostname() -> Result<String> {
     let mut buffer = [0 as libc::c_char; 256];
     // SAFETY: `buffer` is writable for the exact length supplied. A final zero is forced
     // in case a platform truncates without terminating.
