@@ -45,10 +45,11 @@ requirements and upgrade instructions are in the
 
 ### Fleet
 
-- Discovery works from a daemon on a Mac with the Tailscale app installed. The client
-  is now looked for on `$PATH` before the app bundle, and a client that answers with a
-  sentence instead of a status document is skipped for the next one; before this, every
-  runtime on such a Mac listed no devices and named this machine "this device".
+- Discovery works from a daemon on a Mac with the Tailscale app installed. A client
+  that answers with a sentence instead of a status document, or fails outright, is
+  skipped for the next one (the app bundle's CLI needs a GUI session; the Homebrew one
+  does not); before this, every runtime on such a Mac listed no devices and named this
+  machine "this device".
 - A Linux machine added to the fleet gets a working startup service. The generated
   systemd unit quoted `WorkingDirectory=`, which systemd 257 refuses; the unit is now
   written the way systemd reads it, the error shown is the real one rather than the

@@ -2432,7 +2432,7 @@ impl Engine {
         let Some(member) = profile
             .members
             .iter()
-            .find(|member| member.machine == machine)
+            .find(|member| crate::fleet::same_name(&member.machine, &machine))
             .cloned()
             .or_else(|| {
                 let record = journal?.record();

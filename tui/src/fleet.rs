@@ -2669,6 +2669,9 @@ fn generated_runtime_files_spelled(data_dir: &Path, profile: &Profile) -> Result
 /// service unit says `/private/tmp/…`, or the spelling an older build wrote — then
 /// compares equal to the generated one, and a path that resolves anywhere else, or a
 /// value that is not a path at all, is left exactly as it is and fails the comparison.
+/// The files a generated policy may name inside the fleet directory.
+const GENERATED_FILES: [&str; 4] = [CA_CERT_FILE, NODE_CERT_FILE, NODE_KEY_FILE, TLS_OPTFILE];
+
 fn respelled(text: &str, canonical_root: &Path) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -2679,11 +2682,24 @@ fn respelled(text: &str, canonical_root: &Path) -> String {
             break;
         };
         let quoted = &rest[..close];
-        let resolved = Path::new(quoted)
-            .canonicalize()
-            .ok()
-            .filter(|path| path.parent() == Some(canonical_root));
-        match resolved.and_then(|path| erl_string(&path).ok()) {
+        // The *directory* the file names is what gets resolved, never the file: a
+        // symlink somewhere else that points into the fleet directory would resolve
+        // into it and read as the generated policy while the file on disk — the one
+        // the BEAM hands to `ssl` — still named the outside path, which whoever owns
+        // that symlink can point anywhere later. So the spelling has to be a spelling
+        // of the fleet directory itself, followed by one of the generated file names.
+        let literal = Path::new(quoted);
+        let respelled = match (literal.parent(), literal.file_name()) {
+            (Some(parent), Some(name)) if GENERATED_FILES.iter().any(|file| name == *file) => {
+                parent
+                    .canonicalize()
+                    .ok()
+                    .filter(|directory| directory == canonical_root)
+                    .map(|directory| directory.join(name))
+            }
+            _other => None,
+        };
+        match respelled.and_then(|path| erl_string(&path).ok()) {
             Some(spelling) => out.push_str(&spelling),
             None => out.push_str(quoted),
         }
@@ -7274,6 +7290,35 @@ mod tests {
         .unwrap();
         let refused = validate_materials(&resolved, false).unwrap_err();
         assert!(format!("{refused:#}").contains("strict generated mutual-TLS policy"));
+
+        // And so is a policy naming the CA through a symlink *outside* the fleet
+        // directory that happens to point into it today: the file on disk names the
+        // outside path, and whoever owns that symlink can point it anywhere tomorrow.
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let alias = elsewhere.join(CA_CERT_FILE);
+        std::os::unix::fs::symlink(fleet_dir(&resolved).join(CA_CERT_FILE), &alias).unwrap();
+        let canonical_ca = fleet_dir(&canonical).join(CA_CERT_FILE);
+        let via_alias = tls.replace(
+            &canonical_ca.display().to_string(),
+            &alias.display().to_string(),
+        );
+        assert_ne!(
+            via_alias, tls,
+            "the policy has to name the alias, or this proves nothing"
+        );
+        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), via_alias.as_bytes()).unwrap();
+        let refused = validate_materials(&resolved, false).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("strict generated mutual-TLS policy"),
+            "a path outside the fleet directory is never respelled into it: {refused:#}"
+        );
+
+        // A generated name under another directory, and another name under the fleet
+        // directory, are left exactly as written and refused.
+        let other_name = tls.replace(CA_CERT_FILE, "ca-cert.pem.bak");
+        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), other_name.as_bytes()).unwrap();
+        assert!(validate_materials(&resolved, false).is_err());
     }
 
     /// F1: `revoke-<64 hex>.json` is durable state on any machine whose lab ever revoked

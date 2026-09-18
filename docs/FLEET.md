@@ -304,8 +304,9 @@ deadline and a bounded read. It contacts no device, opens no SSH connection, and
 nothing. A discovered peer's Ouroboros state is `discovered_installation_unknown`: nothing
 here has inspected one, so nothing here calls one uninstalled.
 
-The client is found on `$PATH`, then at the usual macOS and Linux locations; a client
-that runs but answers with no status document is skipped for the next candidate. Set
+The client is looked for at the usual macOS and Linux locations, then on `$PATH`; a
+client that runs but answers with no status document, or fails outright, is skipped for
+the next candidate, while a permission refusal is the answer and stops the search. Set
 `OUROBOROS_TAILSCALE` to name a different one. It must be **absolute** — a relative name
 would let the directory you happen to be standing in decide which program runs as your
 network client — and an override that is not an absolute path to an executable file is a

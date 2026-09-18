@@ -273,7 +273,7 @@ surfaces now draw. In order:
 
 | Commit | What it does | Finding |
 |---|---|---|
-| `30366b2c` | Tailscale lookup tries `$PATH` first and skips a client that answers no status document; the detail quotes the client; self row named from the host name; `suggested_machine` on every row | 1, 3 |
+| `30366b2c` | Tailscale lookup skips a client that answers no status document (and, after review, one that fails outright; known locations stay ahead of `$PATH`); the detail quotes the client; self row named from the host name; `suggested_machine` on every row | 1, 3 |
 | `aa271a78` | systemd unit `WorkingDirectory=` unquoted; the manager line repeated is the one that reads as a failure; a refused hand-off removes its `default.target.wants` symlink | 10 |
 | `93800bdf` | `install` enables lingering on Linux so a headless member starts at boot | — |
 | `9b7aca3f` | broker: `kind: "leave"`, `target.machine` required for `add`, `worker_exit` on a journal answer, `dev_runtime` blocker for `setup` | 2, 5, 7, 8 |
