@@ -3603,6 +3603,33 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       end
     end
 
+    test "a member whose setup just finished still has a way into its details",
+         %{conn: conn, root: root} do
+      journal!(root, "00aa00aa00aa00a3", %{
+        "state" => "completed",
+        "kind" => "add",
+        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"}
+      })
+
+      {:ok, view, html} = live(conn, "/devices")
+
+      # The completed add is the fresher fact and its primary control opens the machines
+      # page — which is not where Remove from fleet lives. Without a second control the
+      # details panel, and the removal inside it, were unreachable for as long as the
+      # journal was the newest thing known about the machine.
+      row = view |> element(~s{[data-address="100.64.0.2"]}) |> render()
+      assert row =~ "set up just now"
+      assert row =~ ~s(href="/status")
+
+      html =
+        view
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
+        |> render_click()
+
+      assert html =~ "Remove from fleet"
+      _ = html
+    end
+
     test "the machine a removal finished with can be added again", %{conn: conn, root: root} do
       journal!(root, "00aa00aa00aa00a2", %{
         "state" => "completed",

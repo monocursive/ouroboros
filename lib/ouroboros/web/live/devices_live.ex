@@ -1847,6 +1847,19 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           deploy?={@deploy?}
           blocked={@blocked}
         />
+        <%!-- A member whose latest operation just finished reads "set up just now · Open",
+              and Open goes to the machines page — which left its details panel, and the
+              Remove from fleet inside it, with no way in. The quiet second control keeps
+              the panel reachable whenever the device has one and the primary is not it. --%>
+        <button
+          :if={Devices.inspectable?(@device) and elem(@action || {nil, nil}, 1) != "inspect-device"}
+          type="button"
+          class="ouro-quiet-button"
+          phx-click="inspect-device"
+          phx-value-address={@device["address"]}
+        >
+          Details
+        </button>
       </span>
 
       <span :if={Devices.name_conflict(@device)} class="ouro-devices-note" role="note">
