@@ -1,6 +1,6 @@
 {
   "_fixture": {
-    "note": "What `ouro fleet devices --json` prints. Derived by hand from the sanitized capture in tui/tests/fixtures/tailscale/running-with-peers.json, whose hostnames, addresses, keys and account names are already invented; the peers and their observed states are that file's, rendered through fleet_network::device_rows. `suggested_machine` is what fleet_network::machine_slug makes of each row's name, which for these already-slug-shaped names is the name itself; it is null on the two rows nothing can be deployed to, so that a reader of this fixture also sees the null a surface has to render. Kept here so the Elixir suite never needs the Rust build. This key is not read by anything and proves an unknown top-level key is named in `unknown` rather than passed through.",
+    "note": "What `ouro fleet devices --json` prints. Derived by hand from the sanitized capture in tui/tests/fixtures/tailscale/running-with-peers.json, whose hostnames, addresses, keys and account names are already invented; the peers and their observed states are that file's, rendered through fleet_network::device_rows. Kept here so the Elixir suite never needs the Rust build. This key is not read by anything and proves an unknown top-level key is named in `unknown` rather than passed through. Every row also carries `suggested_machine` (fleet UX review 2026-09-18 section 5.5): the roster name for a member, otherwise a valid slug of the display name, or null when nothing valid remains. It is what a setup form pre-fills with; `name` never is.",
     "source": "tui/tests/fixtures/tailscale/running-with-peers.json"
   },
   "fleet_protocol_revision": 5,
@@ -75,7 +75,7 @@
       "path": "unknown",
       "state": "unsupported_platform",
       "action": "no supported Ouroboros release",
-      "suggested_machine": null
+      "suggested_machine": "pocket-phone"
     },
     {
       "name": "ipv6-only-box",
@@ -87,7 +87,7 @@
       "path": "unknown",
       "state": "no_usable_ipv4",
       "action": "no usable private IPv4 address",
-      "suggested_machine": null
+      "suggested_machine": "ipv6-only-box"
     }
   ]
 }

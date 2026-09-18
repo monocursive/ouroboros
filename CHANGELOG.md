@@ -8,6 +8,35 @@ requirements and upgrade instructions are in the
 
 ## [Unreleased]
 
+### Devices
+
+- The web Devices page is one list instead of two sections. This machine is first,
+  labelled "This Mac" or "This machine"; the fleet's members follow, then the other
+  devices on your network. Each row says what it is, whether it is online and how
+  long ago it was seen, what Ouroboros knows about it, and offers one button — *Set
+  up this Mac*, *Add to fleet*, *Open*, *Continue*, *Retry* or *Details* — or none,
+  when there is nothing to do about it.
+- The words on the page are written for a person rather than copied from the
+  specification. A row that read "Discovered peer; Ouroboros installation unknown"
+  now reads "not set up", and the legend explaining that vocabulary is gone with it.
+  Times are relative ("seen 3 days ago"); the exact timestamp is in a device's
+  details. The search box and the filter appear only when there are more than eight
+  devices.
+- Adding a machine asks for a name, an address and an SSH user, and nothing else up
+  front. The name is pre-filled with a valid fleet name rather than a display name,
+  so a setup no longer fails at the end because "Monocursive's MacBook Pro" is not a
+  machine name. *Add a device by address* now has a name field, which is what it was
+  missing. There is no authentication method to choose: the default SSH identity is
+  used and you are asked for a password only if the machine asks for one. A specific
+  key stays under Advanced — a disclosure that no longer closes itself while you type.
+- A device can be removed from the fleet, from its details panel.
+- When a setup's worker stops without finishing, the page says what the worker said
+  and offers Retry, instead of showing an operation that never moves. A development
+  runtime now says it cannot set a machine up, rather than building a fleet it could
+  never start.
+- A failure to reach Tailscale is reported in Tailscale's own words, and no longer
+  guesses that your Ouroboros may be out of date.
+
 ## [0.1.9] - 2026-09-18
 
 ### Added

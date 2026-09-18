@@ -8,22 +8,33 @@ defmodule Ouroboros.Web.Live.Devices do
   for the same reason `Ouroboros.Web.Presentation` exists: a phrase invented at the call
   site is a phrase the next call site spells differently.
 
-  ## The observed-state table is the proposal's, verbatim
+  ## The words are a person's, not the specification's
 
-  `observed_states/0` is the table under "Devices UI and deployment experience › Inventory"
-  copied word for word, and `state_words/1` and `state_action/1` answer out of it. That is
-  deliberate: the table is the requirement, and a surface that paraphrased it would be
-  deciding for itself what "do not label it uninstalled until inspected" meant.
+  Until the 2026-09-18 fleet review this module answered out of the proposal's
+  observed-state table, verbatim — a row read "Discovered peer; Ouroboros installation
+  unknown" and its button said "Deploy Ouroboros opens preflight". That table is a
+  requirement written for the people building the thing, and rendering it as interface text
+  made every row an instruction to its own implementer. §5 of
+  `docs/design-qa/fleet-ux-review-2026-09-18.md` replaces the vocabulary, and this module is
+  where the replacement lives: **a row is a device, a device has one state and one thing you
+  can do about it.**
 
-  The codes themselves never reach a reader. They reach the markup as `data-state`, where a
-  test can name a row without depending on its wording and a stylesheet can draw one without
-  the wording carrying the meaning on its own — rule: no state by colour alone, and no state
-  by code either.
+  The states themselves did not change and neither did their codes. What a row says about
+  Ouroboros is now one of nine short phrases (`ouroboros_words/1`), what it offers is one of
+  six button names (`row_action/1`) or nothing at all, and presence is a dot, a word and a
+  *relative* time (`presence_word/2`, `relative_time/2`) rather than five facts joined with
+  interpuncts. The exact instant goes in the details panel, where somebody who wants it has
+  asked for it.
+
+  The codes still never reach a reader. They reach the markup as `data-state`, where a test
+  can name a row without depending on its wording and a stylesheet can draw one without the
+  wording carrying the meaning on its own — rule: no state by colour alone, and no state by
+  code either.
 
   ## What this may not do
 
   Claim. Every sentence here describes what was reported, and where nothing was reported it
-  says so. "Not connected" is not "powered off", "not inspected" is not "not installed", and
+  says so. "Not connected" is not "powered off", "not set up" is not "cannot be set up", and
   a network client that could not answer is not a fleet with no members.
   """
 
@@ -33,56 +44,52 @@ defmodule Ouroboros.Web.Live.Devices do
   # at 300 for the same reason: one runaway remote must not own the screen.
   @max_text 300
 
-  # The proposal's table, in its order, as written. `{observed state, primary action}`.
-  @observed_states [
-    {"Discovered peer; Ouroboros installation unknown",
-     "Deploy Ouroboros opens preflight; do not label it uninstalled until inspected"},
-    {"Known compatible fleet member",
-     "View device with readiness, service state and explicit diagnostics"},
-    {"Deployment waiting for input, interrupted or partially complete",
-     "Continue setup for the existing operation"},
-    {"Known member disconnected from this runtime",
-     "Diagnose; disconnected does not establish that the host is powered off"},
-    {"Peer offline, unsupported platform, or no usable IPv4",
-     "Explain the blocker and offer refresh/details; disable deployment while the blocker is established"},
-    {"Current device without a fleet profile",
-     "Set up this device locally, without SSH to itself"}
-  ]
+  # The longest a fleet machine name may be, which is also the cap §5.5 puts on the slug
+  # `ouro fleet devices --json` derives for `suggested_machine`.
+  @max_machine 40
 
-  # `ouro fleet devices --json`'s `state` for a row, joined to the row of the table above it
-  # is an instance of. `this_device` is the one code with no row of its own: the table names
-  # the current device only in its unconfigured form, because a configured local machine is
-  # an ordinary known member that happens to be here.
-  @state_words %{
-    "discovered_installation_unknown" => "Discovered peer; Ouroboros installation unknown",
-    "fleet_member" => "Known compatible fleet member",
-    "fleet_member_connected" => "Known compatible fleet member",
-    "fleet_member_not_visible" => "Known member disconnected from this runtime",
-    "peer_offline" => "Peer offline",
-    "unsupported_platform" => "Unsupported platform for any Ouroboros release",
-    "no_usable_ipv4" => "No usable IPv4 address",
-    "this_device" => "This machine, already set up",
-    "this_device_without_profile" => "Current device without a fleet profile"
+  # What a row says about Ouroboros, from `ouro fleet devices --json`'s `state`. Nine
+  # phrases, fixed by §5.1, and every one of them is something a person would say out loud.
+  # `this_device` is the current machine already set up, which is an ordinary member that
+  # happens to be here.
+  @ouroboros_words %{
+    "this_device" => "in the fleet",
+    "this_device_without_profile" => "not set up",
+    "fleet_member" => "in the fleet",
+    "fleet_member_connected" => "in the fleet",
+    "fleet_member_not_visible" => "in the fleet · not connected",
+    "discovered_installation_unknown" => "not set up",
+    "peer_offline" => "offline",
+    "unsupported_platform" => "can't run Ouroboros",
+    "no_usable_ipv4" => "can't run Ouroboros"
   }
 
-  @state_actions %{
-    "discovered_installation_unknown" => "Deploy Ouroboros",
-    "fleet_member" => "View device",
-    "fleet_member_connected" => "View device",
-    "fleet_member_not_visible" => "Diagnose",
-    "peer_offline" => "Refresh or inspect",
-    "unsupported_platform" => "Nothing to deploy",
-    "no_usable_ipv4" => "Nothing to deploy",
-    "this_device" => "View device",
-    "this_device_without_profile" => "Set up this device"
+  # One button per row, or none. The self row that is already a member opens the machines
+  # panel; a member opens its own details, which is where Remove from fleet lives (§5.4); a
+  # peer nothing has inspected is the one row that offers to add it. Everything else — a
+  # peer that is offline, a platform with no release, an address family this build cannot
+  # reach — offers nothing, because there is nothing it could do, and the reason is in the
+  # words next to it rather than behind a button that refuses.
+  @row_actions %{
+    "this_device" => {"Open", "open-machines"},
+    "fleet_member" => {"Details", "inspect-device"},
+    "fleet_member_connected" => {"Details", "inspect-device"},
+    "fleet_member_not_visible" => {"Details", "inspect-device"},
+    "discovered_installation_unknown" => {"Add to fleet", "deploy"}
   }
 
-  # The two sections of the inventory. A code this build does not know is filed under
-  # "Available on this network", which is the side that makes no claim about membership.
+  # The rows that belong to this fleet rather than to the network around it. Used for the
+  # ordering (§5.1: the self row, then members, then peers) and for the filter that appears
+  # only past eight rows.
   @fleet_states ~w(this_device this_device_without_profile fleet_member fleet_member_connected
                    fleet_member_not_visible)
 
-  # The blockers that must disable deployment while they stand (the table's fifth row).
+  # This machine's own row, whichever way round it is.
+  @self_states ~w(this_device this_device_without_profile)
+
+  # The blockers that stand between a device and any deployment. They are facts the network
+  # client reported, and the row offers nothing while one of them stands rather than
+  # offering something that refuses when pressed.
   @blocked_states ~w(peer_offline unsupported_platform no_usable_ipv4)
 
   @doc """
@@ -92,7 +99,7 @@ defmodule Ouroboros.Web.Live.Devices do
   peer *lying about what it is called*: `U+202E` reverses the characters after it, a
   zero-width space splits a name into two that read as one, and a tab or a newline inside a
   table cell rearranges the row. A device names itself, and this page puts that name next to
-  a Deploy button.
+  an Add to fleet button.
 
   So the same rule the CLI applies to remote text (`sanitize_remote_text/2` in
   `tui/src/fleet_setup/mod.rs`): whitespace collapses to single spaces, every control and
@@ -135,42 +142,102 @@ defmodule Ouroboros.Web.Live.Devices do
     if String.length(text) <= limit, do: text, else: String.slice(text, 0, limit) <> "…"
   end
 
-  @doc "The proposal's observed-state table, verbatim, as `{observed state, primary action}`."
-  @spec observed_states() :: [{String.t(), String.t()}]
-  def observed_states, do: @observed_states
+  # ------------------------------------------------------------------------------------
+  # The list
+  # ------------------------------------------------------------------------------------
 
-  @doc "One device's Ouroboros state, in the table's words."
-  @spec state_words(term()) :: String.t()
-  def state_words(state) when is_binary(state),
-    do: Map.get(@state_words, state, "State this build does not recognise: #{state}")
+  @doc """
+  What this machine is called on its own row: **This Mac** on a Mac, **This machine**
+  everywhere else.
 
-  def state_words(_absent), do: "State not reported"
+  From `host.os`, which is `:os.type/0`'s second element — `darwin` on macOS. A noun rather
+  than an adjective, because the row labelled with it is the one an operator is standing in
+  front of, and "this device" is what the review found on screen where a real name should
+  have been.
+  """
+  @spec self_label(term()) :: String.t()
+  def self_label("darwin"), do: "This Mac"
+  def self_label(_other), do: "This machine"
 
-  @doc "The primary action that state leads to, named as the table names it."
-  @spec state_action(term()) :: String.t()
-  def state_action(state) when is_binary(state), do: Map.get(@state_actions, state, "Details")
-  def state_action(_absent), do: "Details"
+  @doc "Whether this row is the machine the runtime is on, set up or not."
+  @spec self_row?(map()) :: boolean()
+  def self_row?(device) when is_map(device), do: device["state"] in @self_states
+  def self_row?(_other), do: false
 
-  @doc "Whether a row belongs under **Fleet devices** rather than **Available on this network**."
+  @doc """
+  Where a row sorts: this machine first, then the fleet's members, then everything else.
+
+  One list, in one order, which is §5.1's first requirement. `Enum.sort_by/2` is stable, so
+  within each of the three the runtime's own order survives — and the runtime's order is the
+  network client's, which is the order the same devices appear in on the CLI.
+  """
+  @spec group(map()) :: 0 | 1 | 2
+  def group(device) when is_map(device) do
+    cond do
+      self_row?(device) -> 0
+      device["state"] in @fleet_states -> 1
+      true -> 2
+    end
+  end
+
+  @doc "Whether a row belongs to this fleet rather than to the network around it."
   @spec fleet_row?(map()) :: boolean()
   def fleet_row?(device) when is_map(device), do: device["state"] in @fleet_states
 
   @doc """
+  What this row says about Ouroboros, in one short phrase.
+
+  The nine of §5.1 and no others: `in the fleet`, `in the fleet · not connected`,
+  `not set up`, `can't run Ouroboros`, `offline` — and, from an operation this machine is
+  holding rather than from discovery, `setting up…`, `waiting for you`, `setup failed` and
+  `set up just now` (`operation_words/1`).
+  """
+  @spec ouroboros_words(term()) :: String.t()
+  def ouroboros_words(device) when is_map(device), do: ouroboros_words(device["state"])
+
+  def ouroboros_words(state) when is_binary(state),
+    do: Map.get(@ouroboros_words, state, "state not recognised")
+
+  def ouroboros_words(_absent), do: "state not reported"
+
+  @doc """
+  The one button this row offers, as `{label, event}`, or `nil` for a row that offers none.
+
+  §5.1: "A device that cannot be acted on shows no button; the reason is in its details."
+  An offline peer, a platform with no release and an address family this build cannot reach
+  all fall through to `nil` — there is no honest action, and a disabled button carrying an
+  explanation was the shape the review found unreadable.
+  """
+  @spec row_action(map()) :: {String.t(), String.t()} | nil
+  @spec row_action(map(), term()) :: {String.t(), String.t()} | nil
+  def row_action(device, host_os \\ nil)
+
+  # The machine with no fleet of its own offers nothing on its row: its one action is the
+  # primary button beside the status line, which is where section 5.1 puts it and where an
+  # operator who has just read "This Mac is not in a fleet yet" is already looking. Two
+  # copies of one button is two things to decide between.
+  def row_action(%{"state" => "this_device_without_profile"}, _host_os), do: nil
+
+  def row_action(device, _host_os) when is_map(device), do: Map.get(@row_actions, device["state"])
+  def row_action(_other, _host_os), do: nil
+
+  @doc """
+  The primary button's own name: **Set up this Mac**, or **Set up this machine**.
+
+  Lower-cased after the verb, because "Set up This Mac" is a label nobody writes by hand.
+  """
+  @spec setup_label(term()) :: String.t()
+  def setup_label(host_os),
+    do: "Set up " <> String.replace_prefix(self_label(host_os), "This", "this")
+
+  @doc """
   Whether a blocker this listing established stands between this device and a deployment.
 
-  The table's fifth row: offline, unsupported platform and no usable IPv4 are facts the
-  network client reported, and deployment is disabled while one of them stands rather than
-  offered and then refused.
+  Offline, unsupported platform and no usable IPv4 are facts the network client reported,
+  and they are why the row offers nothing.
   """
   @spec blocked?(map()) :: boolean()
   def blocked?(device) when is_map(device), do: device["state"] in @blocked_states
-
-  @doc "Whether this row's primary action is the read-only View device / Diagnose panel."
-  @spec inspectable?(map()) :: boolean()
-  def inspectable?(device) when is_map(device),
-    do: state_action(device["state"]) in ["View device", "Diagnose"]
-
-  def inspectable?(_other), do: false
 
   @doc "Whether this row is a device an SSH deployment can be aimed at."
   @spec deployable?(map()) :: boolean()
@@ -178,75 +245,167 @@ defmodule Ouroboros.Web.Live.Devices do
     device["state"] == "discovered_installation_unknown" and is_binary(device["address"])
   end
 
+  @doc "Whether this row has a details panel to open."
+  @spec inspectable?(map()) :: boolean()
+  def inspectable?(device) when is_map(device),
+    do: device["state"] in ~w(fleet_member fleet_member_connected fleet_member_not_visible)
+
+  def inspectable?(_other), do: false
+
+  @doc """
+  Whether this row is a member this fleet can be asked to remove (§5.4).
+
+  The self row is not one: a machine does not take itself out of its own roster from its own
+  Devices page, and the engine's `leave` names a *target* machine.
+  """
+  @spec removable?(map()) :: boolean()
+  def removable?(device) when is_map(device) do
+    device["state"] in ~w(fleet_member fleet_member_connected fleet_member_not_visible) and
+      is_binary(device["machine"]) and device["machine"] != ""
+  end
+
+  def removable?(_other), do: false
+
   @doc """
   Whether this row is **this machine, with no fleet profile of its own**.
 
-  The proposal's sixth observed state, and the one action that is not a deployment: this
-  machine configures itself, without SSH to itself.
+  The one action that is not a deployment: this machine configures itself, without SSH to
+  itself.
   """
   @spec setup?(map()) :: boolean()
   def setup?(device) when is_map(device), do: device["state"] == "this_device_without_profile"
 
   @doc """
-  Network presence, with the observation time the client gave.
+  The name to put in the setup form's *Name in the fleet* field, and never `name`.
 
-  Three different facts, never collapsed: connected now, seen at a time and not connected
-  now, and a client that reported no presence at all. The last is not "offline".
+  `suggested_machine` is §5.5's: the roster name for a member, otherwise the display name
+  folded to a valid machine name, otherwise `null`. The review's finding 3 is what happens
+  without it — both forms pre-filled with a display name ("Monocursive's MacBook Pro", or
+  the placeholder "this device") and the web submitted it. So this reads exactly that field
+  and falls back to an empty box rather than to something that looks like an answer.
   """
-  @spec presence(map()) :: String.t()
-  def presence(device) when is_map(device) do
-    [network_presence(device) | member_facts(device)] |> Enum.join(" · ")
+  @spec suggested_machine(term()) :: String.t()
+  def suggested_machine(device) when is_map(device) do
+    case plain(device["suggested_machine"], @max_machine) do
+      name when is_binary(name) -> if valid_machine?(name), do: name, else: ""
+      _absent -> ""
+    end
   end
 
-  defp network_presence(device) do
+  def suggested_machine(_absent), do: ""
+
+  @doc """
+  Whether a string is a fleet machine name: letters, digits and hyphens, starting with a
+  letter or a digit, at most #{@max_machine} characters.
+
+  The worker refuses anything else, and the review's finding 2 is a form that let one
+  through: the manual "Deploy to an address" had no name field at all, so the worker took
+  the address as the name and refused it after a connection, a host key and a password.
+  """
+  @spec valid_machine?(term()) :: boolean()
+  def valid_machine?(name) when is_binary(name) do
+    String.length(name) <= @max_machine and String.match?(name, ~r/\A[a-zA-Z0-9][a-zA-Z0-9-]*\z/)
+  end
+
+  def valid_machine?(_other), do: false
+
+  @doc "What to say under a *Name in the fleet* box that was left empty or filled wrongly."
+  @spec machine_error(term()) :: String.t() | nil
+  def machine_error(name) do
+    trimmed = if is_binary(name), do: String.trim(name), else: ""
+
+    cond do
+      trimmed == "" -> "This machine needs a name in the fleet."
+      valid_machine?(trimmed) -> nil
+      true -> "Letters, digits and hyphens only, starting with a letter or a digit."
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # Presence
+  # ------------------------------------------------------------------------------------
+
+  @doc """
+  The mark beside a presence word. Never the only thing saying it.
+
+  A filled ring is connected, a hollow one is not, and a device the client reported nothing
+  about gets a dash rather than either. The word next to it says the same thing, which is
+  the rule: no state by colour, and none by shape either.
+  """
+  @spec presence_dot(map()) :: String.t()
+  def presence_dot(device) when is_map(device) do
     case device["online"] do
-      true -> "Connected now · " <> path_words(device["path"])
-      false -> "Not connected · " <> last_seen(device["last_seen"])
-      _unreported -> "Presence not reported by the network client"
+      true -> "●"
+      false -> "○"
+      _unreported -> "–"
     end
   end
 
-  # A member row carries facts the network client knows nothing about: whether this runtime
-  # is actually talking to it, whether their builds agree, whether its runtime is up, and
-  # when it last answered. Each is `nil` where this build could not establish it, and `nil`
-  # is said as nothing at all rather than read as "no".
-  defp member_facts(device) do
-    [
-      fact(device, "connected", "connected to this runtime", "not connected to this runtime"),
-      fact(device, "compatible", "compatible build", "incompatible build"),
-      fact(device, "runtime_running", "its runtime is running", "its runtime is not running"),
-      probe(device)
-    ]
-    |> Enum.reject(&is_nil/1)
-  end
+  @doc """
+  Presence as a person reads it: a word, and a relative time where the client gave one.
 
-  defp fact(device, key, yes, no) do
-    case Map.fetch(device, key) do
-      {:ok, true} -> yes
-      {:ok, false} -> no
-      {:ok, nil} -> nil
-      :error -> nil
-      {:ok, other} -> "#{key} reported as #{plain(other, 32)}"
+  "online", "offline, seen 3 days ago", "offline" where the client saw it but never said
+  when, and "presence not reported" where it said nothing at all — which is not "offline".
+  The exact instant is `exact_time/1`, in the details panel, because §5.1 bans an ISO
+  timestamp from a row and the review found one on every row with microseconds on it.
+  """
+  @spec presence_word(map()) :: String.t()
+  @spec presence_word(map(), DateTime.t()) :: String.t()
+  def presence_word(device, now \\ DateTime.utc_now())
+
+  def presence_word(device, now) when is_map(device) do
+    case device["online"] do
+      true ->
+        "online"
+
+      false ->
+        case relative_time(device["last_seen"], now) do
+          ago when is_binary(ago) -> "offline, seen " <> ago
+          nil -> "offline"
+        end
+
+      _unreported ->
+        "presence not reported"
     end
   end
 
-  # When this runtime last had an answer from that machine — the cluster's own observation,
-  # which is a different question from when the network client last saw the device.
-  defp probe(device) do
-    case plain(device["last_probe"], 64) do
-      at when is_binary(at) and at != "" -> "last answered this runtime at " <> at
-      _unreported -> nil
+  @doc """
+  An instant, as long ago as it was: "just now", "3 min ago", "2 hours ago", "3 days ago".
+
+  `nil` for anything this build cannot read as a time, so a caller can fall back rather than
+  print a placeholder that looks like an observation. A time in the future — two clocks that
+  disagree, which is ordinary on a private network — reads as "just now" rather than as a
+  negative age.
+
+  `now` is an argument so that a test states the instant it is asking about instead of
+  racing the wall clock.
+  """
+  @spec relative_time(term()) :: String.t() | nil
+  @spec relative_time(term(), DateTime.t()) :: String.t() | nil
+  def relative_time(value, now \\ DateTime.utc_now())
+
+  def relative_time(value, now) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} -> ago(DateTime.diff(now, at, :second))
+      _unreadable -> nil
     end
   end
 
-  defp last_seen(seen) when is_binary(seen) and seen != "" do
-    case plain(seen, 64) do
-      "" -> "the client did not say when it last saw this device"
-      when_seen -> "last seen " <> when_seen
-    end
-  end
+  def relative_time(_absent, _now), do: nil
 
-  defp last_seen(_absent), do: "the client did not say when it last saw this device"
+  defp ago(seconds) when seconds < 60, do: "just now"
+  defp ago(seconds) when seconds < 3_600, do: count(div(seconds, 60), "min")
+  defp ago(seconds) when seconds < 86_400, do: count(div(seconds, 3_600), "hour")
+  defp ago(seconds), do: count(div(seconds, 86_400), "day")
+
+  # "min" is already the abbreviation; "3 mins ago" is a word nobody needs.
+  defp count(amount, "min"), do: "#{amount} min ago"
+  defp count(1, unit), do: "1 #{unit} ago"
+  defp count(amount, unit), do: "#{amount} #{unit}s ago"
+
+  @doc "The exact instant the network client last saw a device, for the details panel only."
+  @spec exact_time(term()) :: String.t()
+  def exact_time(value), do: plain(value, 64) || "not reported"
 
   @doc "How the network client reached a device, where it observed a path at all."
   @spec path_words(term()) :: String.t()
@@ -273,58 +432,103 @@ defmodule Ouroboros.Web.Live.Devices do
     end
   end
 
+  # ------------------------------------------------------------------------------------
+  # The page's own lines
+  # ------------------------------------------------------------------------------------
+
   @doc """
-  What the network discovery answered, as a headline and a next step.
+  The one quiet line under the title: where the work actually happens.
 
-  Every failure the adapter distinguishes gets its own pair, because "no devices" and "no
-  client" and "signed out" are three different things to do something about, and one empty
-  state for all of them is the empty state that teaches nothing.
+  The review's finding 9 is what this replaces — a three-line boxed paragraph on the page
+  *and* again inside every drawer, explaining SSH to somebody who had not asked to do
+  anything yet. The fact still matters, because a browser three hops away cannot lend its
+  own SSH agent to the runtime, so it stays; it is one sentence, under the title, and the
+  caption inside a drawer.
   """
-  @spec discovery(term()) :: {String.t(), String.t()}
-  def discovery("ok"), do: {"The network client answered.", ""}
+  @spec host_line(term()) :: String.t()
+  def host_line(host) when is_map(host) do
+    machine = plain(host["hostname"], 96) || @this_device
+    user = plain(host["user"], 64)
 
-  def discovery("client_missing") do
-    {"No network client is installed on this deployment host.",
-     "Install Tailscale on the machine running this Ouroboros, and sign it in to the network the fleet uses. Known fleet members are still listed below, from this machine's own roster."}
+    case user do
+      account when is_binary(account) -> "Actions run on #{machine} as #{account}."
+      nil -> "Actions run on #{machine}."
+    end
   end
 
-  def discovery("signed_out") do
-    {"The network client is installed and this deployment host is signed out.",
-     "Sign this machine in to the network, then refresh. Known fleet members are still listed below, from this machine's own roster."}
+  def host_line(_absent), do: "Actions run on the machine hosting this runtime."
+
+  @doc """
+  The status line above the list, and whether it is the standalone one.
+
+  Two shapes, from §5.1. A machine in no fleet says so in the status line itself —
+  "This Mac is not in a fleet yet" — with **Set up this Mac** beside it, and that sentence
+  *is* the blocker notice rather than a second paragraph repeating it. A machine in a fleet
+  names the fleet and counts its members.
+  """
+  @spec status_line(term(), term(), boolean()) :: String.t()
+  def status_line(fleet, host_os, standalone?)
+
+  def status_line(_fleet, host_os, true), do: "#{self_label(host_os)} is not in a fleet yet."
+
+  def status_line(fleet, _host_os, false) when is_map(fleet) do
+    name = plain(fleet[:fleet_name], 96)
+    connected = get_in(fleet, [:summary, :connected])
+    expected = get_in(fleet, [:summary, :expected])
+
+    [
+      if(name, do: "Fleet of #{name}", else: "This fleet is not named"),
+      machines_line(connected, expected)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
   end
 
-  def discovery("permission_denied") do
-    {"The network client refused this runtime's account.",
-     "The account Ouroboros runs as may not query the local client. Known fleet members are still listed below, from this machine's own roster."}
+  def status_line(_fleet, _host_os, false), do: "This machine is in a fleet."
+
+  defp machines_line(connected, expected)
+       when is_integer(connected) and is_integer(expected),
+       do: "#{connected} of #{expected} machines connected"
+
+  defp machines_line(_connected, _expected), do: nil
+
+  @doc """
+  The discovery notice, in the network client's own words, or `nil` when it answered.
+
+  §5.1: one inline notice quoting the runtime's `detail`, and **never a claim about build
+  age**. The review's finding 1 is a Mac with the Tailscale app installed, where the client
+  the runtime found printed "The Tailscale GUI failed to start" and exited 0 — and this page
+  read that as "this build of Ouroboros may be older than the client", which is a guess
+  about a version dressed as a diagnosis. The client said something; this says what it said.
+  """
+  @spec discovery_notice(term(), term()) :: String.t() | nil
+  def discovery_notice(code, detail \\ nil)
+
+  def discovery_notice("ok", _detail), do: nil
+
+  def discovery_notice("no_visible_peers", _detail) do
+    "Tailscale answered and can see no other devices. Devices already in the fleet are " <>
+      "still listed."
   end
 
-  def discovery("unavailable") do
-    {"The network client is installed and could not answer.",
-     "It may be stopped, still starting, or answering something this build cannot read. This is not evidence that the fleet has no members."}
+  def discovery_notice(_code, detail) do
+    case plain(detail, 200) do
+      said when is_binary(said) and said != "" ->
+        ~s{Tailscale did not answer from this runtime: "#{said}". } <>
+          "Devices already in the fleet are still listed."
+
+      _nothing ->
+        "Tailscale did not answer from this runtime. Devices already in the fleet are " <>
+          "still listed."
+    end
   end
-
-  def discovery("no_visible_peers") do
-    {"The network client answered and can see no other devices.",
-     "Network policy may limit what this client is shown. This list is that client's visible peers, not every device registered with the coordination server."}
-  end
-
-  def discovery(nil),
-    do: {"This runtime did not report a discovery result.", "Refresh, or read the runtime's log."}
-
-  def discovery(code) when is_binary(code) do
-    {"The network client answered with a result this build does not recognise.",
-     "The runtime reported #{code}. Known fleet members are still listed below, from this machine's own roster."}
-  end
-
-  def discovery(_unreadable),
-    do: {"This runtime did not report a discovery result.", "Refresh, or read the runtime's log."}
 
   @doc "Whether discovery reached the network client at all."
   @spec discovered?(term()) :: boolean()
   def discovered?(code), do: code in ["ok", "no_visible_peers"]
 
   @doc """
-  Why Deploy is not offered on this deployment host, in words.
+  Why the page is not offering to set a machine up, in words.
 
   The reason codes arrive in a fixed order and the surface says the first one, because the
   first is the one an operator has to deal with before any of the others can matter.
@@ -336,17 +540,16 @@ defmodule Ouroboros.Web.Live.Devices do
   def deploy_blocker(code, posture \\ nil)
 
   def deploy_blocker("no_data_dir", _posture) do
-    "This runtime serves no durable data directory, so it has nowhere to record a deployment."
+    "This runtime serves no durable data directory, so it has nowhere to record a setup."
   end
 
   # The one blocker whose sentence depends on a second fact. Holding no CA key means two
   # completely different things: a machine that is in a fleet somebody else issues for is a
   # joiner and should go to the issuer, and a machine in no fleet at all has simply not been
-  # set up — and the control it needs is on its own row. Telling a standalone operator to
-  # "open Devices on the machine that created the fleet" names a machine that does not exist.
+  # set up — and the control it needs is on its own row.
   def deploy_blocker("no_ca_key", :standalone) do
-    "This machine is not set up yet — use Set up this device. It holds no fleet of its own, " <>
-      "so there is no certificate authority here to admit another machine with."
+    "This machine is not in a fleet yet, so there is no authority here to admit another " <>
+      "machine with. Set this machine up first."
   end
 
   def deploy_blocker("no_ca_key", _in_a_fleet) do
@@ -356,7 +559,7 @@ defmodule Ouroboros.Web.Live.Devices do
 
   def deploy_blocker("ouro_path_unknown", _posture) do
     "This runtime cannot say where its own `ouro` executable is, so it cannot start a " <>
-      "deployment worker. Start Ouroboros through its launcher and reload this page."
+      "setup worker. Start Ouroboros through its launcher and reload this page."
   end
 
   def deploy_blocker("cleartext_web_bind", _posture) do
@@ -365,25 +568,34 @@ defmodule Ouroboros.Web.Live.Devices do
       "`tailscale serve` in front of one."
   end
 
+  # §5.5. A Mix dev runtime can build the fleet and then never start it: the LaunchAgent it
+  # writes runs a binary that exits 1 with "built without an embedded release" (finding 8,
+  # which was silent). It blocks `setup` and nothing else — adding a machine over SSH
+  # installs a packaged release on the *target*, which this runtime's own shape says
+  # nothing about.
+  def deploy_blocker("dev_runtime", _posture) do
+    "This is a development runtime; the packaged `ouro` is what sets a machine up."
+  end
+
   def deploy_blocker(code, _posture) when is_binary(code) do
-    "This runtime reported that deployment is unavailable here: #{plain(code, 64)}."
+    "This runtime reported that setup is unavailable here: #{plain(code, 64)}."
   end
 
   def deploy_blocker(_absent, _posture) do
-    "This runtime did not say why deployment is unavailable here."
+    "This runtime did not say why setup is unavailable here."
   end
 
   @doc """
-  Why the inventory or the deployment controls are not available to this reader.
+  Why the inventory or the setup controls are not available to this reader.
 
-  The three answers are different facts and the proposal requires them to stay different:
-  a build that does not serve the method, an endpoint whose scope may not run it, and an
-  identity that is not an administrator.
+  The three answers are different facts and they stay different: a build that does not serve
+  the method, an endpoint whose scope may not run it, and an identity that is not an
+  administrator.
   """
   @spec unavailable(atom(), String.t()) :: String.t()
   def unavailable(:absent, method) do
     "This runtime does not serve #{method}. It is an older build than this page; fleet " <>
-      "membership is shown below, and deployment is not available here."
+      "membership is shown below, and setup is not available here."
   end
 
   def unavailable(:scope, method) do
@@ -395,7 +607,7 @@ defmodule Ouroboros.Web.Live.Devices do
   # Reached only where the method is available and the deployment host still says no with no
   # reason of its own, which is a runtime this build cannot explain rather than a rule.
   def unavailable(:available, _method),
-    do: "This runtime did not say why deployment is unavailable here."
+    do: "This runtime did not say why setup is unavailable here."
 
   def unavailable(:denied, method) do
     "The identity this session is authenticated as is not an administrator, and #{method} " <>
@@ -403,34 +615,38 @@ defmodule Ouroboros.Web.Live.Devices do
       "private network. Fleet membership is shown below."
   end
 
+  # ------------------------------------------------------------------------------------
+  # Operations
+  # ------------------------------------------------------------------------------------
+
   @doc """
   One deployment state, as the operator reads it.
 
-  The proposal fixes the eleven states; a state outside them is named rather than mapped
-  onto the nearest one this build happens to know.
+  The eleven states are fixed by the proposal; a state outside them is named rather than
+  mapped onto the nearest one this build happens to know.
   """
   @spec operation_state(term()) :: String.t()
-  # Two states before the proposal's eleven begin: the broker answers `prepare` as soon as
-  # the connection process exists, so an operation is visible while its handshake with the
+  # Two states before the eleven begin: the broker answers `prepare` as soon as the
+  # connection process exists, so an operation is visible while its handshake with the
   # worker is still running.
-  def operation_state("spawning"), do: "Starting the deployment worker"
-  def operation_state("attaching"), do: "Connecting to the deployment worker"
-  def operation_state("attached"), do: "Connected to the deployment worker"
-  def operation_state("inspecting"), do: "Inspecting the target"
-  def operation_state("awaiting_host_trust"), do: "Waiting for you to verify the host key"
-  def operation_state("awaiting_auth"), do: "Waiting for a credential"
+  def operation_state("spawning"), do: "Starting the setup worker"
+  def operation_state("attaching"), do: "Connecting to the setup worker"
+  def operation_state("attached"), do: "Connected to the setup worker"
+  def operation_state("inspecting"), do: "Reading the machine"
+  def operation_state("awaiting_host_trust"), do: "Waiting for you to check the host key"
+  def operation_state("awaiting_auth"), do: "Waiting for a password"
   def operation_state("awaiting_review"), do: "Waiting for you to approve the plan"
-  def operation_state("deploying"), do: "Deploying"
-  def operation_state("restarting_host"), do: "Restarting the runtime on this machine"
+  def operation_state("deploying"), do: "Setting up"
+  def operation_state("restarting_host"), do: "Restarting Ouroboros on this machine"
   def operation_state("checking_readiness"), do: "Checking readiness"
-  def operation_state("completed"), do: "Completed"
+  def operation_state("completed"), do: "Done"
   def operation_state("interrupted"), do: "Interrupted"
-  def operation_state("failed"), do: "Failed"
+  def operation_state("failed"), do: "Setup failed"
   def operation_state("cancelled"), do: "Cancelled"
   def operation_state(nil), do: "State not reported"
 
   def operation_state(state) when is_binary(state),
-    do: "State this build does not recognise: #{state}"
+    do: "A state this build does not recognise: #{plain(state, 64)}"
 
   def operation_state(_unreadable), do: "State not reported"
 
@@ -444,60 +660,103 @@ defmodule Ouroboros.Web.Live.Devices do
   @spec unfinished?(term()) :: boolean()
   def unfinished?(state), do: state not in ["completed", "cancelled"]
 
-  @doc """
-  How a row reads once an operation has touched the device it names.
-
-  A deployment that just finished is the most important fact about a row, and the
-  inventory's own `state` is a *discovery* fact that will not catch up until the next
-  refresh reaches the network client. So a row whose latest operation is finished says so —
-  and says which way it finished — rather than going back to reading "nothing has inspected
-  this device" the moment the drawer closes.
-
-  Returns `{state words, action label, event}`.
-  """
-  @spec operation_row(term()) :: {String.t(), String.t(), String.t()}
-  @spec operation_row(term(), term()) :: {String.t(), String.t(), String.t()}
-  def operation_row(state, kind \\ "add")
-
-  def operation_row("completed", _kind),
-    do: {"Set up just now by this machine", "Open device", "open-operation"}
-
-  def operation_row("failed", _kind), do: {"Setup failed", "Retry", "open-operation"}
-
-  def operation_row("cancelled", "setup"),
-    do: {"Setup cancelled", "Set up this device", "setup-device"}
-
-  def operation_row("cancelled", _kind), do: {"Setup cancelled", "Deploy again", "deploy"}
-
-  def operation_row(state, _kind),
-    do:
-      {"Deployment waiting for input, interrupted or partially complete — " <>
-         String.downcase(operation_state(state)), "Continue setup", "open-operation"}
-
   @doc "Whether a state means the operation is waiting for this operator."
   @spec waiting?(term()) :: boolean()
   def waiting?(state),
     do: state in ["awaiting_host_trust", "awaiting_auth", "awaiting_review"]
 
-  # The engine's step names, joined to the proposal's six stages. Taken from every
-  # `step_event` and `finish_step` call in `tui/src/fleet_setup/engine.rs` rather than
-  # guessed at by prefix: `install_binary` is not `install`, `issue` is not any of the six
-  # words, and a list that matched on prefixes would file both wrongly and in silence.
+  @doc """
+  What an operation this machine is holding makes its device's row say, or `nil`.
+
+  A setup that is running, waiting or has just finished is the freshest thing known about a
+  device, and it outranks the inventory's `state` — which is a *discovery* fact that will
+  not catch up until the network client notices. `nil` means it does not: a cancelled setup
+  left the device exactly as discovery found it, so the row goes back to saying what
+  discovery says rather than carrying "Setup cancelled" for the life of the journal.
+  """
+  @spec operation_words(term()) :: String.t() | nil
+  # No operation at all. `unfinished?/1` answers `true` for `nil` — an operation whose state
+  # this build could not read is one an operator can still pick up — so without this clause
+  # every row on the page read "setting up…" and offered Continue, which is exactly the
+  # reading that would be wrong on all of them.
+  def operation_words(nil), do: nil
+
+  def operation_words(state) do
+    cond do
+      waiting?(state) -> "waiting for you"
+      state in ["failed", "interrupted"] -> "setup failed"
+      state == "completed" -> "set up just now"
+      state == "cancelled" -> nil
+      unfinished?(state) -> "setting up…"
+      true -> nil
+    end
+  end
+
+  @doc """
+  The button an operation puts on its device's row, as `{label, event}`, or `nil`.
+
+  Only while there is something to go back to: a finished setup leaves the row's own action
+  (Open, or Details), and a cancelled one leaves the row offering to start again.
+  """
+  @spec operation_action(term()) :: {String.t(), String.t()} | nil
+  def operation_action(nil), do: nil
+
+  def operation_action(state) do
+    cond do
+      waiting?(state) -> {"Continue", "open-operation"}
+      state in ["failed", "interrupted"] -> {"Retry", "open-operation"}
+      # The machine is in the fleet now, whatever discovery still says, so the row opens
+      # the machines panel. Falling through to the device's own action would offer to add
+      # a machine that has just been added.
+      state == "completed" -> {"Open", "open-machines"}
+      state == "cancelled" -> nil
+      unfinished?(state) -> {"Continue", "open-operation"}
+      true -> nil
+    end
+  end
+
+  @doc """
+  What a worker that died without finishing left behind, in its own last words.
+
+  §5.5: `fleet.deployment.status` carries `worker_exit` when the journal is unfinished, no
+  `done` frame exists and the worker is gone. The review's finding 5 is the page without it
+  — the worker's own log had the reason (a Unix socket path over 104 bytes), the broker
+  logged `lost its worker: :normal`, and the operation sat at "inspecting" saying nothing.
+
+  `nil` where there is no such record, so the ordinary "no worker is attached" reading
+  stands rather than being overwritten by an empty accusation.
+  """
+  @spec worker_exit(term()) :: String.t() | nil
+  def worker_exit(%{"last_lines" => lines}) when is_list(lines) do
+    said =
+      lines
+      |> Enum.map(&plain(&1, 200))
+      |> Enum.reject(&(is_nil(&1) or &1 == ""))
+      |> Enum.join(" · ")
+
+    if said == "", do: nil, else: "The setup worker stopped: " <> said
+  end
+
+  def worker_exit(_absent), do: nil
+
+  # The engine's step names, joined to the six stages. Taken from every `step_event` and
+  # `finish_step` call in `tui/src/fleet_setup/engine.rs` rather than guessed at by prefix:
+  # `install_binary` is not `install`, `issue` is not any of the six words, and a list that
+  # matched on prefixes would file both wrongly and in silence.
   @stages [
-    {"inspect", "Inspect the target", ~w(inspect)},
-    {"install", "Install Ouroboros if it is missing", ~w(install_binary install)},
-    {"membership", "Configure fleet membership",
-     ~w(prepare issue roster member_preflight create)},
-    {"startup", "Configure startup", ~w(service stop_runtime)},
+    {"inspect", "Inspect", ~w(inspect)},
+    {"install", "Install", ~w(install_binary install)},
+    {"membership", "Join fleet", ~w(prepare issue roster member_preflight create)},
+    {"startup", "Start at login", ~w(service stop_runtime)},
     {"connect", "Connect", ~w(connect)},
-    {"readiness", "Check readiness", ~w(readiness)}
+    {"readiness", "Ready", ~w(readiness)}
   ]
 
   # A step in words. `leave` and `disable_service` belong to cooperative removal and
   # `test_task` is the explicit first-task check, so none of the three is filed under one of
   # the six stages — they are drawn under their own names instead.
   @step_labels %{
-    "inspect" => "Inspect the target",
+    "inspect" => "Read the machine",
     "install_binary" => "Install the `ouro` binary",
     "install" => "Install Ouroboros",
     "prepare" => "Prepare the target's profile",
@@ -515,12 +774,11 @@ defmodule Ouroboros.Web.Live.Devices do
   }
 
   @doc """
-  The six stages a deployment runs through, in the proposal's order, each with the worker's
-  own step names under it.
+  The six stages a setup runs through, in order, each with the worker's own step names.
 
-  Drawn as an outline rather than as claims: a stage the worker has not reported a step for
-  reads "not reported yet", which is the honest thing for a surface whose only knowledge of
-  the remote machine is what a worker told it.
+  Short names, because §5.2 draws them as one strip —
+  `✓ Inspect · ✓ Install · ● Join fleet · ○ Start at login · ○ Connect · ○ Ready` — rather
+  than as six headed sections with a sentence each.
   """
   @spec stages() :: [{String.t(), String.t(), [String.t()]}]
   def stages, do: @stages
@@ -538,14 +796,8 @@ defmodule Ouroboros.Web.Live.Devices do
   def step_label(_absent), do: "a step"
 
   @doc """
-  One step's outcome in words, and whether it is a failure.
-
-  The worker's vocabulary is four words — `started`, `ok`, `skipped`, `failed`
-  (`StepRecord` in `tui/src/fleet_setup/journal.rs`) — and anything else is shown as itself
-  rather than mapped onto the nearest one this build happens to know.
-
-  Returns `{words, tone}` where tone is `:ok`, `:failed`, `:running` or `:unknown`. The tone
-  is never the only carrier of the fact — it picks a mark that sits *beside* the words.
+  A step's outcome as `{word, tone}`, where the tone is for a stylesheet and the word is
+  the one a reader gets.
   """
   @spec outcome(term()) :: {String.t(), :ok | :failed | :running | :unknown}
   def outcome("ok"), do: {"done", :ok}
@@ -557,21 +809,56 @@ defmodule Ouroboros.Web.Live.Devices do
   def outcome(_unreadable), do: {"no outcome reported", :unknown}
 
   @doc """
-  The heading one challenge is rendered under.
+  The mark a stage carries in the progress strip: done, running, or not yet.
 
-  Read from the challenge's kind alone. A remote prompt is data, never a label: the
-  proposal's rule is that challenge labels are normalized rather than rendered as trusted
-  UI, so nothing the worker sends becomes the heading of the box a password is typed into.
+  ✓, ● and ○ — and each of them sits beside the stage's name and its outcome in words, so
+  the mark is a summary of something already said rather than the only place it is said.
+  """
+  @spec stage_mark(term()) :: String.t()
+  def stage_mark("ok"), do: "✓"
+  def stage_mark("skipped"), do: "✓"
+  def stage_mark("failed"), do: "✗"
+  def stage_mark("started"), do: "●"
+  def stage_mark(_not_yet), do: "○"
+
+  @doc """
+  What a challenge is asking for, as its own heading.
+
+  §5.2 names the first two after the thing they are about — the address a host key belongs
+  to, the account a password is for — because "Verify this host before continuing" names a
+  procedure and not a machine.
   """
   @spec challenge_title(term()) :: String.t()
-  def challenge_title("password"), do: "Password for this connection"
+  def challenge_title("password"), do: "Password"
   def challenge_title("passphrase"), do: "Passphrase for the selected key"
-  def challenge_title("host_trust"), do: "Verify this host before continuing"
-  def challenge_title("review"), do: "Review this plan"
+  def challenge_title("host_trust"), do: "First time connecting"
+  def challenge_title("review"), do: "Ready to deploy"
   def challenge_title(kind) when is_binary(kind), do: "The runtime is waiting for: #{kind}"
 
   def challenge_title(_unreadable),
-    do: "The runtime is waiting for something this page cannot read"
+    do: "The runtime is waiting for something this page cannot name"
+
+  @doc "A host-trust heading that names the address, where the worker reported one."
+  @spec host_trust_title(term()) :: String.t()
+  def host_trust_title(address) do
+    case plain(address, 64) do
+      at when is_binary(at) and at != "" -> "First time connecting to #{at}"
+      _absent -> challenge_title("host_trust")
+    end
+  end
+
+  @doc "A password heading that names the account, where the worker reported one."
+  @spec password_title(term(), term()) :: String.t()
+  def password_title(user, address) do
+    account = plain(user, 64)
+    at = plain(address, 64)
+
+    cond do
+      is_binary(account) and is_binary(at) -> "Password for #{account}@#{at}"
+      is_binary(account) -> "Password for #{account}"
+      true -> challenge_title("password")
+    end
+  end
 
   @doc """
   One challenge's kind-specific facts.
@@ -599,12 +886,11 @@ defmodule Ouroboros.Web.Live.Devices do
   def metadata(_absent), do: %{}
 
   @doc """
-  The label under a masked field, naming what the secret is for.
+  The label over the one masked field, naming what is being asked for and what for.
 
-  The two kinds name different things, and the proposal requires that: a password belongs
-  to an account on a target, and a passphrase belongs to a key. Both come out of the
-  worker's own metadata (`password_metadata/5` and `passphrase_metadata/2` in
-  `tui/src/fleet_setup/challenge.rs`).
+  A passphrase is for a key this operator chose; a password is for an account on a machine.
+  Two different secrets, and a field labelled only "Password" is the one an operator types
+  the wrong one into.
   """
   @spec secret_label(map()) :: String.t()
   def secret_label(%{"kind" => "passphrase"} = challenge) do
@@ -616,24 +902,21 @@ defmodule Ouroboros.Web.Live.Devices do
 
   def secret_label(challenge) when is_map(challenge) do
     facts = metadata(challenge)
+    user = plain(facts["user"], 64)
+    target = plain(facts["target"] || facts["address"], 64)
 
-    case {plain(facts["user"], 64), plain(facts["target"], 96)} do
-      {user, target} when is_binary(user) and user != "" and is_binary(target) and target != "" ->
-        "Password for #{user}@#{target}"
-
-      {user, _target} when is_binary(user) and user != "" ->
-        "Password for #{user}"
-
-      _unnamed ->
-        "Password for this connection"
+    cond do
+      present_text?(user) and present_text?(target) -> "Password for #{user}@#{target}"
+      present_text?(user) -> "Password for #{user}"
+      true -> "Password for this connection"
     end
   end
 
   @doc """
-  "Attempt 2 of 3", where the worker said which attempt this is.
+  "Attempt 2 of 3", where the worker said so.
 
-  `nil` when it did not: the cap is the server's as well as the worker's, and inventing a
-  count would be this page claiming to know one.
+  `password_metadata/5` carries `attempt` and `max_attempts`; a passphrase carries neither,
+  and this answers `nil` rather than inventing a first attempt.
   """
   @spec attempt(map()) :: String.t() | nil
   def attempt(challenge) when is_map(challenge) do
@@ -641,15 +924,17 @@ defmodule Ouroboros.Web.Live.Devices do
 
     case {facts["attempt"], facts["max_attempts"]} do
       {attempt, max} when is_integer(attempt) and is_integer(max) ->
-        "Attempt #{attempt} of #{max}."
+        "attempt #{attempt} of #{max}"
 
-      {attempt, _max} when is_integer(attempt) ->
-        "Attempt #{attempt}."
+      {attempt, _absent} when is_integer(attempt) ->
+        "attempt #{attempt}"
 
-      _unreported ->
+      _none ->
         nil
     end
   end
+
+  def attempt(_absent), do: nil
 
   @doc """
   What the operation said about readiness, as `{sentence, offer a test task?}`.
@@ -668,40 +953,189 @@ defmodule Ouroboros.Web.Live.Devices do
 
     case {step && step["outcome"], finished?} do
       {"ok", _finished?} ->
-        {"This device reported that it is ready.", true}
+        {"This machine reported that it is ready.", true}
 
       {"failed", _finished?} ->
-        {"This device did not report itself ready. What is missing is below.", false}
+        {"This machine did not report itself ready. What is missing is below.", false}
 
       {"skipped", _finished?} ->
         {"Readiness was not established from here. " <>
            (plain(step["detail"]) || "The steps below say what was and was not checked."), true}
 
       {_unreported, true} ->
-        {"The deployment finished. Readiness was not reported, so this page does not claim it.",
-         true}
+        {"The setup finished. Readiness was not reported, so this page does not claim it.", true}
 
       {_unreported, _unfinished} ->
         {"Readiness was not reported.", false}
     end
   end
 
+  # ------------------------------------------------------------------------------------
+  # The plan
+  # ------------------------------------------------------------------------------------
+
   @plan_fields ~w(schema operation kind deployment_host target release service members restart
                   grants build)
+
+  @doc """
+  The plan as five plain lines, which is what §5.2's review step shows.
+
+  `Install ouro 0.1.9 (Linux arm64) to ~/.local/bin/ouro`, `Join the fleet as raspberrypi`,
+  `Start at login as a user service`, `Update 1 roster (this Mac)`, and the trust sentence.
+  The whole document is still there — `plan_rows/1` draws every field of it behind a
+  disclosure, and the digest covers the document rather than these five lines — but what an
+  operator approves is a thing they can read in one breath.
+
+  A line whose fact the plan does not carry is left out rather than printed as "not
+  reported": the absence of a startup line on a plan that installs no service is the fact.
+  """
+  @spec review_lines(term()) :: [String.t()]
+  def review_lines(plan) when is_map(plan) do
+    target = plan["target"] || %{}
+
+    [
+      review_install(plan["release"], target["install_path"]),
+      review_join(plan["kind"], target["machine"]),
+      review_startup(plan["service"]),
+      review_roster(plan["members"]),
+      review_trust(plan["grants"])
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  def review_lines(_absent), do: []
+
+  defp review_install(release, install_path) when is_map(release) do
+    version = text(release["version"])
+    where = text(install_path)
+
+    case {version, where} do
+      {nil, _where} ->
+        nil
+
+      {version, nil} ->
+        "Install ouro #{version} (#{release_words(release["target"])})"
+
+      {version, where} ->
+        "Install ouro #{version} (#{release_words(release["target"])}) to #{where}"
+    end
+  end
+
+  defp review_install(_absent, _install_path), do: nil
+
+  defp review_join("leave", machine) when is_binary(machine),
+    do: "Take #{plain(machine, 64)} out of the fleet"
+
+  defp review_join(_kind, machine) when is_binary(machine) and machine != "",
+    do: "Join the fleet as #{plain(machine, 64)}"
+
+  defp review_join(_kind, _absent), do: nil
+
+  defp review_startup("managed"), do: "Start at login as a user service"
+  defp review_startup("manual"), do: "Do not start at login; this machine is started by hand"
+  defp review_startup(other) when is_binary(other), do: "Startup: #{plain(other, 64)}"
+  defp review_startup(_absent), do: nil
+
+  defp review_roster(members) when is_list(members) and members != [] do
+    names =
+      members
+      |> Enum.map(fn member -> is_map(member) and text(member["machine"]) end)
+      |> Enum.filter(&is_binary/1)
+
+    count = length(members)
+    noun = if count == 1, do: "roster", else: "rosters"
+
+    case names do
+      [] -> "Update #{count} #{noun}"
+      named -> "Update #{count} #{noun} (#{Enum.join(named, ", ")})"
+    end
+  end
+
+  defp review_roster(_none), do: nil
+
+  # The grants are the part of a plan an operator most needs not to skim past, so they are
+  # the last line rather than a list somewhere under it.
+  defp review_trust(grants) do
+    said = grants |> List.wrap() |> Enum.map(&text/1) |> Enum.reject(&is_nil/1)
+
+    case said do
+      [] -> nil
+      lines -> Enum.join(lines, " ")
+    end
+  end
+
+  @doc """
+  A Rust target triple as the two words a person would use for it.
+
+  `aarch64-unknown-linux-gnu` is "Linux arm64". A triple this build cannot read is printed
+  as itself rather than guessed at: it is still the exact thing being installed.
+  """
+  @spec release_words(term()) :: String.t()
+  def release_words(triple) when is_binary(triple) do
+    system =
+      cond do
+        String.contains?(triple, "linux") -> "Linux"
+        String.contains?(triple, "darwin") or String.contains?(triple, "apple") -> "macOS"
+        String.contains?(triple, "windows") -> "Windows"
+        true -> nil
+      end
+
+    arch =
+      cond do
+        String.contains?(triple, "aarch64") or String.contains?(triple, "arm64") -> "arm64"
+        String.contains?(triple, "x86_64") -> "x86-64"
+        true -> nil
+      end
+
+    case {system, arch} do
+      {nil, _arch} -> plain(triple, 64)
+      {_system, nil} -> plain(triple, 64)
+      {system, arch} -> "#{system} #{arch}"
+    end
+  end
+
+  def release_words(_absent), do: "platform not reported"
+
+  @doc """
+  What removing a member does, in one sentence (§5.4).
+
+  Named after the machine, because a confirmation that says "this device" is one an operator
+  reads on the wrong row.
+  """
+  @spec leave_line(term()) :: String.t()
+  def leave_line(machine) do
+    named = plain(machine, 64) || "this machine"
+
+    "Stop Ouroboros on #{named}, retire its credentials, take it out of every roster. " <>
+      "Its sessions and data stay on that machine."
+  end
+
+  @doc """
+  What to do about a member that cannot be reached to be removed cooperatively.
+
+  The engine's `leave` needs the machine to answer. When it will not, the roster still has
+  to be cleaned up, and the recipe for that is the CLI's — named here rather than left as a
+  failure with no way forward.
+  """
+  @spec leave_fallback(term()) :: String.t()
+  def leave_fallback(machine) do
+    named = plain(machine, 64) || "that machine"
+
+    "#{named} did not answer, so nothing on it was changed. To take it out of this fleet's " <>
+      "roster anyway, run `ouro fleet sessions forget #{named}` on this machine."
+  end
 
   @doc """
   The reviewed plan, in the order and the words the CLI's own review uses.
 
   `Plan::render/0` in `tui/src/fleet_setup/plan.rs` is the terminal's version of this
-  screen, and the proposal asks the two surfaces to show one plan rather than two: the
-  labels below are its labels — operation, action, machine, address, ssh, identity, host
-  key, node, executable, data dir, install, startup, members, restart, and the grants — and
-  the order is its order. What the raw document calls `install_path` and `data_dir` is not
-  what an operator is shown.
+  screen, and the two surfaces show one plan rather than two: the labels below are its
+  labels and the order is its order. What the raw document calls `install_path` and
+  `data_dir` is not what an operator is shown.
 
-  A row whose fact the plan does not carry is left out rather than printed as "not
-  reported", again following the CLI: the absence of an `ssh` line on a local setup is the
-  fact, not a gap in it.
+  Behind a disclosure since the 2026-09-18 review — `review_lines/1` is what the step leads
+  with — because a fifteen-row table is a thing an operator scrolls past rather than reads,
+  and the five lines above it say the same plan.
   """
   @spec plan_rows(term()) :: [{String.t(), String.t()}]
   def plan_rows(plan) when is_map(plan) do
@@ -742,34 +1176,24 @@ defmodule Ouroboros.Web.Live.Devices do
 
   @doc """
   Whether a digest is the shape seam S6 fixes: sha256, lowercase hex, sixty-four characters.
-
-  A digest is the *only* thing approval sends about the plan, so a surface that forwarded
-  whatever string arrived would be offering an operator a button whose meaning it had not
-  checked. Anything else is refused before Approve is drawn.
   """
   @spec digest?(term()) :: boolean()
   def digest?(digest) when is_binary(digest), do: String.match?(digest, ~r/\A[0-9a-f]{64}\z/)
   def digest?(_other), do: false
 
   @doc """
-  This runtime's own sha256 of a plan, computed the way the worker computes it.
+  This page's own sha256 of the plan it is showing.
 
-  `Plan::digest/0` in `tui/src/fleet_setup/plan.rs` is sha256 over `canonical_json` of the
-  plan document (`tui/src/fleet_setup/mod.rs`): every object's keys sorted at every depth,
-  arrays in order, scalars as `serde_json` writes them, and no whitespace anywhere. This is
-  that, in Elixir, so approval can check that the digest it is about to send is a digest *of
-  the plan on the screen* rather than a string the worker asked it to repeat. That the two
-  agree is proved against a real worker in
-  `test/ouroboros/web/live/devices_plan_digest_test.exs`.
-
-  Returns `nil` for a plan this build cannot canonicalise, which is a reason to say so
-  rather than to approve.
+  Seam S6: the digest a client approves is the digest the client computed, over the document
+  it rendered, so that "approve exactly what was shown" is a property of this page rather
+  than a promise from the other side. Keys are walked in their own order and everything else
+  is encoded whole, which is what `serde_json` writes for the same value.
   """
   @spec plan_digest(term()) :: String.t() | nil
   def plan_digest(plan) when is_map(plan) do
-    :crypto.hash(:sha256, canonical(plan)) |> Base.encode16(case: :lower)
+    :sha256 |> :crypto.hash(canonical(plan)) |> Base.encode16(case: :lower)
   rescue
-    _unencodable -> nil
+    _exception -> nil
   end
 
   def plan_digest(_absent), do: nil
@@ -778,30 +1202,31 @@ defmodule Ouroboros.Web.Live.Devices do
   # `serde_json` writes for a scalar. What it does not do is sort keys, so objects are walked
   # and rebuilt in order; everything else is encoded whole.
   defp canonical(value) when is_map(value) do
-    body =
+    inner =
       value
-      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
-      |> Enum.map_join(",", fn {key, field} ->
-        JSON.encode!(to_string(key)) <> ":" <> canonical(field)
+      |> Enum.map(fn {key, member} ->
+        JSON.encode!(to_string(key)) <> ":" <> canonical(member)
       end)
+      |> Enum.join(",")
 
-    "{" <> body <> "}"
+    "{" <> inner <> "}"
   end
 
   defp canonical(value) when is_list(value),
-    do: "[" <> Enum.map_join(value, ",", &canonical/1) <> "]"
+    do: "[" <> (value |> Enum.map(&canonical/1) |> Enum.join(",")) <> "]"
 
   defp canonical(value), do: JSON.encode!(value)
 
   @doc "Every top-level key of a plan this build does not read, so nothing is cut in silence."
   @spec plan_unread(term()) :: [String.t()]
   def plan_unread(plan) when is_map(plan),
-    do: plan |> Map.keys() |> Kernel.--(@plan_fields) |> Enum.sort()
+    do: plan |> Map.keys() |> Enum.map(&to_string/1) |> Kernel.--(@plan_fields) |> Enum.sort()
 
   def plan_unread(_absent), do: []
 
   defp plan_action("setup"), do: "setup — this machine becomes its own fleet"
   defp plan_action("add"), do: "add — this device joins this fleet"
+  defp plan_action("leave"), do: "leave — this device is taken out of this fleet"
   defp plan_action("remove"), do: "remove — this device leaves this fleet"
   defp plan_action(kind) when is_binary(kind), do: kind
   defp plan_action(_absent), do: nil
@@ -851,6 +1276,8 @@ defmodule Ouroboros.Web.Live.Devices do
 
   defp present?(value), do: is_binary(value) and value != ""
 
+  defp present_text?(value), do: is_binary(value) and value != ""
+
   # Every value in a plan came from a worker quoting a remote machine, so it goes through
   # the same sanitizer a step detail does.
   defp text(value) when is_binary(value), do: if(value == "", do: nil, else: plain(value))
@@ -865,8 +1292,8 @@ defmodule Ouroboros.Web.Live.Devices do
   @doc """
   Whether a device row matches a search.
 
-  Name and address, case-insensitively, as the proposal's "search by name/address" says —
-  not the state, because a reader typing "offline" is looking for a word in a name.
+  Name, roster name and address, case-insensitively — not the state, because a reader typing
+  "offline" is looking for a word in a name.
   """
   @spec matches?(map(), String.t()) :: boolean()
   def matches?(_device, ""), do: true
