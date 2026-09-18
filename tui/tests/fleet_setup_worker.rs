@@ -1074,6 +1074,19 @@ fn a_leave_request_file_runs_the_removal_through_the_detached_worker() {
         "a removal reviews a plan: {review}"
     );
 
+    // A surface that comes back later reads the journal, not the socket, so the state in
+    // which the worker waits for a person is written durably rather than only announced.
+    let journalled: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(ouro::fleet_setup::deploy_dir(&data).join(format!("{leave}.json")))
+            .expect("the leave's journal"),
+    )
+    .expect("a journal document");
+    assert_eq!(
+        journalled["state"],
+        json!("awaiting_review"),
+        "the waiting state reaches the journal: {journalled}"
+    );
+
     // The review carries the plan `plan_leave` computed, and the plan says what it does.
     let plan = &review["metadata"]["plan"];
     assert_eq!(plan["kind"], json!("leave"), "{plan}");

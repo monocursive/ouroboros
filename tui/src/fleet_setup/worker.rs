@@ -334,6 +334,16 @@ impl Shared {
 
     fn set_state(&self, state: OperationState) {
         *self.state.lock().unwrap_or_else(|p| p.into_inner()) = state;
+        // The engine journals the states it moves through and the steps it runs; the
+        // three states in which it waits for a person it only announced. A surface that
+        // comes back later — a page refreshed, a drawer closed and reopened — reads the
+        // journal through `fleet.devices`, and a row that said "setting up" while a host
+        // key sat unanswered was a row with nothing to press. So a waiting state is
+        // written durably here, best effort: a journal that cannot be written is the
+        // engine's failure to report, not this notification's.
+        if state.waiting() {
+            let _ = self.journal.set_state(state);
+        }
     }
 
     fn state(&self) -> OperationState {
