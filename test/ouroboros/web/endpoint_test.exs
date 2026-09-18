@@ -110,19 +110,33 @@ defmodule Ouroboros.Web.EndpointTest do
       assert Endpoint.sticky_port(config) == port
     end
 
-    test "and only when it is still the file this node wrote", %{config: config, data_dir: dir} do
+    test "including one another daemon replaced, which is left exactly as they wrote it", %{
+      config: config,
+      data_dir: dir
+    } do
       start_supervised!({Ouroboros.Web, config: config})
       path = Endpoint.publication_path(dir)
+      {:ok, {_address, port}} = Endpoint.bound_address()
 
-      # A second daemon republished over it. That file is theirs now, and deleting
-      # somebody else's publication on the way out is worse than leaving a stale one.
+      # A second daemon republished over it while this one was running. That file is theirs.
       replacement = path <> ".theirs"
       File.write!(replacement, ~s({"port":1,"protocol":1}))
       File.rename!(replacement, path)
+      theirs = File.lstat!(path, time: :posix)
 
       stop_supervised!(Ouroboros.Web)
 
+      # Byte for byte and inode for inode. This asserts the half that "is kept" above does
+      # not: stopping neither deletes their publication nor writes this node's own document
+      # back over it, which a shutdown that tried to leave the directory tidy would do.
       assert File.read!(path) == ~s({"port":1,"protocol":1})
+      assert File.lstat!(path, time: :posix).inode == theirs.inode
+
+      # And the consequence an operator meets: the port the next boot would take is read out
+      # of whatever file is on disk. That is the replacement's now, so this node's own port
+      # is not what it finds — which is only true because the stop left their file alone.
+      assert {:ok, %{"port" => 1}} = path |> File.read!() |> JSON.decode()
+      refute Endpoint.sticky_port(config) == port
     end
 
     test "says nothing about a token that has no file", %{data_dir: dir} do

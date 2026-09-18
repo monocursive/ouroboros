@@ -978,6 +978,35 @@ defmodule Ouroboros.Fleet.DeploymentTest do
                Deployment.authenticate(operation, "pw", "from-the-tab-that-took-over", tab("b"))
     end
 
+    test "keeps the binding while a second process still speaks for that session", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      # The reconnect a LiveView does: the browser drops the socket, the new one mounts under
+      # the *same* tab id and subscribes, and only then does the old process's `:DOWN` land.
+      # For that moment two subscribers name session A, and releasing on the first of them to
+      # die would hand a live tab's prompt to any other tab this administrator has open.
+      #
+      # Mutating the `Enum.any?` guard in `release_session/2` away passed every other case
+      # here, because every other case has exactly one subscriber per session.
+      tab_a_again = subscriber(operation, "tab-a")
+
+      close(tab_a)
+      settle(operation)
+
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      # The tab that is still there answers, which is what says the refusal above was the
+      # binding holding rather than the challenge having gone.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-a", tab("a"))
+
+      # And when the last one goes, it releases as it always did.
+      close(tab_a_again)
+      settle(operation)
+    end
+
     test "leaves the prompt alone while that tab is still there", %{operation: operation} do
       # This is the property the binding exists for and the one this change must not undo: a
       # second tab open at the same time is not the tab that was asked.
@@ -1231,6 +1260,79 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
   # ---------------------------------------------------------------------------
   # What a worker that died before it could say anything left behind
+
+  describe "the worker log's line sanitiser" do
+    @escape <<0x1B>>
+    @bell <<0x07>>
+
+    test "strips escape sequences whole, so a worker cannot paint its own sentence" do
+      # `String.printable?/1` counts `\e` as printable, which is how this went through
+      # untouched: an operator reading the tail in a terminal saw a sentence in a colour the
+      # worker chose, next to the sentences this build wrote.
+      assert Journal.scrub_line("worker died #{@escape}[1;31mSPOOFED#{@escape}[0m", 300) ==
+               "worker died SPOOFED"
+
+      # An operating-system command — a window title, and everything up to its terminator.
+      assert Journal.scrub_line("title #{@escape}]0;evil#{@bell}after", 300) == "title after"
+
+      # A two-character escape with no sequence after it, and the eight-bit CSI that skips
+      # the escape prefix altogether: the byte a terminal would act on is gone either way.
+      assert Journal.scrub_line("reset#{@escape}c done", 300) == "reset done"
+      refute Journal.scrub_line("eight bit #{<<0xC2, 0x9B>>}mSPOOFED", 300) =~ <<0xC2, 0x9B>>
+    end
+
+    test "strips C0, DEL and C1 but keeps a tab" do
+      assert Journal.scrub_line("bell#{@bell}and#{<<0x08>>}back", 300) == "bellandback"
+      assert Journal.scrub_line("del#{<<0x7F>>}ete", 300) == "delete"
+      assert Journal.scrub_line("c1#{<<0xC2, 0x85>>}next", 300) == "c1next"
+
+      # A tab is layout, not control, and a log tail that loses its columns is harder to
+      # read rather than safer.
+      assert Journal.scrub_line("keep\ta tab", 300) == "keep\ta tab"
+    end
+
+    test "redacts the four shapes a secret takes on a command line" do
+      # The assignment, with a prefix on the name.
+      assert Journal.scrub_line("ssh_password=hunter2 was passed", 300) ==
+               "ssh_password=[redacted] was passed"
+
+      # The same name as a long option, where the value is simply the next word.
+      assert Journal.scrub_line("ssh --password hunter2 host", 300) ==
+               "ssh --password [redacted] host"
+
+      # A flag whose own name says nothing; the program is what makes it a secret. Both
+      # spellings, because `-p` takes its value attached or detached.
+      assert Journal.scrub_line("sshpass -p hunter2 ssh deploy@host", 300) ==
+               "sshpass -p [redacted] ssh deploy@host"
+
+      assert Journal.scrub_line("sshpass -phunter2 ssh deploy@host", 300) ==
+               "sshpass -p[redacted] ssh deploy@host"
+
+      # And the one where the giveaway comes *after* the value.
+      assert Journal.scrub_line("echo hunter2 | sudo -S systemctl restart ouro", 300) ==
+               "echo [redacted] | sudo -S systemctl restart ouro"
+
+      for line <- [
+            "ssh_password=hunter2 was passed",
+            "ssh --password hunter2 host",
+            "sshpass -p hunter2 ssh deploy@host",
+            "echo hunter2 | sudo -S systemctl restart ouro"
+          ] do
+        refute Journal.scrub_line(line, 300) =~ "hunter2"
+      end
+    end
+
+    test "leaves an ordinary diagnostic alone, which is the whole point of showing it" do
+      for line <- [
+            "connecting to 100.64.12.44 port 22",
+            "bind: path is 112 bytes, the limit is 104",
+            "ssh: debug1: reading configuration data /etc/ssh/ssh_config",
+            "echo done | tee /tmp/x"
+          ] do
+        assert Journal.scrub_line(line, 300) == line
+      end
+    end
+  end
 
   describe "worker_exit" do
     test "an unfinished journal carries the last three sanitized lines of the worker's log",

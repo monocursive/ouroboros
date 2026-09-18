@@ -3167,11 +3167,28 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     end
   end
 
-  # What went wrong, in the worker's own sanitized words. `detail` is the failure arm's;
-  # `last_error` is the broker's, for a frame that carried one. The `reason` beside them is
-  # a stable code and stays out of the sentence.
+  # What went wrong, in the worker's own words. `detail` is the failure arm's; `last_error`
+  # is the broker's, for a frame that carried one. The `reason` beside them is a stable code
+  # and stays out of the sentence.
+  #
+  # Both go through `Devices.plain/2`, and `last_error` did not. The broker bounds that field
+  # and drops keys that read like credentials, but it does not touch the *characters* in the
+  # string, so a worker — or anything a worker quoted, which is an `ssh` diagnostic, a remote
+  # shell, a release filename — could put a bidi override or a run of zero-width joiners into
+  # a sentence this page then rendered. `Presentation.refusal/1` rewrites the words and is not
+  # a sanitiser; this is.
   defp cause(status, done) do
-    Presentation.refusal(status["last_error"] || Devices.plain(done["detail"]))
+    Presentation.refusal(cause_text(status["last_error"]) || cause_text(done["detail"]))
+  end
+
+  # `plain/2` answers `""` for a value that was nothing but invisible characters, and `""` is
+  # truthy — a `||` chain written over it stops at nothing at all, which is the same trap
+  # `Devices.name/2` exists for. A cause that sanitises away is not a cause.
+  defp cause_text(value) do
+    case Devices.plain(value) do
+      "" -> nil
+      sanitized -> sanitized
+    end
   end
 
   attr :drawer, :map, required: true

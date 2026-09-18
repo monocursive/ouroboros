@@ -44,12 +44,44 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   # value is dropped before it can reach a log line or a browser.
   @forbidden ~w(secret password passphrase cookie token credential private_key key_pem)
 
-  # The same vocabulary, matched against free text rather than against object keys: a line
-  # of a worker's stdio log has no keys, so `name=value` and `name: value` are where a
-  # credential would be if one were printed. Bounded on both sides — the name may carry a
-  # prefix (`ssh_password`) and the value runs to the next whitespace — and the value is
-  # what is dropped, because the name is what makes the line legible.
-  @secret_assignment ~r/([A-Za-z0-9_.\-]*(?:#{Enum.join(@forbidden, "|")})[A-Za-z0-9_.\-]*\s*[:=]\s*)(\S+)/i
+  # The same vocabulary, matched against free text rather than against object keys: a line of
+  # a worker's stdio log has no keys, so this is where a credential would be if one were
+  # printed. The *name* survives every one of these, because the name is what makes the line
+  # legible; the value does not.
+  #
+  # Four shapes, because a log tail is mostly command lines and shell traces, and a secret on
+  # one of those does not look like `password=`:
+  @secret_names Enum.join(@forbidden, "|")
+
+  #   * `password=x`, `ssh_password: x` — the assignment, with an optional prefix on the
+  #     name and a value that runs to the next whitespace.
+  @secret_assignment ~r/([A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*\s*[:=]\s*)(\S+)/i
+
+  #   * `--password x` — the same name as a long option, where the value is the next word
+  #     rather than something after a separator.
+  @secret_option ~r/(--?[A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*\s+)(\S+)/i
+
+  #   * `sshpass -p x` — a flag whose *name* says nothing at all. The program is what makes
+  #     it a secret, so the program is what this matches on.
+  @sshpass_option ~r/(\bsshpass\b.*?\s-p?\s*)(\S+)/i
+
+  #   * `echo x | sudo -S …` — the secret is before the pipe, which is the one form where
+  #     the giveaway comes after the value rather than before it.
+  @piped_secret ~r/(\b(?:echo|printf)\s+)(.*?)(\|\s*sudo\b.*?-S\b)/i
+
+  # Escape sequences, stripped as sequences rather than character by character: dropping the
+  # `\e` alone out of `\e[1;31m` leaves `[1;31m` on the line, which is noise where the whole
+  # thing was meant to be nothing.
+  @ansi_csi ~r/\e\[[0-9;:<=>?]*[ -\/]*[@-~]/
+  @ansi_osc ~r/\e\][^\a\e]*(?:\a|\e\\)?/
+  # Every other escape form: optional intermediate bytes then one final byte, which covers
+  # `ESC c`, `ESC 7`, `ESC ( B` and a lone `ESC` at the end of a truncated line.
+  @ansi_other ~r/\e[ -\/]*[0-~]?/
+
+  # Then what is left: C0 except tab, DEL, and C1 — which includes the eight-bit CSI at
+  # U+009B, so a line that skipped the escape prefix still loses the byte a terminal would
+  # have acted on. What follows it stays, as the ordinary text it then is.
+  @control_characters ~r/[\x{0000}-\x{0008}\x{000A}-\x{001F}\x{007F}-\x{009F}]/u
 
   @doc """
   The directory the worker keeps its sockets, capability files and journals in.
@@ -398,29 +430,52 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   That log is not a journal. Nothing writes it under a contract: it is whatever the worker
   and the programs it forked printed on their way out, which on a bad day is an `ssh`
   diagnostic, a shell trace, or bytes that are not text at all. So it gets the journal's own
-  rule — the same forbidden vocabulary, here matched against `name=value` and `name: value`
-  because a line has no keys — then the journal's bounding, then the caller's own cap.
+  forbidden vocabulary — matched against the four shapes a secret takes in free text, since
+  a line has no keys — then the journal's bounding, then the caller's own cap.
 
-  Bytes that are not printable text are folded to `.` rather than dropped: a line a worker
+  Before any of that, every control character goes. `String.printable?/1` counts `\e` as
+  printable, so the previous version of this let `"worker died \e[1;31mSPOOFED\e[0m"` through
+  unchanged: an operator reading the tail in a terminal saw a sentence the worker did not
+  write, in a colour it chose. Escape sequences are removed whole, then C0 (bar tab), DEL and
+  C1 individually, so nothing is left to reassemble.
+
+  Bytes that are not text at all are folded to `.` rather than dropped: a line a worker
   printed in a foreign encoding is still evidence of where it stopped, and it must not be
   able to break the encoder that carries it to a browser.
   """
   @spec scrub_line(binary(), pos_integer()) :: String.t()
   def scrub_line(line, max) when is_binary(line) and is_integer(max) and max > 0 do
     line
-    |> printable()
+    |> textual()
+    |> strip_controls()
     |> String.trim()
-    |> then(&Regex.replace(@secret_assignment, &1, "\\1[redacted]"))
+    |> redact()
     |> scrub_value()
     |> String.slice(0, max)
   end
 
-  defp printable(line) do
-    if String.valid?(line) and String.printable?(line) do
+  defp textual(line) do
+    if String.valid?(line) do
       line
     else
       for <<byte <- line>>, into: "", do: <<if(byte in 32..126, do: byte, else: ?.)>>
     end
+  end
+
+  defp strip_controls(line) do
+    line
+    |> then(&Regex.replace(@ansi_csi, &1, ""))
+    |> then(&Regex.replace(@ansi_osc, &1, ""))
+    |> then(&Regex.replace(@ansi_other, &1, ""))
+    |> then(&Regex.replace(@control_characters, &1, ""))
+  end
+
+  defp redact(line) do
+    line
+    |> then(&Regex.replace(@secret_assignment, &1, "\\1[redacted]"))
+    |> then(&Regex.replace(@secret_option, &1, "\\1[redacted]"))
+    |> then(&Regex.replace(@sshpass_option, &1, "\\1[redacted]"))
+    |> then(&Regex.replace(@piped_secret, &1, "\\1[redacted] \\3"))
   end
 
   defp scrub(value, depth) when depth >= @max_depth and (is_map(value) or is_list(value)),

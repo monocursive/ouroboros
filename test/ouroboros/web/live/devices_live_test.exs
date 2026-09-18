@@ -3821,6 +3821,67 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert html =~ "buildbox was not removed"
       refute html =~ "Setup failed"
     end
+
+    test "the cause is normalised, wherever the worker got its words", %{
+      conn: conn,
+      worker: worker
+    } do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared_leave(view)
+
+      # `last_error` is the worker's, and the worker's is often something it quoted — an
+      # `ssh` diagnostic, a remote shell, a filename off a release server. The broker bounds
+      # that field and drops keys that read like credentials; it does not touch the
+      # characters, so this reached the page through `Presentation.refusal/1`, which rewrites
+      # words and is not a sanitiser. A right-to-left override in a failure sentence reverses
+      # the text after it on screen.
+      bidi = <<0x202E::utf8>>
+      pop = <<0x202C::utf8>>
+      zero_width = <<0x200B::utf8>>
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => false,
+          "reason" => "ssh_auth_failed",
+          "error" => "buildbox refused #{bidi}exe.tnegatad#{pop} for#{zero_width} deploy",
+          "detail" => "a detail nobody should see while there is an error"
+        })
+
+      html = await(view, "buildbox refused")
+
+      refute html =~ bidi
+      refute html =~ pop
+      refute html =~ zero_width
+      assert html =~ "buildbox refused exe.tnegatad for deploy"
+
+      # `last_error` still wins over `detail`, which is the ordering this is not allowed to
+      # change while adding the sanitiser in front of it.
+      refute html =~ "nobody should see"
+    end
+
+    test "a cause that sanitises to nothing falls through to the detail", %{
+      conn: conn,
+      worker: worker
+    } do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared_leave(view)
+
+      # `plain/2` answers `""` for a string that was only invisible characters, and `""` is
+      # truthy: written as a bare `||` chain this stops at nothing at all and draws an empty
+      # sentence over a real one.
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => false,
+          "reason" => "ssh_auth_failed",
+          "error" => <<0x200B::utf8, 0x202E::utf8>>,
+          "detail" => "buildbox refused this authentication"
+        })
+
+      html = await(view, "refused this authentication")
+      assert html =~ "buildbox refused this authentication"
+    end
   end
 
   describe "the words a page picks from a kind" do
