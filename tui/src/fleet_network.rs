@@ -135,6 +135,7 @@ pub fn locate_clients() -> Vec<Client> {
 }
 
 /// The first candidate of [`locate_clients_with`].
+#[cfg(test)]
 fn locate_client_with(
     override_path: Option<&OsStr>,
     search_path: Option<&OsStr>,
