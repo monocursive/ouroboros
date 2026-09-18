@@ -197,15 +197,25 @@ command line is readable by every process on the host:
 
 | Flag | What it selects |
 |---|---|
-| *(none)* | the deployment host's own default SSH identities |
+| *(none)* | the deployment host's own default SSH identities, and then — if the target accepts none of them and offers password authentication — the target account's password, through the same masked prompt `--ask-password` uses |
 | `--key <PATH>` | one private key file on the deployment host, checked for ownership and mode. An encrypted key is asked for its passphrase in a masked prompt |
 | `--agent <FINGERPRINT>` | one identity held by this machine's SSH agent, pinned so the agent offers nothing else. No agent is forwarded and no key is exported |
 | `--ask-password` | the target account's password, typed into a masked prompt and used for that operation only |
 
+That fallback is why no surface needs an authentication picker: the ordinary answer is
+"this machine, this account", and the connection asks for a password only when it turns
+out to need one. It is the same `password` challenge, numbered the same way (*attempt 1
+of 3*), and a prompt for an encrypted key's passphrase is still the separate `passphrase`
+challenge that names the key. The method list stays `publickey,password` and nothing
+else: keyboard-interactive would let the far end compose the prompt text, and prompt text
+composed by a far end is never put in front of a person here.
+
 For an explicitly selected key or agent identity, the connection uses the normalized
 options with `-F /dev/null`, so additional `IdentityFile` entries cannot offer another
-key. Preflight still inspects the deployment host's SSH configuration and refuses
-unsupported destination rewriting or proxy routing.
+key. The default identity is the one case that reads the deployment host's own
+`~/.ssh/config`, because using this host's configured identities is what it means.
+Preflight still inspects that configuration and refuses unsupported destination rewriting
+or proxy routing.
 
 An unknown host key is always a separate explicit question showing its algorithm and
 SHA256 fingerprint; `--yes` accepts a reviewed plan but never a host key, never a
@@ -224,9 +234,11 @@ is refused rather than made.
 `--json` prints the operation's result with stable reason codes; incomplete setup exits
 non-zero even when some steps succeeded.
 
-One SSH ControlMaster socket is reused for the operation, so a password is typed once
-and retried up to three times, with a five-minute window to answer. Host-trust and
-review challenges use the same five-minute window.
+One SSH ControlMaster socket is reused for the operation, so a password is typed once and
+retried up to three times, with a five-minute window to answer. A connection refused for a
+reason that never asked for a password — a key the target will not take — is not retried
+three times: there is nothing for anyone to retype. Host-trust and review challenges use
+the same five-minute window.
 
 On this branch the Devices views (the web page at `/devices`, the terminal client's
 `ctrl+x D`) and the `fleet.devices` / `fleet.deployment.*` gateway methods drive this
@@ -292,7 +304,8 @@ deadline and a bounded read. It contacts no device, opens no SSH connection, and
 nothing. A discovered peer's Ouroboros state is `discovered_installation_unknown`: nothing
 here has inspected one, so nothing here calls one uninstalled.
 
-The client is found on `$PATH`, then at the usual macOS and Linux locations. Set
+The client is found on `$PATH`, then at the usual macOS and Linux locations; a client
+that runs but answers with no status document is skipped for the next candidate. Set
 `OUROBOROS_TAILSCALE` to name a different one. It must be **absolute** — a relative name
 would let the directory you happen to be standing in decide which program runs as your
 network client — and an override that is not an absolute path to an executable file is a
@@ -326,6 +339,12 @@ let any device on the network claim a member's row by renaming itself, and show 
 platform and presence under your member's address. A device that does adopt a member's
 name is listed under **Available on this network** as the separate device it is, with
 `name_conflicts_with_roster` in `--json` and a note in the human list.
+
+Every `--json` device row also carries `suggested_machine`: a valid machine name for that
+device — its roster name if it has one, otherwise one derived from its display name, or
+`null` when nothing valid can be derived — so a surface can pre-fill a setup form without
+offering a name the validator will refuse. It is for forms only; the human `ouro fleet
+devices` never prints it, and nothing is named by it until a person submits it.
 
 Human output reads as prose; the snake_case `state` codes are the `--json` contract and
 appear only there.
@@ -625,10 +644,15 @@ not an executor:
    those: `kind: "setup"` configures this machine without SSH to itself, so it carries only
    what this device should be called and the private address its runtime will bind. A third
    kind, `kind: "leave"`, removes a machine that is already in this machine's roster: it
-   names the member and the account to reach it with, and the *address* is read out of this
-   machine's own `fleet/profile.json` rather than taken from the caller, so that the machine
-   named is the machine contacted. A member name that is not in the roster is refused with
-   the roster listed. Written to
+   carries the member's name and host, the account to reach it with, the port and the
+   identity reference, and optionally `install_path` when `ouro` is somewhere unusual on
+   that machine. The *address* is read out of this machine's own `fleet/profile.json`
+   rather than taken from the caller, so that the machine named is the machine contacted,
+   and a member name that is not in the roster is refused with the roster listed.
+   Everything else about how the member was deployed — including its
+   `OUROBOROS_DATA_DIR` — is read back out of the journal of the operation that admitted
+   it, so a surface never has to remember it. Unknown keys are refused, so a request
+   carries these and nothing else. Written to
    `<data dir>/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
    (an exclusive temporary inode chmodded before the first byte, then renamed) and as
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is

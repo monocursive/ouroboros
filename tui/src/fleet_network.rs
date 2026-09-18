@@ -135,6 +135,10 @@ pub fn locate_clients() -> Vec<Client> {
 }
 
 /// The first candidate of [`locate_clients_with`].
+///
+/// Only the tests ask this question — production wants the whole ordered list, because
+/// a candidate that runs and answers with no status document is skipped for the next —
+/// so it is compiled only for them rather than left as dead weight.
 #[cfg(test)]
 fn locate_client_with(
     override_path: Option<&OsStr>,
@@ -3156,6 +3160,50 @@ mod tests {
             "known members survive blind discovery"
         );
         assert!(blind.contains("stopped"));
+    }
+
+    /// `suggested_machine` is for a form, and a form only.
+    ///
+    /// It exists so a setup form can be pre-filled with a name the validator will take,
+    /// instead of "Monocursive’s MacBook Pro" or "this device". It is not what a device
+    /// is *called*: printing it in a terminal would show a person a name nothing on the
+    /// network answers to, beside the name it does.
+    #[test]
+    fn the_suggested_form_name_is_in_the_json_and_never_in_the_terminal() {
+        let summary = summary_with(&[("attic", "100.64.12.77")]);
+        let value = devices_json(&summary, &running());
+        let suggestions: Vec<(String, String)> = value["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row["name"].as_str()?.to_string(),
+                    row["suggested_machine"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        assert!(
+            !suggestions.is_empty(),
+            "a form has something to pre-fill with: {value}"
+        );
+        for (_, suggestion) in &suggestions {
+            fleet::validate_machine(suggestion)
+                .unwrap_or_else(|error| panic!("`{suggestion}` is not a usable name: {error}"));
+        }
+
+        let text = render_devices(&summary, &running());
+        for (name, suggestion) in &suggestions {
+            if name == suggestion {
+                // The device is already called something valid; there is nothing the
+                // human list could be showing that the JSON invented.
+                continue;
+            }
+            assert!(
+                !text.contains(suggestion.as_str()),
+                "`{suggestion}` is a form's pre-fill, not what `{name}` is called:\n{text}"
+            );
+        }
     }
 
     /// The `--json` `state` is a contract for scripts; a terminal column is prose. The
