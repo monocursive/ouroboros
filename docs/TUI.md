@@ -2661,7 +2661,12 @@ list is one status line: `This Mac is not in a fleet yet` on a standalone machin
 The Ouroboros column is one of `in the fleet`, `in the fleet · not connected`,
 `not set up`, `can't run Ouroboros`, `offline`, `setting up…`, `waiting for you`,
 `setup failed`, `set up just now` — the last four from the operation on that row rather
-than from the device's state. `DeviceState::label()` is still where the *CLI's* wording
+than from the device's state. An operation's **kind** is half of what those four say: a
+removal reads `removing…`, `removal failed` and `removed just now`, so a finished
+removal next to an **Add to fleet** button says the machine was taken out rather than
+congratulating the operator on a setup that never happened — which is what a live
+*Remove from fleet* against a Raspberry Pi was told.
+`DeviceState::label()` is still where the *CLI's* wording
 lives and `a_state_code_maps_to_the_words_the_cli_prints` still pins this view against
 the serializer; the shorter vocabulary a row reads is
 `DeviceRow::ouroboros_word`, pinned the same way by
@@ -2743,7 +2748,15 @@ deployment onto another machine perfectly well and cannot be the thing installed
 the roster name, never the address — the SSH user and the port. It says what it does and
 what it does not: *Stops Ouroboros on ‹machine›, retires its credentials and takes it out
 of every roster. Its sessions and data stay on that machine.* `x` on this machine or on a
-device that is not a member opens nothing and says so on the hint line.
+device that is not a member opens nothing and says so on the hint line. A removal that
+**never reached the machine** — a failure with no step recorded against it, and no
+refusal code of the engine's own — ends with the roster fallback, spelled the way the CLI
+takes it: *‹machine› did not answer, so nothing on it was changed. To take it out of this
+fleet's roster anyway, run `ouro fleet sessions forget --machine ‹machine›
+--accept-state-loss` on this machine, and on every other machine in the fleet.* That
+sentence appears nowhere else: on the form, during the operation, or after a failure the
+machine itself answered, it would be telling an operator a machine is gone while the
+thing that would prove it is still running.
 
 **Then the broker is the authority** for every screen after `prepare`:
 `fleet.deployment.status` is polled about once a second, its `state` names the stage, and
@@ -2760,7 +2773,14 @@ kept as a fallback so a broker that stopped lifting would not empty every prompt
 silence. A drift test pins both by calling the real builders rather than by agreeing with
 a fake.
 
-**The review is five plain lines**, headed *Ready to deploy*: what is installed and where
+**The review is five plain lines**, headed from the plan's own kind — *Ready to deploy*
+with `a  Deploy` for an `add`, *Ready to set up* with `a  Set up` for a `setup`, *Ready
+to remove* with `a  Remove` for a `leave`, and the footer hint carrying the same word as
+the key above it. A removal's five lines are its own (*Stop Ouroboros on ‹machine› and
+disable its start at login · Retire ‹machine›'s credentials · Update N rosters · Its
+sessions and data stay on that machine*, and the trust sentence); the startup line is not
+among them, because how a machine starts at login is not a fact about taking it out of
+the fleet. An `add`'s five lines are: what is installed and where
 with its checksum, what the machine joins as, how it starts, how many rosters change, and
 one sentence about trust. The digest is under them in mono. It is not a field table of
 every decoded value — that was the specification, rendered. Every line is built here,
@@ -2771,20 +2791,33 @@ its own review. `PlanView` holds both digests to 64 lowercase hex and refuses a
 multibyte one panicked the whole client. And `a` approves the digest **this client
 computed** over the plan it drew, refusing when the challenge claims a different one.
 
-**Progress is a six-stage strip** — `✓ Inspect · ✓ Install · ● Join fleet · ○ Start at
+**Progress is a stage strip** — `✓ Inspect · ✓ Install · ● Join fleet · ○ Start at
 login · ○ Connect · ○ Ready` — built from the worker's own steps rather than from a state
 name, with the current step's detail under it and the worker's step list below that. A
-`leave` draws its own four stages. In screen-reader mode each mark is the word it stands
-for (`Inspect done · Install now`), because a glyph is not something a screen reader
-announces usefully.
+`leave` draws its own five: `Inspect · Stop · Disable startup · Leave · Update rosters`,
+collecting the engine's `inspect`, `stop_runtime`, `disable_service`,
+`verify_disconnected`, `leave` and `member_preflight`/`roster` steps in that order.
+`fleet.deployment.status` carries **no `kind`**, so the kind travels with the operation
+the view opened and is handed to the strip; reading the snapshot alone is how a removal
+drew the add flow's six stages and filed its roster removal under *Join fleet*. A stage
+no step ever named, on an operation that finished, is `– Ready (not checked)` rather than
+a tick: a successful add whose steps stop at `connect` reported no readiness at all, and
+ticking it was this screen inventing a check nobody made. In screen-reader mode each mark
+is the word it stands for (`Inspect done · Install now · Ready not checked`), because a
+glyph is not something a screen reader announces usefully.
 
-**Finishing** names the machine (*‹machine› is in your fleet*) and offers **Open** and
-**b Done**. It no longer names a model to configure or a task to run: those are per
+**Finishing** names the machine (*‹machine› is in your fleet*), draws the worker's own
+`summary` and `next`, the stage strip when there are steps to draw, and offers **Open**
+and **b Done**. It no longer names a model to configure or a task to run: those are per
 machine and explicit, and naming them here was naming actions this screen does not have.
-A failure shows the cause in the worker's words, the stage strip, what was left behind,
-the steps that did run, and `R` **Retry** — a resume by operation id, so the worker
-inspects again and puts the plan up for review again and a stale failure cannot apply
-anything nobody re-read.
+A finished removal says *‹machine› is out of your fleet*, the same two sentences from the
+worker, and **b back** — there is nothing to open, because the machine it names is not in
+the fleet any more. A failure shows the cause in the worker's words, the stage strip,
+what was left behind, the steps that did run, and `R` **Retry** — a resume by operation
+id, so the worker inspects again and puts the plan up for review again and a stale
+failure cannot apply anything nobody re-read. A removal's failure headings are its own
+(*This removal did not finish*), because a screen that says "setup" about a removal is
+the same defect as a row that does.
 
 **A worker that is gone says so.** When the broker finds an unfinished journal with no
 worker and no `done` frame it carries `worker_exit: {code, last_lines}` from the worker's

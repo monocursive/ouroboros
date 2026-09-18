@@ -4126,6 +4126,482 @@ fn x_on_a_row_that_is_not_a_member_says_so_rather_than_opening_a_form() {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// removing a member: the words, the stages and the fallback
+//
+// Every test below came out of one live run — a real **Remove from fleet** against a
+// Raspberry Pi — where the surfaces described the whole operation as an *add*: the row
+// said the machine had been set up, the review offered to deploy it, and the strip filed
+// the roster removal under *Join fleet*. The kind of an operation is not decoration; it
+// is what every sentence on these screens is about.
+// ---------------------------------------------------------------------------------------
+
+/// A fleet with one member, which is the only kind of row a removal starts from.
+fn with_member() -> Value {
+    let mut reply = populated();
+    reply["devices"] = json!([
+        {
+            "name": "studio", "machine": "studio", "suggested_machine": "studio",
+            "os": "macos", "address": "100.64.12.21", "online": true,
+            "state": "this_device", "connected": true,
+            "name_conflicts_with_roster": Value::Null
+        },
+        {
+            "name": "attic", "machine": "attic", "suggested_machine": "attic",
+            "os": "linux", "address": "100.64.12.77", "online": true,
+            "state": "fleet_member", "action": "view device",
+            "connected": true, "compatible": true, "runtime_running": true,
+            "last_probe": Value::Null,
+            "name_conflicts_with_roster": Value::Null
+        }
+    ]);
+    reply
+}
+
+/// `x` on `attic`, through the form, to an open removal this view is following.
+fn removing() -> App {
+    let mut app = with_inventory(with_member());
+    let _settled = drained(&mut app);
+
+    remove(&mut app, "attic");
+    fill(&mut app, "SSH user", "pi");
+    focus_submit(&mut app);
+    app.apply(key(KeyCode::Enter));
+
+    let calls = drained(&mut app);
+    let prepare = call_for(&calls, "fleet.deployment.prepare");
+    answer(
+        &mut app,
+        prepare.tag.clone(),
+        json!({ "operation_id": "abcdef0123456789" }),
+    );
+
+    app
+}
+
+/// One leave plan, as the worker puts it on the wire.
+fn leave_plan() -> Value {
+    json!({
+        "schema": 1,
+        "operation": "abcdef0123456789",
+        "kind": "leave",
+        "deployment_host": {
+            "hostname": "studio", "user": "ada",
+            "os": "darwin", "arch": "aarch64-apple-darwin", "issuer": true
+        },
+        "target": {
+            "machine": "attic", "address": "100.64.12.77", "port": 22,
+            "ssh_user": "pi", "identity": "agent: id_ed25519",
+            "install_path": "bin/ouro",
+            "host_fingerprint": "SHA256:0Yp1rL8m"
+        },
+        "release": Value::Null,
+        // `plan_leave` builds a removal with no service to propose. The document still
+        // carries the field, which is exactly how the startup sentence got onto a screen
+        // about a machine that is being taken out.
+        "service": "manual",
+        "members": [
+            { "machine": "studio", "host": "100.64.12.21",
+              "reached_by": "local", "change": "remove attic from the roster" }
+        ],
+        "grants": ["no new trust is granted; attic's credentials are retired"]
+    })
+}
+
+/// Defect 1: the row's words come from the operation's *kind*, not only its state.
+#[test]
+fn a_removal_reads_as_a_removal_on_the_row_it_is_about() {
+    let _mode = normal();
+
+    for (state, word, label) in [
+        // A finished removal, on a row the runtime now reports as an ordinary device:
+        // it was removed, and what can be done with it is to add it back.
+        ("completed", "removed just now", "Add to fleet"),
+        ("failed", "removal failed", "Retry"),
+        ("deploying", "removing\u{2026}", "Continue"),
+    ] {
+        let mut reply = populated();
+        reply["operations"] = json!([{
+            "operation": "abcdef0123456789", "state": state, "kind": "leave",
+            "owner": "local-owner", "attached": false, "readable": true,
+            "target": { "machine": "build-linux", "address": "100.64.12.44",
+                        "ssh_user": "pi", "port": 22 }
+        }]);
+
+        let mut app = with_inventory(reply);
+        let _settled = drained(&mut app);
+
+        let drawn = screen(&mut app);
+        let row = device_row(&drawn, "build-linux").to_string();
+        drop(drawn);
+
+        assert!(
+            row.contains(word),
+            "{state} did not read as a removal: {row:?}"
+        );
+        assert!(row.contains(label), "{state}: {row:?}");
+        for setting_up in ["set up just now", "setup failed", "setting up\u{2026}"] {
+            assert!(
+                !row.contains(setting_up),
+                "{state} described a removal as a setup: {row:?}"
+            );
+        }
+    }
+}
+
+/// Defects 2 and 3: the review screen for a removal names removal, and says nothing
+/// about starting at login on a machine it is taking out of the fleet.
+#[test]
+fn the_review_before_a_removal_offers_to_remove_and_not_to_deploy() {
+    let _mode = normal();
+    let mut app = removing();
+
+    let plan = leave_plan();
+    let digest = ouro::fleet_setup::sha256_hex(ouro::fleet_setup::canonical_json(&plan).as_bytes());
+
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "awaiting_review",
+            json!([challenge(
+                "c-review",
+                "review",
+                json!({ "plan_digest": digest, "plan": plan })
+            )]),
+            json!({}),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(text.contains("Ready to remove"), "{text}");
+    assert!(
+        text.contains("a Remove \u{2014} applies exactly this plan"),
+        "the key that applies a removal is labelled as a deployment:\n{text}"
+    );
+    assert!(
+        !text.contains("Ready to deploy") && !text.contains("a Deploy"),
+        "the removal screen still offers a deployment:\n{text}"
+    );
+
+    // §5.4's own sentences, and nothing about installing or starting anything.
+    assert!(
+        text.contains("Stop Ouroboros on attic and disable its start at login."),
+        "{text}"
+    );
+    assert!(text.contains("Retire attic's credentials."), "{text}");
+    assert!(text.contains("Update 1 roster (studio)."), "{text}");
+    assert!(
+        text.contains("Its sessions and data stay on that machine."),
+        "{text}"
+    );
+    for absent in [
+        "Start at login as a user service",
+        "Start manually; no service is installed",
+        "The plan does not say how it starts",
+        "Join the fleet as",
+        "Install ouro",
+    ] {
+        assert!(
+            !text.contains(absent),
+            "a removal's plan drew the add flow's `{absent}` line:\n{text}"
+        );
+    }
+
+    // The footer says the same word as the key above it.
+    let hint = ouro::ui::app::devices_hint_line(&app);
+    assert!(hint.contains("a remove"), "the footer disagrees: {hint}");
+
+    // And `a` still approves exactly the digest this client computed.
+    app.apply(key(KeyCode::Char('a')));
+    let calls = drained(&mut app);
+    assert_eq!(
+        call_for(&calls, "fleet.deployment.start").params["plan_digest"],
+        json!(digest)
+    );
+}
+
+/// Defect 4, first half: the strip is the engine's own `run_leave` steps, in its order.
+///
+/// The step names are pinned here because they are a contract with
+/// `fleet_setup::engine`'s `run_leave` and `stop_and_retire`: `inspect`, `stop_runtime`,
+/// `disable_service`, `verify_disconnected`, `leave`, then `member_preflight`/`roster`
+/// for every roster the removal edits. A rename there that is not made here shows up as
+/// a strip where nothing ever advances.
+#[test]
+fn a_removals_stage_strip_is_the_engines_own_leave_steps() {
+    let _mode = normal();
+    let mut app = removing();
+
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "deploying",
+            json!([]),
+            json!({
+                "steps": [
+                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
+                    { "machine": "attic", "step": "stop_runtime", "outcome": "ok" },
+                    { "machine": "attic", "step": "disable_service", "outcome": "ok" },
+                    { "machine": "attic", "step": "verify_disconnected",
+                      "outcome": "started", "detail": "waiting for attic to disconnect" }
+                ]
+            }),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(
+        text.contains(
+            "\u{2713} Inspect \u{b7} \u{2713} Stop \u{b7} \u{2713} Disable startup \u{b7} \
+             \u{25cf} Leave \u{b7} \u{25cb} Update rosters"
+        ),
+        "the removal drew somebody else's stages:\n{text}"
+    );
+    // The add flow's stages are not what a removal does, and a roster removal is not a
+    // machine joining anything.
+    for stage in ["Join fleet", "Install", "Connect", "Ready"] {
+        assert!(
+            !text.contains(stage),
+            "the removal strip still carries `{stage}`:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("waiting for attic to disconnect"),
+        "the current step's detail is missing:\n{text}"
+    );
+
+    // The rosters are their own stage, and `roster` is the step that fills it.
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "deploying",
+            json!([]),
+            json!({
+                "steps": [
+                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
+                    { "machine": "attic", "step": "stop_runtime", "outcome": "ok" },
+                    { "machine": "attic", "step": "disable_service", "outcome": "ok" },
+                    { "machine": "attic", "step": "verify_disconnected", "outcome": "ok" },
+                    { "machine": "attic", "step": "leave", "outcome": "ok" },
+                    { "machine": "studio", "step": "roster", "outcome": "started" }
+                ]
+            }),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(
+        text.contains("\u{2713} Leave \u{b7} \u{25cf} Update rosters"),
+        "the roster edit is not the stage it belongs to:\n{text}"
+    );
+}
+
+/// Defect 4, second half: what a finished removal says, and what it does not offer.
+#[test]
+fn a_finished_removal_says_the_machine_is_out_and_offers_only_the_way_back() {
+    let _mode = normal();
+    let mut app = removing();
+
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "completed",
+            json!([]),
+            json!({
+                "steps": [
+                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
+                    { "machine": "attic", "step": "stop_runtime", "outcome": "ok" },
+                    { "machine": "attic", "step": "disable_service", "outcome": "ok" },
+                    { "machine": "attic", "step": "verify_disconnected", "outcome": "ok" },
+                    { "machine": "attic", "step": "leave", "outcome": "ok" },
+                    { "machine": "studio", "step": "roster", "outcome": "ok" }
+                ],
+                "done": {
+                    "ok": true, "state": "completed",
+                    "summary": "attic left the fleet; its work and session history stay on it",
+                    "next": "No tombstone is recorded."
+                }
+            }),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(text.contains("attic is out of your fleet"), "{text}");
+    assert!(
+        text.contains("attic left the fleet; its work and session history stay on it"),
+        "the worker's own summary is missing:\n{text}"
+    );
+    assert!(text.contains("No tombstone is recorded."), "{text}");
+    assert!(text.contains("b back to the device list"), "{text}");
+
+    // Nothing to open, nothing to configure, nothing to run: the machine this screen
+    // names is not in the fleet any more.
+    for absent in [
+        "is in your fleet",
+        "Open \u{2014}",
+        "Done \u{2014}",
+        "Configure model",
+        "Run test task",
+    ] {
+        assert!(
+            !text.contains(absent),
+            "a finished removal still offered `{absent}`:\n{text}"
+        );
+    }
+}
+
+/// Defect 5: the `sessions forget` recipe, only where it is the answer, spelled the way
+/// the CLI actually takes it.
+#[test]
+fn only_a_removal_that_never_reached_the_machine_names_the_cli_fallback() {
+    let _mode = normal();
+    let recipe = "ouro fleet sessions forget --machine attic --accept-state-loss";
+
+    // Before anything has failed — the form, and the operation while it is running —
+    // there is no such sentence: the removal has not failed, so there is nothing to fall
+    // back from.
+    let mut app = with_inventory(with_member());
+    let _settled = drained(&mut app);
+    remove(&mut app, "attic");
+    let text = prose(&mut app);
+    assert!(!text.contains("did not answer"), "on the form:\n{text}");
+    assert!(!text.contains("sessions forget"), "on the form:\n{text}");
+
+    let mut app = removing();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot("deploying", json!([]), json!({})),
+    );
+    let _polled = drained(&mut app);
+    assert!(
+        !prose(&mut app).contains("did not answer"),
+        "a running removal already told the operator the machine is gone"
+    );
+
+    // A failure with no step against the machine at all: it was never reached.
+    let mut app = removing();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "failed",
+            json!([]),
+            json!({
+                "steps": [],
+                "done": { "ok": false, "reason": "failed",
+                          "detail": "ssh: connect to host 100.64.12.77 port 22: No route to host" }
+            }),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(text.contains("This removal did not finish"), "{text}");
+    assert!(text.contains("attic did not answer"), "{text}");
+    assert!(
+        text.contains(recipe),
+        "the fallback is not the command the CLI takes:\n{text}"
+    );
+
+    // A failure that *did* reach the machine is a different failure, and the roster
+    // recipe is not its answer: the machine answered, and something else went wrong.
+    let mut app = removing();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "failed",
+            json!([]),
+            json!({
+                "steps": [
+                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
+                    { "machine": "attic", "step": "stop_runtime", "outcome": "failed",
+                      "detail": "attic is working, so it was not stopped" }
+                ],
+                "done": { "ok": false, "reason": "runtime_busy",
+                          "detail": "attic is working, so it was not stopped" }
+            }),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(text.contains("attic is working"), "{text}");
+    assert!(
+        !text.contains("did not answer") && !text.contains("sessions forget"),
+        "a machine that answered was reported as unreachable:\n{text}"
+    );
+}
+
+/// A completed operation whose steps stop at `connect` checked no readiness, and the
+/// strip says so rather than ticking a stage nothing reported.
+///
+/// From a successful live add: the worker finished at `connect`, wrote its summary, and
+/// the finish screen drew a tick against *Ready* — a check nobody had made.
+#[test]
+fn a_completed_setup_that_never_checked_readiness_does_not_claim_it_did() {
+    let _mode = normal();
+    let mut app = deploying();
+
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "completed",
+            json!([]),
+            json!({
+                "steps": [
+                    { "machine": "build-linux", "step": "inspect", "outcome": "ok" },
+                    { "machine": "build-linux", "step": "install_binary", "outcome": "ok" },
+                    { "machine": "build-linux", "step": "issue", "outcome": "ok" },
+                    { "machine": "build-linux", "step": "service", "outcome": "ok" },
+                    { "machine": "build-linux", "step": "connect", "outcome": "ok" }
+                ],
+                "done": {
+                    "ok": true, "state": "completed",
+                    "summary": "build-linux joined the fleet and answered on its node name",
+                    "next": "Open the machines panel to give it a model"
+                }
+            }),
+        ),
+    );
+    let _polled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(text.contains("build-linux is in your fleet"), "{text}");
+    assert!(
+        text.contains("build-linux joined the fleet and answered on its node name"),
+        "the worker's own summary is missing:\n{text}"
+    );
+    assert!(
+        text.contains("Open the machines panel to give it a model"),
+        "the worker's own next step is missing:\n{text}"
+    );
+    assert!(
+        text.contains("\u{2713} Connect \u{b7} \u{2013} Ready (not checked)"),
+        "an unreported readiness was drawn as done:\n{text}"
+    );
+    assert!(
+        !text.contains("\u{2713} Ready"),
+        "readiness was ticked without a step to tick it:\n{text}"
+    );
+    // And it is not reported as something missing either: nothing failed, nothing is
+    // left behind, and the operation finished.
+    assert!(
+        !text.contains("did not finish") && !text.contains("Left behind"),
+        "a completed setup was drawn as a problem:\n{text}"
+    );
+}
+
 /// Every reason, blocker and operation-state code the fixtures in this file put on the
 /// wire has a sentence in the TUI catalogue.
 #[test]

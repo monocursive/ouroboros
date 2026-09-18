@@ -1100,14 +1100,28 @@ impl Inventory {
     }
 
     /// The Ouroboros column, with any operation on this row folded in.
+    ///
+    /// The operation's *kind* is half of what the column says. A completed removal read
+    /// "set up just now" under an **Add to fleet** button, which is a row describing the
+    /// opposite of what just happened — the live run that found this was a real
+    /// `Remove from fleet` against a Raspberry Pi, and the row announced a setup.
     pub fn ouroboros_word(&self, row: &DeviceRow) -> String {
-        match self.latest_operation_state(row).as_deref() {
+        let Some(operation) = latest_operation_for(self, row) else {
+            return row.ouroboros_word();
+        };
+
+        let leaving = operation.kind.as_deref() == Some("leave");
+
+        match operation.state.as_deref() {
+            Some("failed") if leaving => "removal failed".into(),
             Some("failed") => "setup failed".into(),
+            Some("completed") if leaving => "removed just now".into(),
             Some("completed") => "set up just now".into(),
             Some("awaiting_host_trust") | Some("awaiting_auth") | Some("awaiting_review") => {
                 "waiting for you".into()
             }
             Some("cancelled") | None => row.ouroboros_word(),
+            Some(_running) if leaving => "removing\u{2026}".into(),
             Some(_running) => "setting up\u{2026}".into(),
         }
     }
@@ -1132,11 +1146,6 @@ impl Inventory {
             Primary::SetUp if !self.host.setup_reasons().is_empty() => Primary::None,
             other => other,
         }
-    }
-
-    /// The state of the newest operation on this row, when there is one.
-    fn latest_operation_state(&self, row: &DeviceRow) -> Option<String> {
-        latest_operation_for(self, row).and_then(|summary| summary.state.clone())
     }
 
     /// The roster members, which is what "N of M connected" counts.
@@ -1350,6 +1359,14 @@ pub struct Snapshot {
     pub source: String,
     pub attached: bool,
     pub state: String,
+    /// The worker's own refusal code from its `done` frame, when it named one.
+    ///
+    /// Kept beside [`Self::last_error`] rather than folded into it: the sentence is for
+    /// the operator and the code is what this view is allowed to *reason* about. A
+    /// failure the engine gave a stable reason is a refusal it understood; one with no
+    /// reason at all is a plain error, which for a removal is what an unreachable
+    /// machine looks like.
+    pub reason: Option<String>,
     /// The identity that started this operation, when the worker reports one.
     pub owner: Option<String>,
     pub steps: Vec<Step>,
@@ -1420,6 +1437,8 @@ impl Snapshot {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             state: text(value.get("state")).unwrap_or_default(),
+            reason: text(done.and_then(|done| done.get("reason")))
+                .or_else(|| text(value.get("reason"))),
             owner: text(value.get("owner")),
             steps: array(value.get("steps")).iter().map(Step::decode).collect(),
             log: array(value.get("log"))
@@ -1486,19 +1505,31 @@ impl Snapshot {
         self.state == "completed"
     }
 
-    /// The six-stage strip §5.2 draws, as (name, marker) pairs.
+    /// The stage strip §5.2 draws, as (name, marker) pairs.
     ///
     /// Not the worker's steps one for one: those are engine verbs (`member_preflight`,
     /// `install_binary`, `issue`) and there are more of them than a person wants to read.
     /// Each stage collects the steps that belong to it, so a stage is done when its steps
     /// are, current when one of them is running, and pending otherwise.
-    pub fn stages(&self) -> Vec<(&'static str, Marker)> {
-        let plan: &[(&'static str, &[&str])] = match self.kind.as_deref() {
+    ///
+    /// `kind` is passed in rather than read from the snapshot alone: `fleet.deployment.
+    /// status` carries no `kind` field, so a removal watched through the broker arrives
+    /// here indistinguishable from an add — which is how a live `leave` drew the add
+    /// flow's six stages and filed its roster removal under *Join fleet*. The view knows
+    /// the kind from the operation it opened, and hands it over.
+    pub fn stages(&self, kind: Option<&str>) -> Vec<(&'static str, Marker)> {
+        let kind = self.kind.as_deref().or(kind);
+        let plan: &[(&'static str, &[&str])] = match kind {
+            // The engine's own `run_leave`/`stop_and_retire` steps, in the order it
+            // records them: `inspect`, `stop_runtime`, `disable_service`,
+            // `verify_disconnected`, `leave`, then `member_preflight`/`roster` for every
+            // roster this removal edits.
             Some("leave") => &[
-                ("Stop Ouroboros", &["stop_runtime"]),
-                ("Start at login off", &["disable_service"]),
-                ("Leave the fleet", &["leave"]),
-                ("Verify", &["verify_disconnected"]),
+                ("Inspect", &["inspect"]),
+                ("Stop", &["stop_runtime"]),
+                ("Disable startup", &["disable_service"]),
+                ("Leave", &["verify_disconnected", "leave"]),
+                ("Update rosters", &["member_preflight", "roster"]),
             ],
             _add_or_setup => &[
                 ("Inspect", &["inspect", "member_preflight", "prepare"]),
@@ -1529,12 +1560,15 @@ impl Snapshot {
             {
                 reached = true;
                 Marker::Current
-            } else if !mine.is_empty() || (!reached && self.succeeded()) {
-                // A stage with steps that all finished is done — and so is one with no
-                // steps at all on an operation that completed: the engine skips a stage
-                // it did not need, and a completed setup with a silent stage did not
-                // leave it undone.
+            } else if !mine.is_empty() {
                 Marker::Done
+            } else if !reached && self.succeeded() {
+                // A stage the worker never reported a step for, on an operation that
+                // completed. It is not pending — the operation is over — and it is not
+                // done either: the live add that prompted this ended at `connect` with
+                // no readiness step at all, and the strip ticked *Ready* as though
+                // something had checked it. What actually happened is that nothing did.
+                Marker::NotChecked
             } else {
                 Marker::Pending
             };
@@ -1579,6 +1613,8 @@ pub enum Marker {
     Current,
     Pending,
     Failed,
+    /// Finished without this stage ever being reported. Not a tick: nobody looked.
+    NotChecked,
 }
 
 impl Marker {
@@ -1588,6 +1624,7 @@ impl Marker {
             Self::Current => "\u{25cf}",
             Self::Pending => "\u{25cb}",
             Self::Failed => "\u{00d7}",
+            Self::NotChecked => "\u{2013}",
         }
     }
 
@@ -1598,6 +1635,7 @@ impl Marker {
             Self::Current => "now",
             Self::Pending => "to do",
             Self::Failed => "failed",
+            Self::NotChecked => "not checked",
         }
     }
 }
@@ -4611,7 +4649,7 @@ fn operation_lines(app: &App, operation: &Operation, lines: &mut Vec<Line<'stati
             )));
         }
         None if snapshot.terminal() => finish_lines(app, operation, snapshot, lines),
-        None => progress_lines(snapshot, lines),
+        None => progress_lines(operation.kind.as_deref(), snapshot, lines),
     }
 
     if let Some(error) = operation.error.as_ref() {
@@ -4672,9 +4710,9 @@ fn takeover_lines(operation: &Operation, takeover: &Takeover, lines: &mut Vec<Li
 }
 
 /// §5.2 step 4: the strip, the current step's detail, and the worker's own steps.
-fn progress_lines(snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) {
+fn progress_lines(kind: Option<&str>, snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) {
     blank(lines);
-    stage_strip(snapshot, lines);
+    stage_strip(kind, snapshot, lines);
     state_line(snapshot, lines);
 
     if let Some(detail) = snapshot.current_detail() {
@@ -4700,8 +4738,8 @@ fn source_words(snapshot: &Snapshot) -> String {
     }
 }
 
-fn stage_strip(snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) {
-    let stages = snapshot.stages();
+fn stage_strip(kind: Option<&str>, snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) {
+    let stages = snapshot.stages(kind);
     let mut spans = vec![Span::styled("  ", Style::default())];
 
     for (index, (name, marker)) in stages.iter().enumerate() {
@@ -4716,13 +4754,16 @@ fn stage_strip(snapshot: &Snapshot, lines: &mut Vec<Line<'static>>) {
             Marker::Done => theme::good(),
             Marker::Current => theme::accent(),
             Marker::Failed => theme::bad(),
-            Marker::Pending => theme::muted(),
+            Marker::Pending | Marker::NotChecked => theme::muted(),
         };
 
         // A glyph is not what a screen reader announces, so in that mode the mark is the
-        // word it stands for.
+        // word it stands for. "Not checked" is written out in both modes: a dash nobody
+        // has a key for is exactly as silent as the tick it replaces.
         let mark = if access::screen_reader() {
             format!("{name} {}", marker.word())
+        } else if *marker == Marker::NotChecked {
+            format!("{} {name} ({})", marker.glyph(), marker.word())
         } else {
             format!("{} {name}", marker.glyph())
         };
@@ -4915,12 +4956,17 @@ fn secret_lines(operation: &Operation, challenge: &Challenge, lines: &mut Vec<Li
 /// to its own review is a plan nobody has read.
 fn review_lines(challenge: &Challenge, lines: &mut Vec<Line<'static>>) {
     blank(lines);
-    lines.push(Line::from(Span::styled(
-        "Ready to deploy",
-        theme::heading(),
-    )));
 
-    let Some(plan) = challenge.plan() else {
+    // The plan is read before the heading is written, because the heading is one of the
+    // things the plan says. "Ready to deploy" over a removal, answered by `a Deploy`, is
+    // this screen describing the opposite of what approving it does — which is what a
+    // live "Remove from fleet" against a Raspberry Pi was asked to confirm.
+    let plan = challenge.plan();
+    let (heading, approve) = review_words(plan.as_ref().map(|plan| plan.kind.as_str()));
+
+    lines.push(Line::from(Span::styled(heading, theme::heading())));
+
+    let Some(plan) = plan else {
         lines.push(Line::from(Span::styled(
             "This client could not read the plan this operation is holding, so there is \
              nothing here to review. Cancel the setup rather than approving a plan nobody \
@@ -4978,13 +5024,30 @@ fn review_lines(challenge: &Challenge, lines: &mut Vec<Line<'static>>) {
 
     blank(lines);
     lines.push(Line::from(Span::styled(
-        access::numbered(0, "a  Deploy \u{2014} applies exactly this plan"),
+        access::numbered(
+            0,
+            &format!("a  {approve} \u{2014} applies exactly this plan"),
+        ),
         Style::default().fg(theme::action_colour()),
     )));
     lines.push(Line::from(Span::styled(
         access::numbered(1, "c  Cancel"),
         Style::default().fg(theme::action_colour()),
     )));
+}
+
+/// The review screen's heading and the word on its `a` key, from the plan's own kind.
+///
+/// One place, because the heading, the button and the footer hint are three renderings of
+/// the same fact and a surface where two of them agree is worse than one where none do.
+/// An unreadable plan keeps the neutral words: this client will not name a verb it could
+/// not read the document for.
+fn review_words(kind: Option<&str>) -> (&'static str, &'static str) {
+    match kind {
+        Some("leave") => ("Ready to remove", "Remove"),
+        Some("setup") => ("Ready to set up", "Set up"),
+        _add_or_unreadable => ("Ready to deploy", "Deploy"),
+    }
 }
 
 fn finish_lines(
@@ -5000,11 +5063,18 @@ fn finish_lines(
     // updated rather than the machine being added.
     let machine = scrub(&operation.device, NAME_COLUMNS);
 
+    // `fleet.deployment.status` carries no `kind`, so the operation the view opened is
+    // what knows whether this was a removal. Reading the snapshot alone is how a
+    // finished `leave` congratulated the operator on a machine it had just taken out.
+    let kind = snapshot.kind.as_deref().or(operation.kind.as_deref());
+    let leaving = kind == Some("leave");
+
     if snapshot.succeeded() {
         lines.push(Line::from(Span::styled(
-            match snapshot.kind.as_deref() {
-                Some("leave") => format!("{machine} has left the fleet"),
-                _joined => format!("{machine} is in your fleet"),
+            if leaving {
+                format!("{machine} is out of your fleet")
+            } else {
+                format!("{machine} is in your fleet")
             },
             theme::heading(),
         )));
@@ -5024,7 +5094,29 @@ fn finish_lines(
             )));
         }
 
+        // What ran, and — the live add that prompted this — what never did. A completed
+        // operation whose steps stop at `connect` reported no readiness at all, and a
+        // ticked *Ready* was this screen inventing a check nobody made. The strip is
+        // drawn only when there are steps to draw: a snapshot with none says nothing
+        // about stages either way.
+        if !snapshot.steps.is_empty() {
+            blank(lines);
+            stage_strip(kind, snapshot, lines);
+        }
+
         blank(lines);
+
+        // A removal has nowhere to open: the machine it named is not in the fleet any
+        // more, so the machines panel is not where it is. One key, back to the list.
+        if leaving {
+            lines.push(Line::from(Span::styled(
+                "b  back to the device list",
+                Style::default().fg(theme::action_colour()),
+            )));
+
+            return;
+        }
+
         // The key this client would actually press, from the resolved map: a rebound
         // chord is the one printed, and `off` reads as "this has no key any more".
         lines.push(Line::from(Span::styled(
@@ -5046,10 +5138,13 @@ fn finish_lines(
     }
 
     lines.push(Line::from(Span::styled(
-        match snapshot.state.as_str() {
-            "cancelled" => "This setup was cancelled",
-            "interrupted" => "This setup was interrupted",
-            _failed => "This setup did not finish",
+        match (leaving, snapshot.state.as_str()) {
+            (true, "cancelled") => "This removal was cancelled",
+            (true, "interrupted") => "This removal was interrupted",
+            (true, _failed) => "This removal did not finish",
+            (false, "cancelled") => "This setup was cancelled",
+            (false, "interrupted") => "This setup was interrupted",
+            (false, _failed) => "This setup did not finish",
         },
         theme::heading(),
     )));
@@ -5071,7 +5166,23 @@ fn finish_lines(
         )));
     }
 
-    stage_strip(snapshot, lines);
+    // The one place this view names the CLI fallback, and only where it is the answer:
+    // a removal that never reached the machine it was about. §5.4 asks for the recipe
+    // there; showing it any earlier is a screen telling an operator a machine is gone
+    // while the operation that would prove it is still running.
+    if unreached_removal(leaving, snapshot, &operation.device) {
+        lines.push(Line::from(Span::styled(
+            access::speakable(&format!(
+                "{machine} did not answer, so nothing on it was changed. To take it out \
+                 of this fleet's roster anyway, run `ouro fleet sessions forget --machine \
+                 {machine} --accept-state-loss` on this machine, and on every other \
+                 machine in the fleet.",
+            )),
+            Style::default().fg(theme::warn()),
+        )));
+    }
+
+    stage_strip(kind, snapshot, lines);
 
     if snapshot.residue.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -5105,6 +5216,24 @@ fn finish_lines(
     )));
 }
 
+/// Whether this failed removal never reached the machine it was about.
+///
+/// Two pieces of evidence, both from the snapshot, because the broker sends no "could not
+/// connect" code of its own. The engine's first recorded step on a `leave` is `inspect`,
+/// and it is written only after SSH connected, the preflight ran and the helper session
+/// opened — so a removal with no step at all against its target never got that far.
+/// A refusal the engine *named* (a changed plan, a busy runtime, a declined review) is a
+/// failure it understood and is excluded: those reached the machine, or never needed to.
+fn unreached_removal(leaving: bool, snapshot: &Snapshot, device: &str) -> bool {
+    leaving
+        && snapshot.state == "failed"
+        && snapshot.reason.as_deref().unwrap_or("failed") == "failed"
+        && !snapshot
+            .steps
+            .iter()
+            .any(|step| step.machine.as_deref() == Some(device))
+}
+
 /// The footer hint, which is different on every screen because the keys are.
 pub fn devices_hint_line(app: &App) -> String {
     let state = &app.devices;
@@ -5125,19 +5254,32 @@ pub fn devices_hint_line(app: &App) -> String {
                 .into();
         }
 
-        let kind = operation
+        let open = operation
             .snapshot
             .value
             .as_ref()
-            .and_then(Snapshot::challenge)
-            .map(|challenge| challenge.kind.clone());
+            .and_then(Snapshot::challenge);
+        let kind = open.map(|challenge| challenge.kind.clone());
 
         return match kind.as_deref() {
             Some("password") | Some("passphrase") => {
                 "type the secret \u{b7} Enter sends it \u{b7} Esc clears it and leaves".into()
             }
             Some("host_trust") => "t trust and continue \u{b7} n cancel".into(),
-            Some("review") => "a deploy \u{b7} c cancel \u{b7} Esc leave".into(),
+            // The same word as the key on the screen above it, from the same place.
+            Some("review") => {
+                let (_heading, approve) = review_words(
+                    open.and_then(Challenge::plan)
+                        .map(|plan| plan.kind)
+                        .as_deref()
+                        .or(operation.kind.as_deref()),
+                );
+
+                format!(
+                    "a {} \u{b7} c cancel \u{b7} Esc leave",
+                    approve.to_lowercase()
+                )
+            }
             _following => {
                 "c cancel setup \u{b7} R retry \u{b7} b device list \u{b7} Esc leave (nothing is cancelled)"
                     .into()
@@ -5848,6 +5990,94 @@ mod tests {
             Some("the connection dropped")
         );
         assert_eq!(journal.residue, vec!["a half-written roster on studio"]);
+    }
+
+    /// The removal's stages are the engine's own leave steps, and every one of them
+    /// lands somewhere.
+    ///
+    /// The list on the right is `fleet_setup::engine`'s `run_leave` and
+    /// `stop_and_retire` read off in order: a step the engine records and this table
+    /// does not name is a stage strip that stalls while the worker is working.
+    #[test]
+    fn a_removals_stages_account_for_every_step_its_engine_records() {
+        let engine_steps = [
+            "inspect",
+            "stop_runtime",
+            "disable_service",
+            "verify_disconnected",
+            "leave",
+            "member_preflight",
+            "roster",
+        ];
+
+        for step in engine_steps {
+            let snapshot = Snapshot::decode(&json!({
+                "source": "worker", "attached": true, "state": "deploying",
+                "steps": [{ "machine": "attic", "step": step, "outcome": "started" }]
+            }));
+
+            let stages = snapshot.stages(Some("leave"));
+
+            assert_eq!(
+                stages
+                    .iter()
+                    .map(|(name, _marker)| *name)
+                    .collect::<Vec<_>>(),
+                vec![
+                    "Inspect",
+                    "Stop",
+                    "Disable startup",
+                    "Leave",
+                    "Update rosters"
+                ],
+                "{step}"
+            );
+            assert_eq!(
+                stages
+                    .iter()
+                    .filter(|(_name, marker)| *marker == Marker::Current)
+                    .count(),
+                1,
+                "`{step}` is not the current step of any removal stage"
+            );
+        }
+
+        // The kind travels with the operation, because `fleet.deployment.status` does
+        // not carry one: a snapshot read on its own is an `add` as far as the wire is
+        // concerned, and a removal drawn that way is the live defect this pins.
+        let removal = Snapshot::decode(&json!({
+            "source": "worker", "attached": true, "state": "deploying",
+            "steps": [{ "machine": "studio", "step": "roster", "outcome": "started" }]
+        }));
+
+        assert_eq!(removal.stages(Some("leave"))[4].0, "Update rosters");
+        assert_eq!(removal.stages(None)[2].0, "Join fleet");
+    }
+
+    /// A finished operation does not tick a stage nothing reported.
+    #[test]
+    fn a_stage_no_step_ever_named_is_not_checked_rather_than_done() {
+        let completed = Snapshot::decode(&json!({
+            "source": "worker", "attached": true, "state": "completed",
+            "steps": [
+                { "machine": "vps", "step": "inspect", "outcome": "ok" },
+                { "machine": "vps", "step": "install_binary", "outcome": "ok" },
+                { "machine": "vps", "step": "issue", "outcome": "ok" },
+                { "machine": "vps", "step": "service", "outcome": "ok" },
+                { "machine": "vps", "step": "connect", "outcome": "ok" }
+            ]
+        }));
+
+        let stages = completed.stages(None);
+
+        assert_eq!(stages.last().expect("a last stage").0, "Ready");
+        assert_eq!(stages.last().expect("a last stage").1, Marker::NotChecked);
+        assert_eq!(Marker::NotChecked.word(), "not checked");
+        // Everything the worker did report is still done: this is about the silence,
+        // not about doubting the steps that exist.
+        for (name, marker) in stages.iter().take(5) {
+            assert_eq!(*marker, Marker::Done, "{name}");
+        }
     }
 
     /// A code this build has never seen is named, not guessed at.
