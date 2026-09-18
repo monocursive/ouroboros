@@ -918,6 +918,66 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       Map.merge(context, %{worker: worker, operation: operation, tab_a: tab_a})
     end
 
+    test "lets the surviving tab answer the prompts that come after the one it took over", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      # The live reproduction, which the first release did not cover. A removal asks twice:
+      # the review, and then the password for the member being removed. Releasing only the
+      # challenge that was open let tab B press Remove and then refused it the password,
+      # because the connection was still stamping every new challenge with tab A.
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond", "challenge" => "rev"}},
+                     @receive_timeout
+
+      # Step two: the worker asks for the password *after* the tab that started this was
+      # already gone.
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(operation, "pw", tab("b"))
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.authenticate(operation, "pw", "typed-in-the-second-tab", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
+      assert frame["response"]["secret"] == "typed-in-the-second-tab"
+      assert FleetWorkerFake.refusals(worker) == 0
+    end
+
+    test "binds to the tab that took over, so a third tab is a second tab again", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      close(tab_a)
+      settle(operation)
+
+      # Tab B answers, and in doing so says it is the tab holding this operation now.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond", "challenge" => "rev"}},
+                     @receive_timeout
+
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(operation, "pw", tab("b"))
+
+      # So the window the release opened is shut again: the next prompt is tab B's, not
+      # every tab this administrator has.
+      assert {:error, :challenge_not_bound} =
+               Deployment.authenticate(operation, "pw", "from-a-third-tab", tab("c"))
+
+      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.authenticate(operation, "pw", "from-the-tab-that-took-over", tab("b"))
+    end
+
     test "leaves the prompt alone while that tab is still there", %{operation: operation} do
       # This is the property the binding exists for and the one this change must not undo: a
       # second tab open at the same time is not the tab that was asked.

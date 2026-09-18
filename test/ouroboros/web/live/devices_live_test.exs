@@ -2190,6 +2190,20 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
       assert frame["response"]["secret"] == "the-tab-that-is-left"
       refute has_element?(second, "[data-ouro-rebind]")
+
+      # And the prompt after that one, which the first release did not reach: a deployment
+      # asks more than once — a second attempt, a host key, a password after a review — and
+      # the connection was still stamping each new challenge with the tab that had gone.
+      :ok = FleetWorkerFake.challenge(worker, "pw-6", "password", %{"metadata" => %{}})
+      _ = await(second, "data-ouro-secret")
+
+      second
+      |> form("#ouro-deploy-auth", %{"secret" => "and-the-one-after-it"})
+      |> render_submit()
+
+      assert_receive {:fake_worker, %{"op" => "respond"} = again}, @receive_timeout
+      assert again["response"]["secret"] == "and-the-one-after-it"
+      refute has_element?(second, "[data-ouro-rebind]")
     end
 
     test "a tab id this page did not mint is not used", %{conn: conn} do

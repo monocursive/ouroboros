@@ -30,8 +30,11 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
   The *session* half of that binding lasts exactly as long as the session does. Subscribers
   say which session they speak for, this process monitors them, and when the last one for a
-  session dies its open challenges are unbound — see `release_session/2`. The identity half
-  never lapses: another administrator still needs an explicit takeover.
+  session dies, both its open challenges and this connection's binding are released — see
+  `release_session/2`. A deployment asks more than once, so releasing only what was open
+  would fix only the first prompt and stamp the next one with the tab that had already gone.
+  The first answer after that says which tab took over and the connection binds to it again.
+  The identity half never lapses: another administrator still needs an explicit takeover.
 
   ## Frames are bounded by the socket, not by hope
 
@@ -161,6 +164,14 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       socket_path: Keyword.get(opts, :socket_path),
       subject: Keyword.fetch!(opts, :subject),
       session: Keyword.fetch!(opts, :session),
+      # The session a challenge issued *now* is bound to, which starts as the one this
+      # connection attached under and is not the same fact. `session` is what the worker was
+      # told and what it stamps on every `bound_to` it sends, for the life of the socket;
+      # this is which of the operator's tabs is currently holding the prompts, and it is
+      # `nil` while none is. Conflating the two is why releasing the open challenge fixed
+      # only the open challenge: the next one the worker issued was stamped with the dead
+      # tab again.
+      challenge_session: Keyword.fetch!(opts, :session),
       cap: Keyword.get(opts, :cap),
       launcher: Keyword.get(opts, :launcher, Launcher),
       data_dir: Keyword.get(opts, :data_dir),
@@ -535,7 +546,13 @@ defmodule Ouroboros.Fleet.Deployment.Client do
             # Consumed once the frame is on the socket, not before: a send that never
             # leaves this process must not spend the one-use challenge, or a dropped TCP
             # write becomes a credential the operator cannot offer again.
-            {:noreply, put_in(sent.challenges[challenge_id], %{challenge | consumed?: true})}
+            #
+            # And this is the answer that says which tab is holding the operation now, when
+            # a closed one left nobody holding it.
+            {:noreply,
+             sent
+             |> adopt_session(binding[:session])
+             |> put_in([:challenges, challenge_id], %{challenge | consumed?: true})}
 
           other ->
             other
@@ -790,12 +807,11 @@ defmodule Ouroboros.Fleet.Deployment.Client do
         kind: frame["kind"],
         expires_at: frame["expires_at"],
         consumed?: false,
-        # The session this challenge was issued to, which is this connection's — the same
-        # one the worker recorded on its side. Held per challenge rather than read off the
-        # connection, because it is the thing `release_session/2` sets to `nil` when the tab
-        # that was going to answer it is gone, and a connection-wide flag would release the
-        # ones issued after that as well.
-        session: state.session,
+        # Which of the operator's tabs this one is for. Not `state.session`: that is what
+        # the worker stamps on `bound_to` and it is checked just above, but it names the
+        # tab that opened the socket, which may have been closed an hour ago. `nil` here
+        # means no tab is holding this prompt and the identity is the whole test.
+        session: state.challenge_session,
         recorded_at: state.clock.(),
         # A sequence, because `recorded_at` is in seconds and a worker can issue a thousand
         # challenges inside one of them: ordering by the clock made "keep the newest" a tie
@@ -933,17 +949,63 @@ defmodule Ouroboros.Fleet.Deployment.Client do
     else
       now = state.clock.()
 
-      Enum.reduce(state.challenges, state, fn {id, challenge}, acc ->
-        if challenge.session == session and not challenge.consumed? and
-             unexpired(challenge, now) == :ok do
-          audit(acc, id, challenge.kind, :session_released)
-          put_in(acc.challenges[id], %{challenge | session: nil})
-        else
-          acc
-        end
-      end)
+      state
+      |> release_open(session, now)
+      |> release_binding(session)
     end
   end
+
+  defp release_open(state, session, now) do
+    Enum.reduce(state.challenges, state, fn {id, challenge}, acc ->
+      if challenge.session == session and not challenge.consumed? and
+           unexpired(challenge, now) == :ok do
+        audit(acc, id, challenge.kind, :session_released)
+        put_in(acc.challenges[id], %{challenge | session: nil})
+      else
+        acc
+      end
+    end)
+  end
+
+  # And the prompts that have not been issued yet.
+  #
+  # A deployment asks more than once: the review is followed by a password, an unknown host
+  # key by another password, an attempt by a second attempt. Releasing only what was open
+  # when the tab closed fixed exactly one of them — the operator answered the review from
+  # their surviving tab, the worker issued the password a second later, and it was stamped
+  # with the dead tab all over again. So the connection stops naming a tab at all until one
+  # takes the prompts back, which `adopt_session/2` is.
+  defp release_binding(%{challenge_session: session} = state, session) do
+    Logger.info([
+      "fleet deployment operation ",
+      label(state.operation),
+      " released its challenge binding: session ",
+      label(session),
+      " has no subscriber left"
+    ])
+
+    %{state | challenge_session: nil}
+  end
+
+  defp release_binding(state, _other), do: state
+
+  # The first answer after a release says which tab took over, and the connection binds to
+  # it — so the *next* challenge is narrow again rather than open to every tab this
+  # administrator has. The window between a release and that first answer is the only time
+  # two of one operator's tabs can race a prompt, and it is the price of not stranding the
+  # operation behind a tab that no longer exists.
+  defp adopt_session(%{challenge_session: nil} = state, session) when is_binary(session) do
+    Logger.info([
+      "fleet deployment operation ",
+      label(state.operation),
+      " bound its challenges to session ",
+      label(session)
+    ])
+
+    %{state | challenge_session: session}
+  end
+
+  defp adopt_session(state, _session), do: state
 
   # ---------------------------------------------------------------------------
   # Authorization

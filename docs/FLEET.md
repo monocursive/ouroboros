@@ -726,6 +726,16 @@ longer existed, with `resume` refusing `already_attached` because the detached w
 still perfectly alive. An explicit `unsubscribe` releases nothing: a page that unsubscribed
 is a closed drawer, not a closed tab.
 
+Two things are released, not one, because a deployment asks more than once — a review then a
+password, a host key then a password, an attempt then a second attempt. The challenges that
+are *open* are unbound, and so is the **connection's own binding**, which is what every
+challenge issued afterwards would otherwise be stamped with: the connection names the tab
+that opened the socket, and that tab may have been closed an hour ago. Releasing only the
+open ones let the surviving tab press Remove and then refused it the password a second
+later. The first answer after a release says which tab took over and the connection binds to
+it again, so the window in which any of that operator's tabs may answer is the gap between
+the tab closing and the next answer, and not the rest of the operation.
+
 **Ownership.** The journal records the identity that started an operation. `status` and
 `cancel` refuse a different one; `resume` refuses it too, and additionally refuses a journal
 whose owner this build cannot establish, because a resume attaches under the *resuming*
