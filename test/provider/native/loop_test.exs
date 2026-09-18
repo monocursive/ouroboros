@@ -206,6 +206,11 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert completed.payload["status"] == "completed"
       assert completed.payload["iterations"] == 4
       assert completed.payload["input_tokens"] == 120
+
+      # A scripted model has no price, and the turn says so: `cost_usd` is unknown, not
+      # `0.0`. A zero here is the free turn `Ouroboros.Provider.Native.Cost` refuses to
+      # report for one payload, and a sum of unknowns is still unknown.
+      assert is_nil(completed.payload["cost_usd"])
     end
 
     test "carries the system prompt and the tool schemas into every model call", context do
@@ -540,9 +545,67 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert second.tools != []
       assert third.tools == []
 
-      # And it is not kept: the conversation the turn leaves behind has no countdowns.
+      # And it is kept. The conversation is append-only: every request extends the one
+      # before it rather than rewriting it, which is what a prompt cache reads and what
+      # a model that binds its thinking to the prefix before it checks. A countdown
+      # removed on the next call would be a history edit at the end of every request.
+      for [previous, next] <- Enum.chunk_every([first, second, third], 2, 1, :discard) do
+        assert Enum.take(next.messages, length(previous.messages)) == previous.messages
+      end
+
       assert_receive {:finished, {:ok, state}}, 1_000
-      refute Enum.any?(state.messages, &budget_message?/1)
+      assert Enum.count(state.messages, &budget_message?/1) == 3
+    end
+
+    test "keeps the model's thinking on the assistant message it produced", context do
+      script = [
+        [
+          {:thinking, "Read first, "},
+          {:thinking, "then answer."},
+          {:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}
+        ],
+        [{:thinking, "Done thinking."}, {:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      assert Enum.map(all(events, :thinking_delta), & &1.payload["text"]) == [
+               "Read first, ",
+               "then answer.",
+               "Done thinking."
+             ]
+
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assistants = Enum.filter(state.messages, &(&1.role == :assistant))
+
+      assert Enum.map(assistants, & &1[:thinking]) == [
+               "Read first, then answer.",
+               "Done thinking."
+             ]
+
+      # And the second call was shown the first turn's thinking, so a lane that replays
+      # it has it to replay.
+      [_first, second] = NativeModelScript.requests(agent)
+      assistant = Enum.find(second.messages, &(&1.role == :assistant))
+      assert assistant.thinking == "Read first, then answer."
+    end
+
+    test "bounds the thinking it keeps, on a character boundary", context do
+      long = String.duplicate("é", 40_000)
+      script = [[{:thinking, long}, {:text, "done"}, {:finish, :stop}]]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      collect()
+
+      assert_receive {:finished, {:ok, state}}, 1_000
+      [assistant] = Enum.filter(state.messages, &(&1.role == :assistant))
+      assert byte_size(assistant.thinking) <= 64 * 1024
+      assert byte_size(assistant.thinking) >= 64 * 1024 - 3
+      assert String.valid?(assistant.thinking)
+      assert String.starts_with?(assistant.thinking, "éé")
     end
 
     test "a turn far from its budget carries no turn-budget message", context do

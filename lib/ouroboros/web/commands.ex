@@ -251,6 +251,14 @@ defmodule Ouroboros.Web.Commands do
       command("runtime.status", nil, &serves?(&1, "runtime.status")),
       command("runtime.audit", nil, &serves?(&1, "audit.status")),
 
+      # Fleet onboarding, slice 6. Two facts in one question: `fleet.devices` is read-scope,
+      # so `Ouroboros.Web.Call.available?/2` answering true here means both that this build
+      # serves the inventory *and* that the identity asking is an administrator — the method
+      # carries the first read-scope administrator rule in `Ouroboros.Audit.Identity`. A
+      # non-administrator therefore does not see this row, which is the honest thing: the
+      # page it leads to would show them the membership subset and an explanation.
+      command("runtime.devices", nil, &serves?(&1, "fleet.devices")),
+
       # ui-parity W3. Routed to the node the *session* runs on and narrowed by the
       # workspace it names, so the row asks for one — W3's fix wave found it drawn on the
       # empty deck, where `Ouroboros.Web.Live.DeckLive`'s panel state has no subject and

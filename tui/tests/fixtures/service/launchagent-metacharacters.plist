@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ouroboros-managed v1 data-dir=/srv/my%20data/%25h/a%22quoted%22/state content-sha256=8b8664eab89eaf11805b24f82e49f55fb8eed8cad21f7438d0efbee45ac5d2b0 -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.ouroboros.runtime.9d7f79eb182e</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/my tools/100%/ouro</string>
+		<string>service-run</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/home/my user</string>
+		<key>OUROBOROS_DATA_DIR</key>
+		<string>/srv/my data/%h/a"quoted"/state</string>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/srv/my data/%h/a"quoted"/state</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>ExitTimeOut</key>
+	<integer>30</integer>
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+	<key>StandardOutPath</key>
+	<string>/srv/my data/%h/a"quoted"/state/service.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/srv/my data/%h/a"quoted"/state/service.err.log</string>
+</dict>
+</plist>

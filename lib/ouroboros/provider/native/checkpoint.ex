@@ -594,6 +594,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
         Enum.map(message[:reasoning_details] || [], &encode_reasoning_detail/1),
       "provider_metadata" => encode_provider_metadata(message[:provider_metadata] || %{})
     }
+    |> put_thinking(message[:thinking])
   end
 
   defp encode(%{role: :tool} = message) do
@@ -636,6 +637,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
       :provider_metadata,
       decode_provider_metadata(Map.get(message, "provider_metadata", %{}))
     )
+    |> put_nonempty(:thinking, decode_thinking(Map.get(message, "thinking")))
   end
 
   defp decode(%{"role" => "tool"} = message) do
@@ -712,6 +714,18 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
   defp put_nonempty(map, _key, value) when value in [nil, [], %{}], do: map
   defp put_nonempty(map, key, value), do: Map.put(map, key, value)
+
+  # The model's own reasoning text, when the loop kept it (see
+  # `Ouroboros.Provider.Native.Model` on which lanes send it back). Absent rather than
+  # empty, so a checkpoint written before the field existed and one written after it
+  # for a model that produced none are the same bytes.
+  defp put_thinking(encoded, thinking) when is_binary(thinking) and thinking != "",
+    do: Map.put(encoded, "thinking", thinking)
+
+  defp put_thinking(encoded, _absent), do: encoded
+
+  defp decode_thinking(thinking) when is_binary(thinking) and thinking != "", do: thinking
+  defp decode_thinking(_absent), do: nil
   defp safe_map(value) when is_map(value), do: value
   defp safe_map(_value), do: %{}
 

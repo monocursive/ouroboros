@@ -28,6 +28,7 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       model: Application.get_env(:ouroboros, :native_model_module),
       epoch: Application.get_env(:ouroboros, :native_epoch_server),
       window: Application.get_env(:ouroboros, :native_context_window),
+      budget: Application.get_env(:ouroboros, :native_compact_tokens),
       writer: Application.get_env(:ouroboros, :native_compaction_operation_writer),
       starter: Application.get_env(:ouroboros, :native_compaction_task_starter)
     }
@@ -43,6 +44,7 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       restore(:native_model_module, previous.model)
       restore(:native_epoch_server, previous.epoch)
       restore(:native_context_window, previous.window)
+      restore(:native_compact_tokens, previous.budget)
       restore(:native_compaction_operation_writer, previous.writer)
       restore(:native_compaction_task_starter, previous.starter)
       File.rm_rf(root)
@@ -97,6 +99,17 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       refute Map.has_key?(metered, "context_window")
     end
 
+    test "the codex and grok lanes resolve the window of the catalogue they draw on" do
+      Application.delete_env(:ouroboros, :native_context_window)
+
+      # Unknown until now: `llm_db` alone refuses `openai_codex:`, so the default lane
+      # had no denominator and never compacted on its own.
+      assert is_integer(Window.resolve("openai_codex:gpt-5.6-sol"))
+      assert Window.resolve("openai_codex:gpt-5.6-sol") > 0
+      assert Window.resolve("grok:grok-4.3") == Window.resolve("xai:grok-4.3")
+      assert is_integer(Window.resolve("grok:grok-4.3"))
+    end
+
     test "an unknown model resolves to no window at all" do
       assert Window.resolve("not-a-provider:not-a-model") == nil
       assert Window.resolve(nil) == nil
@@ -133,12 +146,44 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
       refute Window.over_threshold?(84, 100, 0.85)
     end
 
+    test "an assistant message's retained thinking counts toward what it costs the window" do
+      bare = %{role: :assistant, content: "done", tool_calls: []}
+      thought = Map.put(bare, :thinking, String.duplicate("reasoning ", 400))
+
+      assert Window.message_tokens(thought) > Window.message_tokens(bare) + 900
+      assert Window.message_text(thought) == Window.message_text(bare)
+    end
+
     test "the defaults are the documented ones" do
       assert Window.default_compact_at() == 0.85
       assert Window.default_keep_recent_tokens() == 20_000
+      assert Window.default_compact_tokens() == 200_000
       assert Window.compact_at(%{}) == 0.85
       assert Window.compact_at(%{compact_at: 0.5}) == 0.5
       assert Window.keep_recent_tokens(%{"keep_recent_tokens" => 42}) == 42
+    end
+
+    test "the absolute budget caps a large window and leaves a small one to the fraction" do
+      Application.delete_env(:ouroboros, :native_compact_tokens)
+      assert Window.threshold(1_000_000, 0.85) == 200_000
+      assert Window.threshold(100_000, 0.85) == 85_000
+      assert Window.threshold(nil, 0.85) == nil
+
+      assert Window.over_threshold?(200_000, 1_000_000, 0.85)
+      refute Window.over_threshold?(199_999, 1_000_000, 0.85)
+      refute Window.over_threshold?(nil, 1_000_000, 0.85)
+
+      Application.put_env(:ouroboros, :native_compact_tokens, 1_000)
+      assert Window.threshold(1_000_000, 0.85) == 1_000
+      assert Window.over_threshold?(1_000, 1_000_000, 0.85)
+
+      Application.put_env(:ouroboros, :native_compact_tokens, false)
+      assert Window.compact_tokens() == nil
+      assert Window.threshold(1_000_000, 0.85) == 850_000
+
+      # Nonsense is the default, not a disabled ceiling.
+      Application.put_env(:ouroboros, :native_compact_tokens, "lots")
+      assert Window.compact_tokens() == 200_000
     end
 
     test "the loop merges the meter into every usage event", context do
@@ -352,6 +397,207 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
     end
   end
 
+  # ------------------------------------------------- the prefix and the thinking
+
+  describe "what compaction leaves for the cache and the model" do
+    defp thinking(index),
+      do: [%{text: "thought #{index}", signature: "sig-#{index}", provider: :anthropic}]
+
+    # `conversation/0` with a bound thinking block on every assistant message.
+    defp thinking_conversation do
+      conversation()
+      |> Enum.with_index()
+      |> Enum.map(fn
+        {%{role: :assistant} = message, index} ->
+          Map.put(message, :reasoning_details, thinking(index))
+
+        {message, _index} ->
+          message
+      end)
+    end
+
+    defp reasoning(messages),
+      do: Enum.map(messages, &Map.get(&1, :reasoning_details))
+
+    test "the summariser and the archive get the folded head verbatim, not the elided copy" do
+      parent = self()
+
+      # Thirty tokens keeps the newest four messages of the elided copy and folds the
+      # first three, one of them the 40,000-byte `read` result.
+      {:ok, outcome} =
+        Compaction.compact(conversation(),
+          keep_recent_tokens: 30,
+          summarize: fn payload ->
+            send(parent, {:summariser_saw, payload.messages})
+            {:ok, "## Goal\n\nfolded"}
+          end
+        )
+
+      assert outcome.summarised
+      assert_receive {:summariser_saw, folded}
+
+      # The head as every earlier model call sent it — the prefix that is already cached.
+      assert folded == Enum.take(conversation(), length(folded))
+      refute Enum.any?(folded, &Compaction.elided?/1)
+      assert Enum.any?(folded, &(Map.get(&1, :content) == String.duplicate("A", 40_000)))
+
+      # And the archive holds the transcript, not markers standing in for it.
+      assert outcome.archived == folded
+      assert outcome.elided > 0
+    end
+
+    test "the split is the elided copy's, so a tail that eliding made cheap enough stays" do
+      # A head message too large to keep, then a tool-call pair whose result is large
+      # before eliding and tiny after it, then one more user message. Measured on the
+      # original, the tail is one message; measured on the elided copy, it is three — and
+      # the elided pair is exactly what "elide before you summarise" exists to keep.
+      messages = [
+        user(String.duplicate("operator context. ", 100)),
+        assistant("reading", [%{id: "c1", name: "read", input: %{"path" => "a.ex"}}]),
+        tool_result("c1", "read", String.duplicate("R", 10_000)),
+        user("next")
+      ]
+
+      {:ok, outcome} =
+        Compaction.compact(messages,
+          keep_recent_tokens: 100,
+          summarize: fn payload ->
+            send(self(), {:folded, payload.messages})
+            {:ok, "## Goal\n\nfolded"}
+          end
+        )
+
+      assert outcome.summarised
+      assert_receive {:folded, [%{role: :user}]}
+      assert outcome.archived == [hd(messages)]
+
+      assert [%{role: :user}, %{role: :assistant}, %{role: :tool} = result, %{role: :user}] =
+               outcome.messages
+
+      assert Compaction.elided?(result)
+      # One marker left in the conversation, so one is what the record says.
+      assert outcome.elided == 1
+    end
+
+    test "an elision the summary replaced is not counted as one the conversation keeps" do
+      {:ok, outcome} =
+        Compaction.compact(conversation(),
+          keep_recent_tokens: 50,
+          summarize: fn _payload -> {:ok, "## Goal\n\nfolded"} end
+        )
+
+      assert outcome.summarised
+      assert outcome.elided == Enum.count(outcome.messages, &Compaction.elided?/1)
+    end
+
+    test "an elided result unbinds the thinking after it and keeps the thinking before it" do
+      {:ok, outcome} = Compaction.compact(thinking_conversation(), keep_recent_tokens: 200)
+
+      assert outcome.elided == 2
+      refute outcome.summarised
+
+      # Index 2 is the first rewritten message. The assistant at 1 keeps its block: nothing
+      # in front of it moved. Every assistant after it — 3, 5, 7 — loses its own.
+      assert reasoning(outcome.messages) == [
+               nil,
+               thinking(1),
+               nil,
+               nil,
+               nil,
+               nil,
+               nil,
+               nil
+             ]
+
+      assert Enum.map(outcome.messages, &Map.get(&1, :role)) ==
+               Enum.map(conversation(), &Map.get(&1, :role))
+    end
+
+    test "a summarised conversation keeps no bound thinking behind the summary" do
+      {:ok, outcome} =
+        Compaction.compact(thinking_conversation(),
+          keep_recent_tokens: 50,
+          summarize: fn _payload -> {:ok, "## Goal\n\nfolded"} end
+        )
+
+      assert outcome.summarised
+      assert [%{role: :user} | tail] = outcome.messages
+      assert tail != []
+      assert Enum.all?(tail, &is_nil(Map.get(&1, :reasoning_details)))
+    end
+
+    test "a checkpoint's string keys are unbound the same way" do
+      stringly =
+        thinking_conversation()
+        |> Enum.map(fn message ->
+          case Map.pop(message, :reasoning_details) do
+            {nil, message} -> message
+            {details, message} -> Map.put(message, "reasoning_details", details)
+          end
+        end)
+
+      {:ok, outcome} = Compaction.compact(stringly, keep_recent_tokens: 200)
+
+      assert Enum.map(outcome.messages, &Map.get(&1, "reasoning_details")) == [
+               nil,
+               thinking(1),
+               nil,
+               nil,
+               nil,
+               nil,
+               nil,
+               nil
+             ]
+    end
+
+    test "an OpenAI reasoning item survives an edit, since nothing signed it over the prefix" do
+      openai =
+        thinking_conversation()
+        |> Enum.map(fn
+          %{reasoning_details: details} = message ->
+            %{
+              message
+              | reasoning_details:
+                  Enum.map(details, &Map.merge(&1, %{provider: :openai, signature: "enc"}))
+            }
+
+          message ->
+            message
+        end)
+
+      {:ok, outcome} = Compaction.compact(openai, keep_recent_tokens: 200)
+
+      assert outcome.elided == 2
+      assert reasoning(outcome.messages) == reasoning(openai)
+
+      # And a message that carried both keeps only the OpenAI one.
+      mixed =
+        Enum.map(openai, fn
+          %{reasoning_details: [detail]} = message ->
+            %{message | reasoning_details: [detail, %{detail | provider: :anthropic}]}
+
+          message ->
+            message
+        end)
+
+      {:ok, outcome} = Compaction.compact(mixed, keep_recent_tokens: 200)
+      assert Enum.at(reasoning(outcome.messages), 3) == [Enum.at(reasoning(openai), 3) |> hd()]
+      assert Enum.at(reasoning(outcome.messages), 1) == Enum.at(reasoning(mixed), 1)
+    end
+
+    test "a conversation that needs no folding keeps every block" do
+      {:ok, outcome} = Compaction.compact(thinking_conversation(), keep_recent_tokens: 500_000)
+
+      assert outcome.elided == 0
+      refute outcome.summarised
+      assert outcome.messages == thinking_conversation()
+    end
+
+    test "the instruction forbids tool calls, since the tools ride along for the prefix" do
+      assert Compaction.summary_instruction(nil) =~ "Do not call any tool"
+    end
+  end
+
   # ---------------------------------------------------------------- archive
 
   describe "the archive" do
@@ -402,6 +648,54 @@ defmodule Ouroboros.Provider.Native.CompactionTest do
   # ---------------------------------------------------------------- session
 
   describe "compaction in a live session" do
+    test "the summariser sends the turn's own prefix with the instruction appended", context do
+      session = open(context, big_script() ++ [[{:text, "## Goal\n\nfolded"}, {:finish, :stop}]])
+      turn(session, "t1")
+      drain()
+
+      assert {:ok, report} = Session.compact(session.handle, nil)
+      assert report.summarised
+
+      [_first, last_turn_call, summary_call] = NativeModelScript.requests(session.agent)
+
+      # Same model, same system prompt, same tool list, same effort: the prefix every
+      # earlier call sent, and the only one a prompt cache could serve. A summariser
+      # that rebuilt any of them could be served nothing.
+      assert summary_call.model == last_turn_call.model
+      assert summary_call.system == last_turn_call.system
+      assert summary_call.tools == last_turn_call.tools
+      assert summary_call.tools != []
+      assert summary_call.reasoning_effort == last_turn_call.reasoning_effort
+      assert summary_call.turn_id == "compact_2"
+
+      # The folded head is a prefix of what the turn sent, verbatim — the tool result
+      # included — and the instruction is the one message after it.
+      {folded, [instruction]} = Enum.split(summary_call.messages, -1)
+      assert instruction == %{role: :user, content: Compaction.summary_instruction(nil)}
+      assert folded == Enum.take(last_turn_call.messages, length(folded))
+      assert Enum.any?(folded, &(Map.get(&1, :role) == :tool and &1.content =~ "defmodule A"))
+    end
+
+    test "a compact on a resumed session builds the prefix rather than sending a bare one",
+         context do
+      session = open(context, big_script() ++ [[{:text, "## Goal\n\nfolded"}, {:finish, :stop}]])
+      turn(session, "t1")
+      drain()
+      {:ok, info} = Session.info(session.handle)
+
+      # The resumed session has spoken no turn, so nothing has built its prefix. The one
+      # with the most history to re-read is exactly this one.
+      reopened = reopen(context, session, info.provider_session_id)
+      assert {:ok, report} = Session.compact(reopened.handle, nil)
+      assert report.summarised
+
+      [_first, last_turn_call, summary_call] = NativeModelScript.requests(session.agent)
+      assert summary_call.system == last_turn_call.system
+      assert summary_call.tools == last_turn_call.tools
+      assert summary_call.tools != []
+      refute summary_call.system =~ "Summarise the conversation above"
+    end
+
     test "/compact retains the archive and lists it", context do
       session = open(context, [[{:text, "ok"}, {:usage, %{input_tokens: 5, output_tokens: 1}}]])
       turn(session, "t1")

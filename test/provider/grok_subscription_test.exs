@@ -123,6 +123,37 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
     end
   end
 
+  test "names the conversation to the proxy, and only with a value fit for a header", %{
+    path: path
+  } do
+    write_credential(path)
+
+    assert {:ok, _, opts} = GrokSubscription.transport("grok:grok-4.6", [], "native-abc123")
+    assert {"x-grok-conv-id", "native-abc123"} in opts[:req_http_options][:headers]
+
+    # Without one, none is invented: an empty or absent id sends no header at all.
+    for absent <- [nil, ""] do
+      assert {:ok, _, opts} = GrokSubscription.transport("grok:grok-4.6", [], absent)
+      refute Enum.any?(opts[:req_http_options][:headers], &match?({"x-grok-conv-id", _}, &1))
+    end
+
+    # And a value that could smuggle a second header line is dropped, not escaped.
+    assert {:ok, _, opts} = GrokSubscription.transport("grok:grok-4.6", [], "id\r\nx-evil: 1")
+    refute Enum.any?(opts[:req_http_options][:headers], &match?({"x-grok-conv-id", _}, &1))
+    refute inspect(opts) =~ "x-evil"
+
+    # The connection still owns every other header.
+    assert {:ok, _, opts} =
+             GrokSubscription.transport(
+               "grok:grok-4.6",
+               [req_http_options: [headers: [{"x-grok-conv-id", "theirs"}]]],
+               "ours"
+             )
+
+    assert Enum.count(opts[:req_http_options][:headers], &match?({"x-grok-conv-id", _}, &1)) == 1
+    assert {"x-grok-conv-id", "ours"} in opts[:req_http_options][:headers]
+  end
+
   test "rejects credentials that become expired while waiting for model capacity", %{path: path} do
     write_credential(path)
     parent = self()
@@ -161,6 +192,7 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
           delta =
             if round == 1 do
               %{
+                "reasoning_content" => "Plan: read the file first.",
                 "tool_calls" => [
                   %{
                     "index" => 0,
@@ -224,6 +256,7 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
 
     assert {:tool_call, %{id: "call-1", name: "lookup", input: %{"path" => "README.md"}}} in chunks
 
+    assert {:thinking, "Plan: read the file first."} in chunks
     assert {:finish, :tool_calls} in chunks
     assert_receive {:outbound, sent}, 5_000
     assert sent.host == "cli-chat-proxy.grok.com"
@@ -232,7 +265,11 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
     headers = Enum.map(sent.headers, fn {k, v} -> {String.downcase(k), v} end)
     assert {"authorization", "Bearer renewed-access-canary"} in headers
     assert {"x-xai-token-auth", "xai-grok-cli"} in headers
+    assert {"x-grok-conv-id", "grok-fixture"} in headers
 
+    # The loop keeps the reasoning that streamed with the tool call on the assistant
+    # message; on this lane it goes back as the message's `reasoning_content`, which
+    # xAI names as what keeps its prompt cache warm across turns on a reasoning model.
     next =
       Map.update!(
         request(),
@@ -242,6 +279,7 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
               %{
                 role: :assistant,
                 content: nil,
+                thinking: "Plan: read the file first.",
                 tool_calls: [%{id: "call-1", name: "lookup", input: %{"path" => "README.md"}}]
               },
               %{
@@ -265,6 +303,11 @@ defmodule Ouroboros.Provider.GrokSubscriptionTest do
     assert payload["model"] == "grok-4.6"
     assert List.last(payload["messages"])["content"] == "Fixture README contents"
     assert List.last(payload["messages"])["tool_call_id"] == "call-1"
+
+    assistant = Enum.find(payload["messages"], &(&1["role"] == "assistant"))
+    assert assistant["reasoning_content"] == "Plan: read the file first."
+    assert [%{"function" => %{"name" => "lookup"}}] = assistant["tool_calls"]
+    refute Enum.any?(List.wrap(assistant["content"]), &match?(%{"type" => "thinking"}, &1))
     Task.await(server, 5_000)
   end
 

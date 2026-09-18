@@ -96,6 +96,31 @@ defmodule Ouroboros.Audit.Identity do
 
   defp required_role("audit." <> _, _), do: "auditor"
 
+  # Both fleet rules are matched on the method alone, before any scope is considered and
+  # before the approval words below, and both of those orderings are load-bearing.
+  #
+  # Every call site passes the *method's declared scope* from the table, never the
+  # listener's, so a rule written on the `:operate` clause is a rule about how a verb
+  # happens to be declared. The proposal declares `fleet.deployment.status` at read scope
+  # (docs/proposals/fleet-network-onboarding.md, "UI backend and operation lifecycle"),
+  # and an operate-only prefix would have handed that one to any operator. Deploying
+  # Ouroboros onto another machine grants that machine the fleet's trust and asks a human
+  # for the credential that gets it there; reading the deployment it is doing is the same
+  # decision seen from the other side. The scope a verb carries is not what makes it an
+  # administrator's.
+  #
+  # And the prefix is tested before the approval words because a deployment verb whose
+  # name happens to contain `respond` or `approve` — `fleet.deployment.respond_challenge`
+  # is the obvious one, beside the `authenticate` this family already has — must not fall
+  # to an approver. This clause is above that `cond`, so it cannot.
+  defp required_role("fleet.deployment." <> _, _), do: "administrator"
+
+  # The tailnet inventory: every machine on the operator's private network, its addresses
+  # and what has been observed about it. Named exactly, at any scope, for the same reason
+  # as above — `fleet.status` and the rest of the fleet summaries keep their existing read
+  # permissions, so a non-admin reader still sees membership, just not the network.
+  defp required_role("fleet.devices", _), do: "administrator"
+
   defp required_role(method, :operate) do
     cond do
       String.contains?(method, ["approval", "approve", "respond"]) ->

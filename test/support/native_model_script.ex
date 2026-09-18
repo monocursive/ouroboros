@@ -86,6 +86,10 @@ defmodule Ouroboros.Test.NativeModelScript do
   @impl true
   def available?, do: true
 
+  @doc "A scripted lane replays thinking, so the loop's retention of it is testable."
+  @impl true
+  def replays_thinking?(_model_spec), do: true
+
   @impl true
   def credential_report,
     do: [%{provider: :scripted, env: "OUROBOROS_TEST_SCRIPTED_KEY", present: false}]

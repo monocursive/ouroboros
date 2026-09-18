@@ -87,7 +87,36 @@ defmodule Ouroboros.Web.Live.ImageAttachments do
       <input type="hidden" name="images_json" value="[]" />
       <input type="hidden" name="images_draft" value="" />
       <div class="ouro-image-tray" role="list" aria-label="Attached images"></div>
-      <button type="button" class="ouro-quiet-button" data-attach disabled>Attach images</button>
+      <span class="ouro-image-hint" role="status" aria-live="polite"></span>
+      <span class="ouro-image-attach-control">
+        <button
+          type="button"
+          class="ouro-icon-button ouro-image-attach"
+          aria-label="Attach images"
+          aria-describedby={@id <> "-help"}
+          data-attach
+          disabled
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="3" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+        </button>
+        <span id={@id <> "-help"} class="ouro-image-tooltip" role="tooltip">
+          Checking image support…
+        </span>
+      </span>
       <input
         type="file"
         accept="image/png,image/jpeg,image/webp,image/gif"
@@ -95,7 +124,6 @@ defmodule Ouroboros.Web.Live.ImageAttachments do
         hidden
         data-image-picker
       />
-      <span class="ouro-image-hint" role="status" aria-live="polite">Checking image support…</span>
     </div>
     """
   end

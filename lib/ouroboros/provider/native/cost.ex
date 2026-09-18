@@ -2,10 +2,12 @@ defmodule Ouroboros.Provider.Native.Cost do
   @moduledoc """
   Turns a model response's token counts into a `usage` payload with numbers in it.
 
-  Pricing comes from `llm_db`'s per-million-token rates for the resolved model. When
-  the model is unknown to `llm_db`, or its entry carries no rates, `cost_usd` is absent
-  from the payload — it is not zero. A zero would render in the footer as a free turn,
-  and "we do not know what this cost" is a different fact from "this cost nothing".
+  Pricing comes from the catalogue's per-million-token rates for the resolved model,
+  through `Ouroboros.Models.lookup/1`. When the catalogue does not know the model, when
+  its entry carries no rates, or when the model is reached through a subscription whose
+  allowance no API price describes, `cost_usd` is absent from the payload — it is not
+  zero. A zero would render in the footer as a free turn, and "we do not know what this
+  cost" is a different fact from "this cost nothing".
 
   The payload is numbers and strings only. No provider response, no request, no key.
   """
@@ -95,19 +97,19 @@ defmodule Ouroboros.Provider.Native.Cost do
   defp per_million(tokens, rate) when is_number(rate), do: tokens * rate / 1_000_000
   defp per_million(_tokens, _rate), do: 0.0
 
+  # Through `Ouroboros.Models.lookup/1`, the one seam that resolves every lane's prefix —
+  # and refused outright for a subscription lane, where the catalogue's public API price
+  # describes nothing this session is charged. That refusal is a decision, not the
+  # accident it used to be: `llm_db` alone happened not to know those prefixes.
   defp rates(model_spec) do
-    with true <- Code.ensure_loaded?(LLMDB),
-         {:ok, model} <- LLMDB.model(model_spec),
+    with false <- Ouroboros.Models.subscription_lane?(model_spec),
+         model when is_map(model) <- Ouroboros.Models.lookup(model_spec),
          cost when is_map(cost) <- Map.get(model, :cost) do
       rates = Map.take(cost, [:input, :output, :cache_read, :cache_write])
       if Enum.any?(rates, fn {_key, value} -> is_number(value) end), do: rates, else: nil
     else
       _unpriced -> nil
     end
-  rescue
-    _error -> nil
-  catch
-    :exit, _reason -> nil
   end
 
   defp count(usage, keys) do

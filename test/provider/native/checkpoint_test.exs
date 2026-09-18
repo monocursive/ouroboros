@@ -15,6 +15,7 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
     %{
       role: :assistant,
       content: "reading",
+      thinking: "Read the file before changing it.",
       tool_calls: [%{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}]
     },
     %{role: :tool, tool_call_id: "c1", name: "read", content: "1\tdefmodule A", is_error: false},

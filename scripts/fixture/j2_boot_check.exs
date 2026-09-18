@@ -8,7 +8,9 @@ manifest =
   |> JSON.decode!()
 
 for {relative, expected} <- manifest do
-  actual = :crypto.hash(:sha256, File.read!(Path.join(root, relative))) |> Base.encode16(case: :lower)
+  actual =
+    :crypto.hash(:sha256, File.read!(Path.join(root, relative))) |> Base.encode16(case: :lower)
+
   unless actual == expected, do: raise("captured baseline checksum differs: #{relative}")
 end
 
@@ -24,13 +26,17 @@ for {key, leaf} <- [interactive_storage: "interactive", effect_ledger_storage: "
   )
 end
 
+# Frozen historical records must not expire under the runtime's normal retention policy.
+Application.put_env(:ouroboros, :terminal_retention_ms, nil)
+
 {:ok, _} = Application.ensure_all_started(:ouroboros)
 
 if Enum.any?(Application.started_applications(), fn {app, _, _} -> app == :jido_harness end),
   do: raise("retired session dependency is still running")
 
 for tag <- Ouroboros.Storage.SessionMigration.legacy_structs() do
-  unless :code.which(tag) == :non_existing, do: raise("retired module is still on code path: #{tag}")
+  unless :code.which(tag) == :non_existing,
+    do: raise("retired module is still on code path: #{tag}")
 end
 
 sessions = Ouroboros.Interactive.Store.list()
@@ -38,7 +44,7 @@ expected = ~w(idle running queued awaiting_approval terminal resumed forked remo
 
 unless Enum.sort(Enum.map(sessions, & &1.id)) ==
          Enum.sort(Enum.map(expected, &("j2-fixture-" <> &1))),
-       do: raise("J2 corpus session loss")
+       do: raise("J2 corpus session loss: loaded #{inspect(Enum.map(sessions, & &1.id))}")
 
 for session <- sessions do
   kind = String.replace_prefix(session.id, "j2-fixture-", "")

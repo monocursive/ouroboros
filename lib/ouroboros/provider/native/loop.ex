@@ -179,6 +179,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   # read the denial and what led to it; not the whole spill file, which the tool result
   # already names a path for.
   @max_escalation_output_bytes 4 * 1024
+  @max_thinking_bytes 64 * 1024
   @bash_retry_ttl_ms 300_000
 
   defstruct [
@@ -280,7 +281,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     # only in that tool result and is consumed before any retry approval is requested.
     retained_bash_attempt: nil,
     bash_retry_ttl_ms: @bash_retry_ttl_ms,
-    usage: %{input: 0, output: 0, cost: 0.0},
+    # `cost` starts unknown, not free: it becomes a number on the first priced usage
+    # payload and stays `nil` for a model nobody here can price — a subscription lane, or
+    # a scripted one — so the turn's `cost_usd` says "unknown" rather than `0.0`. The
+    # same rule `Ouroboros.Provider.Native.Cost` states for one payload, kept for the sum.
+    usage: %{input: 0, output: 0, cost: nil},
     max_iterations: @default_max_iterations,
     tool_timeout_ms: @default_tool_timeout_ms,
     approval_timeout_ms: :infinity
@@ -429,14 +434,21 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       true ->
         case call_model(state, iteration) do
-          {:ok, state, text, calls, reasoning_details, provider_metadata} ->
+          {:ok, state, text, calls, reasoning_details, provider_metadata, thinking} ->
             state = drain_control(state)
 
             if state.interrupted? do
               interrupted(state)
             else
               state =
-                append_assistant(state, text, calls, reasoning_details, provider_metadata)
+                append_assistant(
+                  state,
+                  text,
+                  calls,
+                  reasoning_details,
+                  provider_metadata,
+                  thinking
+                )
 
               cond do
                 calls == [] ->
@@ -483,10 +495,17 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp call_model(state, iteration) do
     if state.tool_source == :live, do: Ouroboros.Audit.ensure_actor(state.session_request)
 
+    # Appended, and kept: see `turn_budget_messages/2` for why the conversation is
+    # append-only from here on.
+    state = %{
+      state
+      | messages: state.messages ++ turn_budget_messages(iteration, state.max_iterations)
+    }
+
     request = %{
       model: state.model_spec,
       system: state.system,
-      messages: state.messages ++ turn_budget_messages(iteration, state.max_iterations),
+      messages: state.messages,
       tools: iteration_tools(state, iteration),
       provider_session_id: state.provider_session_id,
       turn_id: state.turn_id,
@@ -495,9 +514,9 @@ defmodule Ouroboros.Provider.Native.Loop do
     }
 
     # Digested over the module's own projection of the wire request, not over
-    # `state.messages`: that is what makes it cover the transient turn-budget message
-    # and the reserved final round's empty tool list, and what makes two conversations
-    # that project to the same request digest to the same value.
+    # `state.messages`: that is what makes it cover the reserved final round's empty
+    # tool list, and what makes two conversations that project to the same request
+    # digest to the same value.
     prompt_sha256 = Journal.digest(Model.project(state.model_module, request))
     effect_id = inference_effect_id(state, iteration)
 
@@ -559,8 +578,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   # A user-role message rather than a system suffix, for the same reason a compaction
   # summary is one (`Context.Compaction`): the prefix must not carry a value that changes
   # per call. It goes after the tool results the same way a lazily loaded rule or a
-  # steer does, and it is not kept — the next call computes its own, and a transcript
-  # that recorded ten countdowns would be ten messages nobody re-reads.
+  # steer does — and, like them, it stays. It used to be dropped from the next request,
+  # which made every request after it a history edit: the prompt cache missed from the
+  # removed message onward, and a model that binds each thinking block to the prefix
+  # before it (Claude Fable 5.1 onward) refuses or silently drops every block that
+  # followed the message it can no longer find. Ten countdowns at the end of a
+  # hundred-iteration turn are a few hundred tokens nobody re-reads; a cache miss on the
+  # whole conversation, ten times over, is not.
   defp turn_budget_messages(iteration, max_iterations) do
     remaining = max_iterations - iteration + 1
 
@@ -603,48 +627,55 @@ defmodule Ouroboros.Provider.Native.Loop do
   # thinking has ever had here. It is accumulated reversed and flipped once at the end,
   # because a turn can stream tens of thousands of deltas and `++` per chunk is quadratic.
   defp consume(state, stream, iteration, effect_id, started) do
-    {text, calls, usages, reasoning_details, provider_metadata, chunks} =
-      Enum.reduce(Stream.with_index(stream), {[], [], [], [], %{}, []}, fn {chunk, chunk_index},
-                                                                           {text, calls, usages,
-                                                                            details, metadata,
-                                                                            chunks} ->
-        _ =
-          audit_journal(state, "model_chunk", %{
-            "ledger_effect_id" => effect_id,
-            "iteration" => iteration,
-            "chunk_index" => chunk_index,
-            "chunk" => Journal.jsonable(chunk)
-          })
+    {text, thinking, calls, usages, reasoning_details, provider_metadata, chunks} =
+      Enum.reduce(
+        Stream.with_index(stream),
+        {[], [], [], [], [], %{}, []},
+        fn {chunk, chunk_index}, {text, thinking, calls, usages, details, metadata, chunks} ->
+          _ =
+            audit_journal(state, "model_chunk", %{
+              "ledger_effect_id" => effect_id,
+              "iteration" => iteration,
+              "chunk_index" => chunk_index,
+              "chunk" => Journal.jsonable(chunk)
+            })
 
-        chunks = [Journal.jsonable(chunk) | chunks]
+          chunks = [Journal.jsonable(chunk) | chunks]
 
-        case chunk do
-          {:text, delta} when is_binary(delta) and delta != "" ->
-            emit(state, :output_text_delta, %{"text" => delta})
-            {[text, delta], calls, usages, details, metadata, chunks}
+          case chunk do
+            {:text, delta} when is_binary(delta) and delta != "" ->
+              emit(state, :output_text_delta, %{"text" => delta})
+              {[text, delta], thinking, calls, usages, details, metadata, chunks}
 
-          {:thinking, delta} when is_binary(delta) and delta != "" ->
-            emit(state, :thinking_delta, %{"text" => delta})
-            {text, calls, usages, details, metadata, chunks}
+            {:thinking, delta} when is_binary(delta) and delta != "" ->
+              emit(state, :thinking_delta, %{"text" => delta})
+              {text, [thinking, delta], calls, usages, details, metadata, chunks}
 
-          {:tool_call, call} ->
-            {text, calls ++ [call], usages, details, metadata, chunks}
+            {:tool_call, call} ->
+              {text, thinking, calls ++ [call], usages, details, metadata, chunks}
 
-          {:reasoning_details, next} when is_list(next) ->
-            {text, calls, usages, next, metadata, chunks}
+            {:reasoning_details, next} when is_list(next) ->
+              {text, thinking, calls, usages, next, metadata, chunks}
 
-          {:provider_metadata, next} when is_map(next) ->
-            {text, calls, usages, details, Map.merge(metadata, next), chunks}
+            {:provider_metadata, next} when is_map(next) ->
+              {text, thinking, calls, usages, details, Map.merge(metadata, next), chunks}
 
-          {:usage, usage} ->
-            {text, calls, usages ++ [usage], details, metadata, chunks}
+            {:usage, usage} ->
+              {text, thinking, calls, usages ++ [usage], details, metadata, chunks}
 
-          _ignored ->
-            {text, calls, usages, details, metadata, chunks}
+            _ignored ->
+              {text, thinking, calls, usages, details, metadata, chunks}
+          end
         end
-      end)
+      )
 
     final = IO.iodata_to_binary(text)
+
+    thought =
+      if Model.replays_thinking?(state.model_module, state.model_spec),
+        do: thinking |> IO.iodata_to_binary() |> bound_thinking(),
+        else: ""
+
     if final != "", do: emit(state, :output_text_final, %{"text" => final})
 
     state = Enum.reduce(usages, state, &record_usage(&2, &1))
@@ -664,7 +695,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     settle_inference_effect(state, effect_id, :completed, started, journal_seq(state), usage)
 
-    {:ok, state, final, calls, reasoning_details, provider_metadata}
+    {:ok, state, final, calls, reasoning_details, provider_metadata, thought}
   rescue
     error in Ouroboros.Audit.Unavailable ->
       reraise error, __STACKTRACE__
@@ -709,14 +740,25 @@ defmodule Ouroboros.Provider.Native.Loop do
       | usage: %{
           input: state.usage.input + Map.get(payload, "input_tokens", 0),
           output: state.usage.output + Map.get(payload, "output_tokens", 0),
-          cost: state.usage.cost + Map.get(payload, "cost_usd", 0.0)
+          cost: add_cost(state.usage.cost, Map.get(payload, "cost_usd"))
         }
     }
   end
 
-  defp append_assistant(state, "", [], [], metadata) when metadata == %{}, do: state
+  defp add_cost(running, value) when is_number(value) and value >= 0,
+    do: (running || 0.0) + value
 
-  defp append_assistant(state, text, calls, reasoning_details, provider_metadata) do
+  defp add_cost(running, _unpriced), do: running
+
+  defp rounded_cost(cost) when is_number(cost), do: Float.round(cost / 1, 6)
+  defp rounded_cost(_unknown), do: nil
+
+  # A message with no text, no calls and no signed reasoning is dropped as before, its
+  # thinking with it: reasoning that produced nothing is nothing a later turn can use.
+  defp append_assistant(state, "", [], [], metadata, _thinking) when metadata == %{},
+    do: state
+
+  defp append_assistant(state, text, calls, reasoning_details, provider_metadata, thinking) do
     message =
       %{
         role: :assistant,
@@ -725,8 +767,35 @@ defmodule Ouroboros.Provider.Native.Loop do
       }
       |> put_nonempty(:reasoning_details, reasoning_details)
       |> put_nonempty(:provider_metadata, provider_metadata)
+      |> put_thinking(thinking)
 
     %{state | messages: state.messages ++ [message]}
+  end
+
+  defp put_thinking(message, thinking) when is_binary(thinking) and thinking != "",
+    do: Map.put(message, :thinking, thinking)
+
+  defp put_thinking(message, _absent), do: message
+
+  # The model's reasoning as it streamed, kept on the message only for a lane that sends
+  # it back (`Ouroboros.Provider.Native.Model.replays_thinking?/2`) and bounded so a
+  # model that thinks at length cannot grow a checkpoint without limit. A checkpoint is
+  # JSON, so the text must be valid UTF-8 and the cut must land on a character boundary:
+  # text that is not valid is dropped rather than repaired, and a valid text is cut at
+  # most three bytes short of the bound, which is the longest a codepoint can be.
+  defp bound_thinking(text) do
+    cond do
+      not String.valid?(text) -> ""
+      byte_size(text) <= @max_thinking_bytes -> text
+      true -> utf8_prefix(text, @max_thinking_bytes)
+    end
+  end
+
+  defp utf8_prefix(text, limit) do
+    Enum.find_value(0..3, fn back ->
+      prefix = binary_part(text, 0, limit - back)
+      if String.valid?(prefix), do: prefix
+    end)
   end
 
   # The reserved final round already appended the assistant message, including any tool
@@ -3087,7 +3156,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       | usage: %{
           input: state.usage.input + summary.usage.input,
           output: state.usage.output + summary.usage.output,
-          cost: state.usage.cost + (summary.usage.cost || 0.0)
+          cost: add_cost(state.usage.cost, summary.usage.cost)
         }
     }
   end
@@ -3754,7 +3823,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           "iterations" => iterations,
           "input_tokens" => state.usage.input,
           "output_tokens" => state.usage.output,
-          "cost_usd" => Float.round(state.usage.cost, 6)
+          "cost_usd" => rounded_cost(state.usage.cost)
         })
 
         {:ok, state}

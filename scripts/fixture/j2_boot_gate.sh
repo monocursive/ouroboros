@@ -20,6 +20,7 @@ for mode in plain preload; do
       cat "$log" | grep '^J2 BOOT:'
     else
       echo "J2 boot failed: $log" >&2
+      cat "$log" >&2
       exit 1
     fi
     i=$((i + 1))

@@ -67,6 +67,14 @@ defmodule Ouroboros.Web.StatusLive do
           <p class="ouro-subhead">
             <a href="/settings#runtime">How this installation is configured →</a>
           </p>
+
+          <%!-- Fleet onboarding, slice 6. This page answers "what is this node"; Devices
+                answers "what other machines are there, and how do I add one". The second
+                question is the one an operator arrives at from here, so it is named here
+                rather than left to the top bar alone. --%>
+          <p class="ouro-subhead">
+            <a href="/devices">Devices — this fleet's machines, and adding one →</a>
+          </p>
         </section>
       </main>
     </div>

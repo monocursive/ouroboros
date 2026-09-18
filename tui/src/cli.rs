@@ -228,7 +228,24 @@ pub enum Command {
     },
 
     /// Stop the runtime this client started.
-    Stop,
+    Stop {
+        /// Refuse the stop unless the runtime says it is idle.
+        ///
+        /// Sends `runtime.shutdown {"require_idle": true}`: the runtime reads its own
+        /// running and queued turns, image transfers and preparation, and connected
+        /// operator clients, and refuses if any of that is non-zero — or if it could
+        /// not establish one of them, because unknown activity is not idleness. The
+        /// refusals have their own exit codes so a script can tell them apart: 10 for
+        /// a busy runtime, 11 for activity it could not read, 12 for a runtime that
+        /// does not serve `runtime.activity` and therefore has no gate to apply (the
+        /// request is not sent at all, because an older runtime ignores the parameter
+        /// and stops, which looks exactly like a pass), and 13 for a connection that
+        /// closed before any answer arrived. A data directory with no published runtime
+        /// is not a refusal: the command exits 0 and says there was nothing to stop.
+        /// Without this flag `ouro stop` behaves exactly as it always has.
+        #[arg(long)]
+        require_idle: bool,
+    },
 
     /// Print the durable effect ledger: what an agent was allowed to do, and what came
     /// of it.
@@ -1506,7 +1523,13 @@ pub enum FleetCommand {
         command: FleetTagCommand,
     },
     /// Print the machine-management protocol revision, without starting a runtime.
-    Protocol,
+    Protocol {
+        /// Print this binary's whole build contract instead of the bare revision:
+        /// protocol revision, Ouroboros version, OTP and Elixir releases, and platform.
+        /// Still starts no runtime; unknown facts are null rather than guessed.
+        #[arg(long)]
+        json: bool,
+    },
     /// Give this machine its cluster identity: node name, private cookie, TLS materials
     /// and a private EPMD port.
     Create {
@@ -1550,10 +1573,33 @@ pub enum FleetCommand {
     },
 
     /// Show this machine's non-secret cluster identity and next action.
-    Status,
+    Status {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        /// Incomplete setup exits non-zero even when some steps succeeded.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Check local security plus live cluster connectivity and compatibility when running.
-    Doctor,
+    Doctor {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+
+        /// Additionally probe the private-network route to one visible device, by the
+        /// name its network client reports or by its private address. This contacts
+        /// that one device and nothing else.
+        #[arg(long, value_name = "NAME|ADDRESS")]
+        peer: Option<String>,
+    },
+
+    /// List this machine's fleet members alongside the devices its network client can
+    /// see. Contacts no device and inspects no installation.
+    Devices {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Edit this machine's view of which other machines are in the cluster.
     Members {
@@ -1567,8 +1613,299 @@ pub enum FleetCommand {
         command: SessionsCommand,
     },
 
-    /// Remove this machine's cluster credentials after its runtime is stopped.
-    Leave,
+    /// Install, inspect, disable or remove the one startup service Ouroboros manages.
+    ///
+    /// Only ever this data directory's own unit: a macOS LaunchAgent or a systemd user
+    /// unit that runs the foreground `ouro service-run`. Every unit written here carries
+    /// an ownership marker naming this data directory, and anything else found in the
+    /// service manager's directory is reported and left exactly as it is.
+    Service {
+        #[command(subcommand)]
+        command: FleetServiceCommand,
+    },
+
+    /// Give this machine its cluster identity from its own private-network address, and
+    /// arrange for it to start.
+    ///
+    /// On a machine that already has one this is an inspection: it reports what is there
+    /// and names the repair, and changes nothing.
+    Setup {
+        /// A short label people will recognize, such as studio-mini. Lower-cased.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// This machine's private-network IPv4. Omitted, it is read from the network
+        /// client's report about this device.
+        #[arg(long, value_name = "ADDRESS")]
+        address: Option<String>,
+
+        #[command(flatten)]
+        common: FleetSetupArgs,
+    },
+
+    /// Add another machine to this fleet over SSH, from this machine's CA.
+    ///
+    /// Contacts only the destination given here and the machines already in this
+    /// machine's roster. Host verification and authentication are explicit steps.
+    Add {
+        /// The target as `user@address`, where address is its private-network IPv4 or
+        /// the name its network client reports. The account is never inferred from the
+        /// network device's owner.
+        #[arg(value_name = "USER@ADDRESS")]
+        destination: Option<String>,
+
+        /// The new machine's short name. Required when the destination is an address.
+        #[arg(long, value_name = "NAME")]
+        machine: Option<String>,
+
+        /// The target's SSH port. Default 22.
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+
+        /// Authenticate with this private key file on *this* machine. Validated for
+        /// ownership and permissions; never copied, and an encrypted key is asked for
+        /// its passphrase when OpenSSH needs one.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["agent", "ask_password"])]
+        key: Option<PathBuf>,
+
+        /// Authenticate with one identity held by this machine's SSH agent, named by its
+        /// public SHA256 fingerprint. No agent is forwarded and no key is exported.
+        #[arg(long, value_name = "FINGERPRINT", conflicts_with_all = ["key", "ask_password"])]
+        agent: Option<String>,
+
+        /// Ask for the target account's password when the connection needs one. The
+        /// password is typed into a masked prompt; there is deliberately no flag that
+        /// takes one, because a command line is readable by every process on the host.
+        #[arg(long, conflicts_with_all = ["key", "agent"])]
+        ask_password: bool,
+
+        /// Where `ouro` should live on the target, relative to that account's home
+        /// directory. Default `.local/bin/ouro`.
+        #[arg(long, value_name = "PATH")]
+        install_path: Option<String>,
+
+        /// The target's data directory, when it is not that account's default.
+        #[arg(long, value_name = "PATH")]
+        remote_data_dir: Option<String>,
+
+        /// After the machine is connected, start one planning session on it through this
+        /// machine's runtime and report what it said. A real model call happens only
+        /// when this is given, and a planning session reads and reasons but edits
+        /// nothing.
+        #[arg(long, requires = "test_workspace")]
+        run_test_task: bool,
+
+        /// Absolute workspace on the target for the bounded model check.
+        #[arg(long, value_name = "PATH", requires = "run_test_task")]
+        test_workspace: Option<String>,
+
+        #[command(flatten)]
+        common: FleetSetupArgs,
+    },
+
+    /// Remove cluster credentials: this machine's own, or — with `--machine` — a
+    /// reachable member's, cooperatively and from every remaining roster.
+    Leave {
+        /// The member to take out of the fleet from here. Omitted, this machine's own
+        /// credentials are removed after its runtime is stopped, as before.
+        #[arg(long, value_name = "NAME", requires = "user")]
+        machine: Option<String>,
+
+        /// The SSH account on that member. Required with `--machine`, and enforced
+        /// here: discovering it is missing after the plan has been approved wastes the
+        /// operator's review and leaves an operation recorded as failed.
+        #[arg(long, value_name = "USER", requires = "machine")]
+        user: Option<String>,
+
+        /// Where `ouro` lives on that member, when it is not where this machine's
+        /// record of its admission says. Normally unnecessary.
+        #[arg(long, value_name = "PATH", requires = "machine")]
+        remote_executable: Option<String>,
+
+        /// That member's SSH port. Default 22.
+        #[arg(long, value_name = "PORT", requires = "machine")]
+        port: Option<u16>,
+
+        /// Authenticate to that member with this private key file on this machine.
+        #[arg(long, value_name = "PATH", requires = "machine", conflicts_with_all = ["agent", "ask_password"])]
+        key: Option<PathBuf>,
+
+        /// Authenticate to that member with one agent identity, by public fingerprint.
+        #[arg(long, value_name = "FINGERPRINT", requires = "machine", conflicts_with_all = ["key", "ask_password"])]
+        agent: Option<String>,
+
+        /// Ask for that member's account password in a masked prompt when needed.
+        #[arg(long, requires = "machine", conflicts_with_all = ["key", "agent"])]
+        ask_password: bool,
+
+        #[command(flatten)]
+        common: LeaveSetupArgs,
+    },
+
+    /// Run one deployment operation as a process that outlives whatever started it.
+    ///
+    /// Never run by hand. The operation's parameters live in a private file beside its
+    /// journal, which is why nothing here names a target, an account or a port: a
+    /// command line is readable by every process on the host.
+    #[command(hide = true)]
+    Worker {
+        #[command(subcommand)]
+        command: FleetWorkerCommand,
+    },
+
+    /// Answer one OpenSSH password or passphrase prompt over this operation's private
+    /// socket.
+    ///
+    /// Never run by hand: OpenSSH runs it as `SSH_ASKPASS`, and it finds its socket in
+    /// the environment. It takes no flag that could name a secret.
+    #[command(hide = true)]
+    Askpass {
+        /// The prompt OpenSSH composed. Read from stdin when absent.
+        #[arg(value_name = "PROMPT")]
+        prompt: Option<String>,
+    },
+
+    /// Answer the fleet setup protocol on this process's own stdin and stdout.
+    ///
+    /// Never run by hand: an issuer starts it over SSH as a fixed command and speaks
+    /// one JSON object per line to it. It opens no listener, starts no subprocess, and
+    /// takes no flags — everything variable, including which machine is being admitted
+    /// and which paths are touched, arrives inside a frame and is validated as data.
+    #[command(hide = true)]
+    Helper,
+}
+
+/// The flags `setup` and `add` share.
+#[derive(Args, Debug, Default)]
+pub struct FleetSetupArgs {
+    /// Inspect and print the concrete plan, and change nothing: no journal, no
+    /// credentials, no installation, no roster edit, and no recorded host trust. An
+    /// unknown host key is still an explicit question — a dry run cannot inspect a host
+    /// it refuses to connect to — but the acceptance lasts only for this run.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Accept the resolved plan without a confirmation prompt. It never accepts an
+    /// unknown or changed host key, never answers a password prompt, and never makes a
+    /// busy runtime idle.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Machine-readable result on stdout, with stable reason codes. Incomplete setup
+    /// still exits non-zero.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Explicitly labelled manual startup instead of a managed user service.
+    #[arg(long)]
+    pub no_service: bool,
+
+    /// Resume (or name) one operation instead of starting a new one. An operation id is
+    /// 8 to 64 characters of lowercase letters, digits and single hyphens.
+    #[arg(long, value_name = "ID")]
+    pub operation: Option<String>,
+}
+
+/// The flags cooperative `leave --machine` shares with `setup`/`add`, minus `--no-service`.
+///
+/// Flattened into [`FleetCommand::Leave`], which is also the local credential-removal
+/// command when `--machine` is omitted. Every flag here requires `--machine` so a bare
+/// `leave --dry-run` is a parse error rather than a real local leave that ignored the
+/// flag. `--no-service` is not here: cooperative removal always disables a managed
+/// service, and a flag that selected manual startup would be silently meaningless.
+#[derive(Args, Debug, Default)]
+pub struct LeaveSetupArgs {
+    /// Inspect and print the concrete plan, and change nothing.
+    #[arg(long, requires = "machine")]
+    pub dry_run: bool,
+
+    /// Accept the resolved plan without a confirmation prompt. It never accepts an
+    /// unknown or changed host key, never answers a password prompt, and never makes a
+    /// busy runtime idle.
+    #[arg(long, requires = "machine")]
+    pub yes: bool,
+
+    /// Machine-readable result on stdout, with stable reason codes.
+    #[arg(long, requires = "machine")]
+    pub json: bool,
+
+    /// Resume (or name) one operation instead of starting a new one. An operation id is
+    /// 8 to 64 characters of lowercase letters, digits and single hyphens.
+    #[arg(long, value_name = "ID", requires = "machine")]
+    pub operation: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetWorkerCommand {
+    /// Fork the detached worker and print the socket it listens on.
+    Start {
+        #[arg(long, value_name = "ID")]
+        operation: String,
+
+        #[arg(long, value_name = "DIR")]
+        data_dir: PathBuf,
+    },
+
+    /// Serve one operation in the foreground. The detached form execs this.
+    Run {
+        #[arg(long, value_name = "ID")]
+        operation: String,
+
+        #[arg(long, value_name = "DIR")]
+        data_dir: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetServiceCommand {
+    /// Generate this data directory's user service and hand it to the manager.
+    ///
+    /// Refuses without a cluster identity, because `service-run` refuses to start
+    /// without one and a unit installed first would only crash-loop. `--no-service` is
+    /// not here: it belongs to `ouro fleet setup`, which decides whether to call this
+    /// at all.
+    Install {
+        /// Replace a unit at this data directory's own unit path that this code did
+        /// not write, or that somebody has edited since it did. Both are described,
+        /// with the digest of what is there, before this flag will replace them.
+        #[arg(long)]
+        adopt: bool,
+
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Report this data directory's service: installed, loaded, running, last exit.
+    ///
+    /// Reads the unit file and asks the manager; anything the manager does not say is
+    /// reported as unknown rather than guessed. Changes nothing.
+    Status {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop the service and stop it respawning, keeping the unit file.
+    ///
+    /// Documented rather than hidden: it is the first half of taking a managed runtime
+    /// down. A stop that leaves the supervisor enabled is a stop the supervisor undoes
+    /// a second later, so `ouro stop` on a serviced machine is `disable` then `stop`.
+    Disable {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Disable the service and delete the one unit file this code wrote.
+    ///
+    /// Touches no other unit, no other data directory, and nothing in the data
+    /// directory itself: sessions, journals and credentials are left alone.
+    Remove {
+        /// Machine-readable form, with stable codes and null for unavailable facts.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1895,6 +2232,84 @@ mod tests {
         }
     }
 
+    /// The four service verbs, and the one flag that lets `install` replace a file it
+    /// did not write. There is deliberately no `start`: after `disable`, `install` is
+    /// what puts the service back, and a verb that only starts something is a verb that
+    /// hides whether the unit on disk is still the one this code wrote.
+    #[test]
+    fn fleet_service_takes_four_verbs_and_one_adoption_flag() {
+        let Some(Command::Fleet {
+            command: FleetCommand::Service { command },
+        }) = parse(&["fleet", "service", "install"]).command
+        else {
+            panic!("`ouro fleet service install` must parse");
+        };
+        assert!(matches!(
+            command,
+            FleetServiceCommand::Install {
+                adopt: false,
+                json: false
+            }
+        ));
+
+        let Some(Command::Fleet {
+            command: FleetCommand::Service { command },
+        }) = parse(&["fleet", "service", "install", "--adopt", "--json"]).command
+        else {
+            panic!("`ouro fleet service install --adopt --json` must parse");
+        };
+        assert!(matches!(
+            command,
+            FleetServiceCommand::Install {
+                adopt: true,
+                json: true
+            }
+        ));
+
+        for verb in ["status", "disable", "remove"] {
+            let Some(Command::Fleet {
+                command: FleetCommand::Service { command },
+            }) = parse(&["fleet", "service", verb, "--json"]).command
+            else {
+                panic!("`ouro fleet service {verb} --json` must parse");
+            };
+            assert!(match (verb, command) {
+                ("status", FleetServiceCommand::Status { json })
+                | ("disable", FleetServiceCommand::Disable { json })
+                | ("remove", FleetServiceCommand::Remove { json }) => json,
+                _ => false,
+            });
+        }
+
+        // `--no-service` belongs to the setup flow that decides whether to install at
+        // all; a service verb that took it would be asking to install nothing.
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "service", "install", "--no-service"]).is_err()
+        );
+        // Adoption is never implicit, and never available to the verbs that delete.
+        assert!(Cli::try_parse_from(["ouro", "fleet", "service", "remove", "--adopt"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "fleet", "service", "start"]).is_err());
+    }
+
+    /// `--require-idle` is opt-in, and the plain stop keeps its exact shape.
+    #[test]
+    fn stop_gains_an_idle_gate_and_nothing_else() {
+        assert!(matches!(
+            parse(&["stop"]).command,
+            Some(Command::Stop {
+                require_idle: false
+            })
+        ));
+        assert!(matches!(
+            parse(&["stop", "--require-idle"]).command,
+            Some(Command::Stop { require_idle: true })
+        ));
+        // There is no way to ask for the opposite: a stop that ignores a stated refusal
+        // would be the unconditional stop, which is what plain `ouro stop` already is.
+        assert!(Cli::try_parse_from(["ouro", "stop", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "stop", "--no-require-idle"]).is_err());
+    }
+
     /// There is no `--token` anywhere, and that is a property worth failing a build over.
     #[test]
     fn no_subcommand_accepts_a_token_on_the_command_line() {
@@ -1906,6 +2321,83 @@ mod tests {
             vec!["daemon", "--token", "secret"],
             vec!["fleet", "join", "invite", "--token", "secret"],
             vec!["fleet", "service", "install", "--token", "secret"],
+            // A generated unit is a file a service manager reads forever. Nothing that
+            // names one may take a secret, and no flag here may name a password for the
+            // account the unit runs as.
+            vec!["fleet", "service", "install", "--password", "secret"],
+            vec![
+                "fleet", "service", "install", "--adopt", "--token", "secret",
+            ],
+            vec!["fleet", "service", "status", "--token", "secret"],
+            vec!["fleet", "service", "disable", "--token", "secret"],
+            vec!["fleet", "service", "remove", "--token", "secret"],
+            // The idle-gated stop authenticates with the token file beside gateway.json,
+            // exactly as the plain stop does, and takes no token of its own.
+            vec!["stop", "--require-idle", "--token", "secret"],
+            vec!["stop", "--token", "secret"],
+            vec!["fleet", "devices", "--token", "secret"],
+            vec!["fleet", "devices", "--password", "secret"],
+            vec![
+                "fleet",
+                "doctor",
+                "--peer",
+                "buildbox",
+                "--password",
+                "secret",
+            ],
+            vec![
+                "fleet",
+                "doctor",
+                "--peer",
+                "buildbox",
+                "--passphrase",
+                "secret",
+            ],
+            vec!["fleet", "protocol", "--token", "secret"],
+            // The setup helper carries a cookie and a certificate, and it takes them
+            // on stdin inside a frame. No flag here may name one, or name a file, a
+            // machine or an operation that a `ps` line would then publish.
+            vec!["fleet", "helper", "--token", "secret"],
+            vec!["fleet", "helper", "--cookie", "secret"],
+            vec!["fleet", "helper", "--materials", "/tmp/materials.json"],
+            vec!["fleet", "helper", "--operation", "op-1234abcd"],
+            vec!["fleet", "helper", "--data-dir", "/tmp/data"],
+            // The deployment surfaces. `--ask-password` is a boolean on purpose: the
+            // password is typed into a masked prompt, and there is no spelling of this
+            // command line that carries one.
+            vec!["fleet", "setup", "--token", "secret"],
+            vec!["fleet", "setup", "--password", "secret"],
+            vec!["fleet", "setup", "--passphrase", "secret"],
+            vec!["fleet", "setup", "--ask-password", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--token", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--password", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--passphrase", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--key-passphrase", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--ask-password", "secret"],
+            vec!["fleet", "add", "me@buildbox", "--cookie", "secret"],
+            vec![
+                "fleet",
+                "leave",
+                "--machine",
+                "buildbox",
+                "--password",
+                "secret",
+            ],
+            vec![
+                "fleet",
+                "leave",
+                "--machine",
+                "buildbox",
+                "--passphrase",
+                "secret",
+            ],
+            vec!["fleet", "worker", "start", "--token", "secret"],
+            vec!["fleet", "worker", "start", "--password", "secret"],
+            vec!["fleet", "worker", "run", "--cap", "deadbeef"],
+            vec!["fleet", "worker", "run", "--secret", "s"],
+            vec!["fleet", "askpass", "--password", "secret"],
+            vec!["fleet", "askpass", "--token", "secret"],
+            vec!["fleet", "askpass", "--socket", "/tmp/s"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("ouro").chain(args.iter().copied())).is_err(),
@@ -2641,11 +3133,83 @@ mod tests {
             "irreversible local evidence loss must require an explicit acknowledgement"
         );
 
+        // Bare `fleet leave` still retires this machine; `--machine` is the
+        // cooperative form and is the only thing that makes it reach another host.
         assert!(matches!(
             parse(&["fleet", "leave"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Leave
+                command: FleetCommand::Leave { machine: None, .. }
             })
         ));
+        assert!(matches!(
+            parse(&["fleet", "leave", "--machine", "buildbox", "--user", "me"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Leave { machine: Some(machine), user: Some(user), .. }
+            }) if machine == "buildbox" && user == "me"
+        ));
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "leave", "--user", "me"]).is_err(),
+            "an SSH account without a machine names nothing to reach"
+        );
+        // And the other way round: a member is reached over SSH, and the account is
+        // never inferred. Finding that out after the plan was approved is what the live
+        // run did.
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "leave", "--machine", "buildbox"]).is_err(),
+            "a cooperative removal without an SSH account is refused at parse time"
+        );
+        // Setup flags on a bare leave used to parse and then be discarded, so
+        // `leave --dry-run` performed the real local credential removal.
+        for flag in [
+            ["ouro", "fleet", "leave", "--dry-run"].as_slice(),
+            ["ouro", "fleet", "leave", "--json"].as_slice(),
+            ["ouro", "fleet", "leave", "--yes"].as_slice(),
+            ["ouro", "fleet", "leave", "--operation", "x"].as_slice(),
+            ["ouro", "fleet", "leave", "--no-service"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(flag).is_err(),
+                "{} must not parse as a silent local leave",
+                flag.join(" ")
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "ouro",
+                "fleet",
+                "leave",
+                "--machine",
+                "vps",
+                "--user",
+                "me",
+                "--no-service"
+            ])
+            .is_err(),
+            "cooperative leave has no manual-startup choice to make"
+        );
+        assert!(matches!(
+            parse(&[
+                "fleet",
+                "leave",
+                "--machine",
+                "vps",
+                "--user",
+                "me",
+                "--dry-run"
+            ])
+            .command,
+            Some(Command::Fleet {
+                command: FleetCommand::Leave {
+                    machine: Some(machine),
+                    user: Some(user),
+                    common,
+                    ..
+                }
+            }) if machine == "vps" && user == "me" && common.dry_run
+        ));
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "setup", "--dry-run"]).is_ok(),
+            "setup still inspects without an explicit --machine"
+        );
     }
 }

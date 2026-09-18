@@ -276,7 +276,29 @@ attach natively — all of which have landed.
   and a compaction — which are the two prompt-cache invalidators this runtime can cause.
   The fingerprint is asserted stable across turns in `test/provider/native/context_test.exs`,
   which is what stops a well-meaning "put the date in the system prompt" from becoming a
-  bill rather than a failing test.
+  bill rather than a failing test. A stable prefix earns nothing until a request asks the
+  provider to cache it, so on the Anthropic lane `Model.ReqLLM` places `cache_control`
+  breakpoints on every request — the tool list, the system prompt, the newest message —
+  and `test/provider/native/direct_sse_test.exs` asserts they are on the wire; whether
+  they hit is reported, not assumed, as `cache_read_tokens` on every `usage` event. OpenAI
+  and xAI cache prompts without being asked, so those lanes carry only the identity that
+  keeps one conversation's entries together: the session id as `prompt_cache_key` on the
+  OpenAI API-key lane, as `prompt_cache_key` plus the `session-id` header on the Codex
+  lane (both derived by ReqLLM from the `session_id` this runtime passes), and as the
+  `x-grok-conv-id` header on the xAI and Grok lanes. Each is asserted on the wire in
+  `test/provider/native/direct_sse_test.exs` or `test/provider/grok_subscription_test.exs`,
+  and the hit is reported the same way. The xAI and Grok lanes also send the model's
+  earlier reasoning text back as each assistant message's `reasoning_content`, which
+  xAI documents as what keeps its cache warm on reasoning models; the loop keeps that
+  text on the message, bounded, only for a lane that sends it back, the checkpoint
+  carries it, and the compaction budget counts it. The
+  compaction and handoff summarisers send that same prefix with their instruction
+  appended, so the cache can serve whatever of the folded history is still warm; a fork
+  that rebuilt the prefix could be served nothing, and the summariser's own usage record
+  says which it was. The conversation itself is append-only between requests: a turn-budget
+  countdown, once sent, stays, since a message removed from the middle of the history
+  misses the cache from that point and is refused by a model that binds its thinking to
+  the prefix before it.
   - `Context.Instructions` discovers `AGENTS.md` from the workspace up, with `CLAUDE.md`
     as the per-level fallback, a user scope, `@relative` imports four hops deep, and
     `.agents/rules/*.md` held back behind `paths:` globs until a matching file is
@@ -288,13 +310,22 @@ attach natively — all of which have landed.
     `usage` event; an unknown window omits the denominator but retains the provider-counted
     request size. An explicit `unknown_compact_tokens` is an operator-selected history
     budget, not an inferred model capacity; absent that option, unknown capacity never
-    triggers automatic compaction.
+    triggers automatic compaction. A known window compacts at the lower of `compact_at`
+    (a fraction of the window) and the node's `native_compact_tokens` (an absolute
+    request size, 200,000 by default, `false` for none): a fraction alone would carry
+    most of a million-token window into every call.
   - `Context.Compaction` elides older tool results before it summarises anything, and
     summarises into a fixed Goal / Constraints / Progress / Decisions / Next steps,
-    keeping `keep_recent_tokens` of the tail verbatim. `Context.Archive` retains the
-    pre-compaction messages content-addressed under the session directory and the
-    `compaction` event names them, which is the reviewable-history half of R5's open row
-    16. Two compactions inside three turns halts with a named `status` event.
+    keeping `keep_recent_tokens` of the tail verbatim. The folded head reaches the
+    summariser and `Context.Archive` as the conversation had it, not elided — the archive
+    is the transcript, and the head as sent is the prefix already cached. Every assistant
+    message from the first rewritten one onward loses its Anthropic thinking blocks,
+    because that model signs each block over the prefix before it and refuses one
+    replayed behind an edit; an OpenAI reasoning item is not signed over anything and
+    stays beside its call. `Context.Archive` retains the pre-compaction messages content-addressed under
+    the session directory and the `compaction` event names them, which is the
+    reviewable-history half of R5's open row 16. Two compactions inside three turns halts
+    with a named `status` event.
   - `Context.Handoff` builds the packet a *new* session starts from — summary, touched
     files with their hashes as of now, open plan, operator instruction — which is Amp's
     answer to summary-on-summary rather than a third compaction.

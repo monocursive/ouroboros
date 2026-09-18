@@ -27,6 +27,13 @@ defmodule Ouroboros.Session.RuntimeInfo do
               transport: Zoi.atom() |> Zoi.nullish(),
               output_cursor: Zoi.integer() |> Zoi.default(0),
               queued_turns: Zoi.integer() |> Zoi.default(0),
+              # The session's own idle predicate, the one that refuses a maintenance
+              # fence. It is broader than `active_turn_id` on purpose: a compaction in
+              # flight, an unresolved approval or a live loop is work a stop would lose,
+              # and none of it shows up in a turn id. Defaults to `false` so a snapshot
+              # built from an older record is not read as busy; the owning session always
+              # sets it.
+              busy?: Zoi.boolean() |> Zoi.default(false),
               pending_approvals: Zoi.integer() |> Zoi.default(0),
               metadata: Zoi.map() |> Zoi.default(%{})
             },

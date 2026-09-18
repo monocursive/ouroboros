@@ -120,6 +120,21 @@ defmodule Ouroboros.Provider.Native.Replay.Model do
     end
   end
 
+  # Delegated for the same reason `project/1` is: whether an assistant message keeps its
+  # thinking is the sending module's decision, and a replay that decided otherwise would
+  # rebuild a different conversation from the same record and call the difference a
+  # divergence.
+  @impl true
+  def replays_thinking?(model_spec) do
+    case Process.get(@script) do
+      %{delegate: delegate} when delegate != __MODULE__ ->
+        Model.replays_thinking?(delegate, model_spec)
+
+      _unarmed ->
+        false
+    end
+  end
+
   @impl true
   def available?, do: true
 

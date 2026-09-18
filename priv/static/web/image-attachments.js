@@ -61,7 +61,16 @@
       this.picker = this.el.querySelector("[data-image-picker]");
       this.tray = this.el.querySelector(".ouro-image-tray");
       this.hint = this.el.querySelector("[role=status]");
+      this.help = this.el.querySelector("[role=tooltip]");
       this.attach = this.el.querySelector("[data-attach]");
+      this.onTooltipKey = function (event) {
+        if (event.key === "Escape" && !this.help.hidden && this.help.parentElement.matches(":hover, :focus-within")) {
+          this.help.hidden = true;
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }.bind(this);
+      this.attach.onfocus = this.attach.onmouseenter = function () { this.help.hidden = false; }.bind(this);
       this.attach.onclick = function () { this.picker.click(); }.bind(this);
       this.picker.onchange = function () { this.add(this.picker.files, "file_picker"); this.picker.value = ""; }.bind(this);
       this.onPaste = function (event) {
@@ -100,6 +109,7 @@
       this.form.addEventListener("dragover", this.onDrag);
       this.form.addEventListener("drop", this.onDrop);
       this.form.addEventListener("submit", this.onSubmit, true);
+      this.form.addEventListener("keydown", this.onTooltipKey, true);
       this.text.addEventListener("input", this.onInput);
       this.handleEvent("draft-sent", function (event) {
         if (event.key !== this.key || !Array.isArray(event.images)) return;
@@ -132,6 +142,7 @@
       this.form.removeEventListener("dragover", this.onDrag);
       this.form.removeEventListener("drop", this.onDrop);
       this.form.removeEventListener("submit", this.onSubmit, true);
+      this.form.removeEventListener("keydown", this.onTooltipKey, true);
       this.text.removeEventListener("input", this.onInput);
     },
     load: function () {
@@ -141,6 +152,8 @@
       this.draft = storage("ouroboros.images.active." + this.key) || this.key + ":" + this.client;
       this.entries = []; this.enabled = false; this.batchError = false;
       this.attach.disabled = true;
+      this.help.textContent = "Checking image support…";
+      this.hint.textContent = "";
       var cached = drafts.get(this.draft);
       if (cached) { this.entries = cached.entries; this.batchError = cached.batchError; }
       else try { this.entries = JSON.parse(storage("ouroboros.images." + this.draft) || "[]").slice(0, 32); } catch (_) {}
@@ -153,8 +166,8 @@
         this.maxSource = Math.min(MAX, limits.max_source_bytes || MAX);
         this.chunk = Math.min(limits.chunk_bytes || 65536, 65536);
         this.attach.disabled = !this.enabled;
-        this.hint.textContent = this.enabled ? "Paste, drop, or choose images · up to 20 MiB each. Uploads go to the selected runtime before Send; unused images expire after 24 hours." : "Image uploads are unavailable on this runtime.";
-        if (this.enabled && this.maxSource < MAX) this.hint.textContent += " This connection limits source files to " + Math.floor(this.maxSource / 1024) + " KiB.";
+        this.help.textContent = this.enabled ? "Paste, drop, or choose images · up to 20 MiB each. Uploads go to the selected runtime before Send; unused images expire after 24 hours." : "Image uploads are unavailable on this runtime.";
+        if (this.enabled && this.maxSource < MAX) this.help.textContent += " This connection limits source files to " + Math.floor(this.maxSource / 1024) + " KiB.";
         if (this.enabled) { this.recover(); this.pump(); }
       }.bind(this)).catch(function (error) { this.hint.textContent = error.message; }.bind(this));
     },

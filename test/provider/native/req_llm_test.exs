@@ -98,6 +98,44 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLMTest do
     end
   end
 
+  test "replays a message's thinking on the xAI lanes and nowhere else" do
+    messages = [
+      %{role: :user, content: "Read the file"},
+      %{
+        role: :assistant,
+        content: "It defines A.",
+        thinking: "The file is short; summarise it.",
+        tool_calls: []
+      },
+      %{role: :user, content: "Now edit it"}
+    ]
+
+    parts = fn model ->
+      request = %{model: model, tools: [], messages: messages}
+      assert {:ok, projection} = ReqLLM.project(request)
+      assistant = Enum.find(projection["messages"], &(&1["role"] == "assistant"))
+      Enum.map(assistant["content"], &{&1["type"], &1["text"]})
+    end
+
+    for lane <- ["xai:grok-4.6", "grok:grok-4.6"] do
+      assert parts.(lane) == [
+               {"thinking", "The file is short; summarise it."},
+               {"text", "It defines A."}
+             ]
+    end
+
+    # Anthropic binds thinking to signed blocks and refuses an unsigned one; the OpenAI
+    # lanes carry theirs as encrypted reasoning items. Neither ever sees the text.
+    for lane <- ["anthropic:claude-sonnet-5", "openai:gpt-5.6", "openai_codex:gpt-5.6-sol"] do
+      assert parts.(lane) == [{"text", "It defines A."}]
+    end
+
+    assert ReqLLM.replays_thinking?("xai:grok-4.6")
+    assert ReqLLM.replays_thinking?("grok:grok-4.6")
+    refute ReqLLM.replays_thinking?("anthropic:claude-opus-5")
+    refute ReqLLM.replays_thinking?(nil)
+  end
+
   test "normalizes the finite finish-reason vocabulary" do
     assert ReqLLM.normalize_finish_reason("stop") == :stop
     assert ReqLLM.normalize_finish_reason("completed") == :stop

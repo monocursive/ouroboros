@@ -49,6 +49,16 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     :service_tier,
     :verbosity
   ]
+  # The Anthropic lane's prompt-cache switches. `ReqLLM` writes no `cache_control` unless
+  # asked (`ReqLLM.Providers.Anthropic.has_prompt_caching?/1`), so `put_transport_options/2`
+  # asks on every Anthropic request; these keys exist so an operator can lengthen the TTL
+  # or switch the breakpoints off, never so that caching depends on a node remembering to
+  # switch it on.
+  @anthropic_option_keys [
+    :anthropic_prompt_cache,
+    :anthropic_prompt_cache_ttl,
+    :anthropic_cache_messages
+  ]
   @provider_metadata_keys [:request_id, :response_id, :service_tier]
 
   @impl true
@@ -71,7 +81,11 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         # Sign-in may expire or be renewed while this request waits for capacity.
         # Load it only after admission so the outgoing request uses current credentials.
         with {:ok, model, generation_opts} <-
-               GrokSubscription.transport(request.model, generation_opts) do
+               GrokSubscription.transport(
+                 request.model,
+                 generation_opts,
+                 conversation_id(request)
+               ) do
           case ReqLLM.stream_text(model, context, generation_opts) do
             {:ok, response} -> {:ok, normalize(response, request.tools)}
             {:error, reason} -> {:error, reason}
@@ -435,7 +449,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp to_messages(%{role: :system, content: content}, _model),
     do: [ReqLLM.Context.system(content)]
 
-  defp to_messages(%{role: :assistant} = message, _model) do
+  defp to_messages(%{role: :assistant} = message, model) do
     text = message[:content] || ""
     calls = message[:tool_calls] || []
     details = Enum.map(message[:reasoning_details] || [], &reasoning_detail/1)
@@ -445,7 +459,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
       tool_calls = Enum.map(calls, fn call -> {call.name, call.input, [id: call.id]} end)
 
       assistant =
-        ReqLLM.Context.assistant(text,
+        ReqLLM.Context.assistant(assistant_content(text, message[:thinking], model),
           tool_calls: tool_calls,
           metadata: metadata
         )
@@ -480,6 +494,28 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   defp to_messages(_other, _model), do: []
+
+  # The xAI lanes get the model's earlier reasoning back as a thinking part, which the
+  # chat encoder sends as the assistant message's `reasoning_content`: xAI names its
+  # absence as the first cause of prompt-cache misses on its reasoning models. Every
+  # other lane gets the text alone. Anthropic binds thinking to signed blocks that
+  # travel as `reasoning_details`, and an unsigned thinking part there is a refused
+  # request; the OpenAI lanes carry theirs as encrypted reasoning items the same way.
+  defp assistant_content(text, thinking, model) do
+    if replays_thinking?(model) and is_binary(thinking) and thinking != "" do
+      [ReqLLM.Message.ContentPart.thinking(thinking)] ++ text_parts(text)
+    else
+      text
+    end
+  end
+
+  defp text_parts(""), do: []
+  defp text_parts(text), do: [ReqLLM.Message.ContentPart.text(text)]
+
+  @impl true
+  def replays_thinking?("xai:" <> _rest), do: true
+  def replays_thinking?("grok:" <> _rest), do: true
+  def replays_thinking?(_model), do: false
 
   defp normalize(%ReqLLM.StreamResponse{stream: stream}, specs) do
     normalize(stream, specs)
@@ -613,7 +649,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
          :ok <- validate_option_keys(options, @generation_option_keys),
          {:ok, provider_options} <-
            keyword_options(Keyword.get(options, :provider_options, [])),
-         :ok <- validate_option_keys(provider_options, @codex_option_keys) do
+         :ok <-
+           validate_option_keys(provider_options, @codex_option_keys ++ @anthropic_option_keys) do
       {:ok,
        @generation_defaults
        |> Keyword.merge(options)
@@ -637,16 +674,36 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     end
   end
 
+  # OpenAI caches prompts without being asked, keyed on the rendered prefix. What a
+  # request can add is the identity that keeps one conversation's entries together, and
+  # `session_id` is it: ReqLLM 1.23 sends it as the `session-id` header and as the body's
+  # `prompt_cache_key`, which is exactly what the Codex CLI sets from its own session id.
+  # Whether the cache then hits is reported as `cached_tokens` on every `usage` event,
+  # never assumed.
   defp put_transport_options(options, %{model: "openai_codex:" <> _} = request) do
     provider_options =
       options
       |> Keyword.get(:provider_options, [])
+      |> Keyword.drop(@anthropic_option_keys)
       |> Keyword.put_new(:openai_stream_transport, :sse)
       |> Keyword.put_new(:codex_originator, "ouroboros")
-      |> Keyword.put(:session_id, request.provider_session_id)
+      |> Keyword.delete(:session_id)
+      |> put_unless_nil(:session_id, conversation_id(request))
 
     options
     |> Keyword.put_new(:oauth_file, Ouroboros.Provider.OpenAIAuth.credential_path())
+    |> Keyword.put(:provider_options, provider_options)
+  end
+
+  # The OpenAI API-key lane, same cache identity as the Codex lane. The codex and
+  # anthropic keys are kept off it; nothing else in `provider_options` was ever admitted
+  # for this lane, so nothing else is carried.
+  defp put_transport_options(options, %{model: "openai:" <> _} = request) do
+    provider_options = put_prompt_cache_key([], conversation_id(request))
+
+    options
+    |> Keyword.delete(:auth_file)
+    |> Keyword.delete(:oauth_file)
     |> Keyword.put(:provider_options, provider_options)
   end
 
@@ -656,12 +713,32 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   # environment-first `AnthropicKey` boundary supplies the credential only to this
   # transient request. Identity-linked keys also contribute their workspace header; the
   # auth mode is likewise forced here.
+  #
+  # Every Anthropic request also asks for the prompt cache. `Ouroboros.Provider.Native.Context`
+  # lays the request out so the prefix is stable — system prompt, tools in a fixed order,
+  # then the conversation — and that layout earns nothing until a request carries a
+  # `cache_control` breakpoint, because the API caches only what it is asked to. ReqLLM
+  # places three: on the last tool, on the system block, and on the newest message, so each
+  # call reads everything the previous one wrote and pays the write premium only on what
+  # this call appended. The default five-minute TTL is the right one for a tool loop whose
+  # calls are seconds apart; `anthropic_prompt_cache_ttl: "1h"` in `native_model_options`
+  # buys longer idle gaps at twice the write price. Whether it is working is not assumed:
+  # the provider's `cache_read_tokens` ride on every `usage` event, and
+  # `test/provider/native/direct_sse_test.exs` asserts the breakpoints are on the wire.
   defp put_transport_options(options, %{model: "anthropic:" <> _}) do
+    provider_options =
+      options
+      |> Keyword.get(:provider_options, [])
+      |> Keyword.take(@anthropic_option_keys)
+      |> Keyword.put_new(:anthropic_prompt_cache, true)
+      |> Keyword.put_new(:anthropic_cache_messages, true)
+      |> Keyword.put(:auth_mode, :api_key)
+
     options =
       options
       |> Keyword.delete(:auth_file)
       |> Keyword.delete(:oauth_file)
-      |> Keyword.put(:provider_options, auth_mode: :api_key)
+      |> Keyword.put(:provider_options, provider_options)
 
     case AnthropicKey.fetch_credentials() do
       {:ok, credentials, _source} ->
@@ -675,13 +752,20 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   end
 
   # The xai: prefix always uses API keys. The separate grok: prefix selects subscription
-  # credentials and pins its endpoint in GrokSubscription.transport/2.
-  defp put_transport_options(options, %{model: "xai:" <> _}) do
+  # credentials and pins its endpoint in GrokSubscription.transport/3, which sets the
+  # same conversation header itself. xAI caches prompts on its own and keeps the cache
+  # per server; `x-grok-conv-id` is what routes one conversation's requests to the one
+  # server that holds its entries. The lane is pinned to the chat API, as the grok: lane
+  # is: that is the encoder that sends a message's reasoning back as
+  # `reasoning_content`, and this runtime uses none of the built-in tools that would
+  # otherwise route a request to xAI's stateful Responses API.
+  defp put_transport_options(options, %{model: "xai:" <> _} = request) do
     options =
       options
       |> Keyword.delete(:auth_file)
       |> Keyword.delete(:oauth_file)
-      |> Keyword.delete(:provider_options)
+      |> Keyword.put(:provider_options, xai_api: :chat)
+      |> put_request_header("x-grok-conv-id", conversation_id(request))
 
     case XAIKey.fetch() do
       {:ok, key, _source} -> Keyword.put(options, :api_key, key)
@@ -691,16 +775,49 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp put_transport_options(options, _request), do: Keyword.delete(options, :provider_options)
 
+  # The session id, as the value every lane's cache-identity hint takes: one token of
+  # visible ASCII, or nothing at all — a lane sent nothing invents no identity, while a
+  # lane sent a `nil` refuses the call. A `provider_session_id` is one of this runtime's
+  # own ids (`Ouroboros.Provider.Native.Paths.new_session_id/0`, url-safe base64 under
+  # forty bytes) and always passes; the guard is for a request built by hand.
+  @doc false
+  @spec conversation_id(map()) :: String.t() | nil
+  def conversation_id(%{provider_session_id: id}) when is_binary(id) do
+    if header_token?(id), do: id
+  end
+
+  def conversation_id(_request), do: nil
+
+  # Visible ASCII only, so a value can never carry a line break, a tab, an escape or a
+  # space into a header or a JSON string — the same rule `Ouroboros.Provider.GrokSubscription`
+  # applies to the header it owns.
+  @doc false
+  @spec header_token?(term()) :: boolean()
+  def header_token?(id) when is_binary(id) and byte_size(id) in 1..256,
+    do: Regex.match?(~r/\A[\x21-\x7E]+\z/, id)
+
+  def header_token?(_id), do: false
+
+  defp put_prompt_cache_key(provider_options, nil), do: provider_options
+
+  defp put_prompt_cache_key(provider_options, key),
+    do: Keyword.put(provider_options, :prompt_cache_key, key)
+
   defp put_anthropic_workspace(options, nil), do: options
 
-  defp put_anthropic_workspace(options, workspace_id) when is_binary(workspace_id) do
+  defp put_anthropic_workspace(options, workspace_id) when is_binary(workspace_id),
+    do: put_request_header(options, "anthropic-workspace-id", workspace_id)
+
+  defp put_request_header(options, _name, nil), do: options
+
+  defp put_request_header(options, name, value) when is_binary(value) do
     http_options = Keyword.get(options, :req_http_options, [])
 
     headers =
       http_options
       |> request_headers()
-      |> Enum.reject(&workspace_header?/1)
-      |> Kernel.++([{"anthropic-workspace-id", workspace_id}])
+      |> Enum.reject(&header_named?(&1, name))
+      |> Kernel.++([{name, value}])
 
     http_options =
       cond do
@@ -734,10 +851,10 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp normalize_headers(headers) when is_map(headers), do: Map.to_list(headers)
   defp normalize_headers(_headers), do: []
 
-  defp workspace_header?({name, _value}) when is_binary(name),
-    do: String.downcase(name) == "anthropic-workspace-id"
+  defp header_named?({header, _value}, name) when is_binary(header),
+    do: String.downcase(header) == String.downcase(name)
 
-  defp workspace_header?(_header), do: false
+  defp header_named?(_header, _name), do: false
 
   defp reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail), do: detail
 

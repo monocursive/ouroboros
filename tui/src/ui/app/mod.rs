@@ -52,6 +52,8 @@ use super::tree::{TreeState, TreeView};
 mod answers;
 mod cluster;
 mod details;
+pub mod devices;
+mod devices_catalogue;
 mod footer;
 mod home;
 mod image_drafts;
@@ -72,6 +74,11 @@ use session::{
 };
 
 pub use cluster::{MachineChoice, MachineSecurity, MachineSummary};
+pub use devices::{
+    devices_hint_line, devices_lines, ConnectField, DeploymentHost, DeviceRow, DevicesState,
+    Discovery, Filter, IdentityKind, Inventory as DeviceInventory, OperationSummary, Primary,
+    Refusal, SecretInput, Snapshot as DeploymentSnapshot, Takeover,
+};
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use location::Location;
 pub use overlays::{
@@ -402,6 +409,38 @@ pub enum Tag {
         plane: Plane,
         id: String,
         command: String,
+    },
+    /// The Devices view's eight methods, under one variant so the correlation map stays
+    /// readable. See [`DevicesTag`] for what each one is, and for the reason none of
+    /// them carries a secret.
+    Devices(DevicesTag),
+}
+
+/// Which Devices call an answer belongs to.
+///
+/// **No variant here carries a credential, and none ever may.** A tag is cloned into the
+/// in-flight set, compared, hashed and `Debug`-printed; a secret on one would be a secret
+/// in every one of those places. `Answer` carries the operation and the method's name —
+/// enough to route the reply and to say which verb was refused — and the secret travels
+/// only in the parameters of the one call that consumes it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DevicesTag {
+    /// `fleet.devices` — the inventory.
+    Inventory,
+    /// `fleet.status` — the membership subset a non-administrator sees instead.
+    FleetStatus,
+    /// `fleet.deployment.prepare` — the answer carries an operation id that did not
+    /// exist when the call was made, which is why this is not a generic action tag.
+    Prepare,
+    /// `fleet.deployment.status` for one operation.
+    Status { operation: String },
+    /// `fleet.deployment.resume` for one operation, with or without a takeover.
+    Resume { operation: String },
+    /// One answer to the broker: `start`, `authenticate`, `confirm_host` or `cancel`.
+    /// `label` is the method, so a refusal can name the verb it refused.
+    Answer {
+        operation: String,
+        label: &'static str,
     },
 }
 
@@ -910,6 +949,10 @@ pub struct App {
     /// sessions can want attention in the same frame; bounded by [`NOTIFY_BURST`] so a
     /// storm of events cannot become a storm of bells.
     notify_pending: Vec<notify::Signal>,
+    /// The Devices view. Held here rather than in the overlay so that closing the view
+    /// costs nothing and cancels nothing: there is no drop in this type that stops a
+    /// deployment.
+    pub devices: Box<devices::DevicesState>,
     statusline: StatusLine,
     /// A `Ctrl+V` the driver should service (B4).
     clipboard_pending: Option<ClipboardRequest>,
@@ -1039,6 +1082,7 @@ impl App {
             title_shown: None,
             title_pending: None,
             notify_pending: Vec::new(),
+            devices: Box::default(),
             statusline: StatusLine::default(),
             clipboard_pending: None,
             home_images: Vec::new(),
@@ -1473,14 +1517,14 @@ impl App {
     /// Claude Code's `[`: the whole conversation, handed back to the terminal that owns the
     /// scrollback, so `Cmd+F` and drag-to-copy work on it again.
     pub(super) fn dump_to_scrollback(&mut self) {
-        self.overlay = None;
+        self.close_overlay();
         self.scrollback_dump_pending = self.transcript_export();
     }
 
     /// Claude Code's `v`: the same text, in the operator's own editor, where searching and
     /// saving a piece of it are the editor's problem rather than this client's.
     pub(super) fn view_transcript(&mut self) {
-        self.overlay = None;
+        self.close_overlay();
         self.transcript_view_pending = self.transcript_export();
     }
 
@@ -1496,7 +1540,7 @@ impl App {
     /// it refuses to open: the two are the same decision, and an opener is a *more*
     /// dangerous way to touch a file than a header read.
     pub(super) fn open_newest_image(&mut self) {
-        self.overlay = None;
+        self.close_overlay();
 
         let Some((plane, id)) = self.sessions.open.clone() else {
             self.inform(
@@ -2051,6 +2095,10 @@ impl App {
             Tab::Logs => {}
         }
 
+        // Independent of the tab: the Devices view is an overlay over whichever one is
+        // underneath, and it polls only while it is open.
+        self.poll_devices();
+
         // A remote session that lost only its stream keeps recovering even while the
         // operator stays on the conversation. Machine status is the cheap, bounded signal
         // that its owner has returned; it avoids hammering a known-offline node with
@@ -2237,7 +2285,7 @@ impl App {
     /// the same statement `Esc` makes — nothing was chosen — so it restores as well.
     pub fn open_theme_picker(&mut self) {
         if let Some(Overlay::Theme { previous, .. }) = self.overlay {
-            self.overlay = None;
+            self.close_overlay();
             super::switch_theme(previous);
             return;
         }

@@ -223,7 +223,8 @@ test:
 	sh scripts/test-isolated-test.sh
 	sh scripts/test-self-development-artifacts.sh
 	sh scripts/test-dev.sh
-	SHELL="$(SHELL)" $(MIX) test
+	cd tui && $(CARGO) build --locked --bin ouro
+	SHELL="$(SHELL)" OUROBOROS_TEST_OURO="$(CURDIR)/tui/target/debug/ouro" $(MIX) test
 	$(MAKE) boot-gate
 	cd tui && $(CARGO) test
 	cd tui && $(CARGO) test --features embed

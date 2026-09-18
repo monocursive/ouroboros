@@ -1,0 +1,27 @@
+{
+  "_capture": {
+    "client": "1.102.2-teb67e5dcb",
+    "tailscaled": "1.102.1-t8ebe8f7c3-gda6192991",
+    "captured": "2026-09-17",
+    "note": "Adversarial shapes, not a capture: every string here is invented to exercise one refusal. This key is not read by anything and proves unknown fields are ignored."
+  },
+  "Version": "1.102.1",
+  "BackendState": "NoState",
+  "AuthURL": "",
+  "MagicDNSSuffix": "",
+  "TailscaleIPs": null,
+  "Self": {
+    "ID": "n1000000000000099CNTRL",
+    "HostName": "operator-laptop",
+    "DNSName": "operator-laptop.tailnet-example.ts.net.",
+    "OS": "macOS",
+    "TailscaleIPs": [
+      "fd7a:115c:a1e0::99"
+    ],
+    "CurAddr": "",
+    "Relay": "par",
+    "Online": false,
+    "LastSeen": "0001-01-01T00:00:00Z"
+  },
+  "Peer": {}
+}

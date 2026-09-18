@@ -2,7 +2,19 @@ import Config
 
 # LiveView logs event parameters at debug level. Credential forms therefore use names
 # containing `api_key`, and Phoenix must redact those values before any logger sees them.
-config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key", "image_data"]
+# `passphrase` joins them for the deployment credential form: an encrypted SSH key's
+# passphrase is a secret of exactly the kind this list exists for, and Phoenix matches
+# these as substrings of a parameter name rather than as whole names. This filter is a
+# floor and not the redaction — `Ouroboros.Gateway.AuditLine` is what keeps the secret out
+# of the audit digest, which Phoenix never sees.
+config :phoenix, :filter_parameters, [
+  "password",
+  "passphrase",
+  "token",
+  "secret",
+  "api_key",
+  "image_data"
+]
 
 # Native streams are admitted globally by `Provider.Native.Model.Admission`, eight at a
 # time. Keep Finch as one pool with more connections than admitted streams: this removes
@@ -13,7 +25,13 @@ config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key", 
 config :req_llm,
   stream_pool_protocols: [:http1],
   stream_pool_size: 10,
-  stream_pool_count: 1
+  stream_pool_count: 1,
+  # Model ids are operator-configured and may postdate the packaged catalogue snapshot;
+  # `Ouroboros.Models` reports an unknown model as unknown (no window, no price) on the
+  # surfaces that matter. ReqLLM's own `IO.warn` for the same fact would otherwise be
+  # written to stderr on every context build, usage event and model call of such a
+  # session, over the terminal client.
+  warn_unverified_models: false
 
 # Erlexec's port manager refuses to start without SHELL even when every command is an
 # argv list. Service managers and coding harnesses legitimately omit it, so establish the

@@ -9,12 +9,21 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-pub(super) const MANIFEST_CAP: usize = 64 * 1024;
-pub(super) const BINARY_CAP: usize = 1024 * 1024 * 1024;
+pub(crate) const MANIFEST_CAP: usize = 64 * 1024;
+pub(crate) const BINARY_CAP: usize = 1024 * 1024 * 1024;
 
-pub(super) struct Curl {
+pub(crate) struct Curl {
     pub program: std::path::PathBuf,
     pub timeout: Duration,
+    /// Cleartext HTTP, permitted only for a loopback origin a test harness supplied
+    /// (see [`super::release::Origin`]). Production is `https` and nothing else; the
+    /// checksum check is unchanged either way.
+    pub allow_http: bool,
+    /// How many redirects to follow. The updater's own origin is the official release
+    /// host and follows the few GitHub emits; a harness origin follows none, because
+    /// "loopback" would otherwise constrain the first hop only and a redirector could
+    /// serve both the artifact *and* the checksums that certify it from anywhere.
+    pub max_redirects: u32,
 }
 
 impl Default for Curl {
@@ -22,6 +31,8 @@ impl Default for Curl {
         Self {
             program: "curl".into(),
             timeout: Duration::from_secs(600),
+            allow_http: false,
+            max_redirects: 5,
         }
     }
 }
@@ -29,6 +40,7 @@ impl Default for Curl {
 impl Curl {
     fn command(&self, url: &str, head: bool) -> Command {
         let mut command = Command::new(&self.program);
+        let redirects = self.max_redirects.to_string();
         command.args([
             "--disable",
             "--fail",
@@ -36,12 +48,20 @@ impl Curl {
             "--show-error",
             "--location",
             "--proto",
-            "=https",
+            if self.allow_http {
+                "=https,http"
+            } else {
+                "=https"
+            },
             "--proto-redir",
-            "=https",
+            if self.allow_http {
+                "=https,http"
+            } else {
+                "=https"
+            },
             "--tlsv1.2",
             "--max-redirs",
-            "5",
+            &redirects,
             "--connect-timeout",
             "15",
             "--max-time",
@@ -90,7 +110,7 @@ impl std::fmt::Display for CurlFailure {
 }
 impl std::error::Error for CurlFailure {}
 
-pub(super) fn retryable(error: &anyhow::Error) -> bool {
+pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     // A retry starts a completely new file/hash. Never retry a checksum refusal,
     // local write failure, certificate failure, cancellation, or HTTP 404.
     error
@@ -98,7 +118,7 @@ pub(super) fn retryable(error: &anyhow::Error) -> bool {
         .is_some_and(|failure| matches!(failure.0, Some(5 | 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56)))
 }
 
-pub(super) fn capture(
+pub(crate) fn capture(
     command: Command,
     cap: usize,
     timeout: Duration,
@@ -164,7 +184,7 @@ fn stream(
     }
 }
 
-pub(super) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
+pub(crate) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Relaxed) {
         bail!("update cancelled; executable was not replaced");
     }

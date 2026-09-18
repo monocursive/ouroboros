@@ -29,6 +29,29 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
   compaction with Handoff precisely because summary-on-summary loses the thread; keeping
   the archive is what makes "what was folded" a question a client can answer.
 
+  The folded head reaches both the summariser and the archive as the conversation had it,
+  not as decision 1 elided it. The archive because an archive of markers is not the
+  transcript; the summariser because the head as sent is the prefix the earlier model
+  calls sent, which is the only prefix a prompt cache could serve — an elided copy is a
+  fresh prefix no call ever wrote. Whether the cache does serve it is the summariser's
+  own usage record to say, not this module's. The elision still decides *whether* to
+  summarise, and how much of the tail stays: when it alone brings the conversation under
+  the target, it is the whole compaction.
+
+  ## 4. A rewritten message unbinds the thinking after it
+
+  Models that keep their thinking across turns (Claude Fable 5.1 onward) sign each
+  thinking block over the conversation before it and refuse — or silently drop — a block
+  replayed behind a prefix that changed. Both things this module does are such changes: an
+  elided tool result is a rewritten message, and a summary is a replaced head. So every
+  assistant message from the first rewritten message onward loses its Anthropic
+  `reasoning_details` before the new conversation replaces the old one. Messages before
+  the first edit keep theirs; nothing in front of them moved. Thinking the model never
+  sees again costs nothing, and the alternative — a 400 on the next request, or a block
+  dropped mid-chain with the cache after it — costs the turn. An OpenAI reasoning item is
+  a different thing: an encrypted blob the Responses API wants back beside its function
+  call whatever preceded it, not a signature over the prefix, so it stays.
+
   ## The thrash guard
 
   Two compactions inside three turns means compaction is not the fix — the tail alone
@@ -41,7 +64,13 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
 
   @elision_marker "[tool result elided:"
 
-  @typedoc "What one compaction did."
+  @typedoc """
+  What one compaction did.
+
+  `elided` counts the tool results this compaction rewrote in place *and left in the
+  conversation*; a result elided inside a head the summary then replaced is not among
+  them, since nothing will ever read the marker.
+  """
   @type outcome :: %{
           messages: [map()],
           archived: [map()],
@@ -84,7 +113,7 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
     if Window.estimate_tokens(elided_messages) <= target do
       {:ok,
        finish(%{
-         messages: elided_messages,
+         messages: unbind_thinking_after_edit(elided_messages, messages),
          archived: [],
          elided: elided_count,
          summarised: false,
@@ -92,7 +121,7 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
          before_tokens: before_tokens
        })}
     else
-      summarise(elided_messages, elided_count, before_tokens, keep_recent, opts)
+      summarise(messages, elided_messages, before_tokens, keep_recent, opts)
     end
   end
 
@@ -175,8 +204,8 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
     ## Next steps
     What remains, in order.
 
-    Write only the summary. Do not add a preamble, and do not claim work that the
-    transcript does not show.#{focus_line(focus)}
+    Write only the summary. Do not call any tool, do not add a preamble, and do not claim
+    work that the transcript does not show.#{focus_line(focus)}
     """
     |> String.trim()
   end
@@ -240,15 +269,22 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
 
   # ---------------------------------------------------------------- private
 
-  defp summarise(messages, elided_count, before_tokens, keep_recent, opts) do
-    {older, recent} = split_recent(messages, keep_recent)
+  # The split is measured on the elided copy, because that is the copy whose size decided
+  # that eliding alone was not enough, and it is what decides how much of the tail stays:
+  # an elided result is small, so a split measured on the original would fold a tail the
+  # elision had already made cheap enough to keep. The head that split names is then taken
+  # from the conversation as it stood (moduledoc §3); the tail is the elided copy's,
+  # markers included.
+  defp summarise(messages, elided_messages, before_tokens, keep_recent, opts) do
+    {older_elided, recent} = split_recent(elided_messages, keep_recent)
+    older = Enum.take(messages, length(older_elided))
 
     if older == [] do
       {:ok,
        finish(%{
-         messages: messages,
+         messages: unbind_thinking_after_edit(elided_messages, messages),
          archived: [],
-         elided: elided_count,
+         elided: count_rewritten(elided_messages, messages),
          summarised: false,
          summary: nil,
          before_tokens: before_tokens
@@ -261,9 +297,12 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
 
       {:ok,
        finish(%{
-         messages: [summary_message(summary) | recent],
+         messages: [summary_message(summary) | unbind_thinking(recent)],
          archived: older,
-         elided: elided_count,
+         # Only the markers the conversation keeps: an elision inside the folded head was
+         # replaced by the summary along with the rest of it, and is nothing the next
+         # request will see.
+         elided: count_rewritten(recent, Enum.drop(messages, length(older))),
          summarised: true,
          summary: summary,
          summary_error: summary_error,
@@ -271,6 +310,76 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
        })}
     end
   end
+
+  # How many of `edited` differ from `original` at the same position — the tool results
+  # this compaction rewrote in place and left in the conversation.
+  defp count_rewritten(edited, original) do
+    edited
+    |> Enum.zip(original)
+    |> Enum.count(fn {after_edit, before_edit} -> after_edit != before_edit end)
+  end
+
+  # §4. Everything from the first message that differs from the original onward loses its
+  # bound thinking; everything before it keeps its own, because its prefix did not move.
+  defp unbind_thinking_after_edit(edited, original) do
+    first_edit =
+      edited
+      |> Enum.zip(original)
+      |> Enum.find_index(fn {after_edit, before_edit} -> after_edit != before_edit end)
+
+    case first_edit do
+      nil ->
+        edited
+
+      index ->
+        {untouched, rewritten} = Enum.split(edited, index)
+        untouched ++ unbind_thinking(rewritten)
+    end
+  end
+
+  defp unbind_thinking(messages), do: Enum.map(messages, &unbind/1)
+
+  # Both key spellings. A checkpoint restores `:reasoning_details` under its atom key with
+  # a string `provider` inside; other producers of a message list are not held to that,
+  # and a message that kept a bound block under either spelling would be the message the
+  # next request is refused for.
+  defp unbind(message) when is_map(message) do
+    if assistant?(message) do
+      message
+      |> drop_bound(:reasoning_details)
+      |> drop_bound("reasoning_details")
+    else
+      message
+    end
+  end
+
+  defp unbind(message), do: message
+
+  defp assistant?(message),
+    do: Map.get(message, :role) == :assistant or Map.get(message, "role") == "assistant"
+
+  defp drop_bound(message, key) do
+    case Map.get(message, key) do
+      details when is_list(details) ->
+        case Enum.reject(details, &bound?/1) do
+          [] -> Map.delete(message, key)
+          kept -> Map.put(message, key, kept)
+        end
+
+      _absent ->
+        message
+    end
+  end
+
+  # Only the blocks a model signed over the prefix before them, which is Anthropic's. An
+  # OpenAI reasoning item is an opaque encrypted blob the Responses API wants replayed
+  # beside its function call whatever came before it; stripping one would be, on the other
+  # lane, exactly the refused request this section exists to prevent.
+  defp bound?(detail) when is_map(detail) do
+    (Map.get(detail, :provider) || Map.get(detail, "provider")) in [:anthropic, "anthropic"]
+  end
+
+  defp bound?(_detail), do: false
 
   defp run_summariser(summarize, older, focus) when is_function(summarize, 1) do
     case summarize.(%{messages: older, focus: focus, instruction: summary_instruction(focus)}) do

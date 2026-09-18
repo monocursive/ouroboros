@@ -606,7 +606,14 @@ fn process_birth_platform(pid: i32) -> Result<Option<String>> {
     let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
     let stat = match fs::read_to_string(&stat_path) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        // procfs can open the stat file and then lose the task before reading it.
+        // ESRCH means the process is gone, just as ENOENT does at open time.
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            return Ok(None)
+        }
         Err(error) => {
             return Err(error).context(format!(
                 "reading process incarnation from {}",

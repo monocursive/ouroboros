@@ -169,6 +169,8 @@ defmodule Ouroboros.Gateway.Methods.Contract do
                           {"reasoning_effort", :optional, {:enum_of, @reasoning_efforts}, nil}
                         ]
                       ]}, nil}
+  @deployment_operation {"operation_id", :required, :string,
+                         "the id `fleet.deployment.prepare` answered with; sixteen lowercase hex characters, because it also names a Unix socket path and `sun_path` is short"}
   @turn_id_param {"turn_id", :optional, :string,
                   "caller-supplied; resending the same `{id, input, turn_id}` returns the same turn rather than starting a second"}
   @methods %{
@@ -486,6 +488,129 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed, [{"api_key", :required, :string, "replaces the privately stored xAI API key"}],
          "updates the node-owned xAI API key without returning it; `XAI_API_KEY` still takes precedence"},
       handler: :handle_credentials_xai_set
+    },
+    "fleet.devices" => %{
+      scope: :read,
+      timeout: 15_000,
+      params:
+        {:closed, [],
+         "the Devices inventory, answered by this machine about itself and the network it can see. `host` is the deployment host — hostname, local account, os, arch — plus `issuer` (whether the fleet CA *private* key is on this machine, which is what makes it able to admit a member rather than merely describe one) and `capabilities` `{deploy, reasons}`. `deploy` is false with a named reason when this runtime holds no CA key, cannot say where its own `ouro` is, serves no durable data directory, or publishes a cleartext non-loopback web endpoint — the spec decides credential entry on the bind, the one transport fact a server can verify, and a forwarded header never enters it. `discovery` and `devices` are `ouro fleet devices --json` verbatim, bounded and read under a ten-second ceiling: a merge of this machine\'s roster with the peers its network client can see, where a visible peer is never labelled uninstalled because nothing has inspected one. Each **member** row additionally carries what this runtime knows about that machine as a BEAM peer — `connected`, `compatible`, `runtime_running` and `last_probe` — and its `state` becomes `fleet_member_connected` when it is connected. These are the cluster's answers and are kept separate from `online` and `path`, which are the network client's: a member reachable over BEAM but invisible to the network client is a different problem from one that is neither, and reporting only the second is why a machine `fleet doctor` called connected still rendered as \"not visible on this network\". A row that is not a member carries `null` for all four, because this runtime knows nothing about it rather than knowing it is absent. `operations` is the deployment operations this data directory holds journals for — `operation`, `kind`, `state`, `owner`, `created_at`/`updated_at`, whether a worker is `attached`, and the `target` (machine, address, ssh user and port) that puts it on a device row. Newest first by `created_at`, at most 200, with `operations_total` saying how many there are so a surface can say \"and N older\" rather than showing a prefix as if it were the whole. A top-level key `ouro` printed that this build does not read is named in `unknown` rather than passed through. Administrator-only by the identity rule even at read scope: this is every machine on an operator\'s private network. A non-administrator reader sees `fleet.status`\'s membership subset instead"},
+      handler: :handle_fleet_devices
+    },
+    "fleet.deployment.prepare" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed,
+         [
+           {"kind", {:optional, "add"}, {:enum, ["setup", "add"]},
+            "`add` deploys onto another machine over SSH. `setup` is the first **local** fleet — \"Set up this device\" — which the spec is explicit about: this machine configures itself, without SSH to itself, so it takes no target and no account"},
+           {"target", :optional,
+            {:object,
+             [
+               {"address", :required, :string,
+                "the private overlay address. Required, because the worker talks to addresses: a peer id is a network client\'s *name* for a device, and resolving one is what `fleet.devices` is for"},
+               {"machine", :optional, :string,
+                "the roster name for the new member; the peer id or the address when omitted"},
+               {"peer_id", :optional, :string,
+                "the network client\'s own id, used as the machine name when no `machine` is given"}
+             ]}, "required for `add`; unused by `setup`"},
+           {"machine", :optional, :string,
+            "`setup` only: what this device should be called in its own fleet. This host\'s own name when omitted"},
+           {"address", :optional, :string,
+            "`setup` only: this machine\'s private overlay address, the one its runtime will bind. The worker refuses `unresolved_address` rather than guessing when it is absent; `fleet.devices` reports it"},
+           {"ssh_user", :optional, :string,
+            "required for `add`: the account on the target. Never inferred from the network client\'s owner, and never used by `setup`"},
+           {"port", {:optional, 22}, {:integer, 1, 65_535}, nil},
+           {"identity", :optional,
+            {:object,
+             [
+               {"kind", :required, {:enum, ["default", "agent", "key", "password"]}, nil},
+               {"ref", :optional, :string,
+                "required for `agent` (the identity\'s public fingerprint) and for `key` (a path on this host) — a reference, never key material"}
+             ]},
+            "`add` only; omitted means `default`, which is whatever this host\'s own ssh configuration selects"},
+           {"install_path", :optional, :string, "where `ouro` goes on the target"},
+           {"data_dir", :optional, :string, "the target\'s durable directory"},
+           {"service", {:optional, true}, :boolean,
+            "whether to install an Ouroboros-owned startup service on the target"}
+         ],
+         "forks the deployment worker for a new operation and attaches to it, then answers. Inspection, host verification and authentication all happen behind the returned `operation_id` rather than inside this call: the worker is detached, so closing the page and stopping this runtime both leave it running. These parameters reach it in a private 0600 file under the data directory rather than on its command line, because `ps` is readable by every local account and a target hostname is nobody else's business; the worker retains that private, secret-free file for crash recovery and later member access. They are written in the worker's own request shape, which refuses a key it does not know, so what this method accepts and what the worker reads cannot drift apart silently. **Refused `-32003` `deploy_blocked` when this host cannot deploy**, carrying `data.blockers` — the same list `fleet.devices` reports under `capabilities.reasons`. A disabled button is a rendering, not a boundary, so the check is here as well; `.start`, `.authenticate` and `.resume` are held to it too, and `.cancel` never is, because an operator must be able to stop a deployment on a host that may no longer start one. A `setup` is exempt from `no_ca_key` and from that alone: the first local fleet is what creates the key. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
+      handler: :handle_fleet_deployment_prepare
+    },
+    "fleet.deployment.status" => %{
+      scope: :read,
+      timeout: @default_timeout,
+      params:
+        {:closed, [@deployment_operation],
+         "the sanitized snapshot: `source` is `worker` when one is attached and `journal` when none is, which is the operator\'s whole question after an interruption — a journal says what was durably recorded, only a live worker says what is happening now. Carries states, steps, bounded log lines and the metadata of every open challenge; a challenge\'s metadata is secret-free by construction and this reads it defensively anyway. A read cannot obtain or answer a secret"},
+      handler: :handle_fleet_deployment_status
+    },
+    "fleet.deployment.start" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      outcome: :unknown,
+      params:
+        {:closed,
+         [
+           @deployment_operation,
+           {"plan_digest", :required, :string,
+            "the sha256 of the canonical plan that was reviewed; a plan that changed since is refused `plan_changed` rather than applied"},
+           {"idempotency_key", :required, :string,
+            "caller-owned. The same key against the same operation replays the recorded answer without touching the worker; a different key while that operation is running is `operation_in_progress`"}
+         ],
+         "approves the reviewed plan and lets the deployment run. A lost answer is safe to retry under the same key, which is the whole reason the key is required rather than optional"},
+      handler: :handle_fleet_deployment_start
+    },
+    "fleet.deployment.authenticate" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed,
+         [
+           @deployment_operation,
+           {"challenge", :required, :string, "the `password` or `passphrase` challenge answered"},
+           {"secret", :required, :string,
+            "the password or key passphrase, single use. It is written to the worker\'s socket and referenced nowhere else"}
+         ],
+         "**the one method in this protocol whose parameters never reach the audit digest.** The spec\'s secret-handling section names `Web.Call` and gateway parameter digests among the places a secret may never appear, *even hashed* — a hash of a human\'s password is that password in a form somebody can look up. Both surfaces therefore log `operation_id` and `challenge` and nothing else for this verb, and the challenge\'s kind and the outcome are logged by the broker, which knows them. Answering requires the identity **and the client session** the challenge was issued to (seam S4): a second tab, a second listener connection, or another administrator is `challenge_not_bound`. A challenge is consumed when it is sent, so a second answer is `challenge_consumed` rather than a second guess"},
+      handler: :handle_fleet_deployment_authenticate
+    },
+    "fleet.deployment.confirm_host" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed,
+         [
+           @deployment_operation,
+           {"challenge", :required, :string, "the `host_trust` challenge answered"},
+           {"accept", :required, :boolean,
+            "true appends the key to this operation\'s private known-hosts store; false fails the attempt"}
+         ],
+         "explicit trust for one unknown SSH host key, bound to its session exactly as `authenticate` is. A key that *changed* is never offered here: that is `host_key_changed` and it blocks"},
+      handler: :handle_fleet_deployment_confirm_host
+    },
+    "fleet.deployment.cancel" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      outcome: :unknown,
+      params:
+        {:closed, [@deployment_operation],
+         "stops at a safe boundary and reports residue. It does not claim to undo anything: the worker finishes or reconciles the durable step it is inside, reaps its SSH children, and a credential already delivered to another machine stays delivered"},
+      handler: :handle_fleet_deployment_cancel
+    },
+    "fleet.deployment.resume" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed,
+         [
+           @deployment_operation,
+           {"takeover", {:optional, false}, :boolean,
+            "required to resume an operation another identity started, or one whose owner this build cannot establish. A resume attaches under the resuming identity, so every later challenge binds to *them* — that is inheriting somebody else's credential prompt, and it leaves its own audit line naming who took what from whom"}
+         ],
+         "forks a new worker for an operation whose previous one is gone, after reading the journal\'s state. Refused when a worker is still attached (`already_attached`), when the journal records a finished operation (`operation_finished`), and when the journal records no state at all (`operation_state_unknown`) — resuming an operation whose record cannot be read would be starting a second worker against a machine whose state nobody knows — and when the journal's `owner` is not this identity and `takeover` was not set (`operation_not_yours`)"},
+      handler: :handle_fleet_deployment_resume
     },
     "fleet.doctor" => %{
       scope: :read,
@@ -1021,6 +1146,14 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          "node-local by construction and therefore without a `node` parameter: the promotion record and the corpus are where the decisions were made, so this asks the machine rather than routing to it. `tools` is one row per promoted `(tool, shape)` with `allowed` beside it, because a shape can be promoted and withdrawn and both facts are the answer. `evidence` is `Ouroboros.Control.PolicyEvidence.count/0`, bounded: a total, the two degraded counts, the **32 busiest tools** by count, and `other_tools`/`other_records` for the rest — the corpus is bounded by rows rather than by how many distinct tools those rows name. No verb serves a row of it: the corpus holds the exact request a policy component would have been shown, command lines and paths included. `durability` is how the record is kept — `ephemeral_checkpoint`, `synced_checkpoint`, `durable_checkpoint`, or `unavailable` when the authority itself did not answer, which is a different fact from an empty record and is why it is a value rather than a missing key"},
       handler: :handle_policy_status
     },
+    "runtime.activity" => %{
+      scope: :read,
+      timeout: @default_timeout,
+      params:
+        {:closed, [],
+         "the four kinds of work this node counts, and nothing else. `running_turns`, `queued_turns` and `busy_sessions` come from its live native session processes: an active turn, the turns it has accepted and not started, and the session's *own* idle predicate — the one that also refuses a maintenance fence, so a compaction or an unresolved approval is visible here even with no turn running. `in_flight_methods` is the operate-scope calls this node is executing, which is where `workspace.exec` and the other verbs that run in the caller's process rather than in a session are counted; read-scope calls are not. `attachment_transfers` and `attachment_normalizations` are the unexpired uploads and the decoder tasks the attachment service is holding. `operator_clients` is the connections this listener is serving, which includes the one asking. `silent_sessions` is how many live sessions did not answer inside their own deadline, which is the reason `unknown` names what it names. What is *not* counted: another machine's work (this is node-local — no fan-out), a read-scope call, and a session or a port that merely exists. Every counter this build cannot establish is `null` and named in `unknown`, and `idle` is `null` whenever any of them is, because an unknown runtime is not an idle one. `idle` is decided by the work counters alone: a connected client is somebody watching, not work, and the caller is always one of them. Answers may be up to 250ms old; `runtime.shutdown`'s gate reads the same summary freshly instead"},
+      handler: :handle_runtime_activity
+    },
     "runtime.models" => %{
       scope: :read,
       timeout: @default_timeout,
@@ -1037,8 +1170,12 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       scope: :operate,
       timeout: @default_timeout,
       params:
-        {:open, [],
-         "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope"},
+        {:closed,
+         [
+           {"require_idle", {:optional, false}, :boolean,
+            "stop only a runtime that is holding no work. The connection reads the same summary `runtime.activity` answers with, freshly rather than from its cache, and unless its `idle` is `true` it refuses `-32004` — before any acknowledgement is written or any stop scheduled — carrying `data.reason` `runtime_busy` or `activity_unknown` and `data.activity`. Unknown activity never authorizes a stop"}
+         ],
+         "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope. Closed, unlike most connection-answered verbs, because the difference between this envelope's two shapes is a node that stops and a node that does not: a misspelled `requireIdle` must be a refusal naming the key, never an unconditional stop"},
       handler: :connection
     },
     "runtime.status" => %{

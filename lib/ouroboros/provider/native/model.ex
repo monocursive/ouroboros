@@ -27,7 +27,12 @@ defmodule Ouroboros.Provider.Native.Model do
               required(:content) => String.t() | nil,
               required(:tool_calls) => [tool_call()],
               optional(:reasoning_details) => [map()],
-              optional(:provider_metadata) => map()
+              optional(:provider_metadata) => map(),
+              # The model's own reasoning text as it streamed, kept beside the answer it
+              # produced — only on a lane whose module says it is sent back
+              # (`replays_thinking?/1`), and bounded, so no other lane checkpoints text it
+              # will never use.
+              optional(:thinking) => String.t()
             }
           | %{
               role: :tool,
@@ -106,7 +111,29 @@ defmodule Ouroboros.Provider.Native.Model do
               }
             ]
 
-  @optional_callbacks available?: 0, credential_report: 0, project: 1, format_error: 1
+  @doc """
+  Whether this module sends a model's earlier reasoning text back on later turns of the
+  given model spec.
+
+  The loop keeps `:thinking` on an assistant message only when this answers `true`, so a
+  lane that never sends it back never pays to checkpoint it. Absent means `false`.
+  """
+  @callback replays_thinking?(String.t() | nil) :: boolean()
+
+  @optional_callbacks available?: 0,
+                      credential_report: 0,
+                      project: 1,
+                      format_error: 1,
+                      replays_thinking?: 1
+
+  @doc "Whether `module` sends a model's earlier reasoning text back on later turns."
+  @spec replays_thinking?(module(), String.t() | nil) :: boolean()
+  def replays_thinking?(module, model_spec) do
+    Code.ensure_loaded?(module) and function_exported?(module, :replays_thinking?, 1) and
+      module.replays_thinking?(model_spec) == true
+  rescue
+    _error -> false
+  end
 
   @default_module Ouroboros.Provider.Native.Model.ReqLLM
   @model_env "OUROBOROS_NATIVE_MODEL"

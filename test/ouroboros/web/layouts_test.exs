@@ -248,7 +248,8 @@ defmodule Ouroboros.Web.LayoutsTest do
         |> List.flatten()
         |> Enum.map(&String.trim/1)
 
-      assert hidden == ["the build box", "the spare"]
+      assert hidden == ["the build box", "the spare", "Open Devices"]
+      assert html =~ ~s(aria-labelledby="ouro-presence-readout ouro-presence-go")
 
       assert html =~ "the build box — connected"
       assert html =~ "the spare — not connected"
@@ -270,8 +271,9 @@ defmodule Ouroboros.Web.LayoutsTest do
         |> List.flatten()
         |> Enum.map(&String.trim/1)
 
-      # Two machines, two words — never "ouro" twice.
-      assert hidden == ["alpha", "beta"]
+      # Two machines, two words — never "ouro" twice. "Open Devices" is the link's name.
+      assert hidden == ["alpha", "beta", "Open Devices"]
+      assert html =~ ~s(aria-labelledby="ouro-presence-readout ouro-presence-go")
     end
 
     test "renders standalone with no machines and no totals" do
