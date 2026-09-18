@@ -372,33 +372,24 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// The loopback release origin does not follow a redirect off loopback.
+/// The loopback release origin does not follow a redirect to an unapproved host.
 ///
 /// It did, and the SHA256SUMS manifest travelled the same redirect — so the checksum
 /// check certified nothing about where the bytes came from: a redirector on 127.0.0.1
 /// could serve the executable and the digest that blesses it from any host on the
 /// internet, and both would be accepted.
 #[test]
-fn the_loopback_release_origin_refuses_a_redirect_off_loopback() {
+fn the_loopback_release_origin_refuses_a_redirect_to_an_unapproved_host() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
-    // The "somewhere else" server: this host's own LAN address, which is emphatically
-    // not one of the three names `Origin::loopback` will accept. It stands in for any
-    // internet host; what is being shown is that the origin check constrains the first
-    // hop only.
-    let elsewhere_host = std::process::Command::new("/usr/sbin/ipconfig")
-        .args(["getifaddr", "en0"])
-        .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|address| !address.is_empty())
-        .expect("a non-loopback address on this host");
+    // `localhost` reaches this fixture on either platform but is outside the literal
+    // host allowlist. No LAN interface or platform-specific network utility is needed.
+    let elsewhere_host = "localhost";
     assert!(ouro::update::release::Origin::loopback(&format!("http://{elsewhere_host}")).is_err());
-    let elsewhere =
-        TcpListener::bind(format!("{elsewhere_host}:0")).expect("a non-loopback listener");
+    let elsewhere = TcpListener::bind("127.0.0.1:0").expect("a destination listener");
     let elsewhere_port = elsewhere.local_addr().unwrap().port();
-    let redirect_host = elsewhere_host.clone();
+    let redirect_host = elsewhere_host;
     let payload = b"NOT-THE-OFFICIAL-RELEASE".to_vec();
     let digest = ring::digest::digest(&ring::digest::SHA256, &payload);
     let mut sha = String::new();
@@ -410,9 +401,12 @@ fn the_loopback_release_origin_refuses_a_redirect_off_loopback() {
     let manifest = format!("{sha}  {asset}\n").into_bytes();
     let body_asset = payload.clone();
     let body_manifest = manifest.clone();
+    let destination_requests = Arc::new(AtomicU32::new(0));
+    let received = Arc::clone(&destination_requests);
     std::thread::spawn(move || {
         for stream in elsewhere.incoming().take(2) {
             let mut stream = stream.expect("a connection");
+            received.fetch_add(1, Ordering::SeqCst);
             let mut line = String::new();
             let _ = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
             let body = if line.contains("SHA256SUMS") {
@@ -435,9 +429,12 @@ fn the_loopback_release_origin_refuses_a_redirect_off_loopback() {
     // The loopback origin: a pure redirector.
     let front = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
     let front_port = front.local_addr().unwrap().port();
+    let redirect_requests = Arc::new(AtomicU32::new(0));
+    let redirected = Arc::clone(&redirect_requests);
     std::thread::spawn(move || {
         for stream in front.incoming().take(2) {
             let mut stream = stream.expect("a connection");
+            redirected.fetch_add(1, Ordering::SeqCst);
             let mut line = String::new();
             let _ = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
             let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
@@ -460,7 +457,7 @@ fn the_loopback_release_origin_refuses_a_redirect_off_loopback() {
         .err()
         .map(|error| format!("{error:#}"))
         .unwrap_or_else(|| {
-            panic!("the manifest must not be fetched through a redirect off loopback")
+            panic!("the manifest must not be fetched through an unapproved redirect")
         });
     eprintln!("redirected manifest refused: {manifest_error}");
 
@@ -476,9 +473,8 @@ fn the_loopback_release_origin_refuses_a_redirect_off_loopback() {
     .unwrap_or_else(|| panic!("the artifact must not be fetched through a redirect"));
     eprintln!("redirected artifact refused: {fetch_error}");
 
-    // And the payload never reached this process.
-    assert_ne!(manifest, payload);
-    let _ = (elsewhere_port, elsewhere_host);
+    assert_eq!(redirect_requests.load(Ordering::SeqCst), 2);
+    assert_eq!(destination_requests.load(Ordering::SeqCst), 0);
 }
 
 /// One client that stops reading does not wedge the worker.

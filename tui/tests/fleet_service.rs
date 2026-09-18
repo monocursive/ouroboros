@@ -317,7 +317,7 @@ fn plan_for(platform: Platform, root: &Path, data_dir: &Path) -> Plan {
         executable: PathBuf::from(OURO),
         home: home.clone(),
         config_home: home.join(".config"),
-        uid: 501,
+        uid: unsafe { libc::geteuid() },
         user: "tester".to_string(),
     };
     // Every plan in this file writes inside its own scratch root. Asserted here rather
@@ -388,10 +388,14 @@ fn installing_a_launchagent_writes_one_private_file_and_bootstraps_exactly_once(
     assert_eq!(
         fakes.calls(),
         vec![
-            "launchctl print gui/501".to_string(),
-            format!("launchctl bootout gui/501/{label}"),
-            format!("launchctl bootstrap gui/501 {}", plan.unit_path().display()),
-            format!("launchctl print gui/501/{label}"),
+            format!("launchctl print gui/{}", plan.uid),
+            format!("launchctl bootout gui/{}/{label}", plan.uid),
+            format!(
+                "launchctl bootstrap gui/{} {}",
+                plan.uid,
+                plan.unit_path().display()
+            ),
+            format!("launchctl print gui/{}/{label}", plan.uid),
         ]
     );
 
@@ -497,7 +501,10 @@ fn a_foreign_unit_at_our_path_is_described_and_left_exactly_as_it_is() {
     assert_eq!(fs::read_to_string(&unit).expect("their file"), theirs);
     assert_eq!(mode(&unit), 0o644);
     // Nothing was handed to the manager past the one detection call.
-    assert_eq!(fakes.calls(), vec!["launchctl print gui/501".to_string()]);
+    assert_eq!(
+        fakes.calls(),
+        vec![format!("launchctl print gui/{}", plan.uid)]
+    );
 
     // `remove` will not delete it either, for the same reason.
     fakes.forget_calls();
@@ -595,8 +602,8 @@ fn remove_disables_first_and_deletes_only_the_file_this_code_wrote() {
     assert_eq!(
         fakes.calls(),
         vec![
-            "launchctl print gui/501".to_string(),
-            format!("launchctl bootout gui/501/{label}"),
+            format!("launchctl print gui/{}", plan.uid),
+            format!("launchctl bootout gui/{}/{label}", plan.uid),
         ],
         "remove disables through the manager before it unlinks, and asks for nothing else"
     );
@@ -650,9 +657,9 @@ fn disable_stops_respawn_without_removing_anything() {
     assert_eq!(
         fakes.calls(),
         vec![
-            "launchctl print gui/501".to_string(),
-            format!("launchctl bootout gui/501/{label}"),
-            format!("launchctl print gui/501/{label}"),
+            format!("launchctl print gui/{}", plan.uid),
+            format!("launchctl bootout gui/{}/{label}", plan.uid),
+            format!("launchctl print gui/{}/{label}", plan.uid),
         ]
     );
     assert_eq!(report.loaded, Some(false));
@@ -708,9 +715,9 @@ fn start_kickstarts_only_a_unit_this_code_wrote() {
     assert_eq!(
         fakes.calls(),
         vec![
-            "launchctl print gui/501".to_string(),
-            format!("launchctl kickstart gui/501/{label}"),
-            format!("launchctl print gui/501/{label}"),
+            format!("launchctl print gui/{}", plan.uid),
+            format!("launchctl kickstart gui/{}/{label}", plan.uid),
+            format!("launchctl print gui/{}/{label}", plan.uid),
         ]
     );
     assert_eq!(report.running, Some(true));
@@ -835,7 +842,7 @@ struct Helper {
 
 impl Helper {
     fn start(data_dir: &Path, fakes: &Fakes, home: &Path) -> Self {
-        // `$HOME` is where the child's `Plan` puts its unit, and the fence refuses to
+        // Isolate HOME and XDG_CONFIG_HOME, and the fence refuses to
         // write outside the scratch root whatever else goes wrong. Without both of
         // these, a helper that reaches `install` writes a LaunchAgent into the
         // developer's own `~/Library/LaunchAgents` and strands it on any panic.
@@ -843,6 +850,7 @@ impl Helper {
             .args(["fleet", "helper"])
             .env("OUROBOROS_DATA_DIR", data_dir)
             .env("HOME", home)
+            .env_remove("XDG_CONFIG_HOME")
             .env("OUROBOROS_SERVICE_ROOT", home)
             .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
             .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
@@ -939,11 +947,15 @@ fn the_helper_answers_the_service_op_over_the_real_binary() {
     assert_eq!(reply["ok"], json!(false));
 
     // Every call reached the fake rather than this machine's real service manager.
+    let start_command = match Platform::current().expect("a supported service platform") {
+        Platform::MacOs => "launchctl bootstrap",
+        Platform::Linux => "systemctl --user enable --now",
+    };
     assert!(
         fakes
             .calls()
             .iter()
-            .any(|call| call.starts_with("launchctl bootstrap")),
+            .any(|call| call.starts_with(start_command)),
         "{:?}",
         fakes.calls()
     );
@@ -1385,7 +1397,7 @@ fn a_live_launchagent_is_installed_seen_and_removed() {
 /// own service directory.
 ///
 /// It re-runs every other test in this file as a child process and compares a listing of
-/// `~/Library/LaunchAgents` taken either side. The original slice failed exactly this:
+/// the platform's service directory taken either side. The original slice failed exactly this:
 /// the helper's `service` op built its `Plan` from the *process* environment, which the
 /// fakes never redirected, and five stranded `dev.ouroboros.runtime.*.plist` files were
 /// found in the developer's real agents directory afterwards.
@@ -1394,11 +1406,19 @@ fn f0_a_whole_run_of_this_binary_leaves_the_real_service_directory_untouched() {
     if std::env::var_os("OUROBOROS_W2C_NESTED").is_some() {
         return;
     }
-    let Some(agents) = dirs::home_dir().map(|home| home.join("Library").join("LaunchAgents"))
-    else {
-        return;
+    let agents = match Platform::current() {
+        Some(Platform::MacOs) => dirs::home_dir()
+            .expect("a home directory")
+            .join("Library/LaunchAgents"),
+        Some(Platform::Linux) => dirs::config_dir()
+            .expect("a config directory")
+            .join("systemd/user"),
+        None => return,
     };
 
+    let root = scratch("inherited-config");
+    let ambient_config = root.join("config");
+    fs::create_dir_all(&ambient_config).expect("an inherited config directory");
     let before = listing(&agents);
     let output = Command::new(std::env::current_exe().expect("this test binary"))
         .args([
@@ -1408,6 +1428,7 @@ fn f0_a_whole_run_of_this_binary_leaves_the_real_service_directory_untouched() {
             "4",
         ])
         .env("OUROBOROS_W2C_NESTED", "1")
+        .env("XDG_CONFIG_HOME", &ambient_config)
         .env_remove("OUROBOROS_LIVE_LAUNCHD")
         .output()
         .expect("a nested run of this binary");
@@ -1426,11 +1447,12 @@ fn f0_a_whole_run_of_this_binary_leaves_the_real_service_directory_untouched() {
         agents.display(),
         after.difference(&before).collect::<Vec<_>>()
     );
-    // And specifically nothing of ours, however the listing compares.
+    // Isolated children must also ignore an inherited config directory outside their HOME.
     assert!(
-        !after.iter().any(|name| name.contains("ouroboros")),
-        "{after:?}"
+        listing(&ambient_config).is_empty(),
+        "a test wrote into the inherited XDG_CONFIG_HOME"
     );
+    fs::remove_dir_all(root).expect("the inherited config fixture");
 }
 
 fn listing(directory: &Path) -> std::collections::BTreeSet<String> {
@@ -1482,7 +1504,7 @@ fn f1_an_awkwardly_named_data_directory_stays_ours_and_can_still_be_removed() {
 
 /// F3 (H2/L10). The generated plist is well-formed XML and a valid property list, even
 /// when every path in it carries something the format treats specially. `--` inside an
-/// XML comment is the case that used to produce a file `xmllint` refuses.
+/// XML comment is the case that used to produce a file an XML parser refuses.
 #[test]
 fn f3_every_generated_plist_is_well_formed_xml_and_a_valid_property_list() {
     let root = scratch("plist-lint");
@@ -1499,25 +1521,32 @@ fn f3_every_generated_plist_is_well_formed_xml_and_a_valid_property_list() {
         let path = root.join("candidate.plist");
         fs::write(&path, &text).expect("a written plist");
 
-        let xml = Command::new("xmllint")
-            .args(["--noout", "--nonet", path.to_str().expect("utf-8")])
+        let parsed = Command::new("python3")
+            .args([
+                "-c",
+                "import plistlib, sys; plistlib.loads(open(sys.argv[1], 'rb').read())",
+            ])
+            .arg(&path)
             .output()
-            .expect("xmllint on this machine");
+            .expect("python3 with the standard library plist parser");
         assert!(
-            xml.status.success(),
-            "`{directory}` produced a plist no conforming XML parser accepts: {}\n{text}",
-            String::from_utf8_lossy(&xml.stderr)
+            parsed.status.success(),
+            "`{directory}` produced an invalid XML property list: {}\n{text}",
+            String::from_utf8_lossy(&parsed.stderr)
         );
 
-        let linted = Command::new("plutil")
-            .args(["-lint", path.to_str().expect("utf-8")])
-            .output()
-            .expect("plutil on macOS");
-        assert!(
-            linted.status.success(),
-            "`{directory}`: {}",
-            String::from_utf8_lossy(&linted.stderr)
-        );
+        #[cfg(target_os = "macos")]
+        {
+            let linted = Command::new("plutil")
+                .args(["-lint", path.to_str().expect("utf-8")])
+                .output()
+                .expect("plutil on macOS");
+            assert!(
+                linted.status.success(),
+                "`{directory}`: {}",
+                String::from_utf8_lossy(&linted.stderr)
+            );
+        }
     }
 }
 
@@ -1924,6 +1953,7 @@ fn f14_a_manager_override_that_is_not_a_program_is_refused_by_name() {
             .args(["fleet", "service", "status"])
             .env("OUROBOROS_DATA_DIR", &data_dir)
             .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
             .env("OUROBOROS_SERVICE_ROOT", &home)
             .env("OUROBOROS_LAUNCHCTL", &value)
             .output()
@@ -2071,6 +2101,7 @@ fn f19_the_account_is_the_real_one_and_not_whatever_user_says() {
         .args(["fleet", "service", "status", "--json"])
         .env("OUROBOROS_DATA_DIR", &data_dir)
         .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
         .env("OUROBOROS_SERVICE_ROOT", &home)
         .env("USER", "somebody-else")
         .env("LOGNAME", "somebody-else")
@@ -2492,6 +2523,7 @@ fn h0_a_child_writes_its_unit_under_the_home_it_was_given_and_nowhere_else() {
         .args(["fleet", "service", "status", "--json"])
         .env("OUROBOROS_DATA_DIR", &data_dir)
         .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
         .env("OUROBOROS_SERVICE_ROOT", &home)
         .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
         .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
@@ -2525,6 +2557,7 @@ fn h0_a_child_writes_its_unit_under_the_home_it_was_given_and_nowhere_else() {
         .args(["fleet", "service", "install"])
         .env("OUROBOROS_DATA_DIR", &data_dir)
         .env("HOME", &elsewhere)
+        .env_remove("XDG_CONFIG_HOME")
         .env("OUROBOROS_SERVICE_ROOT", &home)
         .env("OUROBOROS_LAUNCHCTL", &fakes.programs.launchctl)
         .env("OUROBOROS_SYSTEMCTL", &fakes.programs.systemctl)
@@ -2534,13 +2567,15 @@ fn h0_a_child_writes_its_unit_under_the_home_it_was_given_and_nowhere_else() {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert!(!output.status.success(), "{stderr}");
     assert!(stderr.contains("OUROBOROS_SERVICE_ROOT"), "{stderr}");
-    assert_eq!(
-        fs::read_dir(elsewhere.join("Library").join("LaunchAgents"))
-            .map(|entries| entries.count())
-            .unwrap_or(0),
-        0,
-        "the fence has to refuse before anything is written"
-    );
+    for directory in ["Library/LaunchAgents", ".config/systemd/user"] {
+        assert_eq!(
+            fs::read_dir(elsewhere.join(directory))
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0,
+            "the fence has to refuse before anything is written into {directory}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
