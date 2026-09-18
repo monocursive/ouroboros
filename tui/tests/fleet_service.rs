@@ -307,6 +307,14 @@ fn loginctl_script(log: &Path, state: &Path) -> String {
     format!(
         r#"#!/bin/sh
 {preamble}
+if [ "$1" = "enable-linger" ]; then
+  if [ -f "$state/linger_refused" ]; then
+    echo "Could not enable linger: Interactive authentication required." >&2
+    exit 1
+  fi
+  : > "$state/linger"
+  exit 0
+fi
 if [ "$1" != "show-user" ] || [ "$3" != "--property=Linger" ]; then
   echo "unexpected loginctl call: $*" >&2
   exit 64
@@ -471,23 +479,54 @@ fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     );
     assert_eq!(mode(&plan.unit_path()), 0o600);
 
-    // Without lingering the same install succeeds and says what it does not promise.
+    // Without lingering the install enables it, because a machine added over SSH is
+    // the machine nobody logs in to, and reports the boot-time start it now has.
     let second = scratch("linux-install-no-linger");
     let second_data = data_dir_with_profile(&second, "buildbox", "127.0.0.1");
     let second_fakes = Fakes::install(&second);
     let second_plan = plan_for(Platform::Linux, &second, &second_data);
     let report = fleet_service::install(&second_plan, &second_fakes.programs, false)
-        .expect("an install without lingering");
-    assert_eq!(report.linger, Some(false));
+        .expect("an install that enables lingering");
+    assert_eq!(report.linger, Some(true));
     assert!(
-        report.persistence.contains("enable-linger"),
+        report.persistence.contains("survives logout"),
         "{}",
         report.persistence
     );
     assert!(
-        report.persistence.contains("does not start at boot"),
+        report
+            .steps
+            .iter()
+            .any(|step| step.contains("enabled lingering for tester")),
+        "{:?}",
+        report.steps
+    );
+    assert!(second_fakes
+        .calls()
+        .contains(&"loginctl enable-linger tester".to_string()));
+
+    // A refused enable-linger keeps the honest login-scoped sentence and names the step.
+    let third = scratch("linux-install-linger-refused");
+    let third_data = data_dir_with_profile(&third, "buildbox", "127.0.0.1");
+    let third_fakes = Fakes::install(&third);
+    third_fakes.set("linger_refused", true);
+    let third_plan = plan_for(Platform::Linux, &third, &third_data);
+    let report = fleet_service::install(&third_plan, &third_fakes.programs, false)
+        .expect("an install whose lingering was refused");
+    assert_eq!(report.linger, Some(false));
+    assert!(
+        report.persistence.contains("enable-linger")
+            && report.persistence.contains("does not start at boot"),
         "{}",
         report.persistence
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("Interactive authentication required")),
+        "{:?}",
+        report.notes
     );
 }
 

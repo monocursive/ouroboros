@@ -1373,8 +1373,44 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         )));
     }
 
+    enable_lingering(plan, programs, &mut report);
     inspect_manager(plan, programs, &mut report)?;
     Ok(report)
+}
+
+/// Ask logind to keep this account's user manager running from boot to shutdown.
+///
+/// A user unit without lingering starts at login and stops at logout, and a machine
+/// that was just added to a fleet over SSH is exactly the machine nobody logs in to.
+/// `loginctl enable-linger` for one's own account needs no administrator on a stock
+/// polkit policy, so it is attempted once, after the unit is loaded; what it answered
+/// is reported either way, and a refusal keeps the honest "starts at login" sentence
+/// with the administrator's step in it.
+fn enable_lingering(plan: &Plan, programs: &Programs, report: &mut Report) {
+    if plan.platform != Platform::Linux || report.linger != Some(false) {
+        return;
+    }
+    let args = ["enable-linger", plan.user.as_str()];
+    report.record(&programs.loginctl, &args);
+    match run(&programs.loginctl, &args, programs.deadline) {
+        Ok(outcome) if outcome.status == Some(0) => {
+            report.linger = Some(true);
+            report.persistence = linger_sentence(&plan.user, Some(true));
+            report.steps.push(format!(
+                "enabled lingering for {}: the unit starts at boot and survives logout",
+                plan.user
+            ));
+        }
+        Ok(outcome) => report.notes.push(format!(
+            "`loginctl enable-linger {}` was refused ({}), so this unit starts at login only",
+            plan.user,
+            first_line(&outcome.stderr, &outcome.stdout)
+        )),
+        Err(error) => report.notes.push(format!(
+            "`loginctl enable-linger {}` could not be run ({error:#}), so this unit starts at login only",
+            plan.user
+        )),
+    }
 }
 
 /// Hand the freshly written unit to the service manager.
