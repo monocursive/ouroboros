@@ -8,6 +8,8 @@ requirements and upgrade instructions are in the
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-09-18
+
 ### Added
 
 - A Devices page in the web UI and the TUI, plus `ouro fleet setup`, `add`,
@@ -18,6 +20,11 @@ requirements and upgrade instructions are in the
 
 ### Changed
 
+- Provider requests use Anthropic prompt-cache breakpoints and stable conversation
+  identifiers for OpenAI, ChatGPT/Codex, xAI and Grok. Compaction and handoff reuse
+  the conversation prefix, and turn-budget updates preserve earlier messages.
+- The web chat composer is more compact, with an inline image attachment control
+  and accessible touch targets.
 - Cooperative leave and `ouro fleet service disable`/`remove` gate the runtime first
   (`ouro stop --require-idle`: exit 0 when nothing is running, 10 busy, 11 unknown)
   and then disable or remove the unit, which gates itself.
@@ -28,6 +35,15 @@ requirements and upgrade instructions are in the
   the journal and deleted at completion or cancel. SSH reuses one ControlMaster so a
   password is typed once.
 
+### Fixed
+
+- ChatGPT/Codex sessions resolve their model context window so the context meter
+  and automatic compaction work. Compaction uses the lower of the model threshold
+  and the configured token cap, which defaults to 200,000 tokens.
+- Subscription sessions report unknown cost when no API price applies.
+- xAI and Grok requests retain prior reasoning text, including across checkpoint
+  recovery, so later requests can reuse the provider's cached prefix.
+
 ### Security
 
 - Credential delivery no longer holds the local lifecycle lock across the SSH
@@ -36,6 +52,8 @@ requirements and upgrade instructions are in the
 
 ### Upgrade notes
 
+- Run `ouro update` from an official standalone installation. Finish active work,
+  then run `ouro stop` and `ouro` to activate the new runtime. Reload open web views.
 - `ouro stop --require-idle` now exits 0 when nothing is running here. Exit 10 is
   still busy work, 11 is still unknown activity. Scripts that treated any zero as
   "a pid was stopped" should read the printed outcome.
@@ -232,7 +250,8 @@ requirements and upgrade instructions are in the
 
 Earlier `v0.1.0` and `v0.1.1` tags have no published release assets.
 
-[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.8...dev
+[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.9...dev
+[0.1.9]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.9
 [0.1.8]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.8
 [0.1.7]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.7
 [0.1.6]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.6
