@@ -243,3 +243,46 @@ the plan digest computed by the client, host keys always an explicit question, t
 detached worker, per-tab challenge binding, take-over as an explicit answer. The
 proposal's *observed states* are still the states; what changes is the words a person
 reads and how many of them there are.
+
+---
+
+## 6. What landed on `fleet-ux`, and what was proven
+
+Every finding in §1 has a commit on the branch, and the design in §5 is what both
+surfaces now draw. In order:
+
+| Commit | What it does | Finding |
+|---|---|---|
+| `30366b2c` | Tailscale lookup tries `$PATH` first and skips a client that answers no status document; the detail quotes the client; self row named from the host name; `suggested_machine` on every row | 1, 3 |
+| `aa271a78` | systemd unit `WorkingDirectory=` unquoted; the manager line repeated is the one that reads as a failure; a refused hand-off removes its `default.target.wants` symlink | 10 |
+| `93800bdf` | `install` enables lingering on Linux so a headless member starts at boot | — |
+| `9b7aca3f` | broker: `kind: "leave"`, `target.machine` required for `add`, `worker_exit` on a journal answer, `dev_runtime` blocker for `setup` | 2, 5, 7, 8 |
+| `7ee03f22` | engine: the default SSH identity falls back to the `password` challenge, so no surface needs an authentication picker | — |
+| `8ee5b4f9` | engine: a leave runs from a request file through the detached worker; plans carry a one-line `summary` | 7 |
+| `502498c6`, `597d7b5c` | the web page rewritten to §5 (one list, one action per row, the drawers of §5.2–5.4, `<details>` bound to its assign, a canonical-digest regression test) | 2, 3, 6, 9 |
+| `42dfd6fc` | the terminal view rewritten to §5, with reconnection after the runtime restart | 4, 9 |
+| `dbc5dfd6` | rows fold onto two lines on a narrow terminal; a fleet's name printed as it is | 9 |
+
+Proven live on 2026-09-18 against the Raspberry Pi, from the packaged `fleet-ux` build
+on a fresh data directory:
+
+- **Discovery inside the runtime** lists the Pi and the other peers; the self row carries
+  its address and a valid suggested name.
+- **Deploy to the Pi** (TUI, password): install, certificate, roster — then the `service`
+  step refused, which is finding 10; the Pi's runtime started by hand connected as a
+  compatible member.
+- **The systemd fix**, in a Linux build of `aa271a78` made in a container and installed
+  on the Pi by hand: `ouro fleet service install` loads the unit, the runtime comes up
+  under it, and lingering is enabled without an administrator.
+- **Remove from fleet** (web): SSH user, default identity → password challenge, review,
+  stop, disable the service, retire credentials, update the Mac's roster. The Pi read
+  as standalone afterwards with its data intact.
+- **Add a device by address** (web) to put it back: name, address, user, password
+  challenge, review, install verified, certificate issued, service installed with
+  lingering, connected.
+
+Not proven: the local **Set up this Mac** from the packaged build (only from a `--dev`
+runtime, which cannot boot the fleet it makes — finding 8, now a named blocker), the
+TUI's reconnection across that restart (covered by a scripted test only), and a
+release-origin install onto a machine with no `ouro` from the rewritten UI (the Pi
+already had one; the 0.1.9 flow installed it).
