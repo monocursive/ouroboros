@@ -131,6 +131,10 @@ pub struct Bridge {
     /// one-shot `run` can overlap, and dropping one must not close the other.
     groups: Arc<Mutex<HashMap<i32, GroupState>>>,
     stop: Arc<AtomicBool>,
+    /// Password prompts this bridge has classified, across every connection it served.
+    /// This is the counter [`super::MAX_PASSWORD_ATTEMPTS`] caps, and the SSH runner
+    /// reads it to tell "the password was wrong" from "no password was ever asked for".
+    attempts: Arc<AtomicU32>,
     /// The number of prompts this bridge actually served, for tests and for the journal
     /// line that says how many attempts an authentication took.
     served: Arc<AtomicU32>,
@@ -241,6 +245,7 @@ impl Bridge {
             launcher,
             groups,
             stop,
+            attempts,
             served,
             prompted,
             in_flight,
@@ -355,6 +360,14 @@ impl Bridge {
     /// How many prompts this bridge has answered, in total.
     pub fn served(&self) -> u32 {
         self.served.load(Ordering::SeqCst)
+    }
+
+    /// How many *password* prompts have reached classification, answered or not.
+    ///
+    /// Not the same question as [`Self::served`]: a passphrase for an encrypted key is
+    /// served too, and it is not a password attempt.
+    pub fn password_prompts(&self) -> u32 {
+        self.attempts.load(Ordering::SeqCst)
     }
 
     /// How many prompts reached classification, answered or not.

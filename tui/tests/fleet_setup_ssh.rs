@@ -660,6 +660,376 @@ exit 255
     );
 }
 
+/// The default identity falls back to a password, and to the *same* challenge.
+///
+/// This is what lets a surface have no authentication picker: an operator says "this
+/// machine, this account" and nothing else, this host's own keys are offered first, and
+/// if the target accepts none of them the password question arrives through the ordinary
+/// `password` challenge — numbered, capped, and never on a command line. Before this,
+/// `PreferredAuthentications=publickey` meant the connection simply failed with
+/// `Permission denied (publickey)`, and the operator had to already know to re-run with
+/// `--ask-password`.
+///
+/// The client here is a fake `ssh`, because an unprivileged `sshd` cannot check a
+/// password. It refuses to ask for one unless the method list actually permits it, so
+/// taking the fallback back out of the options fails this test rather than passing on
+/// the shim's good manners.
+#[test]
+fn a_default_identity_falls_back_to_the_same_password_challenge() {
+    const PASSWORD: &str = "w2a-default-fallback-4c19";
+    let work = scratch("default-pw");
+    let trace = work.join("trace");
+
+    let shim = work.join("ssh");
+    write_script(
+        &shim,
+        &format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-G" ]; then
+    echo "user tester"
+    echo "hostname 127.0.0.1"
+    echo "port 2222"
+    exit 0
+  fi
+done
+methods=""
+for arg in "$@"; do
+  case "$arg" in
+    PreferredAuthentications=*) methods="${{arg#PreferredAuthentications=}}" ;;
+  esac
+done
+echo "methods: $methods" >> {trace}
+echo "argv: $*" >> {trace}
+echo "env: $(env | grep -c '{password}')" >> {trace}
+# Every key this host holds is offered first and refused, in OpenSSH's own order.
+echo "debug1: Offering public key: /home/tester/.ssh/id_ed25519" >&2
+echo "debug1: Authentications that can continue: publickey,password" >&2
+case ",$methods," in
+  *,password,*) ;;
+  *)
+    echo "Permission denied (publickey)." >&2
+    exit 255
+    ;;
+esac
+answer=$("$SSH_ASKPASS" "tester@127.0.0.1's password: ")
+if [ "$answer" = "{password}" ]; then
+  echo authenticated
+  exit 0
+fi
+echo "Permission denied, please try again." >&2
+exit 255
+"#,
+            trace = trace.display(),
+            password = PASSWORD,
+        ),
+    );
+
+    // Two typos and then the real thing: the three-attempt loop is the point.
+    let conversation = Scripted::new(vec![
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new("first-typo".to_string())),
+        ),
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new("second-typo".to_string())),
+        ),
+        (
+            ChallengeKind::Password,
+            Answer::Secret(zeroize::Zeroizing::new(PASSWORD.to_string())),
+        ),
+    ]);
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: "tester".into(),
+                port: 2222,
+                // No key was selected: this is the default identity.
+                key_label: None,
+                key_fingerprint: None,
+            },
+            conversation.clone(),
+        )
+        .expect("an askpass bridge"),
+    );
+
+    let runner = Runner {
+        programs: Programs {
+            ssh: shim,
+            ..programs()
+        },
+        destination: Destination {
+            address: "127.0.0.1".into(),
+            port: 2222,
+            user: "tester".into(),
+        },
+        identity: ResolvedIdentity::Default,
+        known_hosts: vec![work.join("known_hosts")],
+        user_known_hosts: None,
+        connect_timeout: CONNECT_TIMEOUT,
+        command_timeout: COMMAND_TIMEOUT,
+        bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
+    };
+
+    // Keys first, then the account's own password, and nothing a far end could use to
+    // compose prompt text of its own.
+    let options = runner.options();
+    assert!(
+        options
+            .iter()
+            .any(|option| option == "PreferredAuthentications=publickey,password"),
+        "{options:?}"
+    );
+    assert!(
+        !options
+            .iter()
+            .any(|option| option.contains("keyboard-interactive") || option.contains("gssapi")),
+        "{options:?}"
+    );
+    // The default identity is still the one path that honours the operator's own
+    // ssh_config, so it is still the one that does not pass `-F /dev/null`.
+    let argv = runner.argv("exec true");
+    assert!(
+        !argv.iter().any(|word| word == "-F"),
+        "the default identity reads the host's own configuration: {argv:?}"
+    );
+
+    runner
+        .check_access()
+        .expect("the third password is the right one");
+
+    // The same challenge the `password` identity raises: the same metadata, numbered and
+    // capped the same way.
+    let asked = conversation.asked();
+    assert_eq!(
+        asked.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+        vec![
+            ChallengeKind::Password,
+            ChallengeKind::Password,
+            ChallengeKind::Password
+        ],
+        "a default identity that meets a password prompt raises a password challenge"
+    );
+    for (index, (_, metadata)) in asked.iter().enumerate() {
+        assert_eq!(
+            *metadata,
+            json!({
+                "target": "127.0.0.1", "user": "tester", "port": 2222,
+                "attempt": index + 1, "max_attempts": 3
+            }),
+            "attempt {} carries the metadata `--ask-password` carries",
+            index + 1
+        );
+    }
+
+    let seen = std::fs::read_to_string(&trace).expect("the shim's trace");
+    assert!(
+        seen.contains("methods: publickey,password"),
+        "this client is what allows the password method at all: {seen}"
+    );
+    assert!(
+        !seen.contains(PASSWORD),
+        "the password must not appear in the ssh child's arguments: {seen}"
+    );
+    assert!(
+        !seen.contains("env: 1"),
+        "the password must not appear in the ssh child's environment: {seen}"
+    );
+    assert_eq!(bridge.served(), 3);
+    assert_eq!(bridge.password_prompts(), 3);
+
+    drop(runner);
+    drop(bridge);
+    assert!(
+        // The fake `ssh` has to know the right answer to check it; everything else under
+        // this directory was written by the code.
+        !grep_tree_except(&work, PASSWORD, &["ssh"]),
+        "the password is in no file this operation wrote"
+    );
+}
+
+/// A default identity refused for a key reason is *not* asked for three passwords.
+///
+/// The retry budget exists because a password can be mistyped. A far end that never
+/// asked for one has nothing for an operator to retype, and two more password prompts
+/// would be this client inventing a question the connection never asked.
+#[test]
+fn a_default_identity_that_was_never_asked_for_a_password_is_not_retried() {
+    let work = scratch("default-nopw");
+    let trace = work.join("trace");
+    let shim = work.join("ssh");
+    write_script(
+        &shim,
+        &format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-G" ]; then
+    echo "user tester"
+    echo "hostname 127.0.0.1"
+    echo "port 2222"
+    exit 0
+  fi
+done
+echo attempt >> {trace}
+echo "Permission denied (publickey)." >&2
+exit 255
+"#,
+            trace = trace.display(),
+        ),
+    );
+
+    let conversation = Scripted::new(Vec::new());
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: "tester".into(),
+                port: 2222,
+                key_label: None,
+                key_fingerprint: None,
+            },
+            conversation.clone(),
+        )
+        .expect("an askpass bridge"),
+    );
+    let runner = Runner {
+        programs: Programs {
+            ssh: shim,
+            ..programs()
+        },
+        destination: Destination {
+            address: "127.0.0.1".into(),
+            port: 2222,
+            user: "tester".into(),
+        },
+        identity: ResolvedIdentity::Default,
+        known_hosts: vec![work.join("known_hosts")],
+        user_known_hosts: None,
+        connect_timeout: CONNECT_TIMEOUT,
+        command_timeout: COMMAND_TIMEOUT,
+        bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
+    };
+
+    let refused = runner.check_access().expect_err("publickey was refused");
+    assert_eq!(reason_of(&refused), Some("ssh_auth_failed"));
+    assert_eq!(
+        std::fs::read_to_string(&trace)
+            .expect("the shim's trace")
+            .lines()
+            .count(),
+        1,
+        "one connection, because no password was ever asked for"
+    );
+    assert!(
+        conversation.asked().is_empty(),
+        "and nothing was put in front of an operator: {:?}",
+        conversation.asked()
+    );
+}
+
+/// An encrypted *default* key is still a passphrase question, not a password one.
+///
+/// The fallback put `password` on the method list, and the two words share a substring.
+/// A key this host already holds that happens to be encrypted must still be unlocked,
+/// and under the challenge that names a key rather than an account.
+#[test]
+fn a_default_identity_asked_for_a_key_passphrase_still_raises_a_passphrase_challenge() {
+    const PASSPHRASE: &str = "w2a-default-passphrase-5d30";
+    let work = scratch("default-pp");
+    let shim = work.join("ssh");
+    write_script(
+        &shim,
+        &format!(
+            r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-G" ]; then
+    echo "user tester"
+    echo "hostname 127.0.0.1"
+    echo "port 2222"
+    exit 0
+  fi
+done
+answer=$("$SSH_ASKPASS" "Enter passphrase for key '/home/tester/.ssh/id_ed25519': ")
+if [ "$answer" = "{passphrase}" ]; then
+  echo authenticated
+  exit 0
+fi
+echo "Permission denied (publickey)." >&2
+exit 255
+"#,
+            passphrase = PASSPHRASE,
+        ),
+    );
+
+    let conversation = Scripted::new(vec![(
+        ChallengeKind::Passphrase,
+        Answer::Secret(zeroize::Zeroizing::new(PASSPHRASE.to_string())),
+    )]);
+    let bridge = Arc::new(
+        Bridge::start(
+            std::path::Path::new(OURO),
+            PromptContext {
+                target: "127.0.0.1".into(),
+                user: "tester".into(),
+                port: 2222,
+                key_label: None,
+                key_fingerprint: None,
+            },
+            conversation.clone(),
+        )
+        .expect("an askpass bridge"),
+    );
+    let runner = Runner {
+        programs: Programs {
+            ssh: shim,
+            ..programs()
+        },
+        destination: Destination {
+            address: "127.0.0.1".into(),
+            port: 2222,
+            user: "tester".into(),
+        },
+        identity: ResolvedIdentity::Default,
+        known_hosts: vec![work.join("known_hosts")],
+        user_known_hosts: None,
+        connect_timeout: CONNECT_TIMEOUT,
+        command_timeout: COMMAND_TIMEOUT,
+        bridge: Some(Arc::clone(&bridge)),
+        control: None,
+        cancelled: None,
+        challenge_window: None,
+    };
+
+    runner.check_access().expect("the key unlocks");
+    let asked = conversation.asked();
+    assert_eq!(
+        asked.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+        vec![ChallengeKind::Passphrase],
+        "a key passphrase is never an account password"
+    );
+    assert_eq!(
+        asked[0].1["key_label"],
+        json!("the selected key"),
+        "the passphrase challenge names a key, not a target account: {:?}",
+        asked[0].1
+    );
+    assert_eq!(
+        bridge.password_prompts(),
+        0,
+        "a passphrase does not spend the password budget"
+    );
+}
+
 /// A prompt the bridge does not recognise fails the attempt instead of being rendered.
 #[test]
 fn an_unrecognized_prompt_fails_the_attempt_rather_than_reaching_an_operator() {
