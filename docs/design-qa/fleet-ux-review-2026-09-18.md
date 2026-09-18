@@ -281,7 +281,13 @@ surfaces now draw. In order:
 | `8ee5b4f9` | engine: a leave runs from a request file through the detached worker; plans carry a one-line `summary` | 7 |
 | `502498c6`, `597d7b5c` | the web page rewritten to §5 (one list, one action per row, the drawers of §5.2–5.4, `<details>` bound to its assign, a canonical-digest regression test) | 2, 3, 6, 9 |
 | `42dfd6fc` | the terminal view rewritten to §5, with reconnection after the runtime restart | 4, 9 |
-| `dbc5dfd6` | rows fold onto two lines on a narrow terminal; a fleet's name printed as it is | 9 |
+| `dbc5dfd6`, `91e1d8a0` | rows fold onto two lines on a narrow terminal and fit one on a 140-column one; a fleet's name printed as it is, and carried by `fleet.devices` | 9 |
+| `4a073a6e`, `21b6b223` | a removal reads as a removal on both surfaces: row words by kind, "Ready to remove"/Remove, the leave's own stages, no readiness sentence under a connected finish, the `sessions forget` recipe only on an unreachable member | — |
+| `bfbc16bf` | the TLS policy names the data directory's resolved path; the check resolves the paths a policy names | 13 |
+| `ed305282` | the web publication is kept on a clean stop, so the port is sticky across the restart a setup causes | 14 |
+| `aee223fa` | the worker journals the states in which it waits, so a refreshed row reads "waiting for you" | — |
+| `448f022f`, `b9cf764c` | a closed tab's challenge binding is released, and the connection's too, so the surviving tab answers every later prompt; a second identity is still refused | 12 |
+| `e75553c3`, `c364cc16` | a member's details stay reachable after its setup finishes; a drawer opened from an operation is named after its target | — |
 
 Proven live on 2026-09-18 against the Raspberry Pi, from the packaged `fleet-ux` build
 on a fresh data directory:
@@ -301,8 +307,16 @@ on a fresh data directory:
   challenge, review, install verified, certificate issued, service installed with
   lingering, connected.
 
-Not proven: the local **Set up this Mac** from the packaged build (only from a `--dev`
-runtime, which cannot boot the fleet it makes — finding 8, now a named blocker), the
-TUI's reconnection across that restart (covered by a scripted test only), and a
-release-origin install onto a machine with no `ouro` from the rewritten UI (the Pi
-already had one; the 0.1.9 flow installed it).
+Also proven on the final packaged build, on a second fresh data directory and on the
+first: **Set up this Mac** from the web — plan, approval, the runtime stopped through
+its idle gate, the fleet created, the LaunchAgent installed and the runtime back under
+it (once finding 13 was fixed), and the web port the same across two clean restarts
+(finding 14); a removal and a re-add of the Pi with the corrected words; a review left
+in a closed tab answered from a fresh one, through to the password prompt the worker
+issued afterwards.
+
+Not proven: the TUI's reconnection across the local restart (a scripted test only), and
+a release-origin install onto a machine with no `ouro` from the rewritten UI (the Pi
+already had one; the 0.1.9 flow installed it). Two tabs open at once on the same
+prompt still end at a "Reconnect this setup to this tab" that the broker refuses while
+the first tab lives; that is the binding working, but the affordance is misleading.
