@@ -746,6 +746,9 @@ defmodule Ouroboros.Web.Live.SettingsLive do
               <p class="ouro-settings-section-foot">
                 <a href="/status">Runtime status — role, connected machines, live sessions →</a>
               </p>
+              <p class="ouro-settings-section-foot">
+                <a href="/devices">Devices — this fleet's machines, and adding one →</a>
+              </p>
               <p :if={@runtime_error} class="ouro-refusal ouro-settings-inline-error">
                 Runtime details could not be loaded: {@runtime_error}
               </p>

@@ -263,6 +263,151 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, reason}), do: upstream_error(reason)
 
+  # ---------------------------------------------------------------------------
+  # Fleet deployment
+
+  # Every refusal from the deployment broker carries a stable snake_case `reason` in `data`,
+  # because a Devices surface renders one sentence per reason and a test names them. The
+  # table is the contract: a reason that is not in it is a bug in this build rather than a
+  # new refusal a client should learn to read, so it falls through to `-32006` with the term
+  # Wire-encoded and nothing invented.
+  @deployment %{
+    ouro_path_unknown:
+      {:unavailable,
+       "this runtime does not know where its own `ouro` executable is, so it cannot run a deployment"},
+    ouro_timeout: {:upstream_timeout, "`ouro` did not answer inside the deployment ceiling"},
+    ouro_failed: {:upstream_error, "`ouro` refused the call"},
+    ouro_crashed: {:upstream_error, "`ouro` could not be run"},
+    devices_unreadable:
+      {:upstream_error, "`ouro fleet devices --json` printed something this build cannot read"},
+    no_data_dir:
+      {:unavailable, "this runtime serves no durable data directory, so it holds no deployments"},
+    unknown_operation: {:not_found, "no deployment operation with that id on this runtime"},
+    invalid_operation: {:invalid_params, "params.operation_id is not an operation id"},
+    journal_unreadable:
+      {:upstream_error, "the operation journal on this machine could not be read"},
+    no_worker:
+      {:unavailable,
+       "no deployment worker is attached for that operation; read its status, then resume it"},
+    worker_unavailable: {:unavailable, "the deployment worker is no longer connected"},
+    worker_unreachable:
+      {:unavailable,
+       "the deployment worker's socket could not be reached; its log is beside its journal in the data directory"},
+    worker_timeout: {:upstream_timeout, "the deployment worker did not answer in time"},
+    worker_answered_nothing:
+      {:upstream_error, "the deployment worker answered a frame this build cannot read"},
+    worker_frame_too_large:
+      {:upstream_error, "the deployment worker wrote a frame over the protocol's 1 MiB cap"},
+    frame_too_large: {:invalid_params, "that response does not fit in one protocol frame"},
+    worker_spawn_failed: {:upstream_error, "the deployment worker could not be started"},
+    attach_failed: {:upstream_error, "this runtime could not attach to the deployment worker"},
+    capability_missing:
+      {:unavailable,
+       "the deployment worker never published its capability file; its log is beside its journal"},
+    capability_unusable:
+      {:upstream_error,
+       "the deployment worker's capability file is not a private 0600 file holding a capability"},
+    capability_unreadable:
+      {:upstream_error, "the deployment worker's capability file could not be read"},
+    session_unbound:
+      {:scope_denied,
+       "this call arrived with no client session, and a deployment challenge is answered by the session it was issued to"},
+    challenge_not_bound:
+      {:scope_denied,
+       "that challenge was issued to a different identity or session; ask for a new one"},
+    challenge_expired: {:upstream_error, "that challenge has expired; ask for a new one"},
+    challenge_consumed: {:upstream_error, "that challenge has already been answered"},
+    challenge_kind_mismatch:
+      {:upstream_error, "that challenge is not the kind this method answers"},
+    no_review_pending: {:upstream_error, "that operation has no plan waiting for approval"},
+    operation_in_progress:
+      {:upstream_error, "that operation was already started under a different idempotency key"},
+    start_in_flight:
+      {:upstream_error, "that start is still in flight; read the operation's status"},
+    already_attached: {:upstream_error, "that operation already has a worker attached"},
+    operation_finished: {:upstream_error, "that operation has finished and cannot be resumed"},
+    operation_state_unknown:
+      {:upstream_error, "that operation's journal does not record a state to resume from"},
+    worker_refused: {:upstream_error, "the deployment worker refused the request"},
+    deploy_blocked:
+      {:scope_denied,
+       "this host cannot deploy right now; `fleet.devices` reports the same blockers under capabilities.reasons"},
+    worker_attaching:
+      {:unavailable,
+       "that operation's worker is still being attached to; read its status in a moment"},
+    operation_not_yours:
+      {:scope_denied,
+       "that operation belongs to another identity; resume it with takeover if you mean to take it over"},
+    devices_busy:
+      {:unavailable, "this runtime is already running as many device inventories as it allows"},
+    ouro_output_too_large:
+      {:upstream_error, "`ouro` printed more than this runtime will read from it"},
+    socket_not_private:
+      {:upstream_error,
+       "the worker's socket path is not a socket this account owns in a private directory"},
+    socket_unreadable: {:unavailable, "the worker's socket could not be inspected"},
+    client_supervisor_unavailable:
+      {:unavailable, "this runtime's deployment connection supervisor is not running"}
+  }
+
+  @doc "Every stable deployment reason code, for the reference and the tests."
+  @spec deployment_reasons() :: [String.t()]
+  def deployment_reasons,
+    do: @deployment |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort()
+
+  @doc false
+  def deployment_reply({:ok, value}), do: {:ok, value}
+  def deployment_reply(:ok), do: {:ok, %{}}
+
+  def deployment_reply({:error, reason}) do
+    case normalize_deployment(reason) do
+      {name, data} ->
+        {kind, message} = Map.fetch!(@deployment, name)
+
+        {:error, code(kind), message, Map.merge(%{"reason" => Atom.to_string(name)}, data)}
+
+      :unknown ->
+        upstream_error(reason)
+    end
+  end
+
+  # The worker's own refusal keeps the worker's reason string rather than being folded into
+  # one of this side's: `plan_changed`, `host_key_changed` and `unsupported_routing` are
+  # facts about the machine being deployed to, and a broker that renamed them would be
+  # hiding the only part of the answer an operator can act on.
+  defp normalize_deployment({:worker_refused, reason, detail}) when is_binary(reason) do
+    {:worker_refused, %{"worker_reason" => reason, "detail" => bounded(detail)}}
+  end
+
+  # The blockers travel as a list under their own key rather than as prose: a surface renders
+  # one sentence per blocker, and the same list is what `fleet.devices` already answers with.
+  defp normalize_deployment({:deploy_blocked, blockers}) when is_list(blockers) do
+    {:deploy_blocked, %{"blockers" => blockers}}
+  end
+
+  defp normalize_deployment({:ouro_failed, status, output}) do
+    {:ouro_failed, %{"status" => status, "output" => bounded(output)}}
+  end
+
+  defp normalize_deployment({name, detail}) when is_atom(name) do
+    if Map.has_key?(@deployment, name),
+      do: {name, %{"detail" => bounded(detail)}},
+      else: :unknown
+  end
+
+  defp normalize_deployment(name) when is_atom(name) do
+    if Map.has_key?(@deployment, name), do: {name, %{}}, else: :unknown
+  end
+
+  defp normalize_deployment(_other), do: :unknown
+
+  defp bounded(nil), do: nil
+  defp bounded(detail) when is_binary(detail), do: String.slice(detail, 0, 2_000)
+  defp bounded(detail) when is_integer(detail), do: detail
+  defp bounded(detail), do: detail |> inspect(limit: 10) |> String.slice(0, 2_000)
+
+  # ---------------------------------------------------------------------------
+
   def exit_result(reason) do
     case exit_class(reason) do
       :gone ->

@@ -1202,6 +1202,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp command(socket, "runtime.status"), do: push_navigate(socket, to: "/status")
   defp command(socket, "runtime.audit"), do: push_navigate(socket, to: "/audit")
+  defp command(socket, "runtime.devices"), do: push_navigate(socket, to: "/devices")
   defp command(socket, "client.settings"), do: push_navigate(socket, to: "/settings")
   defp command(socket, "client.theme"), do: push_event(socket, "ouro-chrome", %{control: "theme"})
   defp command(socket, "client.shortcuts"), do: open_shortcuts(socket)

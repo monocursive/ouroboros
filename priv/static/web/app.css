@@ -533,9 +533,17 @@ body.phx-loading {
   text-decoration-color: var(--border-strong);
 }
 
-/* A row of presence dots with a label, read out as one image. It is a span: there is no
-   machines page to navigate to. */
+/* A row of presence dots with a label, read out as one image. It is a link now: the
+   machine labels are the route to Devices, which is where a machine is acted on. */
 .ouro-presence {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+/* The dots keep their image role inside that link. Flex, not `contents`: historically
+   `display: contents` dropped the wrapper from the accessibility tree and took the
+   image role with it. */
+.ouro-presence-dots {
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -4085,6 +4093,23 @@ body .ouro-gate {
   body .ouro-cell-actions {
     opacity: 1;
   }
+  /* Devices, slice 6: three columns of facts do not fit a phone. Stacked, the action
+     goes under the row it belongs to rather than beside a name it has squeezed. */
+  body .ouro-devices-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body .ouro-devices-row .ouro-devices-name,
+  body .ouro-devices-row .ouro-devices-facts,
+  body .ouro-devices-row .ouro-devices-presence,
+  body .ouro-devices-row .ouro-devices-state,
+  body .ouro-devices-row .ouro-devices-action {
+    grid-column: 1;
+    grid-row: auto;
+    justify-self: start;
+  }
+  body .ouro-devices-controls .ouro-new-input {
+    flex-basis: 100%;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5034,3 +5059,331 @@ body .ouro-composer-actions .ouro-quiet-button { min-height: 44px; padding: .35r
 body .ouro-composer-box .ouro-image-attach { width: 44px; height: 44px; }
 body .ouro-composer-bar .ouro-palette-trigger { min-height: 44px; padding: .25rem .5rem; font-size: .75rem; }
 body .ouro-composer-settings > summary { padding: .4rem .6rem; }
+
+
+/* ==========================================================================
+   Devices — fleet onboarding, slice 6
+   ==========================================================================
+
+   `/devices` reuses the panel, field and dialog components the rest of the surface
+   already has; what is new here is the inventory row, the discovery notice and the
+   deployment drawer's step list. Nothing in this section restyles a class another
+   section defines, and no state is carried by colour alone: every dot, rule and tone
+   below sits beside words that say the same thing.
+   ========================================================================== */
+
+.ouro-devices-host {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  margin: 0 0 var(--gutter);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--secondary);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.ouro-devices-host strong {
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.ouro-devices-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem 1rem;
+  padding: 0 0 0.9rem;
+  border-bottom: 1px solid var(--hairline-1);
+}
+
+.ouro-devices-controls .ouro-new-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.ouro-devices-filters {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.ouro-devices-filter-on {
+  border-color: var(--border-strong);
+  color: var(--ink);
+}
+
+.ouro-devices-section {
+  padding: 1rem 0 0;
+}
+
+.ouro-devices-section-title {
+  font-size: 0.85rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+  margin: 0 0 0.6rem;
+}
+
+.ouro-devices-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.ouro-devices-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1.2fr) minmax(0, 1.4fr) auto;
+  align-items: baseline;
+  gap: 0.25rem 1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.ouro-devices-name {
+  grid-column: 1;
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.ouro-devices-facts {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  color: var(--tertiary);
+  font-size: 0.75rem;
+}
+
+.ouro-devices-action {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  justify-self: end;
+}
+
+.ouro-devices-presence,
+.ouro-devices-state {
+  grid-column: 1 / span 2;
+  color: var(--secondary);
+  font-size: 0.8rem;
+}
+
+.ouro-devices-state {
+  color: var(--ink);
+}
+
+.ouro-devices-note,
+.ouro-devices-blocked {
+  grid-column: 1 / -1;
+  margin: 0.35rem 0 0;
+  padding: 0.5rem 0.6rem;
+  border-left: 2px solid var(--warn-amber);
+  background: var(--inset);
+  color: var(--secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+/* An action a blocker stands in front of. It keeps its name — a control that vanished
+   tells an operator nothing — and reads as unavailable rather than pressable. Not colour
+   alone: it is also `disabled`, `aria-disabled`, and carries the reason as its title. */
+.ouro-devices-unavailable {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--tertiary);
+  cursor: not-allowed;
+}
+
+.ouro-devices-quiet {
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+.ouro-devices-empty {
+  color: var(--tertiary);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.ouro-devices-discovery {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 1rem 0 0;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--warn-amber);
+  border-radius: var(--radius);
+  background: var(--inset);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.ouro-devices-discovery strong {
+  color: var(--ink);
+}
+
+.ouro-devices-detail {
+  color: var(--tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.ouro-devices-manual {
+  margin: 1rem 0 0;
+  color: var(--secondary);
+  font-size: 0.85rem;
+}
+
+.ouro-devices-legend {
+  margin: 1.25rem 0 0;
+  font-size: 0.8rem;
+  color: var(--secondary);
+}
+
+.ouro-devices-legend table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.6rem;
+}
+
+.ouro-devices-legend th,
+.ouro-devices-legend td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.4rem 0.6rem 0.4rem 0;
+  border-bottom: 1px solid var(--hairline-1);
+  line-height: 1.5;
+}
+
+.ouro-devices-members {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.ouro-devices-drawer {
+  max-width: 44rem;
+  width: min(44rem, 94vw);
+}
+
+.ouro-devices-target {
+  margin: 0 0 0.75rem;
+  color: var(--secondary);
+  font-size: 0.85rem;
+}
+
+.ouro-devices-step {
+  margin: 1rem 0 0;
+  padding: 0.9rem 0 0;
+  border-top: 1px solid var(--hairline-1);
+}
+
+.ouro-devices-step h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+}
+
+.ouro-devices-plan {
+  margin: 0 0 0.75rem;
+}
+
+.ouro-devices-plan h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--secondary);
+}
+
+.ouro-devices-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.ouro-devices-steps li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--hairline-1);
+}
+
+.ouro-devices-step-name {
+  flex: 1 1 12rem;
+  color: var(--ink);
+}
+
+.ouro-devices-step-outcome {
+  color: var(--secondary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.ouro-devices-steps li[data-outcome="failed"] .ouro-devices-step-outcome {
+  color: var(--danger);
+}
+
+.ouro-devices-log {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  font-size: 0.75rem;
+  color: var(--tertiary);
+}
+
+.ouro-devices-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0;
+}
+
+.ouro-devices-advanced {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--secondary);
+}
+
+.ouro-devices-takeover {
+  margin: 1rem 0 0;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--warn-amber);
+  border-radius: var(--radius);
+  background: var(--inset);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.ouro-devices-takeover h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+}
+
+.ouro-devices-drawer-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 1.25rem 0 0;
+  padding: 0.9rem 0 0;
+  border-top: 1px solid var(--hairline-1);
+}

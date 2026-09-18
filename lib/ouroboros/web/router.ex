@@ -15,6 +15,11 @@ defmodule Ouroboros.Web.Router do
   `/status` is W0's page, kept rather than folded in: it is one call deep and stands on
   nothing, which makes it the page an operator loads when the deck itself is what looks
   broken.
+
+  `/devices` is the fleet's other half — the machines this one can see, and the deployment
+  of Ouroboros onto one of them. It takes one optional query parameter, `operation`, which
+  is how a deployment survives the page being closed: the id names the operation to reload,
+  and nothing else about it is in the address.
   """
 
   use Phoenix.Router, helpers: false
@@ -42,6 +47,7 @@ defmodule Ouroboros.Web.Router do
       live "/new", Live.NewSessionLive, :index
       live "/settings", Live.SettingsLive, :index
       live "/status", StatusLive, :index
+      live "/devices", Live.DevicesLive, :index
       live "/audit", AuditLive, :index
       live "/audit/:stream", AuditLive, :show
     end

@@ -53,6 +53,8 @@ workspaces_root =
 
 File.mkdir_p!(workspaces_root)
 Application.put_env(:ouroboros, :workspace_allowed_roots, [workspaces_root])
+# Preserve the frozen corpus while checking historical decoding, regardless of today's date.
+Application.put_env(:ouroboros, :terminal_retention_ms, nil)
 
 started_at = System.monotonic_time(:millisecond)
 

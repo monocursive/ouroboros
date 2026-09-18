@@ -1466,7 +1466,7 @@ impl App {
                         .is_some_and(|watch| watch.awaiting_answer(request_id));
 
                 if answered_under_it {
-                    self.overlay = None;
+                    self.close_overlay();
                 }
             }
 
@@ -3020,7 +3020,7 @@ impl App {
             if matches!(self.overlay, Some(Overlay::Account(_))) {
                 self.cancel_account();
             } else {
-                self.overlay = None;
+                self.close_overlay();
             }
 
             return;

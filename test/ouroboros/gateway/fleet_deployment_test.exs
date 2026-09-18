@@ -1,0 +1,992 @@
+defmodule Ouroboros.Gateway.FleetDeploymentTest do
+  # `async: false`: moves `config :ouroboros, :data_dir`, `config :ouroboros, :audit` and the
+  # `OUROBOROS_PROCESS_ID_HELPER` environment variable, all node-global.
+  use ExUnit.Case, async: false
+
+  @moduletag :capture_log
+
+  alias Ouroboros.Audit.Config, as: AuditConfig
+  alias Ouroboros.Gateway.Config
+  alias Ouroboros.Gateway.Conn
+  alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Gateway.Methods.Contract
+  alias Ouroboros.Test.FleetOuroFake
+  alias Ouroboros.Test.FleetWorkerFake
+
+  @token String.duplicate("g", 40)
+  @receive_timeout 5_000
+
+  @deployment_methods ~w(
+    fleet.deployment.prepare fleet.deployment.start fleet.deployment.authenticate
+    fleet.deployment.confirm_host fleet.deployment.cancel fleet.deployment.resume
+  )
+
+  setup do
+    start_supervised!({Task.Supervisor, name: :fleet_deployment_test_tasks})
+
+    start_supervised!(
+      {DynamicSupervisor, strategy: :one_for_one, name: :fleet_deployment_test_conns}
+    )
+
+    root = Path.join(System.tmp_dir!(), "ogw2b#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o700)
+    fake_dir = Path.join(root, "bin")
+
+    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
+    # enforces that rather than only reporting it. These suites deploy onto other machines,
+    # so they are issuers.
+    File.mkdir_p!(Path.join(root, "fleet"))
+    ca = Path.join([root, "fleet", "ca-key.pem"])
+    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
+    File.chmod!(ca, 0o600)
+
+    previous = %{
+      data_dir: Application.get_env(:ouroboros, :data_dir),
+      audit: Application.get_env(:ouroboros, :audit),
+      # The deploy blockers read this, and a case that reconfigures the endpoint to prove one
+      # of them would otherwise leave it set for every case after it.
+      web: Application.get_env(:ouroboros, :web),
+      ouro: System.get_env("OUROBOROS_PROCESS_ID_HELPER")
+    }
+
+    Application.put_env(:ouroboros, :data_dir, root)
+
+    on_exit(fn ->
+      restore(:data_dir, previous.data_dir)
+      restore(:audit, previous.audit)
+      restore(:web, previous.web)
+
+      if previous.ouro,
+        do: System.put_env("OUROBOROS_PROCESS_ID_HELPER", previous.ouro),
+        else: System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
+
+      File.rm_rf!(root)
+    end)
+
+    %{root: root, fake_dir: fake_dir}
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  # ---------------------------------------------------------------------------
+  # The table itself
+
+  describe "the method table" do
+    test "serves every verb the proposal's method family names, at the scope it names" do
+      table = Methods.table()
+
+      assert table["fleet.devices"].scope == :read
+      assert table["fleet.deployment.status"].scope == :read
+
+      for method <- @deployment_methods do
+        assert table[method].scope == :operate, "#{method} must be operate-scoped"
+      end
+    end
+
+    test "every one of them refuses an unknown parameter before dispatch" do
+      for method <- ["fleet.devices", "fleet.deployment.status" | @deployment_methods] do
+        assert {:invalid, message} = Contract.validate(method, %{"unexpected" => true})
+        assert message =~ "unsupported fields: unexpected"
+      end
+    end
+
+    test "a ceiling breach on the two verbs that change another machine is unknown, not failure" do
+      table = Methods.table()
+
+      assert table["fleet.deployment.start"].outcome == :unknown
+      assert table["fleet.deployment.cancel"].outcome == :unknown
+
+      # And not on the ones where the gateway giving up really does mean nothing happened.
+      refute Map.get(table["fleet.devices"], :outcome)
+      refute Map.get(table["fleet.deployment.status"], :outcome)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Scope
+
+  describe "scope" do
+    test "a read listener serves the inventory and the status read", context do
+      arrange_devices(context, ~s({"devices": [], "discovery": {"code": "ok"}}\n))
+      client = connected(scope: :read)
+
+      result = call(client, "fleet.devices")["result"]
+
+      assert result["devices"] == []
+      assert is_boolean(result["host"]["capabilities"]["deploy"])
+      assert result["host"]["issuer"] == true
+
+      # Status of an operation nobody started is a not-found, not a scope refusal.
+      assert call(client, "fleet.deployment.status", %{"operation_id" => "00aa11bb22cc33dd"})[
+               "error"
+             ]["code"] == -32_007
+    end
+
+    test "a read listener refuses every mutation with -32003", _context do
+      client = connected(scope: :read)
+
+      for method <- @deployment_methods do
+        error = call(client, method, %{})["error"]
+        assert error["code"] == -32_003, "#{method} must be refused at read scope"
+        assert error["message"] =~ method
+      end
+    end
+
+    test "an operate listener gets past scope and lands on the parameters", _context do
+      client = connected(scope: :operate)
+
+      # No `ouro`, so the deepest these can get is a named refusal — never -32003.
+      System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
+
+      error = call(client, "fleet.deployment.prepare", %{})["error"]
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.target is required for an add"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Identities
+
+  describe "with identities configured" do
+    test "an operator reads membership but is refused the network inventory", context do
+      arrange_devices(context, ~s({"devices": []}\n))
+      configure_identities(context)
+
+      client = connected(scope: :operate, token: "operator-token")
+
+      # The membership subset an operator keeps lives in `fleet.status`, and only there.
+      assert call(client, "fleet.status")["result"]
+      assert call(client, "fleet.doctor")["result"]
+
+      # The identity rules are scope-independent, so the read-scoped members of the family
+      # are refused for the same reason the mutations are: a tailnet inventory is every
+      # machine on an operator's private network, and an operation's steps are a
+      # deployment's business.
+      for method <- ["fleet.devices", "fleet.deployment.status" | @deployment_methods] do
+        assert call(client, method, %{})["error"]["code"] == -32_003,
+               "#{method} must need an administrator"
+      end
+    end
+
+    test "an auditor is refused the inventory too", context do
+      arrange_devices(context, ~s({"devices": []}\n))
+      configure_identities(context)
+
+      client = connected(scope: :operate, token: "auditor-token")
+
+      for method <- ["fleet.devices", "fleet.deployment.status" | @deployment_methods] do
+        assert call(client, method, %{})["error"]["code"] == -32_003,
+               "#{method} must need an administrator"
+      end
+    end
+
+    test "an administrator reaches the verbs", context do
+      arrange_devices(context, ~s({"devices": []}\n))
+      configure_identities(context)
+
+      client = connected(scope: :operate, token: "administrator-token")
+
+      assert call(client, "fleet.devices")["result"]["host"]
+
+      # Past the gate, onto the parameters — which is what "reaches the verb" means. The
+      # read-scoped status reaches its own refusal, not the identity's.
+      assert call(client, "fleet.deployment.prepare", %{})["error"]["code"] == -32_602
+
+      assert call(client, "fleet.deployment.status", %{"operation_id" => "00aa11bb22cc33dd"})[
+               "error"
+             ]["code"] == -32_007
+    end
+  end
+
+  describe "with no identities configured" do
+    test "the local owner is the administrator, which is the single-machine posture",
+         context do
+      arrange_devices(context, ~s({"devices": []}\n))
+      Application.delete_env(:ouroboros, :audit)
+
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.devices")["result"]["host"]
+      assert call(client, "fleet.deployment.prepare", %{})["error"]["code"] == -32_602
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The whole lifecycle over a real listener
+
+  describe "over a listener" do
+    test "prepare, challenge, authenticate, start and cancel", context do
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      prepared = call(client, "fleet.deployment.prepare", prepare_params())["result"]
+      operation = prepared["operation_id"]
+      assert String.match?(operation, ~r/\A[0-9a-f]{16}\z/)
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
+      assert status["source"] == "worker"
+      assert status["attached"] == true
+
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(client, operation, "pw")
+
+      answered =
+        call(client, "fleet.deployment.authenticate", %{
+          "operation_id" => operation,
+          "challenge" => "pw",
+          "secret" => "listener-secret-01"
+        })["result"]
+
+      assert answered["accepted"] == true
+      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
+      assert frame["response"]["secret"] == "listener-secret-01"
+
+      :ok = FleetWorkerFake.challenge(worker, "rev", "review", %{"plan" => %{"steps" => []}})
+      await_challenge(client, operation, "rev")
+
+      started =
+        call(client, "fleet.deployment.start", %{
+          "operation_id" => operation,
+          "plan_digest" => "abc123",
+          "idempotency_key" => "key-listener"
+        })["result"]
+
+      assert started["accepted"] == true
+
+      cancelled =
+        call(client, "fleet.deployment.cancel", %{"operation_id" => operation})["result"]
+
+      assert cancelled["cancelled"] == true
+
+      assert FleetWorkerFake.refusals(worker) == 0
+    end
+
+    test "a second listener connection is a second session and cannot answer the challenge",
+         context do
+      %{worker: worker} = arrange_worker(context)
+      first = connected(scope: :operate)
+      second = connected(scope: :operate)
+
+      operation =
+        call(first, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
+      await_challenge(first, operation, "pw")
+
+      # Same identity, same scope, same machine — a different connection. Seam S4 binds a
+      # challenge to the session it was issued to, and this is that session's neighbour.
+      error =
+        call(second, "fleet.deployment.authenticate", %{
+          "operation_id" => operation,
+          "challenge" => "pw",
+          "secret" => "second-connection-secret"
+        })["error"]
+
+      assert error["code"] == -32_003
+      assert error["data"]["reason"] == "challenge_not_bound"
+
+      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+      assert FleetWorkerFake.refusals(worker) == 0
+
+      # The connection it *was* issued to still answers.
+      assert call(first, "fleet.deployment.authenticate", %{
+               "operation_id" => operation,
+               "challenge" => "pw",
+               "secret" => "first-connection-secret"
+             })["result"]["accepted"] == true
+    end
+
+    test "a stale challenge answered twice is refused with a stable reason", context do
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      operation =
+        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
+      await_challenge(client, operation, "pw")
+
+      assert call(client, "fleet.deployment.authenticate", %{
+               "operation_id" => operation,
+               "challenge" => "pw",
+               "secret" => "one"
+             })["result"]
+
+      error =
+        call(client, "fleet.deployment.authenticate", %{
+          "operation_id" => operation,
+          "challenge" => "pw",
+          "secret" => "two"
+        })["error"]
+
+      assert error["code"] == -32_006
+      assert error["data"]["reason"] == "challenge_consumed"
+    end
+
+    test "an expired challenge carries its own reason code", context do
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      operation =
+        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      past = DateTime.utc_now() |> DateTime.add(-30, :second) |> DateTime.to_iso8601()
+      :ok = FleetWorkerFake.challenge(worker, "old", "password", %{"expires_at" => past})
+      await_challenge(client, operation, "old")
+
+      error =
+        call(client, "fleet.deployment.authenticate", %{
+          "operation_id" => operation,
+          "challenge" => "old",
+          "secret" => "too-late"
+        })["error"]
+
+      assert error["data"]["reason"] == "challenge_expired"
+    end
+
+    test "resume brings back an operation whose worker is gone", context do
+      %{worker: _worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      operation =
+        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      # The worker wrote its journal before it died, which is the only reason there is
+      # anything to resume.
+      write_journal(context.root, operation, %{
+        "operation" => operation,
+        # Seam S5's owner. A listener that authenticated with the local token resolves to
+        # `local-owner`, which is what `Audit.Identity.actor/0` answers for this caller.
+        "owner" => "local-owner",
+        "kind" => "add",
+        "state" => "interrupted"
+      })
+
+      assert {:ok, pid} = Ouroboros.Fleet.Deployment.client(operation)
+      reference = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
+
+      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
+      assert status["source"] == "journal"
+      assert status["state"] == "interrupted"
+
+      resumed = call(client, "fleet.deployment.resume", %{"operation_id" => operation})["result"]
+      assert resumed["operation_id"] == operation
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
+      assert status["source"] == "worker"
+    end
+
+    test "an unknown `ouro` is a named unavailability rather than a crash", _context do
+      System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
+      client = connected(scope: :operate)
+
+      error = call(client, "fleet.devices")["error"]
+      assert error["code"] == -32_004
+      assert error["data"]["reason"] == "ouro_path_unknown"
+
+      # `prepare` does not get as far as the launcher: not knowing where `ouro` is, is one of
+      # the blockers this host is refused for, and the refusal names the whole set.
+      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
+      assert error["data"]["reason"] == "deploy_blocked"
+      assert "ouro_path_unknown" in error["data"]["blockers"]
+    end
+
+    test "an operation id that is not one is refused before any path is built", _context do
+      client = connected(scope: :operate)
+
+      error =
+        call(client, "fleet.deployment.status", %{"operation_id" => "../../../etc/passwd"})[
+          "error"
+        ]
+
+      assert error["code"] == -32_602
+      assert error["data"]["reason"] == "invalid_operation"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The first local fleet, and the request the worker actually reads
+
+  describe "prepare kinds" do
+    test "a setup takes no target and no account, because it is this device", context do
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      prepared = call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+      operation = prepared["operation_id"]
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      assert FleetWorkerFake.refusals(worker) == 0
+
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["kind"] == "setup"
+      assert request["operation"] == operation
+      assert request["schema"] == 1
+      assert request["identity"] == %{"kind" => "default"}
+
+      # The spec is explicit that this machine configures itself "without SSH to itself":
+      # there is no account on this request at all.
+      refute Map.has_key?(request, "ssh_user")
+      refute Map.has_key?(request, "ssh_port")
+
+      # And it is called what this device is already called, unless somebody says otherwise.
+      assert request["machine"] == Ouroboros.Fleet.Deployment.host_name()
+    end
+
+    test "a setup takes the machine, address and service the operator chose", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "kind" => "setup",
+               "machine" => "operator-laptop",
+               "address" => "100.64.12.21",
+               "service" => false
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["machine"] == "operator-laptop"
+      assert request["address"] == "100.64.12.21"
+      assert request["service"] == false
+    end
+
+    test "an add still requires the account, and a setup never did", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "target" => %{"address" => "100.64.12.44"}
+        })["error"]
+
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.ssh_user"
+
+      # The same call as a setup is not missing anything, because a setup has no account.
+      assert call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+    end
+
+    test "an add is refused a target that names no address", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "target" => %{"peer_id" => "nkBuildLinux"},
+          "ssh_user" => "deploy"
+        })["error"]
+
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.target.address is required"
+      assert error["message"] =~ "fleet.devices"
+    end
+
+    test "an add names the machine from the peer id when no machine is given", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "target" => %{"address" => "100.64.12.44", "peer_id" => "nkBuildLinux"},
+               "ssh_user" => "deploy"
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["machine"] == "nkBuildLinux"
+      assert request["address"] == "100.64.12.44"
+      assert request["ssh_port"] == 22
+    end
+
+    test "an identity is translated into the shape the worker names it by", context do
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      for {given, expected} <- [
+            {%{"kind" => "agent", "ref" => "SHA256:abc"},
+             %{"kind" => "agent", "fingerprint" => "SHA256:abc"}},
+            {%{"kind" => "key", "ref" => "/home/a/.ssh/id_ed25519"},
+             %{"kind" => "key", "path" => "/home/a/.ssh/id_ed25519"}},
+            {%{"kind" => "password"}, %{"kind" => "password"}},
+            {%{"kind" => "default"}, %{"kind" => "default"}}
+          ] do
+        result =
+          call(client, "fleet.deployment.prepare", %{
+            "target" => %{"address" => "100.64.12.44"},
+            "ssh_user" => "deploy",
+            "identity" => given
+          })["result"]
+
+        assert result
+        assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+        request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+        assert request["identity"] == expected,
+               "#{inspect(given)} became #{inspect(request["identity"])}"
+
+        operation = result["operation_id"]
+        {:ok, pid} = Ouroboros.Fleet.Deployment.client(operation)
+        ref = Process.monitor(pid)
+        Process.exit(pid, :kill)
+        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @receive_timeout
+
+        Enum.reduce_while(1..50, :attached, fn _attempt, _acc ->
+          if FleetWorkerFake.attached(worker) == nil,
+            do: {:halt, :ok},
+            else: Process.sleep(20) && {:cont, :attached}
+        end)
+      end
+    end
+
+    test "an agent or key identity with no reference is refused", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      for kind <- ["agent", "key"] do
+        error =
+          call(client, "fleet.deployment.prepare", %{
+            "target" => %{"address" => "100.64.12.44"},
+            "ssh_user" => "deploy",
+            "identity" => %{"kind" => kind}
+          })["error"]
+
+        assert error["code"] == -32_602
+        assert error["message"] =~ "identity.kind is #{kind}"
+      end
+    end
+
+    test "an unknown kind is refused before anything is forked", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error = call(client, "fleet.deployment.prepare", %{"kind" => "leave"})["error"]
+      assert error["code"] == -32_602
+      assert error["message"] =~ "params.kind must be setup or add"
+
+      refute_receive {:fake_worker, _frame}, 300
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # What a device row needs to know about an open operation
+
+  describe "the operations listing" do
+    test "names the device each open operation belongs to", context do
+      arrange_devices(context, ~s({"devices": []}\n))
+
+      write_journal(context.root, "aa11bb22cc33dd44", %{
+        "operation" => "aa11bb22cc33dd44",
+        "owner" => "adele",
+        "kind" => "add",
+        "state" => "awaiting_auth",
+        "created_at" => "2026-09-17T10:00:00Z",
+        "updated_at" => "2026-09-17T10:05:00Z",
+        "target" => %{
+          "machine" => "build-linux",
+          "address" => "100.64.12.44",
+          "ssh_user" => "deploy",
+          "port" => 2222,
+          "host_fingerprint" => "SHA256:abc",
+          "os" => "linux"
+        }
+      })
+
+      client = connected(scope: :operate)
+      [operation] = call(client, "fleet.devices")["result"]["operations"]
+
+      assert operation["operation"] == "aa11bb22cc33dd44"
+      assert operation["kind"] == "add"
+      assert operation["state"] == "awaiting_auth"
+      assert operation["owner"] == "adele"
+      assert operation["attached"] == false
+
+      # The four fields that put it on a row, and only those: a summary is not a journal,
+      # and a fingerprint or an architecture is not what a list needs.
+      assert operation["target"] == %{
+               "machine" => "build-linux",
+               "address" => "100.64.12.44",
+               "ssh_user" => "deploy",
+               "port" => 2222
+             }
+    end
+
+    test "an operation with no target, and one whose journal cannot be read, still render",
+         context do
+      arrange_devices(context, ~s({"devices": []}\n))
+
+      write_journal(context.root, "1122334455667788", %{
+        "operation" => "1122334455667788",
+        "kind" => "setup",
+        "state" => "inspecting"
+      })
+
+      File.write!(Path.join([context.root, "deploy", "99aabbccddeeff00.json"]), "{ not json")
+
+      client = connected(scope: :operate)
+      operations = call(client, "fleet.devices")["result"]["operations"]
+
+      setup = Enum.find(operations, &(&1["operation"] == "1122334455667788"))
+      assert setup["kind"] == "setup"
+      assert setup["target"] == nil
+      assert setup["owner"] == nil
+      assert setup["readable"] == true
+
+      broken = Enum.find(operations, &(&1["operation"] == "99aabbccddeeff00"))
+      assert broken["readable"] == false
+      assert broken["reason"] == "journal_unreadable"
+
+      # Every row carries every key a surface reads, null where it could not be established:
+      # a missing key and a null one are the same thing to a renderer and different things
+      # to a person reading the JSON.
+      for row <- operations do
+        for field <- ~w(operation owner kind state created_at updated_at target readable) do
+          assert Map.has_key?(row, field), "#{field} missing from #{inspect(row)}"
+        end
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # A disabled button is a rendering; this is the boundary
+
+  describe "deploy blockers" do
+    setup context do
+      context
+      |> arrange_worker()
+      |> Map.put(:client, connected(scope: :operate))
+    end
+
+    test "no CA key blocks an add, and does not block the setup that creates one", %{
+      client: client,
+      root: root
+    } do
+      File.rm!(Path.join([root, "fleet", "ca-key.pem"]))
+
+      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
+      assert error["data"]["reason"] == "deploy_blocked"
+      assert error["data"]["blockers"] == ["no_ca_key"]
+
+      # The first local fleet is what *creates* the key, so refusing it for not having one
+      # would make the operation that fixes the blocker impossible.
+      assert call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+    end
+
+    test "a cleartext bind blocks a setup too, because it still writes a fleet", %{
+      client: client
+    } do
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      for params <- [prepare_params(), %{"kind" => "setup"}] do
+        error = call(client, "fleet.deployment.prepare", params)["error"]
+        assert error["data"]["reason"] == "deploy_blocked"
+        assert "cleartext_web_bind" in error["data"]["blockers"]
+      end
+    end
+
+    test "every blocker this host has is named at once", %{client: client, root: root} do
+      File.rm!(Path.join([root, "fleet", "ca-key.pem"]))
+      System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
+
+      assert error["code"] == -32_003
+
+      assert Enum.sort(error["data"]["blockers"]) ==
+               ["cleartext_web_bind", "no_ca_key", "ouro_path_unknown"]
+    end
+
+    test "an operation already under way cannot be advanced on a host that became blocked",
+         %{client: client, worker: worker} do
+      operation =
+        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
+      await_challenge(client, operation, "pw")
+
+      # The endpoint is reconfigured under a running deployment. The credential must not be
+      # accepted after that, which is the whole point of deciding on the bind.
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      for {method, params} <- [
+            {"fleet.deployment.authenticate",
+             %{"operation_id" => operation, "challenge" => "pw", "secret" => "blocked-secret"}},
+            {"fleet.deployment.start",
+             %{
+               "operation_id" => operation,
+               "plan_digest" => "sha",
+               "idempotency_key" => "blocked"
+             }},
+            {"fleet.deployment.resume", %{"operation_id" => operation}}
+          ] do
+        error = call(client, method, params)["error"]
+
+        assert error["data"]["reason"] == "deploy_blocked", "#{method} was not blocked"
+        assert "cleartext_web_bind" in error["data"]["blockers"]
+      end
+
+      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+
+      # Stopping one is always allowed: an operator must be able to end a deployment on a
+      # host that may no longer start one.
+      assert call(client, "fleet.deployment.cancel", %{"operation_id" => operation})["result"]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The network's answer and the runtime's are two different questions
+
+  describe "live cluster facts on device rows" do
+    @devices_with_member ~s({"devices": [
+      {"name": "buildbox", "machine": "buildbox", "os": "linux", "address": "100.64.12.44",
+       "online": false, "last_seen": null, "path": "unknown",
+       "state": "fleet_member_not_visible", "action": "diagnose"},
+      {"name": "stranger", "machine": null, "os": "linux", "address": "100.64.12.77",
+       "online": true, "last_seen": null, "path": "direct",
+       "state": "discovered_installation_unknown", "action": "deploy Ouroboros"}
+    ]}\n)
+
+    test "a member this runtime is connected to says so, even when discovery cannot see it",
+         context do
+      arrange_devices(context, @devices_with_member)
+
+      client = connected(scope: :operate)
+      rows = call(client, "fleet.devices")["result"]["devices"]
+
+      member = Enum.find(rows, &(&1["machine"] == "buildbox"))
+
+      # This suite's runtime has no `buildbox`, so the live answer is "nothing known" rather
+      # than "disconnected" — which is the shape the assertion is about: three fields that
+      # are the cluster's, separate from the network's.
+      assert Map.has_key?(member, "connected")
+      assert Map.has_key?(member, "compatible")
+      assert Map.has_key?(member, "runtime_running")
+      assert Map.has_key?(member, "last_probe")
+
+      # Discovery's own facts are untouched: they answer a different question.
+      assert member["online"] == false
+      assert member["path"] == "unknown"
+
+      # And a row that was never in a fleet is not reported as disconnected — it is reported
+      # as nothing, because this runtime knows nothing about it.
+      stranger = Enum.find(rows, &(&1["address"] == "100.64.12.77"))
+      assert stranger["connected"] == nil
+      assert stranger["compatible"] == nil
+      assert stranger["runtime_running"] == nil
+      assert stranger["state"] == "discovered_installation_unknown"
+    end
+
+    test "a connected member's row becomes fleet_member_connected", context do
+      # The local machine is in `fleet_status` as `:local` — connected and compatible — so a
+      # discovery row naming it is the case the live merge exists for. Selected by its state
+      # rather than by position: another suite can leave an offline expected machine in that
+      # list, and the first row is then somebody else's.
+      local =
+        Ouroboros.Cluster.fleet_status().machines
+        |> Enum.find(&(&1[:state] == :local))
+        |> Map.get(:machine)
+
+      assert is_binary(local)
+
+      arrange_devices(context, ~s({"devices": [
+        {"name": "#{local}", "machine": "#{local}", "os": "linux", "address": "100.64.12.9",
+         "online": false, "last_seen": null, "path": "unknown",
+         "state": "fleet_member_not_visible", "action": "diagnose"}
+      ]}\n))
+
+      client = connected(scope: :operate)
+      [row] = call(client, "fleet.devices")["result"]["devices"]
+
+      assert row["connected"] == true
+      assert row["compatible"] == true
+      assert row["runtime_running"] == true
+      assert is_binary(row["last_probe"])
+
+      # The row an operator reads stops saying "not visible on this network · Diagnose" and
+      # starts saying the thing that is true.
+      assert row["state"] == "fleet_member_connected"
+
+      # The network still says what the network said.
+      assert row["online"] == false
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers
+
+  defp prepare_params do
+    %{"target" => %{"address" => "100.64.12.44"}, "ssh_user" => "deploy"}
+  end
+
+  defp arrange_devices(context, document) do
+    ouro = FleetOuroFake.write!(context.fake_dir, devices: document)
+    System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+    ouro
+  end
+
+  defp arrange_worker(context) do
+    cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+    instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+    socket_path = Path.join([context.root, "deploy", "w.sock"])
+
+    worker =
+      start_supervised!(
+        {FleetWorkerFake,
+         [
+           socket_path: socket_path,
+           cap: cap,
+           instance: instance,
+           operation_file: FleetOuroFake.operation_file(context.fake_dir),
+           owner: self()
+         ]},
+        id: {FleetWorkerFake, System.unique_integer([:positive])}
+      )
+
+    ouro =
+      FleetOuroFake.write!(context.fake_dir,
+        spawn_line: FleetWorkerFake.spawn_line(worker),
+        cap: cap
+      )
+
+    System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+    %{worker: worker, ouro: ouro}
+  end
+
+  defp configure_identities(context) do
+    identities = [
+      identity("olive", ["operator"], "operator-token"),
+      identity("adele", ["administrator"], "administrator-token"),
+      identity("aster", ["auditor"], "auditor-token")
+    ]
+
+    config =
+      AuditConfig.new!(
+        mode: :local,
+        capture: :full,
+        root: Path.join(context.root, "evidence"),
+        writer_id: "w2b-gateway-test",
+        identities: identities
+      )
+
+    Application.put_env(:ouroboros, :audit, config)
+    config
+  end
+
+  defp identity(id, roles, token) do
+    %{
+      "id" => id,
+      "roles" => roles,
+      "token_sha256" => :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
+    }
+  end
+
+  defp connected(opts) do
+    token = Keyword.get(opts, :token, @token)
+    client = connect(opts)
+
+    assert call(client, "hello", %{
+             "token" => token,
+             "protocol" => 1,
+             "client" => "w2b-test"
+           })["result"]
+
+    client
+  end
+
+  defp connect(opts) do
+    config =
+      Config.new!(
+        token: @token,
+        data_dir: System.tmp_dir!(),
+        scope: Keyword.get(opts, :scope, :read)
+      )
+
+    {:ok, listen} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, port} = :inet.port(listen)
+    {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1_000)
+    {:ok, server} = :gen_tcp.accept(listen, 1_000)
+    :ok = :gen_tcp.close(listen)
+
+    {:ok, conn} =
+      DynamicSupervisor.start_child(
+        :fleet_deployment_test_conns,
+        {Conn,
+         socket: server,
+         config: config,
+         task_supervisor: :fleet_deployment_test_tasks,
+         conn_supervisor: :fleet_deployment_test_conns}
+      )
+
+    :ok = :gen_tcp.controlling_process(server, conn)
+    send(conn, :socket_ready)
+    on_exit(fn -> :gen_tcp.close(client) end)
+
+    client
+  end
+
+  defp call(client, method, params \\ %{}) do
+    id = System.unique_integer([:positive])
+
+    :ok =
+      :gen_tcp.send(client, [
+        JSON.encode_to_iodata!(%{
+          "jsonrpc" => "2.0",
+          "id" => id,
+          "method" => method,
+          "params" => params
+        }),
+        ?\n
+      ])
+
+    :ok = :inet.setopts(client, packet: :line, active: false, buffer: 1_048_576)
+
+    case :gen_tcp.recv(client, 0, @receive_timeout) do
+      {:ok, line} -> JSON.decode!(String.trim_trailing(line, "\n"))
+      {:error, reason} -> flunk("the listener did not answer #{method}: #{inspect(reason)}")
+    end
+  end
+
+  defp await_challenge(client, operation, challenge) do
+    Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
+      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
+
+      if status && Enum.any?(status["challenges"], &(&1["challenge"] == challenge)) do
+        {:halt, :ok}
+      else
+        Process.sleep(20)
+        {:cont, :missing}
+      end
+    end)
+    |> case do
+      :ok -> :ok
+      :missing -> flunk("the broker never recorded challenge #{challenge}")
+    end
+  end
+
+  defp write_journal(root, operation, document) do
+    dir = Path.join([root, "deploy"])
+    File.mkdir_p!(dir)
+    path = Path.join(dir, operation <> ".json")
+    File.write!(path, JSON.encode!(document))
+    File.chmod!(path, 0o600)
+  end
+end

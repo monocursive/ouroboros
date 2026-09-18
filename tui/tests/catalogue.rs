@@ -88,6 +88,7 @@ fn variant(command: Command) -> &'static str {
         Command::Rename => "Rename",
         Command::Quit => "Quit",
         Command::Approval => "Approval",
+        Command::Devices => "Devices",
     }
 }
 

@@ -46,8 +46,8 @@ defmodule Ouroboros.Web.Call do
 
   require Logger
 
+  alias Ouroboros.Gateway.AuditLine
   alias Ouroboros.Gateway.Methods
-  alias Ouroboros.Gateway.Wire
 
   @type scope :: :read | :operate
   # The fourth element is the gateway's own `data`, passed through untouched: a map for
@@ -62,8 +62,12 @@ defmodule Ouroboros.Web.Call do
   @doc """
   Runs one gateway method on behalf of an authenticated browser session.
 
-  Options: `:session` (the authenticated session id, for the audit line) and
-  `:task_supervisor` (defaults to `Ouroboros.Web.TaskSupervisor`).
+  Options: `:session` (the session id this call is attributed to, and the one a deployment
+  challenge binds to), `:client_session` (an explicit binding id when it must differ from the
+  one the audit line names) and `:task_supervisor` (defaults to
+  `Ouroboros.Web.TaskSupervisor`).
+
+  See `view_session/0` for why a `fleet.deployment.*` call should not pass the cookie's id.
 
   Returns exactly what `Ouroboros.Gateway.Methods.invoke/2` returns, or the same error
   shapes the gateway would have produced for a method this build does not serve, a method
@@ -96,6 +100,25 @@ defmodule Ouroboros.Web.Call do
   end
 
   @doc """
+  A fresh session id for one browser tab.
+
+  `Ouroboros.Web.Auth` writes exactly one id into the session cookie, and every tab in that
+  browser reads it. Binding a deployment credential challenge to that id therefore made the
+  contract's "a second tab cannot answer the first tab's prompt" false: two tabs are one
+  cookie (review F7). A challenge is bound to the *tab* instead.
+
+  `DevicesLive.tab_session/1` is what a LiveView calls: `app.js` keeps one id in
+  `sessionStorage` (per tab by definition) and sends it as a connect parameter. This
+  function is the fallback when that parameter is absent — a browser that refuses storage,
+  or the dead render, which answers no events anyway.
+
+  Minted fresh rather than derived from anything: a derived id is one somebody else can
+  derive.
+  """
+  @spec view_session() :: String.t()
+  def view_session, do: Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+  @doc """
   Whether this build serves a method at all, at this scope.
 
   The feature gate the whole surface uses: a page shows a verb's control if and only if
@@ -103,6 +126,7 @@ defmodule Ouroboros.Web.Call do
   `hello` answers for a terminal client, asked directly because there is no handshake
   between a LiveView and the table it reads.
   """
+
   @spec available?(scope(), String.t()) :: boolean()
   def available?(scope, method) when scope in [:read, :operate] and is_binary(method) do
     case Methods.fetch(method) do
@@ -122,9 +146,16 @@ defmodule Ouroboros.Web.Call do
   defp run(method, params, entry, opts) do
     supervisor = Keyword.get(opts, :task_supervisor, Ouroboros.Web.TaskSupervisor)
     subject = Ouroboros.Audit.Identity.current()
+    # What a deployment challenge binds to. Normally the caller's `:session`, which for a
+    # LiveView making a `fleet.deployment.*` call is its own `view_session/0` rather than the
+    # cookie's id; `:client_session` is the explicit override for a caller that needs the
+    # binding and the audited id to be different values.
+    session = Keyword.get(opts, :client_session) || Keyword.get(opts, :session)
 
     task =
       Task.Supervisor.async_nolink(supervisor, fn ->
+        Process.put(:ouroboros_client_session, session)
+
         Ouroboros.Audit.Identity.with_subject(subject, fn -> Methods.invoke(method, params) end)
       end)
 
@@ -176,10 +207,20 @@ defmodule Ouroboros.Web.Call do
 
   # Matches on the *method's* scope, not the endpoint's: the line exists to record that
   # something mutating happened, and a read-scope endpoint cannot reach this at all.
+  #
+  # What the `params=` field may contain is `Ouroboros.Gateway.AuditLine`'s decision, shared
+  # with the listener so one request reproduced against either surface leaves the same
+  # sixteen hex characters in both logs — and so that the one method whose parameters carry
+  # an SSH secret is redacted in both, rather than in whichever file somebody remembered.
   defp audit(method, params, %{scope: :operate}, opts) do
-    Logger.info(
-      "web operate #{method} params=#{params_digest(params)} session=#{session_id(opts)}"
-    )
+    Logger.info([
+      "web operate ",
+      method,
+      " params=",
+      AuditLine.params(method, params),
+      " session=",
+      session_id(opts)
+    ])
   end
 
   defp audit(_method, _params, _entry, _opts), do: :ok
@@ -189,14 +230,5 @@ defmodule Ouroboros.Web.Call do
       id when is_binary(id) -> id
       _other -> "unattributed"
     end
-  end
-
-  # The gateway's digest, computed the gateway's way, so one request reproduced against
-  # either surface leaves the same 16 hex characters in both logs.
-  defp params_digest(params) do
-    :sha256
-    |> :crypto.hash(params |> Wire.to_json() |> JSON.encode_to_iodata!())
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
   end
 end

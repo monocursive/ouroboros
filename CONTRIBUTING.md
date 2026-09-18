@@ -37,6 +37,17 @@ whole of CI:
 make test
 ```
 
+The gate builds the current `ouro` before the Elixir suite so the fleet broker tests
+exercise this checkout's worker. For a direct `mix test` run with those integration tests:
+
+```sh
+cargo build --locked --manifest-path tui/Cargo.toml --bin ouro
+OUROBOROS_TEST_OURO="$PWD/tui/target/debug/ouro" mix test
+```
+
+An explicitly selected binary must exist and be executable; otherwise those tests fail.
+Without `OUROBOROS_TEST_OURO`, they use `tui/target/debug/ouro` if present and skip if absent.
+
 For quick feedback when editing the release-packaging Makefile recipes:
 
 ```sh

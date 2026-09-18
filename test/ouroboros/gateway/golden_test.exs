@@ -14,7 +14,19 @@ defmodule Ouroboros.Gateway.GoldenTest do
     "attachment.read",
     "attachment.status",
     "attachment.touch_draft",
-    "interactive.safe_status"
+    # The deployment family and the network inventory. Additive in the sense this list
+    # means: a client written against the historical contract still gets every method it
+    # knew, and one that has never heard of Devices simply does not call these.
+    "fleet.deployment.authenticate",
+    "fleet.deployment.cancel",
+    "fleet.deployment.confirm_host",
+    "fleet.deployment.prepare",
+    "fleet.deployment.resume",
+    "fleet.deployment.start",
+    "fleet.deployment.status",
+    "fleet.devices",
+    "interactive.safe_status",
+    "runtime.activity"
   ]
   @compatibility_hello Path.expand(
                          "../../support/gateway_compatibility/hello_before_safe_status.json",

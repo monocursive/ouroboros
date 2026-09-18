@@ -38,6 +38,8 @@ for {key, leaf} <- stores do
 end
 
 Application.put_env(:ouroboros, :workspace_allowed_roots, [root])
+# This gate checks historical decoding, so the frozen terminal records never expire here.
+Application.put_env(:ouroboros, :terminal_retention_ms, nil)
 
 {:ok, _} = Application.ensure_all_started(:ouroboros)
 

@@ -117,6 +117,10 @@ pub enum Action {
     LeaderBacktrack,
     /// The Dashboard tab, which is what "status" means here.
     LeaderStatus,
+    /// The Devices view: the machines this runtime can see, and deploying Ouroboros onto
+    /// one of them. Rebindable like every other verb, which is what the proposal asks of
+    /// a new navigation shortcut.
+    LeaderDevices,
     /// Hide and show the session rail.
     LeaderRail,
     /// The four runtime tabs, reachable with a session open. Named `tab_*` because
@@ -145,7 +149,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 63] = [
+    pub const ALL: [Action; 64] = [
         Self::ChooseLocation,
         Self::StarterExplore,
         Self::StarterReview,
@@ -193,6 +197,7 @@ impl Action {
         Self::LeaderModel,
         Self::LeaderBacktrack,
         Self::LeaderStatus,
+        Self::LeaderDevices,
         Self::LeaderRail,
         Self::LeaderTabDashboard,
         Self::LeaderTabSessions,
@@ -261,6 +266,7 @@ impl Action {
             Self::LeaderModel => "leader.model",
             Self::LeaderBacktrack => "leader.backtrack",
             Self::LeaderStatus => "leader.status",
+            Self::LeaderDevices => "leader.devices",
             Self::LeaderRail => "leader.rail",
             Self::LeaderTabDashboard => "leader.tab_dashboard",
             Self::LeaderTabSessions => "leader.tab_sessions",
@@ -311,6 +317,7 @@ impl Action {
             | Self::LeaderModel
             | Self::LeaderBacktrack
             | Self::LeaderStatus
+            | Self::LeaderDevices
             | Self::LeaderRail
             | Self::LeaderTabDashboard
             | Self::LeaderTabSessions
@@ -394,6 +401,7 @@ impl Action {
             Self::LeaderModel => "m",
             Self::LeaderBacktrack => "g",
             Self::LeaderStatus => "s",
+            Self::LeaderDevices => "D",
             Self::LeaderRail => "b",
             Self::LeaderTabDashboard => "1",
             Self::LeaderTabSessions => "2",
@@ -463,6 +471,7 @@ impl Action {
             Self::LeaderModel => "change the model on this session",
             Self::LeaderBacktrack => "go back to an earlier message",
             Self::LeaderStatus => "runtime dashboard",
+            Self::LeaderDevices => "devices, and deploying to one",
             Self::LeaderRail => "hide or show the session rail",
             Self::LeaderTabDashboard => "dashboard tab",
             Self::LeaderTabSessions => "sessions tab",
@@ -550,6 +559,7 @@ impl Action {
 
             // The machines and the tabs that describe them.
             Self::LeaderStatus
+            | Self::LeaderDevices
             | Self::LeaderTabDashboard
             | Self::LeaderTabSessions
             | Self::LeaderTabUpgrade

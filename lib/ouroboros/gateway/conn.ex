@@ -94,7 +94,9 @@ defmodule Ouroboros.Gateway.Conn do
   require Logger
 
   alias Ouroboros.Cluster
+  alias Ouroboros.Gateway.AuditLine
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Gateway.Writer
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
@@ -226,7 +228,18 @@ defmodule Ouroboros.Gateway.Conn do
     state = %{
       socket: Keyword.fetch!(opts, :socket),
       config: config,
+      # This connection's own identity, minted here and never reused. A deployment
+      # challenge is bound at issue to the subject *and* the session that was attached
+      # (seam S4), and a listener has no session cookie to borrow one from — so the
+      # connection is the session, and a second connection by the same operator cannot
+      # answer the first one's credential prompt.
+      session: "gateway-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower),
       task_supervisor: Keyword.fetch!(opts, :task_supervisor),
+      # Named rather than discovered, because the one thing this process cannot ask a
+      # supervisor is who its supervisor is. It is here for `runtime.activity`'s
+      # `operator_clients`: the listener that started this connection is the listener
+      # whose clients the count is about.
+      conn_supervisor: Keyword.get(opts, :conn_supervisor, Ouroboros.Gateway.ConnSupervisor),
       method_invoker: Keyword.get(opts, :method_invoker, &Methods.invoke/2),
       peer: nil,
       client: nil,
@@ -259,6 +272,19 @@ defmodule Ouroboros.Gateway.Conn do
 
     {:ok, state}
   end
+
+  # OTP's gen_server terminate report prints `last_message` even when this process is
+  # `:sensitive`. The first frame on an authenticate call is the raw JSON-RPC line with
+  # the password; `format_status/1` is what that report consults.
+  @impl true
+  def format_status(status) when is_map(status) do
+    status
+    |> Map.put(:message, :redacted)
+    |> Map.update(:state, nil, &redact_state/1)
+  end
+
+  defp redact_state(%{config: _} = state), do: %{state | config: :redacted}
+  defp redact_state(_other), do: :redacted
 
   @impl true
   def handle_info(:socket_ready, state) do
@@ -561,10 +587,27 @@ defmodule Ouroboros.Gateway.Conn do
 
   defp invoke(method, id, params, entry, state) do
     case Map.fetch(@conn_methods, method) do
-      {:ok, {:subscribe, plane}} -> subscribe(state, plane, id, params)
-      {:ok, {:unsubscribe, plane}} -> unsubscribe(state, plane, id, params)
-      {:ok, {:shutdown, _plane}} -> shutdown(state, id)
+      {:ok, conn_method} -> invoke_here(method, conn_method, id, params, state)
       :error -> accept(state, id, method, params, entry)
+    end
+  end
+
+  # A method answered here never reaches `Methods.invoke_handler/2`, which is where every
+  # dispatched method's parameter object meets `Contract.validate/2`. That gap is not a
+  # detail: `runtime.shutdown` declares one optional boolean, and without this an object
+  # carrying `requireIdle` — or any other near miss — was accepted, ignored, and answered
+  # with an unconditional stop. So the envelope is checked here, once, for all three.
+  defp invoke_here(method, conn_method, id, params, state) do
+    case Contract.validate(method, params) do
+      :ok ->
+        case conn_method do
+          {:subscribe, plane} -> subscribe(state, plane, id, params)
+          {:unsubscribe, plane} -> unsubscribe(state, plane, id, params)
+          {:shutdown, _plane} -> shutdown(state, id, params)
+        end
+
+      {:invalid, message} ->
+        respond_error(state, id, :invalid_params, message)
     end
   end
 
@@ -572,22 +615,25 @@ defmodule Ouroboros.Gateway.Conn do
   # its contents: an objective, a prompt, or a workspace path in a log is a payload the
   # operator did not choose to write down. The digest is enough to correlate a log entry
   # with the request a client can reproduce.
+  #
+  # `Ouroboros.Gateway.AuditLine` owns what that field may contain, shared with
+  # `Ouroboros.Web.Call` so the two surfaces cannot redact differently. For
+  # `fleet.deployment.authenticate` it never computes a digest at all: hashing a human's
+  # SSH password is not a redaction of it.
   defp audit(state, method, params, %{scope: :operate}) do
-    Logger.info(
-      "gateway operate #{method} params=#{params_digest(params)} peer=#{describe_peer(state.peer)}"
-    )
+    Logger.info([
+      "gateway operate ",
+      method,
+      " params=",
+      AuditLine.params(method, params),
+      " peer=",
+      describe_peer(state.peer)
+    ])
 
     state
   end
 
   defp audit(state, _method, _params, _entry), do: state
-
-  defp params_digest(params) do
-    :sha256
-    |> :crypto.hash(params |> Wire.to_json() |> JSON.encode_to_iodata!())
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
-  end
 
   defp hello(id, params, state) do
     with :ok <- authenticate(params, state.config),
@@ -776,14 +822,16 @@ defmodule Ouroboros.Gateway.Conn do
     end
   end
 
-  defp shutdown(state, rpc_id) do
+  # The permission comes first and the runtime's state second. A listener that may not
+  # stop this node is told so without being told what the node is doing, which keeps the
+  # refusal a client already knows byte-for-byte what it was.
+  defp shutdown(state, rpc_id, params) do
     if state.config.allow_shutdown do
-      Logger.warning(
-        "gateway accepted runtime.shutdown from #{describe_peer(state.peer)}; this node is stopping"
-      )
-
-      state = respond(state, rpc_id, {:ok, %{"stopping" => true, "node" => node()}})
-      %{state | shutdown?: true}
+      case require_idle(params) do
+        {:ok, false} -> accept_shutdown(state, rpc_id)
+        {:ok, true} -> shutdown_if_idle(state, rpc_id)
+        {:invalid, message} -> respond_error(state, rpc_id, :invalid_params, message)
+      end
     else
       respond_error(
         state,
@@ -793,6 +841,80 @@ defmodule Ouroboros.Gateway.Conn do
           "operate scope: OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1 on the daemon"
       )
     end
+  end
+
+  # `handler: :connection` methods never reach `Contract.validate/2` — the connection
+  # answers them before dispatch — so the one parameter this verb has is checked here.
+  defp require_idle(params) do
+    case Map.fetch(params, "require_idle") do
+      :error -> {:ok, false}
+      {:ok, value} when is_boolean(value) -> {:ok, value}
+      {:ok, _other} -> {:invalid, "params.require_idle must be true or false"}
+    end
+  end
+
+  # Read before anything is written and before any stop is scheduled: the refusal has to
+  # be the whole of what this frame did. The summary is the one `runtime.activity`
+  # answers with, asked through the same function, so a client cannot be shown an idle
+  # runtime by one verb and refused by the other — but asked *fresh*, because the read
+  # verb's quarter-second cache is a rate limit on a reader and a quarter-second-old
+  # picture of the node is not a thing a stop may be authorized by.
+  #
+  # The walk itself happens in `Ouroboros.Gateway.Activity`, not here: this process owns
+  # a socket and traps exits, and the concurrent probe belongs somewhere neither of those
+  # is true.
+  defp shutdown_if_idle(state, rpc_id) do
+    activity = Methods.activity(conn_supervisor: state.conn_supervisor, max_age_ms: 0)
+
+    case Map.get(activity, "idle") do
+      true ->
+        accept_shutdown(state, rpc_id)
+
+      false ->
+        refuse_shutdown(
+          state,
+          rpc_id,
+          activity,
+          "runtime_busy",
+          "this node is still working, and runtime.shutdown was sent with " <>
+            "require_idle: data.activity says what it is holding"
+        )
+
+      _unknown ->
+        refuse_shutdown(
+          state,
+          rpc_id,
+          activity,
+          "activity_unknown",
+          "this node could not establish what it is doing, and unknown activity does " <>
+            "not authorize a stop: data.activity names every counter it could not read " <>
+            "in `unknown`"
+        )
+    end
+  end
+
+  defp accept_shutdown(state, rpc_id) do
+    Logger.warning(
+      "gateway accepted runtime.shutdown from #{describe_peer(state.peer)}; this node is stopping"
+    )
+
+    state = respond(state, rpc_id, {:ok, %{"stopping" => true, "node" => node()}})
+    %{state | shutdown?: true}
+  end
+
+  # Named the same way the acceptance is, and by the same peer: a refused stop is an
+  # operator action somebody took, and the audit line above it carries the parameter
+  # digest that says which one.
+  defp refuse_shutdown(state, rpc_id, activity, reason, message) do
+    Logger.warning(
+      "gateway refused runtime.shutdown from #{describe_peer(state.peer)}: #{reason}"
+    )
+
+    respond(
+      state,
+      rpc_id,
+      {:error, Methods.code(:unavailable), message, %{"reason" => reason, "activity" => activity}}
+    )
   end
 
   defp coordinator_down(state, ref) do
@@ -951,10 +1073,14 @@ defmodule Ouroboros.Gateway.Conn do
     method_invoker = state.method_invoker
     identity = state.identity
     max_frame = state.config.max_frame
+    conn_supervisor = state.conn_supervisor
+    session = state.session
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         Process.put(:ouroboros_attachment_frame, max_frame)
+        Process.put(:ouroboros_gateway_conn_supervisor, conn_supervisor)
+        Process.put(:ouroboros_client_session, session)
         Ouroboros.Audit.Identity.with_subject(identity, fn -> method_invoker.(method, params) end)
       end)
 

@@ -412,7 +412,12 @@ defmodule Ouroboros.Gateway.Listener do
   end
 
   defp hand_off(socket, conn_supervisor, task_supervisor, config) do
-    child = {Conn, socket: socket, config: config, task_supervisor: task_supervisor}
+    child =
+      {Conn,
+       socket: socket,
+       config: config,
+       task_supervisor: task_supervisor,
+       conn_supervisor: conn_supervisor}
 
     case DynamicSupervisor.start_child(conn_supervisor, child) do
       {:ok, pid} ->

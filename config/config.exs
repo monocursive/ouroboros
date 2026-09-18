@@ -2,7 +2,19 @@ import Config
 
 # LiveView logs event parameters at debug level. Credential forms therefore use names
 # containing `api_key`, and Phoenix must redact those values before any logger sees them.
-config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key", "image_data"]
+# `passphrase` joins them for the deployment credential form: an encrypted SSH key's
+# passphrase is a secret of exactly the kind this list exists for, and Phoenix matches
+# these as substrings of a parameter name rather than as whole names. This filter is a
+# floor and not the redaction — `Ouroboros.Gateway.AuditLine` is what keeps the secret out
+# of the audit digest, which Phoenix never sees.
+config :phoenix, :filter_parameters, [
+  "password",
+  "passphrase",
+  "token",
+  "secret",
+  "api_key",
+  "image_data"
+]
 
 # Native streams are admitted globally by `Provider.Native.Model.Admission`, eight at a
 # time. Keep Finch as one pool with more connections than admitted streams: this removes

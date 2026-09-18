@@ -29,6 +29,15 @@ UPDATE = load("update-smoke")
 TARGET = "x86_64-unknown-linux-gnu"
 SESSION = "durable-session-fixture"
 CONFIRMED_STOP = "the runtime accepted runtime.shutdown\nthe runtime stopped (pid 123)\n"
+# What `mix release` records beside the boot scripts, and what a packaged `ouro fleet
+# protocol --json` must agree with. One dict feeds both sides of the fixture so the
+# smoke's comparison is exercised, not just satisfied.
+BUILD = {
+    "fleet_protocol_revision": 5,
+    "ouroboros_version": "0.1.3",
+    "otp_release": "29",
+    "elixir_version": "1.20.2",
+}
 
 
 class Harness:
@@ -82,6 +91,9 @@ class Harness:
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.touch()
                 artifact.chmod(0o755)
+            metadata = release / "releases/0.1.3/ouroboros-build.json"
+            metadata.parent.mkdir(parents=True, exist_ok=True)
+            metadata.write_text(json.dumps(BUILD))
             if self.fail_start:
                 publication.unlink()
                 return "startup failed after claiming ownership", 1
@@ -90,6 +102,14 @@ class Harness:
             return json.dumps({"helper": {"present": True}}), 0
         if command == "doctor":
             return json.dumps({"usable": True, "target": TARGET}), 0
+        if command == "fleet" and tuple(args[2:3]) == ("protocol",):
+            if "--json" in args[3:]:
+                reported = dict(BUILD, embedded_release=True,
+                                release_fleet_protocol_revision=BUILD["fleet_protocol_revision"],
+                                release_ouroboros_version=BUILD["ouroboros_version"],
+                                revision_matches_embedded_release=True)
+                return json.dumps(reported), 0
+            return f"{BUILD['fleet_protocol_revision']}\n", 0
         if command == "new":
             return SESSION + "\n", 0
         if command == "agents":

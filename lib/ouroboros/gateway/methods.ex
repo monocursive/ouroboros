@@ -75,6 +75,8 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Control.PolicyPromotion
+  alias Ouroboros.Fleet.Deployment
+  alias Ouroboros.Gateway.Activity
   alias Ouroboros.Gateway.Methods.Browse
   alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Methods.Encode
@@ -111,6 +113,7 @@ defmodule Ouroboros.Gateway.Methods do
       upstream_error: 1,
       account_reply: 1,
       forget_session_owner_reply: 1,
+      deployment_reply: 1,
       fork_reply: 1,
       exit_result: 1
     ]
@@ -119,6 +122,10 @@ defmodule Ouroboros.Gateway.Methods do
 
   # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
+
+  # Read from the module that owns the ledger, so the two verbs that must not record
+  # themselves are named once.
+  @unledgered Activity.unledgered()
 
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
   # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
@@ -459,7 +466,7 @@ defmodule Ouroboros.Gateway.Methods do
              method,
              entry.scope
            ) do
-          invoke_recorded(method, params, entry)
+          ledgered(method, entry, fn -> invoke_recorded(method, params, entry) end)
         else
           {:error, code(:scope_denied), "This identity may not perform #{method}."}
         end
@@ -468,6 +475,25 @@ defmodule Ouroboros.Gateway.Methods do
         {:error, code(:method_not_found), "unknown method #{inspect(method)}"}
     end
   end
+
+  # This function is the one funnel every mutation this node performs goes through: the
+  # gateway's dispatch tasks and `Ouroboros.Web.Call` both arrive here. That is what
+  # makes it the place the idle gate can see `workspace.exec` from, because the shell it
+  # runs lives in *this* process and never in a session (`InteractiveSession.exec/2`).
+  #
+  # Read verbs are not recorded. A read that a stop interrupts can be read again, and a
+  # client polling `runtime.status` must not make the node look like it is working.
+  defp ledgered(method, %{scope: :operate}, fun) when method not in @unledgered do
+    token = Activity.enter(method)
+
+    try do
+      fun.()
+    after
+      Activity.leave(token)
+    end
+  end
+
+  defp ledgered(_method, _entry, fun), do: fun.()
 
   def invoke_as(subject, method, params),
     do: Ouroboros.Audit.Identity.with_subject(subject, fn -> invoke(method, params) end)
@@ -615,6 +641,33 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
+  def handle_runtime_activity(_params) do
+    safe(fn ->
+      {:ok,
+       activity(
+         conn_supervisor:
+           Process.get(:ouroboros_gateway_conn_supervisor, Ouroboros.Gateway.ConnSupervisor),
+         max_age_ms: Activity.limits().cache_ms
+       )}
+    end)
+  end
+
+  @doc """
+  What work this node is holding, counted rather than inferred.
+
+  The counting itself lives in `Ouroboros.Gateway.Activity`, which owns the bounds, the
+  in-flight ledger and the cache; this is the name the gateway and its tests call it by.
+  Read that module for what is counted and, just as importantly, for what is not.
+
+  Options name the sources — `:session_registry`, `:attachments`, `:conn_supervisor` —
+  and `:max_age_ms` says how stale an answer the caller will take. It defaults to `0`,
+  a fresh walk, because the caller that matters most is the idle gate; the read verb
+  asks for a cached one explicitly.
+  """
+  @spec activity(keyword()) :: map()
+  def activity(opts \\ []), do: Activity.summary(opts)
+
+  @doc false
   def handle_runtime_providers(_params) do
     safe(fn -> {:ok, Present.providers()} end)
   end
@@ -678,6 +731,289 @@ defmodule Ouroboros.Gateway.Methods do
   @doc false
   def handle_fleet_doctor(_params) do
     safe(fn -> {:ok, Cluster.fleet_doctor()} end)
+  end
+
+  @doc false
+  def handle_fleet_devices(_params) do
+    safe(fn -> Deployment.devices() |> deployment_reply() end)
+  end
+
+  @doc false
+  def handle_fleet_deployment_prepare(params) do
+    deployment(fn binding ->
+      with {:ok, request} <- deployment_request(params) do
+        Deployment.prepare(request, binding)
+      end
+    end)
+  end
+
+  @doc false
+  def handle_fleet_deployment_status(params) do
+    # Needs the *subject* — an operation belongs to the identity that started it (seam S5) —
+    # but not a client session. A session is what a challenge is answered against, and this
+    # verb answers nothing; failing a read for the second browser tab would be a restriction
+    # with no property behind it.
+    safe(fn ->
+      with {:ok, operation} <- fetch_string(params, "operation_id") do
+        Deployment.status(operation, deployment_subject()) |> deployment_reply()
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  @doc false
+  def handle_fleet_deployment_start(params) do
+    deployment(fn binding ->
+      with {:ok, operation} <- fetch_string(params, "operation_id"),
+           {:ok, digest} <- fetch_string(params, "plan_digest"),
+           {:ok, key} <- fetch_string(params, "idempotency_key") do
+        Deployment.start(operation, digest, key, binding)
+      end
+    end)
+  end
+
+  @doc false
+  # `params` is not destructured into a local beyond the two fields the audit line is allowed
+  # to name, and `secret` is read once, passed straight through, and never bound to anything
+  # this function keeps. Nothing on this path inspects, logs or digests the map.
+  def handle_fleet_deployment_authenticate(params) do
+    deployment(fn binding ->
+      with {:ok, operation} <- fetch_string(params, "operation_id"),
+           {:ok, challenge} <- fetch_string(params, "challenge"),
+           {:ok, secret} <- fetch_string(params, "secret") do
+        Deployment.authenticate(operation, challenge, secret, binding)
+      end
+    end)
+  end
+
+  @doc false
+  def handle_fleet_deployment_confirm_host(params) do
+    deployment(fn binding ->
+      with {:ok, operation} <- fetch_string(params, "operation_id"),
+           {:ok, challenge} <- fetch_string(params, "challenge"),
+           accept when is_boolean(accept) <- Map.get(params, "accept") do
+        Deployment.confirm_host(operation, challenge, accept, binding)
+      else
+        {:invalid, message} -> {:invalid, message}
+        _not_a_boolean -> {:invalid, "params.accept must be true or false"}
+      end
+    end)
+  end
+
+  @doc false
+  def handle_fleet_deployment_cancel(params) do
+    safe(fn ->
+      with {:ok, operation} <- fetch_string(params, "operation_id") do
+        Deployment.cancel(operation, deployment_subject()) |> deployment_reply()
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
+  @doc false
+  def handle_fleet_deployment_resume(params) do
+    deployment(fn binding ->
+      with {:ok, operation} <- fetch_string(params, "operation_id"),
+           {:ok, takeover?} <- deployment_takeover(params) do
+        Deployment.resume(operation, binding, takeover?)
+      end
+    end)
+  end
+
+  defp deployment_takeover(params) do
+    case Map.get(params, "takeover") do
+      nil -> {:ok, false}
+      takeover when is_boolean(takeover) -> {:ok, takeover}
+      _other -> {:invalid, "params.takeover must be true or false"}
+    end
+  end
+
+  # Every deployment mutation runs the same three steps: establish who is asking, run the
+  # body, map the answer. The binding is the pair a challenge is bound to at issue (seam S4)
+  # — the audited identity and the client session, which is the listener connection for a
+  # terminal client and the authenticated browser session for a page. A call that arrives
+  # with no session is refused rather than given a shared default: two unattributed callers
+  # sharing one binding would be exactly the cross-session reply the binding exists to stop.
+  defp deployment(body) do
+    safe(fn ->
+      case deployment_binding() do
+        {:ok, binding} ->
+          case body.(binding) do
+            {:invalid, message} -> invalid_params(message)
+            result -> deployment_reply(result)
+          end
+
+        {:error, _reason} = refusal ->
+          deployment_reply(refusal)
+      end
+    end)
+  end
+
+  # Who is asking, with no session. The identity rule has already decided this caller may
+  # reach the verb; this is the narrower question of whose operation it is.
+  defp deployment_subject do
+    %{subject: Ouroboros.Audit.Identity.actor(), session: Process.get(:ouroboros_client_session)}
+  end
+
+  defp deployment_binding do
+    case Process.get(:ouroboros_client_session) do
+      session when is_binary(session) and session != "" ->
+        {:ok, %{subject: Ouroboros.Audit.Identity.actor(), session: session}}
+
+      _absent ->
+        {:error, :session_unbound}
+    end
+  end
+
+  # The worker is told what to inspect, in the shape its own `OperationRequest` reads
+  # (`tui/src/fleet_setup/mod.rs`), and nothing it is told is a secret: a machine name, an
+  # address, an account, a port, paths, and an identity named by *reference*. That is exactly
+  # the set the spec permits a deployment to retain. The worker refuses unknown keys, so this
+  # builds its fields rather than a shape of this side's own choosing.
+  defp deployment_request(params) do
+    case deployment_kind(params) do
+      {:ok, "setup"} -> setup_request(params)
+      {:ok, "add"} -> add_request(params)
+      {:invalid, message} -> {:invalid, message}
+    end
+  end
+
+  defp deployment_kind(params) do
+    case Map.get(params, "kind") do
+      nil -> {:ok, "add"}
+      kind when kind in ["setup", "add"] -> {:ok, kind}
+      _other -> {:invalid, "params.kind must be setup or add"}
+    end
+  end
+
+  # The first local fleet, which the spec is explicit about: "Set up this device" configures
+  # *this* machine, without SSH to itself. So there is no target and no account — only what
+  # this machine should be called and the private address it will bind. Both are optional
+  # here because both have an answer this host can supply: the machine name defaults to this
+  # host's own, and an address the caller does not give is one the worker refuses to guess
+  # at, with `unresolved_address` and the command that shows it.
+  defp setup_request(params) do
+    with {:ok, machine} <- deployment_optional_string(params, "machine"),
+         {:ok, address} <- deployment_optional_string(params, "address"),
+         {:ok, service} <- deployment_service(params) do
+      {:ok,
+       prune(%{
+         "kind" => "setup",
+         "machine" => machine || Deployment.host_name(),
+         "address" => address,
+         "identity" => %{"kind" => "default"},
+         "service" => service
+       })}
+    end
+  end
+
+  defp add_request(params) do
+    with {:ok, target} <- deployment_target(params),
+         {:ok, ssh_user} <- fetch_string(params, "ssh_user"),
+         {:ok, port} <- deployment_port(params),
+         {:ok, identity} <- deployment_identity(params),
+         {:ok, install_path} <- deployment_optional_string(params, "install_path"),
+         {:ok, data_dir} <- deployment_optional_string(params, "data_dir"),
+         {:ok, service} <- deployment_service(params) do
+      {:ok,
+       prune(%{
+         "kind" => "add",
+         "machine" => target["machine"],
+         "address" => target["address"],
+         "ssh_user" => ssh_user,
+         "ssh_port" => port,
+         "identity" => identity,
+         "install_path" => install_path,
+         "remote_data_dir" => data_dir,
+         "service" => service
+       })}
+    end
+  end
+
+  # An absent optional field is left out rather than sent as null: the worker's decoder takes
+  # either, and a file with only the fields somebody actually chose is a file an operator can
+  # read.
+  defp prune(request), do: :maps.filter(fn _key, value -> not is_nil(value) end, request)
+
+  # `address` is what reaches the worker — its request has no `peer_id` field, because a peer
+  # id is a network client's name for a device and the worker talks to addresses. A caller
+  # that has only a peer id has not resolved the device yet, and `fleet.devices` is where
+  # that resolution comes from, so this refuses rather than sending a name as an address.
+  defp deployment_target(params) do
+    case Map.get(params, "target") do
+      %{} = target ->
+        address = target["address"]
+        machine = target["machine"] || target["peer_id"] || address
+
+        cond do
+          not (is_binary(address) and address != "") ->
+            {:invalid,
+             "params.target.address is required: a peer_id alone does not name a reachable " <>
+               "address, and fleet.devices answers with the address for a row"}
+
+          not is_binary(machine) ->
+            {:invalid, "params.target.machine must be a string when it is given"}
+
+          true ->
+            {:ok, %{"address" => address, "machine" => machine}}
+        end
+
+      nil ->
+        {:invalid,
+         "params.target is required for an add; a setup takes no target, because it " <>
+           "configures this machine without SSH to itself"}
+
+      _other ->
+        {:invalid, "params.target must be an object"}
+    end
+  end
+
+  defp deployment_port(params) do
+    case Map.get(params, "port") do
+      nil -> {:ok, 22}
+      port when is_integer(port) and port >= 1 and port <= 65_535 -> {:ok, port}
+      _other -> {:invalid, "params.port must be an integer between 1 and 65535"}
+    end
+  end
+
+  # Translated into the worker's internally tagged enum rather than passed through: `ref`
+  # means a different thing for each kind — an agent identity's public fingerprint, a key
+  # file's path — and naming it as one field on this side while the worker names it as two
+  # would be a shape nobody could validate.
+  defp deployment_identity(params) do
+    case Map.get(params, "identity") do
+      nil -> {:ok, %{"kind" => "default"}}
+      %{"kind" => "password"} -> {:ok, %{"kind" => "password"}}
+      %{"kind" => "default"} -> {:ok, %{"kind" => "default"}}
+      %{"kind" => "agent"} = identity -> identity_ref(identity, "agent", "fingerprint")
+      %{"kind" => "key"} = identity -> identity_ref(identity, "key", "path")
+      _other -> {:invalid, "params.identity.kind must be one of default, agent, key, password"}
+    end
+  end
+
+  defp identity_ref(identity, kind, field) do
+    case identity["ref"] do
+      ref when is_binary(ref) and ref != "" -> {:ok, %{"kind" => kind, field => ref}}
+      _absent -> {:invalid, "params.identity.ref is required when identity.kind is #{kind}"}
+    end
+  end
+
+  defp deployment_optional_string(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, nil}
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be a nonempty string when it is given"}
+    end
+  end
+
+  defp deployment_service(params) do
+    case Map.get(params, "service") do
+      nil -> {:ok, true}
+      service when is_boolean(service) -> {:ok, service}
+      _other -> {:invalid, "params.service must be true or false"}
+    end
   end
 
   @doc false

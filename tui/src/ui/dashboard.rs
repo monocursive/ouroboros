@@ -135,6 +135,14 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
         ))),
     }
 
+    // The proposal's Dashboard link. One line, drawn only where the view is offered.
+    if let Some(hint) = app.devices_hint() {
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(theme::accent()),
+        )));
+    }
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)

@@ -243,7 +243,21 @@ defmodule Ouroboros.Application do
       [
         subtree(
           Ouroboros.Surface.Supervisor,
-          [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
+          # The deployment broker sits with the other surfaces: it owns no durable state,
+          # its workers are detached operating-system processes that outlive it by design,
+          # and a broker restart costs exactly the socket connections it was holding.
+          [
+            # Ahead of both operator surfaces, because both of them write to it. It owns
+            # the in-flight ledger every operate-scope call registers in
+            # (`Ouroboros.Gateway.Methods.invoke/2` — the gateway's dispatch tasks *and*
+            # `Ouroboros.Web.Call`), so it has to exist before either can serve a verb.
+            # Sibling, not parent: a surface restart must not lose the ledger, and this
+            # process owns nothing durable that a surface crash could corrupt.
+            Ouroboros.Gateway.Activity,
+            Ouroboros.Cluster,
+            Ouroboros.Provider.OpenAIAuth
+          ] ++
+            Ouroboros.Fleet.Deployment.children() ++
             gateway_children() ++
             [
               subtree(

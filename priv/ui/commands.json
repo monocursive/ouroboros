@@ -322,6 +322,15 @@
     "note": "The terminal client's Dashboard tab and the web's /status page are the same subject on two differently shaped surfaces, and each is named after the thing it opens."
   },
   {
+    "id": "runtime.devices",
+    "label": "Devices",
+    "group": "runtime",
+    "slash": "/devices",
+    "tui": { "command": "Devices", "action": "leader.devices" },
+    "web": { "event": "runtime.devices" },
+    "note": "The proposal's distinct Devices navigation action. The web opens a page at /devices; the terminal client opens a Devices view under the rebindable action leader.devices, which its catalogue drift test pins against Command::action."
+  },
+  {
     "id": "runtime.audit",
     "label": "Audit",
     "group": "runtime",

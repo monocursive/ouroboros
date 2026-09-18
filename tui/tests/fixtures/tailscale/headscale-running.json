@@ -1,0 +1,111 @@
+{
+  "_capture": {
+    "client": "1.102.2-teb67e5dcb",
+    "tailscaled": "1.102.1-t8ebe8f7c3-gda6192991",
+    "captured": "2026-09-17",
+    "note": "Sanitized from a real `tailscale status --json`: hostnames, DNS names, addresses, keys, ids, accounts and tailnet names are invented. The 100.64.0.0/10 shape is kept. This key is not read by anything and proves unknown fields are ignored."
+  },
+  "Version": "1.102.1",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": [
+    "10.63.0.1",
+    "fd7a:115c:a1e0::1"
+  ],
+  "Self": {
+    "ID": "n1000000000000010CNTRL",
+    "NodeID": 1000000000000010,
+    "PublicKey": "nodekey:a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+    "HostName": "operator-laptop",
+    "DNSName": "operator-laptop.headscale.internal.",
+    "OS": "macOS",
+    "UserID": 1000000000000001,
+    "TailscaleIPs": [
+      "10.63.0.1",
+      "fd7a:115c:a1e0::1"
+    ],
+    "AllowedIPs": [
+      "100.64.12.21/32",
+      "fd7a:115c:a1e0::1/128"
+    ],
+    "Addrs": null,
+    "CurAddr": "",
+    "Relay": "par",
+    "PeerRelay": "",
+    "RxBytes": 0,
+    "TxBytes": 0,
+    "Created": "2026-08-01T09:00:00.000000000Z",
+    "LastWrite": "0001-01-01T00:00:00Z",
+    "LastSeen": "0001-01-01T00:00:00Z",
+    "LastHandshake": "2026-09-17T10:39:48.000000+02:00",
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false,
+    "Active": false,
+    "PeerAPIURL": [
+      "http://100.64.12.21:58169"
+    ],
+    "TaildropTarget": 0,
+    "NoFileSharingReason": "",
+    "Capabilities": [],
+    "CapMap": {},
+    "InNetworkMap": true,
+    "InMagicSock": false,
+    "InEngine": false,
+    "KeyExpiry": "2027-02-01T09:00:00Z"
+  },
+  "Health": [],
+  "MagicDNSSuffix": "headscale.internal",
+  "CurrentTailnet": {
+    "Name": "headscale",
+    "MagicDNSSuffix": "headscale.internal",
+    "MagicDNSEnabled": true
+  },
+  "CertDomains": null,
+  "Peer": {
+    "nkBuildLinux": {
+      "ID": "n1000000000000020CNTRL",
+      "NodeID": 1000000000000020,
+      "PublicKey": "nodekey:b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5b2c3d4e5",
+      "HostName": "build-linux",
+      "DNSName": "build-linux.headscale.internal.",
+      "OS": "linux",
+      "UserID": 1000000000000001,
+      "TailscaleIPs": [
+        "10.63.0.4",
+        "fd7a:115c:a1e0::44"
+      ],
+      "AllowedIPs": [
+        "100.64.12.44/32",
+        "fd7a:115c:a1e0::44/128"
+      ],
+      "Addrs": null,
+      "CurAddr": "[2001:db8::1]:41641",
+      "Relay": "lhr",
+      "PeerRelay": "",
+      "RxBytes": 0,
+      "TxBytes": 0,
+      "Created": "2026-08-01T09:00:00.000000000Z",
+      "LastWrite": "0001-01-01T00:00:00Z",
+      "LastSeen": "0001-01-01T00:00:00Z",
+      "LastHandshake": "2026-09-17T10:39:48.000000+02:00",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": true,
+      "PeerAPIURL": [
+        "http://100.64.12.44:58169"
+      ],
+      "TaildropTarget": 1,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": true,
+      "KeyExpiry": "2027-02-01T09:00:00Z"
+    }
+  },
+  "User": {},
+  "ClientVersion": null
+}
