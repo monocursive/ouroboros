@@ -2610,7 +2610,30 @@ fn write_profile(data_dir: &Path, profile: &Profile) -> Result<()> {
     write_private_atomic(&profile_path(data_dir), &bytes)
 }
 
+/// The two generated files, rendered with the data directory's *canonical* path.
+///
+/// Canonical, because the same directory is named two ways on this machine's own
+/// services: an operator types `/tmp/x` or `~/x`, and the service unit carries the
+/// resolved `/private/tmp/x` — and a policy file that spelled the directory one way was
+/// refused as "not the generated policy" by a runtime started under the other. On macOS
+/// `/tmp` is a symlink, so the first local setup from a web page, whose LaunchAgent
+/// names the resolved directory, never started at all.
 fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String, String)> {
+    generated_runtime_files_spelled(&canonical_data_dir(data_dir), profile)
+}
+
+/// The data directory with every symlink resolved, or as given when it cannot be.
+fn canonical_data_dir(data_dir: &Path) -> PathBuf {
+    std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
+}
+
+/// The generated files with the data directory spelled exactly as given.
+///
+/// What every Ouroboros before this one wrote, and therefore what an installed profile
+/// may still hold. The strict check does not render this spelling back: it resolves the
+/// paths the file on disk names instead ([`respelled`]), which accepts any spelling of
+/// the one directory and nothing else.
+fn generated_runtime_files_spelled(data_dir: &Path, profile: &Profile) -> Result<(String, String)> {
     if !data_dir.is_absolute() {
         bail!(
             "fleet data directory must be absolute, got {}",
@@ -2637,6 +2660,38 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
         profile.dist_port_min, profile.dist_port_max
     );
     Ok((tls, vm_args))
+}
+
+/// `text` with every quoted path that resolves to a file directly inside
+/// `canonical_root` rewritten in its resolved spelling.
+///
+/// A policy file that names the fleet directory through a symlink — `/tmp/…` where the
+/// service unit says `/private/tmp/…`, or the spelling an older build wrote — then
+/// compares equal to the generated one, and a path that resolves anywhere else, or a
+/// value that is not a path at all, is left exactly as it is and fails the comparison.
+fn respelled(text: &str, canonical_root: &Path) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('"') {
+        out.push_str(&rest[..=open]);
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('"') else {
+            break;
+        };
+        let quoted = &rest[..close];
+        let resolved = Path::new(quoted)
+            .canonicalize()
+            .ok()
+            .filter(|path| path.parent() == Some(canonical_root));
+        match resolved.and_then(|path| erl_string(&path).ok()) {
+            Some(spelling) => out.push_str(&spelling),
+            None => out.push_str(quoted),
+        }
+        out.push('"');
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The mutual-TLS policy the Ouroboros before this reduction generated.
@@ -2878,11 +2933,21 @@ fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
     let actual_tls = read_private(&root.join(TLS_OPTFILE), "TLS option file")?;
     let actual_vm_args = read_private(&root.join(VM_ARGS_FILE), "VM arguments")?;
     let (expected_tls, expected_vm_args) = generated_runtime_files(data_dir, &profile)?;
-    if actual_tls != expected_tls {
+    // A profile written by an earlier build, or under another spelling of a symlinked
+    // directory, names the same files another way. The paths the file on disk names are
+    // resolved before the comparison, so one policy compares equal however the
+    // directory was spelled, and a policy that names anything else does not.
+    let canonical_root = fleet_dir(&canonical_data_dir(data_dir));
+    let actual_tls_matches = respelled(&actual_tls, &canonical_root) == expected_tls;
+    let actual_vm_args_matches =
+        respelled(&actual_vm_args, &canonical_root).as_bytes() == expected_vm_args.as_bytes();
+    if !actual_tls_matches {
         // A file that is exactly the policy the previous build generated is not a
         // weakened policy, and "restore from a trusted backup" is a loop for it: the
         // trusted backup is that same file.
-        if actual_tls == previous_generated_tls(data_dir)? {
+        if respelled(&actual_tls, &canonical_root)
+            == respelled(&previous_generated_tls(data_dir)?, &canonical_root)
+        {
             bail!(
                 "{} is the strict generated mutual-TLS policy of an older Ouroboros: it routes verification through `Ouroboros.Cluster.Revocations`, a module this build does not have. Rewrite it from this profile with `ouro fleet create --regenerate` on this stopped machine, which keeps this fleet id, CA, cookie and roster",
                 root.join(TLS_OPTFILE).display()
@@ -2893,7 +2958,7 @@ fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
             root.join(TLS_OPTFILE).display()
         );
     }
-    if actual_vm_args.as_bytes() != expected_vm_args.as_bytes() {
+    if !actual_vm_args_matches {
         bail!(
             "{} does not match the generated TLS/port policy for this profile; startup is refused. Rewrite it from this profile with `ouro fleet create --regenerate`, or restore this file from a trusted backup",
             root.join(VM_ARGS_FILE).display()
@@ -7153,6 +7218,64 @@ mod tests {
         fs::remove_dir_all(carried).ok();
     }
 
+    /// The same directory spelled two ways — through a symlink and resolved — is one
+    /// directory, and the generated policy has to validate under both: the service unit
+    /// names the resolved path, the operator typed the other one, and on macOS `/tmp`
+    /// itself is a symlink. A profile an older build wrote under the typed spelling is
+    /// still accepted, so an upgrade refuses nothing that was fine before it.
+    #[test]
+    fn a_symlinked_data_dir_validates_under_either_spelling() {
+        let root = scratch("symlinked-data-dir");
+        let real = root.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let typed = link.join("data");
+        let resolved = real.join("data");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&resolved)
+            .unwrap();
+
+        create(&typed, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+
+        // Written with the resolved spelling, whichever one was typed.
+        let tls = fs::read_to_string(fleet_dir(&typed).join(TLS_OPTFILE)).unwrap();
+        let canonical = fs::canonicalize(&resolved).unwrap();
+        assert!(
+            tls.contains(&canonical.display().to_string()),
+            "the policy names the resolved directory: {tls}"
+        );
+        validate_materials(&typed, false).unwrap();
+        validate_materials(&resolved, false).unwrap();
+
+        // An older profile spelled the directory as typed; still one policy.
+        let profile = load(&typed).unwrap().unwrap();
+        let (older_tls, older_vm_args) = generated_runtime_files_spelled(&typed, &profile).unwrap();
+        assert_ne!(
+            older_tls, tls,
+            "the two spellings differ, or this test proves nothing"
+        );
+        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), older_tls.as_bytes()).unwrap();
+        write_private_atomic(
+            &fleet_dir(&typed).join(VM_ARGS_FILE),
+            older_vm_args.as_bytes(),
+        )
+        .unwrap();
+        validate_materials(&typed, false).unwrap();
+        validate_materials(&resolved, false).unwrap();
+
+        // A policy that is neither spelling is still refused.
+        write_private_atomic(
+            &fleet_dir(&typed).join(TLS_OPTFILE),
+            older_tls.replace("verify_peer", "verify_none").as_bytes(),
+        )
+        .unwrap();
+        let refused = validate_materials(&resolved, false).unwrap_err();
+        assert!(format!("{refused:#}").contains("strict generated mutual-TLS policy"));
+    }
+
     /// F1: `revoke-<64 hex>.json` is durable state on any machine whose lab ever revoked
     /// one, and `leave` is the only command that removes a fleet directory. Recognizing
     /// the shape is what keeps such a machine retirable; naming everything else is what
@@ -7279,7 +7402,9 @@ mod tests {
     fn the_generated_policy_is_the_one_the_handshake_test_drives_ssl_with() {
         let data = scratch("generated-policy-template");
         create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let root = fleet_dir(&data);
+        // Generated under the resolved spelling of the directory (`/private/var/…` on
+        // macOS, where the temp dir is reached through a symlink).
+        let root = fleet_dir(&fs::canonicalize(&data).unwrap());
         let generated = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
         let template = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
