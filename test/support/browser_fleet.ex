@@ -310,7 +310,13 @@ defmodule Ouroboros.Test.BrowserFleet do
       serving ->
         state = %{state | serving: serving, subject: frame["subject"]} |> warm()
         FleetOuroFake.put_spawn_line!(state.bin, FleetWorkerFake.spawn_line(state.next))
-        journal(state, "deploying")
+
+        # The durable state is the one the operation is *about to be in*: this worker is
+        # raising a host-key question and then waiting for an answer. A journal left saying
+        # "deploying" is what made a closed drawer's row read "setting up…" with Continue
+        # over an operation that was waiting for the operator — §5.1 gives the three
+        # `awaiting_*` states the words "waiting for you".
+        journal(state, "awaiting_host_trust")
 
         asked = request(state)
 
@@ -330,6 +336,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-host"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_auth"})
+    journal(state, "awaiting_auth")
 
     asked = request(state)
 
@@ -348,6 +355,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-password"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_review"})
+    journal(state, "awaiting_review")
 
     FleetWorkerFake.challenge(state.serving, "fixture-review", "review", %{
       "metadata" => %{"plan" => plan(request(state)), "plan_digest" => digest(request(state))}
@@ -358,6 +366,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-review"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "deploying"})
+    journal(state, "deploying")
     Process.send_after(self(), {:step, 0}, 90)
     {:noreply, state}
   end

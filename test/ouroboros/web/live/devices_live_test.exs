@@ -203,6 +203,18 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     File.chmod!(Path.join(dir, "ca-key.pem"), 0o600)
   end
 
+  # The roster a `leave` is checked against. `fleet.deployment.prepare` refuses a machine
+  # that is not in it before any worker is spawned (`deployment_member/1` in
+  # `Ouroboros.Gateway.Methods`), and `Deployment.roster/1` reads exactly this file.
+  defp roster!(root, members) do
+    dir = Path.join(root, "fleet")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "profile.json")
+    File.write!(path, JSON.encode!(%{"machine" => "studio", "members" => members}))
+    File.chmod!(path, 0o600)
+    path
+  end
+
   defp ouro!(context, opts \\ []) do
     document = Keyword.get(opts, :devices, @devices)
 
@@ -446,6 +458,80 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       "grants" => ["Joining grants broad authority between this fleet's machines."],
       "build" => nil
     }
+  end
+
+  # `plan_leave/1` in tui/src/fleet_setup/engine.rs, field for field: no release, a `manual`
+  # service plan, the leaving machine first in `members` because the review has to name
+  # every machine the operation authenticates to, and `removal_note/1`'s tombstone sentence
+  # as the one grant.
+  defp leave_plan do
+    %{
+      "schema" => 1,
+      "operation" => "0011223344556677",
+      "kind" => "leave",
+      "deployment_host" => %{
+        "hostname" => "studio",
+        "user" => "operator",
+        "os" => "macos",
+        "arch" => "aarch64",
+        "issuer" => true
+      },
+      "target" => %{
+        "machine" => "buildbox",
+        "address" => "100.64.0.2",
+        "port" => 22,
+        "ssh_user" => "deploy",
+        "identity" => "resolved when the member is contacted",
+        "install_path" => "",
+        "data_dir" => "/home/deploy/.ouroboros",
+        "host_fingerprint" => nil,
+        "node" => "ouro@buildbox"
+      },
+      "release" => nil,
+      "service" => "manual",
+      "members" => [
+        %{
+          "machine" => "buildbox",
+          "host" => "100.64.0.2",
+          "reached_by" => "ssh",
+          "change" => "stop, retire credentials, leave"
+        },
+        %{
+          "machine" => "studio",
+          "host" => "100.64.0.1",
+          "reached_by" => "local",
+          "change" => "remove buildbox"
+        }
+      ],
+      "restart" =>
+        "buildbox's runtime is stopped through its own idle-gated shutdown before its " <>
+          "credentials are removed",
+      "grants" => [
+        "No tombstone is recorded. Session-owner evidence for buildbox is retained, so " <>
+          "its sessions stay discoverable; `ouro fleet sessions forget --machine buildbox " <>
+          "--accept-state-loss` is the separate, irreversible decision that retires it."
+      ],
+      "build" => nil
+    }
+  end
+
+  # `prepared/1` aimed the other way: a removal is reached from the member's details panel,
+  # and its form is `#ouro-deploy-leave`.
+  defp prepared_leave(view, address \\ "100.64.0.2", user \\ "deploy") do
+    view
+    |> element(~s{button[phx-click="inspect-device"][phx-value-address="#{address}"]})
+    |> render_click()
+
+    view
+    |> element(~s{button[phx-click="leave-device"][phx-value-address="#{address}"]})
+    |> render_click()
+
+    view
+    |> form("#ouro-deploy-leave", %{"ssh_user" => user})
+    |> render_submit()
+
+    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+    operation(view)
   end
 
   # The worker's durable record, as this runtime would find it after an interruption.
@@ -3242,8 +3328,10 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert html =~ "Stop Ouroboros on buildbox, retire its credentials"
       assert html =~ "Its sessions and data stay on that machine."
 
-      # A member that cannot be reached still has a way out, and it is the CLI's.
-      assert html =~ "ouro fleet sessions forget buildbox"
+      # The CLI recipe is *not* here: it is the repair for a removal that failed because
+      # the member never answered, and this form has attempted nothing yet.
+      refute html =~ "ouro fleet sessions forget"
+      refute html =~ "did not answer"
 
       _ = fake_dir
 
@@ -3460,6 +3548,475 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert auth_form =~ ~s(phx-submit="authenticate")
       assert html =~ ~s(type="password")
       assert html =~ "Password for deploy@100.64.12.44"
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # A removal, in words about a removal
+  # ------------------------------------------------------------------------------------
+
+  # The 2026-09-18 fix wave, from a real "Remove from fleet" run against a Raspberry Pi.
+  # Every one of these was the page describing a *setup* over an operation that took a
+  # machine away: the state was read and the kind was thrown away.
+  describe "a removal reads as a removal" do
+    setup context do
+      issuer!(context.root)
+      roster!(context.root, [%{"machine" => "buildbox", "host" => "100.64.0.2"}])
+      %{worker: worker!(context), conn: web!(context)}
+    end
+
+    test "the row a finished removal speaks for never reads as a setup",
+         %{conn: conn, root: root} do
+      target = %{"machine" => "buildbox", "address" => "100.64.0.2"}
+
+      for {state, words, action} <- [
+            {"deploying", "removing…", "Continue"},
+            {"failed", "removal failed", "Retry"},
+            {"completed", "removed just now", "Add to fleet"}
+          ] do
+        journal!(root, "00aa00aa00aa00a1", %{
+          "state" => state,
+          "kind" => "leave",
+          "target" => target
+        })
+
+        {:ok, fresh, _html} = live(conn, "/devices")
+
+        row =
+          fresh
+          |> element(~s{[data-address="100.64.0.2"][data-operation-state="#{state}"]})
+          |> render()
+
+        assert row =~ words, "a #{state} leave does not say so on its row"
+        assert row =~ action, "a #{state} leave does not offer #{action}"
+
+        # The three the add flow owns. The row took its words from the latest operation
+        # whatever its kind, so the Pi read "set up just now" with **Open** at the end of
+        # being removed — the opposite of what had happened, over a machine that was gone.
+        refute row =~ "set up just now"
+        refute row =~ "setup failed"
+        refute row =~ "setting up"
+
+        # And a finished removal does not send an operator to the machines panel to look
+        # for a machine that is not there.
+        if state == "completed", do: refute(row =~ ~s(href="/status"))
+      end
+    end
+
+    test "the machine a removal finished with can be added again", %{conn: conn, root: root} do
+      journal!(root, "00aa00aa00aa00a2", %{
+        "state" => "completed",
+        "kind" => "leave",
+        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"}
+      })
+
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html =
+        view
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="deploy"]})
+        |> render_click()
+
+      # Discovery still calls it a member — it will until the network client notices — and
+      # the completed `leave` is the fresher fact. A row that offers **Add to fleet** over a
+      # button that refuses when pressed is a control that lies.
+      assert html =~ "Add buildbox to your fleet"
+      refute html =~ "not one this machine can add to the fleet"
+    end
+
+    test "the review is named after what it approves, and drops a startup line it has none of",
+         %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared_leave(view)
+
+      digest = Devices.plan_digest(leave_plan())
+
+      :ok =
+        FleetWorkerFake.challenge(worker, "leave-rev", "review", %{
+          "metadata" => %{"plan" => leave_plan(), "plan_digest" => digest}
+        })
+
+      html = await(view, digest)
+
+      # "Ready to deploy" over a plan that installs nothing and takes a machine away named
+      # the wrong procedure at the one step an operator commits to.
+      assert html =~ "Ready to remove"
+      refute html =~ "Ready to deploy"
+
+      button = view |> element(~s{button[phx-click="approve"]}) |> render()
+      assert button =~ "Remove"
+      refute button =~ "Deploy"
+
+      # The plan still carries `service: manual` — it is the same document — and "Do not
+      # start at login; this machine is started by hand" is advice about running a machine
+      # this operation is taking away.
+      refute html =~ "Do not start at login"
+      refute html =~ "Start at login"
+
+      # What a removal's review does say.
+      assert html =~ "Take buildbox out of the fleet"
+      assert html =~ "Update 2 rosters"
+      assert html =~ "No tombstone is recorded"
+    end
+
+    test "the strip draws the engine's own leave steps, and the finish step claims nothing else",
+         %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared_leave(view)
+
+      for step <- ~w(inspect stop_runtime disable_service verify_disconnected leave roster) do
+        :ok =
+          FleetWorkerFake.emit(worker, %{
+            "event" => "step",
+            "machine" => "buildbox",
+            "step" => step,
+            "outcome" => "ok"
+          })
+      end
+
+      html = await(view, ~s(data-step="roster" data-outcome="ok"))
+
+      for {key, label, _names} <- Devices.stages("leave") do
+        assert html =~ ~s(data-step="#{key}"), "the strip has no #{key} stage"
+        assert html =~ label, "the strip does not name the #{key} stage"
+      end
+
+      # The add flow's stages are not drawn at all. Before this a removal showed Install,
+      # Join fleet, Start at login, Connect and Ready, all "not reported yet" for ever, and
+      # filed its roster removal under **Join fleet**.
+      for absent <- ~w(install membership startup connect readiness) do
+        refute html =~ ~s(data-step="#{absent}"),
+               "a removal was drawn with the add flow's #{absent} stage"
+      end
+
+      refute html =~ "not reported yet"
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => true,
+          "state" => "completed",
+          "summary" => "buildbox left the fleet; its work and session history stay on it",
+          "next" => "No tombstone is recorded."
+        })
+
+      html = await(view, "is out of your fleet")
+
+      # §5.4's ending: the machine by name, the worker's own two lines, and Done.
+      assert html =~ "buildbox is out of your fleet"
+      assert html =~ "buildbox left the fleet"
+      assert html =~ "No tombstone is recorded."
+
+      refute html =~ "The setup finished"
+      refute html =~ "Readiness was not"
+      refute has_element?(view, ~s{#ouro-deploy a[href="/status"]})
+      assert has_element?(view, ~s{#ouro-deploy button[phx-click="drawer-close"]})
+    end
+
+    test "the CLI fallback is a repair for one failure, not a greeting on the form",
+         %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view
+      |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+      |> render_click()
+
+      html =
+        view
+        |> element(~s{button[phx-click="leave-device"][phx-value-address="100.64.0.2"]})
+        |> render_click()
+
+      # Nothing has been attempted, so nothing "did not answer". This form opened by
+      # reporting a failure that had not happened.
+      refute html =~ "did not answer"
+      refute html =~ "sessions forget"
+
+      view |> form("#ouro-deploy-leave", %{"ssh_user" => "deploy"}) |> render_submit()
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => false,
+          "reason" => "ssh_unavailable",
+          "detail" => "buildbox could not be reached over ssh"
+        })
+
+      html = await(view, "sessions forget")
+
+      # The command the CLI actually takes. `Forget` reads `--machine`, and it refuses
+      # without `--accept-state-loss` because retiring a gone machine's session-owner
+      # evidence cannot be undone — so `ouro fleet sessions forget buildbox` was a usage
+      # error handed to an operator at the end of a removal that had already failed.
+      assert html =~
+               "run `ouro fleet sessions forget --machine buildbox --accept-state-loss` " <>
+                 "on this machine"
+
+      refute html =~ "forget buildbox`"
+    end
+
+    test "a removal that failed for a reason other than silence is not told to forget it",
+         %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared_leave(view)
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => false,
+          "reason" => "ssh_auth_failed",
+          "detail" => "buildbox refused this authentication"
+        })
+
+      html = await(view, "refused this authentication")
+
+      # That machine answered. A roster tombstone is irreversible, and it is not the repair
+      # for a credential that needs fixing.
+      refute html =~ "sessions forget"
+      refute html =~ "did not answer"
+
+      # And the heading is about the removal, not about a setup: `operation_state/1` is the
+      # add flow's vocabulary and it answers "Setup failed" for this state.
+      assert html =~ "buildbox was not removed"
+      refute html =~ "Setup failed"
+    end
+  end
+
+  describe "the words a page picks from a kind" do
+    test "a leave gets the engine's own five stages, and an add keeps its six" do
+      # `run_leave/1` and `stop_and_retire/5` in tui/src/fleet_setup/engine.rs, read rather
+      # than guessed at: `verify_disconnected` is `await_disconnection/3`'s and belongs with
+      # the leave, and `member_preflight` is reached on the way to the roster edits.
+      assert Devices.stages("leave") == [
+               {"inspect", "Inspect", ["inspect"]},
+               {"stop_runtime", "Stop", ["stop_runtime"]},
+               {"disable_service", "Disable startup", ["disable_service"]},
+               {"leave", "Leave", ["leave", "verify_disconnected"]},
+               {"roster", "Update rosters", ["roster", "member_preflight"]}
+             ]
+
+      # `stages/0` is still the add flow's six, which is what every other reading of "the
+      # stages" on this page means.
+      assert Enum.map(Devices.stages(), &elem(&1, 1)) ==
+               ["Inspect", "Install", "Join fleet", "Start at login", "Connect", "Ready"]
+
+      # One step name, two stages, one per kind: on a setup `stop_runtime` is the transition
+      # restart, and on a leave it is the idle-gated shutdown.
+      assert Devices.stage_of("stop_runtime", "leave") == "stop_runtime"
+      assert Devices.stage_of("stop_runtime", "add") == "startup"
+
+      # And the roster removal is filed under **Update rosters**, not under **Join fleet**.
+      assert Devices.stage_of("roster", "leave") == "roster"
+      assert Devices.stage_of("roster") == "membership"
+
+      # Nothing a removal runs falls through to the unfiled list under the strip.
+      for step <- ~w(inspect stop_runtime disable_service verify_disconnected leave
+                     member_preflight roster) do
+        assert Devices.stage_of(step, "leave"),
+               "the strip files #{step} under no stage of a removal"
+      end
+    end
+
+    test "the review step is named after what it approves" do
+      assert Devices.challenge_title("review", "leave") == "Ready to remove"
+      assert Devices.approve_label("leave") == "Remove"
+
+      assert Devices.challenge_title("review", "setup") == "Ready to set up"
+      assert Devices.approve_label("setup") == "Set up"
+
+      assert Devices.challenge_title("review", "add") == "Ready to deploy"
+      assert Devices.approve_label("add") == "Deploy"
+
+      # An operation whose kind this build could not read is still an add, which is the
+      # reading every other unqualified call on this page takes.
+      assert Devices.challenge_title("review") == "Ready to deploy"
+      assert Devices.approve_label(nil) == "Deploy"
+
+      # The other three headings do not depend on the kind at all.
+      for kind <- ["add", "setup", "leave"] do
+        assert Devices.challenge_title("host_trust", kind) == "First time connecting"
+        assert Devices.challenge_title("password", kind) == "Password"
+      end
+    end
+
+    test "an operation waiting for this operator says so on its row, whatever its kind" do
+      # §5.1's three. A row that read "setting up…" over an operation stopped at a host-key
+      # question told an operator to wait for something that was waiting for them.
+      for state <- ~w(awaiting_host_trust awaiting_auth awaiting_review) do
+        assert Devices.operation_words(state) == "waiting for you"
+        assert Devices.operation_words(state, "leave") == "waiting for you"
+        assert Devices.operation_action(state) == {"Continue", "open-operation"}
+        assert Devices.operation_action(state, "leave") == {"Continue", "open-operation"}
+      end
+
+      # And the running ones keep their own words.
+      for state <- ~w(inspecting deploying restarting_host checking_readiness) do
+        assert Devices.operation_words(state) == "setting up…"
+        assert Devices.operation_words(state, "leave") == "removing…"
+      end
+    end
+
+    test "a name is a name, never a boolean and never an empty string" do
+      assert Devices.name("buildbox") == "buildbox"
+      assert Devices.name("  spaced   name ") == "spaced name"
+
+      # The two values `Devices.plain/2` answers truthily and no heading can use. `false` is
+      # what `get_in/2` walks out of a consumed challenge with, and `""` is what a name of
+      # only invisible characters sanitises to — both stop a chain of `||` fallbacks, which
+      # is the whole of the "false is in your fleet" heading.
+      assert Devices.name(false) == nil
+      assert Devices.name(true) == nil
+      assert Devices.name(nil) == nil
+      assert Devices.name("") == nil
+      assert Devices.name("​​") == nil
+      assert Devices.name(%{"machine" => "buildbox"}) == nil
+    end
+
+    test "a completed operation stops saying a stage is not reported yet" do
+      # There is no readiness step here and the operation has finished: nothing more will be
+      # reported, so "not reported yet" promises a report that is not coming.
+      steps = [%{"step" => "connect", "outcome" => "ok"}]
+
+      assert Devices.readiness(steps, %{"ok" => true}) == {nil, true}
+
+      # A readiness step that reported and failed is the one thing the reader does not
+      # already have from the heading and the summary.
+      assert {sentence, false} =
+               Devices.readiness(
+                 steps ++ [%{"step" => "readiness", "outcome" => "failed"}],
+                 %{"ok" => true}
+               )
+
+      assert sentence =~ "did not report itself ready"
+
+      # An operation that has not connected still says what it does not know.
+      assert {"Readiness was not reported.", false} = Devices.readiness([], %{})
+    end
+  end
+
+  describe "the status line above the list" do
+    setup context do
+      issuer!(context.root)
+      :ok
+    end
+
+    test "a fleet with no name is named after the machine holding it", context do
+      # No `this_device_without_profile` row, so this machine is in a fleet and the status
+      # line is the one that names it rather than the standalone sentence.
+      in_a_fleet =
+        Map.put(@devices, "devices", Enum.reject(@devices["devices"], &(&1["name"] == "spare")))
+
+      ouro!(context, devices: in_a_fleet)
+      conn = web!(context)
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      # `status_line/0` in tui/src/ui/app/devices.rs: the terminal says whose fleet it is,
+      # and this page passes it the devices so it can. "This fleet is not named" was the web
+      # naming an empty field instead of the machine.
+      assert html =~ "Fleet of studio"
+      refute html =~ "This fleet is not named"
+    end
+
+    test "one machine is a machine, not machines" do
+      fleet = %{fleet_name: nil, summary: %{connected: 1, expected: 1}}
+      devices = [%{"state" => "this_device", "machine" => "studio"}]
+
+      assert Devices.status_line(fleet, "darwin", false, devices) ==
+               "Fleet of studio · 1 of 1 machine connected"
+
+      assert Devices.status_line(
+               %{fleet | summary: %{connected: 2, expected: 3}},
+               "darwin",
+               false,
+               devices
+             ) == "Fleet of studio · 2 of 3 machines connected"
+
+      # A named fleet already reads as one, so it is printed as it is.
+      assert Devices.status_line(
+               %{fleet | fleet_name: "studio's fleet"},
+               "darwin",
+               false,
+               devices
+             ) == "studio's fleet · 1 of 1 machine connected"
+
+      # And with no self row to name, the terminal's own fallback.
+      assert Devices.status_line(fleet, "darwin", false, []) ==
+               "Fleet of this machine · 1 of 1 machine connected"
+    end
+  end
+
+  describe "the manual add form" do
+    setup context do
+      issuer!(context.root)
+      ouro!(context)
+      %{conn: web!(context)}
+    end
+
+    test "names a machine in its SSH hint even before one is known", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html = view |> element(~s{button[phx-click="deploy-manual"]}) |> render_click()
+
+      # "Add a device by address" has no device behind it and an empty address box, and
+      # `Devices.plain("", 64)` is `""` — truthy — so the hint ended at "the account on "
+      # with nothing after it until the first keystroke.
+      assert html =~ "the account on that machine"
+      refute html =~ "the account on\n"
+
+      # And it takes the address as soon as one is typed.
+      html =
+        view
+        |> form("#ouro-deploy-connect", %{"address" => "100.64.99.9"})
+        |> render_change()
+
+      assert html =~ "the account on 100.64.99.9"
+    end
+  end
+
+  describe "a setup that connected" do
+    setup context do
+      issuer!(context.root)
+      %{worker: worker!(context), conn: web!(context)}
+    end
+
+    test "does not disclaim a readiness nobody claimed", %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared(view)
+
+      for step <- ~w(inspect install_binary issue install roster service connect) do
+        :ok =
+          FleetWorkerFake.emit(worker, %{
+            "event" => "step",
+            "machine" => "vps-1",
+            "step" => step,
+            "outcome" => "ok"
+          })
+      end
+
+      _ = await(view, ~s(data-step="connect" data-outcome="ok"))
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => true,
+          "state" => "completed",
+          "summary" => "vps-1 joined the fleet and is connected"
+        })
+
+      html = await(view, "is in your fleet")
+
+      assert html =~ "vps-1 joined the fleet and is connected"
+
+      # The heading and the worker's own summary have both said it. A third line holding
+      # back a claim neither of them made is noise stacked on an answer.
+      refute html =~ "The setup finished. Readiness was not reported"
+
+      # And the stage nothing reported is not waiting for anything: this operation has
+      # stopped, so there is no "yet" left in it.
+      assert html =~ ~s(data-step="readiness")
+      assert html =~ "not checked"
+      refute html =~ "not reported yet"
     end
   end
 end

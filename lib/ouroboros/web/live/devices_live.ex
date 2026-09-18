@@ -483,9 +483,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # reloaded immediately rather than 150 ms later.
       socket = schedule_reload(socket, operation, event)
 
+      kind = socket.assigns.drawer.kind
+
       cond do
-        event["event"] != "disconnected" -> {:noreply, announce(socket, said(event))}
-        lost?(socket.assigns.drawer) -> {:noreply, announce(socket, said(event))}
+        event["event"] != "disconnected" -> {:noreply, announce(socket, said(event, kind))}
+        lost?(socket.assigns.drawer) -> {:noreply, announce(socket, said(event, kind))}
         true -> {:noreply, socket}
       end
     else
@@ -505,7 +507,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     socket = socket |> update_drawer(&%{&1 | monitor: nil}) |> reload()
 
     if lost?(socket.assigns.drawer) do
-      {:noreply, announce(socket, said(%{"event" => "disconnected"}))}
+      {:noreply, announce(socket, said(%{"event" => "disconnected"}, nil))}
     else
       {:noreply, socket}
     end
@@ -526,32 +528,36 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   # One sentence per event kind, for the polite live region. A step is the one an operator
   # is actually following, so it is the one that names itself.
-  defp said(%{"event" => "step"} = event) do
+  defp said(%{"event" => "step"} = event, _kind) do
     {outcome, _tone} = Devices.outcome(event["outcome"])
     "#{Devices.step_label(event["step"])} on #{event["machine"] || "this fleet"}: #{outcome}."
   end
 
-  defp said(%{"event" => "state"} = event), do: Devices.operation_state(event["state"]) <> "."
+  defp said(%{"event" => "state"} = event, _kind),
+    do: Devices.operation_state(event["state"]) <> "."
 
-  defp said(%{"event" => "challenge"} = event),
-    do: Devices.challenge_title(event["kind"]) <> "."
+  # The operation's kind too, because a challenge is announced in the same words the step
+  # draws: a screen reader told "Ready to deploy." while the page says "Ready to remove" is
+  # being told about a different operation.
+  defp said(%{"event" => "challenge"} = event, kind),
+    do: Devices.challenge_title(event["kind"], kind) <> "."
 
   # A `done` frame from the engine's failure path carries no state at all, only `ok`, a
   # reason and a detail — so this reads the state where there is one and says what happened
   # where there is not, rather than announcing "State not reported".
-  defp said(%{"event" => "done"} = event) do
+  defp said(%{"event" => "done"} = event, _kind) do
     case event["state"] do
       state when is_binary(state) -> Devices.operation_state(state) <> "."
       _absent -> if event["ok"] == true, do: "Done.", else: "The setup stopped."
     end
   end
 
-  defp said(%{"event" => "disconnected"}) do
+  defp said(%{"event" => "disconnected"}, _kind) do
     "The connection to the setup worker was lost. What it has done is unknown until " <>
       "the operation is read again; nothing was cancelled."
   end
 
-  defp said(_other), do: ""
+  defp said(_other, _kind), do: ""
 
   defp start_inspection(socket) do
     case operate(socket, @prepare, prepare_params(socket.assigns.drawer)) do
@@ -991,13 +997,24 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp deployable(socket, address) do
     case Enum.find(devices(socket), &(&1["address"] == address)) do
       device when is_map(device) ->
-        if Devices.deployable?(device),
+        if Devices.deployable?(device) or left?(socket, device),
           do: {:ok, device},
           else: {:refused, "That device is not one this machine can add to the fleet."}
 
       _unknown ->
         {:refused, "This machine's inventory does not list that address."}
     end
+  end
+
+  # A member this fleet has just removed is a machine it can add again, whatever discovery
+  # still says: `fleet.devices` goes on calling it a member until the network client
+  # notices, and the row offers **Add to fleet** on the strength of the completed `leave`
+  # (`Devices.operation_action/2`). Without this the button the row offers would refuse
+  # when pressed — which is the shape the review calls a control that lies.
+  defp left?(socket, device) do
+    operation = latest_operation(socket.assigns.operations, device)
+
+    operation["kind"] == "leave" and operation["state"] == "completed"
   end
 
   # And the row a `leave-device` may be aimed at: a roster member, named by the roster
@@ -1527,7 +1544,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
             <%!-- The status line *is* the blocker sentence for a machine in no fleet, rather
                   than a heading with a paragraph under it repeating the same thing. --%>
             <h2 class="ouro-devices-status" data-standalone={to_string(@standalone?)}>
-              {Devices.status_line(@fleet, @host && @host["os"], @standalone?)}
+              <%!-- The devices, because a fleet with no name is named after the machine
+                    holding it, and that machine is the self row. --%>
+              {Devices.status_line(
+                @fleet,
+                @host && @host["os"],
+                @standalone?,
+                @inventory["devices"]
+              )}
             </h2>
             <div class="ouro-devices-head-actions">
               <button
@@ -1771,10 +1795,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       assigns
       |> assign(:operation, operation)
       |> assign(:self?, Devices.self_row?(device))
-      |> assign(:words, Devices.operation_words(state) || Devices.ouroboros_words(device))
+      # The operation's `kind` and not only its state: a completed `leave` and a completed
+      # `add` are the same state and opposite facts, and the row that read "set up just
+      # now · Open" after a removal was this call throwing the difference away.
+      |> assign(
+        :words,
+        Devices.operation_words(state, operation["kind"]) || Devices.ouroboros_words(device)
+      )
       |> assign(
         :action,
-        Devices.operation_action(state) ||
+        Devices.operation_action(state, operation["kind"]) ||
           Devices.row_action(device, assigns.host && assigns.host["os"])
       )
       |> assign(:operation_id, operation["operation"])
@@ -1789,7 +1819,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     >
       <span :if={@self?} class="ouro-devices-label">{Devices.self_label(@host && @host["os"])}</span>
       <span class="ouro-devices-name">
-        {Devices.plain(@device["machine"] || @device["name"], 96) || Devices.this_device()}
+        {Devices.name(@device["machine"], 96) || Devices.name(@device["name"], 96) ||
+          Devices.this_device()}
       </span>
       <span class="ouro-devices-os">
         {Devices.plain(@device["os"], 48) || "platform not reported"}
@@ -2202,21 +2233,33 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp drawer_title(_other, _host), do: "Add a device by address"
 
   defp device_name(device),
-    do: Devices.plain(device["machine"] || device["name"], 96) || Devices.this_device()
+    do:
+      Devices.name(device["machine"], 96) || Devices.name(device["name"], 96) ||
+        Devices.this_device()
 
   # The machine a finished operation is about, from the plan where there is one and from the
   # form where there is not.
-  defp target_name(drawer) do
+  defp target_name(drawer), do: target_machine(drawer) || "That machine"
+
+  # Every name a heading might use, best first, and `nil` where none of them is a name.
+  #
+  # `Devices.name/2` rather than `Devices.plain/2` at each step, because this is a chain of
+  # `||` and `plain/2` answers about text rather than about names: it says a boolean as
+  # `"false"` and a string of invisible characters as `""`, both of which are truthy and
+  # both of which stop the chain. That is the whole of the "false is in your fleet" bug —
+  # by the time the finish step is drawn the review challenge has been consumed, so
+  # `get_in/2` walked into a non-map and the first fallback was never reached.
+  defp target_machine(drawer) do
     plan = Devices.metadata(challenge(drawer, ["review"]))["plan"]
 
-    # `if` rather than `and`: `is_map(nil) and ...` is `false`, and `Devices.plain/2` says
-    # booleans as themselves — so the finish heading read "false is in your fleet" for every
-    # operation, because by then the review challenge has been consumed and there is no plan.
+    # `if` rather than `and`: `is_map(nil) and ...` is `false`, which is exactly the
+    # boolean that used to reach the heading.
     from_plan = if is_map(plan), do: get_in(plan, ["target", "machine"])
 
-    Devices.plain(from_plan, 64) ||
-      (drawer.device && Devices.plain(drawer.device["machine"] || drawer.device["name"], 64)) ||
-      Devices.plain(drawer.form["machine"], 64) || "That machine"
+    Devices.name(from_plan) ||
+      (drawer.device &&
+         (Devices.name(drawer.device["machine"]) || Devices.name(drawer.device["name"]))) ||
+      Devices.name(drawer.form["machine"])
   end
 
   attr :drawer, :map, required: true
@@ -2502,9 +2545,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       do: Devices.machine_error(trimmed)
   end
 
+  # What the SSH-user hint calls the target. `Devices.name/2` for the same reason as
+  # `target_machine/1`: on the manual "Add a device by address" form there is no device and
+  # the address box is still empty, and `Devices.plain("", 64)` is `""` — truthy — so the
+  # hint rendered as "the account on " with nothing after it until the first keystroke.
   defp target_words(drawer) do
-    (drawer.device && Devices.plain(drawer.device["name"] || drawer.device["machine"], 64)) ||
-      Devices.plain(drawer.form["address"], 64) || "that machine"
+    (drawer.device &&
+       (Devices.name(drawer.device["name"]) || Devices.name(drawer.device["machine"]))) ||
+      Devices.name(drawer.form["address"]) || "that machine"
   end
 
   attr :drawer, :map, required: true
@@ -2534,7 +2582,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           autocomplete="off"
         />
         <p id="leave-ssh-user-hint" class="ouro-new-hint">
-          the account on {Devices.plain(@machine, 64) || "that machine"}
+          the account on {Devices.name(@machine) || "that machine"}
         </p>
       </section>
 
@@ -2554,7 +2602,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <p class="ouro-new-hint">
         Reads the machine first. Nothing is changed until you approve a plan.
       </p>
-      <p class="ouro-devices-quiet">{Devices.leave_fallback(@machine)}</p>
+      <%!-- The `fleet sessions forget` recipe used to be here, which meant this form
+            opened by saying the machine "did not answer, so nothing on it was changed"
+            before anything had been attempted. It is a repair for one failure, and it is
+            now drawn on that failure — see `leave_fallback/2`. --%>
     </form>
     """
   end
@@ -2820,10 +2871,13 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       |> assign(:lines, Devices.review_lines(facts["plan"]))
       |> assign(:rows, Devices.plan_rows(facts["plan"]))
       |> assign(:unread, Devices.plan_unread(facts["plan"]))
+      # The plan's own `kind` first: it is the document being approved, and the drawer's is
+      # the fallback for a plan this build could not read one from.
+      |> assign(:kind, (is_map(facts["plan"]) && facts["plan"]["kind"]) || assigns.drawer.kind)
 
     ~H"""
     <section class="ouro-devices-step" aria-labelledby="ouro-deploy-review-title">
-      <h3 id="ouro-deploy-review-title">{Devices.challenge_title("review")}</h3>
+      <h3 id="ouro-deploy-review-title">{Devices.challenge_title("review", @kind)}</h3>
 
       <ul :if={@lines != []} class="ouro-devices-plan-lines">
         <li :for={line <- @lines}>{line}</li>
@@ -2852,7 +2906,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           phx-click="approve"
           phx-value-digest={@digest}
         >
-          Deploy
+          {Devices.approve_label(@kind)}
         </button>
         <button type="button" class="ouro-quiet-button" phx-click="cancel-setup">Cancel</button>
       </div>
@@ -2950,11 +3004,16 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       |> assign(:state, final_state(status, done, assigns.drawer))
       |> assign(:done, done)
       |> assign(:finished?, done["ok"] == true)
-      |> assign(:readiness, readiness)
+      |> assign(:leave?, assigns.drawer.kind == "leave")
+      # Never on a removal: a `leave` runs no `readiness` step and installs nothing that
+      # could be ready, so "The setup finished. Readiness was not reported…" was the page
+      # holding back a claim nobody had made about a machine it had just given away.
+      |> assign(:readiness, if(assigns.drawer.kind == "leave", do: nil, else: readiness))
       |> assign(:summary, done["summary"])
       |> assign(:next, done["next"])
       |> assign(:unknown, List.wrap(done["unknown"]))
       |> assign(:cause, cause(status, done))
+      |> assign(:fallback, leave_fallback(assigns.drawer, done))
       |> assign(:name, target_name(assigns.drawer))
 
     ~H"""
@@ -2964,10 +3023,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       <p :if={@summary}>{Devices.plain(@summary)}</p>
       <p :if={@cause} class="ouro-refusal">{@cause}</p>
 
+      <%!-- §5.4's way out, on the one failure it is the way out of: the member never
+            answered, so the roster is the only thing left to repair. --%>
+      <p :if={@fallback} class="ouro-devices-note">{@fallback}</p>
+
       <%!-- The next thing to do, in the worker's own words rather than this page's guess. --%>
       <p :if={@next} class="ouro-devices-note"><strong>Next:</strong> {Devices.plain(@next)}</p>
 
-      <p :if={@finished?} class="ouro-devices-quiet">{@readiness}</p>
+      <p :if={@finished? and @readiness} class="ouro-devices-quiet">{@readiness}</p>
 
       <div :if={@unknown != []} class="ouro-devices-note">
         <strong>What this setup could not establish:</strong>
@@ -2978,10 +3041,20 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
       <%!-- Two things, not five. The review found a finished setup offering "Configure
             model" and "Run test task", both of which act on *this* runtime rather than on
-            the machine that was just added — which the hint under them admitted. --%>
+            the machine that was just added — which the hint under them admitted.
+
+            And on a removal, one: **Open** goes to the machines panel, which is the right
+            place to look at a machine that has just joined and the wrong place to look for
+            one that has just left. --%>
       <div :if={@finished?} class="ouro-devices-actions">
-        <a class="ouro-button" href="/status">Open</a>
-        <button type="button" class="ouro-quiet-button" phx-click="drawer-close">Done</button>
+        <a :if={not @leave?} class="ouro-button" href="/status">Open</a>
+        <button
+          type="button"
+          class={if @leave?, do: "ouro-button", else: "ouro-quiet-button"}
+          phx-click="drawer-close"
+        >
+          Done
+        </button>
       </div>
 
       <div
@@ -3006,13 +3079,37 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     """
   end
 
+  # §5.4's fallback, drawn only on a removal that failed because the member could not be
+  # reached. Every other failure has its own repair and this one would be wrong advice:
+  # a roster tombstone is irreversible, and offering it for an authentication refusal or a
+  # busy runtime is offering to throw away a machine that is still there.
+  defp leave_fallback(%{kind: "leave"} = drawer, done) when is_map(done) do
+    if Devices.unreachable?(done["reason"]),
+      do: Devices.leave_fallback(target_machine(drawer))
+  end
+
+  defp leave_fallback(_other, _done), do: nil
+
   # "<name> is in your fleet" — the sentence §5.2 asks for, and its opposite where the
   # operation was a removal rather than a join.
   defp finish_title("completed", "leave", name), do: "#{name} is out of your fleet"
   defp finish_title("completed", _kind, name), do: "#{name} is in your fleet"
+
+  # `operation_state/1` is the add flow's vocabulary — it answers "Setup failed" — and a
+  # removal that could not finish is not a setup that failed. Named after the machine here
+  # too, because the heading is the first thing read and "Setup failed" says neither what
+  # was being done nor to what.
+  defp finish_title(state, "leave", name) when state in ["failed", "interrupted"],
+    do: "#{name} was not removed"
+
   defp finish_title(state, _kind, _name), do: Devices.operation_state(state)
 
   @terminal ~w(completed failed cancelled interrupted)
+
+  # Whether this operation has stopped, either way. A `done` frame settles it where the last
+  # `state` event has not: the engine's failure arm sends one with no state at all.
+  defp finished?(drawer),
+    do: state_of(drawer) in @terminal or is_map(done_of(drawer)) or drawer.cancelled?
 
   defp final_state(status, done, drawer) do
     cond do
@@ -3038,24 +3135,33 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # drawer.
   defp steps(assigns) do
     reported = List.wrap((assigns.drawer.status || %{})["steps"])
+    kind = assigns.drawer.kind
 
     assigns =
       assigns
-      # Each of the six stages, with every step the worker filed under it. A stage the
-      # worker has reported nothing for says so; it does not read as done.
+      # Each stage of *this kind* of operation, with every step the worker filed under it. A
+      # stage the worker has reported nothing for says so; it does not read as done. A
+      # `leave` used to be drawn with the add flow's six, which meant five stages it never
+      # runs reading "not reported yet" and its roster removal filed under **Join fleet**.
       |> assign(
         :stages,
-        Enum.map(Devices.stages(), fn {key, label, _names} ->
+        Enum.map(Devices.stages(kind), fn {key, label, _names} ->
           {key, label,
-           Enum.filter(reported, &(is_map(&1) and Devices.stage_of(&1["step"]) == key))}
+           Enum.filter(reported, &(is_map(&1) and Devices.stage_of(&1["step"], kind) == key))}
         end)
       )
-      # And the steps that belong to none of the six — cooperative removal's, and the
-      # explicit test task — under their own names rather than folded into a stage they
-      # are not part of.
+      # And the steps that belong to none of this kind's stages — the explicit test task —
+      # under their own names rather than folded into a stage they are not part of.
       |> assign(
         :extra,
-        Enum.filter(reported, &(is_map(&1) and is_nil(Devices.stage_of(&1["step"]))))
+        Enum.filter(reported, &(is_map(&1) and is_nil(Devices.stage_of(&1["step"], kind))))
+      )
+      # An operation that has stopped will report nothing more, so a stage it never reached
+      # is not "not reported *yet*" — the yet is a promise the page cannot keep. A finished
+      # add whose steps end at `connect` left **Ready** saying it was still waiting.
+      |> assign(
+        :unreported,
+        if(finished?(assigns.drawer), do: "not checked", else: "not reported yet")
       )
       |> assign(:log, List.wrap((assigns.drawer.status || %{})["log"]))
 
@@ -3076,7 +3182,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           <span class="ouro-devices-step-outcome">
             <span class="ouro-visually-hidden">Outcome:</span>
             {if steps == [],
-              do: "not reported yet",
+              do: @unreported,
               else: elem(Devices.outcome(stage_outcome(steps)), 0)}
           </span>
           <span :for={step <- steps} class="ouro-devices-detail">

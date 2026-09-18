@@ -148,6 +148,32 @@ defmodule Ouroboros.Web.Live.Devices do
     if String.length(text) <= limit, do: text, else: String.slice(text, 0, limit) <> "…"
   end
 
+  @doc """
+  A *name* from an untrusted field, or `nil` where there is nothing a reader could use.
+
+  `plain/2` is the sanitiser and it answers about text in general: a boolean comes back as
+  `"false"`, and a string that was only invisible characters comes back as `""`. Both are
+  truthy, so a chain of `||` fallbacks written over `plain/2` stops at them — which is how
+  the finish heading came to read "false is in your fleet", and how the manual form's hint
+  came to read "the account on " with nothing after it.
+
+  This is the reader for the one question "what is this machine called": only a binary can
+  answer it, and an answer that sanitises to nothing is no answer. Every heading and hint
+  that names a machine goes through here so that its `|| "that machine"` is reached.
+  """
+  @spec name(term()) :: String.t() | nil
+  @spec name(term(), pos_integer()) :: String.t() | nil
+  def name(value, limit \\ 64)
+
+  def name(value, limit) when is_binary(value) do
+    case plain(value, limit) do
+      "" -> nil
+      named -> named
+    end
+  end
+
+  def name(_not_a_name, _limit), do: nil
+
   # ------------------------------------------------------------------------------------
   # The list
   # ------------------------------------------------------------------------------------
@@ -196,7 +222,8 @@ defmodule Ouroboros.Web.Live.Devices do
   The nine of §5.1 and no others: `in the fleet`, `in the fleet · not connected`,
   `not set up`, `can't run Ouroboros`, `offline` — and, from an operation this machine is
   holding rather than from discovery, `setting up…`, `waiting for you`, `setup failed` and
-  `set up just now` (`operation_words/1`).
+  `set up just now`, or a removal's own `removing…`, `removal failed` and `removed just
+  now` (`operation_words/2`).
   """
   @spec ouroboros_words(term()) :: String.t()
   def ouroboros_words(device) when is_map(device), do: ouroboros_words(device["state"])
@@ -474,29 +501,49 @@ defmodule Ouroboros.Web.Live.Devices do
   names the fleet and counts its members.
   """
   @spec status_line(term(), term(), boolean()) :: String.t()
-  def status_line(fleet, host_os, standalone?)
+  @spec status_line(term(), term(), boolean(), term()) :: String.t()
+  def status_line(fleet, host_os, standalone?, devices \\ [])
 
-  def status_line(_fleet, host_os, true), do: "#{self_label(host_os)} is not in a fleet yet."
+  def status_line(_fleet, host_os, true, _devices),
+    do: "#{self_label(host_os)} is not in a fleet yet."
 
-  def status_line(fleet, _host_os, false) when is_map(fleet) do
-    name = plain(fleet[:fleet_name], 96)
+  def status_line(fleet, _host_os, false, devices) when is_map(fleet) do
     connected = get_in(fleet, [:summary, :connected])
     expected = get_in(fleet, [:summary, :expected])
 
-    [
-      # A fleet's name already reads as one ("studio's fleet"), so it stands alone.
-      name || "This fleet is not named",
-      machines_line(connected, expected)
-    ]
+    [fleet_label(fleet, devices), machines_line(connected, expected)]
     |> Enum.reject(&is_nil/1)
     |> Enum.join(" · ")
   end
 
-  def status_line(_fleet, _host_os, false), do: "This machine is in a fleet."
+  def status_line(_fleet, _host_os, false, _devices), do: "This machine is in a fleet."
 
+  # A fleet's name already reads as one ("studio's fleet"), so it stands alone; only a fleet
+  # with *no* name is described by the machine that holds it, and it is described the way
+  # `status_line/0` in `tui/src/ui/app/devices.rs` describes it. "This fleet is not named"
+  # was the web saying which field was empty where the terminal said whose fleet it is.
+  defp fleet_label(fleet, devices) do
+    case name(fleet[:fleet_name], 96) do
+      named when is_binary(named) -> named
+      nil -> "Fleet of #{self_machine(devices)}"
+    end
+  end
+
+  defp self_machine(devices) do
+    devices
+    |> List.wrap()
+    |> Enum.find(&(is_map(&1) and self_row?(&1)))
+    |> case do
+      row when is_map(row) -> name(row["machine"], 96) || "this machine"
+      _none -> "this machine"
+    end
+  end
+
+  # Singular for a fleet of one, which is the fleet every first setup makes: "1 of 1
+  # machines connected" is a plural about a single machine, and the terminal never said it.
   defp machines_line(connected, expected)
        when is_integer(connected) and is_integer(expected),
-       do: "#{connected} of #{expected} machines connected"
+       do: "#{connected} of #{expected} machine#{if expected == 1, do: "", else: "s"} connected"
 
   defp machines_line(_connected, _expected), do: nil
 
@@ -687,13 +734,31 @@ defmodule Ouroboros.Web.Live.Devices do
   discovery says rather than carrying "Setup cancelled" for the life of the journal.
   """
   @spec operation_words(term()) :: String.t() | nil
+  @spec operation_words(term(), term()) :: String.t() | nil
+  def operation_words(state, kind \\ nil)
+
   # No operation at all. `unfinished?/1` answers `true` for `nil` — an operation whose state
   # this build could not read is one an operator can still pick up — so without this clause
   # every row on the page read "setting up…" and offered Continue, which is exactly the
   # reading that would be wrong on all of them.
-  def operation_words(nil), do: nil
+  def operation_words(nil, _kind), do: nil
 
-  def operation_words(state) do
+  # A removal is not a setup, and a row that read "set up just now" after one had the words
+  # exactly backwards: the machine had *left*. The state alone cannot say which — a
+  # `completed` is a `completed` either way — so the operation's `kind` is what picks the
+  # sentence, and this is the only place that decision is made.
+  def operation_words(state, "leave") do
+    cond do
+      waiting?(state) -> "waiting for you"
+      state in ["failed", "interrupted"] -> "removal failed"
+      state == "completed" -> "removed just now"
+      state == "cancelled" -> nil
+      unfinished?(state) -> "removing…"
+      true -> nil
+    end
+  end
+
+  def operation_words(state, _kind) do
     cond do
       waiting?(state) -> "waiting for you"
       state in ["failed", "interrupted"] -> "setup failed"
@@ -711,9 +776,26 @@ defmodule Ouroboros.Web.Live.Devices do
   (Open, or Details), and a cancelled one leaves the row offering to start again.
   """
   @spec operation_action(term()) :: {String.t(), String.t()} | nil
-  def operation_action(nil), do: nil
+  @spec operation_action(term(), term()) :: {String.t(), String.t()} | nil
+  def operation_action(state, kind \\ nil)
 
-  def operation_action(state) do
+  def operation_action(nil, _kind), do: nil
+
+  # The other end of `operation_words/2`. A finished removal leaves a machine this fleet can
+  # add again, so its row offers exactly that — **Open** would have sent an operator to the
+  # machines panel to look for something that is no longer there.
+  def operation_action(state, "leave") do
+    cond do
+      waiting?(state) -> {"Continue", "open-operation"}
+      state in ["failed", "interrupted"] -> {"Retry", "open-operation"}
+      state == "completed" -> {"Add to fleet", "deploy"}
+      state == "cancelled" -> nil
+      unfinished?(state) -> {"Continue", "open-operation"}
+      true -> nil
+    end
+  end
+
+  def operation_action(state, _kind) do
     cond do
       waiting?(state) -> {"Continue", "open-operation"}
       state in ["failed", "interrupted"] -> {"Retry", "open-operation"}
@@ -769,9 +851,35 @@ defmodule Ouroboros.Web.Live.Devices do
     {"readiness", "Ready", ~w(readiness)}
   ]
 
-  # A step in words. `leave` and `disable_service` belong to cooperative removal and
-  # `test_task` is the explicit first-task check, so none of the three is filed under one of
-  # the six stages — they are drawn under their own names instead.
+  # A removal is not an install run backwards, and drawing it under the add flow's six
+  # stages said so on every one of them: "Install — not reported yet" on an operation that
+  # installs nothing, and the roster removal filed under **Join fleet**. So `leave` has its
+  # own five, in the order `run_leave/1` and `stop_and_retire/5` in
+  # `tui/src/fleet_setup/engine.rs` emit them, and named from the same two functions rather
+  # than guessed at:
+  #
+  #   * `inspect` — the one step the two flows share a name for.
+  #   * `stop_runtime` — the idle-gated shutdown.
+  #   * `disable_service` — the startup service, taken away again.
+  #   * `leave` — the helper's own `leave`, which retires the credentials, with
+  #     `verify_disconnected` beside it: that step is `await_disconnection/3` waiting for
+  #     this runtime to stop seeing the member, which is the same stage's business.
+  #   * `roster` — `apply_roster_everywhere/5`, with the `member_preflight` that reaches the
+  #     remaining members first.
+  #
+  # `stop_runtime` therefore belongs to *two* stages, one per kind: on a `setup` it is the
+  # transition restart (filed under **Start at login** below), and on a `leave` it is the
+  # shutdown. That is why `stage_of/2` takes the kind rather than the step alone.
+  @leave_stages [
+    {"inspect", "Inspect", ~w(inspect)},
+    {"stop_runtime", "Stop", ~w(stop_runtime)},
+    {"disable_service", "Disable startup", ~w(disable_service)},
+    {"leave", "Leave", ~w(leave verify_disconnected)},
+    {"roster", "Update rosters", ~w(roster member_preflight)}
+  ]
+
+  # A step in words. `test_task` is the explicit first-task check and belongs to no stage of
+  # either flow, so it is drawn under its own name instead.
   @step_labels %{
     "inspect" => "Read the machine",
     "install_binary" => "Install the `ouro` binary",
@@ -787,25 +895,46 @@ defmodule Ouroboros.Web.Live.Devices do
     "readiness" => "Check readiness",
     "test_task" => "Run the test task",
     "disable_service" => "Disable the startup service",
+    "verify_disconnected" => "Wait for it to disconnect",
     "leave" => "Leave the fleet"
   }
 
   @doc """
-  The six stages a setup runs through, in order, each with the worker's own step names.
+  The stages an operation of this kind runs through, in order, each with the worker's own
+  step names.
 
   Short names, because §5.2 draws them as one strip —
   `✓ Inspect · ✓ Install · ● Join fleet · ○ Start at login · ○ Connect · ○ Ready` — rather
   than as six headed sections with a sentence each.
+
+  A `leave` gets its own five — **Inspect · Stop · Disable startup · Leave · Update
+  rosters** — because the add flow's six were five stages it never runs, all reading "not
+  reported yet" for ever, with the roster removal filed under **Join fleet**. `stages/0` is
+  still the add flow's, which is what an unqualified reading of "the stages" has always
+  meant here.
   """
   @spec stages() :: [{String.t(), String.t(), [String.t()]}]
-  def stages, do: @stages
+  @spec stages(term()) :: [{String.t(), String.t(), [String.t()]}]
+  def stages(kind \\ nil)
 
-  @doc "Which of the six stages a step name belongs to, or `nil` for one that belongs to none."
+  def stages("leave"), do: @leave_stages
+  def stages(_add_or_setup), do: @stages
+
+  @doc """
+  Which stage a step name belongs to for an operation of this kind, or `nil` for one that
+  belongs to none.
+
+  The kind matters: `stop_runtime` is the transition restart of a `setup` and the shutdown
+  of a `leave`, and it is a different stage in each.
+  """
   @spec stage_of(term()) :: String.t() | nil
-  def stage_of(step) when is_binary(step),
-    do: Enum.find_value(@stages, fn {key, _label, names} -> if step in names, do: key end)
+  @spec stage_of(term(), term()) :: String.t() | nil
+  def stage_of(step, kind \\ nil)
 
-  def stage_of(_other), do: nil
+  def stage_of(step, kind) when is_binary(step),
+    do: Enum.find_value(stages(kind), fn {key, _label, names} -> if step in names, do: key end)
+
+  def stage_of(_other, _kind), do: nil
 
   @doc "One step's own name in words, or the name itself where this build has none for it."
   @spec step_label(term()) :: String.t()
@@ -846,14 +975,37 @@ defmodule Ouroboros.Web.Live.Devices do
   procedure and not a machine.
   """
   @spec challenge_title(term()) :: String.t()
-  def challenge_title("password"), do: "Password"
-  def challenge_title("passphrase"), do: "Passphrase for the selected key"
-  def challenge_title("host_trust"), do: "First time connecting"
-  def challenge_title("review"), do: "Ready to deploy"
-  def challenge_title(kind) when is_binary(kind), do: "The runtime is waiting for: #{kind}"
+  @spec challenge_title(term(), term()) :: String.t()
+  def challenge_title(challenge_kind, operation_kind \\ nil)
 
-  def challenge_title(_unreadable),
+  def challenge_title("password", _kind), do: "Password"
+  def challenge_title("passphrase", _kind), do: "Passphrase for the selected key"
+  def challenge_title("host_trust", _kind), do: "First time connecting"
+
+  # The one challenge whose heading depends on what is being approved. "Ready to deploy"
+  # over a plan that installs nothing and removes a machine was the page naming the wrong
+  # procedure at the one step where an operator commits to it.
+  def challenge_title("review", "leave"), do: "Ready to remove"
+  def challenge_title("review", "setup"), do: "Ready to set up"
+  def challenge_title("review", _add), do: "Ready to deploy"
+
+  def challenge_title(kind, _operation_kind) when is_binary(kind),
+    do: "The runtime is waiting for: #{kind}"
+
+  def challenge_title(_unreadable, _operation_kind),
     do: "The runtime is waiting for something this page cannot name"
+
+  @doc """
+  The name on the button that approves a plan: **Deploy**, **Set up** or **Remove**.
+
+  The same three words as `challenge_title("review", kind)`'s three headings, because a
+  heading that says "Ready to remove" over a button that says "Deploy" is two answers to
+  the one question an operator is being asked.
+  """
+  @spec approve_label(term()) :: String.t()
+  def approve_label("leave"), do: "Remove"
+  def approve_label("setup"), do: "Set up"
+  def approve_label(_add), do: "Deploy"
 
   @doc "A host-trust heading that names the address, where the worker reported one."
   @spec host_trust_title(term()) :: String.t()
@@ -954,7 +1106,8 @@ defmodule Ouroboros.Web.Live.Devices do
   def attempt(_absent), do: nil
 
   @doc """
-  What the operation said about readiness, as `{sentence, offer a test task?}`.
+  What the operation said about readiness, as `{sentence, offer a test task?}`, where the
+  sentence is `nil` when there is nothing worth saying.
 
   There is no `ready` flag on the wire. The worker's `done` frame carries `ok`, a state, a
   summary, a next step and what it could not establish, so readiness is read from the
@@ -962,29 +1115,50 @@ defmodule Ouroboros.Web.Live.Devices do
   engine records today because the owner-local readiness methods answer for the runtime
   they are asked rather than for the new member, this says so rather than claiming either
   answer.
+
+  **Silence where the operation already answered.** A setup that finished with its
+  `connect` step done has said what it did: the heading names the machine, the worker's
+  summary says it joined and is connected. Following that with "The setup finished.
+  Readiness was not reported, so this page does not claim it." is an epistemological
+  disclaimer about a fact the two lines above just established — the 2026-09-18 live add
+  showed all three stacked. So a completed operation whose connection is done says nothing
+  more unless the `readiness` step itself reported and *failed*, which is the one case where
+  the reader is being told something they do not already have.
   """
-  @spec readiness(term(), term()) :: {String.t(), boolean()}
+  @spec readiness(term(), term()) :: {String.t() | nil, boolean()}
   def readiness(steps, done) do
-    step = Enum.find(List.wrap(steps), &(is_map(&1) and &1["step"] == "readiness"))
+    steps = List.wrap(steps)
+    step = Enum.find(steps, &(is_map(&1) and &1["step"] == "readiness"))
     finished? = is_map(done) and done["ok"] == true
+    settled? = finished? and connected?(steps)
 
-    case {step && step["outcome"], finished?} do
-      {"ok", _finished?} ->
-        {"This machine reported that it is ready.", true}
-
-      {"failed", _finished?} ->
+    case {step && step["outcome"], finished?, settled?} do
+      {"failed", _finished?, _settled?} ->
         {"This machine did not report itself ready. What is missing is below.", false}
 
-      {"skipped", _finished?} ->
+      {_any, _finished?, true} ->
+        {nil, true}
+
+      {"ok", _finished?, _settled?} ->
+        {"This machine reported that it is ready.", true}
+
+      {"skipped", _finished?, _settled?} ->
         {"Readiness was not established from here. " <>
            (plain(step["detail"]) || "The steps below say what was and was not checked."), true}
 
-      {_unreported, true} ->
+      {_unreported, true, _settled?} ->
         {"The setup finished. Readiness was not reported, so this page does not claim it.", true}
 
-      {_unreported, _unfinished} ->
+      {_unreported, _unfinished, _settled?} ->
         {"Readiness was not reported.", false}
     end
+  end
+
+  # Whether the operation got as far as connecting, from the `connect` step's own outcome.
+  defp connected?(steps) do
+    Enum.any?(steps, fn step ->
+      is_map(step) and step["step"] == "connect" and step["outcome"] in ["ok", "skipped"]
+    end)
   end
 
   # ------------------------------------------------------------------------------------
@@ -1013,7 +1187,7 @@ defmodule Ouroboros.Web.Live.Devices do
     [
       review_install(plan["release"], target["install_path"]),
       review_join(plan["kind"], target["machine"]),
-      review_startup(plan["service"]),
+      review_startup(plan["kind"], plan["service"]),
       review_roster(plan["members"]),
       review_trust(plan["grants"])
     ]
@@ -1048,10 +1222,19 @@ defmodule Ouroboros.Web.Live.Devices do
 
   defp review_join(_kind, _absent), do: nil
 
-  defp review_startup("managed"), do: "Start at login as a user service"
-  defp review_startup("manual"), do: "Do not start at login; this machine is started by hand"
-  defp review_startup(other) when is_binary(other), do: "Startup: #{plain(other, 64)}"
-  defp review_startup(_absent), do: nil
+  # Nothing is being started, so nothing is said about starting. A `leave` plan still
+  # carries `service` — it is the same document — and rendering it read "Do not start at
+  # login; this machine is started by hand" on a removal, which describes a setting the
+  # operation does not touch on a machine it is taking away.
+  defp review_startup("leave", _service), do: nil
+
+  defp review_startup(_kind, "managed"), do: "Start at login as a user service"
+
+  defp review_startup(_kind, "manual"),
+    do: "Do not start at login; this machine is started by hand"
+
+  defp review_startup(_kind, other) when is_binary(other), do: "Startup: #{plain(other, 64)}"
+  defp review_startup(_kind, _absent), do: nil
 
   defp review_roster(members) when is_list(members) and members != [] do
     names =
@@ -1133,14 +1316,42 @@ defmodule Ouroboros.Web.Live.Devices do
   The engine's `leave` needs the machine to answer. When it will not, the roster still has
   to be cleaned up, and the recipe for that is the CLI's — named here rather than left as a
   failure with no way forward.
+
+  Two things this sentence had wrong. It said "did not answer" on a form nobody had
+  submitted yet, which is a page reporting a failure before an attempt; `unreachable?/1`
+  is the guard that keeps it on the failure it describes. And the command was
+  `ouro fleet sessions forget <name>`, which the CLI does not accept: `Forget` takes
+  `--machine`, and it refuses without `--accept-state-loss` because retiring a gone
+  machine's session-owner evidence is irreversible (`main.rs`, the `Forget` arm). An
+  operator who typed what this page printed got a usage error at the end of a removal that
+  had already failed.
   """
   @spec leave_fallback(term()) :: String.t()
   def leave_fallback(machine) do
     named = plain(machine, 64) || "that machine"
 
     "#{named} did not answer, so nothing on it was changed. To take it out of this fleet's " <>
-      "roster anyway, run `ouro fleet sessions forget #{named}` on this machine."
+      "roster anyway, run `ouro fleet sessions forget --machine #{named} " <>
+      "--accept-state-loss` on this machine."
   end
+
+  # A session was never established: nothing on the far machine was touched, so the roster
+  # is the only thing left to repair and the CLI recipe is the way to do it. An
+  # authentication refusal is deliberately *not* one of these — that machine answered, and
+  # the repair is a working credential rather than a tombstone. Nor are the host-key
+  # reasons, whose repair is verifying the key.
+  @unreachable ~w(ssh_unavailable ssh_timeout connection_lost)
+
+  @doc """
+  Whether a failure's stable reason says the member could not be reached at all.
+
+  The `reason` on the worker's failure `done` frame (`worker.rs`: `reason_of(error)`), which
+  is a code rather than a sentence — the sentence beside it is the operator's, this is the
+  page's.
+  """
+  @spec unreachable?(term()) :: boolean()
+  def unreachable?(reason) when is_binary(reason), do: reason in @unreachable
+  def unreachable?(_other), do: false
 
   @doc """
   The reviewed plan, in the order and the words the CLI's own review uses.

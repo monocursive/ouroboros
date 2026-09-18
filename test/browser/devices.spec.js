@@ -290,13 +290,23 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
 
   // 6. Finish. §5.2: "<name> is in your fleet", Open and Done, and nothing that acts on
   // this runtime instead of the machine that was just added.
+  //
+  // Scoped to the drawer, every one of them. "Open" is also the self row's own action and
+  // the action a completed operation leaves on its row, so an unscoped `getByRole("link",
+  // {name: "Open"})` matches three links on this page and fails strict mode — on the page
+  // being right rather than on it being wrong.
   await expect(
-    page.getByRole("heading", { name: device.name + " is in your fleet" })
+    drawer.getByRole("heading", { name: device.name + " is in your fleet" })
   ).toBeVisible({ timeout: 15000 });
-  await expect(page.getByRole("link", { name: "Open", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Done", exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Configure model" })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Run test task" })).toHaveCount(0);
+  await expect(drawer.getByRole("link", { name: "Open", exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Done", exact: true })).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "Configure model" })).toHaveCount(0);
+  await expect(drawer.getByRole("link", { name: "Run test task" })).toHaveCount(0);
+
+  // A finished setup that connected says what it did and stops: no disclaimer about a
+  // readiness nobody claimed, and the stage the worker never reported is not still waiting.
+  await expect(drawer).not.toContainText("The setup finished. Readiness was not reported");
+  await expect(drawer.locator(".ouro-devices-strip")).not.toContainText("not reported yet");
 
   // And nothing in the finished page is the password either, including the address bar.
   expect(page.url()).not.toContain(password);
