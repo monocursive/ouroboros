@@ -70,9 +70,22 @@ use to put Ouroboros on a second machine:
     operation pins its row to **Retry** with no way to discard it from the TUI (the
     web has *Cancel setup*; the TUI's `c` is not offered on a failed state). *(live)*
 
+12. **Closing the tab mid-review strands the setup.** The review challenge is bound to
+    the LiveView session that received it; a new tab gets `challenge_not_bound`, offers
+    *Reconnect this setup to this tab*, and the resume is refused "that operation
+    already has a worker attached" — the closed tab's binding is never released, so
+    the only way forward is Cancel setup. *(live, fleet-ux packaged build)*
+13. **A fleet created under a symlinked data directory never starts under its
+    service.** `fleet create` wrote the TLS policy with the directory as typed
+    (`/tmp/…`); the LaunchAgent names it resolved (`/private/tmp/…`); the strict
+    policy check rendered the expected file under the resolved spelling and refused the
+    one on disk. The first "Set up this Mac" from the web on the packaged build hit
+    this on its restart. *(live)*
+
 The rest of this document is the evidence (§2–§4) and the target design (§5), which
 is what the `fleet-ux` branch implements. Fixed on that branch before the rewrite:
-finding 1 (`30366b2c`) and finding 10 (`aa271a78`).
+finding 1 (`30366b2c`) and finding 10 (`aa271a78`); after it, finding 13
+(`bfbc16bf`) and finding 12 (broker, in progress).
 
 ---
 
