@@ -76,8 +76,8 @@ use session::{
 pub use cluster::{MachineChoice, MachineSecurity, MachineSummary};
 pub use devices::{
     devices_hint_line, devices_lines, ConnectField, DeploymentHost, DeviceRow, DevicesState,
-    Discovery, Filter, IdentityKind, Inventory as DeviceInventory, OperationSummary, Primary,
-    Refusal, SecretInput, Snapshot as DeploymentSnapshot, Takeover,
+    Discovery, Filter, FormKind, Inventory as DeviceInventory, Marker, OperationSummary, Primary,
+    Refusal, SecretInput, Snapshot as DeploymentSnapshot, Takeover, WorkerExit,
 };
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use location::Location;
@@ -2027,6 +2027,11 @@ impl App {
                 self.connection = Connection::Live;
                 self.hello = *hello;
                 self.note_all_watches(Note::Reconnected);
+                // A Devices operation outlives the runtime it was started from — a local
+                // setup stops that runtime by design — so coming back is the moment to
+                // read the operation again by its own id rather than to keep drawing the
+                // snapshot from before the restart.
+                self.devices_reconnected();
                 self.inform(
                     "the connection was re-established; resubscribing",
                     NoticeKind::Warn,
