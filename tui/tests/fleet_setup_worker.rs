@@ -19,10 +19,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use fleet_setup_support::{scratch, OURO};
+use fleet_setup_support::{account, scratch, Sshd, OURO};
 use ouro::fleet;
 use ouro::fleet_setup::journal::Journal;
-use ouro::fleet_setup::{OperationKind, OperationRequest, OperationState, PortPolicy};
+use ouro::fleet_setup::{
+    IdentityChoice, OperationKind, OperationRequest, OperationState, PortPolicy,
+};
 
 /// One client of the worker's socket, speaking seam S3.
 struct Client {
@@ -956,4 +958,262 @@ fn a_crashed_worker_restarts_from_its_private_request_with_a_new_instance() {
         true
     );
     client.ask("cancel", json!({}));
+}
+
+/// A `leave` driven entirely from a request file, through the detached worker.
+///
+/// The broker's third operation. It writes `{"kind": "leave", "machine": …}` and starts
+/// `ouro fleet worker start`; everything after that is the same engine `ouro fleet leave
+/// --machine` runs, and the only thing that differs is where the questions go. What this
+/// pins is that the worker path really does run *that* orchestration — the member is
+/// inspected, the plan is what the review challenge carries, and then stop, disable,
+/// retire, roster — rather than accepting `leave` and doing something shaped like `add`.
+///
+/// The member is admitted through the same worker socket first, so the roster this leave
+/// reads is one this test really created, over real SSH, against the real helper.
+#[test]
+fn a_leave_request_file_runs_the_removal_through_the_detached_worker() {
+    let rig = Sshd::start("wlv-rig");
+    let data = data_dir("wlv");
+    let member = data_dir("wlv-m");
+    fleet::create(
+        &data,
+        Some("worker lab"),
+        "studio",
+        "127.0.0.1",
+        fleet::ephemeral_ports(),
+    )
+    .expect("a fleet on this machine");
+
+    // ---- admit `vps`, so there is a member to remove.
+    let admit = "op-0000000f0001";
+    let mut request = OperationRequest::new(admit, OperationKind::Add, "vps");
+    request.address = Some("127.0.0.1".into());
+    request.ssh_user = Some(account());
+    request.ssh_port = Some(rig.port);
+    request.identity = IdentityChoice::Key {
+        path: rig.client_key.clone(),
+    };
+    // An absolute path names an existing installation: the `ouro` this test was built
+    // beside. The missing-binary path is exercised elsewhere.
+    request.install_path = Some(OURO.to_string());
+    request.remote_data_dir = Some(member.display().to_string());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+
+    let spawner = spawn_detached(&data, admit);
+    let capability = read_capability(&data, admit);
+    let mut client = Client::connect(&spawner.socket);
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": capability, "subject": "operator", "session": "s1"})
+        )["ok"],
+        json!(true)
+    );
+    // An unknown host key is its own question, before the plan.
+    let trust = client.await_event("challenge");
+    assert_eq!(trust["kind"], json!("host_trust"), "{trust}");
+    answer(
+        &mut client,
+        &trust,
+        json!({"accept": true, "fingerprint": trust["metadata"]["fingerprint"]}),
+    );
+    let review = client.await_event("challenge");
+    assert_eq!(review["kind"], json!("review"));
+    approve(&mut client, &review);
+    let done = client.await_event("done");
+    assert_eq!(done["ok"], json!(true), "the admission: {done}");
+    assert_eq!(client.ask("bye", json!({}))["ok"], json!(true));
+    drop(client);
+    assert!(
+        fleet::load(&member)
+            .expect("a readable member profile")
+            .is_some(),
+        "the member really joined"
+    );
+
+    // ---- now the request the broker writes for a removal, and nothing else.
+    //
+    // No `remote_data_dir` and no `ports`: a broker knows the roster member, its
+    // address, an account, a port and an identity. Everything else about how this
+    // machine was deployed is read back out of the journal of the operation that
+    // admitted it.
+    let leave = "op-0000000f0002";
+    let request = serde_json::json!({
+        "schema": 1,
+        "operation": leave,
+        "kind": "leave",
+        "machine": "vps",
+        "address": "127.0.0.1",
+        "ssh_user": account(),
+        "ssh_port": rig.port,
+        "identity": {"kind": "key", "path": rig.client_key.display().to_string()},
+        "install_path": OURO,
+    });
+    write_request_json(&data, leave, &request);
+
+    let spawner = spawn_detached(&data, leave);
+    let capability = read_capability(&data, leave);
+    let mut client = Client::connect(&spawner.socket);
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": capability, "subject": "operator", "session": "s1"})
+        )["ok"],
+        json!(true)
+    );
+
+    // The host key was accepted for the admission and recorded in this machine's own
+    // private store, so a removal of the same member is not a second host question.
+    let review = client.await_event("challenge");
+    assert_eq!(
+        review["kind"],
+        json!("review"),
+        "a removal reviews a plan: {review}"
+    );
+
+    // The review carries the plan `plan_leave` computed, and the plan says what it does.
+    let plan = &review["metadata"]["plan"];
+    assert_eq!(plan["kind"], json!("leave"), "{plan}");
+    assert_eq!(plan["target"]["machine"], json!("vps"));
+    assert_eq!(plan["target"]["address"], json!("127.0.0.1"));
+    assert_eq!(plan["target"]["ssh_user"], json!(account()));
+    assert_eq!(plan["target"]["port"], json!(rig.port));
+    assert_eq!(
+        plan["target"]["data_dir"],
+        json!(member.display().to_string()),
+        "the data directory this member was admitted against is recovered, not guessed"
+    );
+    assert_eq!(
+        plan["summary"],
+        json!(
+            "Stop Ouroboros on vps, retire its credentials, remove it from 1 roster; \
+             its sessions and data stay on that machine."
+        ),
+        "the plan says in one line what approving it does: {plan}"
+    );
+    assert!(
+        plan["grants"]
+            .as_array()
+            .expect("the grants array")
+            .iter()
+            .any(|grant| grant
+                .as_str()
+                .is_some_and(|text| text.contains("No tombstone is recorded"))),
+        "{plan}"
+    );
+    // Every machine this operation authenticates to is named, the target first.
+    let members = plan["members"].as_array().expect("the members array");
+    assert_eq!(members[0]["machine"], json!("vps"));
+    assert_eq!(members[0]["reached_by"], json!("ssh"));
+    assert!(members.iter().any(
+        |member| member["machine"] == json!("studio") && member["reached_by"] == json!("local")
+    ));
+
+    approve(&mut client, &review);
+
+    let done = client.await_event("done");
+    assert_eq!(done["ok"], json!(true), "the removal: {done}");
+    assert_eq!(done["state"], json!("completed"), "{done}");
+
+    // The orchestration that ran is `leave`'s: inspect, gate, disable, retire, roster —
+    // in that order, on the machine that is leaving.
+    let record = Journal::read(&data, leave)
+        .expect("a readable journal")
+        .expect("a written journal");
+    assert_eq!(record.state, OperationState::Completed);
+    assert_eq!(record.kind, OperationKind::Leave);
+    let order: Vec<&str> = record
+        .steps
+        .iter()
+        .filter(|step| step.machine == "vps" && step.outcome != "started")
+        .map(|step| step.step.as_str())
+        .collect();
+    for step in ["inspect", "stop_runtime", "disable_service", "leave"] {
+        assert!(order.contains(&step), "missing `{step}` in {order:?}");
+    }
+    let at = |step: &str| order.iter().position(|found| *found == step);
+    assert!(
+        at("inspect") < at("stop_runtime")
+            && at("stop_runtime") < at("disable_service")
+            && at("disable_service") < at("leave"),
+        "inspect, then gate, then disable, then retire: {order:?}"
+    );
+    assert!(
+        record
+            .steps
+            .iter()
+            .any(|step| step.machine == "studio" && step.step == "roster"),
+        "and this machine's own roster is edited: {:?}",
+        record.steps
+    );
+
+    // Both ends agree it left: the member is standalone again with its data intact, and
+    // this machine's roster no longer names it.
+    assert!(
+        fleet::load(&member).expect("a readable member").is_none(),
+        "the member's credentials were retired on the member itself"
+    );
+    assert!(member.exists(), "and its own data is still there");
+    let profile = fleet::load(&data)
+        .expect("a readable profile")
+        .expect("a profile");
+    assert!(
+        !profile.members.iter().any(|entry| entry.machine == "vps"),
+        "{:?}",
+        profile.members
+    );
+    assert!(
+        profile.tombstones.is_empty(),
+        "cooperative removal records no tombstone: {:?}",
+        profile.tombstones
+    );
+
+    assert_eq!(client.ask("bye", json!({}))["ok"], json!(true));
+}
+
+/// The capability the broker reads the instant `start` returns.
+fn read_capability(data_dir: &Path, operation: &str) -> String {
+    std::fs::read_to_string(ouro::fleet_setup::capability_path(data_dir, operation))
+        .expect("a capability file")
+        .trim()
+        .to_string()
+}
+
+/// Answer a challenge event with the given response.
+fn answer(client: &mut Client, challenge: &Value, response: Value) {
+    let id = challenge["challenge"].as_str().expect("a challenge id");
+    let replied = client.ask("respond", json!({"challenge": id, "response": response}));
+    assert_eq!(replied["ok"], json!(true), "{replied}");
+}
+
+/// Approve a review challenge with the digest it is bound to.
+fn approve(client: &mut Client, challenge: &Value) {
+    let digest = challenge["metadata"]["plan_digest"]
+        .as_str()
+        .expect("a review challenge carries the digest it binds")
+        .to_string();
+    answer(
+        client,
+        challenge,
+        json!({"approve": true, "plan_digest": digest}),
+    );
+}
+
+/// The broker writes the request as a document, not as this crate's struct. Writing it
+/// that way here is what makes the shape itself part of the test: a field the engine
+/// needs and the broker does not write would fail at `OperationRequest::read`.
+fn write_request_json(data_dir: &Path, operation: &str, request: &Value) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = ouro::fleet_setup::ensure_deploy_dir(data_dir).expect("a deploy directory");
+    let path = dir.join(format!("{operation}.request.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(request).expect("an encodable request"),
+    )
+    .expect("a written request");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("a private request");
 }

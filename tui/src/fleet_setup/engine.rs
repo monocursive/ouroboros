@@ -991,6 +991,7 @@ impl Engine {
             schema: super::SCHEMA,
             operation: self.request.operation.clone(),
             kind: OperationKind::Add,
+            summary: String::new(),
             deployment_host: DeploymentHost::here(&self.data_dir),
             target: PlanTarget {
                 machine: machine.clone(),
@@ -1021,6 +1022,9 @@ impl Engine {
                     .unwrap_or(Value::Null),
             ),
         };
+
+        let mut plan = plan;
+        plan.refresh_summary();
 
         Ok((
             plan,
@@ -1080,6 +1084,22 @@ impl Engine {
             return Ok(recorded);
         }
         Ok(preflight.install_path(super::bootstrap::DEFAULT_INSTALL_PATH))
+    }
+
+    /// The `OUROBOROS_DATA_DIR` a named machine's `ouro` was deployed against.
+    ///
+    /// An explicit request wins, and otherwise this comes from the journal of the
+    /// operation that admitted the machine — the same place `remote_executable_for`
+    /// reads the install path from, and for the same reason. A `leave` written by the
+    /// UI's broker names a roster member, an account and an identity; it has no way to
+    /// know that this machine was admitted with a non-default data directory, and
+    /// falling through to the far side's default would open a helper against a data
+    /// directory with no fleet in it and report the member as already standalone.
+    fn remote_data_dir_for(&self, machine: &str) -> Option<String> {
+        self.request
+            .remote_data_dir
+            .clone()
+            .or_else(|| self.member_access(machine).0.data_dir)
     }
 
     /// Where this machine's own journals say `ouro` was installed on `machine`.
@@ -1162,6 +1182,11 @@ impl Engine {
                 )?;
             }
         }
+        // The two edits above — dropping members the approved roster did not have, and
+        // restoring the release this operation already installed — are edits to the
+        // plan, and the sentence is derived from it.
+        plan.refresh_summary();
+
         let machine = prepared.machine.clone();
         let target_host = plan.target.address.clone();
 
@@ -2149,10 +2174,11 @@ impl Engine {
         } else {
             None
         };
-        Ok(Plan {
+        let mut plan = Plan {
             schema: super::SCHEMA,
             operation: self.request.operation.clone(),
             kind: OperationKind::Setup,
+            summary: String::new(),
             deployment_host: DeploymentHost::here(&self.data_dir),
             target: PlanTarget {
                 machine: machine.clone(),
@@ -2185,7 +2211,9 @@ impl Engine {
                 serde_json::to_value(crate::fleet_protocol::build_metadata())
                     .unwrap_or(Value::Null),
             ),
-        })
+        };
+        plan.refresh_summary();
+        Ok(plan)
     }
 
     fn run_setup(&self, journal: &JournalHandle) -> Result<Outcome> {
@@ -2458,6 +2486,7 @@ impl Engine {
             schema: super::SCHEMA,
             operation: self.request.operation.clone(),
             kind: OperationKind::Leave,
+            summary: String::new(),
             deployment_host: DeploymentHost::here(&self.data_dir),
             target: PlanTarget {
                 machine: machine.clone(),
@@ -2466,7 +2495,7 @@ impl Engine {
                 ssh_user: self.request.ssh_user.clone().unwrap_or_default(),
                 identity: "resolved when the member is contacted".into(),
                 install_path: String::new(),
-                data_dir: self.request.remote_data_dir.clone(),
+                data_dir: self.remote_data_dir_for(&machine),
                 host_fingerprint: None,
                 node: Some(member.node.clone()),
             },
@@ -2480,6 +2509,8 @@ impl Engine {
             grants: vec![removal_note(&machine)],
             build: None,
         };
+        let mut plan = plan;
+        plan.refresh_summary();
         Ok((plan, profile))
     }
 
@@ -2519,7 +2550,7 @@ impl Engine {
             let mut session = helper::Session::open(
                 &connection.runner,
                 &executable,
-                self.request.remote_data_dir.as_deref(),
+                self.remote_data_dir_for(&machine).as_deref(),
             )?;
 
             let inspection = session.ask("inspect", json!({}))?;
@@ -2601,7 +2632,7 @@ impl Engine {
     ) -> Result<bool> {
         if !journal.record().completed(machine, "stop_runtime") {
             journal.begin_step(machine, "stop_runtime")?;
-            let command = match self.request.remote_data_dir.as_deref() {
+            let command = match self.remote_data_dir_for(machine).as_deref() {
                 Some(data_dir) => format!(
                     "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} stop --require-idle",
                     ssh::shell_quote(data_dir),
