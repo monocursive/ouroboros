@@ -82,10 +82,17 @@ use to put Ouroboros on a second machine:
     one on disk. The first "Set up this Mac" from the web on the packaged build hit
     this on its restart. *(live)*
 
+14. **The browser tab is dead after a local setup.** The web port is meant to be sticky
+    across restarts, but the endpoint deleted `web.json` on a clean stop, so the port
+    survived a crash and not the deliberate restart a setup performs; the restarted
+    runtime came up on a new port and the page that promised to reconnect could not.
+    *(live)*
+
 The rest of this document is the evidence (§2–§4) and the target design (§5), which
 is what the `fleet-ux` branch implements. Fixed on that branch before the rewrite:
 finding 1 (`30366b2c`) and finding 10 (`aa271a78`); after it, finding 13
-(`bfbc16bf`) and finding 12 (broker, in progress).
+(`bfbc16bf`), finding 14 (the publication is kept on a clean stop) and finding 12
+(broker, in progress).
 
 ---
 

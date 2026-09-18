@@ -93,15 +93,21 @@ defmodule Ouroboros.Web.EndpointTest do
       assert Bitwise.band(stat.mode, 0o777) == 0o600
     end
 
-    test "is removed when the surface stops", %{config: config, data_dir: dir} do
+    test "is kept when the surface stops, so the next boot can take its port", %{
+      config: config,
+      data_dir: dir
+    } do
       start_supervised!({Ouroboros.Web, config: config})
       path = Endpoint.publication_path(dir)
-      assert File.exists?(path)
+      {:ok, {_address, port}} = Endpoint.bound_address()
 
       stop_supervised!(Ouroboros.Web)
 
-      refute File.exists?(path),
-             "a stopped surface left a publication pointing at a port nobody is listening on"
+      # Still there, still naming the port — and naming a pid that every reader checks
+      # for liveness, so it reads as "no endpoint" rather than as a port nobody serves.
+      assert {:ok, %{"port" => ^port, "pid" => pid}} = path |> File.read!() |> JSON.decode()
+      assert is_integer(pid)
+      assert Endpoint.sticky_port(config) == port
     end
 
     test "and only when it is still the file this node wrote", %{config: config, data_dir: dir} do
@@ -185,11 +191,7 @@ defmodule Ouroboros.Web.EndpointTest do
       {:ok, {_address, first}} = Endpoint.bound_address()
       stop_supervised!(Ouroboros.Web)
 
-      # The publication was removed on the way out, so this is not a file the second boot
-      # reads — it is what `sticky_port/1` computes from it. Write it back the way a
-      # killed node would have left it.
-      republish(config, first)
-
+      # The publication the first boot left behind is what the second boot reads.
       start_supervised!({Ouroboros.Web, config: config})
       {:ok, {_address, second}} = Endpoint.bound_address()
 

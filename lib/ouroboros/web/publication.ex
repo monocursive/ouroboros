@@ -123,11 +123,14 @@ defmodule Ouroboros.Web.Publication do
   @impl true
   def handle_call(:path, _from, state), do: {:reply, state.path, state}
 
+  # The publication is left where it is. It names a pid and a birth that are about to be
+  # gone, which every reader already treats as "no endpoint" (`ouro web` starts or adopts
+  # a runtime exactly as it would with no file), and it is the one place the next boot
+  # can read the port it should take again: removing it on the way out made the sticky
+  # port survive a crash and not a clean stop — which is the restart a local fleet setup
+  # does on purpose, with a browser tab waiting on the old port.
   @impl true
-  def terminate(_reason, state) do
-    _ = remove_if_owner(state.path, state.stat)
-    :ok
-  end
+  def terminate(_reason, _state), do: :ok
 
   defp announce(config, address, port, path) do
     Logger.info(
@@ -192,13 +195,6 @@ defmodule Ouroboros.Web.Publication do
       end
 
     {path, stat}
-  end
-
-  defp remove_if_owner(path, expected) do
-    case File.lstat(path, time: :posix) do
-      {:ok, current} -> if same_file?(current, expected), do: File.rm(path), else: :ok
-      {:error, _reason} -> :ok
-    end
   end
 
   defp same_file?(left, right) do
