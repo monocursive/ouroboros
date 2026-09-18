@@ -1301,9 +1301,11 @@ mod tests {
         let mine = file_identity(&path);
         assert!(mine.is_some());
 
-        // A successor replaced the file at that path: it is not this worker's to remove.
-        std::fs::remove_file(&path).expect("the old file");
-        std::fs::write(&path, b"theirs").expect("a successor's file");
+        // Publish a successor's capability the same way the worker does: the new inode
+        // exists before the rename removes the old one. Unlinking first permits Linux
+        // to reuse the old inode immediately, which does not model that publication.
+        super::super::write_private_atomic(&path, b"theirs").expect("a successor's file");
+        assert_ne!(file_identity(&path), mine);
         unpublish(&path, mine);
         assert_eq!(
             std::fs::read_to_string(&path).expect("still there"),

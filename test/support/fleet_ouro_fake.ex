@@ -110,8 +110,11 @@ defmodule Ouroboros.Test.FleetOuroFake do
         printf '%s' "$operation" > #{shell_quote(operation_file)}
         request="$data_dir/deploy/$operation.request.json"
         if [ -f "$request" ]; then
-          ( stat -f '%Lp' "$request" 2>/dev/null || stat -c '%a' "$request" 2>/dev/null ) \
-            > #{shell_quote(request_mode_file)}
+          if mode=$(stat -c '%a' "$request" 2>/dev/null); then
+            printf '%s\\n' "$mode" > #{shell_quote(request_mode_file)}
+          else
+            stat -f '%Lp' "$request" > #{shell_quote(request_mode_file)}
+          fi
           cat "$request" > #{shell_quote(request_body_file)}
     #{request_unlink}    fi
     #{capability}    cat #{shell_quote(spawn_file)}

@@ -165,9 +165,13 @@ jobs:
       # needs a host whose target string is not the Linux container's, which this runner is
       # not. `test/wasm/skew_test.exs` skips a missing record and runs the one this produces.
       - run: scripts/wasm-skew-test.sh version
+      # The fleet broker tests fork the current CLI. The restored cargo cache can
+      # contain an older executable even when the WASM and media helpers are fresh.
+      - run: cargo build --locked --manifest-path tui/Cargo.toml --bin ouro
       - run: mix test
         env:
           OUROBOROS_REQUIRE_WASM: "1"
+          OUROBOROS_TEST_OURO: ${{ github.workspace }}/tui/target/debug/ouro
       - run: make boot-gate
       # A separate clean production build prevents test modules or stale cached
       # dependency BEAMs from supplying historical atoms. Each smoke runs in a fresh

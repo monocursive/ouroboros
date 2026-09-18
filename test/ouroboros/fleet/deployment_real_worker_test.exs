@@ -18,9 +18,9 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
   ## When it does not run
 
   It needs a built `ouro`. Set `OUROBOROS_TEST_OURO` to one, or build `tui/target/debug/ouro`;
-  absent that the module is skipped with a message naming both. The check is at compile time,
-  so a binary built *after* this file was compiled needs `mix compile --force` (or a touch of
-  this file) before the suite will see it.
+  absent that the module is skipped with a message naming both. An explicitly selected
+  binary that is missing or not executable fails instead of skipping. `make test` and CI
+  build and select this checkout's binary before running the suite.
 
   ## Two constraints worth knowing before editing
 
@@ -444,13 +444,13 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       end
     end
   else
-    @moduletag skip:
-                 "the real `ouro` is not built at #{@ouro}; build it with " <>
-                   "`cd tui && cargo build -p ouro`, or set OUROBOROS_TEST_OURO to one, then " <>
-                   "`mix compile --force` so this module sees it"
+    @missing "no executable `ouro` at #{@ouro}; build it with " <>
+               "`cargo build --locked --manifest-path tui/Cargo.toml --bin ouro`, " <>
+               "or set OUROBOROS_TEST_OURO to one"
+    @moduletag skip: if(is_nil(System.get_env("OUROBOROS_TEST_OURO")), do: @missing, else: false)
 
     test "drives the real deployment worker" do
-      flunk("unreachable: this module is skipped when the binary is absent")
+      flunk(@missing)
     end
   end
 end

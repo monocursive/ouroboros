@@ -19,8 +19,8 @@ defmodule Ouroboros.Web.Live.DevicesPlanDigestTest do
   real local setup, and compares the digest it really computed with this runtime's. That is
   the only check that can catch the two drifting apart, and it needs a built binary: set
   `OUROBOROS_TEST_OURO` or build `tui/target/debug/ouro`. Absent one, it says so rather than
-  passing quietly — the compile-time gate means a binary built after this file was compiled
-  needs `mix compile --force` before the suite will see it.
+  passing quietly. An explicitly selected binary that is missing or not executable fails
+  instead of skipping; `make test` and CI build and select this checkout's binary first.
   """
 
   use ExUnit.Case, async: false
@@ -216,7 +216,7 @@ defmodule Ouroboros.Web.Live.DevicesPlanDigestTest do
       end
     end
   else
-    @tag :skip
+    @tag skip: is_nil(System.get_env("OUROBOROS_TEST_OURO"))
     test "this runtime's digest is the one the real worker computed" do
       flunk("no `ouro` at #{@ouro}; set OUROBOROS_TEST_OURO or build tui/target/debug/ouro")
     end

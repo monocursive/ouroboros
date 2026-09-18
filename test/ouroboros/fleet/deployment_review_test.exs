@@ -640,6 +640,10 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
       assert log =~ "takeover operation=#{operation}"
       assert log =~ "orson"
       assert log =~ "adele"
+
+      assert_receive {:fake_worker,
+                      %{"op" => "attach", "subject" => "orson", "session" => "tab-b"}},
+                     @receive_timeout
     end
 
     test "an owner resumes their own operation without saying anything special", context do
@@ -659,6 +663,7 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
       # resume is the verb that inherits the credential prompt.
       assert {:error, :operation_not_yours} = Deployment.resume(operation, bound())
       assert {:ok, _resumed} = Deployment.resume(operation, bound(), true)
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
     end
 
     test "reading an operation whose owner cannot be established is still allowed",

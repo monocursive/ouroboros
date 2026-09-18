@@ -248,7 +248,8 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert {:ok, %{"operation_id" => operation}} =
                Deployment.prepare(detailed_request(), bound())
 
-      argv = await_fake_argv(context.fake_dir)
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      argv = FleetOuroFake.argv(context.fake_dir)
 
       # `ps` is readable by every local account on both platforms this ships to. A target
       # hostname and an SSH account name are not secrets in the sense the spec's one list
@@ -265,7 +266,8 @@ defmodule Ouroboros.Fleet.DeploymentTest do
                Deployment.prepare(detailed_request(), bound())
 
       # What the worker actually saw: a 0600 file, whole, with the request in it.
-      body = await_fake_request_body(context.fake_dir)
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      body = FleetOuroFake.request_body(context.fake_dir)
       assert FleetOuroFake.request_mode(context.fake_dir) == "600"
       decoded = JSON.decode!(body)
 
@@ -298,13 +300,11 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert {:ok, %{"operation_id" => operation}} =
                Deployment.prepare(detailed_request(), bound())
 
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
       # The launch succeeded, so the request belongs to the worker even if it has not got
       # to it yet. A broker that tidied here would be racing the process it just started.
       path = Journal.request_path(context.root, operation)
-
-      Enum.reduce_while(1..100, :missing, fn _attempt, _acc ->
-        if File.exists?(path), do: {:halt, :ok}, else: Process.sleep(20) && {:cont, :missing}
-      end)
 
       assert File.exists?(path)
 
@@ -1135,35 +1135,6 @@ defmodule Ouroboros.Fleet.DeploymentTest do
           {:halt, {:attach_failed, reason}}
 
         _other ->
-          Process.sleep(20)
-          {:cont, nil}
-      end
-    end)
-  end
-
-  defp await_fake_argv(dir) do
-    Enum.reduce_while(1..100, [], fn _attempt, _acc ->
-      case FleetOuroFake.argv(dir) do
-        [] ->
-          Process.sleep(20)
-          {:cont, []}
-
-        argv ->
-          {:halt, argv}
-      end
-    end)
-  end
-
-  defp await_fake_request_body(dir) do
-    Enum.reduce_while(1..100, nil, fn _attempt, _acc ->
-      case FleetOuroFake.request_body(dir) do
-        body when is_binary(body) and byte_size(body) > 2 ->
-          case JSON.decode(body) do
-            {:ok, _document} -> {:halt, body}
-            _incomplete -> Process.sleep(20) && {:cont, nil}
-          end
-
-        _absent ->
           Process.sleep(20)
           {:cont, nil}
       end
