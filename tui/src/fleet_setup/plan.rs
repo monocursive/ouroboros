@@ -231,7 +231,7 @@ impl Plan {
             "  startup      {}\n",
             match self.service {
                 ServicePlan::Managed =>
-                    "propose a user service (starts at login; not a pre-login daemon)",
+                    "propose a user service (starts at login; on Linux also at boot, when lingering can be enabled)",
                 ServicePlan::Manual => "manual start, explicitly chosen",
             }
         ));
