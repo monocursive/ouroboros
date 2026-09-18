@@ -893,7 +893,13 @@ defmodule Ouroboros.Fleet.DeploymentReviewTest do
 
   defp bound, do: %{subject: "runtime-unattributed", session: "tab-a"}
 
-  defp request, do: %{"target" => %{"address" => "100.64.12.44"}, "ssh_user" => "deploy"}
+  # `machine` is required rather than derived: a peer id is not a machine name and neither is
+  # an address, and the worker refused both.
+  defp request,
+    do: %{
+      "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
+      "ssh_user" => "deploy"
+    }
 
   defp start(operation, key) do
     Call.call(

@@ -1,6 +1,6 @@
 {
   "_fixture": {
-    "note": "What `ouro fleet devices --json` prints. Derived by hand from the sanitized capture in tui/tests/fixtures/tailscale/running-with-peers.json, whose hostnames, addresses, keys and account names are already invented; the peers and their observed states are that file's, rendered through fleet_network::device_rows. Kept here so the Elixir suite never needs the Rust build. This key is not read by anything and proves an unknown top-level key is named in `unknown` rather than passed through.",
+    "note": "What `ouro fleet devices --json` prints. Derived by hand from the sanitized capture in tui/tests/fixtures/tailscale/running-with-peers.json, whose hostnames, addresses, keys and account names are already invented; the peers and their observed states are that file's, rendered through fleet_network::device_rows. `suggested_machine` is what fleet_network::machine_slug makes of each row's name, which for these already-slug-shaped names is the name itself; it is null on the two rows nothing can be deployed to, so that a reader of this fixture also sees the null a surface has to render. Kept here so the Elixir suite never needs the Rust build. This key is not read by anything and proves an unknown top-level key is named in `unknown` rather than passed through.",
     "source": "tui/tests/fixtures/tailscale/running-with-peers.json"
   },
   "fleet_protocol_revision": 5,
@@ -38,7 +38,8 @@
       "last_seen": null,
       "path": "direct",
       "state": "this_device_without_profile",
-      "action": "set up this device"
+      "action": "set up this device",
+      "suggested_machine": "operator-laptop"
     },
     {
       "name": "build-linux",
@@ -49,7 +50,8 @@
       "last_seen": null,
       "path": "direct",
       "state": "discovered_installation_unknown",
-      "action": "deploy Ouroboros"
+      "action": "deploy Ouroboros",
+      "suggested_machine": "build-linux"
     },
     {
       "name": "old-pi",
@@ -60,7 +62,8 @@
       "last_seen": null,
       "path": "unknown",
       "state": "peer_offline",
-      "action": "refresh or inspect details"
+      "action": "refresh or inspect details",
+      "suggested_machine": "old-pi"
     },
     {
       "name": "pocket-phone",
@@ -71,7 +74,8 @@
       "last_seen": null,
       "path": "unknown",
       "state": "unsupported_platform",
-      "action": "no supported Ouroboros release"
+      "action": "no supported Ouroboros release",
+      "suggested_machine": null
     },
     {
       "name": "ipv6-only-box",
@@ -82,7 +86,8 @@
       "last_seen": null,
       "path": "unknown",
       "state": "no_usable_ipv4",
-      "action": "no usable private IPv4 address"
+      "action": "no usable private IPv4 address",
+      "suggested_machine": null
     }
   ]
 }

@@ -220,6 +220,54 @@ defmodule Ouroboros.Fleet.Deployment do
 
   defp hostname, do: host_name()
 
+  # A roster is a handful of `{machine, host, node}` triples. A profile larger than this is
+  # not one, and it is refused rather than parsed.
+  @max_profile_bytes 512 * 1024
+
+  @doc """
+  This machine's roster: every member of the fleet profile it holds, `machine` and `host`.
+
+  Public because `fleet.deployment.prepare` needs it for a `leave`. The CLI reads the same
+  file for the same reason (`leave_machine` in `tui/src/fleet_setup/cli.rs`): the operator
+  names a member, and where that member *is* is a fact this machine already recorded when it
+  admitted them. Asking the caller for the address instead would let one machine be removed
+  from the roster while a different one was contacted.
+
+  `[]` for a standalone machine, an unreadable profile, or no data directory — to a caller
+  those are one fact, "this machine has no roster", and the refusal it produces says so.
+  """
+  @spec roster(Path.t() | nil) :: [%{optional(String.t()) => String.t()}]
+  def roster(data_dir \\ nil) do
+    with dir when is_binary(dir) <- data_dir || data_dir(),
+         profile = Path.join([dir, "fleet", "profile.json"]),
+         {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_profile_bytes <-
+           File.lstat(profile),
+         {:ok, body} <- File.read(profile),
+         {:ok, %{"members" => members}} when is_list(members) <- JSON.decode(body) do
+      for %{"machine" => machine, "host" => host} <- members,
+          is_binary(machine) and machine != "" and is_binary(host) and host != "",
+          do: %{"machine" => machine, "host" => host}
+    else
+      _no_roster -> []
+    end
+  end
+
+  @doc """
+  The roster entry for one machine name, matched the way the rest of the fleet matches names.
+
+  `tui/src/fleet.rs`'s `same_name/2` is `eq_ignore_ascii_case`, and an operator whose roster
+  carries a mixed-case entry from an older build has to be able to name it.
+  """
+  @spec roster_member(String.t(), Path.t() | nil) :: {:ok, map()} | :error
+  def roster_member(machine, data_dir \\ nil) when is_binary(machine) do
+    wanted = String.downcase(machine)
+
+    case Enum.find(roster(data_dir), &(String.downcase(&1["machine"]) == wanted)) do
+      nil -> :error
+      member -> {:ok, member}
+    end
+  end
+
   # The CA key is what an issuer has and a member does not (`tui/src/fleet.rs` writes
   # `ca-key.pem` only on the machine that created the fleet). `lstat` rather than `exists?`:
   # a symlink where the key should be is not this machine holding the key.
@@ -233,6 +281,7 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   # Stable codes, in a fixed order, because a surface renders them and a test names them.
+  # New codes are appended rather than inserted, for the same reason.
   defp deploy_blockers(data_dir, issuer?) do
     [
       if(is_nil(data_dir), do: "no_data_dir"),
@@ -241,9 +290,28 @@ defmodule Ouroboros.Fleet.Deployment do
         {:ok, _path} -> nil
         {:error, {:ouro_path_unknown, _detail}} -> "ouro_path_unknown"
       end,
-      if(cleartext_web_bind?(), do: "cleartext_web_bind")
+      if(cleartext_web_bind?(), do: "cleartext_web_bind"),
+      if(dev_runtime?(), do: "dev_runtime")
     ]
     |> Enum.reject(&is_nil/1)
+  end
+
+  # A runtime started from this checkout rather than from a release — `ouro --dev`, and this
+  # suite. Mix is what a release does not ship, so its presence is the question asked.
+  #
+  # It matters to exactly one operation. A `--dev` runtime cannot boot under a fleet profile,
+  # so "Set up this device" from one writes a fleet, installs a service, and leaves an
+  # operator with a machine whose runtime exits 1 on every start (review finding 8). Issuing
+  # *from* a dev runtime is fine: `add` and `leave` act on another machine's installation,
+  # and this one's inability to run a fleet says nothing about theirs.
+  #
+  # Overridable so a suite can exercise the setup path a packaged runtime has: absent, the
+  # runtime answers for itself, which is what a person's machine always does.
+  defp dev_runtime? do
+    case Application.get_env(:ouroboros, :dev_runtime) do
+      declared when is_boolean(declared) -> declared
+      _unset -> Code.ensure_loaded?(Mix)
+    end
   end
 
   # The spec decides credential entry on the endpoint's bind, the one transport fact this
@@ -431,6 +499,10 @@ defmodule Ouroboros.Fleet.Deployment do
   the operator's whole question after an interruption. A journal says what was durably
   recorded; only a live worker can say what is happening now.
 
+  A journal answer for an operation that is neither finished nor done also carries
+  `worker_exit`, the sanitized tail of the worker's own stdio log — the one place a worker
+  that died before it could record anything left its reason.
+
   Takes no binding. A challenge is bound to the session that was attached when it was issued
   (S4) and only a *response* is held to that; reading what an operation is doing is the
   administrator's read that the identity rule already gates, and making it fail for the
@@ -448,19 +520,40 @@ defmodule Ouroboros.Fleet.Deployment do
   defp snapshot(operation) do
     case client(operation) do
       {:ok, pid} ->
-        Client.snapshot(pid)
+        case Client.snapshot(pid) do
+          # `worker_exit` is a journal-only field, and saying so on every answer is what
+          # makes a missing key and a null one the same fact to a renderer.
+          {:ok, snapshot} ->
+            {:ok, Map.put(snapshot, "worker_exit", nil)}
+
+          # The client process is gone. The broker has not necessarily handled its `:DOWN`
+          # yet — a status call and a monitor message race each other — and answering
+          # `worker_unavailable` for that window meant the first read after a worker went
+          # away reported nothing at all where the journal already had the answer (review
+          # finding 5). Falling through here is what makes the next `status` say
+          # `source: "journal"` promptly instead.
+          {:error, :worker_unavailable} ->
+            without_worker(operation)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       {:error, :no_worker} ->
-        case journal_status(operation) do
-          # An operation whose handshake never completed has no journal and no worker. The
-          # broker remembers why for a while, so this answers `attach_failed` rather than
-          # the flatly wrong `no such operation`.
-          {:error, :unknown_operation} -> attach_failure(operation)
-          other -> other
-        end
+        without_worker(operation)
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp without_worker(operation) do
+    case journal_status(operation) do
+      # An operation whose handshake never completed has no journal and no worker. The
+      # broker remembers why for a while, so this answers `attach_failed` rather than
+      # the flatly wrong `no such operation`.
+      {:error, :unknown_operation} -> attach_failure(operation)
+      other -> other
     end
   end
 
@@ -499,9 +592,64 @@ defmodule Ouroboros.Fleet.Deployment do
            document
            |> Map.put("operation", operation)
            |> Map.put("source", "journal")
-           |> Map.put("attached", false)}
+           |> Map.put("attached", false)
+           |> Map.put("worker_exit", worker_exit(dir, operation, document))}
         end
     end
+  end
+
+  # The tail of the worker's private stdio log, and only for the operation that needs it.
+  #
+  # A worker that dies before it can journal anything leaves an operation sitting at
+  # `inspecting` with no error on it, which is a page that says nothing while the reason sat
+  # on disk the whole time — a Unix socket path over 104 bytes, in the case that produced
+  # this (review finding 5). The condition is narrow on purpose: a finished operation, a
+  # cancelled one, and one that reported a `done` frame have all already said what happened,
+  # and a log tail under those would be noise with a credential risk attached.
+  #
+  # `last_lines` may be empty. A worker that left no log is not a worker that left an empty
+  # explanation, and the two are told apart by the list rather than by the field's absence.
+  @worker_log_tail 8 * 1024
+  @worker_log_lines 3
+  @worker_log_width 300
+
+  defp worker_exit(dir, operation, document) do
+    if document["state"] not in @terminal and is_nil(document["done"]) do
+      %{"last_lines" => worker_log_lines(Journal.log_path(dir, operation))}
+    end
+  end
+
+  # Bounded before it is read, not after: the log is whatever the worker and everything it
+  # forked printed, and a `set -x` shell or a chatty `ssh -vvv` can make it arbitrarily
+  # large. Only the last 8 KiB is ever in memory, and only the last three lines of that
+  # survive — each through the journal's own sanitizer, because nothing wrote this file
+  # under a contract.
+  defp worker_log_lines(path) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, io} ->
+        try do
+          {:ok, size} = :file.position(io, :eof)
+          {:ok, _from} = :file.position(io, {:bof, max(size - @worker_log_tail, 0)})
+
+          case IO.binread(io, @worker_log_tail) do
+            tail when is_binary(tail) -> tail_lines(tail)
+            _eof_or_error -> []
+          end
+        after
+          File.close(io)
+        end
+
+      {:error, _absent} ->
+        []
+    end
+  end
+
+  defp tail_lines(tail) do
+    tail
+    |> :binary.split(["\n", "\r\n"], [:global])
+    |> Enum.map(&Journal.scrub_line(&1, @worker_log_width))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.take(-@worker_log_lines)
   end
 
   # ---------------------------------------------------------------------------
@@ -536,6 +684,14 @@ defmodule Ouroboros.Fleet.Deployment do
   that fixes the blocker impossible; every other blocker still applies to it, including the
   cleartext bind, because a setup is asked for no credential but still writes a fleet.
 
+  `leave` is exempt from `no_ca_key` too, for the mirror-image reason: removing a member
+  issues nothing, so a machine that cannot admit one can still take one out.
+
+  `dev_runtime` runs the other way — it is the one blocker that applies to `setup` *only*.
+  Every other kind is exempt from it, including the kinds this build cannot name, because a
+  development runtime's inability to boot under a fleet profile is a fact about this machine
+  and an `add` or a `leave` is about another one.
+
   Checked in the caller's process, so a refusal costs the broker nothing.
   """
   @spec unblocked(String.t() | nil) :: :ok | {:error, {:deploy_blocked, [String.t()]}}
@@ -548,8 +704,11 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
-  defp exempt(blockers, "setup"), do: blockers -- ["no_ca_key"]
-  defp exempt(blockers, _other), do: blockers
+  @doc false
+  @spec exempt([String.t()], String.t() | nil) :: [String.t()]
+  def exempt(blockers, "setup"), do: blockers -- ["no_ca_key"]
+  def exempt(blockers, "leave"), do: blockers -- ["no_ca_key", "dev_runtime"]
+  def exempt(blockers, _other), do: blockers -- ["dev_runtime"]
 
   # The kind an operation already has, from the journal the worker writes when it opens one.
   # Durable, so it answers for an operation whose worker is long gone — which is exactly when

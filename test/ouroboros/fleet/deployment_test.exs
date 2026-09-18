@@ -145,6 +145,20 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert inventory["host"]["hostname"]
       assert inventory["host"]["os"] in ["darwin", "linux", "unix"]
       assert inventory["operations"] == []
+
+      # `prepare` requires a machine name and will not invent one, so the name a surface
+      # offers has to survive this trip verbatim — including the `null` on a row nothing can
+      # be deployed to, which is a different fact from a missing key.
+      assert Enum.map(inventory["devices"], & &1["suggested_machine"]) == [
+               "operator-laptop",
+               "build-linux",
+               "old-pi",
+               nil,
+               nil
+             ]
+
+      for device <- inventory["devices"],
+          do: assert(Map.has_key?(device, "suggested_machine"))
     end
 
     test "names a key it does not read rather than passing it through", context do
@@ -1004,6 +1018,208 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   # ---------------------------------------------------------------------------
+  # What a worker that died before it could say anything left behind
+
+  describe "worker_exit" do
+    test "an unfinished journal carries the last three sanitized lines of the worker's log",
+         context do
+      operation = plant_journal(context.root, "inspecting")
+
+      write_worker_log(context.root, operation, [
+        "connecting to 100.64.12.44",
+        "",
+        "ssh: debug1: reading configuration",
+        "   ",
+        "ssh_password=hunter2 was passed to the child",
+        "error: socket path /very/long/path.sock is #{String.duplicate("x", 600)} bytes"
+      ])
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert snapshot["source"] == "journal"
+      assert [first, second, third] = snapshot["worker_exit"]["last_lines"]
+
+      # Blank lines are not evidence, so they are not three of the three.
+      assert first == "ssh: debug1: reading configuration"
+
+      # The log is whatever the worker printed, and a worker that printed a password is a
+      # worker bug that must not become a browser's problem. The name stays — it is what
+      # makes the line legible — and the value does not.
+      assert second == "ssh_password=[redacted] was passed to the child"
+      refute second =~ "hunter2"
+
+      # And a line nobody bounded is bounded here: 300 characters, not 600.
+      assert String.length(third) == 300
+      assert String.starts_with?(third, "error: socket path")
+    end
+
+    test "a worker log that is not text, and one that is enormous, are both answers",
+         context do
+      operation = plant_journal(context.root, "installing")
+
+      # 64 KiB of padding, so only the tail is ever read, and a final line whose bytes are
+      # not UTF-8 at all.
+      File.write!(Journal.log_path(context.root, operation), [
+        String.duplicate("padding line\n", 5_000),
+        "the last readable line\n",
+        <<0xFF, 0xFE, "binary", 0x00, "\n">>
+      ])
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert [_padding, "the last readable line", last] = snapshot["worker_exit"]["last_lines"]
+
+      assert last == "..binary."
+      assert String.valid?(last)
+    end
+
+    test "a finished operation, and one with no log at all, say so rather than guessing",
+         context do
+      finished = plant_journal(context.root, "completed")
+      write_worker_log(context.root, finished, ["this is not news"])
+
+      assert {:ok, snapshot} = Deployment.status(finished, bound())
+      assert snapshot["worker_exit"] == nil
+
+      cancelled = plant_journal(context.root, "cancelled")
+      assert {:ok, snapshot} = Deployment.status(cancelled, bound())
+      assert snapshot["worker_exit"] == nil
+
+      # An unfinished operation whose worker left no log at all is not an unfinished
+      # operation with no explanation: the list is empty and the field is still there.
+      silent = plant_journal(context.root, "inspecting")
+      assert {:ok, snapshot} = Deployment.status(silent, bound())
+      assert snapshot["worker_exit"] == %{"last_lines" => []}
+    end
+
+    test "a live worker's snapshot carries the field as null", context do
+      arrange_worker(context)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert snapshot["source"] == "worker"
+      assert Map.has_key?(snapshot, "worker_exit")
+      assert snapshot["worker_exit"] == nil
+    end
+
+    test "a worker that goes away before it attaches is read from the journal at once",
+         context do
+      arrange_worker(context)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      write_journal(context.root, operation, %{
+        "operation" => operation,
+        "owner" => "adele",
+        "kind" => "add",
+        "state" => "inspecting"
+      })
+
+      write_worker_log(context.root, operation, ["bind: path is 112 bytes, the limit is 104"])
+
+      # The client dies and the next read follows it immediately, so the broker's monitor
+      # message may or may not have been handled yet. Both orderings have to answer the
+      # same thing: answering `worker_unavailable` for that window is what left the page
+      # saying nothing while the reason was already on disk (review finding 5).
+      assert {:ok, client} = Deployment.client(operation)
+      Process.exit(client, :kill)
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert snapshot["source"] == "journal"
+
+      assert snapshot["worker_exit"]["last_lines"] == [
+               "bind: path is 112 bytes, the limit is 104"
+             ]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The one blocker that is about this runtime rather than about this fleet
+
+  describe "the dev_runtime blocker" do
+    setup context do
+      # `test/test_helper.exs` declares this suite a packaged runtime so that every other
+      # case can drive a local setup. This is the case that asks what the runtime itself
+      # answers, so it puts the key back the way a person's machine has it.
+      declared = Application.get_env(:ouroboros, :dev_runtime)
+      Application.delete_env(:ouroboros, :dev_runtime)
+      on_exit(fn -> Application.put_env(:ouroboros, :dev_runtime, declared) end)
+
+      write_ca_key(context.root)
+      arrange_devices(context, ~s({"devices": []}\n))
+      context
+    end
+
+    test "is a reason on a Mix runtime, which is what this suite is", context do
+      assert Code.ensure_loaded?(Mix)
+
+      reasons = Deployment.host(context.root)["capabilities"]["reasons"]
+      assert "dev_runtime" in reasons
+
+      # Appended rather than inserted: a surface renders this list and a test names it.
+      assert List.last(reasons) == "dev_runtime"
+    end
+
+    test "blocks setup and nothing else" do
+      assert {:error, {:deploy_blocked, blockers}} = Deployment.unblocked("setup")
+      assert "dev_runtime" in blockers
+
+      # `add` and `leave` act on another machine's installation. This runtime's inability to
+      # boot under a fleet profile says nothing about theirs.
+      assert Deployment.unblocked("add") == :ok
+      assert Deployment.unblocked("leave") == :ok
+
+      # And a kind this build cannot name is treated as one of those two rather than as a
+      # setup: `start` and `authenticate` reach here with the journal's kind, which is nil
+      # for an operation whose journal has not been written yet.
+      assert Deployment.unblocked(nil) == :ok
+    end
+
+    test "is exempted by kind, and the exemptions are the ones the contract names" do
+      all = ["no_data_dir", "no_ca_key", "ouro_path_unknown", "cleartext_web_bind", "dev_runtime"]
+
+      assert Deployment.exempt(all, "setup") ==
+               ["no_data_dir", "ouro_path_unknown", "cleartext_web_bind", "dev_runtime"]
+
+      assert Deployment.exempt(all, "leave") ==
+               ["no_data_dir", "ouro_path_unknown", "cleartext_web_bind"]
+
+      assert Deployment.exempt(all, "add") ==
+               ["no_data_dir", "no_ca_key", "ouro_path_unknown", "cleartext_web_bind"]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The roster a leave names a member out of
+
+  describe "the roster" do
+    test "is this machine's fleet profile, matched the way the fleet matches names", context do
+      write_profile(context.root, [
+        %{"machine" => "BuildBox", "host" => "100.64.12.44", "node" => "ouro@buildbox"},
+        %{"machine" => "old-pi", "host" => "100.64.12.10", "node" => "ouro@old-pi"}
+      ])
+
+      assert Deployment.roster(context.root) == [
+               %{"machine" => "BuildBox", "host" => "100.64.12.44"},
+               %{"machine" => "old-pi", "host" => "100.64.12.10"}
+             ]
+
+      # `tui/src/fleet.rs` matches roster names case-insensitively, and an operator whose
+      # profile carries a mixed-case entry from an older build has to be able to name it.
+      assert {:ok, %{"host" => "100.64.12.44"}} =
+               Deployment.roster_member("buildbox", context.root)
+
+      assert Deployment.roster_member("nowhere", context.root) == :error
+    end
+
+    test "is empty rather than an error for a machine that has no fleet", context do
+      assert Deployment.roster(context.root) == []
+
+      File.write!(Path.join([context.root, "fleet", "profile.json"]), "{ not json")
+      assert Deployment.roster(context.root) == []
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
 
   defp bound, do: %{subject: "adele", session: "session-one"}
@@ -1173,6 +1389,39 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     File.chmod!(dir, 0o700)
     path = Journal.path(root, operation)
     File.write!(path, JSON.encode!(document))
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp write_worker_log(root, operation, lines) do
+    dir = Journal.deploy_dir(root)
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+    path = Journal.log_path(root, operation)
+    File.write!(path, Enum.map(lines, &[&1, ?\n]))
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp write_profile(root, members) do
+    dir = Path.join(root, "fleet")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "profile.json")
+
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "schema" => 1,
+        "fleet_id" => "f0000000000000000000000000000000",
+        "name" => "home",
+        "machine" => "studio",
+        "host" => "100.64.0.1",
+        "node" => "ouro@studio",
+        "role" => "issuer",
+        "members" => members
+      })
+    )
+
     File.chmod!(path, 0o600)
     path
   end

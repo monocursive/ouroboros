@@ -623,8 +623,12 @@ not an executor:
 1. **It states the request in a private file.** Which machine, which SSH account, which
    port, which identity *reference*, which paths — or, for the first *local* fleet, none of
    those: `kind: "setup"` configures this machine without SSH to itself, so it carries only
-   what this device should be called and the private address its runtime will bind. Written
-   to
+   what this device should be called and the private address its runtime will bind. A third
+   kind, `kind: "leave"`, removes a machine that is already in this machine's roster: it
+   names the member and the account to reach it with, and the *address* is read out of this
+   machine's own `fleet/profile.json` rather than taken from the caller, so that the machine
+   named is the machine contacted. A member name that is not in the roster is refused with
+   the roster listed. Written to
    `<data dir>/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
    (an exclusive temporary inode chmodded before the first byte, then renamed) and as
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is
@@ -656,11 +660,17 @@ not an executor:
    that writes past that cap loses its connection and nothing else.
 4. **It reconnects by instance, not by path.** A socket that exists is not evidence that the
    worker which printed it is the process listening on it.
-5. **It reads the journal when no worker is alive.** `<data dir>/deploy/<id>.json` is
+5. **It reads the journal when no worker is alive**, and the worker's own log when the
+   journal has nothing to say. `<data dir>/deploy/<id>.json` is
    the operation's durable authority, written by the worker before and after every
    externally visible step. The broker opens it read-only and sanitizes what it returns; it
    never writes one, because a broker that repaired a journal would be inventing steps the
-   target machine never saw.
+   target machine never saw. A worker that dies *before* it can journal anything leaves an
+   operation sitting at `inspecting` with no error on it, so a journal answer for an
+   unfinished operation also carries `worker_exit.last_lines`: the last three non-empty
+   lines of `<id>.log`, read from the tail, sanitized the way a journal is and cut to three
+   hundred characters each. Nothing wrote that file under a contract, which is exactly why
+   it is read defensively.
 
 What that buys: closing the page does not cancel a deployment, and neither does stopping
 the runtime — which is what lets the *first local fleet setup* restart the very runtime
@@ -693,8 +703,13 @@ field would break recovery without protecting anything.
 deployment verbs enforce the same answer: `prepare`, `start`, `authenticate` and `resume`
 refuse `deploy_blocked` carrying the blockers. A disabled button is a rendering, not a
 boundary. `cancel` is never blocked — an operator must be able to stop a deployment on a
-host that may no longer start one — and a `setup` is exempt from `no_ca_key` alone, because
-the first local fleet is what creates that key.
+host that may no longer start one. Two blockers are exempted by kind rather than applied
+flatly: `no_ca_key` does not stop a `setup`, because the first local fleet is what creates
+that key, and it does not stop a `leave`, because removing a member issues nothing.
+`dev_runtime` runs the other way and stops a `setup` and nothing else — a runtime started
+from a checkout cannot boot under a fleet profile, so setting *this* machine up from one
+builds a fleet it can never start, while an `add` or a `leave` from the same runtime acts
+on another machine's installation and is unaffected.
 
 **Authorization.** Every verb here needs an administrator once identities are configured —
 the network inventory as much as the mutations, because a tailnet inventory is every machine

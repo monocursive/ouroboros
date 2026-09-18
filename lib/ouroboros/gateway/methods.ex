@@ -876,6 +876,7 @@ defmodule Ouroboros.Gateway.Methods do
     case deployment_kind(params) do
       {:ok, "setup"} -> setup_request(params)
       {:ok, "add"} -> add_request(params)
+      {:ok, "leave"} -> leave_request(params)
       {:invalid, message} -> {:invalid, message}
     end
   end
@@ -883,8 +884,8 @@ defmodule Ouroboros.Gateway.Methods do
   defp deployment_kind(params) do
     case Map.get(params, "kind") do
       nil -> {:ok, "add"}
-      kind when kind in ["setup", "add"] -> {:ok, kind}
-      _other -> {:invalid, "params.kind must be setup or add"}
+      kind when kind in ["setup", "add", "leave"] -> {:ok, kind}
+      _other -> {:invalid, "params.kind must be setup, add or leave"}
     end
   end
 
@@ -932,6 +933,64 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
+  # Removing a member, in the shape `ouro fleet leave --machine NAME` writes (`leave_machine`
+  # in `tui/src/fleet_setup/cli.rs`). Two things are not parameters here and that is the
+  # point of the verb: the *address* comes from this machine's own roster, so the machine
+  # named is the machine contacted, and there is nothing to install, so `service` and a data
+  # directory never appear. `install_path` is the one path a leave takes, under the name the
+  # CLI gives it — `--remote-executable`, an override for where `ouro` lives on that member.
+  defp leave_request(params) do
+    with {:ok, member, machine} <- deployment_member(params),
+         {:ok, ssh_user} <- fetch_string(params, "ssh_user"),
+         {:ok, port} <- deployment_port(params),
+         {:ok, identity} <- deployment_identity(params),
+         {:ok, install_path} <- deployment_optional_string(params, "remote_executable") do
+      {:ok,
+       prune(%{
+         "kind" => "leave",
+         "machine" => machine,
+         "address" => member["host"],
+         "ssh_user" => ssh_user,
+         "ssh_port" => port,
+         "identity" => identity,
+         "install_path" => install_path
+       })}
+    end
+  end
+
+  # The roster is the closed set a leave may name, and the refusal prints it: "not in the
+  # roster" without the roster is a message that makes an operator go and read a JSON file.
+  defp deployment_member(params) do
+    case Map.get(params, "target") do
+      %{"machine" => machine} when is_binary(machine) and machine != "" ->
+        case Deployment.roster_member(machine) do
+          {:ok, member} -> {:ok, member, machine}
+          :error -> {:invalid, not_a_member(machine)}
+        end
+
+      %{} ->
+        {:invalid, "params.target.machine is required for a leave: " <> roster_sentence()}
+
+      nil ->
+        {:invalid, "params.target is required for a leave: " <> roster_sentence()}
+
+      _other ->
+        {:invalid, "params.target must be an object"}
+    end
+  end
+
+  defp not_a_member(machine) do
+    "params.target.machine #{inspect(machine)} is not in this machine's roster: " <>
+      roster_sentence()
+  end
+
+  defp roster_sentence do
+    case Deployment.roster() |> Enum.map(& &1["machine"]) |> Enum.sort() do
+      [] -> "this machine has no roster, so there is no member to remove"
+      names -> "name one of " <> Enum.join(names, ", ")
+    end
+  end
+
   # An absent optional field is left out rather than sent as null: the worker's decoder takes
   # either, and a file with only the fields somebody actually chose is a file an operator can
   # read.
@@ -941,11 +1000,18 @@ defmodule Ouroboros.Gateway.Methods do
   # id is a network client's name for a device and the worker talks to addresses. A caller
   # that has only a peer id has not resolved the device yet, and `fleet.devices` is where
   # that resolution comes from, so this refuses rather than sending a name as an address.
+  #
+  # `machine` is required rather than defaulted, and that is a change from the build that
+  # fell back to the peer id or the address. Neither is a machine name: a peer id is the
+  # network client's opaque key and an address is an address, and the worker refused both —
+  # which is how "Deploy to an address" came to be a form that could not succeed (review
+  # finding 2). `fleet.devices` answers `suggested_machine` for every row precisely so a
+  # surface has a name to offer, so this refuses and says where the name comes from.
   defp deployment_target(params) do
     case Map.get(params, "target") do
       %{} = target ->
         address = target["address"]
-        machine = target["machine"] || target["peer_id"] || address
+        machine = target["machine"]
 
         cond do
           not (is_binary(address) and address != "") ->
@@ -953,8 +1019,10 @@ defmodule Ouroboros.Gateway.Methods do
              "params.target.address is required: a peer_id alone does not name a reachable " <>
                "address, and fleet.devices answers with the address for a row"}
 
-          not is_binary(machine) ->
-            {:invalid, "params.target.machine must be a string when it is given"}
+          not (is_binary(machine) and machine != "") ->
+            {:invalid,
+             "params.target.machine is required: a machine name is required; suggest one " <>
+               "from fleet.devices `suggested_machine`"}
 
           true ->
             {:ok, %{"address" => address, "machine" => machine}}

@@ -44,6 +44,13 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   # value is dropped before it can reach a log line or a browser.
   @forbidden ~w(secret password passphrase cookie token credential private_key key_pem)
 
+  # The same vocabulary, matched against free text rather than against object keys: a line
+  # of a worker's stdio log has no keys, so `name=value` and `name: value` are where a
+  # credential would be if one were printed. Bounded on both sides — the name may carry a
+  # prefix (`ssh_password`) and the value runs to the next whitespace — and the value is
+  # what is dropped, because the name is what makes the line legible.
+  @secret_assignment ~r/([A-Za-z0-9_.\-]*(?:#{Enum.join(@forbidden, "|")})[A-Za-z0-9_.\-]*\s*[:=]\s*)(\S+)/i
+
   @doc """
   The directory the worker keeps its sockets, capability files and journals in.
 
@@ -73,6 +80,18 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @spec request_path(Path.t(), String.t()) :: Path.t()
   def request_path(data_dir, operation) when is_binary(operation),
     do: Path.join(deploy_dir(data_dir), operation <> ".request.json")
+
+  @doc """
+  The worker's own stdio log, which `ouro fleet worker start` redirects its child onto.
+
+  Neither side's record of the operation: the journal is what the worker *says*, and this is
+  what it and its children *printed*. It is the only thing a worker that died before it
+  could journal anything leaves behind, which is why `fleet.deployment.status` reads its
+  tail — through `scrub_line/2`, because nothing wrote it under a contract.
+  """
+  @spec log_path(Path.t(), String.t()) :: Path.t()
+  def log_path(data_dir, operation) when is_binary(operation),
+    do: Path.join(deploy_dir(data_dir), operation <> ".log")
 
   @doc """
   Reads one operation's journal, sanitized.
@@ -372,6 +391,37 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   """
   @spec scrub_value(term()) :: term()
   def scrub_value(value), do: scrub(value, 0)
+
+  @doc """
+  One line of a worker's private stdio log, made safe to hand to a client.
+
+  That log is not a journal. Nothing writes it under a contract: it is whatever the worker
+  and the programs it forked printed on their way out, which on a bad day is an `ssh`
+  diagnostic, a shell trace, or bytes that are not text at all. So it gets the journal's own
+  rule — the same forbidden vocabulary, here matched against `name=value` and `name: value`
+  because a line has no keys — then the journal's bounding, then the caller's own cap.
+
+  Bytes that are not printable text are folded to `.` rather than dropped: a line a worker
+  printed in a foreign encoding is still evidence of where it stopped, and it must not be
+  able to break the encoder that carries it to a browser.
+  """
+  @spec scrub_line(binary(), pos_integer()) :: String.t()
+  def scrub_line(line, max) when is_binary(line) and is_integer(max) and max > 0 do
+    line
+    |> printable()
+    |> String.trim()
+    |> then(&Regex.replace(@secret_assignment, &1, "\\1[redacted]"))
+    |> scrub_value()
+    |> String.slice(0, max)
+  end
+
+  defp printable(line) do
+    if String.valid?(line) and String.printable?(line) do
+      line
+    else
+      for <<byte <- line>>, into: "", do: <<if(byte in 32..126, do: byte, else: ?.)>>
+    end
+  end
 
   defp scrub(value, depth) when depth >= @max_depth and (is_map(value) or is_list(value)),
     do: "[truncated: nested deeper than #{@max_depth}]"

@@ -58,7 +58,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "direct",
         "state" => "this_device",
         "action" => "view device",
-        "name_conflicts_with_roster" => nil
+        "name_conflicts_with_roster" => nil,
+        "suggested_machine" => "studio"
       },
       %{
         "name" => "spare",
@@ -70,7 +71,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "direct",
         "state" => "this_device_without_profile",
         "action" => "set up this device",
-        "name_conflicts_with_roster" => nil
+        "name_conflicts_with_roster" => nil,
+        "suggested_machine" => "spare"
       },
       %{
         "name" => "buildbox",
@@ -82,7 +84,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "unknown",
         "state" => "fleet_member_not_visible",
         "action" => "diagnose",
-        "name_conflicts_with_roster" => nil
+        "name_conflicts_with_roster" => nil,
+        "suggested_machine" => "buildbox"
       },
       %{
         "name" => "vps-1",
@@ -94,7 +97,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "relayed",
         "state" => "discovered_installation_unknown",
         "action" => "deploy Ouroboros",
-        "name_conflicts_with_roster" => nil
+        "name_conflicts_with_roster" => nil,
+        "suggested_machine" => "vps-1"
       },
       %{
         "name" => "studio",
@@ -106,7 +110,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "direct",
         "state" => "discovered_installation_unknown",
         "action" => "deploy Ouroboros",
-        "name_conflicts_with_roster" => "studio"
+        "name_conflicts_with_roster" => "studio",
+        "suggested_machine" => "studio"
       },
       %{
         "name" => "toaster",
@@ -118,7 +123,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "unknown",
         "state" => "unsupported_platform",
         "action" => "nothing to deploy",
-        "name_conflicts_with_roster" => nil
+        "name_conflicts_with_roster" => nil,
+        "suggested_machine" => "toaster"
       }
     ]
   }
