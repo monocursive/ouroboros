@@ -4100,7 +4100,7 @@ fn empty_sentence(app: &App) -> String {
 /// beside it: `hostile-names.json` carries a name whose text is a forged device row, and
 /// the answer is that the name column *ends*, visibly, well before anything this client
 /// wrote. What follows is always this build's words.
-const NAME_COLUMNS: usize = 18;
+const NAME_COLUMNS: usize = 17;
 
 /// How many columns a device's other fields may occupy. Also a device's choice.
 const ROW_FIELD_COLUMNS: usize = 44;
@@ -4112,8 +4112,9 @@ const ROW_FIELD_COLUMNS: usize = 44;
 /// only truncates the part that says what is going on.
 const OWN_WORDS_COLUMNS: usize = 96;
 
-/// "macOS", "linux", "iOS": five is the widest the network client reports.
-const OS_COLUMNS: usize = 5;
+/// "macOS", "linux", "iOS": five is the widest the network client reports, plus the
+/// column the truncation marker takes when a longer one arrives.
+const OS_COLUMNS: usize = 6;
 const ADDRESS_COLUMNS: usize = 16;
 /// "○ offline, seen 3 days ago" is twenty-six columns; "● online" is the other shape.
 const PRESENCE_COLUMNS: usize = 28;
