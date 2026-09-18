@@ -845,10 +845,18 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
-  @doc "Sends `{:ouroboros_fleet_deployment, operation, event}` to the caller for every event."
-  @spec subscribe(String.t()) :: :ok | {:error, term()}
-  def subscribe(operation) do
-    with {:ok, pid} <- client(operation), do: Client.subscribe(pid, self())
+  @doc """
+  Sends `{:ouroboros_fleet_deployment, operation, event}` to the caller for every event.
+
+  A surface that binds credential challenges to a client session — a browser tab's id, a
+  listener connection's — passes it here, and this process then *is* that session's presence
+  for this operation. When it dies, the challenges bound to that session are unbound rather
+  than left for a tab that no longer exists; `Ouroboros.Fleet.Deployment.Client`'s
+  `release_session/2` has the whole of the reasoning.
+  """
+  @spec subscribe(String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def subscribe(operation, session \\ nil) do
+    with {:ok, pid} <- client(operation), do: Client.subscribe(pid, self(), session)
   end
 
   @doc "Stops the caller's event subscription."

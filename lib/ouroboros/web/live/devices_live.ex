@@ -795,7 +795,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     # me when this changes", and polling a deployment would be a page refreshing itself
     # through a credential prompt. A subscription to an operation with no attached worker
     # simply is not one, which is a fact the journal-sourced snapshot below already states.
-    _ = Deployment.subscribe(operation)
+    # The tab's id travels with the subscription, not just with the calls. It is what makes
+    # this LiveView *this session's presence* for the operation: when the tab is closed over
+    # an open prompt, the broker sees this process die and unbinds the challenge, so the
+    # operator's next tab can answer it instead of being told it belongs to another one.
+    _ = Deployment.subscribe(operation, socket.assigns.view_session)
     demonitor(drawer.monitor)
 
     socket

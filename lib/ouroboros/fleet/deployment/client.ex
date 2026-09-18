@@ -28,6 +28,11 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   (`challenge_kind_mismatch`), which is what stops a host-trust acceptance from being
   delivered as an answer to a password prompt.
 
+  The *session* half of that binding lasts exactly as long as the session does. Subscribers
+  say which session they speak for, this process monitors them, and when the last one for a
+  session dies its open challenges are unbound — see `release_session/2`. The identity half
+  never lapses: another administrator still needs an explicit takeover.
+
   ## Frames are bounded by the socket, not by hope
 
   The socket is opened with `packet: :line` and `packet_size`, so a worker that writes past
@@ -105,9 +110,17 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   @spec cancel(pid()) :: {:ok, map()} | {:error, term()}
   def cancel(pid), do: call(pid, :cancel, @request_timeout)
 
-  @doc "Sends `{:ouroboros_fleet_deployment, operation, event}` to `pid` for every event."
-  @spec subscribe(pid(), pid()) :: :ok
-  def subscribe(pid, subscriber), do: GenServer.cast(pid, {:subscribe, subscriber})
+  @doc """
+  Sends `{:ouroboros_fleet_deployment, operation, event}` to `pid` for every event.
+
+  `session` is the client session that subscriber speaks for — a browser tab's id, a
+  listener connection's. It is not used to decide what the subscriber may *see*; it is the
+  thread that ties a pending challenge to something this runtime can watch die. See
+  `release_session/2`.
+  """
+  @spec subscribe(pid(), pid(), String.t() | nil) :: :ok
+  def subscribe(pid, subscriber, session \\ nil),
+    do: GenServer.cast(pid, {:subscribe, subscriber, session})
 
   @doc "Stops sending events to `pid`."
   @spec unsubscribe(pid(), pid()) :: :ok
@@ -537,12 +550,12 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   def handle_call(:cancel, from, state), do: deliver(state, from, %{"op" => "cancel"}, nil)
 
   @impl true
-  def handle_cast({:subscribe, pid}, state) do
+  def handle_cast({:subscribe, pid, session}, state) do
     if Map.has_key?(state.subscribers, pid) do
       {:noreply, state}
     else
       ref = Process.monitor(pid)
-      {:noreply, put_in(state.subscribers[pid], ref)}
+      {:noreply, put_in(state.subscribers[pid], %{ref: ref, session: session})}
     end
   end
 
@@ -592,8 +605,14 @@ defmodule Ouroboros.Fleet.Deployment.Client do
     end
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state),
-    do: {:noreply, drop_subscriber(state, pid)}
+  # A subscriber that died is a tab that was closed, a listener connection that dropped, or a
+  # LiveView whose browser navigated away. Whichever it was, the session it spoke for is not
+  # coming back to answer anything.
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    session = session_of(state, pid)
+    state = drop_subscriber(state, pid)
+    {:noreply, release_session(state, session)}
+  end
 
   def handle_info(_other, state), do: {:noreply, state}
 
@@ -771,6 +790,12 @@ defmodule Ouroboros.Fleet.Deployment.Client do
         kind: frame["kind"],
         expires_at: frame["expires_at"],
         consumed?: false,
+        # The session this challenge was issued to, which is this connection's — the same
+        # one the worker recorded on its side. Held per challenge rather than read off the
+        # connection, because it is the thing `release_session/2` sets to `nil` when the tab
+        # that was going to answer it is gone, and a connection-wide flag would release the
+        # ones issued after that as well.
+        session: state.session,
         recorded_at: state.clock.(),
         # A sequence, because `recorded_at` is in seconds and a worker can issue a thousand
         # challenges inside one of them: ordering by the clock made "keep the newest" a tie
@@ -864,9 +889,59 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       {nil, _subscribers} ->
         state
 
-      {ref, subscribers} ->
+      {%{ref: ref}, subscribers} ->
         Process.demonitor(ref, [:flush])
         %{state | subscribers: subscribers}
+    end
+  end
+
+  defp session_of(state, pid) do
+    case Map.fetch(state.subscribers, pid) do
+      {:ok, %{session: session}} -> session
+      :error -> nil
+    end
+  end
+
+  # A challenge's session binding must not outlive the session that received it.
+  #
+  # The binding exists so that a *second* tab cannot answer the prompt the first one is
+  # looking at (seam S4, review F7). It was doing something else as well, by accident: a
+  # browser tab closed over an open review left the challenge bound to a session no process
+  # speaks for any more, and the operator's next tab was refused `challenge_not_bound` and
+  # then — because the worker is still attached, which is the whole point of the detached
+  # design — refused `already_attached` on the resume the page offered as the way out. The
+  # operation was stranded until Cancel, or until the worker's own five-minute window shut
+  # it.
+  #
+  # So when the last subscriber speaking for a session goes down, every challenge still open
+  # on that session is unbound: the *identity* check is untouched, so another administrator
+  # still needs `takeover`, and the once-only rule is untouched, so a consumed challenge
+  # stays consumed. What changes is that the same person, in another tab, can answer a prompt
+  # nobody else is holding.
+  #
+  # The worker needs no part in this. It binds the challenge to the *connection's* binding,
+  # and that connection is this process, which did not die — so the `respond` frame this
+  # sends afterwards still matches on its side (`challenge.rs`'s `pending.bound_to`).
+  #
+  # An explicit `unsubscribe` does not release: a page that unsubscribed is a page that is
+  # still there and can subscribe again. Only a dead process is evidence that nobody is.
+  defp release_session(state, nil), do: state
+
+  defp release_session(state, session) do
+    if Enum.any?(state.subscribers, fn {_pid, entry} -> entry.session == session end) do
+      state
+    else
+      now = state.clock.()
+
+      Enum.reduce(state.challenges, state, fn {id, challenge}, acc ->
+        if challenge.session == session and not challenge.consumed? and
+             unexpired(challenge, now) == :ok do
+          audit(acc, id, challenge.kind, :session_released)
+          put_in(acc.challenges[id], %{challenge | session: nil})
+        else
+          acc
+        end
+      end)
     end
   end
 
@@ -886,12 +961,17 @@ defmodule Ouroboros.Fleet.Deployment.Client do
     end
   end
 
+  # The identity is the gate; the session is the tie-break between two of that identity's own
+  # tabs. `nil` on the challenge means the session that was holding it has gone (see
+  # `release_session/2`), and then the identity is the whole test — which is what it was
+  # before per-tab binding existed, applied only to a prompt nobody is left to answer.
   defp fetch(state, id, binding) do
     case Map.fetch(state.challenges, id) do
       {:ok, challenge} ->
-        if binding[:subject] == state.subject and binding[:session] == state.session,
-          do: {:ok, challenge},
-          else: {:error, :challenge_not_bound}
+        if binding[:subject] == state.subject and
+             (is_nil(challenge.session) or binding[:session] == challenge.session),
+           do: {:ok, challenge},
+           else: {:error, :challenge_not_bound}
 
       :error ->
         {:error, :challenge_not_bound}

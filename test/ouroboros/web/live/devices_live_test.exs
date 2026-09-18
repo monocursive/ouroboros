@@ -59,8 +59,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "direct",
         "state" => "this_device",
         "action" => "view device",
-        "name_conflicts_with_roster" => nil,
-        "suggested_machine" => "studio"
+        "name_conflicts_with_roster" => nil
       },
       %{
         "name" => "spare",
@@ -73,8 +72,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "direct",
         "state" => "this_device_without_profile",
         "action" => "set up this device",
-        "name_conflicts_with_roster" => nil,
-        "suggested_machine" => "spare"
+        "name_conflicts_with_roster" => nil
       },
       %{
         "name" => "buildbox",
@@ -87,8 +85,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "unknown",
         "state" => "fleet_member_not_visible",
         "action" => "diagnose",
-        "name_conflicts_with_roster" => nil,
-        "suggested_machine" => "buildbox"
+        "name_conflicts_with_roster" => nil
       },
       %{
         "name" => "vps-1",
@@ -101,8 +98,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "relayed",
         "state" => "discovered_installation_unknown",
         "action" => "deploy Ouroboros",
-        "name_conflicts_with_roster" => nil,
-        "suggested_machine" => "vps-1"
+        "name_conflicts_with_roster" => nil
       },
       %{
         "name" => "studio",
@@ -115,8 +111,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "direct",
         "state" => "discovered_installation_unknown",
         "action" => "deploy Ouroboros",
-        "name_conflicts_with_roster" => "studio",
-        "suggested_machine" => "studio"
+        "name_conflicts_with_roster" => "studio"
       },
       %{
         "name" => "toaster",
@@ -129,8 +124,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "path" => "unknown",
         "state" => "unsupported_platform",
         "action" => "nothing to deploy",
-        "name_conflicts_with_roster" => nil,
-        "suggested_machine" => "toaster"
+        "name_conflicts_with_roster" => nil
       }
     ]
   }
@@ -357,6 +351,30 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     conn
     |> Phoenix.LiveViewTest.put_connect_params(%{"_ouro_tab" => tab})
     |> live(path)
+  end
+
+  # The browser tab is closed: the LiveView process goes, and the deployment client it was
+  # subscribed to has handled that before the next line runs. Unlinked first, because a
+  # `:kill` on a process this test is linked to would take the test with it.
+  #
+  # The client process is left alone — it is not the tab, and it staying up while the tab
+  # goes is exactly the situation being tested.
+  defp close_tab!(view, operation) do
+    pid = view.pid
+    # The LiveView is linked into the test's own tree, so the kill would otherwise take this
+    # process with it. Trapping turns that signal into a message, which is what a test that
+    # is *about* a process dying has to do.
+    Process.flag(:trap_exit, true)
+    Process.unlink(pid)
+    reference = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
+
+    # One round trip through the client, so its own monitor message — enqueued by the same
+    # exit, ahead of this call — has been handled.
+    {:ok, client} = Ouroboros.Fleet.Deployment.client(operation)
+    {:ok, _snapshot} = Ouroboros.Fleet.Deployment.Client.snapshot(client)
+    :ok
   end
 
   # Kill the connection process and wait until the broker has stopped holding it. Both
@@ -2060,6 +2078,32 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       second |> form("#ouro-deploy-auth", %{"secret" => "other-tab"}) |> render_submit()
       refute_receive {:fake_worker, %{"op" => "respond"}}, 500
+    end
+
+    test "is released when the tab that was asked is closed", %{conn: conn, worker: worker} do
+      {:ok, first, _html} = live_with_tab(conn, "/devices", String.duplicate("ab", 16))
+      operation = prepared(first)
+
+      :ok = FleetWorkerFake.challenge(worker, "pw-5", "password", %{"metadata" => %{}})
+      _ = await(first, "data-ouro-secret")
+
+      # The tab is closed over the open prompt. The worker is still attached — that is the
+      # whole point of the detached design — so `resume` cannot help, and before the broker
+      # released the binding this operation was stranded until Cancel.
+      close_tab!(first, operation)
+
+      {:ok, second, _html} =
+        live_with_tab(conn, "/devices?operation=#{operation}", String.duplicate("cd", 16))
+
+      _ = await(second, "data-ouro-secret")
+
+      second
+      |> form("#ouro-deploy-auth", %{"secret" => "the-tab-that-is-left"})
+      |> render_submit()
+
+      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
+      assert frame["response"]["secret"] == "the-tab-that-is-left"
+      refute has_element?(second, "[data-ouro-rebind]")
     end
 
     test "a tab id this page did not mint is not used", %{conn: conn} do

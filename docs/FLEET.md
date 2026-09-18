@@ -714,6 +714,18 @@ browser's *cookie* id is not that session — one cookie per browser, read by ev
 LiveView mints its own with `Ouroboros.Web.Call.view_session/0` and passes it as `session:`
 on deployment calls.
 
+The session half of that binding lasts exactly as long as the session. A surface passes its
+id to `Ouroboros.Fleet.Deployment.subscribe/2` as well as on its calls, the broker monitors
+the subscriber, and when the last process speaking for a session goes down every challenge
+still open on it is **unbound**, with an audit line naming the operation and the challenge.
+The identity half never lapses — another administrator still needs an explicit takeover — and
+a consumed challenge stays consumed. This is what the binding was always for: a *second* tab
+open at the same time must not answer the first one's prompt. A tab that has been closed is
+not a second tab, and leaving its prompt bound stranded the operation behind a page that no
+longer existed, with `resume` refusing `already_attached` because the detached worker was
+still perfectly alive. An explicit `unsubscribe` releases nothing: a page that unsubscribed
+is a closed drawer, not a closed tab.
+
 **Ownership.** The journal records the identity that started an operation. `status` and
 `cancel` refuse a different one; `resume` refuses it too, and additionally refuses a journal
 whose owner this build cannot establish, because a resume attaches under the *resuming*

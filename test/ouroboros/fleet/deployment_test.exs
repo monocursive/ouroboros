@@ -6,6 +6,8 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
   @moduletag :capture_log
 
+  import ExUnit.CaptureLog
+
   alias Ouroboros.Fleet.Deployment
   alias Ouroboros.Fleet.Deployment.Frame
   alias Ouroboros.Fleet.Deployment.Journal
@@ -897,6 +899,155 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   # ---------------------------------------------------------------------------
+  # A challenge's session binding may not outlive the session
+
+  describe "a session that goes away" do
+    setup context do
+      %{worker: worker} = arrange_worker(context)
+
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), tab("a"))
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      # The shape the web surface has: one process per browser tab, subscribed to the
+      # operation under that tab's id, which is what a credential challenge binds to.
+      tab_a = subscriber(operation, "tab-a")
+
+      :ok = FleetWorkerFake.challenge(worker, "rev", "review", %{"plan" => %{"steps" => []}})
+      await_challenge(operation, "rev", tab("a"))
+
+      Map.merge(context, %{worker: worker, operation: operation, tab_a: tab_a})
+    end
+
+    test "leaves the prompt alone while that tab is still there", %{operation: operation} do
+      # This is the property the binding exists for and the one this change must not undo: a
+      # second tab open at the same time is not the tab that was asked.
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-live", tab("b"))
+
+      # And the tab it was issued to still answers, which is what says the refusal above was
+      # about the session rather than about the challenge.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-a", tab("a"))
+    end
+
+    test "unbinds the prompt when the tab is closed, so the next one can answer it", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-early", tab("b"))
+
+      close(tab_a)
+      settle(operation)
+
+      # Same person, another tab. The operation is not stranded behind a prompt bound to a
+      # browser tab that no longer exists.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond", "challenge" => "rev"}},
+                     @receive_timeout
+
+      assert FleetWorkerFake.refusals(worker) == 0
+    end
+
+    test "unbinds the session and not the identity", %{operation: operation, tab_a: tab_a} do
+      close(tab_a)
+      settle(operation)
+
+      # A second administrator is exactly what the identity half of the binding is for, and
+      # it does not lapse with a tab: `resume` with `takeover` is still the only way in.
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-bruno", %{
+                 subject: "bruno",
+                 session: "tab-b"
+               })
+
+      # And the prompt is still there for the operator it belongs to.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+    end
+
+    test "releases a password prompt too, and it is still answerable exactly once", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      # The kind with a secret on it. Nothing of the credential is in play here — the tab
+      # that was asked never typed one, and the worker is still waiting — so there is no
+      # unconsumed secret to strand and every reason to let the operator answer from the
+      # tab they still have.
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(operation, "pw", tab("a"))
+
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.authenticate(operation, "pw", "typed-in-the-second-tab", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
+      assert frame["response"]["secret"] == "typed-in-the-second-tab"
+
+      # Releasing the session does not release the once-only rule.
+      assert {:error, :challenge_consumed} =
+               Deployment.authenticate(operation, "pw", "a-second-guess", tab("c"))
+    end
+
+    test "says which challenge it unbound, and says it once", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      log =
+        capture_log(fn ->
+          close(tab_a)
+          settle(operation)
+        end)
+
+      assert log =~ "fleet deployment challenge operation=#{operation}"
+      assert log =~ "challenge=rev"
+      assert log =~ "outcome=session_released"
+    end
+
+    test "an explicit unsubscribe is not a tab that is gone", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      # A page that unsubscribed is a page that is still there and can subscribe again — a
+      # closed drawer, not a closed tab. Only a dead process is evidence that nobody is left
+      # to answer.
+      unsubscribe(tab_a, operation)
+      settle(operation)
+
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+    end
+
+    test "a subscriber that named no session releases nothing", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      # The listener's shape: a connection subscribes without a per-tab id. Its going away
+      # says nothing about which session may answer, so nothing is released — including by
+      # the tab that is still open beside it.
+      anonymous = subscriber(operation, nil)
+      close(anonymous)
+      settle(operation)
+
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      # And the tab that did name one still releases when *it* goes.
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b2", tab("b"))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Spawn does not stall the broker; a timeout does not discard the request
 
   describe "an asynchronous spawn" do
@@ -1321,9 +1472,64 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     %{worker: worker, ouro: ouro, ouro_dir: context.fake_dir, cap: cap, instance: instance}
   end
 
-  defp await_challenge(operation, id) do
+  # One browser tab's binding: the same operator, a different per-tab session id.
+  defp tab(id), do: %{subject: "adele", session: "tab-#{id}"}
+
+  # A stand-in for the LiveView that a browser tab runs: one process, subscribed to the
+  # operation under that tab's session, which stays alive until the tab is closed.
+  defp subscriber(operation, session) do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        send(test, {:subscribed, self(), Deployment.subscribe(operation, session)})
+        loop()
+      end)
+
+    assert_receive {:subscribed, ^pid, :ok}, @receive_timeout
+    pid
+  end
+
+  defp loop do
+    receive do
+      {:unsubscribe, operation, from} ->
+        send(from, {:unsubscribed, self(), Deployment.unsubscribe(operation)})
+        loop()
+
+      _other ->
+        loop()
+    end
+  end
+
+  # The tab is closed. Waiting for this process's own `:DOWN` is what makes the next line
+  # deterministic: both monitor messages are generated by the same exit, so by the time this
+  # one has arrived the client's is already in its mailbox, ahead of anything sent after.
+  defp close(pid) do
+    reference = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
+    :ok
+  end
+
+  defp unsubscribe(pid, operation) do
+    send(pid, {:unsubscribe, operation, self()})
+    assert_receive {:unsubscribed, ^pid, :ok}, @receive_timeout
+    :ok
+  end
+
+  # One round trip through the client process, so everything already in its mailbox — the
+  # monitor message `close/1` just produced — has been handled before the next assertion.
+  defp settle(operation) do
+    assert {:ok, pid} = Deployment.client(operation)
+    assert {:ok, _snapshot} = Ouroboros.Fleet.Deployment.Client.snapshot(pid)
+    :ok
+  end
+
+  defp await_challenge(operation, id, binding \\ nil) do
+    binding = binding || bound()
+
     Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      case Deployment.status(operation, bound()) do
+      case Deployment.status(operation, binding) do
         {:ok, %{"challenges" => challenges}} ->
           if Enum.any?(challenges, &(&1["challenge"] == id)) do
             {:halt, :ok}
