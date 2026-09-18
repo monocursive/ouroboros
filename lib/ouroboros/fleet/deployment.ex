@@ -166,6 +166,10 @@ defmodule Ouroboros.Fleet.Deployment do
 
     %{
       "host" => host(data_dir),
+      # The fleet's own name, for the line above the list. `fleet.status` carries it too,
+      # but a surface that reads only this method — the terminal client — drew "Fleet of
+      # <machine>" for a fleet that has a name of its own.
+      "fleet_name" => fleet_name(data_dir),
       "discovery" => Journal.scrub_value(document["discovery"]),
       "devices" => merge_cluster(devices, cluster_facts()),
       "fleet_protocol_revision" => document["fleet_protocol_revision"],
@@ -223,6 +227,30 @@ defmodule Ouroboros.Fleet.Deployment do
   # A roster is a handful of `{machine, host, node}` triples. A profile larger than this is
   # not one, and it is refused rather than parsed.
   @max_profile_bytes 512 * 1024
+
+  @doc "The fleet's name from this machine's profile, or `nil` for a standalone machine."
+  @spec fleet_name(Path.t() | nil) :: String.t() | nil
+  def fleet_name(data_dir \\ nil) do
+    case profile_document(data_dir) do
+      %{"name" => name} when is_binary(name) and name != "" -> Journal.scrub_value(name)
+      _standalone -> nil
+    end
+  end
+
+  # The profile as a document, bounded and read as the roster reads it; `nil` for a
+  # standalone machine, an unreadable profile, or no data directory.
+  defp profile_document(data_dir) do
+    with dir when is_binary(dir) <- data_dir || data_dir(),
+         profile = Path.join([dir, "fleet", "profile.json"]),
+         {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_profile_bytes <-
+           File.lstat(profile),
+         {:ok, body} <- File.read(profile),
+         {:ok, document} when is_map(document) <- JSON.decode(body) do
+      document
+    else
+      _none -> nil
+    end
+  end
 
   @doc """
   This machine's roster: every member of the fleet profile it holds, `machine` and `host`.

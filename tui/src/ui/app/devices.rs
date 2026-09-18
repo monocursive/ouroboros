@@ -4112,9 +4112,11 @@ const ROW_FIELD_COLUMNS: usize = 44;
 /// only truncates the part that says what is going on.
 const OWN_WORDS_COLUMNS: usize = 96;
 
-const OS_COLUMNS: usize = 6;
+/// "macOS", "linux", "iOS": five is the widest the network client reports.
+const OS_COLUMNS: usize = 5;
 const ADDRESS_COLUMNS: usize = 16;
-const PRESENCE_COLUMNS: usize = 30;
+/// "○ offline, seen 3 days ago" is twenty-six columns; "● online" is the other shape.
+const PRESENCE_COLUMNS: usize = 28;
 const STATE_COLUMNS: usize = 30;
 
 /// One cell of the list, bounded to its width and padded out to it.
@@ -4142,7 +4144,7 @@ const FULL_ROW_COLUMNS: usize = 2
     + 2
     + STATE_COLUMNS
     + 2
-    + 14;
+    + 15;
 
 /// The columns the Devices overlay has for a line: 92 % of the frame inside a border,
 /// which is how `view::devices` sizes it. Zero before the first frame reads as wide, so a
