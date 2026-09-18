@@ -703,6 +703,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # one.
       manual?: is_nil(device),
       operation: nil,
+      # What the operation itself says it is aimed at, from its journal summary. A drawer
+      # opened from a row has the row; a drawer opened from an operation — Continue, or the
+      # address bar after the tab that started it was closed — has only this.
+      target: nil,
       status: nil,
       error: nil,
       residue: [],
@@ -741,6 +745,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       kind: "inspect",
       manual?: false,
       operation: nil,
+      target: nil,
       status: nil,
       error: nil,
       residue: [],
@@ -813,6 +818,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       drawer
       | operation: operation,
         device: device || drawer.device,
+        # The operation's own recorded target, which is the only thing a drawer opened by id
+        # knows about the machine it is about. Kept where the summary has one, so a reload
+        # that finds the journal gone does not blank a heading that was right.
+        target: (summary && summary["target"]) || drawer.target,
         busy: nil,
         reloads: 0,
         monitor: monitor(operation),
@@ -2227,28 +2236,49 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # Named after the machine, not after the procedure. "Deploy Ouroboros" was the heading on
   # every one of these, including the one that removes a machine.
   defp drawer_title(%{kind: "inspect"} = drawer, _host),
-    do: (drawer.device && device_name(drawer.device)) || "This device"
+    do: drawer_machine(drawer) || "This device"
 
   defp drawer_title(%{kind: "setup"}, host),
     do: Devices.setup_label(host && host["os"])
 
   defp drawer_title(%{kind: "leave"} = drawer, _host),
-    do: "Remove #{(drawer.device && device_name(drawer.device)) || "this machine"} from the fleet"
+    do: "Remove #{drawer_machine(drawer) || "this machine"} from the fleet"
 
   defp drawer_title(%{manual?: true, operation: nil}, _host), do: "Add a device by address"
 
-  defp drawer_title(%{device: device}, _host) when is_map(device),
-    do: "Add #{device_name(device)} to your fleet"
+  defp drawer_title(%{kind: "add"} = drawer, _host) do
+    # An `add` reopened by id whose operation names no target: the row it came from is not
+    # in this drawer, and "Add a device by address" would name a path the operator did not
+    # take.
+    "Add #{drawer_machine(drawer) || "a machine"} to your fleet"
+  end
 
-  # An `add` reopened by id: the row it came from is not in this drawer, and "Add a device by
-  # address" would name a path the operator did not take.
-  defp drawer_title(%{kind: "add"}, _host), do: "Add a machine to your fleet"
-  defp drawer_title(_other, _host), do: "Add a device by address"
+  defp drawer_title(drawer, _host) do
+    case drawer_machine(drawer) do
+      named when is_binary(named) -> "Add #{named} to your fleet"
+      nil -> "Add a device by address"
+    end
+  end
 
-  defp device_name(device),
-    do:
-      Devices.name(device["machine"], 96) || Devices.name(device["name"], 96) ||
-        Devices.this_device()
+  # The machine a drawer is about, best source first, or `nil` when it knows of none.
+  #
+  # The row it was opened from is the best: it carries the roster name and the display name.
+  # But a drawer opened from an *operation* has no row — Continue on a row whose setup this
+  # tab did not start, or `/devices?operation=…` after the tab that did was closed — and a
+  # heading that fell straight through to "this machine" was the page failing to say which
+  # machine an operator was about to remove.
+  defp drawer_machine(drawer) do
+    (drawer.device &&
+       (Devices.name(drawer.device["machine"], 96) || Devices.name(drawer.device["name"], 96))) ||
+      operation_machine(drawer)
+  end
+
+  # What the operation recorded it was aimed at: the roster name it names, or failing that
+  # the address it was pointed at, which is still a thing an operator recognises.
+  defp operation_machine(%{target: target}) when is_map(target),
+    do: Devices.name(target["machine"], 96) || Devices.name(target["address"], 96)
+
+  defp operation_machine(_no_target), do: nil
 
   # The machine a finished operation is about, from the plan where there is one and from the
   # form where there is not.
@@ -2269,10 +2299,13 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     # boolean that used to reach the heading.
     from_plan = if is_map(plan), do: get_in(plan, ["target", "machine"])
 
+    # And the operation's own target, which is all a drawer opened by id has. Without it a
+    # resumed operation's ending read "That machine is out of your fleet".
     Devices.name(from_plan) ||
       (drawer.device &&
          (Devices.name(drawer.device["machine"]) || Devices.name(drawer.device["name"]))) ||
-      Devices.name(drawer.form["machine"])
+      Devices.name(drawer.form["machine"]) ||
+      operation_machine(drawer)
   end
 
   attr :drawer, :map, required: true

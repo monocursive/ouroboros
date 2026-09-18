@@ -3987,6 +3987,100 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     end
   end
 
+  describe "a drawer opened from an operation rather than from a row" do
+    setup context do
+      issuer!(context.root)
+      ouro!(context)
+      %{conn: web!(context)}
+    end
+
+    # The row's Continue, and `/devices?operation=…` after the tab that started the
+    # operation was closed, both open a drawer with no device behind it. The heading fell
+    # straight through to its fallback and stopped naming the machine: "Remove this machine
+    # from the fleet" over a removal an operator was about to confirm.
+    test "is still titled after the machine the operation is aimed at",
+         %{conn: conn, root: root} do
+      for {kind, address, title} <- [
+            {"leave", "100.64.0.2", "Remove buildbox from the fleet"},
+            {"add", "100.64.12.44", "Add vps-1 to your fleet"}
+          ] do
+        operation = "00bb00bb00bb00b1"
+
+        journal!(root, operation, %{
+          "state" => "awaiting_review",
+          "kind" => kind,
+          "target" => %{
+            "machine" => if(kind == "leave", do: "buildbox", else: "vps-1"),
+            "address" => address
+          }
+        })
+
+        {:ok, view, _html} = live(conn, "/devices")
+
+        html =
+          view
+          |> element(
+            ~s{[data-address="#{address}"] button[phx-click="open-operation"][phx-value-operation="#{operation}"]}
+          )
+          |> render_click()
+
+        assert html =~ title, "a #{kind} opened from its row's Continue is not named"
+        refute html =~ "Remove this machine from the fleet"
+        refute html =~ "Add a machine to your fleet"
+      end
+    end
+
+    # Reopened by id from a fresh page, which is the shape the live report came from: the
+    # tab that started it is gone, so there is no row in this drawer at all.
+    test "is named from the operation alone when the address bar opened it",
+         %{conn: conn, root: root} do
+      operation = "00bb00bb00bb00b2"
+
+      journal!(root, operation, %{
+        "state" => "awaiting_review",
+        "kind" => "leave",
+        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"}
+      })
+
+      {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
+
+      assert html =~ "Remove buildbox from the fleet"
+      refute html =~ "Remove this machine from the fleet"
+    end
+
+    # A target with no roster name is still a thing an operator recognises. A manual add is
+    # exactly this case: it is aimed at an address and named later.
+    test "falls back to the address the operation was aimed at", %{conn: conn, root: root} do
+      operation = "00bb00bb00bb00b3"
+
+      journal!(root, operation, %{
+        "state" => "inspecting",
+        "kind" => "add",
+        "target" => %{"address" => "100.64.99.9"}
+      })
+
+      {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
+
+      assert html =~ "Add 100.64.99.9 to your fleet"
+      refute html =~ "Add a machine to your fleet"
+    end
+
+    # And "Set up this Mac" is a heading about *this* machine, so it never wanted a target.
+    test "a setup is still named after this machine", %{conn: conn, root: root} do
+      operation = "00bb00bb00bb00b4"
+
+      journal!(root, operation, %{
+        "state" => "inspecting",
+        "kind" => "setup",
+        "target" => %{"machine" => "spare", "address" => "100.64.0.7"}
+      })
+
+      {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
+
+      assert html =~ "Set up this Mac"
+    end
+  end
+
   describe "the manual add form" do
     setup context do
       issuer!(context.root)
