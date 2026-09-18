@@ -584,9 +584,22 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
 
       # Section 5.1: "A device that cannot be acted on shows no button; the reason is in its
-      # details." `toaster` is an unsupported platform, so its row offers nothing — not a
-      # disabled control carrying a paragraph.
-      refute has_element?(view, ~s{button[phx-value-address="100.64.0.5"]})
+      # details." `toaster` is an unsupported platform, so nothing can be *done* to it — no
+      # deployment, no setup, not a disabled control carrying a paragraph. What it keeps is
+      # the way in to the reason, which the same sentence promises and which the row's one
+      # word can only summarise.
+      refute has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.0.5"]})
+
+      refute has_element?(
+               view,
+               ~s{button[phx-click="setup-device"][phx-value-address="100.64.0.5"]}
+             )
+
+      assert has_element?(
+               view,
+               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.5"]}
+             )
+
       assert html =~ "run Ouroboros"
       refute html =~ "Deployment is disabled for this device while that blocker stands."
 
@@ -601,6 +614,24 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert html =~ "Details"
       refute html =~ "Diagnose"
       refute html =~ "View device"
+    end
+
+    test "a device nothing can be done about can still be asked why", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html =
+        view
+        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.5"]})
+        |> render_click()
+
+      # Section 5.1 promises the reason is in its details, so there has to be a way in and
+      # something there when you arrive.
+      assert html =~ "run Ouroboros"
+      assert html =~ "so there is nothing to offer on its row"
+      assert html =~ "Name on the network"
+
+      # And a device with nothing to remove does not offer to remove it.
+      refute html =~ "Remove from fleet"
     end
 
     test "pre-fills the name from suggested_machine and never from the display name",
@@ -902,6 +933,20 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       assert html =~ "Tailscale did not answer from this runtime."
       refute html =~ ~s(runtime: "")
+    end
+
+    test "a runtime that reported no discovery at all does not blame Tailscale", context do
+      document = Map.delete(@devices, "discovery")
+
+      ouro!(context, devices: document)
+      conn = web!(context)
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      # Nobody observed Tailscale doing anything, so the page may not say it did. "What this
+      # may not do: claim."
+      assert html =~ "This runtime did not report a discovery result."
+      refute html =~ "Tailscale did not answer"
     end
 
     test "no_visible_peers is an answer, not a failure", context do
@@ -1534,6 +1579,34 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       # the two events after the one awaited above arrive on their own schedule.
       assert html =~ ~s(aria-live="polite")
       assert await(view, "Issue the new member&#39;s certificate on vps-1: done.")
+    end
+
+    test "a finished setup names the machine it finished with", %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared(view)
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => true,
+          "state" => "completed",
+          "summary" => "vps-1 joined this fleet"
+        })
+
+      html = await(view, "is in your fleet")
+
+      # Section 5.2's finish step. By the time it is drawn the review challenge has been
+      # consumed, so the name has to come from somewhere else - and "false is in your
+      # fleet" is what a boolean falling through `Devices.plain/2` produced.
+      assert html =~ "vps-1 is in your fleet"
+      refute html =~ "false is in your fleet"
+      refute html =~ "That machine is in your fleet"
+
+      # Two follow-ups, not five: Open goes to the machines panel and Done closes.
+      assert has_element?(view, ~s{#ouro-deploy a[href="/status"]})
+      assert has_element?(view, ~s{#ouro-deploy button[phx-click="drawer-close"]})
+      refute html =~ "Configure model"
+      refute html =~ "Run test task"
     end
 
     test "a failure keeps the completed steps, names the cause and offers a retry",
@@ -2272,6 +2345,24 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       # None of them names a device on this list, so they get the one panel that exists for
       # exactly that case — capped, rather than two hundred rows above the inventory.
       assert html =~ "Setups with no device on this list"
+
+      # And the cap says it is one. A prefix drawn as if it were the whole is what
+      # `operations_total` exists to prevent, and dropping the sentence was how the
+      # rewrite lost it.
+      assert html =~ "more are recorded on this machine and are not drawn here"
+    end
+
+    test "a panel that is not truncated says nothing about a cap", %{conn: conn, root: root} do
+      journal!(root, "00aa11bb22cc33dd", %{
+        "state" => "awaiting_auth",
+        "kind" => "add",
+        "target" => %{"machine" => "gone", "address" => "10.9.9.9"}
+      })
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ "Setups with no device on this list"
+      refute html =~ "more are recorded on this machine"
     end
 
     test "a setup whose device is not on the list still has somewhere to be",
@@ -3000,7 +3091,21 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       assert Devices.worker_exit(%{}) == nil
       assert Devices.worker_exit(%{"last_lines" => []}) == nil
       assert Devices.worker_exit(%{"last_lines" => ["", "  "]}) == nil
-      assert Devices.worker_exit(%{"code" => 1}) == nil
+    end
+
+    test "reports an exit code even when the worker printed nothing" do
+      # Section 5.5 specifies `{code, last_lines}`. A worker that died with a status and no
+      # printable line is still a worker that died, and answering nil there would be
+      # finding 5 again with one field filled in.
+      assert Devices.worker_exit(%{"code" => 1}) ==
+               "The setup worker stopped with status 1."
+
+      assert Devices.worker_exit(%{"code" => 1, "last_lines" => []}) ==
+               "The setup worker stopped with status 1."
+
+      # The lines win when there are any: they say more than the number does.
+      assert Devices.worker_exit(%{"code" => 1, "last_lines" => ["no such file"]}) ==
+               "The setup worker stopped: no such file"
     end
 
     test "sanitizes what the worker quoted out of a remote machine" do
@@ -3121,6 +3226,62 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       for key <- ~w(secret password passphrase), do: refute(Map.has_key?(request, key))
     end
 
+    test "an agent fingerprint is not mistaken for a key file's path", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view
+      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
+      |> render_click()
+
+      # OpenSSH prints a SHA256 fingerprint as base64, whose alphabet includes "/". Deciding
+      # on "is there a slash anywhere in it" sent about half of all real fingerprints as a
+      # key file's path, which then failed on a file that does not exist.
+      for reference <- [
+            "SHA256:n0tAr3alF/ngerPr1ntBut1tHasASlash+In1t",
+            "SHA256:noslashesinthisoneatall",
+            "ssh-ed25519 AAAAC3Nza/C1lZDI1NTE5"
+          ] do
+        view
+        |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy", "identity_ref" => reference})
+        |> render_change()
+
+        request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
+
+        assert request["identity"] == %{"kind" => "agent", "ref" => reference},
+               "#{reference} was not read as an agent identity"
+      end
+
+      # And a path still is one.
+      for path <- ["/home/ouro/.ssh/id_ed25519", "~/.ssh/id_ed25519", "./key"] do
+        view
+        |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy", "identity_ref" => path})
+        |> render_change()
+
+        request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
+
+        assert request["identity"] == %{"kind" => "key", "ref" => path},
+               "#{path} was not read as a key file"
+      end
+    end
+
+    test "no identity at all is the default identity, named by nothing", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view
+      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
+      |> render_click()
+
+      view
+      |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy"})
+      |> render_change()
+
+      request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
+
+      # Section 5.2: the default SSH identity is used and a target that asks for a password
+      # raises the challenge. An empty Advanced field is not an identity to send.
+      refute Map.has_key?(request, "identity")
+    end
+
     test "an add names both the address and the machine", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/devices")
 
@@ -3153,6 +3314,54 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html = render_click(view, "leave-device", %{"address" => "10.0.0.1"})
       assert html =~ "does not list that address"
+    end
+  end
+
+  describe "what may and may not block a removal" do
+    setup context do
+      %{worker: worker!(context)}
+    end
+
+    test "a machine that holds no certificate authority key can still remove one", context do
+      # Section 5.5: a leave is exempt from `no_ca_key`, because removing a machine retires
+      # credentials rather than issuing them. Gating it on the same question as adding one
+      # made a member unremovable from every machine in the fleet but the issuer.
+      #
+      # No `issuer!/1`, so this runtime holds no CA key.
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html =
+        view
+        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> render_click()
+
+      assert html =~ "Remove from fleet"
+
+      html =
+        view
+        |> element(~s{button[phx-click="leave-device"][phx-value-address="100.64.0.2"]})
+        |> render_click()
+
+      assert html =~ "Remove buildbox from the fleet"
+      assert has_element?(view, "#ouro-deploy-leave")
+
+      # Adding one, on the same machine, still is not offered: that needs the authority a
+      # removal does not.
+      refute has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
+    end
+
+    test "a blocker that is not about issuing stops a removal too", context do
+      # A cleartext bind stops this runtime running the operation at all, whichever
+      # direction it points, so it stops a removal as well.
+      issuer!(context.root)
+      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html = render_click(view, "leave-device", %{"address" => "100.64.0.2"})
+
+      assert html =~ "credential entry is refused here"
+      refute has_element?(view, "#ouro-deploy-leave")
     end
   end
 

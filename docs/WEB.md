@@ -571,6 +571,22 @@ member's details panel rather than from its row, and names a **roster machine** 
 address — aiming a removal at whatever answers at an address is not something this page will
 do.
 
+**Three of these need the runtime half of §5.5, which lands separately.** The page is
+written against the documented shape and degrades honestly without it, but until each
+arrives the behaviour is inert rather than broken:
+
+| What the page does | What it needs | Where |
+|---|---|---|
+| The **Remove from fleet** drawer sends `kind: "leave"` with `target.machine` | `prepare`'s `kind` enum accepts `leave`, and `target.address` stops being required for it | `lib/ouroboros/gateway/methods/contract.ex` |
+| **The setup worker stopped: …** with a **Retry** | `worker_exit` survives `Journal`'s field allowlist and is put in the live snapshot | `lib/ouroboros/fleet/deployment/journal.ex`, `.../deployment/client.ex` |
+| *This is a development runtime; the packaged `ouro` is what sets a machine up.* | `dev_runtime` is emitted as a capability reason | `Deployment.deploy_blockers/2` |
+
+Pressing **Connect** in the leave drawer today returns `params.kind must be one of add,
+setup`, which the drawer reports as a refusal rather than hanging. The tests for these three
+say so where they cannot drive the real path: the leave test asserts on
+`DevicesLive.prepare_params/1` — the request document this page owns — rather than on what a
+fake worker received, and the `worker_exit` test injects the snapshot it would be handed.
+
 Everything in [`FLEET.md`](FLEET.md)'s "Trust" section is unchanged and is the reason several
 of these choices look roundabout: no secret on a command line or in a journal, one masked
 field per challenge, **no `phx-change` on it**, the plan digest computed by the client and

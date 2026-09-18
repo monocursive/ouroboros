@@ -29,11 +29,13 @@ requirements and upgrade instructions are in the
   missing. There is no authentication method to choose: the default SSH identity is
   used and you are asked for a password only if the machine asks for one. A specific
   key stays under Advanced — a disclosure that no longer closes itself while you type.
-- A device can be removed from the fleet, from its details panel.
+- A device can be removed from the fleet, from its details panel. (The web half
+  is here; it needs `fleet.deployment.prepare` to accept `kind: "leave"`.)
 - When a setup's worker stops without finishing, the page says what the worker said
   and offers Retry, instead of showing an operation that never moves. A development
   runtime now says it cannot set a machine up, rather than building a fleet it could
-  never start.
+  never start. (Both read facts the runtime has still to report: `worker_exit` on a
+  deployment's status, and `dev_runtime` among its capability reasons.)
 - A failure to reach Tailscale is reported in Tailscale's own words, and no longer
   guesses that your Ouroboros may be out of date.
 

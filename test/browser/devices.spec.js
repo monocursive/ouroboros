@@ -95,11 +95,16 @@ test("one list, one action per row, and the work's machine named once", async ({
   await expect(untouched.locator(".ouro-devices-presence")).toContainText("online");
   await expect(page.locator("#devices-list")).not.toContainText("2026-09-01T00:00:00Z");
 
-  // A platform with no release offers nothing at all: §5.1's "a device that cannot be
-  // acted on shows no button; the reason is in its details".
+  // A platform with no release offers no deployment — §5.1's "a device that cannot be acted
+  // on shows no button" — but keeps the way in to the reason the same sentence promises.
   const blocked = page.locator('[data-state="unsupported_platform"]').first();
   await expect(blocked).toContainText("run Ouroboros");
-  await expect(blocked.getByRole("button")).toHaveCount(0);
+  await expect(blocked.getByRole("button", { name: "Add to fleet" })).toHaveCount(0);
+  await expect(blocked.getByRole("button", { name: "Details" })).toBeVisible();
+
+  await blocked.getByRole("button", { name: "Details" }).click();
+  await expect(page.locator("#ouro-deploy")).toContainText("nothing to offer on its row");
+  await page.keyboard.press("Escape");
 });
 
 test("the drawer opens, traps focus and gives it back, under the keyboard alone", async ({

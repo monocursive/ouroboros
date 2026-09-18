@@ -75,7 +75,13 @@ defmodule Ouroboros.Web.Live.Devices do
     "fleet_member" => {"Details", "inspect-device"},
     "fleet_member_connected" => {"Details", "inspect-device"},
     "fleet_member_not_visible" => {"Details", "inspect-device"},
-    "discovered_installation_unknown" => {"Add to fleet", "deploy"}
+    "discovered_installation_unknown" => {"Add to fleet", "deploy"},
+    # Nothing can be *done* to these — no release, no route, nothing answering — so none of
+    # them offers an action. What they offer is the reason, which is what section 5.1's
+    # "the reason is in its details" promises and what the row's one word can only summarise.
+    "peer_offline" => {"Details", "inspect-device"},
+    "unsupported_platform" => {"Details", "inspect-device"},
+    "no_usable_ipv4" => {"Details", "inspect-device"}
   }
 
   # The rows that belong to this fleet rather than to the network around it. Used for the
@@ -248,7 +254,8 @@ defmodule Ouroboros.Web.Live.Devices do
   @doc "Whether this row has a details panel to open."
   @spec inspectable?(map()) :: boolean()
   def inspectable?(device) when is_map(device),
-    do: device["state"] in ~w(fleet_member fleet_member_connected fleet_member_not_visible)
+    do: device["state"] in ~w(fleet_member fleet_member_connected fleet_member_not_visible
+                            peer_offline unsupported_platform no_usable_ipv4)
 
   def inspectable?(_other), do: false
 
@@ -506,6 +513,14 @@ defmodule Ouroboros.Web.Live.Devices do
 
   def discovery_notice("ok", _detail), do: nil
 
+  # No discovery result at all is a fact about this runtime, not about the network client.
+  # Saying "Tailscale did not answer" here would be the page claiming an observation nobody
+  # made, which is the one thing this module may not do.
+  def discovery_notice(nil, _detail) do
+    "This runtime did not report a discovery result. Devices already in the fleet are " <>
+      "still listed."
+  end
+
   def discovery_notice("no_visible_peers", _detail) do
     "Tailscale answered and can see no other devices. Devices already in the fleet are " <>
       "still listed."
@@ -522,10 +537,6 @@ defmodule Ouroboros.Web.Live.Devices do
           "still listed."
     end
   end
-
-  @doc "Whether discovery reached the network client at all."
-  @spec discovered?(term()) :: boolean()
-  def discovered?(code), do: code in ["ok", "no_visible_peers"]
 
   @doc """
   Why the page is not offering to set a machine up, in words.
@@ -727,14 +738,19 @@ defmodule Ouroboros.Web.Live.Devices do
   stands rather than being overwritten by an empty accusation.
   """
   @spec worker_exit(term()) :: String.t() | nil
-  def worker_exit(%{"last_lines" => lines}) when is_list(lines) do
+  def worker_exit(record) when is_map(record) do
     said =
-      lines
+      record["last_lines"]
+      |> List.wrap()
       |> Enum.map(&plain(&1, 200))
       |> Enum.reject(&(is_nil(&1) or &1 == ""))
       |> Enum.join(" · ")
 
-    if said == "", do: nil, else: "The setup worker stopped: " <> said
+    case {said, record["code"]} do
+      {"", code} when is_integer(code) -> "The setup worker stopped with status #{code}."
+      {"", _no_code} -> nil
+      {said, _code} -> "The setup worker stopped: " <> said
+    end
   end
 
   def worker_exit(_absent), do: nil
@@ -906,8 +922,8 @@ defmodule Ouroboros.Web.Live.Devices do
     target = plain(facts["target"] || facts["address"], 64)
 
     cond do
-      present_text?(user) and present_text?(target) -> "Password for #{user}@#{target}"
-      present_text?(user) -> "Password for #{user}"
+      present?(user) and present?(target) -> "Password for #{user}@#{target}"
+      present?(user) -> "Password for #{user}"
       true -> "Password for this connection"
     end
   end
@@ -1023,7 +1039,7 @@ defmodule Ouroboros.Web.Live.Devices do
 
   defp review_install(_absent, _install_path), do: nil
 
-  defp review_join("leave", machine) when is_binary(machine),
+  defp review_join("leave", machine) when is_binary(machine) and machine != "",
     do: "Take #{plain(machine, 64)} out of the fleet"
 
   defp review_join(_kind, machine) when is_binary(machine) and machine != "",
@@ -1186,8 +1202,14 @@ defmodule Ouroboros.Web.Live.Devices do
 
   Seam S6: the digest a client approves is the digest the client computed, over the document
   it rendered, so that "approve exactly what was shown" is a property of this page rather
-  than a promise from the other side. Keys are walked in their own order and everything else
-  is encoded whole, which is what `serde_json` writes for the same value.
+  than a promise from the other side.
+
+  **Every object's keys are sorted, at every depth**, because `canonical_json` in
+  `tui/src/fleet_setup/mod.rs` sorts them and the two have to agree byte for byte or no plan
+  is ever approvable. Elixir's own map iteration is not that order: it coincides with it for
+  a map of at most 32 keys and stops coinciding above, so a page that relied on it would
+  agree with the worker on every plan anyone happened to test and disagree on a larger one,
+  with "the digest this operation offered is not this page's own sha256" as the only symptom.
   """
   @spec plan_digest(term()) :: String.t() | nil
   def plan_digest(plan) when is_map(plan) do
@@ -1199,21 +1221,22 @@ defmodule Ouroboros.Web.Live.Devices do
   def plan_digest(_absent), do: nil
 
   # `JSON.encode!` is the same encoder the rest of this tree uses, and it writes exactly what
-  # `serde_json` writes for a scalar. What it does not do is sort keys, so objects are walked
-  # and rebuilt in order; everything else is encoded whole.
+  # `serde_json` writes for a scalar. What it does not do is sort keys, so every object is
+  # sorted here — by the key as a string, which is the comparison the Rust side makes —
+  # and everything else is encoded whole.
   defp canonical(value) when is_map(value) do
-    inner =
+    body =
       value
-      |> Enum.map(fn {key, member} ->
-        JSON.encode!(to_string(key)) <> ":" <> canonical(member)
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map_join(",", fn {key, field} ->
+        JSON.encode!(to_string(key)) <> ":" <> canonical(field)
       end)
-      |> Enum.join(",")
 
-    "{" <> inner <> "}"
+    "{" <> body <> "}"
   end
 
   defp canonical(value) when is_list(value),
-    do: "[" <> (value |> Enum.map(&canonical/1) |> Enum.join(",")) <> "]"
+    do: "[" <> Enum.map_join(value, ",", &canonical/1) <> "]"
 
   defp canonical(value), do: JSON.encode!(value)
 
@@ -1275,8 +1298,6 @@ defmodule Ouroboros.Web.Live.Devices do
   defp members_line(_none), do: "none"
 
   defp present?(value), do: is_binary(value) and value != ""
-
-  defp present_text?(value), do: is_binary(value) and value != ""
 
   # Every value in a plan came from a worker quoting a remote machine, so it goes through
   # the same sanitizer a step detail does.

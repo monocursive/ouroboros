@@ -244,7 +244,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # than from a button on its row, because it is not the thing a person came to this page
   # to do.
   def handle_event("leave-device", %{"address" => address}, socket) when is_binary(address) do
-    with :ok <- allowed?(socket, :add),
+    with :ok <- allowed?(socket, :leave),
          {:ok, device} <- removable(socket, address) do
       {:noreply, open_drawer(socket, device, "leave")}
     else
@@ -950,10 +950,19 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   runtime cannot set *itself* up, but adding a machine over SSH installs a packaged release
   on the target and this runtime's own shape says nothing about that.
   """
-  @spec allowed?(Phoenix.LiveView.Socket.t(), :add | :setup | :cancel) ::
+  @spec allowed?(Phoenix.LiveView.Socket.t(), :add | :setup | :leave | :cancel) ::
           :ok | {:refused, String.t()}
   def allowed?(socket, :setup) do
     if setup?(socket), do: :ok, else: {:refused, setup_blocked(socket)}
+  end
+
+  # §5.5: a leave is "exempt from no blocker except `no_ca_key` is *not* required (a leave
+  # needs no CA)". Removing a machine retires credentials rather than issuing them, so the
+  # question "is this runtime this fleet's issuer" is not one a removal has to answer — and
+  # gating it on `:add` made a member unremovable from every machine but the issuer.
+  # `dev_runtime` is out too: it blocks setting *this* machine up and nothing else.
+  def allowed?(socket, :leave) do
+    if leave?(socket), do: :ok, else: {:refused, leave_blocked(socket)}
   end
 
   def allowed?(socket, :cancel) do
@@ -967,8 +976,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   end
 
   # Which gate the open drawer answers to. A setup drawer is a local operation on a machine
-  # that may hold no CA key yet; everything else is an SSH deployment.
+  # that may hold no CA key yet, a leave needs no CA at all, and everything else is an SSH
+  # deployment that admits a member and therefore does.
   defp drawer_gate(%{assigns: %{drawer: %{kind: "setup"}}}), do: :setup
+  defp drawer_gate(%{assigns: %{drawer: %{kind: "leave"}}}), do: :leave
   defp drawer_gate(_socket), do: :add
 
   # The row a `deploy` may be aimed at: one this listing says nothing has inspected. The
@@ -1252,8 +1263,15 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     end
   end
 
+  # A path, or a fingerprint. Decided on how the value *starts*, never on whether a "/"
+  # appears somewhere in it: OpenSSH prints a SHA256 fingerprint as base64, whose alphabet
+  # includes "/", so about half of all real fingerprints contain one — and each of those
+  # would have been sent as a key file's path and failed on a file that does not exist.
+  defp identity_kind("SHA256:" <> _fingerprint), do: "agent"
+  defp identity_kind("ssh-" <> _algorithm), do: "agent"
+
   defp identity_kind(ref) do
-    if String.contains?(ref, "/") or String.starts_with?(ref, "~"), do: "key", else: "agent"
+    if String.starts_with?(ref, ["/", "~", "./", "../"]), do: "key", else: "agent"
   end
 
   defp put_present(params, _key, nil), do: params
@@ -1409,6 +1427,22 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     end
   end
 
+  # Taking a machine out of the fleet: every blocker that stops this runtime running an
+  # operation at all still stands, and the two that are about *issuing* do not.
+  @leave_exempt ~w(no_ca_key dev_runtime)
+
+  defp leave?(socket) do
+    Call.available?(socket.assigns.scope, @prepare) and
+      Enum.all?(blockers(socket), &(&1 in @leave_exempt))
+  end
+
+  defp leave_blocked(socket) do
+    case Enum.reject(blockers(socket), &(&1 in @leave_exempt)) do
+      [] -> unavailable(socket, @prepare)
+      [first | _rest] -> Devices.deploy_blocker(first, posture(socket))
+    end
+  end
+
   # The row for this machine, where the inventory has one. `deploy-manual` has no row, and
   # neither does a Set up pressed from a page whose inventory could not be read.
   defp local_device(socket) do
@@ -1444,7 +1478,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # that typing a query that matches two devices does not take the search box away from
       # under the cursor.
       |> assign(:controls?, length(all) > @search_rows)
-      |> assign(:orphans, orphans(assigns, all))
+      |> then(fn assigns ->
+        {shown, hidden} = orphans(assigns, all)
+
+        assigns |> assign(:orphans, shown) |> assign(:orphans_hidden, hidden)
+      end)
 
     ~H"""
     <div>
@@ -1581,7 +1619,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <%!-- Only the setups no row could claim. An operation whose journal names a machine
               this listing still has is drawn on that machine's row, which is where somebody
               looking for it would look. --%>
-        <.orphan_operations :if={@orphans != []} operations={@orphans} />
+        <.orphan_operations
+          :if={@orphans != []}
+          operations={@orphans}
+          hidden={@orphans_hidden}
+        />
 
         <p class="ouro-subhead">
           <a href="/status">Runtime status — role, connected machines, live sessions →</a>
@@ -1634,14 +1676,18 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp filtered(devices, "available"), do: Enum.reject(devices, &Devices.fleet_row?/1)
   defp filtered(devices, _all), do: devices
 
+  # The setups no row could claim, capped — and how many the cap left out, because a prefix
+  # drawn as if it were the whole is the thing `operations_total` exists to prevent.
   defp orphans(assigns, all) do
-    assigns[:operations]
-    |> List.wrap()
-    |> Enum.filter(&Devices.unfinished?(&1["state"]))
-    |> Enum.reject(fn operation ->
-      Enum.any?(all, &same_device?(operation["target"], &1))
-    end)
-    |> Enum.take(@max_stopped)
+    loose =
+      assigns[:operations]
+      |> List.wrap()
+      |> Enum.filter(&Devices.unfinished?(&1["state"]))
+      |> Enum.reject(fn operation ->
+        Enum.any?(all, &same_device?(operation["target"], &1))
+      end)
+
+    {Enum.take(loose, @max_stopped), max(length(loose) - @max_stopped, 0)}
   end
 
   # ------------------------------------------------------------------------------------
@@ -1845,6 +1891,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp matches?(_left, _right), do: false
 
   attr :operations, :list, required: true
+  attr :hidden, :integer, default: 0
 
   defp orphan_operations(assigns) do
     ~H"""
@@ -1880,6 +1927,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           </span>
         </li>
       </ul>
+
+      <p :if={@hidden > 0} class="ouro-devices-quiet">
+        {@hidden} more are recorded on this machine and are not drawn here. They are in this
+        data directory's deployment journals.
+      </p>
     </section>
     """
   end
@@ -1944,7 +1996,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
               at "inspecting" with nothing on screen and nothing in the page's words about
               it; the reason was in the worker's own private log. Now it is here, with the
               one control that does anything about it. --%>
-        <div :if={@worker_exit} class="ouro-devices-takeover" data-ouro-worker-exit>
+        <div
+          :if={@worker_exit && @step != :finish}
+          class="ouro-devices-takeover"
+          data-ouro-worker-exit
+        >
           <p id="ouro-deploy-worker-exit">{@worker_exit}</p>
           <button
             type="button"
@@ -2131,11 +2187,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp drawer_title(%{kind: "leave"} = drawer, _host),
     do: "Remove #{(drawer.device && device_name(drawer.device)) || "this machine"} from the fleet"
 
-  defp drawer_title(%{manual?: true}, _host), do: "Add a device by address"
+  defp drawer_title(%{manual?: true, operation: nil}, _host), do: "Add a device by address"
 
   defp drawer_title(%{device: device}, _host) when is_map(device),
     do: "Add #{device_name(device)} to your fleet"
 
+  # An `add` reopened by id: the row it came from is not in this drawer, and "Add a device by
+  # address" would name a path the operator did not take.
+  defp drawer_title(%{kind: "add"}, _host), do: "Add a machine to your fleet"
   defp drawer_title(_other, _host), do: "Add a device by address"
 
   defp device_name(device),
@@ -2145,7 +2204,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # form where there is not.
   defp target_name(drawer) do
     plan = Devices.metadata(challenge(drawer, ["review"]))["plan"]
-    from_plan = is_map(plan) and get_in(plan, ["target", "machine"])
+
+    # `if` rather than `and`: `is_map(nil) and ...` is `false`, and `Devices.plain/2` says
+    # booleans as themselves — so the finish heading read "false is in your fleet" for every
+    # operation, because by then the review challenge has been consumed and there is no plan.
+    from_plan = if is_map(plan), do: get_in(plan, ["target", "machine"])
 
     Devices.plain(from_plan, 64) ||
       (drawer.device && Devices.plain(drawer.device["machine"] || drawer.device["name"], 64)) ||
