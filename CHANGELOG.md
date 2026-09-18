@@ -29,15 +29,44 @@ requirements and upgrade instructions are in the
   missing. There is no authentication method to choose: the default SSH identity is
   used and you are asked for a password only if the machine asks for one. A specific
   key stays under Advanced — a disclosure that no longer closes itself while you type.
-- A device can be removed from the fleet, from its details panel. (The web half
-  is here; it needs `fleet.deployment.prepare` to accept `kind: "leave"`.)
+- A device can be removed from the fleet, from its details panel: it stops there,
+  gives up its credentials and leaves every roster, and its sessions and data stay
+  on that machine.
 - When a setup's worker stops without finishing, the page says what the worker said
   and offers Retry, instead of showing an operation that never moves. A development
-  runtime now says it cannot set a machine up, rather than building a fleet it could
-  never start. (Both read facts the runtime has still to report: `worker_exit` on a
-  deployment's status, and `dev_runtime` among its capability reasons.)
+  runtime (`ouro --dev`) now says it cannot set a machine up, rather than building a
+  fleet it could never start.
 - A failure to reach Tailscale is reported in Tailscale's own words, and no longer
   guesses that your Ouroboros may be out of date.
+- The terminal client's Devices view (`ctrl+x D`) draws the same list and the same
+  flows: one line per device, the details of the selected one underneath, `a` to add a
+  device by address, `x` to remove a member, and a setup that keeps following its
+  operation across the restart it causes.
+
+### Fleet
+
+- Discovery works from a daemon on a Mac with the Tailscale app installed. The client
+  is now looked for on `$PATH` before the app bundle, and a client that answers with a
+  sentence instead of a status document is skipped for the next one; before this, every
+  runtime on such a Mac listed no devices and named this machine "this device".
+- A Linux machine added to the fleet gets a working startup service. The generated
+  systemd unit quoted `WorkingDirectory=`, which systemd 257 refuses; the unit is now
+  written the way systemd reads it, the error shown is the real one rather than the
+  "Created symlink" line before it, and `install` enables lingering for the account
+  so the service starts at boot and survives logout without an administrator.
+- The default SSH identity falls back to a password prompt when the machine asks for
+  one, so `ouro fleet add` without `--ask-password` works against a machine that only
+  takes passwords, and the web and terminal forms need no authentication picker.
+- `ouro fleet leave --machine` is reachable through the deployment worker and the
+  gateway (`fleet.deployment.prepare` with `kind: "leave"`), which is what the Devices
+  pages remove a member with.
+- A fleet created under a symlinked data directory (`/tmp` on macOS is one) starts under
+  its service: the generated TLS policy names the directory's resolved path, and the
+  strict policy check resolves the paths a policy file names before comparing.
+- The web port stays the same across a clean stop and start, so the browser tab that
+  asked for a local setup reconnects after the restart it causes. Every device row from
+  `ouro fleet devices --json` carries `suggested_machine`, a valid fleet name derived
+  from the display name.
 
 ## [0.1.9] - 2026-09-18
 
