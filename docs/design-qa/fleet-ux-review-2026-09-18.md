@@ -56,8 +56,23 @@ use to put Ouroboros on a second machine:
    device so five devices do not fit a 45-row terminal; a working home network of four
    devices is split into two sections with a search box and three filter buttons.
 
+10. **A Linux target never gets its service.** The generated user unit quotes
+    `WorkingDirectory=`; systemd 257 (Debian 13) reads the quotes as part of the path,
+    refuses the unit as "path is not absolute", and the operator is shown the
+    `Created symlink …` line that precedes the real error on stderr. The deployment to
+    the Pi reached this step with everything before it green — binary installed,
+    credentials issued, roster updated — and stopped there; started by hand, the Pi's
+    runtime then connected as a compatible member. Fixed in `aa271a78`, but the
+    `ouro` a deploy installs is the *released* one, so Linux targets need a release
+    carrying that fix. *(live, 0.1.9)*
+11. **Operations started from the web have no owner on a runtime without identities,
+    so the TUI asks "Take over this setup?" of the same person**, and a failed
+    operation pins its row to **Retry** with no way to discard it from the TUI (the
+    web has *Cancel setup*; the TUI's `c` is not offered on a failed state). *(live)*
+
 The rest of this document is the evidence (§2–§4) and the target design (§5), which
-is what the `fleet-ux` branch implements.
+is what the `fleet-ux` branch implements. Fixed on that branch before the rewrite:
+finding 1 (`30366b2c`) and finding 10 (`aa271a78`).
 
 ---
 
@@ -72,6 +87,7 @@ is what the `fleet-ux` branch implements.
 | TUI `ctrl+x D` | `--dev` + `OUROBOROS_TAILSCALE` override | inventory correct; local setup ran to completion on disk, view went blank (finding 4) |
 | TUI `ctrl+x D` | packaged 0.1.9 | discovery failed (finding 1) |
 | LaunchAgent written by `--dev` setup | launchd | exit 1, finding 8 |
+| TUI deploy to the Pi (password) | packaged 0.1.9 → Pi | install, issue, roster ok; `service` refused (finding 10); Pi runtime started by hand connected and compatible |
 
 The `OUROBOROS_TAILSCALE=/opt/homebrew/bin/tailscale` override is the one thing that
 made discovery work under a runtime, which is what isolates finding 1 to the lookup
