@@ -288,6 +288,8 @@ surfaces now draw. In order:
 | `aee223fa` | the worker journals the states in which it waits, so a refreshed row reads "waiting for you" | — |
 | `448f022f`, `b9cf764c` | a closed tab's challenge binding is released, and the connection's too, so the surviving tab answers every later prompt; a second identity is still refused | 12 |
 | `e75553c3`, `c364cc16` | a member's details stay reachable after its setup finishes; a drawer opened from an operation is named after its target | — |
+| `ca63c210`, `676ff137` | the adversarial review's findings: the policy check respells only a generated file name under a spelling of the fleet directory itself (a symlink elsewhere pointing into it was accepted); known Tailscale locations ahead of `$PATH` with a fall-through that also passes a failing client; a colliding suggested name is not suggested; a leave matches the roster case-insensitively; `last_error` sanitised on the web; ANSI stripped and more secret forms redacted in the worker-log tail; the session-release guard pinned by a test | — |
+| `91e1d8a0`, `b287fbe3` | a device row fits one line on a 140-column terminal; `fleet.devices` carries `fleet_name` | 9 |
 
 Proven live on 2026-09-18 against the Raspberry Pi, from the packaged `fleet-ux` build
 on a fresh data directory:
