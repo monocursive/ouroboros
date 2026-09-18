@@ -1168,20 +1168,25 @@ impl Inventory {
             })
             .count();
 
+        // A fleet's name already reads as one ("studio's fleet"), so it is printed as it
+        // is; "Fleet of studio's fleet" was what the first draft said. Only a fleet with
+        // no name is described by the machine that holds it.
         let name = self
             .fleet_name
             .clone()
-            .or_else(|| {
-                self.devices
+            .map(|name| scrub(&name, 40))
+            .unwrap_or_else(|| {
+                let machine = self
+                    .devices
                     .iter()
                     .find(|row| self.is_self(row))
                     .and_then(|row| row.machine.clone())
-            })
-            .unwrap_or_else(|| "this machine".into());
+                    .unwrap_or_else(|| "this machine".into());
+                format!("Fleet of {}", scrub(&machine, NAME_COLUMNS))
+            });
 
         format!(
-            "Fleet of {} \u{b7} {connected} of {total} machine{} connected",
-            scrub(&name, NAME_COLUMNS),
+            "{name} \u{b7} {connected} of {total} machine{} connected",
             if total == 1 { "" } else { "s" }
         )
     }
@@ -4084,8 +4089,42 @@ fn column(value: &str, columns: usize) -> String {
     format!("{:<width$}", scrub(value, columns), width = columns + 2)
 }
 
+/// The columns a full-width row needs: marker, name, OS, address, presence, state and
+/// the widest action label. Below this the row is drawn on two lines on purpose, because
+/// a Paragraph wrapping one long line puts "seen 3 days" on one row and "ago" on the
+/// next, in the wrong column.
+const FULL_ROW_COLUMNS: usize = 2
+    + NAME_COLUMNS
+    + 4
+    + OS_COLUMNS
+    + 2
+    + ADDRESS_COLUMNS
+    + 2
+    + PRESENCE_COLUMNS
+    + 2
+    + STATE_COLUMNS
+    + 2
+    + 14;
+
+/// The columns the Devices overlay has for a line: 92 % of the frame inside a border,
+/// which is how `view::devices` sizes it. Zero before the first frame reads as wide, so a
+/// test that never drew a frame sees the one-line row.
+fn overlay_columns(app: &App) -> usize {
+    match app.terminal_width {
+        0 => usize::MAX,
+        width => (usize::from(width) * 92 / 100).saturating_sub(2),
+    }
+}
+
+/// Whether the list has to fold each row onto two lines to fit.
+pub fn narrow_rows(app: &App) -> bool {
+    overlay_columns(app) < FULL_ROW_COLUMNS
+}
+
 /// One device, one line: name, OS, address, presence, Ouroboros, and the one thing you
-/// can do about it.
+/// can do about it. On a narrow terminal, two lines: the name, address and presence on
+/// the first (which carries the cursor marker), the Ouroboros word and the action on the
+/// second, indented under the name.
 fn row_line(
     app: &App,
     inventory: &Inventory,
@@ -4097,52 +4136,76 @@ fn row_line(
     let marker = if selected { "> " } else { "  " };
     let name = access::numbered(index, &inventory.row_label(row));
     let primary = inventory.primary(row);
+    let narrow = narrow_rows(app);
+
+    let name_span = Span::styled(
+        // Four spare columns rather than two: screen-reader mode puts "10. " in front
+        // of the name, and a number that pushed the OS column along would undo the
+        // boundary the narrow name column exists to draw.
+        format!("{marker}{name:<width$}", width = NAME_COLUMNS + 4),
+        if selected {
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        },
+    );
+    let os_span = Span::styled(
+        column(row.os.as_deref().unwrap_or("?"), OS_COLUMNS),
+        Style::default().fg(theme::muted()),
+    );
+    let address_span = Span::styled(
+        column(
+            row.address.as_deref().unwrap_or("no address"),
+            ADDRESS_COLUMNS,
+        ),
+        Style::default(),
+    );
+    let presence_span = Span::styled(
+        column(&row.presence_short(), PRESENCE_COLUMNS),
+        Style::default().fg(if row.online == Some(true) {
+            theme::good()
+        } else {
+            theme::muted()
+        }),
+    );
+    let state_span = Span::styled(
+        column(&inventory.ouroboros_word(row), STATE_COLUMNS),
+        Style::default(),
+    );
+    let action_span = Span::styled(
+        primary.label(inventory.host.self_label()),
+        Style::default().fg(if primary == Primary::None {
+            theme::muted()
+        } else {
+            theme::action_colour()
+        }),
+    );
+
+    if narrow {
+        // The last cell of a line is not padded: the pane wraps a trailing run of
+        // spaces onto a blank row of its own, which read as a third line per device.
+        let presence_end = Span::styled(
+            scrub(&row.presence_short(), PRESENCE_COLUMNS),
+            presence_span.style,
+        );
+        lines.push(Line::from(vec![name_span, address_span, presence_end]));
+        lines.push(Line::from(vec![
+            Span::raw("      "),
+            state_span,
+            action_span,
+        ]));
+        return;
+    }
 
     lines.push(Line::from(vec![
-        Span::styled(
-            // Four spare columns rather than two: screen-reader mode puts "10. " in front
-            // of the name, and a number that pushed the OS column along would undo the
-            // boundary the narrow name column exists to draw.
-            format!("{marker}{name:<width$}", width = NAME_COLUMNS + 4),
-            if selected {
-                Style::default()
-                    .fg(theme::accent())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            },
-        ),
-        Span::styled(
-            column(row.os.as_deref().unwrap_or("?"), OS_COLUMNS),
-            Style::default().fg(theme::muted()),
-        ),
-        Span::styled(
-            column(
-                row.address.as_deref().unwrap_or("no address"),
-                ADDRESS_COLUMNS,
-            ),
-            Style::default(),
-        ),
-        Span::styled(
-            column(&row.presence_short(), PRESENCE_COLUMNS),
-            Style::default().fg(if row.online == Some(true) {
-                theme::good()
-            } else {
-                theme::muted()
-            }),
-        ),
-        Span::styled(
-            column(&inventory.ouroboros_word(row), STATE_COLUMNS),
-            Style::default(),
-        ),
-        Span::styled(
-            primary.label(inventory.host.self_label()),
-            Style::default().fg(if primary == Primary::None {
-                theme::muted()
-            } else {
-                theme::action_colour()
-            }),
-        ),
+        name_span,
+        os_span,
+        address_span,
+        presence_span,
+        state_span,
+        action_span,
     ]));
 }
 
@@ -5100,12 +5163,21 @@ pub fn devices_hint_line(app: &App) -> String {
 
     // The keys on this row are the keys that work. `/` and `f` exist only past eight
     // rows, so on a list of four they are not offered.
-    let mut hint =
+    // The same keys in fewer words on a narrow terminal, where the long form is cut off
+    // mid-word by the footer row and the last keys are the ones that vanish.
+    let mut hint = if narrow_rows(app) {
+        "\u{2191}\u{2193} Enter act \u{b7} a add \u{b7} x remove \u{b7} r refresh".to_string()
+    } else {
         "\u{2191}\u{2193} select \u{b7} Enter act \u{b7} a add by address \u{b7} x remove (members) \u{b7} r refresh"
-            .to_string();
+            .to_string()
+    };
 
     if narrowing {
-        hint.push_str(" \u{b7} / search \u{b7} f filter");
+        hint.push_str(if narrow_rows(app) {
+            " \u{b7} / f"
+        } else {
+            " \u{b7} / search \u{b7} f filter"
+        });
     }
 
     hint.push_str(" \u{b7} Esc close");

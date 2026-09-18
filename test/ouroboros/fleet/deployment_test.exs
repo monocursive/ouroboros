@@ -147,14 +147,15 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert inventory["operations"] == []
 
       # `prepare` requires a machine name and will not invent one, so the name a surface
-      # offers has to survive this trip verbatim — including the `null` on a row nothing can
-      # be deployed to, which is a different fact from a missing key.
+      # offers has to survive this trip verbatim. Every row carries one — the Rust side
+      # slugs the display name whatever the state — and a row nothing can be deployed to
+      # simply has nothing to do with it.
       assert Enum.map(inventory["devices"], & &1["suggested_machine"]) == [
                "operator-laptop",
                "build-linux",
                "old-pi",
-               nil,
-               nil
+               "pocket-phone",
+               "ipv6-only-box"
              ]
 
       for device <- inventory["devices"],

@@ -532,6 +532,50 @@ fn opening_reads_the_inventory_and_closing_cancels_nothing() {
 // the inventory
 // ---------------------------------------------------------------------------------------
 
+/// On a narrow terminal each device folds onto two deliberate lines — name, address and
+/// presence, then the Ouroboros word and the action under the name — rather than one
+/// long line the pane wraps mid-word, and the hint says the same keys in fewer words.
+#[test]
+fn a_narrow_terminal_folds_each_device_onto_two_lines() {
+    let _mode = normal();
+    let mut app = with_inventory(populated());
+    // The real frame loop records the width before every draw; the harness does not.
+    app.terminal_width = 80;
+    let screen = render(&mut app, 80, 40);
+    let text = flowed(&screen);
+
+    let name_row = screen
+        .rows
+        .iter()
+        .position(|row| row.contains("build-linux"))
+        .expect("a row for build-linux");
+    let first = &screen.rows[name_row];
+    let second = &screen.rows[name_row + 1];
+    assert!(
+        first.contains("100.64.12.44"),
+        "the address stays on the name line: {first}"
+    );
+    assert!(
+        first.contains("\u{25cf} online"),
+        "the presence stays on the name line: {first}"
+    );
+    assert!(
+        !first.contains("Add to fleet") && !first.contains("not set up"),
+        "the state and the action fold onto the second line: {first}"
+    );
+    assert!(
+        second.contains("not set up") && second.contains("Add to fleet"),
+        "the second line carries the Ouroboros word and the action: {second}"
+    );
+    // A fold is not a wrap: "seen 3 days" and "ago" stay together.
+    assert!(!text.contains("seen 3 days\nago"), "{text}");
+    // The footer draws the hint's separators as commas.
+    assert!(
+        text.contains("Enter act, a add, x remove, r refresh"),
+        "the short hint: {text}"
+    );
+}
+
 /// One list, one line per device, the status line above it and the quiet line under it.
 #[test]
 fn the_inventory_draws_one_line_per_device_under_a_status_line() {
@@ -542,7 +586,7 @@ fn the_inventory_draws_one_line_per_device_under_a_status_line() {
 
     // The fleet, and how much of it is here.
     assert!(
-        text.contains("Fleet of studio \u{b7} 1 of 1 machine connected"),
+        text.contains("studio \u{b7} 1 of 1 machine connected"),
         "the status line is missing:\n{text}"
     );
     // The one quiet line, not a boxed paragraph.
@@ -3249,10 +3293,7 @@ fn a_blocked_runtime_opens_no_connect_form_at_all() {
         !text.contains("SSH user"),
         "a form opened on a runtime that cannot deploy:\n{text}"
     );
-    assert!(
-        text.contains("Fleet of studio"),
-        "the list was left:\n{text}"
-    );
+    assert!(text.contains("studio \u{b7}"), "the list was left:\n{text}");
     assert!(drained(&mut app).is_empty());
 
     // And at read scope, the same.

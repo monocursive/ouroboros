@@ -484,7 +484,8 @@ defmodule Ouroboros.Web.Live.Devices do
     expected = get_in(fleet, [:summary, :expected])
 
     [
-      if(name, do: "Fleet of #{name}", else: "This fleet is not named"),
+      # A fleet's name already reads as one ("studio's fleet"), so it stands alone.
+      name || "This fleet is not named",
       machines_line(connected, expected)
     ]
     |> Enum.reject(&is_nil/1)
