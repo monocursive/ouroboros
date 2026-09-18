@@ -37,6 +37,8 @@ requirements and upgrade instructions are in the
 
 ### Fixed
 
+- Linux shutdown confirms a stopped runtime when the process exits during the
+  final identity check, instead of reporting a spurious "No such process" error.
 - ChatGPT/Codex sessions resolve their model context window so the context meter
   and automatic compaction work. Compaction uses the lower of the model threshold
   and the configured token cap, which defaults to 200,000 tokens.

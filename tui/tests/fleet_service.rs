@@ -160,7 +160,23 @@ impl Fakes {
 }
 
 fn write_script(path: &Path, text: &str) {
-    fs::write(path, text).expect("a written fake");
+    // A sibling test can fork while fs::write holds the executable open. Even after
+    // our write closes, that child holds the descriptor until exec, and Linux can
+    // refuse the fake with ETXTBSY. A separate writer never shares its writable file
+    // descriptor with sibling tests; waiting for it closes the file before use.
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\"", "write-fake"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("a fake-script writer");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's stdin")
+        .write_all(text.as_bytes())
+        .expect("the fake script is delivered");
+    assert!(writer.wait().expect("the writer exits").success());
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("an executable fake");
 }
 
