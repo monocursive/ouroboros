@@ -198,11 +198,22 @@ defmodule Ouroboros.Web.Call do
     {:error, Methods.code(:upstream_error), "#{method} answered something this build cannot read"}
   end
 
+  # A crash on a method whose parameters may never be printed is named by its shape rather
+  # than by its reason: a `GenServer` exit is `{exception, stacktrace}`, an Erlang stacktrace
+  # carries the failing call's arguments, and on that one verb those arguments are an SSH
+  # password. `AuditLine` owns the list and the naming, so the log line and the answer's
+  # `data` field say the same thing on both surfaces.
   defp crashed(method, reason) do
-    Logger.error("web #{method} failed: #{inspect(reason, limit: 10)}")
+    Logger.error("web #{method} failed: #{said(method, reason)}")
 
     {:error, Methods.code(:upstream_error),
      "#{method} failed inside the runtime; the daemon's log has the reason"}
+  end
+
+  defp said(method, reason) do
+    if AuditLine.redacted?(method),
+      do: AuditLine.shape(reason),
+      else: inspect(reason, limit: 10)
   end
 
   # Matches on the *method's* scope, not the endpoint's: the line exists to record that

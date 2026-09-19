@@ -35,9 +35,14 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   # answered by whoever is an administrator on this runtime (§10), so there is no identity to
   # record on an operation; the roster is a dial hint each machine writes for itself (§1); and
   # `plan` is the reviewed lines rather than a digest of a document (§6).
+  # `service` is here because a resume has to know it. A runtime that restarted has forgotten
+  # the command line it built, and rebuilding one that silently left `--no-service` out
+  # installs a startup service the operator declined — on their machine, without saying so.
+  # The identity travels the same way, inside `target`, and for the same reason: a rebuilt
+  # command line without `--key` authenticates as somebody else.
   @fields ~w(
     schema operation kind state created_at updated_at target release paths
-    plan steps residue last_error
+    plan steps residue last_error service
   )
 
   # Anywhere, at any depth. These are the names the one list in the spec's "Secret handling
@@ -416,13 +421,31 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   able to break the encoder that carries it to a browser.
   """
   @spec scrub_line(binary(), pos_integer()) :: String.t()
-  def scrub_line(line, max) when is_binary(line) and is_integer(max) and max > 0 do
+  def scrub_line(line, max) when is_binary(line) and is_integer(max) and max > 0,
+    do: clean(line, max)
+
+  # The one string leaf, shared by `scrub_line/2` and by `scrub/2`.
+  #
+  # It used to be `scrub_line/2`'s alone, and the difference was the finding: a `log` line
+  # had its escapes stripped and its credential shapes refused, while `last_error.detail`,
+  # `steps[].detail`, `plan[]` and every other *journal* string got a `String.slice/3` and
+  # nothing else — so `"\e[2J\e[1;31mSPOOFED\e[0m"` in a step's detail reached an operator's
+  # terminal as the sentence it chose, in the colour it chose, and `sshpass -p hunter2 …`
+  # in a `last_error` reached the page whole. Nothing writes a journal under a contract
+  # either: every string in one came from a program quoting a remote machine.
+  defp clean(line, max) do
     line
     |> textual()
+    # Bounded *before* anything scans it, and that is not only an optimisation. The four
+    # free-text credential patterns each wrap an alternation in a greedy character class, and
+    # a hundred thousand characters with no match in them is quadratic backtracking: a
+    # journal naming a machine that long took the regex engine past its own limit and the
+    # read never returned. Nothing past `max` is ever shown, so nothing past `max` is read —
+    # and a credential beyond the cut is a credential this answer does not contain either.
+    |> String.slice(0, max)
     |> strip_controls()
     |> String.trim()
     |> redact()
-    |> scrub_value()
     |> String.slice(0, max)
   end
 
@@ -466,9 +489,9 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   defp scrub(value, depth) when is_list(value),
     do: value |> Enum.take(@max_list) |> Enum.map(&scrub(&1, depth + 1))
 
-  defp scrub(value, _depth) when is_binary(value), do: String.slice(value, 0, @max_string)
+  defp scrub(value, _depth) when is_binary(value), do: clean(value, @max_string)
   defp scrub(value, _depth) when is_number(value) or is_boolean(value) or is_nil(value), do: value
-  defp scrub(value, _depth), do: inspect(value, limit: 10) |> String.slice(0, @max_string)
+  defp scrub(value, _depth), do: value |> inspect(limit: 10) |> clean(@max_string)
 
   defp forbidden?(key) when is_binary(key) do
     downcased = String.downcase(key)

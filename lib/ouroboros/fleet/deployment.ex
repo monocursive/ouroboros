@@ -123,7 +123,10 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   defp run_devices(timeout, data_dir) do
-    case Launcher.run(["fleet", "devices", "--json"], timeout) do
+    # The data directory this runtime serves, not the one the daemon happened to inherit: a
+    # bounded read of `ouro` is asked about *this* machine's fleet, and a `--dev` runtime or
+    # a relocated durable directory would otherwise have it answer about a different one.
+    case Launcher.run(["fleet", "devices", "--json"], timeout, data_dir: data_dir) do
       {:ok, output} ->
         case JSON.decode(output) do
           {:ok, document} when is_map(document) -> {:ok, inventory(document, data_dir)}
@@ -380,8 +383,17 @@ defmodule Ouroboros.Fleet.Deployment do
   #
   # `null` throughout where this runtime cannot establish a fact, which includes every row
   # that is not a member.
+  # The three names §9 and §12 take out of this answer, dropped from a *row* as well as from
+  # the top of it. A device row is `ouro fleet devices --json` verbatim, so a binary that
+  # still prints one of them — an older `ouro` beside a newer runtime, which is the whole
+  # case the version fence exists for — would put it back inside the row where the removal
+  # was only ever applied outside it.
+  @retired_row_keys ~w(issuer owner attached)
+
   defp merge_cluster(devices, facts) do
     Enum.map(devices, fn device ->
+      device = Map.drop(device, @retired_row_keys)
+
       case Map.fetch(facts, device["machine"]) do
         {:ok, live} ->
           device |> Map.merge(live) |> promote_state()
@@ -539,6 +551,7 @@ defmodule Ouroboros.Fleet.Deployment do
              "plan" => document["plan"],
              "summary" => nil,
              "last_error" => document["last_error"] || recorded_exit(operation, document),
+             "residue" => List.wrap(document["residue"]),
              "running" => false,
              "source" => "journal"
            }}
@@ -627,8 +640,10 @@ defmodule Ouroboros.Fleet.Deployment do
     operation = Base.encode16(:crypto.strong_rand_bytes(@operation_bytes), case: :lower)
 
     with :ok <- unblocked(request["kind"]),
-         {:ok, argv} <- argv(request, operation) do
-      GenServer.call(__MODULE__, {:start, operation, request["kind"], argv}, @call_timeout)
+         {:ok, argv} <- argv(request, operation),
+         {:ok, started} <-
+           GenServer.call(__MODULE__, {:start, operation, request["kind"], argv}, @call_timeout) do
+      {:ok, Map.delete(started, "pid")}
     end
   end
 
@@ -706,9 +721,79 @@ defmodule Ouroboros.Fleet.Deployment do
   @spec resume(String.t()) :: {:ok, map()} | {:error, term()}
   def resume(operation) when is_binary(operation) do
     with :ok <- Journal.validate_operation(operation),
-         :ok <- unblocked(operation_kind(operation)) do
-      GenServer.call(__MODULE__, {:resume, operation}, @call_timeout)
+         :ok <- unblocked(operation_kind(operation)),
+         {:ok, %{"pid" => pid}} <-
+           GenServer.call(__MODULE__, {:resume, operation}, @call_timeout) do
+      settle(operation, pid)
     end
+  end
+
+  # How long a resume waits to find out whether the program it just started is the only one.
+  # §8's program holds a lock on the journal it writes, so a second run against an operation
+  # the first is still finishing exits promptly — the wait is a ceiling on "promptly", not a
+  # poll of a healthy program, which announces a step, a log line or a challenge within a
+  # few milliseconds and is answered then.
+  @resume_settle 2_000
+  @resume_interval 25
+
+  # Runs in the caller's process, not the broker's: two seconds inside a named singleton is
+  # two seconds of every other operation's inventory read and every other page's status.
+  defp settle(operation, pid) do
+    case await_probe(pid, operation, System.monotonic_time(:millisecond) + @resume_settle) do
+      {:refused, "operation_in_progress"} ->
+        # There is a program already running this operation. This one refused and exited;
+        # closing its port is what lets the worker go, and the operator is told that the
+        # operation is not theirs to restart rather than that a second one has begun.
+        _ = retire(pid)
+        {:error, :operation_in_progress}
+
+      {:refused, reason} ->
+        _ = retire(pid)
+        {:error, {:worker_refused, reason}}
+
+      _running ->
+        {:ok, %{"operation" => operation}}
+    end
+  end
+
+  defp await_probe(pid, operation, deadline) do
+    case Worker.probe(pid) do
+      {:ok, :pending} ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(@resume_interval)
+          await_probe(pid, operation, deadline)
+        else
+          :pending
+        end
+
+      {:ok, settled} ->
+        settled
+
+      # The worker is already gone, which is the ordinary case rather than a corner: a
+      # program that refuses writes its `done` and exits, the port's exit status stops the
+      # worker, and the frame that said why may be a millisecond behind the process that
+      # carried it. The journal is the durable copy of the same sentence, so the answer is
+      # read from there instead of guessed at.
+      {:error, _gone} ->
+        journal_refusal(operation)
+    end
+  end
+
+  defp journal_refusal(operation) do
+    case journal_status(operation) do
+      {:ok, %{"state" => "failed", "last_error" => %{"reason" => reason}}}
+      when is_binary(reason) ->
+        {:refused, reason}
+
+      _no_refusal ->
+        :pending
+    end
+  end
+
+  defp retire(pid) do
+    DynamicSupervisor.terminate_child(@supervisor, pid)
+  catch
+    :exit, _reason -> :ok
   end
 
   @doc """
@@ -789,7 +874,7 @@ defmodule Ouroboros.Fleet.Deployment do
   defp add_argv(request, operation) do
     with {:ok, machine} <- machine_name(request["machine"]),
          {:ok, address} <- word(request["address"], "address"),
-         {:ok, ssh_user} <- word(request["ssh_user"], "ssh_user"),
+         {:ok, ssh_user} <- account(request["ssh_user"]),
          {:ok, port} <- port(request["port"]),
          {:ok, identity} <- identity(request["identity"]),
          {:ok, install_path} <- optional_word(request["install_path"], "install_path"),
@@ -805,7 +890,7 @@ defmodule Ouroboros.Fleet.Deployment do
 
   defp leave_argv(request, operation) do
     with {:ok, machine} <- machine_name(request["machine"]),
-         {:ok, ssh_user} <- word(request["ssh_user"], "ssh_user"),
+         {:ok, ssh_user} <- account(request["ssh_user"]),
          {:ok, port} <- port(request["port"]),
          {:ok, identity} <- identity(request["identity"]) do
       {:ok,
@@ -832,6 +917,12 @@ defmodule Ouroboros.Fleet.Deployment do
 
   defp machine_name(_absent), do: {:error, {:invalid_request, "machine is required"}}
 
+  # Every space character Unicode has, not the four that were easy to name. A tab inside an
+  # address reaches a shell that word-splits on `$IFS` as two words; a vertical tab, a form
+  # feed and U+00A0 are each a space to something between here and the target. `\s` in
+  # Elixir's regex is ASCII-only, so this is the unicode property.
+  @whitespace ~r/[\p{Z}\p{C}]/u
+
   defp word(value, field) when is_binary(value) do
     trimmed = String.trim(value)
 
@@ -842,7 +933,7 @@ defmodule Ouroboros.Fleet.Deployment do
       String.starts_with?(trimmed, "-") ->
         {:error, {:invalid_request, "#{field} is not a flag"}}
 
-      String.contains?(trimmed, ["\n", "\r", "\0", " "]) ->
+      Regex.match?(@whitespace, trimmed) ->
         {:error, {:invalid_request, "#{field} must be one word"}}
 
       true ->
@@ -851,6 +942,17 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   defp word(_absent, field), do: {:error, {:invalid_request, "#{field} is required"}}
+
+  # The account on the target, which becomes the left half of `USER@ADDRESS`. An `@` inside
+  # it makes a destination with two of them, and which host is contacted is then decided by
+  # whichever end the CLI splits on — not by the address this runtime validated.
+  defp account(value) do
+    with {:ok, user} <- word(value, "ssh_user") do
+      if String.contains?(user, "@"),
+        do: {:error, {:invalid_request, "ssh_user is an account, not a destination"}},
+        else: {:ok, user}
+    end
+  end
 
   defp optional_word(nil, _field), do: {:ok, nil}
   defp optional_word("", _field), do: {:ok, nil}
@@ -945,8 +1047,19 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
-  def handle_call({:start, operation, kind, argv}, _from, state),
-    do: open(state, operation, kind, argv)
+  def handle_call({:start, operation, kind, argv}, _from, state) do
+    # One operation per target at a time. Two `ouro fleet add deploy@100.64.0.2 --machine pi`
+    # runs are two programs installing onto one machine, two journals describing it, and two
+    # sets of challenges an operator has to tell apart — and nothing downstream refuses it,
+    # because each has an operation id of its own. The pair that names the work is
+    # `{kind, machine}`, which is what the command line is built from.
+    case Enum.find(state.operations, fn {_id, entry} ->
+           entry.kind == kind and entry.machine == machine_of(argv)
+         end) do
+      {running, _entry} -> {:reply, {:error, {:target_in_progress, running}}, state}
+      nil -> open(state, operation, kind, argv)
+    end
+  end
 
   def handle_call({:resume, operation}, _from, state) do
     if Map.has_key?(state.operations, operation) do
@@ -980,11 +1093,14 @@ defmodule Ouroboros.Fleet.Deployment do
         {:noreply, state}
 
       {operation, _entry} ->
-        Logger.info("fleet deployment operation #{operation} lost its worker: #{inspect(reason)}")
+        Logger.info(
+          "fleet deployment operation #{operation} lost its worker: #{exit_shape(reason)}"
+        )
 
         {:noreply,
          state
          |> Map.put(:operations, Map.delete(state.operations, operation))
+         |> Map.put(:argv, Map.delete(state.argv, operation))
          |> remember_exit(operation, reason)
          |> retain()}
     end
@@ -1002,6 +1118,34 @@ defmodule Ouroboros.Fleet.Deployment do
         %{state | devices: devices}
     end
   end
+
+  # What an exit reason may be *said* to be, which is never the reason itself.
+  #
+  # A `GenServer` that crashed exits `{exception, stacktrace}`, and an Erlang stacktrace
+  # carries the failing call's arguments — for this process, `{:respond, id, %{"secret" =>
+  # …}}`. `inspect/1` on that term put the operator's password in the daemon's log. The
+  # shapes below are the ones this runtime produces on purpose, matched the way
+  # `remember_exit/3` matches them; everything else is named by its head and nothing more.
+  defp exit_shape({:shutdown, {:exited, status}}) when is_integer(status),
+    do: "the program exited with status #{status}"
+
+  defp exit_shape({:shutdown, {:worker_spawn_failed, _detail}}),
+    do: "the program could not be started"
+
+  defp exit_shape({:shutdown, :port_closed}), do: "the port closed"
+  defp exit_shape(reason) when is_atom(reason), do: inspect(reason)
+
+  defp exit_shape({reason, stack}) when is_list(stack),
+    do: "#{exception_name(reason)}, and a stacktrace this build does not print"
+
+  defp exit_shape(reason) when is_tuple(reason) and tuple_size(reason) > 0,
+    do: "#{inspect(elem(reason, 0))}/#{tuple_size(reason)}"
+
+  defp exit_shape(_other), do: "an exit reason this build does not print"
+
+  defp exception_name(%{__struct__: module}), do: inspect(module)
+  defp exception_name(reason) when is_atom(reason), do: inspect(reason)
+  defp exception_name(_other), do: "an exception this build does not name"
 
   # Only the program's own exit status, and only from the worker's own shutdown reason. A raw
   # exit reason is never kept: it can carry call arguments, and this map is read by `status`.
@@ -1022,14 +1166,30 @@ defmodule Ouroboros.Fleet.Deployment do
 
   # ---------------------------------------------------------------------------
 
+  # The machine a command line is aimed at, read back out of the argv rather than carried
+  # beside it: the argv is the request (§6), so it is the one thing that cannot disagree
+  # with what the program was actually told.
+  defp machine_of(argv) do
+    case Enum.drop_while(argv, &(&1 != "--machine")) do
+      ["--machine", machine | _rest] -> machine
+      _none -> nil
+    end
+  end
+
   defp open(state, operation, kind, argv) do
     with {:ok, dir} <- resolve_data_dir(state),
          {:ok, ouro} <- resolve_executable(state),
          :ok <- private_deploy_dir(Journal.deploy_dir(dir)),
          {:ok, pid} <- start_worker(state, operation, kind, argv, dir, ouro) do
-      entry = %{pid: pid, ref: Process.monitor(pid), kind: kind, argv: argv}
+      entry = %{
+        pid: pid,
+        ref: Process.monitor(pid),
+        kind: kind,
+        machine: machine_of(argv),
+        argv: argv
+      }
 
-      {:reply, {:ok, %{"operation" => operation}},
+      {:reply, {:ok, %{"operation" => operation, "pid" => pid}},
        state
        |> put_in([:operations, operation], entry)
        |> put_in([:argv, operation], argv)
@@ -1071,9 +1231,14 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   # This runtime's own memory of the command line first, because it is the one that ran.
-  # Failing that the journal, which carries everything the argv needs except the two things
-  # a resume does not decide again: the identity, which reaches a password prompt on its own,
-  # and the service, whose step is either already recorded `ok` or is the default.
+  # Failing that the journal — and the journal has to carry everything, because the two
+  # fields it used to be missing are not defaults a resume may pick for an operator.
+  #
+  # Without the identity the rebuilt line authenticates as whatever this host's ssh
+  # configuration selects, which is somebody other than the key the operator named. Without
+  # the service it installs a startup service on a machine whose operator declined one. §6's
+  # journal carries `target.identity` and a top-level `service`; an operation whose record
+  # has neither is one this runtime refuses to continue rather than continue differently.
   defp resume_argv(state, operation, document) do
     kind = document["kind"]
 
@@ -1085,19 +1250,50 @@ defmodule Ouroboros.Fleet.Deployment do
         target = document["target"] || %{}
         paths = document["paths"] || %{}
 
-        request = %{
-          "kind" => kind,
-          "machine" => target["machine"],
-          "address" => target["address"],
-          "ssh_user" => target["ssh_user"],
-          "port" => target["port"],
-          "install_path" => paths["install_path"],
-          "data_dir" => paths["data_dir"]
-        }
+        with {:ok, identity} <- recorded_identity(kind, target["identity"]),
+             {:ok, service} <- recorded_service(kind, document["service"]) do
+          request =
+            %{
+              "kind" => kind,
+              "machine" => target["machine"],
+              "address" => target["address"],
+              "ssh_user" => target["ssh_user"],
+              "port" => target["port"],
+              "install_path" => paths["install_path"],
+              "data_dir" => paths["data_dir"],
+              "service" => service
+            }
+            |> put_identity(identity)
 
-        with {:ok, argv} <- argv(request, operation), do: {:ok, kind, argv}
+          with {:ok, argv} <- argv(request, operation), do: {:ok, kind, argv}
+        end
     end
   end
+
+  # A `setup` names no identity and a `leave` installs nothing, so each is asked only for
+  # what its own command line can carry. Everything else must be on the record.
+  defp recorded_identity("setup", _absent), do: {:ok, nil}
+
+  defp recorded_identity(_kind, %{"kind" => kind} = identity) when is_binary(kind),
+    do: {:ok, Map.take(identity, ["kind", "ref"])}
+
+  defp recorded_identity(_kind, _absent),
+    do:
+      {:error,
+       {:operation_request_incomplete,
+        "this operation's journal records no identity, and a resume must not choose one"}}
+
+  defp recorded_service("leave", _absent), do: {:ok, nil}
+  defp recorded_service(_kind, service) when is_boolean(service), do: {:ok, service}
+
+  defp recorded_service(_kind, _absent),
+    do:
+      {:error,
+       {:operation_request_incomplete,
+        "this operation's journal does not record whether a startup service was asked for"}}
+
+  defp put_identity(request, nil), do: request
+  defp put_identity(request, identity), do: Map.put(request, "identity", identity)
 
   defp resumable_state(recorded) when recorded in @terminal, do: {:error, :operation_finished}
   defp resumable_state(nil), do: {:error, :operation_state_unknown}

@@ -6,17 +6,31 @@ defmodule Ouroboros.Gateway.Methods.Safe do
   # a `:timeout` becomes `-32005`, and anything else becomes `-32006` carrying the
   # Wire-encoded reason. None of them become a dead connection.
 
+  alias Ouroboros.Gateway.AuditLine
   alias Ouroboros.Gateway.Wire
 
   defp code(name), do: Ouroboros.Gateway.Methods.code(name)
 
-  def safe(fun) do
+  def safe(fun), do: safe(nil, fun)
+
+  @doc """
+  The same, for a method whose parameters may never be printed.
+
+  A crash's reason is not a sentence: for a `GenServer` it is `{exception, stacktrace}`, and
+  an Erlang stacktrace carries the failing call's arguments. On the one verb that carries an
+  SSH password those arguments *are* the password, so `Wire.to_json/1` on that term would
+  put it in the JSON-RPC `data` field of the answer and in whatever the caller logs — the
+  place the spec's secret-handling list names first. For those methods the answer carries
+  the exception's struct name and its own message and nothing else; every other method keeps
+  the encoded reason, which is what makes an ordinary upstream failure diagnosable.
+  """
+  def safe(method, fun) do
     fun.()
   rescue
-    error -> upstream_error(error)
+    error -> upstream_error(method, error)
   catch
-    :exit, reason -> exit_result(reason)
-    kind, reason -> upstream_error({kind, reason})
+    :exit, reason -> exit_result(method, reason)
+    kind, reason -> upstream_error(method, {kind, reason})
   end
 
   def reply({:ok, value}), do: {:ok, value}
@@ -328,6 +342,16 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     challenge_consumed: {:upstream_error, "that challenge has already been answered"},
     challenge_kind_mismatch: {:upstream_error, "that is not the answer this challenge asks for"},
     already_attached: {:upstream_error, "that operation is already running on this runtime"},
+    operation_in_progress:
+      {:unavailable,
+       "a program is already running that operation on this machine; read its status rather than starting a second one"},
+    target_in_progress:
+      {:unavailable,
+       "an operation is already under way against that machine; finish or cancel it before starting another"},
+    operation_request_incomplete:
+      {:upstream_error,
+       "that operation's journal does not record everything its command line needs, so a resume would run a different one"},
+    worker_refused: {:upstream_error, "the deployment program refused to run that operation"},
     operation_finished: {:upstream_error, "that operation has finished and cannot be resumed"},
     operation_state_unknown:
       {:upstream_error, "that operation's journal does not record a state to resume from"},
@@ -365,6 +389,12 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     {:deploy_blocked, %{"blockers" => blockers}}
   end
 
+  # The operation already working on that machine, named: "finish or cancel it" is advice an
+  # operator can act on only when they are told which one.
+  defp normalize_deployment({:target_in_progress, operation}) when is_binary(operation) do
+    {:target_in_progress, %{"operation" => operation}}
+  end
+
   defp normalize_deployment({:ouro_failed, status, output}) do
     {:ouro_failed, %{"status" => status, "output" => bounded(output)}}
   end
@@ -388,19 +418,30 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   # ---------------------------------------------------------------------------
 
-  def exit_result(reason) do
+  def exit_result(reason), do: exit_result(nil, reason)
+
+  def exit_result(method, reason) do
+    detail = detail(method, reason)
+
     case exit_class(reason) do
       :gone ->
-        {:error, code(:unavailable), "that plane is not running on this node",
-         Wire.to_json(reason)}
+        {:error, code(:unavailable), "that plane is not running on this node", detail}
 
       :timeout ->
-        {:error, code(:upstream_timeout), "the runtime did not answer in time",
-         Wire.to_json(reason)}
+        {:error, code(:upstream_timeout), "the runtime did not answer in time", detail}
 
       :other ->
-        {:error, code(:upstream_error), "the runtime failed the call", Wire.to_json(reason)}
+        {:error, code(:upstream_error), "the runtime failed the call", detail}
     end
+  end
+
+  # The whole reason, or only its shape. `Ouroboros.Gateway.AuditLine` is the one list of
+  # methods whose parameters never leave this runtime, and it decides this too: one list,
+  # read by the audit line, by the browser surface's crash path and by here.
+  defp detail(method, reason) do
+    if AuditLine.redacted?(method),
+      do: %{"reason" => AuditLine.shape(reason)},
+      else: Wire.to_json(reason)
   end
 
   defp exit_class(:noproc), do: :gone
@@ -413,8 +454,10 @@ defmodule Ouroboros.Gateway.Methods.Safe do
   defp exit_class({:timeout, _detail}), do: :timeout
   defp exit_class(_reason), do: :other
 
-  def upstream_error(reason) do
-    {:error, code(:upstream_error), "the runtime failed the call", Wire.to_json(reason)}
+  def upstream_error(reason), do: upstream_error(nil, reason)
+
+  def upstream_error(method, reason) do
+    {:error, code(:upstream_error), "the runtime failed the call", detail(method, reason)}
   end
 
   def unavailable(message), do: {:error, code(:unavailable), message}

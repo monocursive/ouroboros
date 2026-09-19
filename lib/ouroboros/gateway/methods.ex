@@ -106,6 +106,7 @@ defmodule Ouroboros.Gateway.Methods do
   import Ouroboros.Gateway.Methods.Safe,
     only: [
       safe: 1,
+      safe: 2,
       reply: 1,
       invalid_params: 1,
       not_found: 1,
@@ -769,7 +770,11 @@ defmodule Ouroboros.Gateway.Methods do
   # the broker is asked for the worker's pid and the response goes to that pid directly, so
   # a secret never enters the mailbox of the named singleton every deployment shares.
   def handle_fleet_deployment_respond(params) do
-    safe(fn ->
+    # `safe/2`, with the method named: a crash on this path exits `{exception, stacktrace}`
+    # and an Erlang stacktrace carries the failing call's arguments, which here are the
+    # operator's password. Named, the answer's `data` field gets the exception's shape
+    # instead of the term.
+    safe("fleet.deployment.respond", fn ->
       with {:ok, operation} <- fetch_string(params, "operation"),
            {:ok, challenge} <- fetch_string(params, "challenge"),
            {:ok, response} <- deployment_response(params) do

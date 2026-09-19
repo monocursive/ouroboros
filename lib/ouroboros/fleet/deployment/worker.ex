@@ -127,6 +127,9 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
       # The first piece is refused and the rest are swallowed rather than measured: measuring
       # what arrived would mean having already held it.
       oversize?: false,
+      # Whether this program has done anything beyond announcing a state. A refusal's whole
+      # output is a state and a `done`; work starts with a step, a log line or a challenge.
+      progressed?: false,
       subscribers: %{}
     }
 
@@ -206,9 +209,18 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
 
   def handle_call(:cancel, _from, state) do
     case write(state, %{"op" => "cancel"}) do
-      :ok -> {:reply, {:ok, %{"cancelling" => true}}, state}
+      # §9's table answers `{state}`, and the contract text beside it says a cancel reports
+      # residue. Both come back here: the state this process holds, and the residue the
+      # program has durably recorded, because residue is a thing a program writes down
+      # rather than a frame it sends. `%{"cancelling" => true}` was neither, which is why
+      # the page's "What this left behind" panel could not be drawn by any path.
+      :ok -> {:reply, {:ok, %{"state" => state.state, "residue" => residue(state)}}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call(:probe, _from, state) do
+    {:reply, {:ok, probe_of(state)}, state}
   end
 
   def handle_call({:subscribe, pid}, _from, state) do
@@ -220,6 +232,30 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
   end
 
   def handle_call({:unsubscribe, pid}, _from, state), do: {:reply, :ok, forget(state, pid)}
+
+  # The last clause, and it is not a convenience.
+  #
+  # Without it an unmatched call raises `FunctionClauseError`, and an Erlang
+  # `function_clause` stacktrace prints its arguments in full — so the terminate report, the
+  # exit reason, and everything downstream that interpolates that reason all carry the real
+  # argument list, which for this process is `{:respond, id, %{"secret" => …}}`. `:sensitive`
+  # keeps the mailbox out of the crash dump and `format_status/1` redacts the report's
+  # `Last message` and `State`; neither touches a stacktrace.
+  #
+  # So this crashes — a caller must not wait out the ceiling for a call nobody will
+  # answer — on a term of its own making. `shape/1` names the head of the message and how
+  # many elements it had, and nothing else: an atom and an integer, which cannot be a
+  # password however the message was built.
+  def handle_call(message, _from, state) do
+    raise ArgumentError,
+          "the deployment worker for #{state.operation} does not serve #{shape(message)}"
+  end
+
+  defp shape(message) when is_tuple(message) and tuple_size(message) > 0,
+    do: "#{inspect(elem(message, 0))}/#{tuple_size(message)}"
+
+  defp shape(message) when is_atom(message), do: inspect(message)
+  defp shape(_other), do: "a call of a shape this process does not name"
 
   @impl true
   def handle_info({port, {:data, {:eol, line}}}, %{port: port} = state) do
@@ -291,9 +327,9 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
   defp apply_frame(state, frame) do
     case Frame.event(frame) do
       "state" -> state |> put_state(frame["state"]) |> broadcast(frame)
-      "step" -> state |> put_step(frame) |> broadcast(frame)
-      "log" -> state |> put_log(frame["line"]) |> broadcast(frame)
-      "challenge" -> state |> put_challenge(frame) |> broadcast(frame)
+      "step" -> state |> progressed() |> put_step(frame) |> broadcast(frame)
+      "log" -> state |> progressed() |> put_log(frame["line"]) |> broadcast(frame)
+      "challenge" -> state |> progressed() |> put_challenge(frame) |> broadcast(frame)
       "done" -> state |> put_done(frame) |> broadcast(frame)
       # A frame this build does not name is counted and dropped rather than passed on: a
       # subscriber renders what it is given, and an unnamed event is a program this runtime
@@ -301,6 +337,8 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
       nil -> fault(state, :worker_answered_nothing, "an unnamed event")
     end
   end
+
+  defp progressed(state), do: %{state | progressed?: true}
 
   @states ~w(running waiting completed failed cancelled)
 
@@ -356,9 +394,28 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
       | done?: true,
         summary: Journal.scrub_value(frame["summary"]),
         challenge: nil,
-        state: if(frame["state"] in @states, do: frame["state"], else: state.state)
+        state: if(frame["state"] in @states, do: frame["state"], else: state.state),
+        last_error: done_error(state, frame)
     }
   end
+
+  # A `done` that ends the operation badly says why in a stable code beside its sentence.
+  # §8 fixes `state` and `summary` on that frame; a `reason` alongside them is what lets a
+  # refusal be recognised as one rather than read out of an English summary — `resume/1`
+  # turns on exactly that, because a second program against a live operation exits promptly
+  # with `operation_in_progress` and this runtime has to answer the refusal rather than
+  # report a deployment it did not start.
+  defp done_error(state, %{"state" => "failed"} = frame) do
+    case Journal.scrub_value(frame["reason"]) do
+      reason when is_binary(reason) and reason != "" ->
+        %{"reason" => reason, "detail" => Journal.scrub_value(frame["summary"])}
+
+      _unnamed ->
+        state.last_error
+    end
+  end
+
+  defp done_error(state, _frame), do: state.last_error
 
   # A fault is recorded rather than raised: a program writing something this build cannot read
   # is a fact about the operation, and one an operator has to be told without the connection
@@ -448,12 +505,23 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
   # challenge's kind and the outcome, which this process knows without being told. Never the
   # response — a refusal's audit line is written from the *challenge*, not from what was
   # offered to it, so an answer of the wrong shape does not get logged by being wrong.
-  defp audit(state, challenge, outcome \\ :sent) do
+  # The challenge named is the one this operation is *waiting on*, never the string the
+  # caller sent. A challenge id is a token a client chose, and a client that chose
+  # `"trust-1\ngateway operate fleet.deployment.respond params=redacted …"` writes a second
+  # line into the operator's log that reads exactly like a real one. Stripping the newline
+  # is not enough — the rest of the sentence is still the client's — and this runtime
+  # already knows the only id that matters. An answer to anything else is named by its
+  # outcome (`unknown_challenge`, `challenge_consumed`), which is the fact worth recording.
+  defp audit(state, _challenge, outcome \\ :sent) do
     Logger.info(
-      "fleet deployment respond operation=#{state.operation} challenge=#{challenge} " <>
+      "fleet deployment respond operation=#{state.operation} " <>
+        "challenge=#{id_of(state.challenge)} " <>
         "kind=#{kind_of(state.challenge)} outcome=#{outcome}"
     )
   end
+
+  defp id_of(%{"challenge" => id}) when is_binary(id), do: Journal.scrub_line(id, 128)
+  defp id_of(_none), do: "none"
 
   defp kind_of(%{"kind" => kind}), do: kind
   defp kind_of(_none), do: "none"
@@ -497,8 +565,41 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
       "plan" => state.plan,
       "summary" => state.summary,
       "last_error" => state.last_error,
+      "residue" => residue(state),
       "running" => not is_nil(state.port),
       "source" => "worker"
     }
   end
+
+  # What the operation left behind, from the one place that records it. A program writes
+  # residue into its journal rather than sending it as a frame, so a live answer reads the
+  # same file a journal answer does — bounded, sanitized, and `[]` where there is nothing to
+  # say or nothing readable to say it from.
+  defp residue(state) do
+    case Journal.read(state.data_dir, state.operation) do
+      {:ok, %{"residue" => residue}} when is_list(residue) -> residue
+      _none -> []
+    end
+  end
+
+  @doc """
+  What a caller that has just *started* this process needs to know about it, and no more.
+
+  `resume/1` is the caller: §8's program holds a lock on the journal it writes, so a second
+  run against an operation the first is still finishing exits promptly with a `done failed`
+  whose reason is `operation_in_progress`. That is the only way this runtime can see a
+  program it did not start, and it is a refusal to pass on rather than a deployment to
+  report. `:progressed` is the other side of the same question — a program that has sent a
+  step, a log line or a challenge is one that is doing the work.
+  """
+  @spec probe(pid()) :: {:ok, :pending | :progressed | :done | {:refused, String.t()}}
+  def probe(pid), do: call(pid, :probe)
+
+  defp probe_of(%{done?: true, last_error: %{"reason" => reason}})
+       when is_binary(reason),
+       do: {:refused, reason}
+
+  defp probe_of(%{done?: true}), do: :done
+  defp probe_of(%{progressed?: true}), do: :progressed
+  defp probe_of(_pending), do: :pending
 end
