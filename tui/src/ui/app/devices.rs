@@ -1462,6 +1462,21 @@ const COMMAND_LIMIT: usize = 72;
 /// what makes cutting it on the row safe.
 const COMMAND_PANE_COLUMNS: usize = 160;
 
+/// Pads a value out to `columns` *display* columns.
+///
+/// Not `{:<width$}`, which counts `char`s. A name of ten CJK ideographs is ten characters
+/// and twenty columns, so padding it by character count pushed every cell after it eight
+/// columns to the right — the column boundary moving because of what a device called
+/// itself, which is the one thing these cells exist to prevent. [`human`] already bounds
+/// by display width on the way in; this closes the other half.
+fn pad(value: &str, columns: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let width = UnicodeWidthStr::width(value);
+
+    format!("{value}{}", " ".repeat(columns.saturating_sub(width)))
+}
+
 /// One cell of the list, bounded to its width and padded out to it.
 ///
 /// Every column goes through here, including the ones this build composed. The column
@@ -1469,7 +1484,7 @@ const COMMAND_PANE_COLUMNS: usize = 160;
 /// happens to respect: a presence string that overran its cell used to push the Ouroboros
 /// column along, and a name that can move a column is a name that can forge a row.
 fn column(value: &str, columns: usize) -> String {
-    format!("{:<width$}", scrub(value, columns), width = columns + 2)
+    pad(&scrub(value, columns), columns + 2)
 }
 
 /// The columns a full-width row needs: marker, name, OS, address, presence, the Ouroboros
@@ -1539,7 +1554,7 @@ fn row_line(
         // Four spare columns rather than two: screen-reader mode puts "10. " in front
         // of the name, and a number that pushed the OS column along would undo the
         // boundary the narrow name column exists to draw.
-        format!("{marker}{name:<width$}", width = NAME_COLUMNS + 4),
+        format!("{marker}{}", pad(&name, NAME_COLUMNS + 4)),
         if selected {
             Style::default()
                 .fg(theme::accent())
@@ -2808,13 +2823,32 @@ mod tests {
     /// The row's cells end where this build says they end, whatever a device calls itself.
     #[test]
     fn a_column_is_a_fact_about_the_row_not_an_alignment() {
+        use unicode_width::UnicodeWidthStr;
+
         let wide = column(&"x".repeat(200), NAME_COLUMNS);
         assert_eq!(
-            wide.chars().count(),
+            UnicodeWidthStr::width(wide.as_str()),
             NAME_COLUMNS + 2,
             "a long value moved its own column: {wide}"
         );
         assert!(wide.contains('\u{2026}'), "the cut is invisible: {wide}");
+
+        // Every shape a name can take ends at the same column: narrow, wide, combining,
+        // and the emoji sequence a terminal draws as one glyph.
+        for name in [
+            "pi",
+            "\u{5bb6}".repeat(20).as_str(),
+            "e\u{301}\u{302}looong",
+            "emoji-\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            "",
+        ] {
+            let cell = column(name, NAME_COLUMNS);
+            assert_eq!(
+                UnicodeWidthStr::width(cell.as_str()),
+                NAME_COLUMNS + 2,
+                "{name:?} moved the column after it: {cell:?}"
+            );
+        }
     }
 
     /// The row budget is 140 columns, and the pane is where a command is never cut.
