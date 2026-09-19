@@ -78,8 +78,29 @@ defmodule Ouroboros.Test.FleetFramesFake do
   def write_scenario!(dir, lines) when is_list(lines),
     do: write_scenario!(dir, Enum.join(lines, "\n") <> "\n")
 
-  def write_scenario!(dir, body) when is_binary(body),
-    do: File.write!(scenario_path(dir), body)
+  def write_scenario!(dir, body) when is_binary(body) do
+    _ = File.rm_rf(scenario_path(dir))
+    File.write!(scenario_path(dir), body)
+  end
+
+  @doc """
+  Writes a *directory* of scenarios instead of one file, keyed the way the script looks them
+  up: `<kind>-<machine>`, then `<kind>`, then `default`.
+
+  What a fixture with one runtime and four deployments to script needs. `scenarios` is a map
+  of that key to the directive lines.
+  """
+  @spec write_scenarios!(Path.t(), %{optional(String.t()) => [String.t()] | String.t()}) :: :ok
+  def write_scenarios!(dir, scenarios) when is_map(scenarios) do
+    path = scenario_path(dir)
+    _ = File.rm_rf(path)
+    File.mkdir_p!(path)
+
+    Enum.each(scenarios, fn {key, lines} ->
+      body = if is_list(lines), do: Enum.join(lines, "\n") <> "\n", else: lines
+      File.write!(Path.join(path, key), body)
+    end)
+  end
 
   @doc "Replaces the inventory `fleet devices --json` prints."
   @spec write_devices!(Path.t(), map() | String.t()) :: :ok

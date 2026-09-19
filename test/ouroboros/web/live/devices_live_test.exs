@@ -2,29 +2,25 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   @moduledoc """
   `/devices`, driven the way an operator drives it, with no SSH anywhere in it.
 
-  The fakes are the point. `Ouroboros.Test.FleetOuroFake` is a real executable file at a
-  real absolute path, so `fleet.devices` really forks something and really parses what it
-  printed; `Ouroboros.Test.FleetWorkerFake` is a real Unix socket speaking seam S3, so a
-  challenge this page renders is a challenge that crossed a wire, and a secret this page
-  submits is one a test can watch arrive. Neither is a stub standing in for the mechanism:
-  the fake worker **refuses every frame it did not expect** and counts the refusal, so a
-  test that passed because nothing was sent fails instead.
+  The fake is the point. `Ouroboros.Test.FleetFramesFake` is a real executable file at a real
+  absolute path, so `fleet.devices` really runs something and really parses what it printed,
+  and a deployment really opens a port and really reads §8 frames off its stdout. A challenge
+  this page renders crossed a pipe; a secret this page submits is one a test can watch
+  arrive.
 
-  Not async: it moves `config :ouroboros, :data_dir`, `config :ouroboros, :audit` and the
-  `OUROBOROS_PROCESS_ID_HELPER` environment variable, all of which are node-global.
+  Not async: it moves `config :ouroboros, :data_dir`, `config :ouroboros, :audit`, the web
+  config and the `OUROBOROS_*` environment, all of which are node-global.
   """
 
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
 
-  import ExUnit.CaptureLog
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
   alias Ouroboros.Audit.Config, as: AuditConfig
-  alias Ouroboros.Test.FleetOuroFake
-  alias Ouroboros.Test.FleetWorkerFake
+  alias Ouroboros.Test.FleetFramesFake
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Live.Devices
   alias Ouroboros.Web.Live.DevicesLive
@@ -32,13 +28,10 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   @endpoint Ouroboros.Web.Endpoint
   @token String.duplicate("d", 40)
   @cookie "_ouroboros_web"
-  @receive_timeout 5_000
 
-  # The inventory every rendering test reads. One row per branch of the proposal's
-  # observed-state table that this build can reach, including the device that has taken a
-  # roster machine's name.
+  # The inventory every rendering test reads. One row per branch of the observed-state table
+  # this build can reach, including the device that has taken a member's name.
   @devices %{
-    "fleet_protocol_revision" => 5,
     "discovery" => %{
       "code" => "ok",
       "reason" => nil,
@@ -101,19 +94,6 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         "name_conflicts_with_roster" => nil
       },
       %{
-        "name" => "studio",
-        "machine" => nil,
-        "os" => "linux",
-        "address" => "100.64.9.9",
-        "suggested_machine" => "studio",
-        "online" => true,
-        "last_seen" => nil,
-        "path" => "direct",
-        "state" => "discovered_installation_unknown",
-        "action" => "deploy Ouroboros",
-        "name_conflicts_with_roster" => "studio"
-      },
-      %{
         "name" => "toaster",
         "machine" => nil,
         "suggested_machine" => "toaster",
@@ -129,32 +109,10 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     ]
   }
 
-  # Nine rows, which is the first count past the threshold that puts a search box and the
-  # filter on the page (section 5.1).
-  @many put_in(
-          @devices["devices"],
-          @devices["devices"] ++
-            for index <- 1..4 do
-              %{
-                "name" => "filler-#{index}",
-                "machine" => nil,
-                "suggested_machine" => "filler-#{index}",
-                "os" => "linux",
-                "address" => "100.64.30.#{index}",
-                "online" => true,
-                "last_seen" => nil,
-                "path" => "direct",
-                "state" => "discovered_installation_unknown",
-                "action" => "deploy Ouroboros",
-                "name_conflicts_with_roster" => nil
-              }
-            end
-        )
-
   setup do
     root = Path.join(System.tmp_dir!(), "ouro-w3a-#{System.unique_integer([:positive])}")
     Ouroboros.DataDir.ensure_private!(root)
-    fake_dir = Path.join(root, "bin")
+    bin = Path.join(root, "bin")
 
     previous = %{
       data_dir: Application.get_env(:ouroboros, :data_dir),
@@ -166,6 +124,9 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     Application.put_env(:ouroboros, :data_dir, root)
 
     on_exit(fn ->
+      reap_workers()
+      Process.sleep(150)
+      FleetFramesFake.uninstall!()
       restore(:data_dir, previous.data_dir)
       restore(:audit, previous.audit)
       restore(:web, previous.web)
@@ -174,10 +135,10 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         do: System.put_env("OUROBOROS_PROCESS_ID_HELPER", previous.ouro),
         else: System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
 
-      File.rm_rf!(root)
+      _ = File.rm_rf(root)
     end)
 
-    %{root: root, fake_dir: fake_dir}
+    %{root: root, bin: bin}
   end
 
   # The noun the page uses for the machine it is running on, and the button that follows it.
@@ -190,64 +151,38 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
 
+  defp reap_workers do
+    supervisor = Ouroboros.Fleet.Deployment.WorkerSupervisor
+
+    supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.each(fn {_id, pid, _type, _modules} ->
+      if is_pid(pid), do: DynamicSupervisor.terminate_child(supervisor, pid)
+    end)
+  catch
+    :exit, _not_running -> :ok
+  end
+
   # ------------------------------------------------------------------------------------
   # Fixtures
   # ------------------------------------------------------------------------------------
 
-  # The fleet CA private key is what makes this machine an issuer, which is the first thing
-  # `capabilities.deploy` asks about. A file, because that is what the broker `lstat`s.
-  defp issuer!(root) do
-    dir = Path.join(root, "fleet")
-    File.mkdir_p!(dir)
-    File.write!(Path.join(dir, "ca-key.pem"), "not a key, and never read as one\n")
-    File.chmod!(Path.join(dir, "ca-key.pem"), 0o600)
-  end
-
-  # The roster a `leave` is checked against. `fleet.deployment.prepare` refuses a machine
-  # that is not in it before any worker is spawned (`deployment_member/1` in
-  # `Ouroboros.Gateway.Methods`), and `Deployment.roster/1` reads exactly this file.
-  defp roster!(root, members) do
-    dir = Path.join(root, "fleet")
-    File.mkdir_p!(dir)
-    path = Path.join(dir, "profile.json")
-    File.write!(path, JSON.encode!(%{"machine" => "studio", "members" => members}))
-    File.chmod!(path, 0o600)
-    path
-  end
-
   defp ouro!(context, opts \\ []) do
     document = Keyword.get(opts, :devices, @devices)
 
-    path =
-      FleetOuroFake.write!(
-        context.fake_dir,
-        Keyword.merge([devices: JSON.encode!(document) <> "\n"], Keyword.drop(opts, [:devices]))
-      )
-
-    System.put_env("OUROBOROS_PROCESS_ID_HELPER", path)
-    path
+    FleetFramesFake.install!(context.bin, devices: JSON.encode!(document) <> "\n")
+    FleetFramesFake.write_scenario!(context.bin, Keyword.get(opts, :scenario, happy()))
+    :ok
   end
 
-  defp worker!(context) do
-    cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
-    instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-    socket_path = Path.join([context.root, "deploy", "w.sock"])
-
-    worker =
-      start_supervised!(
-        {FleetWorkerFake,
-         [
-           socket_path: socket_path,
-           cap: cap,
-           instance: instance,
-           operation_file: FleetOuroFake.operation_file(context.fake_dir),
-           owner: self()
-         ]},
-        id: {FleetWorkerFake, System.unique_integer([:positive])}
-      )
-
-    ouro!(context, spawn_line: FleetWorkerFake.spawn_line(worker), cap: cap)
-    worker
+  # This machine's own members, which is the closed set a `leave` may name.
+  defp members!(root, members) do
+    dir = Path.join(root, "fleet")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "profile.json")
+    File.write!(path, JSON.encode!(%{"schema" => 2, "machine" => "studio", "members" => members}))
+    File.chmod!(path, 0o600)
+    path
   end
 
   defp web!(context, opts \\ []) do
@@ -317,10 +252,10 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     }
   end
 
-  # The page reads a live worker, so what it renders lags the frame by a message or two.
+  # The page reads a live program, so what it renders lags the frame by a message or two.
   # Polling `render/1` is the honest wait: it is the same HTML a person would be looking at.
   defp await(view, needle, message \\ nil) do
-    Enum.reduce_while(1..100, :missing, fn _attempt, _acc ->
+    Enum.reduce_while(1..150, :missing, fn _attempt, _acc ->
       html = render(view)
 
       if html =~ needle do
@@ -336,4078 +271,555 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     end
   end
 
-  defp prepared(view, address \\ "100.64.12.44", user \\ "deploy") do
+  defp operation(view), do: :sys.get_state(view.pid).socket.assigns.drawer.operation
+
+  # The whole of a deployment that works, in the directives the fake reads.
+  defp happy do
+    [
+      "state running",
+      "state waiting",
+      "challenge trust-1 host_trust {\"address\":\"100.64.12.44\",\"port\":22,\"algorithm\":\"ssh-ed25519\",\"sha256_fingerprint\":\"SHA256:fixtureFingerprintNotARealHostKey\",\"user\":\"deploy\"}",
+      "await trust-1",
+      "challenge secret-1 password {\"target\":\"100.64.12.44\",\"user\":\"deploy\",\"port\":22,\"attempt\":1,\"max_attempts\":3}",
+      "await secret-1",
+      "step inspect ok reachable, and no Ouroboros installed",
+      "plan Install ouro 0.1.10 (Linux arm64) to /usr/local/bin/ouro",
+      "plan Join the fleet as vps-1",
+      "challenge review-1 review {}",
+      "await review-1",
+      "state running",
+      "step install ok /usr/local/bin/ouro",
+      "step join ok -",
+      "step service ok an Ouroboros-owned user service",
+      "step start ok -",
+      "step connect ok -",
+      "done completed vps-1 joined this fleet"
+    ]
+  end
+
+  # Straight to the review, which is what a `setup` and a `leave` do in this suite: the two
+  # challenges before it are the same panels the add flow already proved.
+  defp review_only(plan_lines) do
+    ["state running"] ++
+      Enum.map(plan_lines, &"plan #{&1}") ++
+      ["state waiting", "challenge review-1 review {}", "await review-1"]
+  end
+
+  # Open the add drawer on a row and submit its form.
+  defp add!(view, address \\ "100.64.12.44", machine \\ "vps-1", user \\ "deploy") do
     view
     |> element(~s{button[phx-click="deploy"][phx-value-address="#{address}"]})
     |> render_click()
 
     view
-    |> form("#ouro-deploy-connect", %{"address" => address, "ssh_user" => user})
+    |> form("#ouro-deploy-connect", %{
+      "address" => address,
+      "machine" => machine,
+      "ssh_user" => user
+    })
     |> render_submit()
 
-    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-    operation(view)
+    view
   end
 
-  defp html_live_region(html) do
-    case Regex.run(~r/id="ouro-deploy-live"[^>]*>(.*?)<\/p>/s, html) do
-      [_, inner] -> String.trim(inner)
-      _missing -> nil
+  # ------------------------------------------------------------------------------------
+  # The list
+  # ------------------------------------------------------------------------------------
+
+  describe "the inventory" do
+    test "is one list, in one order, with the codes on the rows", context do
+      ouro!(context)
+      conn = web!(context)
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ ~s(data-state="this_device")
+      assert html =~ ~s(data-state="fleet_member_not_visible")
+      assert html =~ ~s(data-state="discovered_installation_unknown")
+      assert html =~ ~s(data-state="unsupported_platform")
+
+      # The self row first, then the fleet's members, then everything else.
+      states = Regex.scan(~r/data-state="([a-z_]+)"/, html) |> Enum.map(&Enum.at(&1, 1))
+      assert Enum.take(states, 2) == ["this_device", "this_device_without_profile"]
+      assert "fleet_member_not_visible" in states
+
+      # The words are the nine short phrases, not the proposal's table.
+      assert html =~ "in the fleet · not connected"
+      assert html =~ "not set up"
+      assert html =~ "can&#39;t run Ouroboros"
+      refute html =~ "Discovered peer; Ouroboros installation unknown"
+
+      # One quiet line about where the work happens, and no boxed paragraph.
+      assert html =~ "data-ouro-deployment-host"
+      assert html =~ "Actions run on"
+    end
+
+    test "presence is a dot, a word and a relative time, never an ISO instant", context do
+      ouro!(context)
+      conn = web!(context)
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ "online"
+      assert html =~ "offline, seen"
+      assert html =~ "presence not reported"
+      refute html =~ "2026-09-01T00:00:00Z"
+    end
+
+    test "the status line is the blocker sentence for a machine in no fleet", context do
+      ouro!(context)
+      conn = web!(context)
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ "#{self_label()} is not in a fleet yet."
+      assert html =~ setup_label()
+    end
+
+    test "a peer wearing a member's name is named as the impostor it may be", context do
+      ouro!(context,
+        devices:
+          put_in(@devices["devices"], [
+            Enum.at(@devices["devices"], 0),
+            %{
+              Enum.at(@devices["devices"], 3)
+              | "name" => "buildbox",
+                "name_conflicts_with_roster" => "buildbox"
+            }
+          ])
+      )
+
+      conn = web!(context)
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ "It is not that machine."
     end
   end
 
-  defp operation(view), do: :sys.get_state(view.pid).socket.assigns.drawer.operation
+  describe "discovery" do
+    test "quotes the client's own words and never claims a build is old", context do
+      ouro!(context,
+        devices:
+          put_in(@devices["discovery"], %{
+            "code" => "client_unreadable",
+            "detail" => "The Tailscale GUI failed to start"
+          })
+      )
 
-  # A mount that says which browser tab it is, the way `app.js` does with a connect param.
-  defp live_with_tab(conn, path, tab) do
-    conn
-    |> Phoenix.LiveViewTest.put_connect_params(%{"_ouro_tab" => tab})
-    |> live(path)
-  end
+      conn = web!(context)
+      {:ok, _view, html} = live(conn, "/devices")
 
-  # The browser tab is closed: the LiveView process goes, and the deployment client it was
-  # subscribed to has handled that before the next line runs. Unlinked first, because a
-  # `:kill` on a process this test is linked to would take the test with it.
-  #
-  # The client process is left alone — it is not the tab, and it staying up while the tab
-  # goes is exactly the situation being tested.
-  defp close_tab!(view, operation) do
-    pid = view.pid
-    # The LiveView is linked into the test's own tree, so the kill would otherwise take this
-    # process with it. Trapping turns that signal into a message, which is what a test that
-    # is *about* a process dying has to do.
-    Process.flag(:trap_exit, true)
-    Process.unlink(pid)
-    reference = Process.monitor(pid)
-    Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
-
-    # One round trip through the client, so its own monitor message — enqueued by the same
-    # exit, ahead of this call — has been handled.
-    {:ok, client} = Ouroboros.Fleet.Deployment.client(operation)
-    {:ok, _snapshot} = Ouroboros.Fleet.Deployment.Client.snapshot(client)
-    :ok
-  end
-
-  # Kill the connection process and wait until the broker has stopped holding it. Both
-  # halves matter: the process dying is what makes the operation resumable, and the broker
-  # noticing is what makes `resume` answer something other than `already_attached`.
-  defp detach!(operation) do
-    {:ok, pid} = Ouroboros.Fleet.Deployment.client(operation)
-    reference = Process.monitor(pid)
-    Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
-
-    Enum.reduce_while(1..100, :attached, fn _attempt, _acc ->
-      case Ouroboros.Fleet.Deployment.client(operation) do
-        {:error, :no_worker} ->
-          {:halt, :ok}
-
-        _still_there ->
-          Process.sleep(20)
-          {:cont, :attached}
-      end
-    end)
-    |> case do
-      :ok -> :ok
-      :attached -> flunk("the broker never let go of operation #{operation}")
+      assert html =~ "The Tailscale GUI failed to start"
+      assert html =~ "Devices already in the fleet are still listed."
+      refute html =~ "older than the client"
     end
   end
 
-  # `Plan::to_value/0` in tui/src/fleet_setup/plan.rs, field for field.
-  defp plan do
-    %{
-      "schema" => 1,
-      "operation" => "0011223344556677",
-      "kind" => "add",
-      "deployment_host" => %{
-        "hostname" => "studio",
-        "user" => "operator",
-        "os" => "macos",
-        "arch" => "aarch64",
-        "issuer" => true
-      },
-      "target" => %{
-        "machine" => "vps-1",
-        "address" => "100.64.12.44",
-        "port" => 22,
-        "ssh_user" => "deploy",
-        "identity" => "agent identity SHA256:anAgentKey",
-        "install_path" => "/usr/local/bin/ouro",
-        "data_dir" => "/home/deploy/.ouroboros",
-        "host_fingerprint" => "SHA256:aHostKey",
-        "node" => "ouro@vps-1"
-      },
-      "release" => %{
-        "version" => "0.1.8",
-        "target" => "x86_64-unknown-linux-gnu",
-        "asset" => "ouro-0.1.8.tar.gz",
-        "sha256" => "0123456789abcdef0123456789abcdef",
-        "official_origin" => true
-      },
-      "service" => "managed",
-      "members" => [
-        %{
-          "machine" => "studio",
-          "host" => "100.64.0.1",
-          "reached_by" => "local",
-          "change" => "add vps-1"
-        }
-      ],
-      "restart" => nil,
-      "grants" => ["Joining grants broad authority between this fleet's machines."],
-      "build" => nil
-    }
+  # ------------------------------------------------------------------------------------
+  # Add
+  # ------------------------------------------------------------------------------------
+
+  describe "adding a machine" do
+    test "walks host trust, the password, the review, progress and done", context do
+      ouro!(context)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view = add!(view)
+      operation = operation(view)
+      assert String.match?(operation, ~r/\A[0-9a-f]{16}\z/)
+
+      # 1. The host key, with the fingerprint and the command that checks it independently.
+      html = await(view, "First time connecting to 100.64.12.44")
+      assert html =~ "SHA256:fixtureFingerprintNotARealHostKey"
+      assert html =~ "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"
+
+      view
+      |> element(~s{button[phx-click="trust-host"][phx-value-accept="true"]})
+      |> render_click()
+
+      # 2. The password, in one masked field with no phx-change on it.
+      html = await(view, "Password for deploy@100.64.12.44")
+      assert html =~ "(attempt 1 of 3)"
+      assert html =~ ~s(type="password")
+      refute html =~ ~s(phx-change="authenticate")
+
+      view
+      |> form("#ouro-deploy-auth", %{"challenge" => "secret-1", "secret" => "hunter2"})
+      |> render_submit()
+
+      # And it arrived, which is what makes the page's silence about it evidence.
+      assert Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, "hunter2"))
+
+      # 3. The plan, as the lines it is. No digest, and nothing behind a disclosure.
+      html = await(view, "Ready to deploy")
+      assert html =~ "Install ouro 0.1.10 (Linux arm64) to /usr/local/bin/ouro"
+      assert html =~ "Join the fleet as vps-1"
+      refute html =~ "plan digest"
+      refute html =~ "data-ouro-plan-digest"
+      refute html =~ "Everything in this plan"
+
+      view |> element(~s{button[phx-click="approve"]}) |> render_click()
+
+      # 4. Progress, with the step names of an `add` and no stage this kind never runs.
+      html = await(view, ~s(data-step="connect"))
+      assert html =~ ~s(data-step="inspect")
+      assert html =~ ~s(data-step="join")
+      refute html =~ ~s(data-step="membership")
+
+      # 5. Done, named after the machine. The program's own `summary` is on the snapshot only
+      # while a process is holding the operation — §6's journal has no field for it — so the
+      # heading is what has to carry the outcome, and it does.
+      html = await(view, "vps-1 is in your fleet")
+      assert html =~ "Done"
+    end
+
+    test "the address bar carries the operation, and reopening it reloads by id", context do
+      ouro!(context)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view = add!(view)
+      operation = operation(view)
+      await(view, "First time connecting")
+
+      # A second view on the same operation answers the same prompt: §10 deletes the per-tab
+      # binding, so there is no "this prompt belongs to another tab" left to draw.
+      {:ok, second, _html} = live(conn, "/devices?operation=" <> operation)
+      html = await(second, "First time connecting")
+      refute html =~ "data-ouro-rebind"
+      refute html =~ "data-ouro-takeover"
+
+      second
+      |> element(~s{button[phx-click="trust-host"][phx-value-accept="true"]})
+      |> render_click()
+
+      await(second, "Password for deploy@100.64.12.44")
+    end
+
+    test "add by address is the same form with the address editable", context do
+      ouro!(context)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html = render_click(view, "deploy-manual", %{})
+      assert html =~ "Add a device by address"
+
+      view
+      |> form("#ouro-deploy-connect", %{
+        "address" => "100.64.99.99",
+        "machine" => "manual-1",
+        "ssh_user" => "deploy"
+      })
+      |> render_submit()
+
+      await(view, "First time connecting")
+
+      assert Enum.take(FleetFramesFake.argv(context.bin), 5) == [
+               "fleet",
+               "add",
+               "deploy@100.64.99.99",
+               "--machine",
+               "manual-1"
+             ]
+    end
+
+    test "a name that is not a machine name is refused before anything is run", context do
+      ouro!(context)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view
+      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
+      |> render_click()
+
+      html =
+        view
+        |> form("#ouro-deploy-connect", %{
+          "address" => "100.64.12.44",
+          "machine" => "not a name",
+          "ssh_user" => "deploy"
+        })
+        |> render_submit()
+
+      assert html =~ "Letters, digits and hyphens only"
+      refute "--frames" in FleetFramesFake.argv(context.bin)
+    end
+
+    test "a deployment that fails says why and offers Retry", context do
+      ouro!(context,
+        scenario: [
+          "state running",
+          "step inspect ok reachable",
+          "step install failed the release archive did not verify",
+          "error install_failed the release archive did not verify",
+          "done failed vps-1 was not added"
+        ]
+      )
+
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      view = add!(view)
+
+      html = await(view, "Setup failed")
+      assert html =~ "the release archive did not verify"
+      assert html =~ ~s(phx-click="resume")
+      assert html =~ "Retry"
+    end
   end
 
-  # `plan_leave/1` in tui/src/fleet_setup/engine.rs, field for field: no release, a `manual`
-  # service plan, the leaving machine first in `members` because the review has to name
-  # every machine the operation authenticates to, and `removal_note/1`'s tombstone sentence
-  # as the one grant.
-  defp leave_plan do
-    %{
-      "schema" => 1,
-      "operation" => "0011223344556677",
-      "kind" => "leave",
-      "deployment_host" => %{
-        "hostname" => "studio",
-        "user" => "operator",
-        "os" => "macos",
-        "arch" => "aarch64",
-        "issuer" => true
-      },
-      "target" => %{
-        "machine" => "buildbox",
-        "address" => "100.64.0.2",
-        "port" => 22,
-        "ssh_user" => "deploy",
-        "identity" => "resolved when the member is contacted",
-        "install_path" => "",
-        "data_dir" => "/home/deploy/.ouroboros",
-        "host_fingerprint" => nil,
-        "node" => "ouro@buildbox"
-      },
-      "release" => nil,
-      "service" => "manual",
-      "members" => [
-        %{
-          "machine" => "buildbox",
-          "host" => "100.64.0.2",
-          "reached_by" => "ssh",
-          "change" => "stop, retire credentials, leave"
-        },
-        %{
-          "machine" => "studio",
-          "host" => "100.64.0.1",
-          "reached_by" => "local",
-          "change" => "remove buildbox"
-        }
-      ],
-      "restart" =>
-        "buildbox's runtime is stopped through its own idle-gated shutdown before its " <>
-          "credentials are removed",
-      "grants" => [
-        "No tombstone is recorded. Session-owner evidence for buildbox is retained, so " <>
-          "its sessions stay discoverable; `ouro fleet sessions forget --machine buildbox " <>
-          "--accept-state-loss` is the separate, irreversible decision that retires it."
-      ],
-      "build" => nil
-    }
+  # ------------------------------------------------------------------------------------
+  # Leave and setup
+  # ------------------------------------------------------------------------------------
+
+  describe "removing a member" do
+    test "is reached from the details panel and reads as a removal", context do
+      members!(context.root, [%{"machine" => "buildbox", "host" => "100.64.0.2"}])
+
+      ouro!(context,
+        scenario:
+          review_only([
+            "Stop Ouroboros on buildbox",
+            "Remove its fleet credentials and its startup service",
+            "Forget it here"
+          ])
+      )
+
+      conn = web!(context)
+      {:ok, view, html} = live(conn, "/devices")
+
+      # Not on the row: §5.4 puts it in the member's details.
+      refute html =~ ~s(phx-click="leave-device")
+
+      row = Enum.find(@devices["devices"], &(&1["address"] == "100.64.0.2"))
+      render_click(view, "inspect-device", %{"row" => Devices.row_id(row)})
+      html = render(view)
+      assert html =~ "Remove from fleet" or html =~ ~s(phx-click="leave-device")
+
+      render_click(view, "leave-device", %{"address" => "100.64.0.2"})
+      html = render(view)
+      assert html =~ "Remove buildbox from the fleet"
+
+      view
+      |> form("#ouro-deploy-leave", %{"ssh_user" => "deploy"})
+      |> render_submit()
+
+      html = await(view, "Ready to remove")
+      assert html =~ "Stop Ouroboros on buildbox"
+      # The button says the same word as the heading.
+      assert html =~ ">\n          Remove\n" or html =~ "Remove\n"
+
+      assert FleetFramesFake.argv(context.bin) == [
+               "fleet",
+               "leave",
+               "--machine",
+               "buildbox",
+               "--user",
+               "deploy",
+               "--port",
+               "22",
+               "--frames",
+               "--operation",
+               operation(view)
+             ]
+    end
   end
 
-  # `prepared/1` aimed the other way: a removal is reached from the member's details panel,
-  # and its form is `#ouro-deploy-leave`.
-  defp prepared_leave(view, address \\ "100.64.0.2", user \\ "deploy") do
-    view
-    |> element(~s{[data-address="#{address}"] button[phx-click="inspect-device"]})
-    |> render_click()
+  describe "setting this machine up" do
+    test "takes no account, asks for a name and an address, and reviews", context do
+      ouro!(context,
+        scenario:
+          review_only(["Create this fleet on this machine", "Start at login as a user service"])
+      )
 
-    view
-    |> element(~s{button[phx-click="leave-device"][phx-value-address="#{address}"]})
-    |> render_click()
+      conn = web!(context)
+      {:ok, view, html} = live(conn, "/devices")
 
-    view
-    |> form("#ouro-deploy-leave", %{"ssh_user" => user})
-    |> render_submit()
+      assert html =~ setup_label()
+      render_click(view, "setup-device", %{"address" => "100.64.0.7"})
+      html = render(view)
+      assert html =~ setup_label()
+      refute html =~ ~s(name="ssh_user")
 
-    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-    operation(view)
+      view
+      |> form("#ouro-deploy-setup", %{"machine" => "spare", "address" => "100.64.0.7"})
+      |> render_submit()
+
+      html = await(view, "Ready to set up")
+      assert html =~ "Create this fleet on this machine"
+
+      argv = FleetFramesFake.argv(context.bin)
+      assert Enum.take(argv, 4) == ["fleet", "setup", "--machine", "spare"]
+      refute Enum.any?(argv, &String.contains?(&1, "@"))
+    end
+
+    test "a setup aimed at another device's address is refused", context do
+      ouro!(context)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html = render_click(view, "setup-device", %{"address" => "100.64.12.44"})
+
+      assert html =~ "add it to the fleet instead"
+      refute "--frames" in FleetFramesFake.argv(context.bin)
+    end
   end
 
-  # The worker's durable record, as this runtime would find it after an interruption.
-  #
-  # `owner` defaults to the identity this test is asking as, because the broker's resume
-  # rule is strict about it: an operation whose owner it cannot match — including one it
-  # cannot establish at all — is not resumed without an explicit takeover. A fixture that
-  # left the field out would be testing the takeover path by accident.
+  # ------------------------------------------------------------------------------------
+  # The gates
+  # ------------------------------------------------------------------------------------
+
+  describe "what the page will not do" do
+    test "a hand-sent deploy at an address the inventory does not list is refused", context do
+      ouro!(context)
+      conn = web!(context)
+      {:ok, view, _html} = live(conn, "/devices")
+
+      html = render_click(view, "deploy", %{"address" => "10.0.0.1"})
+
+      assert html =~ "This machine&#39;s inventory does not list that address."
+      refute "--frames" in FleetFramesFake.argv(context.bin)
+    end
+
+    test "a cleartext bind refuses the credential path even when a drawer is open", context do
+      ouro!(context)
+      conn = web!(context, bind: "0.0.0.0")
+      {:ok, view, html} = live(conn, "/devices")
+
+      assert html =~ "credential entry is refused here"
+
+      # And the events themselves, which is the boundary rather than the rendering.
+      html = render_click(view, "deploy-manual", %{})
+      assert html =~ "credential entry is refused here"
+      refute "--frames" in FleetFramesFake.argv(context.bin)
+    end
+
+    test "a read endpoint draws membership and no controls", context do
+      ouro!(context)
+      conn = web!(context, scope: :read)
+
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ "OUROBOROS_WEB_SCOPE=read"
+      refute html =~ ~s(phx-click="deploy-manual")
+    end
+
+    test "a non-administrator is told so rather than shown the network", context do
+      ouro!(context)
+      identities!(context)
+
+      Ouroboros.Audit.Identity.install(%{
+        "id" => "olive",
+        "token_sha256" => :crypto.hash(:sha256, "operator-token") |> Base.encode16(case: :lower)
+      })
+
+      on_exit(fn -> Ouroboros.Audit.Identity.install(nil) end)
+
+      # The page asks this and draws the sentence it answers with. Asserted here rather than
+      # through a mounted view, because a non-administrator's browser does not get as far as
+      # a LiveView socket on this endpoint — and the distinction the function makes is the
+      # thing under test: denied is not absent, and neither is out of scope.
+      assert DevicesLive.availability(:operate, "fleet.devices") == :denied
+      assert Devices.unavailable(:denied, "fleet.devices") =~ "is not an administrator"
+      assert Devices.unavailable(:scope, "fleet.devices") =~ "OUROBOROS_WEB_SCOPE=read"
+      assert Devices.unavailable(:absent, "fleet.devices") =~ "older build than this page"
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # The gate function itself, which every event asks
+  # ------------------------------------------------------------------------------------
+
+  describe "allowed?/2" do
+    test "a dev runtime blocks a setup and nothing else", context do
+      ouro!(context)
+      conn = web!(context)
+
+      previous = Application.get_env(:ouroboros, :dev_runtime)
+      Application.put_env(:ouroboros, :dev_runtime, true)
+      on_exit(fn -> Application.put_env(:ouroboros, :dev_runtime, previous) end)
+
+      {:ok, view, _html} = live(conn, "/devices")
+      socket = :sys.get_state(view.pid).socket
+
+      assert {:refused, sentence} = DevicesLive.allowed?(socket, :setup)
+      assert sentence =~ "development runtime"
+      assert :ok == DevicesLive.allowed?(socket, :add)
+      assert :ok == DevicesLive.allowed?(socket, :leave)
+    end
+  end
+
+  # ------------------------------------------------------------------------------------
+  # Operations on rows
+  # ------------------------------------------------------------------------------------
+
+  describe "an operation this machine is holding" do
+    test "is drawn on its device's row with the words the state gives it", context do
+      ouro!(context)
+
+      journal!(context.root, "00aa11bb22cc33dd", %{
+        "schema" => 2,
+        "kind" => "add",
+        "state" => "waiting",
+        "target" => %{"machine" => "vps-1", "address" => "100.64.12.44"}
+      })
+
+      conn = web!(context)
+      {:ok, view, html} = live(conn, "/devices")
+
+      row = view |> element(~s{[data-address="100.64.12.44"]}) |> render()
+      assert row =~ "waiting for you"
+      assert row =~ "Continue"
+      assert row =~ ~s(data-operation-state="waiting")
+
+      # Nothing is left over for a panel to hold, so there is no panel.
+      refute html =~ "Setups with no device on this list"
+    end
+
+    test "one whose device is not on this list gets the leftovers panel", context do
+      ouro!(context)
+
+      journal!(context.root, "11bb22cc33dd44ee", %{
+        "schema" => 2,
+        "kind" => "add",
+        "state" => "failed",
+        "target" => %{"machine" => "gone", "address" => "10.9.9.9"}
+      })
+
+      conn = web!(context)
+      {:ok, _view, html} = live(conn, "/devices")
+
+      assert html =~ "Setups with no device on this list"
+      assert html =~ "11bb22cc33dd44ee"
+    end
+  end
+
   defp journal!(root, operation, document) do
     dir = Path.join(root, "deploy")
     File.mkdir_p!(dir)
     File.chmod!(dir, 0o700)
     path = Path.join(dir, operation <> ".json")
 
-    body =
-      document
-      |> Map.put("operation", operation)
-      |> Map.put_new("owner", Ouroboros.Audit.Identity.actor())
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
 
-    File.write!(path, JSON.encode!(body))
+    File.write!(
+      path,
+      JSON.encode!(
+        Map.merge(
+          %{
+            "operation" => operation,
+            "created_at" => now,
+            "updated_at" => now,
+            "steps" => [],
+            "plan" => []
+          },
+          document
+        )
+      )
+    )
+
     File.chmod!(path, 0o600)
     path
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The inventory
-  # ------------------------------------------------------------------------------------
-
-  describe "the inventory" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context)
-      %{conn: web!(context)}
-    end
-
-    test "says where the work happens in one line, not in a box on every screen", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      # A browser cannot lend its own laptop's SSH agent to the runtime, so the page still
-      # says whose machine acts. Once, under the title.
-      assert html =~ "Actions run on "
-      assert html =~ "data-ouro-deployment-host"
-
-      # And not the three-line paragraph the review found above the list and again inside
-      # every drawer.
-      refute html =~ "not on the computer showing this page"
-      refute html =~ "Discovery, SSH and certificate issuance run on that machine"
-    end
-
-    test "draws one list, this machine first, with the state in words and the code in data",
-         %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      # One list, not two sections split by membership.
-      assert html =~ ~s(id="devices-list")
-      refute html =~ "Fleet devices"
-      refute html =~ "Available on this network"
-
-      # Section 5.1's vocabulary, and none of the proposal's table.
-      assert html =~ "not set up"
-      assert html =~ "in the fleet"
-      refute html =~ "Discovered peer; Ouroboros installation unknown"
-      refute html =~ "Known member disconnected from this runtime"
-
-      # The codes are data attributes and nothing else.
-      assert html =~ ~s(data-state="discovered_installation_unknown")
-      assert html =~ ~s(data-state="fleet_member_not_visible")
-      refute html =~ ">discovered_installation_unknown<"
-      refute html =~ ">fleet_member_not_visible<"
-    end
-
-    test "puts this machine's own row first and labels it after the host's OS",
-         %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ ~s(<span class="ouro-devices-label">#{self_label()}</span>)
-
-      # The self rows come before the member, which comes before the discovered peers.
-      order = Regex.scan(~r/data-state="([a-z_]+)"/, html) |> Enum.map(&List.last/1)
-
-      assert Enum.take(order, 2) == ["this_device", "this_device_without_profile"]
-
-      assert Enum.find_index(order, &(&1 == "fleet_member_not_visible")) <
-               Enum.find_index(order, &(&1 == "discovered_installation_unknown"))
-    end
-
-    test "gives the state column screen-reader text rather than colour alone", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ ~s(<span class="ouro-visually-hidden">Ouroboros:</span>)
-      assert html =~ ~s(<span class="ouro-visually-hidden">Network presence:</span>)
-
-      # The dot is decoration beside a word, never the word itself.
-      assert html =~ ~s(<span aria-hidden="true" class="ouro-devices-dot">)
-    end
-
-    test "says presence as a dot, a word and a relative time, and never an ISO row",
-         %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      # `toaster` is offline and the client said when it last saw it; `buildbox` has no
-      # presence reported at all, which is not the same fact as being offline.
-      assert html =~ "offline, seen "
-      assert html =~ "presence not reported"
-
-      # Section 5.1 bans the exact instant from a row. It lives in the details panel.
-      refute html =~ "2026-09-01T00:00:00Z"
-    end
-
-    test "renders a roster name collision as a note rather than merging the row",
-         %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ "This device calls itself studio, which is the name of a machine in"
-      assert html =~ "It is not that machine."
-
-      # And the impostor is still its own row, with its own address.
-      assert html =~ ~s(data-address="100.64.9.9")
-    end
-
-    test "draws no legend, because the words no longer need one", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      refute html =~ "What each state means"
-      refute html =~ "Observed state"
-      refute html =~ "Primary action"
-    end
-
-    test "offers no search or filter over a list this short", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/devices")
-
-      # Six rows. At eight or fewer, the list is its own index (section 5.1).
-      refute html =~ ~s(id="devices-search")
-      refute has_element?(view, "#devices-search")
-    end
-
-    test "refreshes by asking again", %{conn: conn, fake_dir: fake_dir} = context do
-      {:ok, view, html} = live(conn, "/devices")
-      assert html =~ "vps-1"
-
-      ouro!(context, devices: put_in(@devices["devices"], []))
-      _ = fake_dir
-
-      html = render_click(view, "refresh", %{})
-      refute html =~ "vps-1"
-      assert html =~ "No device matches"
-    end
-
-    test "offers Add to fleet on an uninspected peer and nothing at all on a blocked one",
-         %{conn: conn} do
-      {:ok, view, html} = live(conn, "/devices")
-
-      assert html =~ "Add to fleet"
-      assert has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-
-      # Section 5.1: "A device that cannot be acted on shows no button; the reason is in its
-      # details." `toaster` is an unsupported platform, so nothing can be *done* to it — no
-      # deployment, no setup, not a disabled control carrying a paragraph. What it keeps is
-      # the way in to the reason, which the same sentence promises and which the row's one
-      # word can only summarise.
-      refute has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.0.5"]})
-
-      refute has_element?(
-               view,
-               ~s{button[phx-click="setup-device"][phx-value-address="100.64.0.5"]}
-             )
-
-      assert has_element?(
-               view,
-               ~s{[data-address="100.64.0.5"] button[phx-click="inspect-device"]}
-             )
-
-      assert html =~ "run Ouroboros"
-      refute html =~ "Deployment is disabled for this device while that blocker stands."
-
-      # A known member is not a deployment target either; Details is a read-only panel.
-      refute has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.0.2"]})
-
-      assert has_element?(
-               view,
-               ~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]}
-             )
-
-      assert html =~ "Details"
-      refute html =~ "Diagnose"
-      refute html =~ "View device"
-    end
-
-    test "a device nothing can be done about can still be asked why", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.5"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      # Section 5.1 promises the reason is in its details, so there has to be a way in and
-      # something there when you arrive.
-      assert html =~ "run Ouroboros"
-      assert html =~ "so there is nothing to offer on its row"
-      assert html =~ "Name on the network"
-
-      # And a device with nothing to remove does not offer to remove it.
-      refute html =~ "Remove from fleet"
-    end
-
-    test "two IPv6-only peers open their own details without a deployment address", context do
-      peers = [
-        %{
-          "name" => "ipv6-one",
-          "stable_id" => "peer-one",
-          "address" => nil,
-          "state" => "no_usable_ipv4",
-          "os" => "linux",
-          "online" => true
-        },
-        %{
-          "name" => "ipv6-two",
-          "node_key" => "nodekey:peer-two",
-          "address" => nil,
-          "state" => "no_usable_ipv4",
-          "os" => "macos",
-          "online" => true
-        }
-      ]
-
-      ouro!(context, devices: put_in(@devices["devices"], peers))
-      {:ok, view, _html} = live(context.conn, "/devices")
-
-      for {peer, index} <- Enum.with_index(peers, 1) do
-        view
-        |> element(~s{.ouro-devices-row:nth-child(#{index}) button[phx-click="inspect-device"]})
-        |> render_click()
-
-        details = view |> element("#ouro-deploy") |> render()
-        assert details =~ peer["name"]
-        refute details =~ Enum.at(peers, rem(index, 2))["name"]
-        assert details =~ "no address"
-        refute has_element?(view, ~s{#ouro-deploy button[phx-click="leave-device"]})
-        view |> element(~s{#ouro-deploy button[phx-click="drawer-close"]}) |> render_click()
-      end
-
-      refute has_element?(view, ~s{button[phx-click="deploy"]})
-      html = render_click(view, "deploy", %{"address" => nil})
-      assert html =~ "does not list that address"
-      refute has_element?(view, "#ouro-deploy-connect")
-    end
-
-    test "pre-fills the name from suggested_machine and never from the display name",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-        |> render_click()
-
-      # `suggested_machine` is the one field section 5.5 puts a *valid* name in. Finding 3
-      # is what happens without it: the display name went into the box and was submitted.
-      assert has_element?(view, ~s{#deploy-machine[value="vps-1"]})
-      assert html =~ "letters, digits, hyphens"
-
-      # And the address that came from the list is a fact rather than something to retype.
-      assert has_element?(view, "#deploy-address[readonly]")
-    end
-
-    test "leaves the name empty when no valid one could be suggested", context do
-      ouro!(context,
-        devices:
-          put_in(@devices["devices"], [
-            %{
-              "name" => "Somebody's Laptop!",
-              "machine" => nil,
-              "suggested_machine" => nil,
-              "os" => "linux",
-              "address" => "100.64.12.44",
-              "online" => true,
-              "last_seen" => nil,
-              "path" => "direct",
-              "state" => "discovered_installation_unknown",
-              "action" => "deploy Ouroboros",
-              "name_conflicts_with_roster" => nil
-            }
-          ])
-      )
-
-      {:ok, view, _html} = live(context.conn, "/devices")
-      render_click(view, "refresh", %{})
-
-      view
-      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-      |> render_click()
-
-      assert has_element?(view, ~s{#deploy-machine[value=""]})
-    end
-
-    test "takes a manual destination through the same form, with the name required",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_click(view, "deploy-manual", %{})
-
-      assert html =~ "Add a device by address"
-      assert html =~ "Name in the fleet"
-      assert html =~ "SSH user"
-
-      # Finding 2. The manual form had no name field at all, so the worker took the address
-      # as the machine name and refused it after a connection, a host key and a password.
-      assert has_element?(view, "#deploy-machine[required]")
-      assert has_element?(view, ~s{#deploy-machine[value=""]})
-
-      # The address is the point of this form, so it is editable here and only here.
-      assert has_element?(view, "#deploy-address[required]")
-      refute has_element?(view, "#deploy-address[readonly]")
-      assert has_element?(view, ~s{#deploy-address[value=""]})
-    end
-
-    test "refuses a manual submission with no name, before anything is connected to",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      render_click(view, "deploy-manual", %{})
-
-      html =
-        view
-        |> form("#ouro-deploy-connect", %{
-          "address" => "100.64.77.77",
-          "machine" => "",
-          "ssh_user" => "deploy"
-        })
-        |> render_submit()
-
-      assert html =~ "This machine needs a name in the fleet."
-      # Nothing was prepared: no operation id anywhere on the page.
-      refute html =~ "data-ouro-operation"
-    end
-
-    test "says a bad name is bad while it is being typed, and not before", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_click(view, "deploy-manual", %{})
-
-      # An empty box on the manual form is not yet a mistake.
-      refute html =~ "deploy-machine-error"
-      refute html =~ "Letters, digits and hyphens only"
-
-      html =
-        view
-        |> form("#ouro-deploy-connect", %{"machine" => "not a machine name"})
-        |> render_change()
-
-      assert html =~ ~s(id="deploy-machine-error")
-      assert html =~ "Letters, digits and hyphens only"
-      assert has_element?(view, ~s{#deploy-machine[aria-invalid="true"]})
-
-      assert has_element?(
-               view,
-               ~s{#deploy-machine[aria-describedby="deploy-machine-hint deploy-machine-error"]}
-             )
-
-      # And it goes away when the name becomes one.
-      html =
-        view
-        |> form("#ouro-deploy-connect", %{"machine" => "raspberrypi"})
-        |> render_change()
-
-      refute html =~ "deploy-machine-error"
-      refute has_element?(view, ~s{#deploy-machine[aria-invalid="true"]})
-    end
-
-    test "refuses a name that is not a machine name", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      render_click(view, "deploy-manual", %{})
-
-      html =
-        view
-        |> form("#ouro-deploy-connect", %{
-          "address" => "100.64.77.77",
-          "machine" => "not a machine name",
-          "ssh_user" => "deploy"
-        })
-        |> render_submit()
-
-      assert html =~ "Letters, digits and hyphens only"
-      refute html =~ "data-ouro-operation"
-    end
-
-    test "the drawer is a dialog a keyboard can leave", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-        |> render_click()
-
-      assert html =~ ~s(aria-modal="true")
-      assert html =~ ~s(aria-labelledby="ouro-deploy-title")
-      # `Modal` is the hook that opens it, restores focus when it closes, and turns the
-      # browser's own Escape into this event.
-      assert html =~ ~s(phx-hook="Modal")
-      assert html =~ ~s(data-cancel-event="drawer-close")
-      assert html =~ ~s(aria-live="polite")
-    end
-
-    test "links Devices from the top bar and marks it as the page being read",
-         %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ ~s(href="/devices")
-      assert Regex.run(~r/href="\/devices"[^>]*aria-current="page"/, html)
-      assert length(String.split(html, ~s(aria-current="page"))) - 1 == 1
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The controls that only a long list earns
-  # ------------------------------------------------------------------------------------
-
-  describe "past eight rows" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context, devices: @many)
-      %{conn: web!(context)}
-    end
-
-    test "the search box and the filter appear", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/devices")
-
-      assert html =~ ~s(id="devices-search")
-      assert has_element?(view, "#devices-search")
-      assert html =~ "In the fleet"
-      assert html =~ "Everything else"
-    end
-
-    test "searching by name and by address narrows the one list", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_change(view, "search", %{"query" => "vps"})
-      assert html =~ "vps-1"
-      refute html =~ "toaster"
-
-      html = render_change(view, "search", %{"query" => "100.64.0.5"})
-      assert html =~ "toaster"
-      refute html =~ "vps-1"
-
-      html = render_change(view, "search", %{"query" => ""})
-      assert html =~ "vps-1"
-      assert html =~ "toaster"
-    end
-
-    test "a query that matches nothing keeps the controls on the page", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_change(view, "search", %{"query" => "nothing-matches-this"})
-
-      # The threshold is the unfiltered count, so the box does not vanish from under the
-      # cursor of the person typing into it.
-      assert html =~ ~s(id="devices-search")
-      assert html =~ "No device matches"
-    end
-
-    test "a search can be cleared after a refresh shrinks the inventory",
-         %{conn: conn} = context do
-      {:ok, view, _html} = live(conn, "/devices")
-      render_change(view, "search", %{"query" => "filler"})
-
-      ouro!(context, devices: @devices)
-      render_click(view, "refresh")
-
-      assert has_element?(view, "#devices-search")
-      refute has_element?(view, ~s([data-address="100.64.0.1"]))
-
-      view |> form("#ouro-devices-search", %{"query" => ""}) |> render_change()
-
-      assert has_element?(view, ~s([data-address="100.64.0.1"]))
-      refute has_element?(view, "#devices-search")
-    end
-
-    test "a filter can be cleared after a refresh shrinks the inventory",
-         %{conn: conn} = context do
-      {:ok, view, _html} = live(conn, "/devices")
-      render_click(view, "filter", %{"filter" => "available"})
-
-      ouro!(context, devices: @devices)
-      render_click(view, "refresh")
-
-      assert has_element?(view, "#devices-search")
-      refute has_element?(view, ~s([data-address="100.64.0.1"]))
-
-      view |> element(~s(button[phx-value-filter="all"])) |> render_click()
-
-      assert has_element?(view, ~s([data-address="100.64.0.1"]))
-      refute has_element?(view, "#devices-search")
-    end
-
-    test "the filter keeps one list and changes which rows are in it", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_click(view, "filter", %{"filter" => "fleet"})
-      assert html =~ ~s(data-state="fleet_member_not_visible")
-      refute html =~ ~s(data-state="discovered_installation_unknown")
-      assert html =~ ~s(aria-pressed="true")
-
-      html = render_click(view, "filter", %{"filter" => "available"})
-      assert html =~ ~s(data-state="discovered_installation_unknown")
-      refute html =~ ~s(data-state="fleet_member_not_visible")
-
-      html = render_click(view, "filter", %{"filter" => "all"})
-      assert html =~ ~s(data-state="fleet_member_not_visible")
-      assert html =~ ~s(data-state="discovered_installation_unknown")
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Discovery
-  # ------------------------------------------------------------------------------------
-
-  describe "discovery" do
-    setup context do
-      issuer!(context.root)
-      :ok
-    end
-
-    for code <- ~w(client_missing signed_out permission_denied unavailable) do
-      test "#{code} is one notice quoting the client's own words", context do
-        code = unquote(code)
-
-        document = %{
-          @devices
-          | "discovery" => %{
-              "code" => code,
-              "reason" => nil,
-              "detail" => "The Tailscale GUI failed to start",
-              "client" => nil,
-              "self" => nil,
-              "visible_peers" => 0
-            }
-        }
-
-        ouro!(context, devices: document)
-        conn = web!(context)
-
-        {:ok, _view, html} = live(conn, "/devices")
-
-        # Section 5.1: one inline notice with the client's own words and the repair. Every
-        # failure reads the same way, because what an operator does about it is the same
-        # thing and the client is the only one of the two that knows why.
-        assert html =~ "Tailscale did not answer from this runtime"
-        assert html =~ "The Tailscale GUI failed to start"
-        assert html =~ "Devices already in the fleet are still listed."
-        assert html =~ ~s(data-discovery="#{code}")
-
-        # Finding 1: never a claim about this build's age. The client printed something
-        # and exited 0; that is not evidence about a version.
-        refute html =~ "older than the client"
-        refute html =~ "may be older"
-      end
-    end
-
-    test "a client that said nothing still gets a notice, without inventing a quote",
-         context do
-      document = %{
-        @devices
-        | "discovery" => %{
-            "code" => "unavailable",
-            "reason" => nil,
-            "detail" => nil,
-            "client" => nil,
-            "self" => nil,
-            "visible_peers" => 0
-          }
-      }
-
-      ouro!(context, devices: document)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ "Tailscale did not answer from this runtime."
-      refute html =~ ~s(runtime: "")
-    end
-
-    test "a runtime that reported no discovery at all does not blame Tailscale", context do
-      document = Map.delete(@devices, "discovery")
-
-      ouro!(context, devices: document)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      # Nobody observed Tailscale doing anything, so the page may not say it did. "What this
-      # may not do: claim."
-      assert html =~ "This runtime did not report a discovery result."
-      refute html =~ "Tailscale did not answer"
-    end
-
-    test "no_visible_peers is an answer, not a failure", context do
-      document = %{
-        @devices
-        | "discovery" => %{
-            "code" => "no_visible_peers",
-            "reason" => nil,
-            "detail" => nil,
-            "client" => nil,
-            "self" => nil,
-            "visible_peers" => 0
-          }
-      }
-
-      ouro!(context, devices: document)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ "Tailscale answered and can see no other devices."
-      refute html =~ "did not answer"
-      assert html =~ ~s(data-discovery="no_visible_peers")
-    end
-
-    test "keeps known members when discovery could not answer", context do
-      document = %{
-        @devices
-        | "discovery" => %{
-            "code" => "unavailable",
-            "reason" => nil,
-            "detail" => "the client is not running",
-            "client" => nil,
-            "self" => nil,
-            "visible_peers" => 0
-          }
-      }
-
-      ouro!(context, devices: document)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      # This machine's own roster stands even when nothing could be discovered — and the
-      # page says so rather than implying an empty fleet.
-      assert html =~ "buildbox"
-      assert html =~ "Devices already in the fleet are still listed."
-    end
-
-    test "a successful discovery draws no empty state at all", context do
-      ouro!(context)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      refute html =~ "ouro-devices-discovery"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Capability, scope and identity
-  # ------------------------------------------------------------------------------------
-
-  describe "when deployment is unavailable" do
-    test "a machine with no fleet at all is told to set itself up", context do
-      # The fixture inventory carries this machine as `this_device_without_profile`, which
-      # is what "standalone" means. Sending that operator to "the machine that created the
-      # fleet" names a machine that does not exist.
-      ouro!(context)
-      conn = web!(context)
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      # Section 5.1: the status line *is* the blocker sentence, not a second paragraph
-      # under it repeating the same thing.
-      assert html =~ "#{self_label()} is not in a fleet yet."
-      refute html =~ "Open Devices on the machine that created the fleet."
-
-      # And the control it points at is the one that is offered.
-      assert has_element?(view, ~s{button[phx-click="setup-device"]})
-    end
-
-    test "a machine that is in a fleet and holds no key is sent to the issuer", context do
-      # The same blocker, the other posture: a joiner. Its own row is `this_device`, so it
-      # has a fleet — and the machine to open Devices on is the one holding the key.
-      joiner =
-        Map.put(@devices, "devices", [
-          %{
-            "name" => "studio",
-            "machine" => "studio",
-            "os" => "macos",
-            "address" => "100.64.0.1",
-            "online" => true,
-            "last_seen" => nil,
-            "path" => "direct",
-            "state" => "this_device",
-            "action" => "view device",
-            "name_conflicts_with_roster" => nil
-          }
-        ])
-
-      ouro!(context, devices: joiner)
-      conn = web!(context)
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      assert html =~ "Open Devices on the machine that created the fleet."
-      refute html =~ "is not in a fleet yet"
-      refute has_element?(view, ~s{button[phx-click="setup-device"]})
-    end
-
-    test "a cleartext non-loopback endpoint refuses credential entry and says so",
-         context do
-      issuer!(context.root)
-      ouro!(context)
-      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      refute has_element?(view, ~s{button[phx-click="deploy"]})
-      assert html =~ "credential entry is refused here"
-      assert html =~ "tailscale serve"
-
-      # The control keeps its name and reads as unavailable rather than disappearing, and
-      # it carries the reason itself — as a title, and as `aria-describedby` pointing at
-      # the sentence the page already draws, so it is not sighted-only.
-      assert has_element?(view, ~s{button[disabled][aria-describedby="ouro-devices-blocked"]})
-      assert html =~ ~s(id="ouro-devices-blocked")
-      assert html =~ "Add to fleet"
-
-      [button] = Regex.run(~r/<button[^>]*aria-describedby="ouro-devices-blocked"[^>]*>/, html)
-      assert button =~ "credential entry is refused here"
-      assert button =~ ~s(aria-disabled="true")
-      refute button =~ "phx-click"
-    end
-
-    test "a read-scope endpoint says it is the scope, and still shows membership",
-         context do
-      issuer!(context.root)
-      ouro!(context)
-      conn = web!(context, scope: :read)
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      # The inventory itself is read-scoped, so it is still there; what a read endpoint
-      # cannot do is start one.
-      assert html =~ ~s(id="devices-list")
-      assert html =~ "buildbox"
-      refute has_element?(view, ~s{button[phx-click="deploy"]})
-      assert html =~ "OUROBOROS_WEB_SCOPE=read"
-      assert html =~ "cannot start a setup or answer a credential prompt"
-
-      assert DevicesLive.availability(:read, "fleet.deployment.prepare") == :scope
-      assert DevicesLive.availability(:read, "fleet.devices") == :available
-    end
-
-    test "a non-administrator is told it is permission, not capability", context do
-      issuer!(context.root)
-      ouro!(context)
-      identities!(context)
-      conn = web!(context, token: "operator-token")
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      assert html =~ "is not an administrator"
-      assert html =~ "every machine on an operator"
-      refute html =~ "This runtime does not serve fleet.devices"
-      refute has_element?(view, ~s{button[phx-click="deploy"]})
-
-      # And the fallback the proposal names: the `fleet.status` membership subset.
-      assert html =~ "Machines"
-    end
-
-    test "capability absent and permission denied are different sentences", context do
-      issuer!(context.root)
-      ouro!(context)
-      identities!(context)
-      conn = web!(context, token: "operator-token")
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert DevicesLive.availability(:operate, "fleet.devices") in [:denied, :available]
-      refute html =~ "It is an older build than this page"
-
-      # The wording for a build that does not serve the method at all is a different
-      # sentence from the one a refused identity gets, which is the distinction acceptance
-      # item 14 asks for.
-      assert Devices.unavailable(:absent, "fleet.devices") =~ "does not serve fleet.devices"
-      assert Devices.unavailable(:denied, "fleet.devices") =~ "not an administrator"
-      assert Devices.unavailable(:scope, "fleet.devices") =~ "OUROBOROS_WEB_SCOPE=read"
-
-      # And the absent branch is reachable: a method this build does not serve at all.
-      assert DevicesLive.availability(:operate, "fleet.devices.that.does.not.exist") == :absent
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The deploy drawer
-  # ------------------------------------------------------------------------------------
-
-  describe "the deploy drawer" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{conn: web!(context), worker: worker}
-    end
-
-    test "asks for the SSH username, and never infers it", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-        |> render_click()
-
-      assert html =~ "SSH user"
-      # Named after the machine rather than explained: the account on the target is not the
-      # account that registered it with the network, and the label says which machine.
-      assert html =~ "the account on vps-1"
-      assert has_element?(view, ~s{#deploy-ssh-user[required]})
-
-      # Port, identity and paths are the advanced fields the proposal puts behind a
-      # disclosure rather than in front of every deployment.
-      assert html =~ "Advanced — port, SSH key"
-      assert has_element?(view, "#deploy-port")
-      assert has_element?(view, "#deploy-identity-ref")
-
-      # Section 5.2: no authentication picker. The default identity is used, and a target
-      # that asks for a password raises the challenge the drawer already answers.
-      refute has_element?(view, "#deploy-identity-kind")
-      refute html =~ "Authentication method"
-      assert has_element?(view, "#deploy-install-path")
-    end
-
-    test "prepares an operation and puts its id in the address, not its secrets",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      assert String.match?(operation, ~r/\A[0-9a-f]{16}\z/)
-      assert_patched(view, "/devices?operation=#{operation}")
-      assert FleetWorkerFake.refusals(worker) == 0
-    end
-
-    test "sends the verb's own parameters, and a target named by address",
-         %{conn: conn, fake_dir: fake_dir} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      # What actually reached `ouro fleet worker start` — the request file the broker wrote
-      # and the fake worker read. `kind`, an address, an account, and no secret of any shape.
-      request = JSON.decode!(FleetOuroFake.request_body(fake_dir))
-
-      assert request["kind"] == "add"
-      assert request["address"] == "100.64.12.44"
-      assert request["ssh_user"] == "deploy"
-      refute Map.has_key?(request, "peer_id")
-
-      for key <- ~w(secret password passphrase), do: refute(Map.has_key?(request, key))
-    end
-
-    test "sets this device up locally, with no account and no target",
-         %{conn: conn, fake_dir: fake_dir} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{button[phx-click="setup-device"][phx-value-address="100.64.0.7"]})
-        |> render_click()
-
-      assert html =~ setup_label()
-      assert html =~ "Ouroboros restarts once during setup; this page reconnects by itself."
-
-      # No account field at all: asking for one would be this page proposing to SSH to the
-      # machine it is already running on.
-      refute has_element?(view, "#deploy-ssh-user")
-      assert has_element?(view, "#setup-machine")
-      assert has_element?(view, "#setup-address")
-
-      view
-      |> form("#ouro-deploy-setup", %{"machine" => "studio", "address" => "100.64.0.7"})
-      |> render_submit()
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      request = JSON.decode!(FleetOuroFake.request_body(fake_dir))
-      assert request["kind"] == "setup"
-      assert request["machine"] == "studio"
-      assert request["address"] == "100.64.0.7"
-      refute Map.has_key?(request, "ssh_user")
-      refute Map.has_key?(request, "target")
-    end
-
-    test "never shows a takeover panel over an operation nobody has started yet",
-         %{conn: conn} do
-      # Both fields are nil on a drawer that has prepared nothing, and comparing them
-      # directly drew "this setup was started by another identity" over a device nobody had
-      # touched.
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-        |> render_click()
-
-      refute html =~ "This setup was started by another identity"
-      refute has_element?(view, "[data-ouro-takeover]")
-
-      # And it stays absent once the operation exists and is this session's own — the
-      # worker claims an unowned operation for whoever attached, so the owner is us.
-      _operation = prepared(view)
-      refute render(view) =~ "This setup was started by another identity"
-
-      snapshot = :sys.get_state(view.pid).socket.assigns.drawer.status
-      assert snapshot["owner"] == Ouroboros.Audit.Identity.actor()
-    end
-
-    test "renders a host-trust challenge from its metadata, with the verify guidance",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      # The worker's own frame: kind-specific facts nest under `metadata`
-      # (`challenge_event/2` in tui/src/fleet_setup/worker.rs), and `host_trust_metadata/5`
-      # fixes the five field names.
-      :ok =
-        FleetWorkerFake.challenge(worker, "ht-1", "host_trust", %{
-          "metadata" => %{
-            "address" => "100.64.12.44",
-            "port" => 22,
-            "algorithm" => "ssh-ed25519",
-            "sha256_fingerprint" => "SHA256:5s0mEfIngeRPrinT",
-            "user" => "deploy"
-          }
-        })
-
-      html = await(view, "SHA256:5s0mEfIngeRPrinT")
-
-      # The contract this page actually consumes is the *broker's* snapshot, not the
-      # worker's wire: the frame above goes through the real
-      # `Ouroboros.Fleet.Deployment.Client`, which lifts `metadata` to the top of the
-      # challenge (seam S4 calls these fields of the challenge) and drops the nesting. A
-      # page that read them nested drew this panel with every field empty.
-      [challenge] = :sys.get_state(view.pid).socket.assigns.drawer.status["challenges"]
-      assert challenge["sha256_fingerprint"] == "SHA256:5s0mEfIngeRPrinT"
-      refute Map.has_key?(challenge, "metadata")
-
-      assert html =~ "First time connecting"
-      assert html =~ "ssh-ed25519"
-      assert html =~ "100.64.12.44"
-      assert html =~ "deploy"
-      assert html =~ "Check this fingerprint on the device itself"
-      assert html =~ "Trust and continue"
-
-      view
-      |> element(~s{button[phx-value-challenge="ht-1"][phx-value-accept="true"]})
-      |> render_click()
-
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["challenge"] == "ht-1"
-      assert frame["response"] == %{"accept" => true}
-      assert FleetWorkerFake.refusals(worker) == 0
-      assert operation != nil
-    end
-
-    test "refusing a host key sends the refusal rather than nothing",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(worker, "ht-2", "host_trust", %{})
-      _html = await(view, "First time connecting")
-
-      view
-      |> element(~s{button[phx-value-challenge="ht-2"][phx-value-accept="false"]})
-      |> render_click()
-
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["response"] == %{"accept" => false}
-    end
-
-    for kind <- ["password", "passphrase"] do
-      test "a #{kind} challenge draws a masked field with no change event",
-           %{conn: conn, worker: worker} do
-        kind = unquote(kind)
-        {:ok, view, _html} = live(conn, "/devices")
-        _operation = prepared(view)
-
-        # `password_metadata/5` and `passphrase_metadata/2` in
-        # tui/src/fleet_setup/challenge.rs: a password names a target and an account and
-        # counts its attempts; a passphrase names a key and its public fingerprint, and
-        # counts nothing.
-        metadata =
-          if kind == "password",
-            do: %{
-              "target" => "100.64.12.44",
-              "user" => "deploy",
-              "port" => 22,
-              "attempt" => 1,
-              "max_attempts" => 3
-            },
-            else: %{
-              "key_label" => "/home/ouro/.ssh/id_ed25519",
-              "public_fingerprint" => "SHA256:aPub1icFingerprint"
-            }
-
-        :ok = FleetWorkerFake.challenge(worker, "c-1", kind, %{"metadata" => metadata})
-
-        html = await(view, "data-ouro-secret")
-
-        assert html =~ ~s(type="password")
-        assert html =~ "data-ouro-secret"
-        assert html =~ "not stored, not remembered for a reconnection"
-
-        if kind == "password" do
-          assert html =~ "Password for deploy@100.64.12.44"
-          assert html =~ "attempt 1 of 3"
-        else
-          assert html =~ "Passphrase for the key /home/ouro/.ssh/id_ed25519"
-          assert html =~ "SHA256:aPub1icFingerprint"
-          refute html =~ "Attempt"
-        end
-
-        # The one rule the proposal states about this form: no change event, because a
-        # change event on a password field streams every keystroke to this server.
-        [form] = Regex.run(~r{<form id="ouro-deploy-auth"[^>]*>}, html)
-        refute form =~ "phx-change"
-      end
-    end
-
-    test "a secret is submitted once and is nowhere afterwards",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "pw-1", "password", %{
-          "metadata" => %{"target" => "100.64.12.44", "user" => "deploy", "port" => 22}
-        })
-
-      _html = await(view, "data-ouro-secret")
-
-      secret = "w3a-unique-password-#{System.unique_integer([:positive])}"
-
-      log =
-        capture_log(fn ->
-          view
-          |> form("#ouro-deploy-auth", %{"secret" => secret})
-          |> render_submit()
-
-          # It reached the worker, which is the only proof that the path works at all: a
-          # test that could not see the secret arrive could not prove it arrived.
-          assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-          assert frame["response"]["secret"] == secret
-        end)
-
-      # And now the three places it must not be.
-      refute render(view) =~ secret
-
-      state = :sys.get_state(view.pid)
-      dumped = inspect(state, limit: :infinity, printable_limit: :infinity, structs: false)
-      refute dumped =~ secret, "the secret is somewhere in the LiveView's own state"
-
-      refute log =~ secret, "the secret reached a log line"
-
-      # The audit line for this verb is written and is the redacted one.
-      assert log =~ "fleet.deployment.authenticate"
-      assert log =~ "redacted"
-
-      assert FleetWorkerFake.refusals(worker) == 0
-    end
-
-    test "the field is replaced after a submission rather than left holding the value",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-2", "password", %{})
-      before = await(view, "ouro-deploy-secret-0")
-
-      assert before =~ ~s(id="ouro-deploy-secret-0")
-
-      view |> form("#ouro-deploy-auth", %{"secret" => "one"}) |> render_submit()
-      assert_receive {:fake_worker, %{"op" => "respond"}}, @receive_timeout
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-3", "password", %{})
-      after_html = await(view, "ouro-deploy-secret-1")
-
-      # A new id is a new element, which is how the browser is made to drop what was typed
-      # rather than patch a value back into it.
-      assert after_html =~ ~s(id="ouro-deploy-secret-1")
-      refute after_html =~ ~s(id="ouro-deploy-secret-0")
-    end
-
-    test "a refused credential is shown as a sentence, not a reason code",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-4", "password", %{})
-      _html = await(view, "data-ouro-secret")
-
-      :ok = FleetWorkerFake.refuse_next(worker, "authentication_failed")
-
-      html =
-        view
-        |> form("#ouro-deploy-auth", %{"secret" => "wrong"})
-        |> render_submit()
-
-      assert html =~ "the deployment worker refused the request"
-      refute html =~ ~s(>worker_refused<)
-    end
-
-    test "review shows the plan and approves exactly its digest",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      # The digest the worker really would send: this runtime's own sha256 of that plan.
-      # Approval will not offer a button for anything else — see `devices_plan_digest_test`.
-      digest = Devices.plan_digest(plan())
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "rev-1", "review", %{
-          "metadata" => %{"plan" => plan(), "plan_digest" => digest}
-        })
-
-      html = await(view, digest)
-
-      assert html =~ "Ready to deploy"
-      assert html =~ "plan digest"
-
-      # The CLI's labels, not the document's key names. `Plan::render/0` prints `executable`
-      # and `data dir`; a page that printed `install_path` and `data_dir` would be showing
-      # an operator the JSON rather than the plan.
-      for label <-
-            ~w(operation action machine address ssh identity node executable install startup members) do
-        assert html =~ ">#{label}</dt>", "the review has no `#{label}` row"
-      end
-
-      refute html =~ ">install_path</dt>"
-      refute html =~ ">data_dir</dt>"
-
-      assert html =~ "data dir"
-      assert html =~ "host key"
-      assert html =~ "deploy@100.64.12.44 port 22"
-      assert html =~ "ouro 0.1.8 (x86_64-unknown-linux-gnu) sha256 0123456789abcdef"
-      assert html =~ "propose a user service"
-      assert html =~ "studio (100.64.0.1, add vps-1, via local)"
-      assert html =~ "Joining grants broad authority between this fleet"
-      assert html =~ "Joining grants broad authority"
-
-      view |> element(~s{button[phx-click="approve"]}) |> render_click()
-
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["challenge"] == "rev-1"
-      assert frame["response"] == %{"approve" => true, "plan_digest" => digest}
-
-      # The idempotency key is the drawer's, stable for the operation, so a repeated
-      # approval replays rather than starting a second deployment.
-      assert :sys.get_state(view.pid).socket.assigns.drawer.approval_key =~
-               ~r/\Aweb-[0-9a-f]{24}\z/
-
-      assert operation != nil
-      assert FleetWorkerFake.refusals(worker) == 0
-    end
-
-    test "a plan with no digest is not approvable at all", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "rev-2", "review", %{
-          "metadata" => %{"plan" => plan()}
-        })
-
-      html = await(view, "Ready to deploy")
-
-      refute has_element?(view, ~s{button[phx-click="approve"]})
-      assert html =~ "did not name a digest for this plan"
-      assert html =~ "no digest reported"
-    end
-
-    test "progress draws the six stages and announces each step politely",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
-      _ = await(view, "Setting up")
-
-      FleetWorkerFake.emit(worker, %{
-        "event" => "step",
-        "machine" => "vps-1",
-        "step" => "install_binary",
-        "outcome" => "started",
-        "detail" => "Uploading: 4 / 90 MB (4%) · 2s elapsed"
-      })
-
-      _ = await(view, "Uploading: 4 / 90 MB")
-
-      # `install_binary` is the engine's name, and it belongs to the "install if missing"
-      # stage even though it is not spelled `install` — which is why the stage table names
-      # the worker's steps instead of matching on a prefix.
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "step",
-          "machine" => "vps-1",
-          "step" => "install_binary",
-          "outcome" => "ok",
-          "detail" => "0.1.8 from the official release"
-        })
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "step",
-          "machine" => "vps-1",
-          "step" => "issue",
-          "outcome" => "ok",
-          "detail" => nil
-        })
-
-      :ok = FleetWorkerFake.emit(worker, %{"event" => "log", "line" => "ssh said something"})
-
-      html = await(view, "0.1.8 from the official release")
-
-      # Every stage the proposal names, and the ones nothing has reported say so rather
-      # than claiming a result.
-      for {_key, label, _names} <- Devices.stages(), do: assert(html =~ label)
-      assert html =~ "not reported yet"
-      assert has_element?(view, ~s{li[data-step="install"][data-outcome="ok"]})
-      refute has_element?(view, ~s{#ouro-deploy-live span.ouro-visually-hidden})
-      refute html =~ "Uploading: 4 / 90 MB"
-      assert html =~ ~s(data-step="install")
-      assert html =~ ~s(data-step="membership")
-      assert html =~ "Install the `ouro` binary on vps-1"
-      assert html =~ "Issue the new member&#39;s certificate on vps-1"
-
-      # The worker's log lines are `line`, not `message`.
-      assert html =~ "ssh said something"
-
-      # The live region is polite and carries the last change in words. Re-rendered, because
-      # the two events after the one awaited above arrive on their own schedule.
-      assert html =~ ~s(aria-live="polite")
-      assert await(view, "Issue the new member&#39;s certificate on vps-1: done.")
-    end
-
-    test "a finished setup names the machine it finished with", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => true,
-          "state" => "completed",
-          "summary" => "vps-1 joined this fleet"
-        })
-
-      html = await(view, "is in your fleet")
-
-      # Section 5.2's finish step. By the time it is drawn the review challenge has been
-      # consumed, so the name has to come from somewhere else - and "false is in your
-      # fleet" is what a boolean falling through `Devices.plain/2` produced.
-      assert html =~ "vps-1 is in your fleet"
-      refute html =~ "false is in your fleet"
-      refute html =~ "That machine is in your fleet"
-
-      # Two follow-ups, not five: Open goes to the machines panel and Done closes.
-      assert has_element?(view, ~s{#ouro-deploy a[href="/status"]})
-      assert has_element?(view, ~s{#ouro-deploy button[phx-click="drawer-close"]})
-      refute html =~ "Configure model"
-      refute html =~ "Run test task"
-    end
-
-    test "a failure keeps the completed steps, names the cause and offers a retry",
-         %{conn: conn, worker: worker, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "step",
-          "machine" => "vps-1",
-          "step" => "inspect",
-          "outcome" => "ok"
-        })
-
-      # The engine's failure arm sends `{ok: false, reason, detail}` and **no state at
-      # all**, so a page that only looked at `state` would still be drawing "Deploying".
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => false,
-          "reason" => "ssh_refused",
-          "detail" => "the target refused the connection"
-        })
-
-      html = await(view, "the target refused the connection")
-
-      assert html =~ "Setup failed"
-      assert html =~ "Retry"
-      assert html =~ ~s(data-step="inspect")
-      refute html =~ "ssh_refused"
-
-      # Retrying means resuming, and resuming needs the previous worker to be gone — which
-      # is exactly the state an interrupted operation is in.
-      journal!(root, operation, %{"state" => "failed", "kind" => "add"})
-      detach!(operation)
-
-      view |> element(~s{button[phx-click="resume"]}) |> render_click()
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      assert render(view) =~ "A new setup worker was started for this operation."
-    end
-
-    test "cancelling asks the worker to stop and never claims an undo",
-         %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      html = render(view)
-      assert html =~ "Cancel setup"
-      assert html =~ "keeps running"
-
-      view |> element(~s{button[phx-click="cancel-setup"]}) |> render_click()
-
-      assert_receive {:fake_worker, %{"op" => "cancel"}}, @receive_timeout
-
-      # The broker releases the worker socket once a cancel has been answered, so the client
-      # process exits right after this — normally, and by design. The page must still be
-      # saying what happened, not "the result is unknown".
-      html = await(view, "asked to stop at a safe boundary")
-
-      refute html =~ "unknown until the operation is read again"
-      assert html =~ "stopped at a safe boundary"
-      assert render(view) =~ "asked to stop at a safe boundary"
-    end
-
-    test "closing the drawer leaves the operation running", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      view |> element(~s{button[phx-click="drawer-close"]}) |> render_click()
-
-      refute has_element?(view, "#ouro-deploy")
-      assert_patched(view, "/devices")
-
-      # Nothing was sent to the worker, and it is still attached.
-      refute_receive {:fake_worker, %{"op" => "cancel"}}, 200
-      assert {:ok, _pid} = Ouroboros.Fleet.Deployment.client(operation)
-      assert FleetWorkerFake.refusals(worker) == 0
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Recovery
-  # ------------------------------------------------------------------------------------
-
-  describe "recovery" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{conn: web!(context), worker: worker}
-    end
-
-    test "a lost worker is reported as unknown-until-queried, not as a failure",
-         %{conn: conn, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-      journal!(root, operation, %{"state" => "deploying", "kind" => "add"})
-
-      detach!(operation)
-
-      html = await(view, "No worker is attached")
-
-      assert html =~ "what the journal durably recorded"
-      assert html =~ "not the same as what is happening now"
-      refute html =~ "Failed"
-    end
-
-    test "a new page reloads the operation by its id", %{conn: conn, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-      journal!(root, operation, %{"state" => "deploying", "kind" => "add"})
-
-      detach!(operation)
-
-      # A different LiveView, as if the page had been closed and opened again.
-      {:ok, reopened, html} = live(conn, "/devices?operation=#{operation}")
-
-      assert html =~ operation
-      assert html =~ "Setting up"
-      assert :sys.get_state(reopened.pid).socket.assigns.drawer.operation == operation
-    end
-
-    test "an unfinished operation is offered on the row it was aimed at",
-         %{conn: conn, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      journal!(root, operation, %{
-        "state" => "interrupted",
-        "kind" => "add",
-        "target" => %{"address" => "100.64.12.44"}
-      })
-
-      detach!(operation)
-
-      {:ok, fresh, html} = live(conn, "/devices")
-
-      # The row says it, rather than a panel above the list.
-      assert html =~ "setup failed"
-      refute html =~ "Setups with no device on this list"
-
-      # The row for the device that operation targets offers Retry rather than a second
-      # Add to fleet.
-      assert has_element?(
-               fresh,
-               ~s{button[phx-click="open-operation"][phx-value-operation="#{operation}"]}
-             )
-    end
-
-    test "a finished operation speaks for its row until discovery catches up",
-         %{conn: conn, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-      detach!(operation)
-
-      target = %{"machine" => "vps-1", "address" => "100.64.12.44"}
-
-      # Three endings, three different things for the row to say. The inventory's own
-      # `state` never moves in any of them — it is a discovery fact, and the point is that
-      # the operation is the fresher one.
-      for {state, words, action} <- [
-            {"completed", "set up just now", "Open"},
-            {"failed", "setup failed", "Retry"},
-            {"cancelled", "not set up", "Add to fleet"}
-          ] do
-        journal!(root, operation, %{"state" => state, "kind" => "add", "target" => target})
-
-        {:ok, fresh, html} = live(conn, "/devices")
-
-        row =
-          fresh
-          |> element(~s{[data-address="100.64.12.44"][data-operation-state="#{state}"]})
-          |> render()
-
-        assert row =~ words, "a #{state} operation does not say so on its row"
-
-        assert row =~ action, "a #{state} operation does not offer #{action}"
-
-        if state == "completed",
-          do:
-            refute(
-              row =~ "Add to fleet",
-              "a completed operation left a second deployment one press away"
-            )
-
-        # The inventory still calls it an uninspected peer — that is the discovery fact,
-        # and the row is the fresher one.
-        assert html =~ ~s(data-state="discovered_installation_unknown")
-
-        # A cancelled setup left the device exactly as discovery found it, so its row goes
-        # back to discovery's own words rather than carrying "cancelled" for ever.
-        if state == "cancelled", do: assert(row =~ "not set up")
-
-        # And a finished one is not held open as a setup with nowhere to be.
-        refute html =~ "Setups with no device on this list"
-      end
-    end
-
-    test "an operation another identity started needs an explicit takeover",
-         %{conn: conn, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      # The journal is the authority when no worker is attached, and this one records an
-      # owner that is not this session.
-      journal!(root, operation, %{
-        "state" => "interrupted",
-        "kind" => "add",
-        "owner" => "somebody-else"
-      })
-
-      detach!(operation)
-
-      {:ok, fresh, html} = live(conn, "/devices?operation=#{operation}")
-
-      # Reading it is already refused, so the prompt is what the drawer opens on: there is
-      # no Retry to press first, and nothing happens quietly.
-      assert html =~ "This setup was started by another identity"
-      refute has_element?(fresh, ~s{button[phx-click="resume"]:not([phx-value-takeover])})
-      assert html =~ "asked of you rather than of whoever started it"
-      assert has_element?(fresh, ~s{button[phx-value-takeover="true"]})
-
-      # And taking it over is one more explicit press, which attaches a new worker.
-      fresh |> element(~s{button[phx-value-takeover="true"]}) |> render_click()
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      assert render(fresh) =~ "taken over"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The catalogue row
-  # ------------------------------------------------------------------------------------
-
-  # ------------------------------------------------------------------------------------
-  # The gate, asked where an event cannot skip it
-  # ------------------------------------------------------------------------------------
-
-  describe "a hand-sent event" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{worker: worker}
-    end
-
-    test "cannot start a deployment on a cleartext non-loopback bind", context do
-      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
-
-      {:ok, view, html} = live(conn, "/devices")
-      assert html =~ "credential entry is refused here"
-
-      # The events the hidden controls would have sent, sent anyway — a console one-liner, a
-      # hostile page, a stale tab. Every one is refused by the handler.
-      html = render_click(view, "deploy-manual", %{})
-      assert html =~ "credential entry is refused here"
-      refute has_element?(view, "#ouro-deploy-connect")
-
-      html = render_click(view, "deploy", %{"address" => "100.64.12.44"})
-      assert html =~ "credential entry is refused here"
-
-      html = render_click(view, "setup-device", %{"address" => "100.64.0.7"})
-      assert html =~ "credential entry is refused here"
-
-      refute has_element?(view, "#ouro-deploy")
-      refute_receive {:fake_worker, %{"op" => "attach"}}, 400
-    end
-
-    test "cannot start one at read scope, or as a non-administrator", context do
-      conn = web!(context, scope: :read)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_click(view, "deploy-manual", %{})
-      assert html =~ "OUROBOROS_WEB_SCOPE=read"
-      refute has_element?(view, "#ouro-deploy")
-      refute_receive {:fake_worker, %{"op" => "attach"}}, 400
-    end
-
-    test "cannot aim Set up this device at another machine", context do
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      # `100.64.12.44` is a remote peer. A local setup bound to its address would ask the
-      # worker to configure this machine to bind somebody else's.
-      html = render_click(view, "setup-device", %{"address" => "100.64.12.44"})
-
-      assert html =~ "That address is another device"
-      refute has_element?(view, "#ouro-deploy-setup")
-
-      # And the same at submission, where the form's own field is editable.
-      render_click(view, "setup-device", %{"address" => "100.64.0.7"})
-      assert has_element?(view, "#ouro-deploy-setup")
-
-      html =
-        render_submit(view, "connect", %{"address" => "100.64.12.44", "machine" => "vps-1"})
-
-      assert html =~ "A local setup binds this machine"
-      refute_receive {:fake_worker, %{"op" => "attach"}}, 400
-    end
-
-    test "cannot deploy to an address this machine's inventory does not list", context do
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_click(view, "deploy", %{"address" => "10.9.9.9"})
-      assert html =~ "inventory does not list that address"
-      refute has_element?(view, "#ouro-deploy")
-    end
-
-    test "cannot crash the view with an operation id that is not one", context do
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      for hostile <- ["../../../etc/passwd", "a b c", "a&b=c#frag", "", "NOTHEX"] do
-        html = render_click(view, "open-operation", %{"operation" => hostile})
-        assert html =~ "not an operation this machine could be holding"
-        assert Process.alive?(view.pid), "#{inspect(hostile)} took the view down"
-      end
-
-      # And through the address bar, which is the other way in.
-      assert {:ok, _view, html} = live(conn, "/devices?operation=../../../etc/passwd")
-      assert html =~ "not an operation this machine could be holding"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # What a refusal looks like
-  # ------------------------------------------------------------------------------------
-
-  describe "a refused answer" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{conn: web!(context), worker: worker}
-    end
-
-    test "draws the visible alert, not only the live region", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-1", "password", %{"metadata" => %{}})
-      _ = await(view, "data-ouro-secret")
-
-      :ok = FleetWorkerFake.refuse_next(worker, "authentication_failed")
-
-      html = view |> form("#ouro-deploy-auth", %{"secret" => "wrong"}) |> render_submit()
-      assert_receive {:fake_worker, %{"op" => "respond"}}, @receive_timeout
-
-      # The box a sighted operator reads, with the role that makes a screen reader read it
-      # out — not just the 1×1 pixel polite region the suite used to find the sentence in.
-      assert html =~ ~s(id="ouro-deploy-error")
-      assert html =~ ~s(role="alert")
-      assert :sys.get_state(view.pid).socket.assigns.drawer.error =~ "refused the request"
-    end
-
-    test "is pointed at by the control that caused it", %{conn: conn} do
-      # A refusal whose form is still on screen — the connect step, which stays. `Inspect
-      # this device` names the box, so a screen reader reads the reason with the button.
-      {:ok, view, _html} = live(conn, "/devices")
-      render_click(view, "deploy-manual", %{})
-
-      html = render_submit(view, "connect", %{"address" => "", "ssh_user" => "deploy"})
-
-      assert html =~ ~s(id="ouro-deploy-error")
-      assert html =~ ~s(aria-describedby="ouro-deploy-error")
-    end
-
-    test "survives for a refused host-trust answer too", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(worker, "ht-1", "host_trust", %{"metadata" => %{}})
-      _ = await(view, "Trust and continue")
-
-      :ok = FleetWorkerFake.refuse_next(worker, "host_key_rejected")
-
-      html =
-        view
-        |> element(~s{button[phx-click="trust-host"][phx-value-accept="true"]})
-        |> render_click()
-
-      assert_receive {:fake_worker, %{"op" => "respond"}}, @receive_timeout
-      assert html =~ ~s(id="ouro-deploy-error")
-      refute :sys.get_state(view.pid).socket.assigns.drawer.error == nil
-    end
-
-    test "offers a way out when the prompt belongs to another tab",
-         %{conn: conn, worker: worker} do
-      {:ok, first, _html} = live(conn, "/devices")
-      operation = prepared(first)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-2", "password", %{"metadata" => %{}})
-      _ = await(first, "data-ouro-secret")
-
-      # A second *tab*: no `_ouro_tab` of its own, so it mints one and is refused — which is
-      # the property S4 wants.
-      {:ok, second, _html} = live(conn, "/devices?operation=#{operation}")
-      _ = await(second, "data-ouro-secret")
-
-      html = second |> form("#ouro-deploy-auth", %{"secret" => "other-tab"}) |> render_submit()
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 500
-
-      assert html =~ "This prompt belongs to another tab"
-      assert has_element?(second, "[data-ouro-rebind]")
-      assert html =~ "Reconnect this setup to this tab"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The binding is the tab's
-  # ------------------------------------------------------------------------------------
-
-  describe "the credential binding" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{conn: web!(context), worker: worker}
-    end
-
-    test "survives a remount in the same tab", %{conn: conn, worker: worker} do
-      tab = String.duplicate("ab", 16)
-
-      {:ok, first, _html} = live_with_tab(conn, "/devices", tab)
-      operation = prepared(first)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-3", "password", %{"metadata" => %{}})
-      _ = await(first, "data-ouro-secret")
-
-      # The remount: a refresh, a dropped socket, or the `?operation=` address this page
-      # puts in the bar itself. Same tab, so the same binding.
-      {:ok, second, _html} = live_with_tab(conn, "/devices?operation=#{operation}", tab)
-      _ = await(second, "data-ouro-secret")
-
-      assert :sys.get_state(second.pid).socket.assigns.view_session == tab
-
-      second |> form("#ouro-deploy-auth", %{"secret" => "same-tab"}) |> render_submit()
-
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["response"]["secret"] == "same-tab"
-    end
-
-    test "is refused for a different tab", %{conn: conn, worker: worker} do
-      {:ok, first, _html} = live_with_tab(conn, "/devices", String.duplicate("ab", 16))
-      operation = prepared(first)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-4", "password", %{"metadata" => %{}})
-      _ = await(first, "data-ouro-secret")
-
-      {:ok, second, _html} =
-        live_with_tab(conn, "/devices?operation=#{operation}", String.duplicate("cd", 16))
-
-      _ = await(second, "data-ouro-secret")
-
-      second |> form("#ouro-deploy-auth", %{"secret" => "other-tab"}) |> render_submit()
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 500
-    end
-
-    test "is released when the tab that was asked is closed", %{conn: conn, worker: worker} do
-      {:ok, first, _html} = live_with_tab(conn, "/devices", String.duplicate("ab", 16))
-      operation = prepared(first)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-5", "password", %{"metadata" => %{}})
-      _ = await(first, "data-ouro-secret")
-
-      # The tab is closed over the open prompt. The worker is still attached — that is the
-      # whole point of the detached design — so `resume` cannot help, and before the broker
-      # released the binding this operation was stranded until Cancel.
-      close_tab!(first, operation)
-
-      {:ok, second, _html} =
-        live_with_tab(conn, "/devices?operation=#{operation}", String.duplicate("cd", 16))
-
-      _ = await(second, "data-ouro-secret")
-
-      second
-      |> form("#ouro-deploy-auth", %{"secret" => "the-tab-that-is-left"})
-      |> render_submit()
-
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["response"]["secret"] == "the-tab-that-is-left"
-      refute has_element?(second, "[data-ouro-rebind]")
-
-      # And the prompt after that one, which the first release did not reach: a deployment
-      # asks more than once — a second attempt, a host key, a password after a review — and
-      # the connection was still stamping each new challenge with the tab that had gone.
-      :ok = FleetWorkerFake.challenge(worker, "pw-6", "password", %{"metadata" => %{}})
-      _ = await(second, "data-ouro-secret")
-
-      second
-      |> form("#ouro-deploy-auth", %{"secret" => "and-the-one-after-it"})
-      |> render_submit()
-
-      assert_receive {:fake_worker, %{"op" => "respond"} = again}, @receive_timeout
-      assert again["response"]["secret"] == "and-the-one-after-it"
-      refute has_element?(second, "[data-ouro-rebind]")
-    end
-
-    test "a tab id this page did not mint is not used", %{conn: conn} do
-      {:ok, view, _html} = live_with_tab(conn, "/devices", "not-hex-and-far-too-short")
-
-      session = :sys.get_state(view.pid).socket.assigns.view_session
-      refute session == "not-hex-and-far-too-short"
-      assert String.match?(session, ~r/\A[0-9a-f]{32}\z/)
-    end
-
-    test "and the deployment call carries it, not the cookie's", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      attached = FleetWorkerFake.attached(worker)
-      assigns = :sys.get_state(view.pid).socket.assigns
-
-      assert attached.session == assigns.view_session
-      refute attached.session == assigns.web_session
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # The gaps the adversarial review's surviving mutants named
-  # ------------------------------------------------------------------------------------
-
-  describe "coverage the mutants found missing" do
-    setup context do
-      issuer!(context.root)
-      :ok
-    end
-
-    # M5b: `setup?` always true.
-    test "a read-scope endpoint offers no Set up this device either", context do
-      ouro!(context)
-      conn = web!(context, scope: :read)
-
-      {:ok, view, _html} = live(conn, "/devices")
-
-      refute has_element?(view, ~s{button[phx-click="deploy"]})
-
-      refute has_element?(view, ~s{button[phx-click="setup-device"]}),
-             "a read-only endpoint drew the local-setup button"
-    end
-
-    # M5b from the other side: a blocker that is not `no_ca_key` stops a setup too.
-    test "a cleartext bind offers no Set up this device", context do
-      ouro!(context)
-      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
-
-      {:ok, view, _html} = live(conn, "/devices")
-      refute has_element?(view, ~s{button[phx-click="setup-device"]})
-    end
-
-    # M7: `stage_of` by prefix. `roster` and `service` are not prefixed by their stage keys,
-    # and a prefix match files them nowhere at all.
-    test "every stage the worker reported a step for stops saying 'not reported yet'",
-         context do
-      worker = worker!(context)
-      conn = web!(context)
-
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      for {step, outcome} <- [
-            {"inspect", "ok"},
-            {"install_binary", "ok"},
-            {"roster", "ok"},
-            {"service", "ok"},
-            {"connect", "ok"},
-            {"readiness", "skipped"}
-          ] do
-        :ok =
-          FleetWorkerFake.emit(worker, %{
-            "event" => "step",
-            "machine" => "vps-1",
-            "step" => step,
-            "outcome" => outcome
-          })
-      end
-
-      _ = await(view, ~s(data-step="membership" data-outcome="ok"))
-      html = render(view)
-
-      for stage <- ~w(inspect install membership startup connect readiness) do
-        assert html =~ ~s(data-step="#{stage}" data-outcome="ok"),
-               "stage #{stage} did not take the step the worker filed under it"
-      end
-
-      refute html =~ "not reported yet"
-    end
-
-    # M7b: a stage reads as done because the last frame to arrive said so.
-    test "one failed step makes its whole stage failed, whatever arrived after it",
-         context do
-      worker = worker!(context)
-      conn = web!(context)
-
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "step",
-          "machine" => "vps-1",
-          "step" => "install_binary",
-          "outcome" => "failed",
-          "detail" => "the archive did not verify"
-        })
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "step",
-          "machine" => "vps-1",
-          "step" => "install",
-          "outcome" => "ok"
-        })
-
-      _ = await(view, "the archive did not verify")
-
-      assert render(view) =~ ~s(data-step="install" data-outcome="failed"),
-             "the stage read as done because the last frame to arrive said so"
-    end
-
-    # M4b: a fresh idempotency key per click. The same key against the same operation
-    # replays; a different one is a second intention.
-    test "a second approval replays the first rather than being a new intention", context do
-      worker = worker!(context)
-      conn = web!(context)
-
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-      digest = Devices.plan_digest(plan())
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "rv-1", "review", %{
-          "metadata" => %{"plan" => plan(), "plan_digest" => digest}
-        })
-
-      _ = await(view, "Ready to deploy")
-      key = :sys.get_state(view.pid).socket.assigns.drawer.approval_key
-
-      render_click(view, "approve", %{"digest" => digest})
-      assert_receive {:fake_worker, %{"op" => "respond"}}, @receive_timeout
-      assert :sys.get_state(view.pid).socket.assigns.announcement == "The plan was approved."
-
-      render_click(view, "approve", %{"digest" => digest})
-      Process.sleep(300)
-
-      assert :sys.get_state(view.pid).socket.assigns.drawer.approval_key == key,
-             "the second click minted a second idempotency key"
-
-      assert :sys.get_state(view.pid).socket.assigns.announcement == "The plan was approved.",
-             "the second click was treated as a second intention rather than a replay"
-    end
-
-    # M10: a device name rendered raw.
-    test "a device name that is markup is rendered as text", context do
-      hostile =
-        Map.put(@devices, "devices", [
-          %{
-            "name" => "<script>window.x=1</script>",
-            "machine" => nil,
-            "os" => "linux",
-            "address" => "100.64.3.3",
-            "online" => true,
-            "path" => "direct",
-            "state" => "discovered_installation_unknown",
-            "name_conflicts_with_roster" => nil
-          }
-        ])
-
-      ouro!(context, devices: hostile)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      refute html =~ "<script>window.x=1</script>"
-      assert html =~ "&lt;script&gt;"
-    end
-
-    # F9: markup is escaped, and a name that *renders* as a lie is not drawn at all.
-    test "a name that reverses or hides itself is normalised", context do
-      hostile =
-        Map.put(@devices, "devices", [
-          %{
-            "name" => "prod\u202Eyrammus\u202C",
-            "machine" => nil,
-            "os" => "li\u200Bnux",
-            "address" => "100.64.3.4",
-            "online" => true,
-            "path" => "direct",
-            "state" => "discovered_installation_unknown",
-            "name_conflicts_with_roster" => nil
-          }
-        ])
-
-      ouro!(context, devices: hostile)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      refute html =~ "\u202E", "a bidi override reached the page"
-      refute html =~ "\u200B", "a zero-width space reached the page"
-      assert html =~ "prodyrammus"
-      assert html =~ "linux"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Rows, the operations panel, and what a live region says twice
-  # ------------------------------------------------------------------------------------
-
-  describe "the inventory under pressure" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context)
-      %{conn: web!(context)}
-    end
-
-    test "a peer that takes a roster machine's name does not inherit its setup",
-         %{conn: conn, root: root} do
-      # The impostor row calls itself `studio`, which is a roster machine. An operation
-      # aimed at `studio` must stay on `studio`'s row: matching a journal target against a
-      # peer's self-declared name would hand its Retry button to whoever asked for the name.
-      journal!(root, "00aa11bb22cc33dd", %{
-        "state" => "interrupted",
-        "kind" => "add",
-        "target" => %{"machine" => "studio", "address" => "100.64.0.1"}
-      })
-
-      {:ok, view, _html} = live(conn, "/devices")
-
-      impostor = view |> element(~s{[data-address="100.64.9.9"]}) |> render()
-
-      refute impostor =~ "Retry"
-      refute impostor =~ "setup failed"
-      refute impostor =~ "00aa11bb22cc33dd"
-
-      # And the machine it belongs to does have it.
-      owner = view |> element(~s{[data-address="100.64.0.1"]}) |> render()
-      assert owner =~ "Retry"
-      assert owner =~ "setup failed"
-    end
-
-    test "an operation this list has a row for is drawn on that row, not in a panel",
-         %{conn: conn, root: root} do
-      journal!(root, "00aa11bb22cc33dd", %{
-        "state" => "awaiting_auth",
-        "kind" => "add",
-        "target" => %{"machine" => "vps-1", "address" => "100.64.12.44"}
-      })
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      row = view |> element(~s{[data-address="100.64.12.44"]}) |> render()
-      assert row =~ "waiting for you"
-      assert row =~ "Continue"
-      assert row =~ ~s(data-operation-state="awaiting_auth")
-
-      # Nothing is left over for a panel to hold, so there is no panel.
-      refute html =~ "Setups with no device on this list"
-    end
-
-    test "two hundred stopped setups do not push the list off the page",
-         %{conn: conn, root: root} do
-      for index <- 1..200 do
-        journal!(root, String.pad_leading(Integer.to_string(index, 16), 16, "0"), %{
-          "state" => "failed",
-          "kind" => "add",
-          "updated_at" => "2020-01-01T00:00:00Z",
-          "target" => %{"machine" => "m#{index}", "address" => "10.0.0.#{rem(index, 250)}"}
-        })
-      end
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      drawn = length(String.split(html, ~s(phx-click="open-operation"))) - 1
-
-      assert drawn <= 12,
-             "the page drew #{drawn} operation controls; a journal directory holds two hundred"
-
-      # None of them names a device on this list, so they get the one panel that exists for
-      # exactly that case — capped, rather than two hundred rows above the inventory.
-      assert html =~ "Setups with no device on this list"
-
-      # And the cap says it is one. A prefix drawn as if it were the whole is what
-      # `operations_total` exists to prevent, and dropping the sentence was how the
-      # rewrite lost it.
-      assert html =~ "more are recorded on this machine and are not drawn here"
-    end
-
-    test "a panel that is not truncated says nothing about a cap", %{conn: conn, root: root} do
-      journal!(root, "00aa11bb22cc33dd", %{
-        "state" => "awaiting_auth",
-        "kind" => "add",
-        "target" => %{"machine" => "gone", "address" => "10.9.9.9"}
-      })
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ "Setups with no device on this list"
-      refute html =~ "more are recorded on this machine"
-    end
-
-    test "a setup whose device is not on the list still has somewhere to be",
-         %{conn: conn, root: root} do
-      journal!(root, "00aa11bb22cc33dd", %{
-        "state" => "awaiting_auth",
-        "kind" => "add",
-        "target" => %{"machine" => "gone", "address" => "10.9.9.9"}
-      })
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      assert html =~ "Setups with no device on this list"
-      assert html =~ "00aa11bb22cc33dd"
-      assert html =~ "Closing the page did not cancel them."
-    end
-  end
-
-  describe "the live region" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{conn: web!(context), worker: worker}
-    end
-
-    test "says the same thing twice as two announcements", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      step = %{
-        "event" => "step",
-        "machine" => "vps-1",
-        "step" => "roster",
-        "outcome" => "ok"
-      }
-
-      :ok = FleetWorkerFake.emit(worker, step)
-      _ = await(view, "Update a roster on vps-1: done.")
-      first = render(view)
-      first_live = html_live_region(first)
-
-      :ok = FleetWorkerFake.emit(worker, step)
-
-      # A live region announces a change. The same sentence twice is one change to the
-      # announcement text unless the counter beside it changes the text node.
-      second =
-        Enum.reduce_while(1..100, first, fn _attempt, acc ->
-          html = render(view)
-
-          if html_live_region(html) != first_live,
-            do: {:halt, html},
-            else:
-              (
-                Process.sleep(20)
-                {:cont, acc}
-              )
-        end)
-
-      assert html_live_region(second) != first_live
-      assert second =~ "Update a roster on vps-1: done."
-    end
-
-    test "is emptied when the drawer closes", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
-      _ = await(view, "Setting up.")
-
-      view |> element(~s{button[phx-click="drawer-close"]}) |> render_click()
-
-      assert :sys.get_state(view.pid).socket.assigns.announcement == "",
-             "the last deployment's sentence is still there for the next one to read out"
-    end
-  end
-
-  describe "a member the cluster can see" do
-    setup context do
-      issuer!(context.root)
-      :ok
-    end
-
-    defp member_inventory do
-      Map.put(@devices, "devices", [
-        %{
-          "name" => "buildbox",
-          "machine" => "buildbox",
-          "suggested_machine" => "buildbox",
-          "os" => "linux",
-          "address" => "100.64.0.2",
-          "online" => false,
-          "last_seen" => "2026-09-01T00:00:00Z",
-          "path" => "unknown",
-          "state" => "fleet_member_connected",
-          "action" => "view device",
-          "name_conflicts_with_roster" => nil,
-          "connected" => true,
-          "compatible" => true,
-          "runtime_running" => true,
-          "last_probe" => "2026-09-17T09:00:00Z"
-        }
-      ])
-    end
-
-    test "reads as in the fleet, and offers its details rather than a deployment", context do
-      ouro!(context, devices: member_inventory())
-      conn = web!(context)
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      assert html =~ "in the fleet"
-      assert html =~ ~s(data-state="fleet_member_connected")
-      assert view |> element(~s{#devices-list}) |> render() =~ "buildbox"
-
-      row = view |> element(~s{[data-address="100.64.0.2"]}) |> render()
-      refute row =~ "Add to fleet"
-      assert row =~ "Details"
-    end
-
-    test "the cluster's questions are in the details panel, with the exact instant",
-         context do
-      ouro!(context, devices: member_inventory())
-      conn = web!(context)
-
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      # Four different questions, never collapsed into one another. This runtime's cluster
-      # does not know the machine the fixture invented, so each reads "not reported" —
-      # which is the point: absent is not "no".
-      assert html =~ "Connected to this runtime"
-      assert html =~ "Compatible build"
-      assert html =~ "Its runtime is running"
-      assert html =~ "Last answered this runtime"
-
-      # Section 5.1 keeps the ISO instant off the rows and puts it here, where somebody
-      # opened a panel to ask for it.
-      assert html =~ "2026-09-01T00:00:00Z"
-    end
-
-    test "presence on a row is the network's answer, and only that" do
-      # The old row joined five facts with interpuncts, including a raw timestamp. The
-      # network client's answer is one of them; the cluster's are the panel's.
-      offline =
-        Devices.presence_word(
-          %{"online" => false, "last_seen" => "2026-09-15T00:00:00Z"},
-          ~U[2026-09-18 00:00:00Z]
-        )
-
-      assert offline == "offline, seen 3 days ago"
-
-      assert Devices.presence_word(%{"online" => true}) == "online"
-
-      # Nothing reported is not "offline".
-      assert Devices.presence_word(%{"online" => nil}) == "presence not reported"
-      assert Devices.presence_word(%{}) == "presence not reported"
-    end
-
-    test "the dot follows the word rather than carrying it" do
-      assert Devices.presence_dot(%{"online" => true}) == "●"
-      assert Devices.presence_dot(%{"online" => false}) == "○"
-      assert Devices.presence_dot(%{"online" => nil}) == "–"
-    end
-
-    test "a fact the runtime could not establish is not reported as no", context do
-      unknown =
-        Map.put(@devices, "devices", [
-          %{
-            "name" => "buildbox",
-            "machine" => "buildbox",
-            "suggested_machine" => "buildbox",
-            "os" => "linux",
-            "address" => "100.64.0.2",
-            "online" => nil,
-            "last_seen" => nil,
-            "path" => "unknown",
-            "state" => "fleet_member",
-            "action" => "view device",
-            "name_conflicts_with_roster" => nil,
-            "connected" => nil,
-            "compatible" => nil,
-            "runtime_running" => nil,
-            "last_probe" => nil
-          }
-        ])
-
-      ouro!(context, devices: unknown)
-      conn = web!(context)
-
-      {:ok, view, _html} = live(conn, "/devices")
-
-      row = view |> element(~s{[data-address="100.64.0.2"]}) |> render()
-      assert row =~ "presence not reported"
-      refute row =~ "offline"
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      # `nil` is "not reported", which is a different answer from "no".
-      assert html =~ "not reported"
-      refute html =~ "<dd>no</dd>"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Four claims a mutant walked past
-  # ------------------------------------------------------------------------------------
-
-  describe "what the page will not do" do
-    setup context do
-      issuer!(context.root)
-      worker = worker!(context)
-      %{conn: web!(context), worker: worker}
-    end
-
-    test "send a digest it did not vouch for, even when the click carries one",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "rv-2", "review", %{
-          "metadata" => %{"plan" => plan(), "plan_digest" => Devices.plan_digest(plan())}
-        })
-
-      _ = await(view, "Ready to deploy")
-
-      # A click is a message, and this one carries a digest of some *other* document — the
-      # shape is right, the plan is not. Approval sends one thing about a plan, so it is the
-      # one thing this page checks rather than repeats.
-      html = render_click(view, "approve", %{"digest" => String.duplicate("a", 64)})
-
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 500
-      assert html =~ "not this page"
-      assert html =~ ~s(id="ouro-deploy-error")
-    end
-
-    test "ask for a handover when all it was told to do was resume",
-         %{conn: conn, root: root} do
-      # Retry is a resume of this identity's *own* operation, and the attach frame it sends
-      # says so: `takeover: false`. The worker records a takeover when one happens and binds
-      # every later challenge to whoever took it, so a page that set the flag by default
-      # would make every ordinary recovery a silent handover with an audit line to match.
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-      journal!(root, operation, %{"state" => "failed", "kind" => "add"})
-      detach!(operation)
-
-      view |> element(~s{button[phx-click="resume"]}) |> render_click()
-
-      assert_receive {:fake_worker, %{"op" => "attach"} = frame}, @receive_timeout
-      assert frame["takeover"] == false, "an ordinary retry asked the worker for a takeover"
-
-      # And the explicit one does say so.
-      detach!(operation)
-      render_click(view, "resume", %{"operation" => operation, "takeover" => "true"})
-
-      assert_receive {:fake_worker, %{"op" => "attach"} = taken}, @receive_timeout
-      assert taken["takeover"] == true
-    end
-
-    test "render a step detail as markup", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      # Both paths a detail is drawn on: a step the page files under one of the six stages,
-      # and one it does not — `test_task` belongs to none of them and is drawn under its own
-      # name. A test that only exercised one left the other rendering whatever arrived.
-      for {step, marker} <- [{"install", "stage"}, {"test_task", "extra"}] do
-        payload = "<img src=x onerror=window.#{marker}=1>"
-
-        :ok =
-          FleetWorkerFake.emit(worker, %{
-            "event" => "step",
-            "machine" => "vps-1",
-            "step" => step,
-            "outcome" => "failed",
-            "detail" => payload
-          })
-
-        # Awaited on a marker unique to *this* step, because the escaped form of the other
-        # one is already on the page — a wait satisfied by the previous iteration's evidence
-        # would let the assertion below pass without ever seeing this step at all.
-        html = await(view, "window.#{marker}=1")
-
-        refute html =~ payload, "#{step}'s detail was rendered as markup"
-        refute html =~ "<img src=x"
-
-        # And on the element itself, so the claim cannot be satisfied by the other step's
-        # escaped copy sitting elsewhere on the page.
-        drawn = view |> element(~s{[data-step="#{step}"]}) |> render()
-        assert drawn =~ "window.#{marker}=1"
-        refute drawn =~ "<img", "#{step}'s own row carries a tag"
-      end
-
-      # And a log line, which is the third thing a worker quotes a remote machine into.
-      :ok = FleetWorkerFake.emit(worker, %{"event" => "log", "line" => "<b>from ssh</b>"})
-      html = await(view, "&lt;b&gt;from ssh")
-      refute html =~ "<b>from ssh"
-    end
-
-    test "refuse something without saying so out loud", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(worker, "pw-9", "password", %{"metadata" => %{}})
-      _ = await(view, "data-ouro-secret")
-      :ok = FleetWorkerFake.refuse_next(worker, "authentication_failed")
-
-      view |> form("#ouro-deploy-auth", %{"secret" => "wrong"}) |> render_submit()
-      assert_receive {:fake_worker, %{"op" => "respond"}}, @receive_timeout
-
-      # A refusal an operator has to notice a red box to learn about is a refusal a screen
-      # reader never mentions. It goes to the live region as well.
-      assert :sys.get_state(view.pid).socket.assigns.announcement =~ "refused the request"
-    end
-  end
-
-  describe "a challenge's own facts" do
-    test "are read from the top of the challenge, and from a nested metadata too" do
-      # Both shapes, because the broker lifts and an older one did not. `metadata/1` is the
-      # one place that decision lives, so it is the one place worth pinning.
-      lifted = %{"challenge" => "c", "kind" => "password", "user" => "deploy", "port" => 22}
-      nested = %{"challenge" => "c", "kind" => "password", "metadata" => %{"user" => "deploy"}}
-
-      assert Devices.metadata(lifted)["user"] == "deploy"
-      assert Devices.metadata(lifted)["port"] == 22
-      assert Devices.metadata(nested)["user"] == "deploy"
-      assert Devices.metadata(nil) == %{}
-
-      # And the labels come out of whichever shape carried them.
-      assert Devices.secret_label(Map.put(lifted, "target", "100.64.0.9")) ==
-               "Password for deploy@100.64.0.9"
-
-      assert Devices.secret_label(%{"kind" => "passphrase", "key_label" => "~/.ssh/id"}) ==
-               "Passphrase for the key ~/.ssh/id"
-    end
-  end
-
-  describe "the command row" do
-    test "is offered where the inventory is, and not where it is not", context do
-      issuer!(context.root)
-      ouro!(context)
-      _conn = web!(context)
-
-      offered = Ouroboros.Web.Commands.available(%{scope: :operate})
-      assert Enum.any?(offered, &(&1.id == "runtime.devices"))
-
-      row = Enum.find(Ouroboros.Web.Commands.all(), &(&1.id == "runtime.devices"))
-      assert row.label == "Devices"
-      assert row.slash == "/devices"
-      assert row.group == :runtime
-
-      # With identities configured and a non-administrator asking, the row is not drawn:
-      # `fleet.devices` is administrator-only even at read scope.
-      identities!(context)
-
-      Ouroboros.Audit.Identity.install(%{
-        "id" => "olive",
-        "token_sha256" => digest("operator-token")
-      })
-
-      refute Enum.any?(
-               Ouroboros.Web.Commands.available(%{scope: :operate}),
-               &(&1.id == "runtime.devices")
-             )
-
-      Ouroboros.Audit.Identity.install(nil)
-    end
-  end
-
-  defp digest(token), do: :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
-
-  test "a reopened local setup can resume before its CA exists", context do
-    worker!(context)
-    conn = web!(context)
-    {:ok, view, _} = live(conn, "/devices")
-    render_click(view, "setup-device", %{"address" => "100.64.0.7"})
-
-    view
-    |> form("#ouro-deploy-setup", %{"machine" => "studio", "address" => "100.64.0.7"})
-    |> render_submit()
-
-    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-    operation = operation(view)
-    journal!(context.root, operation, %{"state" => "failed", "kind" => "setup"})
-    detach!(operation)
-    {:ok, reopened, _} = live(conn, "/devices?operation=" <> operation)
-    socket = :sys.get_state(reopened.pid).socket
-    assert socket.assigns.drawer.kind == "setup"
-    assert :ok == DevicesLive.allowed?(socket, :setup)
-    render_click(reopened, "resume", %{"operation" => operation})
-    assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-  end
-
-  describe "review follow-ups" do
-    setup context do
-      %{worker: worker!(context)}
-    end
-
-    test "local setup with no CA key still shows Cancel setup", context do
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{button[phx-click="setup-device"][phx-value-address="100.64.0.7"]})
-      |> render_click()
-
-      view
-      |> form("#ouro-deploy-setup", %{"machine" => "studio", "address" => "100.64.0.7"})
-      |> render_submit()
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      html = render(view)
-      assert html =~ "Cancel setup"
-      refute has_element?(view, ~s{button[phx-click="cancel-setup"][disabled]})
-
-      view |> element(~s{button[phx-click="cancel-setup"]}) |> render_click()
-      assert_receive {:fake_worker, %{"op" => "cancel"}}, @receive_timeout
-    end
-
-    test "opening a second operation resets the drawer and unsubscribes the first", context do
-      issuer!(context.root)
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-      first = prepared(view)
-      {:ok, first_pid} = Ouroboros.Fleet.Deployment.client(first)
-
-      second = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-      journal!(context.root, second, %{"state" => "interrupted", "kind" => "add"})
-
-      view |> element(~s{button[phx-click="refresh"]}) |> render_click()
-      render_click(view, "open-operation", %{"operation" => second})
-
-      drawer = :sys.get_state(view.pid).socket.assigns.drawer
-      assert drawer.operation == second
-      assert drawer.cancelled? == false
-      assert drawer.approved == nil
-      assert drawer.residue == []
-      assert drawer.secret_nonce == 0
-      assert drawer.takeover == nil
-      refute drawer.operation == first
-
-      # The cast has to land; the first client must no longer be notifying this view.
-      Process.sleep(50)
-      refute Map.has_key?(:sys.get_state(first_pid).subscribers, view.pid)
-    end
-
-    test "a bidi-control device name is sanitized in the host-trust step", context do
-      issuer!(context.root)
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      evil = "good\u202Etxt.exe"
-
-      :sys.replace_state(view.pid, fn %{socket: socket} = state ->
-        drawer = socket.assigns.drawer
-        device = Map.put(drawer.device || %{}, "name", evil)
-        %{state | socket: Phoenix.Component.assign(socket, :drawer, %{drawer | device: device})}
-      end)
-
-      :ok =
-        FleetWorkerFake.challenge(context.worker, "ht-bidi", "host_trust", %{
-          "metadata" => %{"address" => evil, "port" => "22"}
-        })
-
-      html = await(view, "First time connecting")
-      refute html =~ <<0x202E::utf8>>
-      assert html =~ "good"
-    end
-
-    test "Details opens a read-only panel on a member, and Open a link on this machine",
-         context do
-      issuer!(context.root)
-      conn = web!(context)
-      {:ok, view, html} = live(conn, "/devices")
-
-      # The machine this runtime is on does not get a details drawer: section 5.1 sends it
-      # to the machines panel instead.
-      refute has_element?(
-               view,
-               ~s{[data-address="100.64.0.1"] button[phx-click="inspect-device"]}
-             )
-
-      assert html =~ ~s(<a class="ouro-button" href="/status">Open</a>)
-
-      assert has_element?(
-               view,
-               ~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]}
-             )
-
-      assert html =~ "Details"
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      assert html =~ "Name in the fleet"
-      assert html =~ "Name on the network"
-      assert html =~ "Its runtime is running"
-      assert html =~ "not reported"
-      assert has_element?(view, ~s{#ouro-deploy button[phx-click="refresh"]})
-    end
-
-    test "read scope still gets the details panel", context do
-      issuer!(context.root)
-      conn = web!(context, scope: :read)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      assert html =~ "Name in the fleet"
-      refute has_element?(view, ~s{button[phx-click="cancel-setup"]})
-    end
-
-    test "a pending authenticate is refused after the bind becomes cleartext", context do
-      issuer!(context.root)
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      :ok = FleetWorkerFake.challenge(context.worker, "pw-stale", "password")
-      _ = await(view, ~s(data-ouro-secret))
-
-      config = Config.for_endpoint(Ouroboros.Web.Endpoint)
-      Phoenix.Config.put(Ouroboros.Web.Endpoint, :ouroboros_web, %{config | bind: {0, 0, 0, 0}})
-
-      html =
-        view
-        |> form("#ouro-deploy-auth", %{"challenge" => "pw-stale", "secret" => "stale-secret"})
-        |> render_submit()
-
-      assert html =~ "credential entry is refused here"
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 400
-    end
-
-    test "forwarded headers do not change the cleartext bind decision", context do
-      issuer!(context.root)
-
-      conn =
-        web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
-        |> Plug.Conn.put_req_header("x-forwarded-for", "127.0.0.1")
-        |> Plug.Conn.put_req_header("x-forwarded-proto", "https")
-        |> Map.put(:host, "ouro.example")
-
-      {:ok, view, html} = live(conn, "/devices")
-      assert html =~ "credential entry is refused here"
-      refute has_element?(view, ~s{button[phx-click="deploy"]:not([disabled])})
-    end
-
-    test "a raise in authenticate assigns a generic error and never logs the secret",
-         context do
-      issuer!(context.root)
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-      :ok = FleetWorkerFake.challenge(context.worker, "pw-boom", "password")
-      _ = await(view, ~s(data-ouro-secret))
-
-      secret = "LIVE-SECRET-#{System.unique_integer([:positive])}"
-
-      :sys.replace_state(view.pid, fn %{socket: socket} = state ->
-        %{state | socket: Phoenix.Component.assign(socket, :crash_point, fn -> raise "boom" end)}
-      end)
-
-      log =
-        capture_log(fn ->
-          view
-          |> form("#ouro-deploy-auth", %{"challenge" => "pw-boom", "secret" => secret})
-          |> render_submit()
-        end)
-
-      refute log =~ secret
-      assert render(view) =~ "The setup could not complete that action."
-    end
-
-    test "malformed events do not crash the view", context do
-      issuer!(context.root)
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      assert render_click(view, "deploy", %{})
-      assert render_click(view, "filter", %{"filter" => "nope"})
-      assert render_click(view, "approve", %{})
-      assert render_click(view, "no-such-event", %{"x" => 1})
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # What the 2026-09-18 review asked for
-  # ------------------------------------------------------------------------------------
-
-  describe "relative time" do
-    # Section 5.1: a row says how long ago, never an ISO instant. `now` is an argument so
-    # this states the moment it is asking about instead of racing the wall clock.
-    @now ~U[2026-09-18 12:00:00Z]
-
-    test "reads as a person would say it" do
-      assert Devices.relative_time("2026-09-18T11:59:30Z", @now) == "just now"
-      assert Devices.relative_time("2026-09-18T11:57:00Z", @now) == "3 min ago"
-      assert Devices.relative_time("2026-09-18T11:00:00Z", @now) == "1 hour ago"
-      assert Devices.relative_time("2026-09-18T10:00:00Z", @now) == "2 hours ago"
-      assert Devices.relative_time("2026-09-17T12:00:00Z", @now) == "1 day ago"
-      assert Devices.relative_time("2026-09-15T12:00:00Z", @now) == "3 days ago"
-    end
-
-    test "never pluralises the abbreviation, and never counts backwards" do
-      assert Devices.relative_time("2026-09-18T11:59:00Z", @now) == "1 min ago"
-      refute Devices.relative_time("2026-09-18T11:55:00Z", @now) =~ "mins"
-
-      # Two clocks that disagree is ordinary on a private network, and a negative age is
-      # not a thing to show anybody.
-      assert Devices.relative_time("2026-09-18T12:30:00Z", @now) == "just now"
-    end
-
-    test "answers nothing for what it cannot read, so a caller can fall back" do
-      assert Devices.relative_time(nil, @now) == nil
-      assert Devices.relative_time("", @now) == nil
-      assert Devices.relative_time("the day before yesterday", @now) == nil
-      assert Devices.relative_time(%{"at" => 1}, @now) == nil
-    end
-  end
-
-  describe "the Advanced disclosure" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context)
-      %{conn: web!(context)}
-    end
-
-    test "stays open across a change event on the form it lives in", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-      |> render_click()
-
-      refute has_element?(view, "details.ouro-devices-advanced[open]")
-
-      html =
-        view
-        |> element(~s{summary[phx-click="advanced"]})
-        |> render_click()
-
-      assert html =~ ~s(<details class="ouro-devices-advanced" open)
-      assert has_element?(view, "details.ouro-devices-advanced[open]")
-
-      # Finding 6. The element carried no `open` attribute and the `advanced` event wrote a
-      # field nothing read, so every keystroke in the form above collapsed the disclosure.
-      html =
-        view
-        |> form("#ouro-deploy-connect", %{"ssh_user" => "d"})
-        |> render_change()
-
-      assert html =~ ~s(<details class="ouro-devices-advanced" open),
-             "a change event on the form collapsed the disclosure again"
-
-      assert has_element?(view, "details.ouro-devices-advanced[open]")
-
-      # And it still closes when it is asked to.
-      view |> element(~s{summary[phx-click="advanced"]}) |> render_click()
-      refute has_element?(view, "details.ouro-devices-advanced[open]")
-    end
-  end
-
-  describe "a worker that stopped" do
-    setup context do
-      issuer!(context.root)
-      %{worker: worker!(context), conn: web!(context)}
-    end
-
-    test "is quoted in its own last words, with a Retry", %{conn: conn, root: root} do
-      {:ok, view, _html} = live(conn, "/devices")
-      operation = prepared(view)
-
-      # Section 5.5: the journal is unfinished, no `done` frame exists, and the runtime can
-      # say why the worker is gone. Finding 5 is the page without it — the reason was in
-      # the worker's private log and the operation sat at "inspecting" saying nothing.
-      #
-      # The snapshot is written into the drawer directly because `Journal.@fields` does not
-      # carry `worker_exit` yet: that allowlist is the runtime half of section 5.5 and is
-      # landing separately. What is asserted here is this page's half — that a snapshot
-      # carrying the field is drawn, in the worker's words, with the one control that does
-      # something about it.
-      _ = root
-
-      :sys.replace_state(view.pid, fn state ->
-        put_in(state.socket.assigns.drawer.status, %{
-          "operation" => operation,
-          "state" => "inspecting",
-          "kind" => "add",
-          "source" => "journal",
-          "attached" => false,
-          "worker_exit" => %{
-            "code" => 1,
-            "last_lines" => ["socket path is 118 bytes", "giving up"]
-          }
-        })
-      end)
-
-      # Any event that re-assigns the drawer republishes it; `advanced` is the one that
-      # touches nothing else, so what is drawn below is the injected snapshot rather than a
-      # side effect of the event.
-      html = render_click(view, "advanced", %{"open" => "true"})
-
-      assert html =~ "The setup worker stopped: socket path is 118 bytes · giving up"
-      assert html =~ "data-ouro-worker-exit"
-
-      assert has_element?(view, ~s{[data-ouro-worker-exit] button[phx-click="resume"]})
-    end
-
-    test "says nothing when the runtime did not say" do
-      # No record is not an accusation. The ordinary "no worker is attached" reading stands.
-      assert Devices.worker_exit(nil) == nil
-      assert Devices.worker_exit(%{}) == nil
-      assert Devices.worker_exit(%{"last_lines" => []}) == nil
-      assert Devices.worker_exit(%{"last_lines" => ["", "  "]}) == nil
-    end
-
-    test "reports an exit code even when the worker printed nothing" do
-      # Section 5.5 specifies `{code, last_lines}`. A worker that died with a status and no
-      # printable line is still a worker that died, and answering nil there would be
-      # finding 5 again with one field filled in.
-      assert Devices.worker_exit(%{"code" => 1}) ==
-               "The setup worker stopped with status 1."
-
-      assert Devices.worker_exit(%{"code" => 1, "last_lines" => []}) ==
-               "The setup worker stopped with status 1."
-
-      # The lines win when there are any: they say more than the number does.
-      assert Devices.worker_exit(%{"code" => 1, "last_lines" => ["no such file"]}) ==
-               "The setup worker stopped: no such file"
-    end
-
-    test "sanitizes what the worker quoted out of a remote machine" do
-      said = Devices.worker_exit(%{"last_lines" => ["<b>boom</b>", "line\ttwo"]})
-
-      assert said == "The setup worker stopped: <b>boom</b> · line two"
-    end
-  end
-
-  describe "a development runtime" do
-    test "blocks setting this machine up, and says why in one sentence" do
-      assert Devices.deploy_blocker("dev_runtime", nil) ==
-               "This is a development runtime; the packaged `ouro` is what sets a machine up."
-
-      assert Devices.deploy_blocker("dev_runtime", :standalone) =~ "packaged `ouro`"
-    end
-
-    test "is a reason for setup and not for adding another machine" do
-      # Section 5.5: `dev_runtime` blocks `setup` only. A dev runtime cannot set *itself*
-      # up — the LaunchAgent it writes exits 1 — but adding a machine over SSH installs a
-      # packaged release on the target, which this runtime's own shape says nothing about.
-      refute DevicesLive.setup?(socket_with(["dev_runtime"]))
-      refute DevicesLive.setup?(socket_with(["dev_runtime", "no_ca_key"]))
-
-      # And the one reason that is not a reason for a local setup still is not.
-      assert DevicesLive.setup?(socket_with(["no_ca_key"]))
-      assert DevicesLive.setup?(socket_with([]))
-
-      # Any other blocker stops both.
-      refute DevicesLive.setup?(socket_with(["no_data_dir"]))
-    end
-
-    defp socket_with(reasons) do
-      %{
-        assigns: %{
-          scope: :operate,
-          availability: :available,
-          inventory: %{
-            "host" => %{
-              "os" => "darwin",
-              "capabilities" => %{"deploy" => reasons == [], "reasons" => reasons}
-            },
-            "devices" => []
-          }
-        }
-      }
-    end
-  end
-
-  describe "removing a member" do
-    setup context do
-      issuer!(context.root)
-      %{worker: worker!(context), conn: web!(context)}
-    end
-
-    test "is reached from the member's details panel, not from its row", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/devices")
-
-      # Section 5.1: "Remove from fleet lives in the member's details panel, not on the row."
-      refute html =~ "Remove from fleet"
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      assert html =~ "Remove from fleet"
-
-      assert has_element?(
-               view,
-               ~s{button[phx-click="leave-device"][phx-value-address="100.64.0.2"]}
-             )
-    end
-
-    test "sends kind leave with the roster machine, and never an address as a name",
-         %{conn: conn, fake_dir: fake_dir} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-      |> render_click()
-
-      html =
-        view
-        |> element(~s{button[phx-click="leave-device"][phx-value-address="100.64.0.2"]})
-        |> render_click()
-
-      # Section 5.4's sentence, named after the machine rather than "this device".
-      assert html =~ "Remove buildbox from the fleet"
-      assert html =~ "Stop Ouroboros on buildbox, retire its credentials"
-      assert html =~ "Its sessions and data stay on that machine."
-
-      # The CLI recipe is *not* here: it is the repair for a removal that failed because
-      # the member never answered, and this form has attempted nothing yet.
-      refute html =~ "ouro fleet sessions forget"
-      refute html =~ "did not answer"
-
-      _ = fake_dir
-
-      view
-      |> form("#ouro-deploy-leave", %{"ssh_user" => "deploy"})
-      |> render_change()
-
-      # The document this drawer sends. Asserted on the request rather than on what a fake
-      # worker received, because `fleet.deployment.prepare` does not accept `leave` yet —
-      # that is the runtime half of section 5.5, landing separately — and a page that built
-      # the wrong document would otherwise be caught only after that lands.
-      request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
-
-      assert request["kind"] == "leave"
-      assert request["target"]["machine"] == "buildbox"
-      assert request["ssh_user"] == "deploy"
-      assert request["port"] == 22
-
-      # A leave names a roster machine. Sending an address as the target would be asking
-      # the engine to retire whatever answers at it.
-      refute Map.has_key?(request["target"], "address")
-
-      # And no secret travels in it, on any path.
-      for key <- ~w(secret password passphrase), do: refute(Map.has_key?(request, key))
-    end
-
-    test "an agent fingerprint is not mistaken for a key file's path", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-      |> render_click()
-
-      # OpenSSH prints a SHA256 fingerprint as base64, whose alphabet includes "/". Deciding
-      # on "is there a slash anywhere in it" sent about half of all real fingerprints as a
-      # key file's path, which then failed on a file that does not exist.
-      for reference <- [
-            "SHA256:n0tAr3alF/ngerPr1ntBut1tHasASlash+In1t",
-            "SHA256:noslashesinthisoneatall",
-            "ssh-ed25519 AAAAC3Nza/C1lZDI1NTE5"
-          ] do
-        view
-        |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy", "identity_ref" => reference})
-        |> render_change()
-
-        request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
-
-        assert request["identity"] == %{"kind" => "agent", "ref" => reference},
-               "#{reference} was not read as an agent identity"
-      end
-
-      # And a path still is one.
-      for path <- ["/home/ouro/.ssh/id_ed25519", "~/.ssh/id_ed25519", "./key"] do
-        view
-        |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy", "identity_ref" => path})
-        |> render_change()
-
-        request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
-
-        assert request["identity"] == %{"kind" => "key", "ref" => path},
-               "#{path} was not read as a key file"
-      end
-    end
-
-    test "no identity at all is the default identity, named by nothing", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-      |> render_click()
-
-      view
-      |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy"})
-      |> render_change()
-
-      request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
-
-      # Section 5.2: the default SSH identity is used and a target that asks for a password
-      # raises the challenge. An empty Advanced field is not an identity to send.
-      refute Map.has_key?(request, "identity")
-    end
-
-    test "an add names both the address and the machine", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-      |> render_click()
-
-      view
-      |> form("#ouro-deploy-connect", %{"ssh_user" => "deploy"})
-      |> render_change()
-
-      request = DevicesLive.prepare_params(:sys.get_state(view.pid).socket.assigns.drawer)
-
-      assert request["kind"] == "add"
-      assert request["target"]["address"] == "100.64.12.44"
-      # Finding 2 and finding 3: a machine name, and the suggested one rather than the
-      # display name.
-      assert request["target"]["machine"] == "vps-1"
-    end
-
-    test "cannot be aimed at a device that is not a member", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      # `vps-1` is a discovered peer, not a roster member. The event is a message a browser
-      # sends, so the gate is asked again where a click cannot skip it.
-      html = render_click(view, "leave-device", %{"address" => "100.64.12.44"})
-
-      assert html =~ "not a member this fleet can remove"
-      refute has_element?(view, "#ouro-deploy-leave")
-
-      html = render_click(view, "leave-device", %{"address" => "10.0.0.1"})
-      assert html =~ "does not list that address"
-    end
-  end
-
-  describe "what may and may not block a removal" do
-    setup context do
-      %{worker: worker!(context)}
-    end
-
-    test "a machine that holds no certificate authority key can still remove one", context do
-      # Section 5.5: a leave is exempt from `no_ca_key`, because removing a machine retires
-      # credentials rather than issuing them. Gating it on the same question as adding one
-      # made a member unremovable from every machine in the fleet but the issuer.
-      #
-      # No `issuer!/1`, so this runtime holds no CA key.
-      conn = web!(context)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      assert html =~ "Remove from fleet"
-
-      html =
-        view
-        |> element(~s{button[phx-click="leave-device"][phx-value-address="100.64.0.2"]})
-        |> render_click()
-
-      assert html =~ "Remove buildbox from the fleet"
-      assert has_element?(view, "#ouro-deploy-leave")
-
-      # Adding one, on the same machine, still is not offered: that needs the authority a
-      # removal does not.
-      refute has_element?(view, ~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-    end
-
-    test "a blocker that is not about issuing stops a removal too", context do
-      # A cleartext bind stops this runtime running the operation at all, whichever
-      # direction it points, so it stops a removal as well.
-      issuer!(context.root)
-      conn = web!(context, bind: {0, 0, 0, 0}, allow_remote: true)
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = render_click(view, "leave-device", %{"address" => "100.64.0.2"})
-
-      assert html =~ "credential entry is refused here"
-      refute has_element?(view, "#ouro-deploy-leave")
-    end
-  end
-
-  describe "the one change event this page has" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context)
-      %{conn: web!(context)}
-    end
-
-    test "never carries a password, whatever is submitted to it", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{button[phx-click="deploy"][phx-value-address="100.64.12.44"]})
-      |> render_click()
-
-      # `connect-change` merges only the keys the form already has, so a field that is not
-      # one of them is dropped rather than kept. Nothing on this page streams a secret.
-      html =
-        render_change(view, "connect-change", %{
-          "address" => "100.64.12.44",
-          "secret" => "hunter2",
-          "password" => "hunter2"
-        })
-
-      form = :sys.get_state(view.pid).socket.assigns.drawer.form
-
-      refute Map.has_key?(form, "secret")
-      refute Map.has_key?(form, "password")
-      refute html =~ "hunter2"
-      refute render(view) =~ "hunter2"
-    end
-
-    test "is not on the form that carries one", context do
-      worker = worker!(context)
-      {:ok, view, _html} = live(context.conn, "/devices")
-      _operation = prepared(view)
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "pw-nc", "password", %{
-          "metadata" => %{"user" => "deploy", "target" => "100.64.12.44"}
-        })
-
-      html = await(view, "data-ouro-secret")
-
-      # The one rule the secret-handling section forbids breaking by name: the field that
-      # takes a password is submitted once and never streamed.
-      [auth_form] = Regex.run(~r/<form id="ouro-deploy-auth"[^>]*>/, html)
-
-      refute auth_form =~ "phx-change"
-      assert auth_form =~ ~s(phx-submit="authenticate")
-      assert html =~ ~s(type="password")
-      assert html =~ "Password for deploy@100.64.12.44"
-    end
-  end
-
-  # ------------------------------------------------------------------------------------
-  # A removal, in words about a removal
-  # ------------------------------------------------------------------------------------
-
-  # The 2026-09-18 fix wave, from a real "Remove from fleet" run against a Raspberry Pi.
-  # Every one of these was the page describing a *setup* over an operation that took a
-  # machine away: the state was read and the kind was thrown away.
-  describe "a removal reads as a removal" do
-    setup context do
-      issuer!(context.root)
-      roster!(context.root, [%{"machine" => "buildbox", "host" => "100.64.0.2"}])
-      %{worker: worker!(context), conn: web!(context)}
-    end
-
-    test "a connected member keeps its failed removal reachable after closing the drawer",
-         context do
-      {:ok, view, _html} = live(context.conn, "/devices")
-      operation = prepared_leave(view)
-
-      journal!(context.root, operation, %{
-        "state" => "failed",
-        "kind" => "leave",
-        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"},
-        "steps" => [
-          %{"machine" => "buildbox", "step" => "inspect", "outcome" => "ok"},
-          %{"machine" => "buildbox", "step" => "stop_runtime", "outcome" => "failed"}
-        ],
-        "last_error" => %{
-          "reason" => "runtime_busy",
-          "detail" => "buildbox is working; let the work finish and retry"
-        }
-      })
-
-      detach!(operation)
-
-      inventory =
-        update_in(@devices["devices"], fn rows ->
-          Enum.map(rows, fn row ->
-            if row["machine"] == "buildbox",
-              do: Map.merge(row, %{"state" => "fleet_member_connected", "connected" => true}),
-              else: row
-          end)
-        end)
-
-      File.write!(Path.join(context.fake_dir, "devices.json"), JSON.encode!(inventory))
-      view |> element(~s{#ouro-deploy button[phx-click="drawer-close"]}) |> render_click()
-
-      row = view |> element(~s{[data-address="100.64.0.2"]}) |> render()
-      assert row =~ "in the fleet"
-      assert row =~ "removal failed"
-      refute row =~ "last setup stopped"
-
-      view
-      |> element(~s{[data-address="100.64.0.2"] button[phx-click="open-operation"]})
-      |> render_click()
-
-      assert has_element?(
-               view,
-               ~s{#ouro-deploy button[phx-click="resume"][phx-value-operation="#{operation}"]}
-             )
-
-      assert render(view) =~ "buildbox is working"
-      view |> element(~s{#ouro-deploy button[phx-click="drawer-close"]}) |> render_click()
-
-      view
-      |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-      |> render_click()
-
-      refute has_element?(view, ~s{#ouro-deploy button[phx-click="leave-device"]})
-
-      assert has_element?(
-               view,
-               ~s{#ouro-deploy button[phx-click="open-operation"]},
-               "Retry removal"
-             )
-
-      view |> element(~s{#ouro-deploy button[phx-click="open-operation"]}) |> render_click()
-      view |> element(~s{#ouro-deploy button[phx-click="resume"]}) |> render_click()
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      assert operation(view) == operation
-    end
-
-    test "the row a finished removal speaks for never reads as a setup",
-         %{conn: conn, root: root} do
-      target = %{"machine" => "buildbox", "address" => "100.64.0.2"}
-
-      for {state, words, action} <- [
-            {"deploying", "removing…", "Continue"},
-            {"failed", "removal failed", "Retry"},
-            {"completed", "removed just now", "Add to fleet"}
-          ] do
-        journal!(root, "00aa00aa00aa00a1", %{
-          "state" => state,
-          "kind" => "leave",
-          "target" => target
-        })
-
-        {:ok, fresh, _html} = live(conn, "/devices")
-
-        row =
-          fresh
-          |> element(~s{[data-address="100.64.0.2"][data-operation-state="#{state}"]})
-          |> render()
-
-        assert row =~ words, "a #{state} leave does not say so on its row"
-        assert row =~ action, "a #{state} leave does not offer #{action}"
-
-        # The three the add flow owns. The row took its words from the latest operation
-        # whatever its kind, so the Pi read "set up just now" with **Open** at the end of
-        # being removed — the opposite of what had happened, over a machine that was gone.
-        refute row =~ "set up just now"
-        refute row =~ "setup failed"
-        refute row =~ "setting up"
-
-        # And a finished removal does not send an operator to the machines panel to look
-        # for a machine that is not there.
-        if state == "completed", do: refute(row =~ ~s(href="/status"))
-      end
-    end
-
-    test "a member whose setup just finished still has a way into its details",
-         %{conn: conn, root: root} do
-      journal!(root, "00aa00aa00aa00a3", %{
-        "state" => "completed",
-        "kind" => "add",
-        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"}
-      })
-
-      {:ok, view, html} = live(conn, "/devices")
-
-      # The completed add is the fresher fact and its primary control opens the machines
-      # page — which is not where Remove from fleet lives. Without a second control the
-      # details panel, and the removal inside it, were unreachable for as long as the
-      # journal was the newest thing known about the machine.
-      row = view |> element(~s{[data-address="100.64.0.2"]}) |> render()
-      assert row =~ "set up just now"
-      assert row =~ ~s(href="/status")
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-        |> render_click()
-
-      assert html =~ "Remove from fleet"
-      _ = html
-    end
-
-    test "the machine a removal finished with can be added again", %{conn: conn, root: root} do
-      journal!(root, "00aa00aa00aa00a2", %{
-        "state" => "completed",
-        "kind" => "leave",
-        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"}
-      })
-
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html =
-        view
-        |> element(~s{[data-address="100.64.0.2"] button[phx-click="deploy"]})
-        |> render_click()
-
-      # Discovery still calls it a member — it will until the network client notices — and
-      # the completed `leave` is the fresher fact. A row that offers **Add to fleet** over a
-      # button that refuses when pressed is a control that lies.
-      assert html =~ "Add buildbox to your fleet"
-      refute html =~ "not one this machine can add to the fleet"
-    end
-
-    test "the review is named after what it approves, and drops a startup line it has none of",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared_leave(view)
-
-      digest = Devices.plan_digest(leave_plan())
-
-      :ok =
-        FleetWorkerFake.challenge(worker, "leave-rev", "review", %{
-          "metadata" => %{"plan" => leave_plan(), "plan_digest" => digest}
-        })
-
-      html = await(view, digest)
-
-      # "Ready to deploy" over a plan that installs nothing and takes a machine away named
-      # the wrong procedure at the one step an operator commits to.
-      assert html =~ "Ready to remove"
-      refute html =~ "Ready to deploy"
-
-      button = view |> element(~s{button[phx-click="approve"]}) |> render()
-      assert button =~ "Remove"
-      refute button =~ "Deploy"
-
-      # The plan still carries `service: manual` — it is the same document — and "Do not
-      # start at login; this machine is started by hand" is advice about running a machine
-      # this operation is taking away.
-      refute html =~ "Do not start at login"
-      refute html =~ "Start at login"
-
-      # What a removal's review does say.
-      assert html =~ "Take buildbox out of the fleet"
-      assert html =~ "Update 2 rosters"
-      assert html =~ "No tombstone is recorded"
-    end
-
-    test "the strip draws the engine's own leave steps, and the finish step claims nothing else",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared_leave(view)
-
-      for step <- ~w(inspect stop_runtime disable_service verify_disconnected leave roster) do
-        :ok =
-          FleetWorkerFake.emit(worker, %{
-            "event" => "step",
-            "machine" => "buildbox",
-            "step" => step,
-            "outcome" => "ok"
-          })
-      end
-
-      html = await(view, ~s(data-step="roster" data-outcome="ok"))
-
-      for {key, label, _names} <- Devices.stages("leave") do
-        assert html =~ ~s(data-step="#{key}"), "the strip has no #{key} stage"
-        assert html =~ label, "the strip does not name the #{key} stage"
-      end
-
-      # The add flow's stages are not drawn at all. Before this a removal showed Install,
-      # Join fleet, Start at login, Connect and Ready, all "not reported yet" for ever, and
-      # filed its roster removal under **Join fleet**.
-      for absent <- ~w(install membership startup connect readiness) do
-        refute html =~ ~s(data-step="#{absent}"),
-               "a removal was drawn with the add flow's #{absent} stage"
-      end
-
-      refute html =~ "not reported yet"
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => true,
-          "state" => "completed",
-          "summary" => "buildbox left the fleet; its work and session history stay on it",
-          "next" => "No tombstone is recorded."
-        })
-
-      html = await(view, "is out of your fleet")
-
-      # §5.4's ending: the machine by name, the worker's own two lines, and Done.
-      assert html =~ "buildbox is out of your fleet"
-      assert html =~ "buildbox left the fleet"
-      assert html =~ "No tombstone is recorded."
-
-      refute html =~ "The setup finished"
-      refute html =~ "Readiness was not"
-      refute has_element?(view, ~s{#ouro-deploy a[href="/status"]})
-      assert has_element?(view, ~s{#ouro-deploy button[phx-click="drawer-close"]})
-    end
-
-    test "the CLI fallback is a repair for one failure, not a greeting on the form",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      view
-      |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
-      |> render_click()
-
-      html =
-        view
-        |> element(~s{button[phx-click="leave-device"][phx-value-address="100.64.0.2"]})
-        |> render_click()
-
-      # Nothing has been attempted, so nothing "did not answer". This form opened by
-      # reporting a failure that had not happened.
-      refute html =~ "did not answer"
-      refute html =~ "sessions forget"
-
-      view |> form("#ouro-deploy-leave", %{"ssh_user" => "deploy"}) |> render_submit()
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => false,
-          "reason" => "ssh_unavailable",
-          "detail" => "buildbox could not be reached over ssh"
-        })
-
-      html = await(view, "sessions forget")
-
-      # The command the CLI actually takes. `Forget` reads `--machine`, and it refuses
-      # without `--accept-state-loss` because retiring a gone machine's session-owner
-      # evidence cannot be undone — so `ouro fleet sessions forget buildbox` was a usage
-      # error handed to an operator at the end of a removal that had already failed.
-      assert html =~
-               "run `ouro fleet sessions forget --machine buildbox --accept-state-loss` " <>
-                 "on this machine"
-
-      refute html =~ "forget buildbox`"
-    end
-
-    test "a timeout after target inspection and a stop attempt never recommends forgetting",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared_leave(view)
-
-      for {step, outcome} <- [{"inspect", "ok"}, {"stop_runtime", "started"}] do
-        :ok =
-          FleetWorkerFake.emit(worker, %{
-            "event" => "step",
-            "machine" => "buildbox",
-            "step" => step,
-            "outcome" => outcome
-          })
-      end
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => false,
-          "reason" => "ssh_timeout",
-          "detail" => "the stop command timed out"
-        })
-
-      html = await(view, "the stop command timed out")
-      refute html =~ "nothing on it was changed"
-      refute html =~ "did not answer"
-      refute html =~ "sessions forget"
-      assert has_element?(view, ~s{#ouro-deploy button[phx-click="resume"]})
-    end
-
-    test "a removal that failed for a reason other than silence is not told to forget it",
-         %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared_leave(view)
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => false,
-          "reason" => "ssh_auth_failed",
-          "detail" => "buildbox refused this authentication"
-        })
-
-      html = await(view, "refused this authentication")
-
-      # That machine answered. A roster tombstone is irreversible, and it is not the repair
-      # for a credential that needs fixing.
-      refute html =~ "sessions forget"
-      refute html =~ "did not answer"
-
-      # And the heading is about the removal, not about a setup: `operation_state/1` is the
-      # add flow's vocabulary and it answers "Setup failed" for this state.
-      assert html =~ "buildbox was not removed"
-      refute html =~ "Setup failed"
-    end
-
-    test "the cause is normalised, wherever the worker got its words", %{
-      conn: conn,
-      worker: worker
-    } do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared_leave(view)
-
-      # `last_error` is the worker's, and the worker's is often something it quoted — an
-      # `ssh` diagnostic, a remote shell, a filename off a release server. The broker bounds
-      # that field and drops keys that read like credentials; it does not touch the
-      # characters, so this reached the page through `Presentation.refusal/1`, which rewrites
-      # words and is not a sanitiser. A right-to-left override in a failure sentence reverses
-      # the text after it on screen.
-      bidi = <<0x202E::utf8>>
-      pop = <<0x202C::utf8>>
-      zero_width = <<0x200B::utf8>>
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => false,
-          "reason" => "ssh_auth_failed",
-          "error" => "buildbox refused #{bidi}exe.tnegatad#{pop} for#{zero_width} deploy",
-          "detail" => "a detail nobody should see while there is an error"
-        })
-
-      html = await(view, "buildbox refused")
-
-      refute html =~ bidi
-      refute html =~ pop
-      refute html =~ zero_width
-      assert html =~ "buildbox refused exe.tnegatad for deploy"
-
-      # `last_error` still wins over `detail`, which is the ordering this is not allowed to
-      # change while adding the sanitiser in front of it.
-      refute html =~ "nobody should see"
-    end
-
-    test "a cause that sanitises to nothing falls through to the detail", %{
-      conn: conn,
-      worker: worker
-    } do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared_leave(view)
-
-      # `plain/2` answers `""` for a string that was only invisible characters, and `""` is
-      # truthy: written as a bare `||` chain this stops at nothing at all and draws an empty
-      # sentence over a real one.
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => false,
-          "reason" => "ssh_auth_failed",
-          "error" => <<0x200B::utf8, 0x202E::utf8>>,
-          "detail" => "buildbox refused this authentication"
-        })
-
-      html = await(view, "refused this authentication")
-      assert html =~ "buildbox refused this authentication"
-    end
-  end
-
-  describe "the words a page picks from a kind" do
-    test "a leave gets the engine's own five stages, and an add keeps its six" do
-      # `run_leave/1` and `stop_and_retire/5` in tui/src/fleet_setup/engine.rs, read rather
-      # than guessed at: `verify_disconnected` is `await_disconnection/3`'s and belongs with
-      # the leave, and `member_preflight` is reached on the way to the roster edits.
-      assert Devices.stages("leave") == [
-               {"inspect", "Inspect", ["inspect"]},
-               {"stop_runtime", "Stop", ["stop_runtime"]},
-               {"disable_service", "Disable startup", ["disable_service"]},
-               {"leave", "Leave", ["leave", "verify_disconnected"]},
-               {"roster", "Update rosters", ["roster", "member_preflight"]}
-             ]
-
-      # `stages/0` is still the add flow's six, which is what every other reading of "the
-      # stages" on this page means.
-      assert Enum.map(Devices.stages("setup"), &elem(&1, 1)) == [
-               "Inspect",
-               "Create fleet",
-               "Start at login"
-             ]
-
-      assert Enum.map(Devices.stages(), &elem(&1, 1)) ==
-               ["Inspect", "Install", "Join fleet", "Start at login", "Connect", "Ready"]
-
-      # One step name, two stages, one per kind: on a setup `stop_runtime` is the transition
-      # restart, and on a leave it is the idle-gated shutdown.
-      assert Devices.stage_of("stop_runtime", "leave") == "stop_runtime"
-      assert Devices.stage_of("stop_runtime", "add") == "startup"
-
-      # And the roster removal is filed under **Update rosters**, not under **Join fleet**.
-      assert Devices.stage_of("roster", "leave") == "roster"
-      assert Devices.stage_of("roster") == "membership"
-
-      # Nothing a removal runs falls through to the unfiled list under the strip.
-      for step <- ~w(inspect stop_runtime disable_service verify_disconnected leave
-                     member_preflight roster) do
-        assert Devices.stage_of(step, "leave"),
-               "the strip files #{step} under no stage of a removal"
-      end
-    end
-
-    test "the review step is named after what it approves" do
-      assert Devices.challenge_title("review", "leave") == "Ready to remove"
-      assert Devices.approve_label("leave") == "Remove"
-
-      assert Devices.challenge_title("review", "setup") == "Ready to set up"
-      assert Devices.approve_label("setup") == "Set up"
-
-      assert Devices.challenge_title("review", "add") == "Ready to deploy"
-      assert Devices.approve_label("add") == "Deploy"
-
-      # An operation whose kind this build could not read is still an add, which is the
-      # reading every other unqualified call on this page takes.
-      assert Devices.challenge_title("review") == "Ready to deploy"
-      assert Devices.approve_label(nil) == "Deploy"
-
-      # The other three headings do not depend on the kind at all.
-      for kind <- ["add", "setup", "leave"] do
-        assert Devices.challenge_title("host_trust", kind) == "First time connecting"
-        assert Devices.challenge_title("password", kind) == "Password"
-      end
-    end
-
-    test "an operation waiting for this operator says so on its row, whatever its kind" do
-      # §5.1's three. A row that read "setting up…" over an operation stopped at a host-key
-      # question told an operator to wait for something that was waiting for them.
-      for state <- ~w(awaiting_host_trust awaiting_auth awaiting_review) do
-        assert Devices.operation_words(state) == "waiting for you"
-        assert Devices.operation_words(state, "leave") == "waiting for you"
-        assert Devices.operation_action(state) == {"Continue", "open-operation"}
-        assert Devices.operation_action(state, "leave") == {"Continue", "open-operation"}
-      end
-
-      # And the running ones keep their own words.
-      for state <- ~w(inspecting deploying restarting_host checking_readiness) do
-        assert Devices.operation_words(state) == "setting up…"
-        assert Devices.operation_words(state, "leave") == "removing…"
-      end
-    end
-
-    test "a name is a name, never a boolean and never an empty string" do
-      assert Devices.name("buildbox") == "buildbox"
-      assert Devices.name("  spaced   name ") == "spaced name"
-
-      # The two values `Devices.plain/2` answers truthily and no heading can use. `false` is
-      # what `get_in/2` walks out of a consumed challenge with, and `""` is what a name of
-      # only invisible characters sanitises to — both stop a chain of `||` fallbacks, which
-      # is the whole of the "false is in your fleet" heading.
-      assert Devices.name(false) == nil
-      assert Devices.name(true) == nil
-      assert Devices.name(nil) == nil
-      assert Devices.name("") == nil
-      assert Devices.name("​​") == nil
-      assert Devices.name(%{"machine" => "buildbox"}) == nil
-    end
-
-    test "a completed operation stops saying a stage is not reported yet" do
-      # There is no readiness step here and the operation has finished: nothing more will be
-      # reported, so "not reported yet" promises a report that is not coming.
-      steps = [%{"step" => "connect", "outcome" => "ok"}]
-
-      assert Devices.readiness(steps, %{"ok" => true}) == {nil, true}
-
-      # A readiness step that reported and failed is the one thing the reader does not
-      # already have from the heading and the summary.
-      assert {sentence, false} =
-               Devices.readiness(
-                 steps ++ [%{"step" => "readiness", "outcome" => "failed"}],
-                 %{"ok" => true}
-               )
-
-      assert sentence =~ "did not report itself ready"
-
-      # An operation that has not connected still says what it does not know.
-      assert {"Readiness was not reported.", false} = Devices.readiness([], %{})
-    end
-  end
-
-  describe "the status line above the list" do
-    setup context do
-      issuer!(context.root)
-      :ok
-    end
-
-    test "a fleet with no name is named after the machine holding it", context do
-      # No `this_device_without_profile` row, so this machine is in a fleet and the status
-      # line is the one that names it rather than the standalone sentence.
-      in_a_fleet =
-        Map.put(@devices, "devices", Enum.reject(@devices["devices"], &(&1["name"] == "spare")))
-
-      ouro!(context, devices: in_a_fleet)
-      conn = web!(context)
-
-      {:ok, _view, html} = live(conn, "/devices")
-
-      # `status_line/0` in tui/src/ui/app/devices.rs: the terminal says whose fleet it is,
-      # and this page passes it the devices so it can. "This fleet is not named" was the web
-      # naming an empty field instead of the machine.
-      assert html =~ "Fleet of studio"
-      refute html =~ "This fleet is not named"
-    end
-
-    test "one machine is a machine, not machines" do
-      fleet = %{fleet_name: nil, summary: %{connected: 1, expected: 1}}
-      devices = [%{"state" => "this_device", "machine" => "studio"}]
-
-      assert Devices.status_line(fleet, "darwin", false, devices) ==
-               "Fleet of studio · 1 of 1 machine connected"
-
-      assert Devices.status_line(
-               %{fleet | summary: %{connected: 2, expected: 3}},
-               "darwin",
-               false,
-               devices
-             ) == "Fleet of studio · 2 of 3 machines connected"
-
-      # A named fleet already reads as one, so it is printed as it is.
-      assert Devices.status_line(
-               %{fleet | fleet_name: "studio's fleet"},
-               "darwin",
-               false,
-               devices
-             ) == "studio's fleet · 1 of 1 machine connected"
-
-      # And with no self row to name, the terminal's own fallback.
-      assert Devices.status_line(fleet, "darwin", false, []) ==
-               "Fleet of this machine · 1 of 1 machine connected"
-    end
-  end
-
-  describe "a drawer opened from an operation rather than from a row" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context)
-      %{conn: web!(context)}
-    end
-
-    # The row's Continue, and `/devices?operation=…` after the tab that started the
-    # operation was closed, both open a drawer with no device behind it. The heading fell
-    # straight through to its fallback and stopped naming the machine: "Remove this machine
-    # from the fleet" over a removal an operator was about to confirm.
-    test "is still titled after the machine the operation is aimed at",
-         %{conn: conn, root: root} do
-      for {kind, address, title} <- [
-            {"leave", "100.64.0.2", "Remove buildbox from the fleet"},
-            {"add", "100.64.12.44", "Add vps-1 to your fleet"}
-          ] do
-        operation = "00bb00bb00bb00b1"
-
-        journal!(root, operation, %{
-          "state" => "awaiting_review",
-          "kind" => kind,
-          "target" => %{
-            "machine" => if(kind == "leave", do: "buildbox", else: "vps-1"),
-            "address" => address
-          }
-        })
-
-        {:ok, view, _html} = live(conn, "/devices")
-
-        html =
-          view
-          |> element(
-            ~s{[data-address="#{address}"] button[phx-click="open-operation"][phx-value-operation="#{operation}"]}
-          )
-          |> render_click()
-
-        assert html =~ title, "a #{kind} opened from its row's Continue is not named"
-        refute html =~ "Remove this machine from the fleet"
-        refute html =~ "Add a machine to your fleet"
-      end
-    end
-
-    # Reopened by id from a fresh page, which is the shape the live report came from: the
-    # tab that started it is gone, so there is no row in this drawer at all.
-    test "is named from the operation alone when the address bar opened it",
-         %{conn: conn, root: root} do
-      operation = "00bb00bb00bb00b2"
-
-      journal!(root, operation, %{
-        "state" => "awaiting_review",
-        "kind" => "leave",
-        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"}
-      })
-
-      {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
-
-      assert html =~ "Remove buildbox from the fleet"
-      refute html =~ "Remove this machine from the fleet"
-    end
-
-    # A target with no roster name is still a thing an operator recognises. A manual add is
-    # exactly this case: it is aimed at an address and named later.
-    test "falls back to the address the operation was aimed at", %{conn: conn, root: root} do
-      operation = "00bb00bb00bb00b3"
-
-      journal!(root, operation, %{
-        "state" => "inspecting",
-        "kind" => "add",
-        "target" => %{"address" => "100.64.99.9"}
-      })
-
-      {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
-
-      assert html =~ "Add 100.64.99.9 to your fleet"
-      refute html =~ "Add a machine to your fleet"
-    end
-
-    # And "Set up this Mac" is a heading about *this* machine, so it never wanted a target.
-    test "a setup is still named after this machine", %{conn: conn, root: root} do
-      operation = "00bb00bb00bb00b4"
-
-      journal!(root, operation, %{
-        "state" => "inspecting",
-        "kind" => "setup",
-        "target" => %{"machine" => "spare", "address" => "100.64.0.7"}
-      })
-
-      {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
-
-      assert html =~ setup_label()
-    end
-  end
-
-  describe "the manual add form" do
-    setup context do
-      issuer!(context.root)
-      ouro!(context)
-      %{conn: web!(context)}
-    end
-
-    test "names a machine in its SSH hint even before one is known", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/devices")
-
-      html = view |> element(~s{button[phx-click="deploy-manual"]}) |> render_click()
-
-      # "Add a device by address" has no device behind it and an empty address box, and
-      # `Devices.plain("", 64)` is `""` — truthy — so the hint ended at "the account on "
-      # with nothing after it until the first keystroke.
-      assert html =~ "the account on that machine"
-      refute html =~ "the account on\n"
-
-      # And it takes the address as soon as one is typed.
-      html =
-        view
-        |> form("#ouro-deploy-connect", %{"address" => "100.64.99.9"})
-        |> render_change()
-
-      assert html =~ "the account on 100.64.99.9"
-    end
-  end
-
-  describe "a setup that connected" do
-    setup context do
-      issuer!(context.root)
-      %{worker: worker!(context), conn: web!(context)}
-    end
-
-    test "does not disclaim a readiness nobody claimed", %{conn: conn, worker: worker} do
-      {:ok, view, _html} = live(conn, "/devices")
-      _operation = prepared(view)
-
-      for step <- ~w(inspect install_binary issue install roster service connect) do
-        :ok =
-          FleetWorkerFake.emit(worker, %{
-            "event" => "step",
-            "machine" => "vps-1",
-            "step" => step,
-            "outcome" => "ok"
-          })
-      end
-
-      _ = await(view, ~s(data-step="connect" data-outcome="ok"))
-
-      :ok =
-        FleetWorkerFake.emit(worker, %{
-          "event" => "done",
-          "ok" => true,
-          "state" => "completed",
-          "summary" => "vps-1 joined the fleet and is connected"
-        })
-
-      html = await(view, "is in your fleet")
-
-      assert html =~ "vps-1 joined the fleet and is connected"
-
-      # The heading and the worker's own summary have both said it. A third line holding
-      # back a claim neither of them made is noise stacked on an answer.
-      refute html =~ "The setup finished. Readiness was not reported"
-      refute html =~ "keeps running"
-      refute html =~ "Cancel setup"
-
-      # And the stage nothing reported is not waiting for anything: this operation has
-      # stopped, so there is no "yet" left in it.
-      assert html =~ ~s(data-step="readiness")
-      assert html =~ "not checked"
-      refute html =~ "not reported yet"
-    end
   end
 end

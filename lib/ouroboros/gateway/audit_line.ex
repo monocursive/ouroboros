@@ -37,7 +37,7 @@ defmodule Ouroboros.Gateway.AuditLine do
 
   # method => the parameter keys its line may name. Anything else about the call is dropped,
   # and the digest is never computed for it.
-  @redacted %{"fleet.deployment.authenticate" => ["operation_id", "challenge"]}
+  @redacted %{"fleet.deployment.respond" => ["operation", "challenge"]}
 
   @doc "Whether this method's parameters bypass the digest entirely."
   @spec redacted?(String.t()) :: boolean()

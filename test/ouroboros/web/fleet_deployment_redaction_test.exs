@@ -1,6 +1,6 @@
 defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
   @moduledoc """
-  Acceptance item 16, for the one place a deployment secret crosses this runtime.
+  The one place a deployment secret crosses this runtime.
 
   The spec's "Secret handling and authorization" section is a single list of places a
   password or passphrase may never appear, and it names `Web.Call` and gateway parameter
@@ -8,29 +8,34 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
   one alone would be a comfortable lie:
 
     * **Instrumentation.** `Ouroboros.Gateway.AuditLine.digest/2` emits a telemetry event
-      before it returns. Driving the authenticate path with a unique secret must produce no
-      digest event for that method at all, and no emitted digest may equal the digest those
-      exact parameters would have produced. That is a statement about the hashing function's
-      inputs rather than about the log's contents.
+      before it returns. Driving `fleet.deployment.respond` with a unique secret must produce
+      no digest event for that method at all, and no emitted digest may equal the digest
+      those exact parameters would have produced. That is a statement about the hashing
+      function's inputs rather than about the log's contents.
     * **The log itself.** A unique secret must not appear in any captured line, on the
       success path, the refusal path or the failure path, through either surface.
 
   A test that only searched the log would pass against a build that hashed the password into
   it, which is the failure mode the spec calls out by name.
+
+  What is *not* asserted any more is a session binding. §10 of
+  `docs/proposals/fleet-kiss.md` deletes it: a challenge is answered by whoever is an
+  administrator on this runtime, so `session_unbound` and `challenge_not_bound` are gone and
+  the refusal a second caller gets is about the *challenge* rather than about who they are.
   """
 
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
+  alias Ouroboros.Fleet.Deployment
   alias Ouroboros.Gateway.AuditLine
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Conn
-  alias Ouroboros.Test.FleetOuroFake
-  alias Ouroboros.Test.FleetWorkerFake
+  alias Ouroboros.Test.FleetFramesFake
   alias Ouroboros.Web.Call
 
-  @method "fleet.deployment.authenticate"
+  @method "fleet.deployment.respond"
   @token String.duplicate("r", 40)
   @receive_timeout 5_000
 
@@ -42,21 +47,18 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     root = Path.join(System.tmp_dir!(), "orw2b#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
     File.chmod!(root, 0o700)
-    fake_dir = Path.join(root, "bin")
-
-    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
-    # enforces that rather than only reporting it. These suites deploy onto other machines,
-    # so they are issuers.
-    File.mkdir_p!(Path.join(root, "fleet"))
-    ca = Path.join([root, "fleet", "ca-key.pem"])
-    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
-    File.chmod!(ca, 0o600)
+    bin = Path.join(root, "bin")
 
     previous_data_dir = Application.get_env(:ouroboros, :data_dir)
     previous_ouro = System.get_env("OUROBOROS_PROCESS_ID_HELPER")
     Application.put_env(:ouroboros, :data_dir, root)
+    FleetFramesFake.install!(bin, devices: ~s({"devices":[]}\n))
 
     on_exit(fn ->
+      reap_workers()
+      Process.sleep(150)
+      FleetFramesFake.uninstall!()
+
       if previous_data_dir,
         do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
         else: Application.delete_env(:ouroboros, :data_dir)
@@ -65,10 +67,22 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
         do: System.put_env("OUROBOROS_PROCESS_ID_HELPER", previous_ouro),
         else: System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
 
-      File.rm_rf!(root)
+      _ = File.rm_rf(root)
     end)
 
-    %{root: root, fake_dir: fake_dir}
+    %{root: root, bin: bin}
+  end
+
+  defp reap_workers do
+    supervisor = Ouroboros.Fleet.Deployment.WorkerSupervisor
+
+    supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.each(fn {_id, pid, _type, _modules} ->
+      if is_pid(pid), do: DynamicSupervisor.terminate_child(supervisor, pid)
+    end)
+  catch
+    :exit, _not_running -> :ok
   end
 
   # ---------------------------------------------------------------------------
@@ -85,25 +99,22 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     test "the redacted line names the operation and the challenge, and nothing else" do
       line =
         AuditLine.params(@method, %{
-          "operation_id" => "0011223344556677",
+          "operation" => "0011223344556677",
           "challenge" => "pw-1",
           "secret" => "a-very-unique-secret-value"
         })
         |> IO.iodata_to_binary()
 
-      assert line == "redacted operation_id=0011223344556677 challenge=pw-1"
+      assert line == "redacted operation=0011223344556677 challenge=pw-1"
       refute line =~ "a-very-unique-secret-value"
     end
 
     test "an allowlisted key of an unexpected shape is named rather than printed" do
       line =
-        AuditLine.params(@method, %{
-          "operation_id" => %{"nested" => "surprise"},
-          "challenge" => nil
-        })
+        AuditLine.params(@method, %{"operation" => %{"nested" => "surprise"}, "challenge" => nil})
         |> IO.iodata_to_binary()
 
-      assert line == "redacted operation_id=unreadable challenge=absent"
+      assert line == "redacted operation=unreadable challenge=absent"
       refute line =~ "surprise"
     end
 
@@ -113,8 +124,6 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     end
 
     test "Phoenix's own parameter filter covers both credential words" do
-      # Asserted through the filter rather than against the configured list: Phoenix compiles
-      # that list into a matcher at boot, and the behaviour is what a form actually gets.
       filtered =
         Phoenix.Logger.filter_values(%{
           "password" => "p",
@@ -136,27 +145,20 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
   # Instrumentation
 
   describe "the digest never receives the secret" do
-    test "no digest event is emitted for the authenticate method, on any outcome", context do
+    test "no digest event is emitted for the respond method, on any outcome", context do
       secret = "instrumented-secret-#{System.unique_integer([:positive])}"
-
-      params = %{
-        "operation_id" => "00aa11bb22cc33dd",
-        "challenge" => "pw-1",
-        "secret" => secret
-      }
+      params = %{"operation" => "00aa11bb22cc33dd", "challenge" => "pw-1", "secret" => secret}
 
       # Computed before the probe is attached, so this call is not one of the samples. If
-      # anything on the authenticate path ever hashes these parameters, this is the value
-      # that would come out of it.
+      # anything on the respond path ever hashes these parameters, this is the value that
+      # would come out of it.
       forbidden = AuditLine.digest(params)
-
-      arrange_devices(context)
       events = probe()
 
       # Three outcomes, one method: an operation that does not exist, a malformed one, and
       # one whose data directory is gone. None of them may reach the digest.
       assert {:error, _code, _message, _data} = web_call(params)
-      assert {:error, _code, _message, _data} = web_call(%{params | "operation_id" => "zzzz"})
+      assert {:error, _code, _message, _data} = web_call(%{params | "operation" => "zzzz"})
 
       Application.delete_env(:ouroboros, :data_dir)
       assert {:error, _code, _message, _data} = web_call(params)
@@ -169,25 +171,6 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
 
       refute Enum.any?(samples, &(&1.digest == forbidden)),
              "the digest of the parameters carrying the secret was emitted"
-    end
-
-    test "a call that arrives with no client session cannot answer a challenge at all",
-         context do
-      arrange_devices(context)
-
-      # `Web.Call` installs the authenticated browser session; a caller that supplies none
-      # gets no binding, and a binding is what a challenge is answered against. Failing
-      # closed is the only safe direction: a shared "unattributed" session would let two
-      # unbound callers answer each other's credential prompts.
-      assert {:error, code, _message, data} =
-               Call.call(:operate, @method, %{
-                 "operation_id" => "00aa11bb22cc33dd",
-                 "challenge" => "pw",
-                 "secret" => "no-session-secret"
-               })
-
-      assert code == -32_003
-      assert data["reason"] == "session_unbound"
     end
 
     test "the probe is not inert: an ordinary operate method does reach the digest" do
@@ -205,35 +188,24 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
 
   describe "the secret in the log" do
     test "is absent on the success path, through the browser surface", context do
-      %{worker: worker} = arrange_worker(context)
+      FleetFramesFake.write_scenario!(context.bin, password_scenario())
       secret = "web-success-secret-#{System.unique_integer([:positive])}"
 
-      {:ok, %{"operation_id" => operation}} =
-        Ouroboros.Fleet.Deployment.prepare(request(), %{
-          subject: "runtime-unattributed",
-          session: "web-session-1"
-        })
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      await_attached(operation)
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      operation = start_add()
       await_challenge(operation, "pw")
 
       log =
         capture_log(fn ->
           assert {:ok, %{"accepted" => true}} =
-                   web_call(
-                     %{"operation_id" => operation, "challenge" => "pw", "secret" => secret},
-                     session: "web-session-1"
-                   )
+                   web_call(%{"operation" => operation, "challenge" => "pw", "secret" => secret})
         end)
 
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["response"]["secret"] == secret
+      # It arrived, which is what makes the absences below evidence rather than a tautology.
+      assert Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, secret))
 
       refute log =~ secret
       assert log =~ "web operate #{@method} params=redacted"
-      assert log =~ "operation_id=#{operation}"
+      assert log =~ "operation=#{operation}"
       assert log =~ "challenge=pw"
       # The kind and the outcome are logged by the process that knows them.
       assert log =~ "kind=password"
@@ -241,50 +213,40 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     end
 
     test "is absent on a refusal, through the listener", context do
-      %{worker: worker} = arrange_worker(context)
+      FleetFramesFake.write_scenario!(context.bin, password_scenario())
       secret = "listener-refused-secret-#{System.unique_integer([:positive])}"
 
-      first = connected(:operate)
-      second = connected(:operate)
-
-      operation =
-        call(first, "fleet.deployment.prepare", request())["result"]["operation_id"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      # Through a listener, `hello` resolves this node's local owner, and that is who the
-      # worker claims the operation for.
-      await_attached(operation, "local-owner")
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
-      await_challenge(operation, "pw", "local-owner")
+      client = connected(:operate)
+      operation = call(client, "fleet.deployment.start", request())["result"]["operation"]
+      await_challenge(operation, "pw")
 
       log =
         capture_log(fn ->
           error =
-            call(second, @method, %{
-              "operation_id" => operation,
-              "challenge" => "pw",
+            call(client, @method, %{
+              "operation" => operation,
+              "challenge" => "not-the-open-one",
               "secret" => secret
             })["error"]
 
-          assert error["data"]["reason"] == "challenge_not_bound"
+          assert error["data"]["reason"] == "unknown_challenge"
         end)
 
       refute log =~ secret
       assert log =~ "gateway operate #{@method} params=redacted"
-      assert log =~ "outcome=challenge_not_bound"
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+      assert log =~ "outcome=unknown_challenge"
+      refute Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, secret))
     end
 
-    test "is absent when the whole plane is unavailable", context do
+    test "is absent when nothing is holding the operation", _context do
       secret = "unavailable-secret-#{System.unique_integer([:positive])}"
-      arrange_devices(context)
       client = connected(:operate)
 
       log =
         capture_log(fn ->
           error =
             call(client, @method, %{
-              "operation_id" => "00aa11bb22cc33dd",
+              "operation" => "00aa11bb22cc33dd",
               "challenge" => "pw",
               "secret" => secret
             })["error"]
@@ -296,34 +258,34 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
       assert log =~ "params=redacted"
     end
 
-    test "is absent from the operation's own status and event stream", context do
-      %{worker: worker} = arrange_worker(context)
+    test "is absent from the operation's own status and from every process that saw it",
+         context do
+      FleetFramesFake.write_scenario!(context.bin, password_scenario())
       secret = "status-secret-#{System.unique_integer([:positive])}"
 
-      bound = %{subject: "runtime-unattributed", session: "web-session-2"}
-      {:ok, %{"operation_id" => operation}} = Ouroboros.Fleet.Deployment.prepare(request(), bound)
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      :ok = Ouroboros.Fleet.Deployment.subscribe(operation)
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
+      operation = start_add()
+      :ok = Deployment.subscribe(operation)
       await_challenge(operation, "pw")
 
-      assert {:ok, _} = Ouroboros.Fleet.Deployment.authenticate(operation, "pw", secret, bound)
-      assert_receive {:fake_worker, %{"op" => "respond"}}, @receive_timeout
+      assert {:ok, _} = Deployment.respond(operation, "pw", %{"secret" => secret})
 
       # Nothing the operation can be asked about afterwards holds it, and neither does the
-      # process that sent it: the response is an argument on the way to the socket and is
-      # never written into state.
-      assert {:ok, snapshot} = Ouroboros.Fleet.Deployment.status(operation, bound())
+      # process that sent it: the response is an argument on the way to the pipe and is never
+      # written into state.
+      assert {:ok, snapshot} = Deployment.status(operation)
       refute JSON.encode!(snapshot) =~ secret
 
-      assert {:ok, client} = Ouroboros.Fleet.Deployment.client(operation)
+      assert {:ok, worker} = Deployment.worker(operation)
 
-      refute inspect(:sys.get_state(client), limit: :infinity, printable_limit: :infinity) =~
+      refute inspect(:sys.get_state(worker), limit: :infinity, printable_limit: :infinity) =~
                secret
 
-      broker = :sys.get_state(Process.whereis(Ouroboros.Fleet.Deployment))
+      broker = :sys.get_state(Process.whereis(Deployment))
       refute inspect(broker, limit: :infinity, printable_limit: :infinity) =~ secret
+
+      # And nothing the subscriber was sent, either.
+      assert_receive {:ouroboros_fleet_deployment, ^operation, frame}, @receive_timeout
+      refute JSON.encode!(frame) =~ secret
     end
   end
 
@@ -331,12 +293,11 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
   # The browser surface is held to the same boundary
 
   describe "deploy blockers through Web.Call" do
-    test "a cleartext bind refuses the credential path before any worker hears of it",
+    test "a cleartext bind refuses the credential path before the program hears of it",
          context do
-      arrange_worker(context)
+      FleetFramesFake.write_scenario!(context.bin, password_scenario())
 
       Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
-
       on_exit(fn -> Application.delete_env(:ouroboros, :web) end)
 
       secret = "blocked-secret-#{System.unique_integer([:positive])}"
@@ -344,13 +305,7 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
       log =
         capture_log(fn ->
           assert {:error, code, _message, data} =
-                   Call.call(
-                     :operate,
-                     "fleet.deployment.prepare",
-                     %{
-                       "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
-                       "ssh_user" => "deploy"
-                     },
+                   Call.call(:operate, "fleet.deployment.start", request(),
                      session: "web-session-1"
                    )
 
@@ -361,16 +316,11 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
           # And the credential verb itself, which is the one that matters: this is the
           # decision the spec makes on the bind, so it has to hold where the secret is.
           assert {:error, -32_003, _m, blocked} =
-                   Call.call(
-                     :operate,
-                     @method,
-                     %{
-                       "operation_id" => "00aa11bb22cc33dd",
-                       "challenge" => "pw",
-                       "secret" => secret
-                     },
-                     session: "web-session-1"
-                   )
+                   web_call(%{
+                     "operation" => "00aa11bb22cc33dd",
+                     "challenge" => "pw",
+                     "secret" => secret
+                   })
 
           assert blocked["reason"] == "deploy_blocked"
         end)
@@ -378,12 +328,21 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
       # The refusal is still a redacted line: being blocked is no reason to start logging it.
       refute log =~ secret
       assert log =~ "params=redacted"
-      refute_receive {:fake_worker, _frame}, 300
+      assert FleetFramesFake.responses(context.bin) == []
     end
   end
 
   # ---------------------------------------------------------------------------
   # Helpers
+
+  defp password_scenario do
+    [
+      "state waiting",
+      "challenge pw password {\"user\":\"deploy\",\"target\":\"100.64.12.44\",\"attempt\":1,\"max_attempts\":3}",
+      "await pw",
+      "done completed answered"
+    ]
+  end
 
   defp probe do
     events = :ets.new(:digest_probe, [:public, :duplicate_bag])
@@ -417,80 +376,34 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
     }
   end
 
-  defp arrange_devices(context) do
-    ouro = FleetOuroFake.write!(context.fake_dir, devices: ~s({"devices": []}\n))
-    System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
-    ouro
+  defp start_add do
+    {:ok, %{"operation" => operation}} =
+      Deployment.start(%{
+        "kind" => "add",
+        "machine" => "build-linux",
+        "address" => "100.64.12.44",
+        "ssh_user" => "deploy",
+        "port" => 22
+      })
+
+    operation
   end
 
-  defp arrange_worker(context) do
-    cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
-    instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  defp await_challenge(operation, challenge) do
+    Enum.reduce_while(1..120, :missing, fn _attempt, _acc ->
+      case Deployment.status(operation) do
+        {:ok, %{"challenge" => %{"challenge" => ^challenge}}} ->
+          {:halt, :ok}
 
-    worker =
-      start_supervised!(
-        {FleetWorkerFake,
-         [
-           socket_path: Path.join([context.root, "deploy", "w.sock"]),
-           cap: cap,
-           instance: instance,
-           operation_file: FleetOuroFake.operation_file(context.fake_dir),
-           owner: self()
-         ]},
-        id: {FleetWorkerFake, System.unique_integer([:positive])}
-      )
-
-    ouro =
-      FleetOuroFake.write!(context.fake_dir,
-        spawn_line: FleetWorkerFake.spawn_line(worker),
-        cap: cap
-      )
-
-    System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
-    %{worker: worker, ouro: ouro}
-  end
-
-  # Who an operation belongs to depends on which surface started it. The worker claims an
-  # unowned operation for the subject that attached (`attach/4` in
-  # `tui/src/fleet_setup/worker.rs`, and now the fake too), and a listener's `hello`
-  # resolves the local owner while a direct call from this test process is unattributed.
-  # Reading an operation as somebody it does not belong to is refused, so these helpers say
-  # who is asking rather than assuming one answer for both paths.
-  defp bound(subject \\ "runtime-unattributed"),
-    do: %{subject: subject, session: "web-session-1"}
-
-  # The handshake runs in the client's own process now, so a fake that writes a challenge the
-  # moment `prepare` answers writes it into a socket nobody has accepted yet.
-  defp await_attached(operation, subject \\ "runtime-unattributed") do
-    Enum.reduce_while(1..100, :missing, fn _attempt, _acc ->
-      case Ouroboros.Fleet.Deployment.status(operation, bound(subject)) do
-        {:ok, %{"attached" => true}} -> {:halt, :ok}
-        _not_yet -> tick()
-      end
-    end)
-  end
-
-  defp await_challenge(operation, challenge, subject \\ "runtime-unattributed") do
-    Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      case Ouroboros.Fleet.Deployment.status(operation, bound(subject)) do
-        {:ok, %{"challenges" => challenges}} ->
-          if Enum.any?(challenges, &(&1["challenge"] == challenge)),
-            do: {:halt, :ok},
-            else: tick()
-
-        _other ->
-          tick()
+        _not_yet ->
+          Process.sleep(25)
+          {:cont, :missing}
       end
     end)
     |> case do
       :ok -> :ok
-      :missing -> flunk("the broker never recorded challenge #{challenge}")
+      :missing -> flunk("the runtime never recorded challenge #{challenge}")
     end
-  end
-
-  defp tick do
-    Process.sleep(20)
-    {:cont, :missing}
   end
 
   defp connected(scope) do

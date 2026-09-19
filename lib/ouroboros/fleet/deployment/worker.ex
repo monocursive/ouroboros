@@ -194,10 +194,12 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
              }}
 
           {:error, reason} ->
+            audit(state, challenge, reason)
             {:reply, {:error, reason}, state}
         end
 
       {:error, reason} ->
+        audit(state, challenge, reason)
         {:reply, {:error, reason}, state}
     end
   end
@@ -443,13 +445,18 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
   end
 
   # The allowlist the spec's secret handling gives: the operation and the challenge, and the
-  # challenge's kind, which this process knows without being told.
-  defp audit(state, challenge) do
+  # challenge's kind and the outcome, which this process knows without being told. Never the
+  # response — a refusal's audit line is written from the *challenge*, not from what was
+  # offered to it, so an answer of the wrong shape does not get logged by being wrong.
+  defp audit(state, challenge, outcome \\ :sent) do
     Logger.info(
       "fleet deployment respond operation=#{state.operation} challenge=#{challenge} " <>
-        "kind=#{state.challenge["kind"]}"
+        "kind=#{kind_of(state.challenge)} outcome=#{outcome}"
     )
   end
+
+  defp kind_of(%{"kind" => kind}), do: kind
+  defp kind_of(_none), do: "none"
 
   # ---------------------------------------------------------------------------
 

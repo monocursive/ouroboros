@@ -1631,10 +1631,10 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         :words,
         if(
           device["state"] == "fleet_member_connected" and
-            state in ["failed", "interrupted", "completed", "cancelled"],
+            state in ["failed", "completed", "cancelled"],
           do:
             Devices.ouroboros_words(device) <>
-              if(state in ["failed", "interrupted"],
+              if(state == "failed",
                 do:
                   " · " <>
                     if(operation["kind"] == "leave",
@@ -1652,7 +1652,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         if(
           device["state"] == "fleet_member_connected" and
             (state in ["completed", "cancelled"] or
-               (state in ["failed", "interrupted"] and operation["kind"] != "leave")),
+               (state == "failed" and operation["kind"] != "leave")),
           do: Devices.row_action(device, assigns.host && assigns.host["os"]),
           else:
             Devices.operation_action(state, operation["kind"]) ||
@@ -2150,7 +2150,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
       <div class="ouro-devices-actions">
         <button
-          :if={@operation["kind"] == "leave" and @operation["state"] in ["failed", "interrupted"]}
+          :if={@operation["kind"] == "leave" and @operation["state"] == "failed"}
           type="button"
           class="ouro-button"
           phx-click="open-operation"
@@ -2161,7 +2161,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <button
           :if={
             Devices.removable?(@device) and
-              not (@operation["kind"] == "leave" and @operation["state"] in ["failed", "interrupted"])
+              not (@operation["kind"] == "leave" and @operation["state"] == "failed")
           }
           type="button"
           class="ouro-quiet-button"

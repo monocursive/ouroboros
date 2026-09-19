@@ -124,7 +124,29 @@ finish_cancelled() {
 
 write_journal
 
-exec 3< "${OUROBOROS_FAKE_SCENARIO:-/dev/null}"
+# OUROBOROS_FAKE_SCENARIO is either one directive file, or a directory of them — in which
+# case the run picks `<kind>-<machine>`, then `<kind>`, then `default`. A fixture that has to
+# script four different deployments against one runtime needs the second shape; a test that
+# scripts one needs the first, and rewrites it between cases.
+scenario="${OUROBOROS_FAKE_SCENARIO:-/dev/null}"
+
+if [ -d "$scenario" ]; then
+  machine=""
+  previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--machine" ]; then machine="$arg"; fi
+    previous="$arg"
+  done
+
+  for candidate in "$kind-$machine" "$kind" "default"; do
+    if [ -f "$scenario/$candidate" ]; then
+      scenario="$scenario/$candidate"
+      break
+    fi
+  done
+fi
+
+exec 3< "$scenario"
 
 while IFS= read -r line <&3; do
   case "$line" in

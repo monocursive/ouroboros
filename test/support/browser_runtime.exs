@@ -28,10 +28,10 @@ Enum.each(
 File.mkdir_p!(Path.join([File.cwd!(), "_build", "playwright-workspace"]))
 Ouroboros.Test.BrowserHistory.seed()
 
-# Fleet onboarding, slice 6. `test/browser/devices.spec.js` drives the Deploy drawer, which
-# needs `fleet.devices` to answer and `fleet.deployment.prepare` to fork something. Both are
-# fakes inside this BEAM; no SSH client, no network and no credential store is involved.
-{:ok, _fleet} = Ouroboros.Test.BrowserFleet.seed()
+# `test/browser/devices.spec.js` drives the Devices drawer, which needs `fleet.devices` to
+# answer and `fleet.deployment.start` to really run a program. Both are one fake `ouro` at an
+# absolute path; no SSH client, no network and no credential store is involved.
+:ok = Ouroboros.Test.BrowserFleet.seed()
 
 for client <- ["desktop", "mobile"] do
   {:ok, _} = Ouroboros.Test.BrowserHistoryReplay.start("browser-history-replay-#{client}")
