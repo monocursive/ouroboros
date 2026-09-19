@@ -595,9 +595,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed,
          [
            {"machine", :required, :string,
-            "a machine this runtime is not connected to. There is no tombstone precondition: `ouro fleet forget NAME` is the operator's own statement about a machine that cannot be reached, and it takes the name out of this profile's members"},
-           {"accept_state_loss", :required, {:const, true},
-            "anything else is refused: this retires durable session-owner evidence"}
+            "a machine this runtime is not connected to. There is no tombstone precondition: `ouro fleet forget NAME` is the operator's own statement about a machine that cannot be reached, and it takes the name out of this profile's members. It retires that machine's durable session-owner evidence, which is irreversible"}
          ]},
       handler: :handle_fleet_forget_session_owner
     },

@@ -1031,17 +1031,11 @@ defmodule Ouroboros.Gateway.Methods do
   @doc false
   def handle_fleet_forget_session_owner(params) do
     safe(fn ->
-      with {:ok, machine} <- fetch_string(params, "machine"),
-           true <- Map.get(params, "accept_state_loss") == true do
+      with {:ok, machine} <- fetch_string(params, "machine") do
         machine
         |> Cluster.forget_session_owner()
         |> forget_session_owner_reply()
       else
-        false ->
-          invalid_params(
-            "params.accept_state_loss must be true; forgetting an owner can hide its offline interactive and coding sessions"
-          )
-
         {:invalid, message} ->
           invalid_params(message)
       end

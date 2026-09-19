@@ -1635,29 +1635,13 @@ defmodule Ouroboros.ClusterTest do
                    {target, [%{id: "offline-interactive"}]}
                  ])
 
-        assert {:error, -32_602, confirmation_message} =
-                 Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
-
-        assert confirmation_message == "params.accept_state_loss is required"
-
-        assert {:error, -32_602, false_confirmation_message} =
-                 Methods.invoke("fleet.forget_session_owner", %{
-                   "machine" => machine,
-                   "accept_state_loss" => false
-                 })
-
-        assert false_confirmation_message =~ "accept_state_loss must be true"
-
         assert {:error, -32_004, connected_message,
                 %{
                   "reason" => "session_owner_connected",
                   "machine" => ^machine,
                   "node" => connected_node
                 }} =
-                 Methods.invoke("fleet.forget_session_owner", %{
-                   "machine" => machine,
-                   "accept_state_loss" => true
-                 })
+                 Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
 
         assert connected_node == Atom.to_string(target)
         assert connected_message =~ "inspect or copy its sessions"
@@ -1678,10 +1662,7 @@ defmodule Ouroboros.ClusterTest do
         assert owner == Atom.to_string(target)
 
         assert {:ok, %{machine: ^machine, node: forgotten_node, removed: true} = result} =
-                 Methods.invoke("fleet.forget_session_owner", %{
-                   "machine" => machine,
-                   "accept_state_loss" => true
-                 })
+                 Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
 
         assert forgotten_node == Atom.to_string(target)
         # No roster to revise, so no revision to report.
@@ -1693,10 +1674,7 @@ defmodule Ouroboros.ClusterTest do
         # Repeating an already-confirmed retirement is safe for automation and still
         # forces a synced checkpoint before success.
         assert {:ok, %{removed: false}} =
-                 Methods.invoke("fleet.forget_session_owner", %{
-                   "machine" => machine,
-                   "accept_state_loss" => true
-                 })
+                 Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
 
         restart_cluster_monitor!()
 
@@ -1736,10 +1714,7 @@ defmodule Ouroboros.ClusterTest do
         end)
 
         assert {:ok, %{machine: ^machine, removed: true}} =
-                 Methods.invoke("fleet.forget_session_owner", %{
-                   "machine" => machine,
-                   "accept_state_loss" => true
-                 })
+                 Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
 
         on_exit(fn -> forget_fixture_machines([target]) end)
       end)
