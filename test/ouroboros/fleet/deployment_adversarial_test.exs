@@ -442,6 +442,55 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
                "`inspect(reason)` is where it lands"
     end
 
+    test "a SIGKILL with the secret genuinely in flight leaks nothing", context do
+      # The literal scenario: the program is not reading its stdin, the write blocks in
+      # `Port.command/2` with the secret as an argument, and the process is killed there.
+      FleetFramesFake.write_scenario!(context.bin, [
+        "state running",
+        "challenge secret-1 password {}",
+        "sleep 10"
+      ])
+
+      {:ok, %{"operation" => operation}} =
+        Deployment.start(%{
+          "kind" => "add",
+          "machine" => "pi",
+          "address" => "100.64.0.2",
+          "ssh_user" => "deploy",
+          "port" => 22
+        })
+
+      pid =
+        await(fn ->
+          case Deployment.worker(operation) do
+            {:ok, pid} -> {:ok, pid}
+            _other -> nil
+          end
+        end)
+
+      await(fn ->
+        case Worker.snapshot(pid) do
+          {:ok, %{"challenge" => %{"challenge" => "secret-1"}}} -> {:ok, :yes}
+          _other -> nil
+        end
+      end)
+
+      # Past the 64 KiB pipe buffer of a program that never reads, and under the frame cap.
+      secret = "inflight-#{System.unique_integer([:positive])}-" <> String.duplicate("x", 300_000)
+
+      log =
+        capture_log(fn ->
+          caller = spawn(fn -> Worker.respond(pid, "secret-1", %{"secret" => secret}) end)
+          Process.sleep(200)
+          Process.exit(pid, :kill)
+          Process.sleep(400)
+          Process.exit(caller, :kill)
+        end)
+
+      refute log =~ "inflight-", "a SIGKILL must not print the argument being written"
+      assert log =~ "lost its worker: :killed"
+    end
+
     test "the belts cover the report's message and state, and not its stacktrace", context do
       FleetFramesFake.write_scenario!(context.bin, [
         "state running",
@@ -635,6 +684,9 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
           "operation" => operation,
           "kind" => "add",
           "state" => "running",
+          "owner" => "a name §1 deleted",
+          "roster" => ["also deleted"],
+          "plan_digest" => "and this",
           "steps" => for(n <- 1..10_000, do: %{"step" => "s#{n}", "state" => "ok"}),
           "target" => %{
             "machine" => String.duplicate("m", 100_000),
@@ -648,6 +700,13 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       assert {:ok, document} = Journal.read(context.root, operation)
       assert length(document["steps"]) == 200
       assert String.length(document["target"]["machine"]) == 2_000
+
+      # §6's field list and nothing else: the two names §9 and §1 deleted cannot come back
+      # by a journal carrying them.
+      refute Map.has_key?(document, "owner")
+      refute Map.has_key?(document, "roster")
+      refute Map.has_key?(document, "plan_digest")
+
       refute Map.has_key?(document["target"], "cookie")
       refute Map.has_key?(document["target"]["nested"], "password")
       assert inspect(document["residue"]) =~ "truncated: nested deeper than"
@@ -1120,6 +1179,278 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       refute inspect(Process.info(pid, :messages), limit: :infinity) =~ secret
       refute inspect(Process.info(pid, :dictionary), limit: :infinity) =~ secret
       refute inspect(:sys.get_state(Deployment), limit: :infinity) =~ secret
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # F11 — fleet.devices (§9's row)
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # F10b — what a worker does with the frames it is given
+  #
+  # Both cases below are mutations the slice's own suite does not kill: removing the
+  # `@states` guard from `put_state/2`, and dropping `Journal.scrub_line/2` from
+  # `put_log/2`. The second is where the whole terminal-escape defence lives for a live
+  # operation, because a journal answer's log comes from a different function entirely.
+  # ---------------------------------------------------------------------------
+
+  describe "F10b frames in" do
+    setup context do
+      FleetFramesFake.write_scenario!(context.bin, [
+        "state running",
+        # Not one of §8's five. The program is this runtime's own `ouro`, so a state outside
+        # them is a mismatched installation, not a new value to render.
+        "raw {\"event\":\"state\",\"state\":\"<script>alert(1)</script>\"}",
+        "log \\u001b[2J\\u001b[1;31mSPOOFED: your fleet is compromised\\u001b[0m",
+        "log sshpass -p hunter2 ssh deploy@100.64.0.2",
+        "raw {\"event\":\"log\",\"line\":\"a line with a newline \\u000a and a tab \\u0009\"}",
+        "challenge trust-1 host_trust {}",
+        "await trust-1",
+        "sleep 6"
+      ])
+
+      {:ok, %{"operation" => operation}} =
+        Deployment.start(%{
+          "kind" => "add",
+          "machine" => "pi",
+          "address" => "100.64.0.2",
+          "ssh_user" => "deploy",
+          "port" => 22
+        })
+
+      pid =
+        await(fn ->
+          case Deployment.worker(operation) do
+            {:ok, pid} -> {:ok, pid}
+            _other -> nil
+          end
+        end)
+
+      snapshot =
+        await(fn ->
+          case Worker.snapshot(pid) do
+            {:ok, %{"log" => log} = snapshot} when length(log) >= 3 -> {:ok, snapshot}
+            _other -> nil
+          end
+        end)
+
+      %{operation: operation, pid: pid, snapshot: snapshot}
+    end
+
+    test "a state outside §8's five does not become the operation's state", context do
+      assert context.snapshot["state"] in ~w(running waiting completed failed cancelled)
+      refute context.snapshot["state"] =~ "script"
+    end
+
+    test "a worker answer says `running` from the port it actually holds", context do
+      # §9 replaces `owner`/`attached` with this one boolean, and it is the difference
+      # between "this is happening" and "this is what was last written down".
+      assert context.snapshot["source"] == "worker"
+      assert context.snapshot["running"] == true
+
+      # Wait for the challenge, so the refusal below is `write/2`'s and not `authorize/3`'s.
+      await(fn ->
+        case Worker.snapshot(context.pid) do
+          {:ok, %{"challenge" => %{"challenge" => "trust-1"}}} -> {:ok, :yes}
+          _other -> nil
+        end
+      end)
+
+      # Same process, no port: the field follows the port and not the process.
+      :sys.replace_state(context.pid, fn state -> %{state | port: nil} end)
+      assert {:ok, %{"running" => false, "source" => "worker"}} = Worker.snapshot(context.pid)
+
+      # And an answer with no port to write it to is refused rather than reported accepted.
+      assert {:error, :worker_unavailable} =
+               Worker.respond(context.pid, "trust-1", %{"accept" => true})
+    end
+
+    test "a log frame is stripped of escapes, controls and credential shapes", context do
+      log = context.snapshot["log"]
+
+      for line <- log do
+        refute line =~ "\e", "an escape survived: #{inspect(line)}"
+        refute line =~ "\n", "a newline survived: #{inspect(line)}"
+        # Sequences go whole, so no `[1;31m` is left behind where the escape used to be.
+        # The words between them stay, which is the documented intent.
+        refute line =~ "[2J", "an escape's tail survived: #{inspect(line)}"
+        refute line =~ "[1;31m", "an escape's tail survived: #{inspect(line)}"
+      end
+
+      assert Enum.any?(log, &(&1 == "SPOOFED: your fleet is compromised")),
+             "the sentence itself is kept, stripped of the colour it chose"
+
+      assert Enum.any?(log, &(&1 == "[redacted credential-bearing diagnostic]")),
+             "the sshpass line reached a subscriber as itself: #{inspect(log)}"
+
+      # Every line is bounded at the 300 the worker asks for.
+      for line <- log, do: assert(String.length(line) <= 300)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # F12 — cancel answers neither §9's `{state}` nor the residue its own text promises
+  # ---------------------------------------------------------------------------
+
+  describe "F12 cancel and residue" do
+    test "the reply has no state and no residue, and no status answer carries one either",
+         context do
+      FleetFramesFake.write_scenario!(context.bin, [
+        "state running",
+        "challenge trust-1 host_trust {}",
+        "await trust-1",
+        "sleep 6"
+      ])
+
+      {:ok, %{"operation" => operation}} =
+        Deployment.start(%{
+          "kind" => "add",
+          "machine" => "pi",
+          "address" => "100.64.0.2",
+          "ssh_user" => "deploy",
+          "port" => 22
+        })
+
+      pid =
+        await(fn ->
+          case Deployment.worker(operation) do
+            {:ok, pid} -> {:ok, pid}
+            _other -> nil
+          end
+        end)
+
+      await(fn ->
+        case Worker.snapshot(pid) do
+          {:ok, %{"challenge" => %{"challenge" => "trust-1"}}} -> {:ok, :yes}
+          _other -> nil
+        end
+      end)
+
+      assert {:ok, reply} = Deployment.cancel(operation)
+
+      # §9's table: `fleet.deployment.cancel` | operate | `operation` | `{state}`.
+      assert Map.has_key?(reply, "state"),
+             "the reply is #{inspect(reply)}; §9 says the answer is `{state}` and the " <>
+               "contract text says it reports residue"
+
+      assert Map.has_key?(reply, "residue")
+    end
+
+    test "a journal that records residue does not put it in the status answer", context do
+      operation = "adversarial0020"
+      deploy = Journal.deploy_dir(context.root)
+      File.mkdir_p!(deploy)
+
+      File.write!(
+        Path.join(deploy, operation <> ".json"),
+        JSON.encode!(%{
+          "schema" => 2,
+          "operation" => operation,
+          "kind" => "add",
+          "state" => "cancelled",
+          "residue" => ["a partial install at /usr/local/bin/ouro.partial"]
+        })
+      )
+
+      # `Journal.sanitize/1` keeps it — `residue` is in §6's field list and in `@fields`.
+      assert {:ok, document} = Journal.read(context.root, operation)
+      assert document["residue"] == ["a partial install at /usr/local/bin/ouro.partial"]
+
+      assert {:ok, status} = Deployment.status(operation)
+
+      assert Map.has_key?(status, "residue"), """
+      `Deployment.journal_status/1` projects ten keys and `residue` is not one of them, and
+      `Worker.view/1` has none either. So the only thing that ever fills the page's
+      "What this left behind" panel (devices_live.ex:1953) is `reply["residue"]` from a
+      cancel — and `Worker.cancel/1` answers `%{"cancelling" => true}`. The panel cannot be
+      drawn by any path. Status keys: #{inspect(Map.keys(status))}
+      """
+    end
+  end
+
+  describe "F11 fleet.devices" do
+    test "capabilities.reasons keeps §9's order and dev_runtime is setup-only", context do
+      Application.put_env(:ouroboros, :dev_runtime, true)
+
+      assert %{"capabilities" => %{"deploy" => false, "reasons" => reasons}} =
+               Deployment.host(context.root)
+
+      assert reasons == ["dev_runtime"]
+      assert Deployment.unblocked("add") == :ok
+      assert Deployment.unblocked("leave") == :ok
+      assert {:error, {:deploy_blocked, ["dev_runtime"]}} = Deployment.unblocked("setup")
+
+      # A kind this build cannot name is *not* exempt, which is the safe direction.
+      assert Deployment.unblocked("something-new") == :ok
+
+      assert Deployment.exempt(["dev_runtime", "no_data_dir"], "setup") ==
+               ["dev_runtime", "no_data_dir"]
+
+      assert Deployment.exempt(["dev_runtime", "no_data_dir"], "add") == ["no_data_dir"]
+    end
+
+    test "operations is cut at 200 with the total beside it, and unknown names the rest",
+         context do
+      deploy = Journal.deploy_dir(context.root)
+      File.mkdir_p!(deploy)
+
+      for n <- 1..205 do
+        id = "adv" <> String.pad_leading(Integer.to_string(n), 6, "0")
+
+        File.write!(
+          Path.join(deploy, id <> ".json"),
+          JSON.encode!(%{
+            "schema" => 2,
+            "operation" => id,
+            "kind" => "add",
+            "state" => "failed",
+            "created_at" =>
+              "2026-09-#{String.pad_leading(Integer.to_string(rem(n, 28) + 1), 2, "0")}T00:00:00Z",
+            "target" => %{
+              "machine" => "pi",
+              "address" => "100.64.0.2",
+              "ssh_user" => "deploy",
+              "port" => 22
+            },
+            # Keys §6 does not name never reach a client, so neither `owner` nor `attached`
+            # can come back on an operation row.
+            "owner" => "somebody",
+            "attached" => true
+          })
+        )
+      end
+
+      FleetFramesFake.write_devices!(context.bin, %{
+        "devices" => [
+          %{"machine" => "pi", "issuer" => "old", "owner" => "someone", "attached" => true}
+        ],
+        "discovery" => %{"code" => "ok"},
+        "issuer" => "a top-level key this build does not read",
+        "something_new" => 1
+      })
+
+      assert {:ok, inventory} = Deployment.devices(data_dir: context.root)
+
+      assert length(inventory["operations"]) == 200
+      assert inventory["operations_total"] == 205
+      assert inventory["unknown"] == ["issuer", "something_new"]
+
+      row = hd(inventory["operations"])
+      refute Map.has_key?(row, "owner")
+      refute Map.has_key?(row, "attached")
+      assert Map.has_key?(row, "running")
+      assert row["target"]["machine"] == "pi"
+
+      # A *device* row is `ouro fleet devices --json` verbatim, so anything the binary
+      # prints inside one comes straight through — including the three names §9 and §12 say
+      # the answer loses.
+      device = hd(inventory["devices"])
+
+      assert device["issuer"] == "old" and device["owner"] == "someone" and
+               device["attached"] == true,
+             "§12 says `fleet.devices` loses `issuer`; it is dropped at the top level and " <>
+               "passed through inside a device row"
     end
   end
 end
