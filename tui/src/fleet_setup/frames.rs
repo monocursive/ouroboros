@@ -126,6 +126,14 @@ struct FramesConversation {
     cancelled: Arc<AtomicBool>,
     /// Set when stdin reached EOF: there is nobody left who can answer a question.
     finishing: Arc<AtomicBool>,
+    /// Whether stderr is this operation's own log.
+    ///
+    /// The progress lines exist to fill `deploy/<id>.log`. When there is no log — a
+    /// dry run, which creates nothing, or a capture that could not be set up — stderr
+    /// is still whatever descriptor this process was handed, and for the broker's port
+    /// program that is the runtime's own console. Nothing is written there that the
+    /// frames on stdout do not already carry.
+    logged: bool,
 }
 
 impl FramesConversation {
@@ -185,7 +193,9 @@ impl Conversation for FramesConversation {
                 }));
                 // The phase's own word, as a terminal prints it: a log of `running`
                 // repeated six times says nothing a person can act on.
-                eprintln!("· {}", phase.as_str().replace('_', " "));
+                if self.logged {
+                    eprintln!("· {}", phase.as_str().replace('_', " "));
+                }
             }
             Event::Step {
                 machine,
@@ -204,9 +214,11 @@ impl Conversation for FramesConversation {
                     "state": outcome,
                     "detail": detail,
                 }));
-                match detail.as_deref().filter(|detail| !detail.is_empty()) {
-                    Some(detail) => eprintln!("  {machine}: {step} {outcome} — {detail}"),
-                    None => eprintln!("  {machine}: {step} {outcome}"),
+                if self.logged {
+                    match detail.as_deref().filter(|detail| !detail.is_empty()) {
+                        Some(detail) => eprintln!("  {machine}: {step} {outcome} — {detail}"),
+                        None => eprintln!("  {machine}: {step} {outcome}"),
+                    }
                 }
             }
             Event::Log(line) => {
@@ -215,7 +227,9 @@ impl Conversation for FramesConversation {
                     "event": "log",
                     "line": line,
                 }));
-                eprintln!("  {line}");
+                if self.logged {
+                    eprintln!("  {line}");
+                }
             }
         }
     }
@@ -240,6 +254,16 @@ pub fn run(
     input: impl BufRead + Send + 'static,
     output: Box<dyn Write + Send>,
 ) -> Result<Outcome> {
+    run_logging(engine, input, output, false)
+}
+
+/// The same, told whether this process's stderr is the operation's own log.
+fn run_logging(
+    engine: Engine,
+    input: impl BufRead + Send + 'static,
+    output: Box<dyn Write + Send>,
+    logged: bool,
+) -> Result<Outcome> {
     let sink = Arc::new(Sink::new(output));
     let registry = Arc::new(Registry::new());
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -249,6 +273,7 @@ pub fn run(
         registry: Arc::clone(&registry),
         cancelled: Arc::clone(&cancelled),
         finishing: Arc::clone(&finishing),
+        logged,
     });
 
     let reader = {
@@ -318,7 +343,9 @@ pub fn run(
             // And into this operation's log, which is where a person sent by FLEET.md
             // looks for why it stopped. The process's own exit message is printed by
             // `main` long after the log has been closed, so it cannot be this.
-            eprintln!("· {state}: {reason} — {summary}");
+            if logged {
+                eprintln!("· {state}: {reason} — {summary}");
+            }
         }
     }
     sink.close();
@@ -363,10 +390,12 @@ pub fn serve(engine: Engine) -> Result<Outcome> {
         }
     }
     detach();
-    let result = run(
+    let logged = log.is_some();
+    let result = run_logging(
         engine,
         BufReader::new(std::io::stdin()),
         Box::new(std::io::stdout()),
+        logged,
     );
     // Explicit rather than at the end of the scope: the log is closed, and everything
     // written to it drained, before this returns — because what happens next is `main`
@@ -709,6 +738,8 @@ mod tests {
             registry: Arc::new(Registry::new()),
             cancelled: Arc::new(AtomicBool::new(false)),
             finishing: Arc::new(AtomicBool::new(false)),
+            // What is under test is the frame, and this test has no log to fill.
+            logged: false,
         };
         for phase in [
             Phase::Inspecting,
