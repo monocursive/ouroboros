@@ -247,18 +247,20 @@ defmodule Ouroboros.Test.BrowserFleet do
     # So the spec chooses a path by choosing a *row*, which is what an operator does.
     FleetFramesFake.write_scenarios!(bin, %{
       "add" => scenario(),
-      # The one peer whose deployment fails, so the spec can reach Retry without a second
-      # server and without making every other row's deployment fail too.
-      "add-fixture-peer-09" => failing_scenario(),
+      # One peer per Playwright project whose deployment fails, so the spec can reach Retry
+      # without a second server and without making every other row's deployment fail too.
+      # The spec's own `peer/1` offsets the mobile project by five, so these are its
+      # `peer(5)` on either.
+      "add-fixture-peer-05" => failing_scenario(),
+      "add-fixture-peer-10" => failing_scenario(),
       "leave" => leave_scenario(),
       "setup" => setup_scenario(),
       "default" => scenario()
     })
 
-    System.put_env("OUROBOROS_FAKE_MACHINE", "fixture-peer-01")
-    System.put_env("OUROBOROS_FAKE_ADDRESS", "100.100.7.1")
-    System.put_env("OUROBOROS_FAKE_USER", "fixture")
-    System.put_env("OUROBOROS_FAKE_PORT", "22")
+    # This machine's own members, which is the closed set a removal may name: the gateway
+    # refuses a `leave` of a machine this profile does not list, before anything is run.
+    profile!(data_dir)
 
     # This is a Mix runtime, and `dev_runtime` blocks a local `setup` on one — correctly, on
     # a person's machine. The fixture is asserting the page rather than the blocker, so it
@@ -266,5 +268,43 @@ defmodule Ouroboros.Test.BrowserFleet do
     Application.put_env(:ouroboros, :dev_runtime, false)
 
     :ok
+  end
+
+  defp profile!(data_dir) do
+    dir = Path.join(data_dir, "fleet")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "profile.json")
+
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "schema" => 2,
+        "fleet_id" => "f1000000000000000000000000000001",
+        "name" => "fixture",
+        "machine" => "fixture-studio",
+        "host" => "100.100.0.1",
+        "node" => "ouro-fixture-studio@100.100.0.1",
+        "role" => "core",
+        "dist_port" => 13_700,
+        "gateway_port" => 17_342,
+        "members" => [
+          %{
+            "machine" => "fixture-studio",
+            "host" => "100.100.0.1",
+            "node" => "ouro-fixture-studio@100.100.0.1",
+            "dist_port" => 13_700
+          },
+          %{
+            "machine" => "fixture-buildbox",
+            "host" => "100.100.0.2",
+            "node" => "ouro-fixture-buildbox@100.100.0.2",
+            "dist_port" => 13_700
+          }
+        ],
+        "tags" => []
+      })
+    )
+
+    File.chmod!(path, 0o600)
   end
 end

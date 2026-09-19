@@ -16,6 +16,11 @@
 #   OUROBOROS_FAKE_DEVICES    the JSON `fleet devices --json` prints
 #   OUROBOROS_FAKE_ARGV       every argument of the last run, one per line
 #   OUROBOROS_FAKE_RESPONSES  every line read from stdin, appended verbatim
+#   OUROBOROS_FAKE_EXPIRES    the `expires_at` every challenge carries
+#
+# The journal's `target` is read back out of the argv rather than out of the environment,
+# because a fixture with ten peers is ten different deployments and a journal that named one
+# of them for all ten would put every operation on one row.
 #
 # Directives:
 #   state <running|waiting|completed|failed|cancelled>
@@ -49,11 +54,38 @@ fi
 
 kind="${2:-}"
 operation=""
+machine=""
+ssh_user=""
+address=""
+port="22"
 previous=""
+
 for arg in "$@"; do
-  if [ "$previous" = "--operation" ]; then operation="$arg"; fi
+  case "$previous" in
+    --operation) operation="$arg" ;;
+    --machine) machine="$arg" ;;
+    --user) ssh_user="$arg" ;;
+    --port) port="$arg" ;;
+  esac
   previous="$arg"
 done
+
+# `add` names its destination positionally, as `[USER@]ADDRESS`. The journal's `target` is
+# read back out of the argv rather than out of the environment, because a fixture with ten
+# peers is ten different deployments and a journal that named one of them for all ten would
+# put every operation on one row.
+if [ "$kind" = "add" ]; then
+  destination="${3:-}"
+  case "$destination" in
+    *@*)
+      ssh_user="${destination%@*}"
+      address="${destination#*@}"
+      ;;
+    *)
+      address="$destination"
+      ;;
+  esac
+fi
 
 if [ -z "$operation" ]; then
   echo "fake ouro: no --operation on $*" >&2
@@ -82,8 +114,7 @@ cancelled=0
 write_journal() {
   printf '{"schema":2,"operation":"%s","kind":"%s","state":"%s","created_at":"%s","updated_at":"%s","target":{"machine":"%s","address":"%s","ssh_user":"%s","port":%s},"paths":{},"plan":[%s],"steps":[%s],"residue":[],"last_error":%s}\n' \
     "$operation" "$kind" "$state" "$now" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "${OUROBOROS_FAKE_MACHINE:-fixture-target}" "${OUROBOROS_FAKE_ADDRESS:-100.100.7.1}" \
-    "${OUROBOROS_FAKE_USER:-deploy}" "${OUROBOROS_FAKE_PORT:-22}" \
+    "$machine" "$address" "$ssh_user" "${port:-22}" \
     "$plan" "$steps" "$last_error" > "$journal.tmp"
   chmod 600 "$journal.tmp"
   mv "$journal.tmp" "$journal"
@@ -131,13 +162,6 @@ write_journal
 scenario="${OUROBOROS_FAKE_SCENARIO:-/dev/null}"
 
 if [ -d "$scenario" ]; then
-  machine=""
-  previous=""
-  for arg in "$@"; do
-    if [ "$previous" = "--machine" ]; then machine="$arg"; fi
-    previous="$arg"
-  done
-
   for candidate in "$kind-$machine" "$kind" "default"; do
     if [ -f "$scenario/$candidate" ]; then
       scenario="$scenario/$candidate"

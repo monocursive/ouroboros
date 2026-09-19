@@ -2,18 +2,18 @@ const { test, expect } = require("@playwright/test");
 
 // The Devices page in a real browser, driven the way a person without a mouse drives it.
 //
-// The runtime behind it is `test/support/browser_runtime.exs`, which stands up a fake `ouro`
-// and a scripted fake deployment worker (`Ouroboros.Test.BrowserFleet`). No SSH client, no
-// network and no credential store is anywhere in this path: the password typed below goes to
-// a Unix socket inside the same BEAM and is dropped.
+// The runtime behind it is `test/support/browser_runtime.exs`, which stands up one fake
+// `ouro` (`Ouroboros.Test.BrowserFleet`). That executable answers `fleet devices --json` with
+// a frozen inventory and, for a `--frames` run, speaks the frames protocol of
+// docs/proposals/fleet-kiss.md §8 on its own stdio. No SSH client, no network and no
+// credential store is anywhere in this path: the password typed below goes to the stdin of a
+// shell script in a pipe and is dropped.
 //
 // What only a browser can prove, and therefore what this file is for: that the drawer opens
 // and closes under the keyboard alone, that focus goes into it and comes back out to the
 // control that opened it, that the live region is a real `aria-live` region the browser
 // updates, that the Advanced disclosure survives a re-render, and that the credential field
 // is a masked input whose value never leaves the page after it is submitted.
-//
-// Rewritten for the one-list design in docs/design-qa/fleet-ux-review-2026-09-18.md §5.
 
 const TOKEN = "ouroboros-browser-test-token-000000000000";
 
@@ -21,6 +21,8 @@ const TOKEN = "ouroboros-browser-test-token-000000000000";
 // stops reading as an untouched peer — correctly, and for the life of this server. One
 // server serves both projects, so the row has to be private to the test *and* the project
 // or the second run looks at the first run's leftovers.
+//
+// `peer(5)` is the one the fixture scripts as a failure, on either project.
 function peer(index) {
   const offset = test.info().project.name === "mobile-chromium" ? 5 : 0;
   const number = index + offset;
@@ -58,7 +60,7 @@ function focused(page) {
 
 // Tab until the predicate holds, so a test does not depend on the exact number of controls
 // between two points in the page.
-async function tabUntil(page, predicate, limit = 80) {
+async function tabUntil(page, predicate, limit = 100) {
   for (let step = 0; step < limit; step++) {
     await page.keyboard.press("Tab");
     const where = await focused(page);
@@ -67,10 +69,19 @@ async function tabUntil(page, predicate, limit = 80) {
   throw new Error("tabbed " + limit + " times without reaching the target");
 }
 
+// Open the add drawer on a row and submit its form.
+async function startAdd(page, device, user = "fixture") {
+  await page
+    .locator('button[phx-click="deploy"][phx-value-address="' + device.address + '"]')
+    .click();
+  await page.locator("#deploy-ssh-user").fill(user);
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+}
+
 test("one list, one action per row, and the work's machine named once", async ({ page }) => {
   await openDevices(page);
 
-  // §5.1's quiet line, and not the boxed paragraph it replaced.
+  // The quiet line, and not the boxed paragraph it replaced.
   await expect(page.locator("[data-ouro-deployment-host]").first()).toContainText("Actions run on");
   await expect(page.getByText("not on the computer showing this page")).toHaveCount(0);
 
@@ -95,8 +106,8 @@ test("one list, one action per row, and the work's machine named once", async ({
   await expect(untouched.locator(".ouro-devices-presence")).toContainText("online");
   await expect(page.locator("#devices-list")).not.toContainText("2026-09-01T00:00:00Z");
 
-  // A platform with no release offers no deployment — §5.1's "a device that cannot be acted
-  // on shows no button" — but keeps the way in to the reason the same sentence promises.
+  // A platform with no release offers no deployment — "a device that cannot be acted on
+  // shows no button" — but keeps the way in to the reason.
   const blocked = page.locator('[data-state="unsupported_platform"]').first();
   await expect(blocked).toContainText("run Ouroboros");
   await expect(blocked.getByRole("button", { name: "Add to fleet" })).toHaveCount(0);
@@ -105,6 +116,19 @@ test("one list, one action per row, and the work's machine named once", async ({
   await blocked.getByRole("button", { name: "Details" }).click();
   await expect(page.locator("#ouro-deploy")).toContainText("nothing to offer on its row");
   await page.keyboard.press("Escape");
+});
+
+test("the discovery notice quotes the client and claims nothing about a build", async ({
+  page
+}) => {
+  await openDevices(page);
+
+  // This fixture's client answers, so there is no notice at all — and in particular not the
+  // guess about a version that the 2026-09-18 review found on a Mac whose Tailscale app
+  // printed "The Tailscale GUI failed to start" and exited 0.
+  await expect(page.getByText("may be older than the client")).toHaveCount(0);
+  await expect(page.getByText("Tailscale did not answer from this runtime")).toHaveCount(0);
+  await expect(page.locator("#devices-list > li").nth(1)).toBeVisible();
 });
 
 test("the drawer opens, traps focus and gives it back, under the keyboard alone", async ({
@@ -137,7 +161,7 @@ test("the Advanced disclosure stays open while the form above it is typed in", a
 }) => {
   await openDevices(page);
 
-  const device = peer(5);
+  const device = peer(4);
   await page
     .locator('button[phx-click="deploy"][phx-value-address="' + device.address + '"]')
     .click();
@@ -148,10 +172,9 @@ test("the Advanced disclosure stays open while the form above it is typed in", a
   await page.locator("details.ouro-devices-advanced > summary").click();
   await expect(advanced).toHaveAttribute("open", /.*/);
 
-  // Finding 6, in the browser that found it: `<details>` carried no `open` attribute and
-  // the event that recorded the choice was read by nothing, so every keystroke in the form
-  // above collapsed it.
-  await page.locator("#deploy-ssh-user").fill("deploy");
+  // `<details>` is bound to its assign, so a `phx-change` on the form above it re-renders it
+  // open rather than collapsing it on every keystroke.
+  await page.locator("#deploy-ssh-user").fill("fixture");
   await page.locator("#deploy-ssh-user").press("y");
   await expect(advanced).toHaveAttribute("open", /.*/);
   await expect(page.locator("#deploy-port")).toBeVisible();
@@ -169,11 +192,13 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
   const drawer = page.locator("#ouro-deploy");
   await expect(drawer).toBeVisible();
 
-  // Nobody has started anything here, so nothing may suggest somebody else did.
+  // Nobody has started anything here, so nothing may suggest somebody else did — and §10
+  // deletes the two panels that used to say so.
   await expect(page.locator("[data-ouro-takeover]")).toHaveCount(0);
+  await expect(page.locator("[data-ouro-rebind]")).toHaveCount(0);
 
-  // 1. The form. §5.2: a name pre-filled from `suggested_machine`, a read-only address
-  // because this one came from the list, an SSH user, and no authentication picker.
+  // 1. The form: a name pre-filled from `suggested_machine`, a read-only address because
+  // this one came from the list, an SSH user, and no authentication picker.
   await expect(drawer).toContainText("Add " + device.name + " to your fleet");
   await expect(page.locator("#deploy-machine")).toHaveValue(device.name);
   await expect(page.locator("#deploy-address")).toHaveValue(device.address);
@@ -182,7 +207,7 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
   await expect(page.locator("#deploy-identity-kind")).toHaveCount(0);
   await expect(page.getByText("Authentication method")).toHaveCount(0);
 
-  await page.locator("#deploy-ssh-user").fill("deploy");
+  await page.locator("#deploy-ssh-user").fill("fixture");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
 
   // 2. The host key, named after the address it belongs to.
@@ -197,6 +222,7 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
   await expect(secret).toBeVisible();
   await expect(secret).toHaveAttribute("type", "password");
   await expect(page.locator("#ouro-deploy-auth")).not.toHaveAttribute("phx-change", /.*/);
+  await expect(drawer).toContainText("attempt 1 of 3");
 
   // The field takes focus by itself, so a keyboard operator types straight into it.
   await expect(secret).toBeFocused();
@@ -206,26 +232,15 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
   await expect(secret).toHaveValue(password);
   await page.keyboard.press("Enter");
 
-  // 4. Review. Five plain lines, the digest under them, and the whole document behind a
-  // disclosure — the digest covers the document, not the five lines.
+  // 4. Review: the plan's own lines, and nothing else. §10 deletes the digest, the
+  // idempotency key and the second copy of the plan behind a disclosure.
   await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
-  await expect(drawer).toContainText("Install ouro 0.1.8 (Linux x86-64)");
-  await expect(drawer).toContainText("/usr/local/bin/ouro");
-  await expect(drawer).toContainText("Join the fleet as " + device.name);
+  await expect(drawer).toContainText("Install ouro 0.1.10 (Linux arm64) to /usr/local/bin/ouro");
+  await expect(drawer).toContainText("Join this fleet as the target");
   await expect(drawer).toContainText("Start at login as a user service");
-  await expect(drawer).toContainText("Update 1 roster");
-
-  // Sixty-four lowercase hex, and the page's own sha256 of the plan above it — approval is
-  // not offered for anything else.
-  await expect(page.locator("[data-ouro-plan-digest]")).toHaveText(/^[0-9a-f]{64}$/);
-
-  // The document's own key names are never what an operator is shown.
-  await page.getByText("Everything in this plan").click();
-  for (const label of ["operation", "action", "machine", "address", "ssh", "install", "startup"]) {
-    await expect(drawer.locator("dt", { hasText: new RegExp("^" + label + "$") })).toHaveCount(1);
-  }
-  await expect(drawer.locator("dt", { hasText: /^install_path$/ })).toHaveCount(0);
-  await expect(drawer.locator("dt", { hasText: /^data_dir$/ })).toHaveCount(0);
+  await expect(page.locator("[data-ouro-plan-digest]")).toHaveCount(0);
+  await expect(page.getByText("plan digest")).toHaveCount(0);
+  await expect(page.getByText("Everything in this plan")).toHaveCount(0);
 
   // The password is gone from the page the moment its step is over: not in any input, and
   // not anywhere in the rendered document.
@@ -234,22 +249,21 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
 
   await page.locator('button[phx-click="approve"]').click();
 
-  // 5. Progress. A polite live region carries each step change, and the six-mark strip is
-  // drawn with "not reported yet" where nothing has been.
+  // 5. Progress. A polite live region carries each step change.
   const live = page.locator("#ouro-deploy-live");
   await expect(live).toHaveAttribute("aria-live", "polite");
 
-  // Every sentence the region took, not whichever one it happened to hold when this
-  // polled: the steps go past in under a second, and "it said something at the end" is not
-  // the claim. A screen reader hears each of these.
+  // Every sentence the region took, not whichever one it happened to hold when this polled:
+  // the steps go past in under a second, and "it said something at the end" is not the
+  // claim. A screen reader hears each of these.
   const announced = await page.evaluate(
     () =>
       new Promise(resolve => {
         const region = document.getElementById("ouro-deploy-live");
         const seen = [];
-        // The sentence is the region's first text node; a visually-hidden counter beside
-        // it is what makes two identical sentences two announcements rather than one
-        // silent no-op, and it is not part of what is said.
+        // The sentence is the region's first text node; a visually-hidden counter beside it
+        // is what makes two identical sentences two announcements rather than one silent
+        // no-op, and it is not part of what is said.
         const said = () => {
           const first = region.querySelector("span") || region.firstChild;
           return ((first && first.textContent) || "").trim();
@@ -270,31 +284,22 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
       })
   );
 
-  expect(announced).toContain("Install the `ouro` binary on " + device.name + ": running.");
-  expect(announced).toContain("Update a roster on fixture-studio: done.");
-  expect(announced).toContain("Connect on " + device.name + ": done.");
+  expect(announced).toContain("Install Ouroboros: done.");
+  expect(announced).toContain("Connect: done.");
   expect(announced[announced.length - 1]).toBe("Done.");
 
-  // The strip names all six stages, short.
-  for (const stage of ["Inspect", "Install", "Join fleet", "Start at login", "Connect", "Ready"]) {
+  // The strip names the add flow's six stages, short, and none of the others'.
+  for (const stage of ["Inspect", "Install", "Join fleet", "Start at login", "Start", "Connect"]) {
     await expect(drawer.locator(".ouro-devices-strip")).toContainText(stage);
   }
-  // `install_binary` is the engine's name and belongs to the install stage; a prefix match
-  // would have filed it nowhere.
-  await expect(drawer.locator('[data-step="install"]')).toContainText(
-    "Install the `ouro` binary on " + device.name
-  );
-  await expect(drawer.locator('[data-step="membership"]')).toContainText(
-    "Update a roster on fixture-studio"
-  );
+  await expect(drawer.locator('[data-step="create"]')).toHaveCount(0);
+  await expect(drawer.locator('[data-step="install"]')).toContainText("/usr/local/bin/ouro");
 
-  // 6. Finish. §5.2: "<name> is in your fleet", Open and Done, and nothing that acts on
-  // this runtime instead of the machine that was just added.
+  // 6. Finish: "<name> is in your fleet", Open and Done, and nothing that acts on this
+  // runtime instead of the machine that was just added.
   //
   // Scoped to the drawer, every one of them. "Open" is also the self row's own action and
-  // the action a completed operation leaves on its row, so an unscoped `getByRole("link",
-  // {name: "Open"})` matches three links on this page and fails strict mode — on the page
-  // being right rather than on it being wrong.
+  // the action a completed operation leaves on its row.
   await expect(
     drawer.getByRole("heading", { name: device.name + " is in your fleet" })
   ).toBeVisible({ timeout: 15000 });
@@ -302,15 +307,132 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
   await expect(drawer.getByRole("button", { name: "Done", exact: true })).toBeVisible();
   await expect(drawer.getByRole("link", { name: "Configure model" })).toHaveCount(0);
   await expect(drawer.getByRole("link", { name: "Run test task" })).toHaveCount(0);
-
-  // A finished setup that connected says what it did and stops: no disclaimer about a
-  // readiness nobody claimed, and the stage the worker never reported is not still waiting.
-  await expect(drawer).not.toContainText("The setup finished. Readiness was not reported");
   await expect(drawer.locator(".ouro-devices-strip")).not.toContainText("not reported yet");
 
   // And nothing in the finished page is the password either, including the address bar.
   expect(page.url()).not.toContain(password);
   expect(await page.content()).not.toContain(password);
+});
+
+test("add by address is the same form with the address to type in", async ({ page }) => {
+  await openDevices(page);
+
+  await page.getByRole("button", { name: "Add a device by address" }).click();
+  const drawer = page.locator("#ouro-deploy");
+  await expect(drawer).toContainText("Add a device by address");
+
+  // The address is a thing to be typed rather than a fact, and the name starts empty because
+  // nothing has suggested one.
+  await expect(page.locator("#deploy-address")).not.toHaveAttribute("readonly", /.*/);
+  await expect(page.locator("#deploy-machine")).toHaveValue("");
+
+  // A name that is not a machine name is refused here rather than three steps later.
+  await page.locator("#deploy-address").fill("100.100.9.9");
+  await page.locator("#deploy-machine").fill("not a name");
+  await page.locator("#deploy-ssh-user").fill("fixture");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(drawer).toContainText("Letters, digits and hyphens only");
+
+  await page.locator("#deploy-machine").fill("typed-by-hand");
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.getByRole("heading", { name: /First time connecting/ })).toBeVisible();
+});
+
+test("a deployment that fails says why and offers Retry", async ({ page }) => {
+  await openDevices(page);
+
+  const device = peer(5);
+  await startAdd(page, device);
+
+  const drawer = page.locator("#ouro-deploy");
+  await page.getByRole("button", { name: "Trust and continue" }).click();
+  await expect(page.locator("[data-ouro-secret]")).toBeVisible();
+  await page.keyboard.type("browser-fixture-failing-password");
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
+  await page.locator('button[phx-click="approve"]').click();
+
+  await expect(drawer.getByRole("heading", { name: "Setup failed" })).toBeVisible({
+    timeout: 15000
+  });
+  await expect(drawer).toContainText("the release archive did not verify");
+  await expect(drawer.getByRole("button", { name: "Retry" }).first()).toBeVisible();
+});
+
+test("removing a member is reached from its details and reads as a removal", async ({ page }) => {
+  await openDevices(page);
+
+  const row = page.locator('[data-address="100.100.0.2"]');
+
+  // Not on the row: the one action a member's row offers is Details.
+  await expect(row.getByRole("button", { name: "Remove from fleet" })).toHaveCount(0);
+  await row.getByRole("button", { name: "Details" }).click();
+
+  const drawer = page.locator("#ouro-deploy");
+  await drawer.getByRole("button", { name: "Remove from fleet" }).click();
+  await expect(drawer).toContainText("Remove fixture-buildbox from the fleet");
+  await expect(drawer).toContainText("Its sessions and data stay on that machine.");
+
+  // No install path and no data directory on a form that installs nothing.
+  await expect(page.locator("#deploy-install-path")).toHaveCount(0);
+
+  await page.locator("#leave-ssh-user").fill("fixture");
+  await drawer.getByRole("button", { name: "Connect", exact: true }).click();
+
+  await page.getByRole("button", { name: "Trust and continue" }).click();
+  await expect(page.locator("[data-ouro-secret]")).toBeVisible();
+  await page.keyboard.type("browser-fixture-leave-password");
+  await page.keyboard.press("Enter");
+
+  // The review reads as a removal, and so does the button under it.
+  await expect(page.getByRole("heading", { name: "Ready to remove" })).toBeVisible();
+  await expect(drawer).toContainText("Stop Ouroboros on fixture-buildbox");
+  await expect(drawer.getByRole("button", { name: "Remove", exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Remove", exact: true }).click();
+
+  // The removal's own three stages, and none of the add flow's.
+  for (const stage of ["Stop", "Remove", "Forget"]) {
+    await expect(drawer.locator(".ouro-devices-strip")).toContainText(stage);
+  }
+  await expect(drawer.locator('[data-step="install"]')).toHaveCount(0);
+
+  await expect(
+    drawer.getByRole("heading", { name: "fixture-buildbox is out of your fleet" })
+  ).toBeVisible({ timeout: 15000 });
+});
+
+test("setting this machine up takes no account and reviews before it changes anything", async ({
+  page
+}) => {
+  await openDevices(page);
+
+  // The status line is the blocker sentence, and the primary button is beside it.
+  await expect(page.locator(".ouro-devices-status")).toContainText(/is not in a fleet yet/);
+  await page.getByRole("button", { name: /^Set up this (Mac|machine)$/ }).click();
+
+  const drawer = page.locator("#ouro-deploy");
+  await expect(drawer).toBeVisible();
+
+  // No SSH account anywhere: this machine configures itself.
+  await expect(page.locator("#leave-ssh-user")).toHaveCount(0);
+  await expect(page.locator("#deploy-ssh-user")).toHaveCount(0);
+  await expect(page.locator("#setup-machine")).toHaveValue("fixture-spare");
+  await expect(drawer).toContainText("Ouroboros restarts once during setup");
+
+  await page.getByRole("button", { name: "Set up", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "Ready to set up" })).toBeVisible();
+  await expect(drawer).toContainText("Create this fleet on this machine");
+  await expect(page.locator("[data-ouro-plan-digest]")).toHaveCount(0);
+
+  await page.locator('button[phx-click="approve"]').click();
+
+  // The setup flow's own stages, and none of the add flow's.
+  for (const stage of ["Create fleet", "Stop", "Start at login", "Ready"]) {
+    await expect(drawer.locator(".ouro-devices-strip")).toContainText(stage);
+  }
+  await expect(drawer.locator('[data-step="inspect"]')).toHaveCount(0);
 });
 
 test("a finished operation changes what its row says", async ({ page }) => {
@@ -320,18 +442,14 @@ test("a finished operation changes what its row says", async ({ page }) => {
   const row = page.locator('[data-address="' + device.address + '"]');
   await expect(row).toContainText("not set up");
 
-  await page
-    .locator('button[phx-click="deploy"][phx-value-address="' + device.address + '"]')
-    .click();
-  await page.locator("#deploy-ssh-user").fill("deploy");
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await startAdd(page, device);
   await expect(page.getByRole("heading", { name: /First time connecting/ })).toBeVisible();
 
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
 
-  // The operation is the freshest thing known about this device, and the row says so
-  // rather than going back to reading as an untouched peer with an Add to fleet button.
+  // The operation is the freshest thing known about this device, and the row says so rather
+  // than going back to reading as an untouched peer with an Add to fleet button.
   await expect(row).toContainText("waiting for you");
   await expect(row.getByRole("button", { name: "Add to fleet" })).toHaveCount(0);
   await expect(row.getByRole("button", { name: "Continue" })).toBeVisible();
@@ -340,12 +458,8 @@ test("a finished operation changes what its row says", async ({ page }) => {
 test("closing the drawer keeps the operation, and the address reopens it", async ({ page }) => {
   await openDevices(page);
 
-  const device = peer(4);
-  await page
-    .locator('button[phx-click="deploy"][phx-value-address="' + device.address + '"]')
-    .click();
-  await page.locator("#deploy-ssh-user").fill("deploy");
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  const device = peer(1);
+  await startAdd(page, device);
   await expect(page.getByRole("heading", { name: /First time connecting/ })).toBeVisible();
 
   const url = new URL(page.url());
@@ -356,9 +470,13 @@ test("closing the drawer keeps the operation, and the address reopens it", async
   await expect(page.locator("#ouro-deploy")).toHaveCount(0);
   await expect(page).toHaveURL(/\/devices$/);
 
-  // Reopened by id, from a fresh page load: the operation outlived the drawer.
+  // Reopened by id, from a fresh page load: the operation outlived the drawer, and the
+  // prompt it left is answerable from this load rather than bound to the one that started it.
   await page.goto("/devices?operation=" + operation);
   await liveConnected(page);
   await expect(page.locator("#ouro-deploy")).toBeVisible();
   await expect(page.locator("[data-ouro-operation]")).toHaveText(operation);
+  await expect(page.locator("[data-ouro-rebind]")).toHaveCount(0);
+  await page.getByRole("button", { name: "Trust and continue" }).click();
+  await expect(page.locator("[data-ouro-secret]")).toBeVisible();
 });

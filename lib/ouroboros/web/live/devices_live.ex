@@ -2245,7 +2245,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <button
           type="submit"
           class="ouro-button"
-          disabled={@drawer.busy == :prepare}
+          disabled={@drawer.busy == :start}
           aria-describedby={@drawer.error && "ouro-deploy-error"}
         >
           Set up
@@ -2350,7 +2350,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <button
           type="submit"
           class="ouro-button"
-          disabled={@drawer.busy == :prepare}
+          disabled={@drawer.busy == :start}
           aria-describedby={@drawer.error && "ouro-deploy-error"}
         >
           Connect
@@ -2419,7 +2419,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         <button
           type="submit"
           class="ouro-button"
-          disabled={@drawer.busy == :prepare}
+          disabled={@drawer.busy == :start}
           aria-describedby={@drawer.error && "ouro-deploy-error"}
         >
           Connect

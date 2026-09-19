@@ -218,10 +218,25 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     )
   end
 
-  def forget_session_owner_reply({:error, {:session_owner_not_tombstoned, machine}}) do
+  # A machine this profile's members do not name. There is no tombstone to have been
+  # recorded first any more — `ouro fleet forget NAME` is the whole of the local statement —
+  # so the refusal is simply that this is not a machine this fleet knows about.
+  def forget_session_owner_reply({:error, {:unknown_session_owner_machine, machine}}) do
     not_found(
-      "fleet profile has no roster tombstone for machine #{inspect(machine)}; run `ouro fleet sessions forget --machine NAME --accept-state-loss` on this machine, which records the tombstone before asking for this"
+      "machine #{inspect(machine)} is not a member of this fleet, so this runtime holds no session-owner evidence to retire for it"
     )
+  end
+
+  # And one that names more than one node, which is a fleet an operator has to look at
+  # before anything irreversible happens to it.
+  def forget_session_owner_reply({:error, {:ambiguous_session_owner_machine, machine, nodes}}) do
+    {:error, code(:invalid_params),
+     "machine #{inspect(machine)} names more than one node on this fleet, so there is no single owner to retire; run `ouro fleet status` and give the machines distinct names first",
+     %{
+       "reason" => "ambiguous_session_owner_machine",
+       "machine" => machine,
+       "nodes" => Enum.map(List.wrap(nodes), &to_string/1)
+     }}
   end
 
   def forget_session_owner_reply({:error, {:session_owner_connected, machine, owner}}) do
@@ -236,7 +251,7 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, :fleet_profile_unavailable}) do
     unavailable(
-      "no active fleet profile is available; this command only retires a member this machine's own roster records as tombstoned"
+      "no active fleet profile is available; this command retires the session-owner evidence of a machine this profile's own members name"
     )
   end
 

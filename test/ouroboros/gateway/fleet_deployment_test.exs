@@ -463,8 +463,18 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
     test "a leave names a member of this machine's profile, and never an address", context do
       write_profile(context.root, [
-        %{"machine" => "studio", "host" => "100.64.0.1", "node" => "ouro@100.64.0.1"},
-        %{"machine" => "buildbox", "host" => "100.64.12.44", "node" => "ouro@100.64.12.44"}
+        %{
+          "machine" => "studio",
+          "host" => "100.64.0.1",
+          "node" => "ouro-studio@100.64.0.1",
+          "dist_port" => 13_700
+        },
+        %{
+          "machine" => "buildbox",
+          "host" => "100.64.12.44",
+          "node" => "ouro-buildbox@100.64.12.44",
+          "dist_port" => 13_700
+        }
       ])
 
       FleetFramesFake.write_scenario!(context.bin, hold_scenario())
@@ -497,7 +507,12 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     test "a leave of a machine that is not a member is refused with the list printed",
          context do
       write_profile(context.root, [
-        %{"machine" => "studio", "host" => "100.64.0.1", "node" => "ouro@100.64.0.1"}
+        %{
+          "machine" => "studio",
+          "host" => "100.64.0.1",
+          "node" => "ouro-studio@100.64.0.1",
+          "dist_port" => 13_700
+        }
       ])
 
       client = connected(scope: :operate)
@@ -517,7 +532,12 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     test "a leave matches a member's name the way the rest of the fleet matches names",
          context do
       write_profile(context.root, [
-        %{"machine" => "BuildBox", "host" => "100.64.12.44", "node" => "ouro@100.64.12.44"}
+        %{
+          "machine" => "BuildBox",
+          "host" => "100.64.12.44",
+          "node" => "ouro-BuildBox@100.64.12.44",
+          "dist_port" => 13_700
+        }
       ])
 
       FleetFramesFake.write_scenario!(context.bin, hold_scenario())
@@ -937,7 +957,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
         "name" => "home",
         "machine" => "studio",
         "host" => "100.64.0.1",
-        "node" => "ouro@100.64.0.1",
+        "node" => "ouro-studio@100.64.0.1",
         "role" => "core",
         "dist_port" => 13_700,
         "members" => members

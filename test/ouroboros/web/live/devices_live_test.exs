@@ -180,7 +180,19 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
     dir = Path.join(root, "fleet")
     File.mkdir_p!(dir)
     path = Path.join(dir, "profile.json")
-    File.write!(path, JSON.encode!(%{"schema" => 2, "machine" => "studio", "members" => members}))
+
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "schema" => 2,
+        "machine" => "studio",
+        "host" => "100.64.0.1",
+        "node" => "ouro-studio@100.64.0.1",
+        "dist_port" => 13_700,
+        "members" => members
+      })
+    )
+
     File.chmod!(path, 0o600)
     path
   end
@@ -374,6 +386,25 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       assert html =~ "#{self_label()} is not in a fleet yet."
       assert html =~ setup_label()
+    end
+
+    test "a profile this build refuses outranks both shapes of the status line" do
+      # `fleet.status` carries `profile` as null or `{reason, message}`, and the message is
+      # §2's own sentence. "Not in a fleet yet" would be the wrong repair to send somebody
+      # to: this machine *is* in a fleet, one written by an older Ouroboros.
+      refused = %{
+        profile: %{
+          reason: :unsupported_profile_schema,
+          message:
+            "this fleet was created by an older Ouroboros; run `ouro fleet leave` here and set the fleet up again"
+        }
+      }
+
+      assert Devices.status_line(refused, "darwin", true) =~ "created by an older Ouroboros"
+      assert Devices.status_line(refused, "darwin", false) =~ "run `ouro fleet leave` here"
+
+      # And a runtime that reports no such thing still gets the two ordinary shapes.
+      assert Devices.status_line(%{profile: nil}, "darwin", true) =~ "is not in a fleet yet."
     end
 
     test "a peer wearing a member's name is named as the impostor it may be", context do
@@ -575,7 +606,14 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
   describe "removing a member" do
     test "is reached from the details panel and reads as a removal", context do
-      members!(context.root, [%{"machine" => "buildbox", "host" => "100.64.0.2"}])
+      members!(context.root, [
+        %{
+          "machine" => "buildbox",
+          "host" => "100.64.0.2",
+          "node" => "ouro-buildbox@100.64.0.2",
+          "dist_port" => 13_700
+        }
+      ])
 
       ouro!(context,
         scenario:

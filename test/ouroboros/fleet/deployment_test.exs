@@ -641,7 +641,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       FleetFramesFake.write_devices!(context.bin, %{
         "discovery" => %{"code" => "ok"},
         "devices" => [%{"machine" => "pi", "state" => "fleet_member", "address" => "100.64.0.2"}],
-        "fleet_protocol_revision" => 5
+        "something_a_later_ouro_prints" => 5
       })
 
       assert {:ok, inventory} = Deployment.devices(data_dir: context.root)
@@ -650,7 +650,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert inventory["host"]["capabilities"]["reasons"] == []
       refute "no_ca_key" in inventory["host"]["capabilities"]["reasons"]
       # A key this build does not read is named rather than passed through.
-      assert "fleet_protocol_revision" in inventory["unknown"]
+      assert "something_a_later_ouro_prints" in inventory["unknown"]
       assert [%{"machine" => "pi"}] = inventory["devices"]
     end
 

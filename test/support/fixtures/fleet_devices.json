@@ -3,7 +3,6 @@
     "note": "What `ouro fleet devices --json` prints. Derived by hand from the sanitized capture in tui/tests/fixtures/tailscale/running-with-peers.json, whose hostnames, addresses, keys and account names are already invented; the peers and their observed states are that file's, rendered through fleet_network::device_rows. Kept here so the Elixir suite never needs the Rust build. This key is not read by anything and proves an unknown top-level key is named in `unknown` rather than passed through. Every row also carries `suggested_machine` (fleet UX review 2026-09-18 section 5.5): the roster name for a member, otherwise a valid slug of the display name, or null when nothing valid remains. It is what a setup form pre-fills with; `name` never is.",
     "source": "tui/tests/fixtures/tailscale/running-with-peers.json"
   },
-  "fleet_protocol_revision": 5,
   "discovery": {
     "code": "ok",
     "reason": null,
