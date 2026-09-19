@@ -193,15 +193,13 @@ impl Lab {
         fs::create_dir_all(&scan).expect("a scan directory");
         fs::set_permissions(&scan, fs::Permissions::from_mode(0o700))
             .expect("a private scan directory");
-        match trust::examine(
+        match fleet_setup_support::examine_with_retry(
             &tools(),
             std::slice::from_ref(&store),
             "127.0.0.1",
             self.rig.port,
             &scan,
-        )
-        .expect("a host-key scan")
-        {
+        ) {
             Trust::Unknown { keys } => {
                 let key = keys.first().expect("a scanned key");
                 trust::accept(&store, key).expect("recording trust");
@@ -711,6 +709,113 @@ fn forget_refuses_while_no_runtime_can_retire_the_evidence() {
         after.members
     );
     assert_eq!(after.members.len(), 2, "{:?}", after.members);
+}
+
+// ================================================== --yes, and the one thing it is not
+
+/// One pseudo-terminal, as two owned halves.
+///
+/// Needed because the property under test only exists when there *is* a terminal:
+/// `terminal.rs` refuses every question noninteractively, so a suite whose stdin is a
+/// pipe proves nothing about what `--yes` does when somebody is watching.
+fn pty_pair() -> (fs::File, fs::File) {
+    use std::os::fd::FromRawFd;
+
+    let mut master = 0;
+    let mut slave = 0;
+    // SAFETY: `openpty` fills the two descriptors it is given; the three optional
+    // pointers are null, which asks for the platform defaults.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(opened, 0, "a pseudo-terminal");
+    // SAFETY: both descriptors are fresh and owned by exactly one `File` from here on.
+    unsafe { (fs::File::from_raw_fd(master), fs::File::from_raw_fd(slave)) }
+}
+
+/// **Mutation pin.** `--yes` never answers a host key, *including* on a real terminal.
+///
+/// `assume_yes` is read in exactly one arm of `TerminalConversation::ask` — the review —
+/// and the proposal is explicit that host verification is the decision automation cannot
+/// make for an operator. Every other test of this reaches the host-trust arm without a
+/// tty, where it is refused `host_unknown` before `assume_yes` could possibly matter, so
+/// an `if self.assume_yes { return Ok(Answer::Trust(true)) }` added at the top of that
+/// arm survives the whole suite: the one code path that would notice is the one no test
+/// has a terminal for.
+///
+/// So: a real pty, an untrusted host, `--yes`, and `n` typed at the prompt. What must
+/// happen is that the answer typed is the answer used — the operation stops, and nothing
+/// reaches the target.
+#[test]
+fn yes_never_answers_a_host_key_even_with_a_terminal_to_answer_on() {
+    let lab = Lab::new("kr3yes", "studio");
+    // Forget the rig's key, so this run has to ask about it. `Lab::new` records it
+    // because every other test here runs noninteractively and could not be asked.
+    let store = known_hosts_path(&lab.issuer);
+    fs::remove_file(&store).expect("the recorded host key");
+
+    let operation = "op-0000000000a9";
+    let mut args = lab.add_args("vps", operation);
+    args.extend(["--no-service".into(), "--yes".into(), "--json".into()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let (mut master, slave) = pty_pair();
+    let child = lab
+        .command(&lab.issuer, lab.target_ports, &borrowed, &[])
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the built ouro binary");
+    // The answer a person gives. Written before the prompt appears, which a terminal
+    // buffers exactly as it would a fast typist.
+    writeln!(master, "n").expect("a terminal to type into");
+    master.flush().expect("a flushed answer");
+
+    let finished = child.wait_with_output().expect("the process exits");
+    let stdout = String::from_utf8_lossy(&finished.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&finished.stderr).into_owned();
+
+    assert!(
+        !finished.status.success(),
+        "`--yes` accepted an unknown host key on a terminal:\n{stdout}\n{stderr}"
+    );
+    let document: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+        panic!("a --json refusal is one document: {error}\n{stdout}\n{stderr}")
+    });
+    assert_eq!(
+        document["reason"],
+        json!("host_trust_declined"),
+        "the refusal is the operator's own answer, not a missing terminal: {document:#}"
+    );
+    // The question really was asked, with the fingerprint to verify independently.
+    assert!(
+        stderr.contains("is not yet trusted on this machine") && stderr.contains("SHA256:"),
+        "the host key question was never put: {stderr}"
+    );
+    // And nothing was sent: no host key recorded, no credentials on the target.
+    assert!(
+        !store.exists(),
+        "a declined host key was recorded at {}",
+        store.display()
+    );
+    assert!(
+        fleet::load(&lab.target)
+            .expect("a readable target")
+            .is_none(),
+        "a declined host key still reached the target"
+    );
+    assert!(
+        lab.child_argv().is_empty(),
+        "a declined host key still started a helper: {}",
+        lab.child_argv()
+    );
 }
 
 // ============================================================================== --frames
@@ -1579,6 +1684,44 @@ fn a_start_that_the_manager_refuses_keeps_the_credentials_and_says_so() {
     .expect("a decodable journal");
     assert_eq!(document["state"], json!("failed"), "{document:#}");
     assert_eq!(document["last_error"]["reason"], json!("start_failed"));
+
+    // And what it left behind is named. §6 requires an operation that stops to say what
+    // it delivered rather than claim a clean undo, and `residue` was `[]` on every
+    // surface in this build — `--json`, `fleet.deployment.status`, the cancel path —
+    // because nothing called `note_residue` at all. This is the case that most needs
+    // it: the credentials really are on that machine and it really is on this roster,
+    // and an operator deciding what to do next has to be told both.
+    let residue = document["residue"]
+        .as_array()
+        .expect("a residue list")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        residue.contains("vps holds this fleet's credentials"),
+        "the journal does not name the credentials it delivered:\n{residue}"
+    );
+    assert!(
+        residue.contains("vps is on this machine's member list"),
+        "the journal does not name the roster entry it made:\n{residue}"
+    );
+    assert!(
+        residue.contains("ouro fleet leave --machine vps"),
+        "the residue names what takes it back:\n{residue}"
+    );
+    // The same list reaches `--json`, which is the document an orchestrator reads.
+    let reported: Value = serde_json::from_str(&attempted.stdout).unwrap_or_else(|error| {
+        panic!(
+            "a --json run is one document: {error}\n{}",
+            attempted.stdout
+        )
+    });
+    assert_eq!(
+        reported["residue"], document["residue"],
+        "the outcome and the journal disagree about what was left behind: {reported:#}"
+    );
+    assert_eq!(reported["state"], json!("failed"), "{reported:#}");
 
     // And it is still a resumable document: `--operation ID` reopens it, and the step
     // that already landed is recorded `ok`, so a resume does not send the bundle again.

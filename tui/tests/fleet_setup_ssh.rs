@@ -130,8 +130,7 @@ fn programs() -> Programs {
 /// would. Returns the fingerprint that was recorded.
 fn trust_now(rig: &Sshd, store: &Path, scratch: &Path) -> String {
     let stores = [store.to_path_buf()];
-    match trust::examine(&tools(), &stores, "127.0.0.1", rig.port, scratch)
-        .expect("a scan of the rig")
+    match fleet_setup_support::examine_with_retry(&tools(), &stores, "127.0.0.1", rig.port, scratch)
     {
         Trust::Unknown { keys } => {
             let key = keys.first().expect("at least one host key").clone();
@@ -219,14 +218,13 @@ fn an_unknown_host_is_an_explicit_decision_recorded_in_the_private_store() {
     let work = scratch("unknown-host-work");
     let store = work.join("known_hosts");
 
-    let examined = trust::examine(
+    let examined = fleet_setup_support::examine_with_retry(
         &tools(),
         std::slice::from_ref(&store),
         "127.0.0.1",
         rig.port,
         &work,
-    )
-    .expect("a scan");
+    );
     let Trust::Unknown { keys } = examined else {
         panic!("a fresh private store knows nothing");
     };
@@ -255,14 +253,13 @@ fn an_unknown_host_is_an_explicit_decision_recorded_in_the_private_store() {
     }
 
     assert!(matches!(
-        trust::examine(
+        fleet_setup_support::examine_with_retry(
             &tools(),
             std::slice::from_ref(&store),
             "127.0.0.1",
             rig.port,
             &work
-        )
-        .expect("a second scan"),
+        ),
         Trust::Known { .. }
     ));
 }
@@ -277,14 +274,13 @@ fn a_changed_host_key_blocks_and_the_connection_is_refused() {
 
     rig.rotate_host_key();
 
-    let examined = trust::examine(
+    let examined = fleet_setup_support::examine_with_retry(
         &tools(),
         std::slice::from_ref(&store),
         "127.0.0.1",
         rig.port,
         &work,
-    )
-    .expect("a scan of the rotated server");
+    );
     let Trust::Changed { presented, .. } = examined else {
         panic!("a rotated host key is a changed host key, not an unknown one");
     };

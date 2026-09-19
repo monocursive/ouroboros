@@ -36,6 +36,16 @@ fn scratch(label: &str) -> PathBuf {
     path
 }
 
+/// A file's permission bits, for the modes §6 and §8 fix.
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .permissions()
+        .mode()
+        & 0o777
+}
+
 /// `ouro` refuses a data directory anyone else can read.
 fn private_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -331,11 +341,46 @@ fn a_declined_review_changes_nothing_and_exits_non_zero() {
         "every terminal frame names its operation: {done}"
     );
 
-    let (code, stderr) = frames.finish();
+    let operation = done["operation"]
+        .as_str()
+        .expect("an operation id")
+        .to_string();
+    let (code, inherited) = frames.finish();
     assert_ne!(code, 0, "a refused operation exits non-zero");
-    // §8: stderr is diagnostics, and stdout is frames. Nothing that is not a frame
-    // reached stdout, which the parse above already proved.
-    assert!(!stderr.is_empty(), "the refusal is explained on stderr");
+    // §8: stdout is frames and stderr is diagnostics, and stderr's destination is
+    // `<data dir>/deploy/<id>.log` rather than whatever descriptor this process was
+    // handed. The broker's port program inherits the *runtime's* stderr, so "the
+    // refusal is explained on stderr" used to mean "it is somewhere in the runtime's
+    // own log, unattributed"; it is in this operation's own file now, which is the one
+    // `fleet.deployment.status` reads.
+    let log = data.join("deploy").join(format!("{operation}.log"));
+    let explained = std::fs::read_to_string(&log).expect("this operation's log");
+    assert!(
+        !explained.trim().is_empty(),
+        "the refusal is explained in {}",
+        log.display()
+    );
+    assert_eq!(mode(&log), 0o600, "§8: the operation log is 0600");
+    assert!(
+        explained.contains("review_declined"),
+        "the log names the reason: {explained}"
+    );
+    // The operation's own account of itself is in its log and not on the descriptor
+    // this process inherited. What is still there is `main`'s one-line exit message,
+    // printed after the log is closed, which is what a person who ran this by hand
+    // reads.
+    assert!(
+        !inherited.contains('·'),
+        "the operation's progress still reached the inherited stderr: {inherited}"
+    );
+    assert!(
+        inherited
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            <= 1,
+        "more than an exit message reached the inherited stderr: {inherited}"
+    );
     assert!(
         !data.join("fleet").exists(),
         "a declined review installs nothing"
@@ -1012,6 +1057,262 @@ fn kr3_a_finished_frames_operation_writes_no_deploy_log() {
          process wrote to stderr went to the descriptor it inherited and nowhere else",
         listing(&deploy),
         stderr.len()
+    );
+
+    // And it is the operation's own account rather than an empty file at the right
+    // path: §8's `deploy/<id>.log` is what `fleet.deployment.status` serves as "the
+    // scrubbed tail", so a log with nothing in it answers the operator's question with
+    // silence. The phases and the steps are what a person reads there.
+    let written = std::fs::read_to_string(deploy.join(format!("{operation}.log")))
+        .expect("this operation's log");
+    assert_eq!(
+        mode(&deploy.join(format!("{operation}.log"))),
+        0o600,
+        "§8: the operation log is 0600"
+    );
+    for line in ["· inspecting", "· deploying", "· completed"] {
+        assert!(
+            written.contains(line),
+            "the log is missing `{line}`:\n{written}"
+        );
+    }
+    assert!(
+        written.contains("create ok"),
+        "the log carries the steps as well as the phases:\n{written}"
+    );
+    // Scrubbed by the journal's own funnel, so nothing a target printed can carry a
+    // control sequence into whatever reads this file.
+    assert!(
+        !written.contains('\u{1b}'),
+        "an escape sequence survived into the log"
+    );
+    // The fleet this operation created is on this machine, and its cookie is not.
+    let cookie = std::fs::read_to_string(data.join("fleet").join("cookie")).expect("a cookie");
+    assert!(
+        !written.contains(cookie.trim()),
+        "the cookie reached the operation log"
+    );
+}
+
+/// The operation's own flock, held the way a running engine holds it, from this test.
+///
+/// `fleet_setup::lock` is private, and this is deliberately the same file and the same
+/// `flock` rather than a stand-in: what is being pinned is that the engine takes *this*
+/// lock before it writes, so a test that held something else would prove nothing.
+struct HeldLock {
+    /// Held, not read: dropping the file releases the `flock`.
+    _file: std::fs::File,
+}
+
+impl HeldLock {
+    fn on(data_dir: &Path, operation: &str) -> Self {
+        use std::os::fd::AsRawFd as _;
+        let path = data_dir.join("deploy").join(format!("{operation}.lock"));
+        std::fs::create_dir_all(path.parent().expect("a deploy directory"))
+            .expect("a deploy directory");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .expect("the operation's lock file");
+        // SAFETY: the descriptor is owned by `file`, which outlives the lock.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(taken, 0, "the lock was already held: {}", path.display());
+        Self { _file: file }
+    }
+}
+
+/// **Mutation pin.** A resume that cannot have the lock writes nothing at all.
+///
+/// `run_locked` takes the operation's lock *first*, and only then records the startup
+/// choice and clears the previous run's error. The order is the whole of it: a second
+/// process that got as far as `clear_error` would have erased the reason the first run
+/// stopped — from the journal that the operator is at that moment reading to decide what
+/// to do — on its way to being refused for an operation it was never going to run.
+///
+/// A failed operation is the case that makes it visible, because `failed` is the state
+/// that carries something worth losing: `last_error.reason`, which §6 puts there
+/// precisely so a resume and a person can tell the two ways an operation stops apart.
+#[test]
+fn kr3_a_resume_that_cannot_take_the_lock_writes_nothing_to_the_journal() {
+    let root = scratch("locked-resume");
+    let data = root.join("data");
+    private_dir(&data);
+    let operation = "op-0000000000dd";
+
+    // A failed operation, with its reason: the review was declined.
+    let mut first = Frames::start(
+        &data,
+        &root.join("first.log"),
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    let mut challenge = None;
+    while let Some(frame) = first.next() {
+        if frame["event"] == "challenge" {
+            challenge = frame["challenge"].as_str().map(str::to_string);
+            break;
+        }
+    }
+    first.send(serde_json::json!({
+        "op": "respond",
+        "challenge": challenge.expect("a review"),
+        "accept": false,
+    }));
+    while first.next().is_some() {}
+    let (code, _log) = first.finish();
+    assert_ne!(code, 0);
+
+    let path = data.join("deploy").join(format!("{operation}.json"));
+    let before: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("the journal")).expect("a journal");
+    assert_eq!(before["state"], "failed");
+    assert_eq!(before["last_error"]["reason"], "review_declined");
+
+    // Somebody else is running it.
+    let _held = HeldLock::on(&data, operation);
+
+    let mut resume = Frames::start(
+        &data,
+        &root.join("resume.log"),
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    resume.close_stdin();
+    let mut done = None;
+    while let Some(frame) = resume.next() {
+        if frame["event"] == "done" {
+            done = Some(frame);
+        }
+    }
+    let done = done.expect("a done frame");
+    let (resumed_code, _log) = resume.finish();
+    assert_ne!(resumed_code, 0, "{done}");
+    assert_eq!(done["reason"], "operation_in_progress", "{done}");
+
+    let after: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("the journal")).expect("a journal");
+    assert_eq!(
+        after, before,
+        "a resume refused for the lock changed this operation's journal"
+    );
+}
+
+/// **Mutation pin.** A resumed `setup` checks *both* halves of the identity it created.
+///
+/// `run_setup`'s `identity_mismatch` compares the machine name *and* the address the
+/// plan resolved against the profile that is on this machine. Dropping the address half
+/// leaves a resume that records "verified this operation's local fleet identity" about a
+/// fleet published on a different host, and then completes — a journal claiming a
+/// machine at an address that machine does not answer on, and a `create` step marked
+/// `ok` for a fleet this operation did not create.
+///
+/// The journal is built here rather than interrupted out of a live run: what is under
+/// test is one branch of a resume, and reaching it by killing a `--no-service` setup
+/// between `create` and `start` would be a race rather than a test.
+#[test]
+fn kr3_a_resumed_setup_whose_local_fleet_moved_is_an_identity_mismatch() {
+    use ouro::fleet_setup::journal::{Journal, TargetIdentity};
+    use ouro::fleet_setup::OperationKind;
+
+    let root = scratch("identity");
+    let data = root.join("data");
+    private_dir(&data);
+    let operation = "op-0000000000ee";
+
+    // A machine that is already set up, at 127.0.0.1, by some earlier operation.
+    let (gateway, dist) = test_ports();
+    let profile = ouro::fleet::create(
+        &data,
+        None,
+        "lab",
+        "127.0.0.1",
+        ouro::fleet::Ports {
+            gateway: Some(gateway),
+            dist: Some(dist),
+        },
+    )
+    .expect("a local fleet");
+    assert_eq!(profile.host, "127.0.0.1");
+
+    // And an operation that was reviewed and reached `create` against a *different*
+    // address. Everything else about it agrees with the argv below, so `hydrate` has
+    // nothing to refuse and the resume reaches the identity check rather than being
+    // turned away as a different plan wearing this id.
+    {
+        let mut journal = Journal::open(&data, operation, OperationKind::Setup).expect("a journal");
+        journal
+            .set_target(TargetIdentity {
+                machine: "lab".into(),
+                address: Some("127.0.0.2".into()),
+                node: Some("ouro-lab@127.0.0.2".into()),
+                ..TargetIdentity::default()
+            })
+            .expect("a target");
+        journal.set_service(false).expect("the startup choice");
+        journal
+            .set_plan(vec!["Create a fleet on this machine as lab".into()])
+            .expect("an approved plan");
+        journal.begin_step("lab", "create").expect("an attempt");
+    }
+
+    let mut resume = Frames::start(
+        &data,
+        &root.join("resume.log"),
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.2",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    resume.close_stdin();
+    let mut done = None;
+    while let Some(frame) = resume.next() {
+        if frame["event"] == "done" {
+            done = Some(frame);
+        }
+    }
+    let done = done.expect("a done frame");
+    let (code, _log) = resume.finish();
+    assert_ne!(code, 0, "{done}");
+    assert_eq!(
+        done["reason"], "identity_mismatch",
+        "a resume whose local fleet is at another address must not verify it: {done}"
+    );
+
+    // And the fleet that is here is untouched, still at the address it was created on.
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &std::fs::read(data.join("fleet").join("profile.json")).expect("a profile")
+        )
+        .expect("a profile")["host"],
+        "127.0.0.1"
     );
 }
 

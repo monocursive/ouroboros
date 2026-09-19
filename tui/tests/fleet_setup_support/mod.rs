@@ -56,6 +56,41 @@ pub fn account() -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// `trust::examine`, retried, because a host key scan is the one step of this rig that
+/// a busy machine can fail for reasons that have nothing to do with the test.
+///
+/// `ssh-keyscan` opens one TCP connection per key type and authenticates on none of
+/// them. `sshd` has a finite `MaxStartups` and the loopback stack has a finite backlog,
+/// so under a fully parallel `cargo test` — several rigs, each with its own server, all
+/// scanning at once — a scan can come back with no keys at all. `examine` is right to
+/// call that `host_scan_failed`; it is the *product's* answer to "the server did not
+/// respond". What is wrong is a test reading it as "this build cannot scan a host key".
+///
+/// Bounded: four attempts, 100ms apart, and the last failure is the one that panics, so
+/// a genuinely broken scan still fails the test with the product's own refusal.
+pub fn examine_with_retry(
+    tools: &ouro::fleet_setup::trust::Tools,
+    stores: &[PathBuf],
+    address: &str,
+    port: u16,
+    scratch: &Path,
+) -> ouro::fleet_setup::trust::Trust {
+    let mut last = None;
+    for attempt in 0..4 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(100 * attempt));
+        }
+        match ouro::fleet_setup::trust::examine(tools, stores, address, port, scratch) {
+            Ok(trust) => return trust,
+            Err(error) => last = Some(error),
+        }
+    }
+    panic!(
+        "{address} port {port} did not answer a host key scan in four attempts: {:#}",
+        last.expect("four attempts leave an error")
+    );
+}
+
 /// One unprivileged `sshd` serving one authorized key on 127.0.0.1.
 pub struct Sshd {
     pub dir: PathBuf,
