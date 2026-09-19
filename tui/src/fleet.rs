@@ -249,12 +249,19 @@ fn validate_inferred_host(host: &str) -> Result<()> {
     })
 }
 
-/// The one sentence a profile written before the fleet simplification gets.
+/// The one sentence a profile this build cannot read gets.
 ///
 /// §2 and §12: there is no migration, and a machine on a schema-1 profile cannot form a
 /// fleet with a schema-2 machine. `ouro fleet status`, `ouro fleet doctor` and the
 /// launcher all reach this through [`load`].
-pub const SCHEMA_1_SENTENCE: &str = "this fleet was created by an older Ouroboros; run `ouro fleet leave` here and set the fleet up again.";
+///
+/// Word for word the runtime's own `@unsupported_profile_message`
+/// (`lib/ouroboros/cluster.ex`), because `fleet.status` and `fleet.doctor` answer about
+/// this same file with that sentence while the CLI answers with this one: an operator
+/// who ran both and read two different sentences would reasonably conclude they were
+/// two different faults. It names the disagreement rather than its direction — a
+/// profile from a *newer* Ouroboros is the same file, the same repair, the same words.
+pub const SCHEMA_1_SENTENCE: &str = "this fleet's profile was written by a different version of Ouroboros than the one running here; run `ouro fleet leave` here and set the fleet up again.";
 
 pub fn load(data_dir: &Path) -> Result<Option<Profile>> {
     let path = profile_path(data_dir);
