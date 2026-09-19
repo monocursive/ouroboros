@@ -25,7 +25,7 @@ use support::{app, fixture, full_hello, render};
 fn fleet_profile() -> Profile {
     Profile {
         tags: serde_json::json!([]),
-        schema: 1,
+        schema: 2,
         fleet_id: "fleet-test-0123456789".into(),
         name: "Studio fleet".into(),
         machine: "studio".into(),
@@ -37,24 +37,23 @@ fn fleet_profile() -> Profile {
                 machine: "studio".into(),
                 host: "studio.test".into(),
                 node: "ouro@studio.test".into(),
+                dist_port: 13_700,
             },
             Member {
                 machine: "mini".into(),
                 host: "mini.test".into(),
                 node: "ouro@mini.test".into(),
+                dist_port: 13_700,
             },
             Member {
                 machine: "workstation".into(),
                 host: "workstation.test".into(),
                 node: "ouro@workstation.test".into(),
+                dist_port: 13_700,
             },
         ],
-        tombstones: Vec::new(),
-        roster_revision: 1,
         gateway_port: 47_123,
-        epmd_port: 14_123,
-        dist_port_min: 43_700,
-        dist_port_max: 43_729,
+        dist_port: 13_700,
     }
 }
 

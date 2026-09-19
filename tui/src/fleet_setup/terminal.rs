@@ -138,7 +138,7 @@ impl Conversation for TerminalConversation {
                     }
                 }
                 if self.assume_yes {
-                    return Ok(Answer::Approval);
+                    return Ok(Answer::Approval(true));
                 }
                 if !interactive() {
                     return refuse(
@@ -147,7 +147,7 @@ impl Conversation for TerminalConversation {
                     );
                 }
                 if confirm("Apply this plan?")? {
-                    Ok(Answer::Approval)
+                    Ok(Answer::Approval(true))
                 } else {
                     refuse("review_declined", "the plan was not approved")
                 }
@@ -435,7 +435,7 @@ mod tests {
             })
             .expect("--yes approves the resolved plan")
         {
-            Answer::Approval => {}
+            Answer::Approval(true) => {}
             other => panic!("expected an approval, got {other:?}"),
         }
 

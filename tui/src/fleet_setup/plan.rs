@@ -480,8 +480,12 @@ mod tests {
                     .to_string()
             ]
         );
+        plan.summary = plan.lines().join(" ");
         let rendered = plan.render();
-        assert!(rendered.contains("its sessions and data stay on that machine"));
+        assert!(
+            rendered.contains("Its sessions and data stay on that machine"),
+            "{rendered}"
+        );
         assert!(
             !rendered.to_lowercase().contains("tombstone"),
             "tombstones are gone"

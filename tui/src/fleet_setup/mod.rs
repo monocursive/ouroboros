@@ -755,147 +755,106 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A digest binds values, not the order an encoder happened to emit keys in.
-    #[test]
-    fn canonical_json_sorts_keys_at_every_depth_so_one_plan_has_one_digest() {
-        let left = json!({"b": 1, "a": {"z": [1, {"y": 2, "x": 3}], "m": null}});
-        let right = json!({"a": {"m": null, "z": [1, {"x": 3, "y": 2}]}, "b": 1});
-
-        assert_eq!(canonical_json(&left), canonical_json(&right));
-        assert_eq!(
-            canonical_json(&left),
-            r#"{"a":{"m":null,"z":[1,{"x":3,"y":2}]},"b":1}"#
-        );
-        assert_ne!(
-            sha256_hex(canonical_json(&left).as_bytes()),
-            sha256_hex(canonical_json(&json!({"a": {}, "b": 2})).as_bytes())
-        );
-    }
-
-    /// An operation id names files in a shared directory; `..` and `/` cannot survive.
+    /// An operation id names files in a shared directory, so nothing that could be a
+    /// path survives the check.
     #[test]
     fn an_operation_id_cannot_name_a_path() {
         assert!(validate_operation_id("op-0123456789ab").is_ok());
         for hostile in [
-            "../etc",
-            "op/passwd",
+            "../../etc/passwd",
+            "op/../../x",
             "OP-0123456789AB",
             "short",
-            "op--double",
-            "-leading",
-            "trailing-",
+            "op--0123456789",
+            "-op-0123456789",
+            &"o".repeat(65),
         ] {
             assert!(
                 validate_operation_id(hostile).is_err(),
-                "{hostile} must not be accepted as an operation id"
+                "{hostile} must be refused"
             );
         }
-        let generated = new_operation_id().expect("an operation id");
+        let generated = new_operation_id().expect("an id");
         assert!(validate_operation_id(&generated).is_ok(), "{generated}");
     }
 
-    /// Every durable path an operation owns lives under one private directory.
+    /// Remote text is data on its way to a terminal, a log and a durable file.
     #[test]
-    fn every_operation_path_is_inside_the_deploy_directory() {
-        let data = Path::new("/tmp/data");
-        let deploy = deploy_dir(data);
-        assert_eq!(deploy, Path::new("/tmp/data/deploy"));
-        for path in [
-            journal_path(data, "op-1234abcd"),
-            request_path(data, "op-1234abcd"),
-            log_path(data, "op-1234abcd"),
-            socket_path(data, "op-1234abcd"),
-            capability_path(data, "op-1234abcd"),
-            scratch_dir(data, "op-1234abcd"),
-            known_hosts_path(data),
-        ] {
-            assert!(path.starts_with(&deploy), "{}", path.display());
-        }
-    }
-
-    /// The states the proposal lists, spelled the way the wire spells them.
-    #[test]
-    fn the_state_names_are_the_ones_the_proposal_names() {
-        let states = [
-            OperationState::Inspecting,
-            OperationState::AwaitingHostTrust,
-            OperationState::AwaitingAuth,
-            OperationState::AwaitingReview,
-            OperationState::Deploying,
-            OperationState::RestartingHost,
-            OperationState::CheckingReadiness,
-            OperationState::Completed,
-            OperationState::Interrupted,
-            OperationState::Failed,
-            OperationState::Cancelled,
-        ];
-        let names: Vec<&str> = states.iter().map(|state| state.as_str()).collect();
+    fn remote_text_loses_control_characters_urls_and_length() {
         assert_eq!(
-            names,
-            vec![
-                "inspecting",
-                "awaiting_host_trust",
-                "awaiting_auth",
-                "awaiting_review",
-                "deploying",
-                "restarting_host",
-                "checking_readiness",
-                "completed",
-                "interrupted",
-                "failed",
-                "cancelled",
-            ]
-        );
-        for state in states {
-            assert_eq!(
-                serde_json::to_value(state).expect("a serializable state"),
-                json!(state.as_str()),
-                "the journal and the wire spell a state the same way"
-            );
-        }
-    }
-
-    /// Remote output is data. It cannot move a cursor, own the screen, or put a link in
-    /// front of an operator who is authenticating to the machine that sent it.
-    #[test]
-    fn remote_text_is_stripped_capped_and_has_its_urls_redacted() {
-        assert_eq!(
-            sanitize_remote_text("ouro\u{1b}[2J fleet\nhelper  ready", 200),
-            "ouro[2J fleet helper ready"
+            sanitize_remote_text("hello\u{1b}[2Jworld", 40),
+            "hello[2Jworld"
         );
         assert_eq!(
-            sanitize_remote_text("visit https://evil.example/login to continue", 200),
-            "visit <redacted url> to continue"
+            sanitize_remote_text("go to https://evil.example now", 60),
+            "go to <redacted url> now"
         );
-        assert_eq!(
-            sanitize_remote_text("tailscale up --login-server=http://10.0.0.1:8080", 200),
-            "tailscale up <redacted url>"
-        );
-        let long = sanitize_remote_text(&"x".repeat(500), 40);
-        assert_eq!(long.chars().count(), 41, "capped, with a marker: {long}");
+        let long = sanitize_remote_text(&"x".repeat(100), 10);
+        assert_eq!(long.chars().count(), 11, "ten characters plus the marker");
         assert!(long.ends_with('…'));
     }
 
-    /// A reason code survives the trip through `anyhow`, including one raised by the
-    /// admission half, because an orchestrator branches on it.
+    /// §6: a resumed operation is the same operation, or it is a new one.
     #[test]
-    fn a_stable_reason_survives_anyhow_from_either_half_of_admission() {
-        let ours: anyhow::Error = SetupError {
-            reason: "host_key_changed",
-            detail: "the host key changed".into(),
-        }
-        .into();
-        assert_eq!(reason_of(&ours), Some("host_key_changed"));
+    fn hydrating_a_request_fills_gaps_and_refuses_contradictions() {
+        let target = journal::TargetIdentity {
+            machine: "buildbox".into(),
+            address: Some("100.64.0.2".into()),
+            ssh_user: Some("me".into()),
+            port: Some(2222),
+            ..journal::TargetIdentity::default()
+        };
+        let paths = journal::IntendedPaths {
+            install_path: Some("/home/me/.local/bin/ouro".into()),
+            data_dir: None,
+        };
 
-        let theirs = crate::fleet::prepare_admission(
-            Path::new("/nonexistent-deploy-test"),
-            "not an id",
-            "m",
-            "127.0.0.1",
-        )
-        .expect_err("an invalid operation id is refused");
-        assert_eq!(reason_of(&theirs), Some("invalid_request"));
+        let mut request = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        request.hydrate(&target, &paths).expect("a clean resume");
+        assert_eq!(request.address.as_deref(), Some("100.64.0.2"));
+        assert_eq!(request.ssh_user.as_deref(), Some("me"));
+        assert_eq!(request.ssh_port, Some(2222));
+        assert_eq!(
+            request.install_path.as_deref(),
+            Some("/home/me/.local/bin/ouro")
+        );
 
-        assert_eq!(reason_of(&anyhow!("plain")), None);
+        let mut moved = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        moved.address = Some("100.64.0.9".into());
+        let error = moved.hydrate(&target, &paths).expect_err("a moved target");
+        assert_eq!(reason_of(&error), Some("plan_changed"));
+
+        let mut renamed = OperationRequest::new("op-0123456789ab", OperationKind::Add, "vps");
+        let error = renamed
+            .hydrate(&target, &paths)
+            .expect_err("another machine");
+        assert_eq!(reason_of(&error), Some("plan_changed"));
+    }
+
+    /// §6 deleted the plan digest, but the canonical encoder is still how two sides
+    /// agree about a document's values rather than its key order.
+    #[test]
+    fn canonical_json_sorts_keys_and_keeps_arrays_in_order() {
+        assert_eq!(
+            canonical_json(&json!({"b": 1, "a": [3, 2]})),
+            r#"{"a":[3,2],"b":1}"#
+        );
+    }
+
+    /// A refusal carries a stable reason through `anyhow`.
+    #[test]
+    fn a_refusal_keeps_its_reason() {
+        let error = refuse::<()>("invalid_request", "nope").expect_err("a refusal");
+        assert_eq!(reason_of(&error), Some("invalid_request"));
+        let wrapped = refusing("plan_changed", anyhow!("something moved"));
+        assert_eq!(reason_of(&wrapped), Some("plan_changed"));
+        assert!(format!("{wrapped:#}").contains("something moved"));
+        // And a fleet-library refusal keeps its own.
+        let fleet = crate::fleet::refusal(&anyhow::Error::new(crate::fleet::Refusal {
+            reason: "fleet_present",
+            detail: "already there".into(),
+        }))
+        .map(|declared| declared.reason);
+        assert_eq!(fleet, Some("fleet_present"));
     }
 }

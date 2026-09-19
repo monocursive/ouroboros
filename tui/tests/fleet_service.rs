@@ -58,19 +58,16 @@ fn data_dir_with_profile(root: &Path, machine: &str, host: &str) -> PathBuf {
         .expect("a private fleet dir");
     let node = format!("ouro-{machine}@{host}");
     let profile = json!({
-        "schema": 1,
+        "schema": 2,
         "fleet_id": "0123456789abcdef01234567",
         "name": "a test fleet",
         "machine": machine,
         "host": host,
         "node": node,
         "role": "core",
-        "members": [{ "machine": machine, "host": host, "node": node }],
-        "roster_revision": 1,
+        "dist_port": 45_002,
         "gateway_port": 45_000,
-        "epmd_port": 45_001,
-        "dist_port_min": 45_002,
-        "dist_port_max": 45_010,
+        "members": [{ "machine": machine, "host": host, "node": node, "dist_port": 45_002 }],
     });
     let path = data_dir.join("fleet").join("profile.json");
     fs::write(
@@ -990,25 +987,24 @@ fn the_helper_answers_the_service_op_over_the_real_binary() {
     fs::create_dir_all(&home).expect("a scratch home");
     let mut helper = Helper::start(&data_dir, &fakes, &home);
 
-    // A closed set of actions, and a refusal with a stable code for anything else.
+    // §7: `service` takes `install: bool`, and anything else is a bad request rather
+    // than a default.
     let reply = helper.ask(json!({ "op": "service", "action": "restart-everything" }));
     assert_eq!(reply["ok"], json!(false));
-    assert_eq!(reply["reason"], json!("unsupported_action"));
+    let reply = helper.ask(json!({ "op": "service" }));
+    assert_eq!(reply["ok"], json!(false));
 
-    // `status` on a machine with nothing installed: a report, not a failure.
-    let reply = helper.ask(json!({ "op": "service", "action": "status" }));
+    // `install: false` on a machine with nothing installed: a report, not a failure.
+    let reply = helper.ask(json!({ "op": "service", "install": false }));
     assert_eq!(reply["ok"], json!(true), "{reply}");
-    assert_eq!(reply["action"], json!("status"));
-    assert_eq!(reply["report"]["ownership"], json!("absent"));
-    assert_eq!(reply["report"]["installed"], json!(false));
+    assert_eq!(reply["installed"], json!(false));
     // The helper runs on this machine, so the platform it reports is this one.
     assert!(reply["report"]["platform"].is_string(), "{reply}");
 
-    // `install` through the helper reaches the same library and the same fake manager.
-    let reply = helper.ask(json!({ "op": "service", "action": "install" }));
+    // `install: true` reaches the same library and the same fake manager.
+    let reply = helper.ask(json!({ "op": "service", "install": true }));
     assert_eq!(reply["ok"], json!(true), "{reply}");
-    assert_eq!(reply["report"]["ownership"], json!("ours"));
-    assert_eq!(reply["report"]["installed"], json!(true));
+    assert_eq!(reply["installed"], json!(true));
     // And it wrote inside the scratch home it was given, not the account's own.
     let unit_path = reply["report"]["unit_path"]
         .as_str()
@@ -1021,18 +1017,9 @@ fn the_helper_answers_the_service_op_over_the_real_binary() {
     assert!(Path::new(&unit_path).exists(), "{unit_path}");
 
     // A request that names a different data directory is refused before any of this.
-    let reply = helper.ask(json!({ "op": "service", "action": "status", "data_dir": "/etc" }));
+    let reply = helper.ask(json!({ "op": "service", "install": false, "data_dir": "/etc" }));
     assert_eq!(reply["ok"], json!(false), "{reply}");
     assert_eq!(reply["reason"], json!("invalid_path"), "{reply}");
-
-    let reply = helper.ask(json!({ "op": "service", "action": "remove" }));
-    assert_eq!(reply["ok"], json!(true), "{reply}");
-    assert_eq!(reply["report"]["installed"], json!(false));
-
-    // The action is required, and a request that omits it is a bad request rather than
-    // a default.
-    let reply = helper.ask(json!({ "op": "service" }));
-    assert_eq!(reply["ok"], json!(false));
 
     // Every call reached the fake rather than this machine's real service manager.
     let start_command = match Platform::current().expect("a supported service platform") {

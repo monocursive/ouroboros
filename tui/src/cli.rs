@@ -2123,12 +2123,11 @@ mod tests {
         }
     }
 
-    /// The four service verbs, and the one flag that lets `install` replace a file it
-    /// did not write. There is deliberately no `start`: after `disable`, `install` is
-    /// what puts the service back, and a verb that only starts something is a verb that
-    /// hides whether the unit on disk is still the one this code wrote.
+    /// The four service verbs. §11 deleted `--adopt` along with the ownership marker:
+    /// one data directory is one unit at one deterministic path, and `install`
+    /// overwrites whatever is there.
     #[test]
-    fn fleet_service_takes_four_verbs_and_one_adoption_flag() {
+    fn fleet_service_takes_four_verbs_and_no_adoption_flag() {
         let Some(Command::Fleet {
             command: FleetCommand::Service { command },
         }) = parse(&["fleet", "service", "install"]).command
@@ -2137,24 +2136,7 @@ mod tests {
         };
         assert!(matches!(
             command,
-            FleetServiceCommand::Install {
-                adopt: false,
-                json: false
-            }
-        ));
-
-        let Some(Command::Fleet {
-            command: FleetCommand::Service { command },
-        }) = parse(&["fleet", "service", "install", "--adopt", "--json"]).command
-        else {
-            panic!("`ouro fleet service install --adopt --json` must parse");
-        };
-        assert!(matches!(
-            command,
-            FleetServiceCommand::Install {
-                adopt: true,
-                json: true
-            }
+            FleetServiceCommand::Install { json: false }
         ));
 
         for verb in ["status", "disable", "remove"] {
@@ -2177,8 +2159,7 @@ mod tests {
         assert!(
             Cli::try_parse_from(["ouro", "fleet", "service", "install", "--no-service"]).is_err()
         );
-        // Adoption is never implicit, and never available to the verbs that delete.
-        assert!(Cli::try_parse_from(["ouro", "fleet", "service", "remove", "--adopt"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "fleet", "service", "install", "--adopt"]).is_err());
         assert!(Cli::try_parse_from(["ouro", "fleet", "service", "start"]).is_err());
     }
 
@@ -2210,15 +2191,11 @@ mod tests {
             vec!["new", "--token", "secret"],
             vec!["run", "prompt", "--token", "secret"],
             vec!["daemon", "--token", "secret"],
-            vec!["fleet", "join", "invite", "--token", "secret"],
             vec!["fleet", "service", "install", "--token", "secret"],
             // A generated unit is a file a service manager reads forever. Nothing that
             // names one may take a secret, and no flag here may name a password for the
             // account the unit runs as.
             vec!["fleet", "service", "install", "--password", "secret"],
-            vec![
-                "fleet", "service", "install", "--adopt", "--token", "secret",
-            ],
             vec!["fleet", "service", "status", "--token", "secret"],
             vec!["fleet", "service", "disable", "--token", "secret"],
             vec!["fleet", "service", "remove", "--token", "secret"],
@@ -2244,7 +2221,6 @@ mod tests {
                 "--passphrase",
                 "secret",
             ],
-            vec!["fleet", "protocol", "--token", "secret"],
             // The setup helper carries a cookie and a certificate, and it takes them
             // on stdin inside a frame. No flag here may name one, or name a file, a
             // machine or an operation that a `ps` line would then publish.
@@ -2282,10 +2258,6 @@ mod tests {
                 "--passphrase",
                 "secret",
             ],
-            vec!["fleet", "worker", "start", "--token", "secret"],
-            vec!["fleet", "worker", "start", "--password", "secret"],
-            vec!["fleet", "worker", "run", "--cap", "deadbeef"],
-            vec!["fleet", "worker", "run", "--secret", "s"],
             vec!["fleet", "askpass", "--password", "secret"],
             vec!["fleet", "askpass", "--token", "secret"],
             vec!["fleet", "askpass", "--socket", "/tmp/s"],
@@ -2890,8 +2862,6 @@ mod tests {
             command:
                 FleetCommand::Create {
                     name,
-                    from,
-                    regenerate,
                     machine,
                     host,
                     gateway_port,
@@ -2901,7 +2871,7 @@ mod tests {
             "fleet",
             "create",
             "--machine",
-            "studio-mini",
+            "studio",
             "--host",
             "studio.tailnet.ts.net",
         ])
@@ -2909,119 +2879,86 @@ mod tests {
         else {
             panic!("fleet create must parse");
         };
-        assert_eq!(machine.as_deref(), Some("studio-mini"));
-        assert_eq!(host.as_deref(), Some("studio.tailnet.ts.net"));
         assert_eq!(name, None);
-        assert_eq!(from, None);
-        assert!(!regenerate);
+        assert_eq!(machine.as_deref(), Some("studio"));
+        assert_eq!(host.as_deref(), Some("studio.tailnet.ts.net"));
         assert_eq!(gateway_port, None);
         assert_eq!(dist_port, None);
 
-        // The second machine of a two-machine cluster: one option, one local directory.
-        let Some(Command::Fleet {
-            command: FleetCommand::Create { from, machine, .. },
-        }) = parse(&[
-            "fleet",
-            "create",
-            "--from",
-            "/tmp/carried/fleet",
-            "--machine",
-            "vps",
-        ])
-        .command
-        else {
-            panic!("fleet create --from must parse");
-        };
-        assert_eq!(from, Some(PathBuf::from("/tmp/carried/fleet")));
-        assert_eq!(machine.as_deref(), Some("vps"));
-
-        assert!(matches!(
-            parse(&["fleet", "create", "--regenerate"]).command,
-            Some(Command::Fleet {
-                command: FleetCommand::Create {
-                    regenerate: true,
-                    ..
-                }
-            })
-        ));
-        for conflicting in [
-            vec!["fleet", "create", "--regenerate", "--machine", "studio"],
-            vec!["fleet", "create", "--regenerate", "--from", "/tmp/carried"],
-            vec![
-                "fleet",
-                "create",
-                "--from",
-                "/tmp/carried",
-                "--name",
-                "Other",
-            ],
+        // §5 deleted these two.
+        assert!(Cli::try_parse_from(["ouro", "fleet", "create", "--from", "/tmp/x"]).is_err());
+        assert!(Cli::try_parse_from(["ouro", "fleet", "create", "--regenerate"]).is_err());
+        // And these three whole subcommands.
+        for gone in [
+            ["fleet", "protocol"].as_slice(),
+            ["fleet", "members", "add", "vps", "--host", "h"].as_slice(),
+            ["fleet", "sessions", "forget", "--machine", "vps"].as_slice(),
+            ["fleet", "worker", "start"].as_slice(),
         ] {
             assert!(
-                Cli::try_parse_from(std::iter::once("ouro").chain(conflicting.iter().copied()))
-                    .is_err(),
-                "{conflicting:?} names two different jobs and must not parse"
+                Cli::try_parse_from(std::iter::once("ouro").chain(gone.iter().copied())).is_err(),
+                "{gone:?} is deleted"
             );
         }
 
+        // §5's replacement for the roster commands.
         assert!(matches!(
-            parse(&["fleet", "members", "add", "vps", "--host", "vps.tailnet.ts.net"]).command,
+            parse(&["fleet", "forget", "vps"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Members {
-                    command: FleetMembersCommand::Add { machine, host, node: None }
-                }
-            }) if machine == "vps" && host == "vps.tailnet.ts.net"
-        ));
-        assert!(
-            Cli::try_parse_from(["ouro", "fleet", "members", "add", "vps"]).is_err(),
-            "a roster entry without an address cannot be built"
-        );
-        assert!(matches!(
-            parse(&["fleet", "members", "remove", "vps"]).command,
-            Some(Command::Fleet {
-                command: FleetCommand::Members {
-                    command: FleetMembersCommand::Remove { machine }
-                }
+                command: FleetCommand::Forget { machine }
             }) if machine == "vps"
         ));
-        assert!(matches!(
-            parse(&["fleet", "sessions", "restore", "retired-vps"]).command,
-            Some(Command::Fleet {
-                command: FleetCommand::Sessions {
-                    command: SessionsCommand::Restore { machine }
-                }
-            }) if machine == "retired-vps"
-        ));
+        assert!(Cli::try_parse_from(["ouro", "fleet", "forget"]).is_err());
 
+        // §5 renamed `--remote-data-dir` and deleted the bounded model check.
         assert!(matches!(
-            parse(&[
-                "fleet",
-                "sessions",
-                "forget",
-                "--machine",
-                "retired-vps",
-                "--accept-state-loss"
-            ])
-            .command,
+            parse(&["fleet", "add", "me@100.64.0.2", "--machine", "pi", "--data-dir", "/srv/ouro"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Sessions {
-                    command: SessionsCommand::Forget {
-                        machine,
-                        accept_state_loss: true
-                    }
-                }
-            }) if machine == "retired-vps"
+                command: FleetCommand::Add { data_dir: Some(path), .. }
+            }) if path == "/srv/ouro"
         ));
-        assert!(
-            Cli::try_parse_from([
-                "ouro",
+        assert!(Cli::try_parse_from([
+            "ouro",
+            "fleet",
+            "add",
+            "me@h",
+            "--machine",
+            "pi",
+            "--run-test-task"
+        ])
+        .is_err());
+
+        // §8's third front end, on all three operations, and never with --json.
+        for framed in [
+            ["fleet", "setup", "--frames"].as_slice(),
+            [
                 "fleet",
-                "sessions",
-                "forget",
+                "add",
+                "me@100.64.0.2",
                 "--machine",
-                "retired-vps"
-            ])
-            .is_err(),
-            "irreversible local evidence loss must require an explicit acknowledgement"
+                "pi",
+                "--frames",
+            ]
+            .as_slice(),
+            [
+                "fleet",
+                "leave",
+                "--machine",
+                "pi",
+                "--user",
+                "me",
+                "--frames",
+            ]
+            .as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(framed.iter().copied())).is_ok(),
+                "{framed:?} must parse"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "setup", "--frames", "--json"]).is_err(),
+            "a frames run does not also print a document"
         );
 
         // Bare `fleet leave` still retires this machine; `--machine` is the

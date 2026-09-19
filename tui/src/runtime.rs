@@ -2711,7 +2711,6 @@ fn open_daemon_log(path: &Path, expected: Option<FileIdentity>) -> Result<File> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, TcpListener};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static SCRATCH: AtomicU32 = AtomicU32::new(0);
@@ -3184,11 +3183,7 @@ mod tests {
             Some("Test fleet"),
             "alpha",
             "127.0.0.1",
-            crate::fleet::Ports {
-                gateway: Some(48_501),
-                dist: Some(44_501),
-                ..crate::fleet::ephemeral_ports()
-            },
+            crate::fleet::ephemeral_ports(),
         )
         .unwrap();
         let actual_cookie =
@@ -3220,7 +3215,10 @@ mod tests {
             Some("/private/operator/audit.json")
         );
         assert_eq!(get("OUROBOROS_AUDIT_MODE"), Some("required"));
-        assert_eq!(get("OUROBOROS_GATEWAY_PORT"), Some("48501"));
+        assert_eq!(
+            get("OUROBOROS_GATEWAY_PORT"),
+            Some(profile.gateway_port.to_string().as_str())
+        );
         assert!(get("OUROBOROS_COOKIE_FILE").is_some());
         assert!(get("OUROBOROS_BOOT_COOKIE_DECOY").is_some());
         assert_eq!(get("OUROBOROS_FLEET_ID"), Some(profile.fleet_id.as_str()));
@@ -4261,8 +4259,6 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd: EpmdLifecycle::Absent,
-            data_dir: std::env::temp_dir(),
         };
 
         assert!(pid_alive(pid));
@@ -4297,8 +4293,6 @@ mod tests {
                 birth: format!("test:{pid}"),
             },
             logs: LogRing::default(),
-            epmd: EpmdLifecycle::Absent,
-            data_dir: std::env::temp_dir(),
         };
 
         daemon.detach();
@@ -4325,280 +4319,5 @@ mod tests {
         }
 
         assert!(!pid_alive(pid), "the detached test child should be reaped");
-    }
-
-    #[tokio::test]
-    async fn epmd_health_failure_stops_the_exact_child_owned_by_daemon_wait() {
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("a long-running child");
-        let pid = child.id().expect("the child pid") as i32;
-        let (failure, receiver) = tokio::sync::oneshot::channel();
-        let mut daemon = Daemon {
-            child: Some(child),
-            identity: ProcessIdentity {
-                pid,
-                birth: format!("test:{pid}"),
-            },
-            logs: LogRing::default(),
-            epmd: EpmdLifecycle::Supervised(receiver),
-            data_dir: std::env::temp_dir(),
-        };
-
-        failure
-            .send("EPMD fixture disappeared".into())
-            .expect("deliver the health failure");
-        let status = tokio::time::timeout(Duration::from_secs(5), daemon.wait())
-            .await
-            .expect("the managed child stopped promptly")
-            .expect("the managed child was reaped");
-        assert!(!status.success());
-        assert!(!pid_alive(pid));
-        assert!(daemon.child.is_none());
-    }
-
-    #[tokio::test]
-    async fn normal_runtime_exit_disarms_epmd_health_without_a_spurious_restart_signal() {
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("a short-lived child");
-        let pid = child.id().expect("the child pid") as i32;
-        let (failure, receiver) = tokio::sync::oneshot::channel();
-        let mut daemon = Daemon {
-            child: Some(child),
-            identity: ProcessIdentity {
-                pid,
-                birth: format!("test:{pid}"),
-            },
-            logs: LogRing::default(),
-            epmd: EpmdLifecycle::Supervised(receiver),
-            data_dir: std::env::temp_dir(),
-        };
-
-        let status = daemon.wait().await.expect("reap the normal runtime exit");
-        assert!(status.success());
-        assert!(daemon.child.is_none());
-        assert!(matches!(daemon.epmd, EpmdLifecycle::Absent));
-        assert!(
-            failure.send("late EPMD failure".into()).is_err(),
-            "normal runtime completion must close and disarm its health receiver"
-        );
-    }
-
-    fn sleep_command() -> std::process::Command {
-        let mut command = std::process::Command::new("/bin/sh");
-        command
-            .args(["-c", "exec sleep 30"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command
-    }
-
-    // Keep any boot/supervision probe on a listener owned for the entire test.
-    fn epmd_test_listener() -> TcpListener {
-        loop {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            if listener.local_addr().unwrap().port() != 65_358 {
-                return listener;
-            }
-        }
-    }
-
-    fn tokio_sleep_child() -> (Child, i32) {
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("a long-running child");
-        let pid = child.id().expect("the child pid") as i32;
-        (child, pid)
-    }
-
-    #[tokio::test]
-    async fn dropping_a_boot_daemon_stops_the_packaged_epmd() {
-        let listener = epmd_test_listener();
-        let data = scratch("drop-boot-epmd");
-        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
-        let epmd_pid = epmd.id() as i32;
-        let (child, pid) = tokio_sleep_child();
-        let daemon = Daemon {
-            child: Some(child),
-            identity: ProcessIdentity {
-                pid,
-                birth: format!("test:{pid}"),
-            },
-            logs: LogRing::default(),
-            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
-                Some(epmd),
-                Ipv4Addr::LOCALHOST,
-                listener.local_addr().unwrap().port(),
-            )),
-            data_dir: data.clone(),
-        };
-
-        drop(daemon);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while (pid_alive(pid) || pid_alive(epmd_pid)) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            !pid_alive(pid),
-            "dropping an armed Daemon must kill the runtime"
-        );
-        assert!(
-            !pid_alive(epmd_pid),
-            "dropping a Boot Daemon must stop the packaged EPMD"
-        );
-        fs::remove_dir_all(&data).ok();
-    }
-
-    #[tokio::test]
-    async fn wait_does_not_arm_boot_epmd_so_cancellation_can_still_reap_it() {
-        let listener = epmd_test_listener();
-        let data = scratch("wait-boot-epmd");
-        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
-        let epmd_pid = epmd.id() as i32;
-        let (child, pid) = tokio_sleep_child();
-        let mut daemon = Daemon {
-            child: Some(child),
-            identity: ProcessIdentity {
-                pid,
-                birth: format!("test:{pid}"),
-            },
-            logs: LogRing::default(),
-            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
-                Some(epmd),
-                Ipv4Addr::LOCALHOST,
-                listener.local_addr().unwrap().port(),
-            )),
-            data_dir: data.clone(),
-        };
-
-        {
-            let wait = daemon.wait();
-            tokio::pin!(wait);
-            tokio::select! {
-                result = &mut wait => panic!("the runtime should still be running: {result:?}"),
-                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-            }
-        }
-        drop(daemon);
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while (pid_alive(pid) || pid_alive(epmd_pid)) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            !pid_alive(pid),
-            "cancelling wait must still Drop-kill the runtime"
-        );
-        assert!(
-            !pid_alive(epmd_pid),
-            "wait must not arm Boot EPMD; cancellation must still be able to stop it"
-        );
-        fs::remove_dir_all(&data).ok();
-    }
-
-    #[tokio::test]
-    async fn failed_wait_ready_leaves_boot_epmd_reapable() {
-        let listener = epmd_test_listener();
-        let data = scratch("wait-ready-reap-epmd");
-        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
-        let epmd_pid = epmd.id() as i32;
-        let (child, pid) = tokio_sleep_child();
-        let mut daemon = Daemon {
-            child: Some(child),
-            identity: ProcessIdentity {
-                pid,
-                birth: format!("test:{pid}"),
-            },
-            logs: LogRing::default(),
-            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
-                Some(epmd),
-                Ipv4Addr::LOCALHOST,
-                listener.local_addr().unwrap().port(),
-            )),
-            data_dir: data.clone(),
-        };
-
-        let error = daemon
-            .wait_ready(&data, Duration::from_millis(200))
-            .await
-            .expect_err("no publication was written");
-        assert!(error.to_string().contains("did not publish"), "{error:#}");
-        assert!(
-            daemon
-                .reap_spawned_epmd()
-                .await
-                .expect("reap the Boot EPMD"),
-            "a failed readiness check must still be able to reap the packaged EPMD"
-        );
-        assert!(!pid_alive(epmd_pid), "reap must stop the packaged EPMD");
-
-        daemon.terminate(Duration::from_secs(2)).await.ok();
-        fs::remove_dir_all(&data).ok();
-    }
-
-    #[tokio::test]
-    async fn arming_makes_reap_a_no_op_so_a_validated_start_keeps_its_epmd() {
-        let listener = epmd_test_listener();
-        let data = scratch("arm-then-reap-epmd");
-        let epmd = sleep_command().spawn().expect("a packaged EPMD stand-in");
-        let epmd_pid = epmd.id() as i32;
-        let (child, pid) = tokio_sleep_child();
-        let mut daemon = Daemon {
-            child: Some(child),
-            identity: ProcessIdentity {
-                pid,
-                birth: format!("test:{pid}"),
-            },
-            logs: LogRing::default(),
-            epmd: EpmdLifecycle::Boot(crate::fleet::EpmdRuntimeWatch::new(
-                Some(epmd),
-                Ipv4Addr::LOCALHOST,
-                listener.local_addr().unwrap().port(),
-            )),
-            data_dir: data.clone(),
-        };
-
-        daemon.arm_epmd_supervision();
-        assert!(
-            !daemon
-                .reap_spawned_epmd()
-                .await
-                .expect("armed EPMD is not ours to reap"),
-            "after validation the monitor owns EPMD; reap must not stop it"
-        );
-        assert!(
-            pid_alive(epmd_pid),
-            "an armed EPMD must survive a post-validation reap"
-        );
-
-        daemon.detach();
-        drop(daemon);
-        send_signal(pid, libc::SIGTERM).ok();
-        send_signal(epmd_pid, libc::SIGTERM).ok();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while (pid_alive(pid) || pid_alive(epmd_pid)) && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        if pid_alive(epmd_pid) {
-            let _ = send_signal(epmd_pid, libc::SIGKILL);
-        }
-        if pid_alive(pid) {
-            let _ = send_signal(pid, libc::SIGKILL);
-        }
-        fs::remove_dir_all(&data).ok();
     }
 }

@@ -605,6 +605,13 @@ pub fn create(
 /// There is no EPMD daemon any more (§1, §4): the runtime's `-epmd_module` resolves a
 /// peer's distribution port out of `OUROBOROS_DIST_PORTS`, which is this profile's
 /// members, and listens on `OUROBOROS_DIST_PORT`, which is this machine's own.
+///
+/// `OUROBOROS_DIST_PORTS` is keyed by the **full node name**, one entry per member
+/// including this one. `Ouroboros.Cluster.Epmd.port_please/2` consults `name@host`
+/// first and falls back to a bare host key, and a full-name key is what makes two lab
+/// nodes on one host resolvable at all — two `host=port` entries for one host cannot
+/// both be true. `OUROBOROS_DIST_PORT_MIN`/`_MAX` are gone with the range: the
+/// generated `vm.args` pins `inet_dist_listen_min/max` to `dist_port` directly.
 pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
     let staging = inspect_orphan_staging(data_dir)?;
     if !staging.is_empty() {
@@ -630,7 +637,7 @@ pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
     let dist_ports = profile
         .members
         .iter()
-        .map(|member| format!("{}={}", member.host, member.dist_port))
+        .map(|member| format!("{}={}", member.node, member.dist_port))
         .collect::<Vec<_>>()
         .join(",");
 
@@ -3075,8 +3082,7 @@ fn validate_bundle(bundle: &Bundle) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::DirBuilderExt;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -3098,186 +3104,6 @@ mod tests {
         path
     }
 
-    #[test]
-    fn tags_round_trip_and_validate_before_persisting() {
-        let dir = scratch("tags");
-        fs::create_dir(dir.join("fleet")).unwrap();
-        let profile = loopback_test_profile("studio");
-        write_profile(&dir, &profile).unwrap();
-        assert_eq!(
-            tags(&dir, None, Some(("xcode", true))).unwrap(),
-            vec!["xcode"]
-        );
-        assert_eq!(
-            tags(&dir, None, Some(("xcode", true))).unwrap(),
-            vec!["xcode"]
-        );
-        assert_eq!(
-            load(&dir).unwrap().unwrap().tags,
-            serde_json::json!(["xcode"])
-        );
-        assert!(tags(&dir, None, Some(("BAD tag", true)))
-            .unwrap_err()
-            .to_string()
-            .contains("BAD tag"));
-        assert_eq!(
-            tags(&dir, None, Some(("xcode", false))).unwrap(),
-            Vec::<String>::new()
-        );
-        let mut invalid = profile;
-        invalid.tags = serde_json::json!(["BAD"]);
-        let encoded = serde_json::to_vec(&invalid).unwrap();
-        write_private_atomic(&profile_path(&dir), &encoded).unwrap();
-        assert!(doctor(&dir).text.contains("BAD"));
-        assert!(
-            load(&dir).unwrap().is_some(),
-            "advisory tags cannot block daemon profile loading"
-        );
-        assert_eq!(
-            tags(&dir, None, Some(("BAD", false))).unwrap(),
-            Vec::<String>::new()
-        );
-        for malformed in [
-            serde_json::json!([null]),
-            serde_json::json!({"invalid": true}),
-        ] {
-            invalid.tags = malformed.clone();
-            write_profile(&dir, &invalid).unwrap();
-            assert_eq!(load(&dir).unwrap().unwrap().tags, malformed);
-            assert!(doctor(&dir).text.contains("advisory tags ignored"));
-        }
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The tombstone is the operator's statement that a machine is gone, and the only
-    /// thing `fleet.forget_session_owner` will act on. It is written here, by hand, never
-    /// inferred from a machine being unreachable.
-    #[test]
-    fn declaring_a_machine_gone_moves_it_out_of_the_roster_and_can_be_undone() {
-        let dir = scratch("forget-machine");
-        fs::create_dir(dir.join("fleet")).unwrap();
-        let mut profile = sample_profile("studio");
-        let vps = member("vps", "vps.tailnet.ts.net");
-        profile.members.push(vps.clone());
-        write_profile(&dir, &profile).unwrap();
-        assert!(
-            load(&dir).unwrap().unwrap().tombstones.is_empty(),
-            "an unreachable peer is not a peer anyone declared gone"
-        );
-
-        assert_eq!(forget_machine(&dir, "vps").unwrap(), vps);
-        let after = load(&dir).unwrap().unwrap();
-        assert_eq!(
-            after.members,
-            vec![member("studio", "studio.tailnet.ts.net")]
-        );
-        assert_eq!(after.tombstones, vec![vps.clone()]);
-        assert_eq!(after.roster_revision, profile.roster_revision + 1);
-        assert_eq!(after.expected_peers(), 0);
-
-        // A gateway call that failed is retried against the same statement, so the second
-        // run must reach the gateway rather than refuse, and must not move the roster on.
-        assert_eq!(forget_machine(&dir, &vps.node).unwrap(), vps);
-        assert_eq!(
-            load(&dir).unwrap().unwrap().roster_revision,
-            profile.roster_revision + 1
-        );
-
-        // The runtime refusing — the machine turned out to be connected — puts it back.
-        restore_machine(&dir, &vps).unwrap();
-        let restored = load(&dir).unwrap().unwrap();
-        assert!(restored.tombstones.is_empty());
-        assert!(restored.members.contains(&vps));
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn declaring_a_machine_gone_refuses_this_machine_and_a_name_the_roster_never_had() {
-        let dir = scratch("forget-machine-refusals");
-        fs::create_dir(dir.join("fleet")).unwrap();
-        let profile = sample_profile("studio");
-        write_profile(&dir, &profile).unwrap();
-
-        for own in ["studio", "ouro-studio@studio.tailnet.ts.net"] {
-            let refusal = forget_machine(&dir, own).unwrap_err().to_string();
-            assert!(refusal.contains("ouro fleet leave"), "{refusal}");
-        }
-        let unknown = forget_machine(&dir, "ghost").unwrap_err().to_string();
-        assert!(unknown.contains("no member named ghost"), "{unknown}");
-        assert!(load(&dir).unwrap().unwrap().tombstones.is_empty());
-
-        // A profile written before this field reads as "nothing declared gone" rather
-        // than as a profile this machine refuses to start from.
-        let mut encoded: Value =
-            serde_json::from_str(&fs::read_to_string(profile_path(&dir)).unwrap()).unwrap();
-        assert!(encoded
-            .as_object_mut()
-            .unwrap()
-            .remove("tombstones")
-            .is_some());
-        write_private_atomic(
-            &profile_path(&dir),
-            &serde_json::to_vec_pretty(&encoded).unwrap(),
-        )
-        .unwrap();
-        assert!(load(&dir).unwrap().unwrap().tombstones.is_empty());
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_hand_edited_roster_cannot_call_a_machine_both_active_and_gone() {
-        let mut both = sample_profile("studio");
-        let vps = member("vps", "vps.tailnet.ts.net");
-        both.members.push(vps.clone());
-        both.tombstones.push(vps);
-        let refusal = validate_profile(&both).unwrap_err().to_string();
-        assert!(refusal.contains("both active and removed"), "{refusal}");
-
-        let mut itself = sample_profile("studio");
-        itself
-            .tombstones
-            .push(member("studio", "studio.tailnet.ts.net"));
-        let refusal = validate_profile(&itself).unwrap_err().to_string();
-        assert!(
-            refusal.contains("cannot tombstone the machine it belongs to"),
-            "{refusal}"
-        );
-
-        let mut mismatched = sample_profile("studio");
-        mismatched.tombstones.push(Member {
-            machine: "vps".into(),
-            host: "vps.tailnet.ts.net".into(),
-            node: "ouro-elsewhere@vps.tailnet.ts.net".into(),
-        });
-        let refusal = validate_profile(&mismatched).unwrap_err().to_string();
-        assert!(refusal.contains("fleet tombstone vps"), "{refusal}");
-    }
-
-    #[test]
-    fn facts_render_with_tags_and_older_peers_stay_unknown() {
-        assert_eq!(
-            render_machine_facts(&serde_json::json!({})),
-            "platform unknown · tags unknown"
-        );
-        assert_eq!(
-            render_machine_facts(
-                &serde_json::json!({"facts": {"os": "macos", "arch": "aarch64", "tags": ["xcode", "ios"]}})
-            ),
-            "macos/aarch64 · tags: xcode ios"
-        );
-    }
-
-    /// What an operator does when they move `<data dir>/fleet/` to the second machine.
-    fn copy_fleet_dir(from: &Path, to: &Path) {
-        fs::DirBuilder::new().mode(0o700).create(to).unwrap();
-        for entry in fs::read_dir(from).unwrap() {
-            let entry = entry.unwrap();
-            let target = to.join(entry.file_name());
-            fs::copy(entry.path(), &target).unwrap();
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-    }
-
     fn env_value<'a>(environment: &'a [(String, String)], key: &str) -> &'a str {
         environment
             .iter()
@@ -3286,429 +3112,14 @@ mod tests {
             .unwrap_or_else(|| panic!("{key} is not in the computed runtime environment"))
     }
 
-    /// Plan §3 D4 keeps the cluster and drops enrollment: "an operator copies the binary
-    /// to each machine and sets the cluster environment by hand". Copying files by hand
-    /// therefore has to be enough to form the two-machine mutual-TLS cluster FLEET.md
-    /// describes — one CA, one cookie, two leaves, two rosters. Nothing below opens a
-    /// socket to another machine or installs anything.
-    #[test]
-    fn a_second_machine_is_created_from_a_private_copy_of_the_first_machines_fleet_directory() {
-        let one = scratch("create-from-one");
-        let two = scratch("create-from-two");
-        let carried = scratch("create-from-carried");
-
-        let first = create(
-            &one,
-            Some("Workshop"),
-            "studio",
-            "127.0.0.1",
-            ephemeral_ports(),
-        )
-        .expect("the first machine mints its own CA");
-        let copy = carried.join("fleet");
-        copy_fleet_dir(&fleet_dir(&one), &copy);
-
-        // An incomplete copy is refused before anything is written.
-        let partial = carried.join("partial");
-        copy_fleet_dir(&fleet_dir(&one), &partial);
-        fs::remove_file(partial.join(CA_KEY_FILE)).unwrap();
-        let error = create_from(&two, &partial, "vps", "127.0.0.1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not a complete copy"), "{error}");
-        assert!(!fleet_dir(&two).exists(), "a refusal wrote fleet state");
-
-        // A name the copied roster already holds is refused: `--from` mints a machine
-        // that is not in the cluster yet, it does not reissue one that is.
-        let error = create_from(&two, &copy, "studio", "127.0.0.1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("already names machine `studio`"), "{error}");
-        assert!(!fleet_dir(&two).exists(), "a refusal wrote fleet state");
-
-        let second = create_from(&two, &copy, "vps", "127.0.0.1", ephemeral_ports())
-            .expect("the second machine signs its leaf with the copied CA");
-
-        // One cluster: one id, one name, one cookie.
-        assert_eq!(second.fleet_id, first.fleet_id);
-        assert_eq!(second.name, first.name);
-        assert_eq!(
-            read_private(&fleet_dir(&two).join(COOKIE_FILE), "cookie").unwrap(),
-            read_private(&fleet_dir(&one).join(COOKIE_FILE), "cookie").unwrap()
-        );
-        // The signing authority stays on the machine that already holds it.
-        assert!(
-            !fleet_dir(&two).join(CA_KEY_FILE).exists(),
-            "the second machine was given the CA key"
-        );
-
-        // Both leaves chain to the one CA, checked against the first machine's own CA
-        // bytes rather than against a re-encoding of them.
-        let ca = read_private(&fleet_dir(&one).join(CA_CERT_FILE), "CA").unwrap();
-        assert_eq!(
-            ca,
-            read_private(&fleet_dir(&two).join(CA_CERT_FILE), "CA").unwrap()
-        );
-        for (data, machine) in [(&one, "studio"), (&two, "vps")] {
-            validate_tls_identity(
-                &member(machine, "127.0.0.1"),
-                &ca,
-                &read_private(&fleet_dir(data).join(NODE_CERT_FILE), "leaf").unwrap(),
-                &read_private(&fleet_dir(data).join(NODE_KEY_FILE), "leaf key").unwrap(),
-                None,
-                "test",
-            )
-            .unwrap_or_else(|error| {
-                panic!("{machine}'s leaf does not chain to the one CA: {error:#}")
-            });
-        }
-
-        // The second machine already expects both; the first has to be told, locally.
-        assert_eq!(
-            second
-                .members
-                .iter()
-                .map(|member| member.machine.as_str())
-                .collect::<Vec<_>>(),
-            vec!["studio", "vps"]
-        );
-        assert_eq!(first.members.len(), 1);
-        let added = add_member(&one, "vps", "127.0.0.1", Some("ouro-vps@127.0.0.1")).unwrap();
-        assert_eq!(added, member("vps", "127.0.0.1"));
-        let after = load(&one).unwrap().unwrap();
-        assert_eq!(after.members.len(), 2);
-        assert_eq!(after.roster_revision, first.roster_revision + 1);
-        // Idempotent, so a repeated command is not an error and does not move the revision.
-        assert_eq!(add_member(&one, "vps", "127.0.0.1", None).unwrap(), added);
-        assert_eq!(
-            load(&one).unwrap().unwrap().roster_revision,
-            after.roster_revision
-        );
-        let error = add_member(&one, "vps", "127.0.0.2", None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("already names vps"), "{error}");
-        let error = add_member(&one, "vps", "127.0.0.1", Some("vps"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("ouro-vps@127.0.0.1"), "{error}");
-
-        // Both machines validate, and both boot with the same two-node seed list.
-        for data in [&one, &two] {
-            let environment = runtime_env(data)
-                .unwrap_or_else(|error| panic!("{} refuses to start: {error:#}", data.display()))
-                .expect("a profile is installed");
-            let hosts = env_value(&environment, "OUROBOROS_CLUSTER_HOSTS");
-            assert!(hosts.contains("ouro-studio@127.0.0.1"), "{hosts}");
-            assert!(hosts.contains("ouro-vps@127.0.0.1"), "{hosts}");
-            assert_eq!(
-                env_value(&environment, "OUROBOROS_FLEET_ID"),
-                first.fleet_id
-            );
-        }
-        assert!(doctor(&one).text.contains("vps"));
-
-        // `members remove` is the counterpart of `leave` on the other machine, and it is
-        // not a tombstone: nothing durable is retired by it.
-        let error = remove_member(&one, "studio").unwrap_err().to_string();
-        assert!(error.contains("`ouro fleet leave`"), "{error}");
-        assert_eq!(remove_member(&one, "vps").unwrap(), added);
-        let after = load(&one).unwrap().unwrap();
-        assert_eq!(after.members, vec![member("studio", "127.0.0.1")]);
-        assert!(after.tombstones.is_empty());
-
-        fs::remove_dir_all(one).ok();
-        fs::remove_dir_all(two).ok();
-        fs::remove_dir_all(carried).ok();
-    }
-
-    /// The same directory spelled two ways — through a symlink and resolved — is one
-    /// directory, and the generated policy has to validate under both: the service unit
-    /// names the resolved path, the operator typed the other one, and on macOS `/tmp`
-    /// itself is a symlink. A profile an older build wrote under the typed spelling is
-    /// still accepted, so an upgrade refuses nothing that was fine before it.
-    #[test]
-    fn a_symlinked_data_dir_validates_under_either_spelling() {
-        let root = scratch("symlinked-data-dir");
-        let real = root.join("real");
-        fs::create_dir_all(&real).unwrap();
-        let link = root.join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let typed = link.join("data");
-        let resolved = real.join("data");
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&resolved)
-            .unwrap();
-
-        create(&typed, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-
-        // Written with the resolved spelling, whichever one was typed.
-        let tls = fs::read_to_string(fleet_dir(&typed).join(TLS_OPTFILE)).unwrap();
-        let canonical = fs::canonicalize(&resolved).unwrap();
-        assert!(
-            tls.contains(&canonical.display().to_string()),
-            "the policy names the resolved directory: {tls}"
-        );
-        validate_materials(&typed, false).unwrap();
-        validate_materials(&resolved, false).unwrap();
-
-        // An older profile spelled the directory as typed; still one policy.
-        let profile = load(&typed).unwrap().unwrap();
-        let (older_tls, older_vm_args) = generated_runtime_files_spelled(&typed, &profile).unwrap();
-        assert_ne!(
-            older_tls, tls,
-            "the two spellings differ, or this test proves nothing"
-        );
-        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), older_tls.as_bytes()).unwrap();
-        write_private_atomic(
-            &fleet_dir(&typed).join(VM_ARGS_FILE),
-            older_vm_args.as_bytes(),
-        )
-        .unwrap();
-        validate_materials(&typed, false).unwrap();
-        validate_materials(&resolved, false).unwrap();
-
-        // A policy that is neither spelling is still refused.
-        write_private_atomic(
-            &fleet_dir(&typed).join(TLS_OPTFILE),
-            older_tls.replace("verify_peer", "verify_none").as_bytes(),
-        )
-        .unwrap();
-        let refused = validate_materials(&resolved, false).unwrap_err();
-        assert!(format!("{refused:#}").contains("strict generated mutual-TLS policy"));
-
-        // And so is a policy naming the CA through a symlink *outside* the fleet
-        // directory that happens to point into it today: the file on disk names the
-        // outside path, and whoever owns that symlink can point it anywhere tomorrow.
-        let elsewhere = root.join("elsewhere");
-        fs::create_dir_all(&elsewhere).unwrap();
-        let alias = elsewhere.join(CA_CERT_FILE);
-        std::os::unix::fs::symlink(fleet_dir(&resolved).join(CA_CERT_FILE), &alias).unwrap();
-        let canonical_ca = fleet_dir(&canonical).join(CA_CERT_FILE);
-        let via_alias = tls.replace(
-            &canonical_ca.display().to_string(),
-            &alias.display().to_string(),
-        );
-        assert_ne!(
-            via_alias, tls,
-            "the policy has to name the alias, or this proves nothing"
-        );
-        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), via_alias.as_bytes()).unwrap();
-        let refused = validate_materials(&resolved, false).unwrap_err();
-        assert!(
-            format!("{refused:#}").contains("strict generated mutual-TLS policy"),
-            "a path outside the fleet directory is never respelled into it: {refused:#}"
-        );
-
-        // A generated name under another directory, and another name under the fleet
-        // directory, are left exactly as written and refused.
-        let other_name = tls.replace(CA_CERT_FILE, "ca-cert.pem.bak");
-        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), other_name.as_bytes()).unwrap();
-        assert!(validate_materials(&resolved, false).is_err());
-    }
-
-    /// F1: `revoke-<64 hex>.json` is durable state on any machine whose lab ever revoked
-    /// one, and `leave` is the only command that removes a fleet directory. Recognizing
-    /// the shape is what keeps such a machine retirable; naming everything else is what
-    /// keeps the refusal from being silent.
-    #[test]
-    fn leave_retires_a_directory_holding_a_retired_revocation_and_doctor_names_what_it_cannot() {
-        let data = scratch("leave-revocation");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let artifact = fleet_dir(&data).join(format!("revoke-{}.json", "ab".repeat(32)));
-        write_private_atomic(&artifact, b"{\"schema\":1}").unwrap();
-
-        // The artifact is inert but recognized, so it is not something doctor asks the
-        // operator to move, and it does not make the machine unhealthy.
-        let report = doctor(&data);
-        assert!(report.healthy, "{}", report.text);
-        assert!(!report.text.contains("no Ouroboros command recognizes"));
-
-        // An entry nothing recognizes is still a refusal, and doctor now says which.
-        write_private_atomic(&fleet_dir(&data).join("operator-note"), b"keep me").unwrap();
-        let report = doctor(&data);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains("[fix]") && report.text.contains("operator-note"),
-            "{}",
-            report.text
-        );
-        let error = leave(&data).unwrap_err().to_string();
-        assert!(error.contains("operator-note"), "{error}");
-        assert!(artifact.exists(), "a refusal removed a file");
-
-        fs::remove_file(fleet_dir(&data).join("operator-note")).unwrap();
-        let removal = leave(&data)
-            .unwrap()
-            .expect("a fleet directory was present");
-        assert!(removal
-            .removed
-            .iter()
-            .any(|name| name.starts_with("revoke-")));
-        assert!(!fleet_dir(&data).exists());
-        fs::remove_dir_all(data).ok();
-    }
-
-    /// F2: a crash between `install_new_profile`'s staging rename and its fsync leaves a
-    /// fleet directory with no `profile.json`. Every surface refuses such a directory, so
-    /// `leave` refusing it too is a total lockout repairable only by hand.
-    #[test]
-    fn leave_clears_a_fleet_directory_whose_profile_never_landed() {
-        let data = scratch("leave-incomplete");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        fs::remove_file(profile_path(&data)).unwrap();
-
-        for message in [
-            load(&data).unwrap_err().to_string(),
-            runtime_env(&data).unwrap_err().to_string(),
-            doctor(&data).text,
-        ] {
-            assert!(
-                !message.contains("--discard-incomplete"),
-                "a surface still names a flag that does not parse: {message}"
-            );
-            assert!(message.contains("ouro fleet leave"), "{message}");
-        }
-
-        let removal = leave(&data)
-            .unwrap()
-            .expect("a fleet directory was present");
-        assert!(!removal.profile_readable);
-        assert_eq!(removal.machine, None);
-        assert!(removal.removed.iter().any(|name| name == COOKIE_FILE));
-        assert!(removal.removed.iter().any(|name| name == CA_KEY_FILE));
-        assert!(!fleet_dir(&data).exists());
-        assert!(load(&data).unwrap().is_none());
-        fs::remove_dir_all(data).ok();
-    }
-
-    /// F4: the previous Ouroboros generated a policy that routed verification through a
-    /// module this build deleted. "Restore from a trusted backup" is a loop for that file
-    /// — the backup is the file — and `leave` + `create` mints a new fleet id, CA and
-    /// cookie, which is a rebuild of the trust domain, not a repair.
-    #[test]
-    fn regenerating_repairs_a_generated_policy_written_by_an_older_ouroboros() {
-        let data = scratch("regenerate");
-        let created = create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let root = fleet_dir(&data);
-        let current = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
-        let previous = previous_generated_tls(&data).unwrap();
-        assert_ne!(previous, current);
-        write_private_atomic(&root.join(TLS_OPTFILE), previous.as_bytes()).unwrap();
-
-        let error = runtime_env(&data).unwrap_err().to_string();
-        assert!(error.contains("Cluster.Revocations"), "{error}");
-        assert!(error.contains("--regenerate"), "{error}");
-        assert!(
-            !error.contains("trusted backup"),
-            "the loop remedy is still offered for the one file it loops on: {error}"
-        );
-
-        let regenerated = regenerate(&data).unwrap();
-        assert_eq!(regenerated.fleet_id, created.fleet_id);
-        assert_eq!(regenerated.members, created.members);
-        assert_eq!(
-            fs::read_to_string(root.join(TLS_OPTFILE)).unwrap(),
-            current,
-            "regenerate did not restore the current generated policy"
-        );
-        assert!(runtime_env(&data).unwrap().is_some());
-        assert!(doctor(&data).healthy);
-
-        // A policy nobody generated is still a refusal, and it still names the repair.
-        let weakened = current.replace("verify_peer", "verify_none");
-        write_private_atomic(&root.join(TLS_OPTFILE), weakened.as_bytes()).unwrap();
-        let error = runtime_env(&data).unwrap_err().to_string();
-        assert!(error.contains("--regenerate"), "{error}");
-        assert!(error.contains("trusted backup"), "{error}");
-        fs::remove_dir_all(data).ok();
-    }
-
-    /// The other half of `test/cluster_dist_tls_test.exs`. That test drives `:ssl` with a
-    /// committed copy of this policy and proves what it refuses; this one fails if the
-    /// generator stops emitting exactly that copy. Without the pair, an edit that drops
-    /// `verify_peer` from one half only changes the string the drift test compares to
-    /// itself, and nothing in either language notices.
-    #[test]
-    fn the_generated_policy_is_the_one_the_handshake_test_drives_ssl_with() {
-        let data = scratch("generated-policy-template");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        // Generated under the resolved spelling of the directory (`/private/var/…` on
-        // macOS, where the temp dir is reached through a symlink).
-        let root = fleet_dir(&fs::canonicalize(&data).unwrap());
-        let generated = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
-        let template = fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../test/support/fleet_tls/ssl_dist.conf.template"),
-        )
-        .expect("the committed template the Elixir handshake test consults");
-        assert_eq!(
-            generated,
-            template.replace("@FLEET_DIR@", root.to_str().unwrap()),
-            "`generated_runtime_files` no longer emits the policy test/cluster_dist_tls_test.exs proves the behaviour of; regenerate test/support/fleet_tls/ as its README says"
-        );
-        fs::remove_dir_all(data).ok();
-    }
-
-    /// F5: a client that dies between the tombstone write and the gateway reply leaves a
-    /// silently shrunk roster. It is safe, but it has to be visible and it has to have an
-    /// undo.
-    #[test]
-    fn a_machine_declared_gone_is_named_by_status_and_doctor_and_can_be_restored() {
-        let dir = scratch("tombstone-visible");
-        fs::create_dir(dir.join("fleet")).unwrap();
-        let mut profile = loopback_test_profile("studio");
-        let vps = member("vps", "127.0.0.1");
-        profile.members.push(vps.clone());
-        write_profile(&dir, &profile).unwrap();
-
-        forget_machine(&dir, "vps").unwrap();
-        let status = render_status(&dir).unwrap();
-        assert!(status.contains("gone"), "{status}");
-        assert!(status.contains("vps"), "{status}");
-        assert!(status.contains("sessions restore"), "{status}");
-        let report = doctor(&dir);
-        assert!(
-            report.text.contains("gone for good") && report.text.contains("vps"),
-            "{}",
-            report.text
-        );
-
-        // The live projection comes from a runtime that never heard of the machine
-        // either, so without this the tombstone is invisible on the surface an operator
-        // with a running daemon actually sees.
-        let live = serde_json::json!({
-            "summary": {"expected": 1, "connected": 1, "offline": 0, "incompatible": 0},
-            "machines": [{
-                "machine": "studio",
-                "node": profile.node,
-                "state": "local",
-                "role": "core"
-            }]
-        });
-        let rendered = render_live_status(&dir, &live).expect("a live projection");
-        assert!(rendered.contains(&vps.node), "{rendered}");
-        assert!(rendered.contains("sessions restore"), "{rendered}");
-
-        // `members add` refuses to quietly undo the operator's statement.
-        let error = add_member(&dir, "vps", "vps.tailnet.ts.net", None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("sessions restore vps"), "{error}");
-
-        restore_machine(&dir, &vps).unwrap();
-        let after = load(&dir).unwrap().unwrap();
-        assert!(after.tombstones.is_empty());
-        assert!(after.members.contains(&vps));
-        assert!(!render_status(&dir).unwrap().contains("gone for good"));
-        fs::remove_dir_all(dir).ok();
+    fn reason_of(error: &anyhow::Error) -> &str {
+        refusal(error)
+            .map(|declared| declared.reason)
+            .unwrap_or("<undeclared>")
     }
 
     fn sample_profile(machine: &str) -> Profile {
         Profile {
-            tags: empty_tags(),
             schema: PROFILE_SCHEMA,
             fleet_id: "00112233445566778899aabb".into(),
             name: "Workshop fleet".into(),
@@ -3716,3299 +3127,627 @@ mod tests {
             host: "studio.tailnet.ts.net".into(),
             node: format!("ouro-{machine}@studio.tailnet.ts.net"),
             role: "core".into(),
-            members: vec![member(machine, "studio.tailnet.ts.net")],
-            tombstones: Vec::new(),
-            roster_revision: initial_roster_revision(),
+            dist_port: 44_111,
             gateway_port: 48_111,
-            epmd_port: 14_111,
-            dist_port_min: 44_111,
-            dist_port_max: 44_111,
+            members: vec![member(machine, "studio.tailnet.ts.net", 44_111)],
+            tags: empty_tags(),
         }
     }
 
-    // Doctor performs real local listener checks even when other fixture material is
-    // missing. Give those tests numeric loopback hosts and allocated test ports.
+    /// Doctor performs real local listener checks even when other fixture material is
+    /// missing. Give those tests numeric loopback hosts and allocated test ports.
     fn loopback_test_profile(machine: &str) -> Profile {
         let ports = ephemeral_ports();
-        let local = member(machine, "127.0.0.1");
+        let local = member(machine, "127.0.0.1", ports.dist.unwrap());
         Profile {
             host: local.host.clone(),
             node: local.node.clone(),
             members: vec![local],
             gateway_port: ports.gateway.unwrap(),
-            epmd_port: ports.epmd.unwrap(),
-            dist_port_min: ports.dist.unwrap(),
-            dist_port_max: ports.dist.unwrap(),
+            dist_port: ports.dist.unwrap(),
             ..sample_profile(machine)
         }
     }
 
-    fn fake_epmd(port: u16, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
-        assert_ne!(port, 65_358, "never use the protected runtime endpoint");
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        // Port-availability and ownership checks can overlap. A bare TCP
-                        // reachability probe sends no NAMES request; handling it inline
-                        // would hold the only accept loop for the read timeout and make a
-                        // simultaneous real protocol probe observe a reset or timeout.
-                        thread::spawn(move || {
-                            stream.set_nonblocking(false).unwrap();
-                            stream
-                                .set_read_timeout(Some(Duration::from_millis(250)))
-                                .unwrap();
-                            stream
-                                .set_write_timeout(Some(Duration::from_millis(250)))
-                                .unwrap();
-                            let mut request = [0_u8; 3];
-                            if stream.read_exact(&mut request).is_ok() && request == [0, 1, 110] {
-                                stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
-                            }
-                        });
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("fake EPMD accept failed: {error}"),
-                }
-            }
-        })
-    }
-
-    // Keep the allocated listener owned until the fixture is dropped. No client probes
-    // a released ephemeral port, including the operator's protected runtime endpoint.
-    fn epmd_probe_test_listener(address: Ipv4Addr) -> TcpListener {
-        loop {
-            let listener = TcpListener::bind((address, 0)).unwrap();
-            if listener.local_addr().unwrap().port() != 65_358 {
-                return listener;
-            }
-        }
-    }
-
-    struct EpmdProtocolFixture {
-        port: u16,
-        stop: Arc<AtomicBool>,
-        server: Option<thread::JoinHandle<()>>,
-    }
-
-    impl EpmdProtocolFixture {
-        fn new(mut respond: impl FnMut(&mut TcpStream, u16) + Send + 'static) -> Self {
-            let listener = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
-            let port = listener.local_addr().unwrap().port();
-            listener.set_nonblocking(true).unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
-            let server_stop = stop.clone();
-            let server = thread::spawn(move || {
-                while !server_stop.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            // Accepted sockets inherit O_NONBLOCK on some platforms.
-                            // The fixture's bounded read/write timeouts need blocking I/O.
-                            stream.set_nonblocking(false).unwrap();
-                            stream
-                                .set_read_timeout(Some(Duration::from_millis(250)))
-                                .unwrap();
-                            stream
-                                .set_write_timeout(Some(Duration::from_millis(250)))
-                                .unwrap();
-                            let mut request = [0_u8; 3];
-                            stream.read_exact(&mut request).unwrap();
-                            assert_eq!(request, [0, 1, 110]);
-                            respond(&mut stream, port);
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("EPMD protocol fixture accept failed: {error}"),
-                    }
-                }
-            });
-            Self {
-                port,
-                stop,
-                server: Some(server),
-            }
-        }
-    }
-
-    impl Drop for EpmdProtocolFixture {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::Relaxed);
-            let result = self.server.take().unwrap().join();
-            if !thread::panicking() {
-                result.unwrap();
-            }
-        }
-    }
-
-    fn assign_free_loopback_epmd_port(data_dir: &Path) -> Profile {
-        let mut profile = load(data_dir).unwrap().unwrap();
-        loop {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-            let port = listener.local_addr().unwrap().port();
-            drop(listener);
-            if port != 65_358
-                && port != legacy_epmd_port()
-                && port != profile.gateway_port
-                && !(profile.dist_port_min..=profile.dist_port_max).contains(&port)
-            {
-                profile.epmd_port = port;
-                write_profile(data_dir, &profile).unwrap();
-                return profile;
-            }
-        }
+    /// A fleet on loopback, with ports no live lab can be using.
+    fn create_local(label: &str, machine: &str) -> (PathBuf, Profile) {
+        let dir = scratch(label);
+        let profile =
+            create(&dir, None, machine, "127.0.0.1", ephemeral_ports()).expect("a loopback fleet");
+        (dir, profile)
     }
 
     #[test]
-    fn create_is_private_complete_and_never_places_the_cookie_in_runtime_env() {
-        let data = scratch("create");
-        let profile = create(
-            &data,
-            Some("Studio fleet"),
-            "studio-mini",
-            "localhost",
-            Ports {
-                gateway: Some(48_001),
-                dist: Some(44_001),
-                ..ephemeral_ports()
-            },
-        )
-        .unwrap();
+    fn tags_round_trip_and_validate_before_persisting() {
+        let dir = scratch("tags");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let profile = loopback_test_profile("studio");
+        write_profile(&dir, &profile).expect("a profile");
 
-        assert_eq!(profile.node, "ouro-studio-mini@localhost");
-        assert_eq!(profile.name, "Studio fleet");
-        assert_eq!(profile.gateway_port, 48_001);
-        assert_eq!(profile.dist_port_min, 44_001);
-        let loaded = load(&data).unwrap().unwrap();
-        assert_eq!(loaded, profile);
-
-        for name in [
-            PROFILE_FILE,
-            COOKIE_FILE,
-            CA_CERT_FILE,
-            CA_KEY_FILE,
-            NODE_CERT_FILE,
-            NODE_KEY_FILE,
-            TLS_OPTFILE,
-            VM_ARGS_FILE,
-        ] {
-            assert_eq!(
-                fs::metadata(fleet_dir(&data).join(name)).unwrap().mode() & 0o777,
-                0o600,
-                "{name}"
-            );
-        }
-        assert_eq!(fs::metadata(fleet_dir(&data)).unwrap().mode() & 0o077, 0);
-
-        let env = runtime_env(&data).unwrap().unwrap();
-        assert!(
-            env.iter()
-                .any(|(key, value)| key == "OUROBOROS_COOKIE_FILE"
-                    && value.ends_with("/fleet/cookie"))
-        );
-        assert!(!env.iter().any(|(key, _)| key == "OUROBOROS_COOKIE"));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "RELEASE_VM_ARGS" && value.ends_with("/fleet/vm.args")));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "ERL_EPMD_ADDRESS" && value == "127.0.0.1"));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "OUROBOROS_FLEET_ID" && value == &profile.fleet_id));
-        let vm = fs::read_to_string(fleet_dir(&data).join(VM_ARGS_FILE)).unwrap();
-        assert!(vm.contains("-proto_dist inet_tls"));
-        assert!(vm.contains("inet_dist_use_interface {127,0,0,1}"));
-        assert!(vm.contains("inet_dist_listen_min 44001 inet_dist_listen_max 44001"));
-
-        let (_, ca_pem) = parse_x509_pem(
-            &fs::read(fleet_dir(&data).join(CA_CERT_FILE)).expect("generated CA PEM"),
-        )
-        .unwrap();
-        let ca = ca_pem.parse_x509().unwrap();
-        assert!(
-            (ca.validity().not_after - ca.validity().not_before)
-                .unwrap()
-                .whole_days()
-                <= MAX_CA_VALIDITY_DAYS
-        );
-        let (_, node_pem) = parse_x509_pem(
-            &fs::read(fleet_dir(&data).join(NODE_CERT_FILE)).expect("generated node PEM"),
-        )
-        .unwrap();
-        let node = node_pem.parse_x509().unwrap();
-        assert!(
-            (node.validity().not_after - node.validity().not_before)
-                .unwrap()
-                .whole_days()
-                <= MAX_NODE_VALIDITY_DAYS
-        );
-
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn create_refuses_occupied_gateway_and_distribution_ports_before_install() {
-        let created = scratch("occupied-create-ports");
-        let gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let gateway_port = gateway.local_addr().unwrap().port();
-        let free_dist = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let free_dist_port = free_dist.local_addr().unwrap().port();
-        drop(free_dist);
-        let error = create(
-            &created,
-            None,
-            "owner",
-            "127.0.0.1",
-            Ports {
-                gateway: Some(gateway_port),
-                dist: Some(free_dist_port),
-                ..ephemeral_ports()
-            },
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("local gateway port"), "{error}");
-        assert!(
-            error.contains("no fleet credential was installed"),
-            "{error}"
-        );
-        assert!(!fleet_dir(&created).exists());
-        drop(gateway);
-
-        let distribution = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let distribution_port = distribution.local_addr().unwrap().port();
-        let free_gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let free_gateway_port = free_gateway.local_addr().unwrap().port();
-        drop(free_gateway);
-        let occupied_dist = scratch("occupied-dist-ports");
-        let error = create(
-            &occupied_dist,
-            None,
-            "owner",
-            "127.0.0.1",
-            Ports {
-                gateway: Some(free_gateway_port),
-                dist: Some(distribution_port),
-                ..ephemeral_ports()
-            },
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("TLS distribution port"), "{error}");
-        assert!(
-            error.contains("no fleet credential was installed"),
-            "{error}"
-        );
-        assert!(!fleet_dir(&occupied_dist).exists());
-
-        fs::remove_dir_all(created).ok();
-        fs::remove_dir_all(occupied_dist).ok();
-    }
-
-    #[test]
-    fn interrupted_private_setup_is_recovered_but_ambiguous_staging_fails_closed() {
-        let recovered = scratch("staging-recovered");
-        let staging = recovered.join(".fleet.setup.123.001122aabbcc");
-        DirBuilder::new().mode(0o700).create(&staging).unwrap();
-        write_private_new(&staging.join(COOKIE_FILE), b"interrupted-secret", "fixture").unwrap();
-        create(&recovered, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        assert!(!staging.exists());
-        assert!(fleet_dir(&recovered).exists());
-
-        let unsafe_data = scratch("staging-unsafe");
-        let unsafe_staging = unsafe_data.join(".fleet.setup.456.ffeeddccbbaa");
-        DirBuilder::new()
-            .mode(0o755)
-            .create(&unsafe_staging)
-            .unwrap();
-        let error = create(&unsafe_data, None, "owner", "127.0.0.1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("mode-0700 real directory"), "{error}");
-        assert!(unsafe_staging.exists());
-        assert!(!fleet_dir(&unsafe_data).exists());
-
-        fs::remove_dir_all(recovered).ok();
-        fs::remove_dir_all(unsafe_data).ok();
-    }
-
-    #[test]
-    fn stopped_mutations_share_the_runtime_lock_and_refuse_every_live_owner_shape() {
-        let live = scratch("live-mutation");
-        write_private_atomic(
-            &live.join(runtime::PUBLICATION_FILE),
-            format!(
-                r#"{{"port":47001,"protocol":1,"node":"ouro-live@127.0.0.1","pid":{},"scope":"operate"}}"#,
-                std::process::id()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-
-        for error in [
-            create(&live, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap_err(),
-            leave(&live).unwrap_err(),
-        ] {
-            let error = error.to_string();
-            assert!(error.contains("`ouro stop`"), "{error}");
-            assert!(error.contains("then retry"), "{error}");
-        }
-        assert!(!fleet_dir(&live).exists());
-
-        fs::remove_file(live.join(runtime::PUBLICATION_FILE)).unwrap();
-        let held = runtime::acquire_spawn_lock(&live).unwrap();
-        let concurrent = create(&live, None, "owner", "127.0.0.1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(concurrent.contains("another ouro"), "{concurrent}");
-        assert!(!fleet_dir(&live).exists());
-        drop(held);
-
-        let unpublished = scratch("unpublished-mutation");
-        write_private_atomic(
-            &unpublished.join(runtime::RUNTIME_OWNER_FILE),
-            format!(r#"{{"pid":{},"owner":"test-live-vm"}}"#, std::process::id()).as_bytes(),
-        )
-        .unwrap();
-        let error = create(&unpublished, None, "owner", "127.0.0.1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("even though its gateway is not published"),
-            "{error}"
-        );
-        assert!(error.contains("`ouro stop`"), "{error}");
-        assert!(!fleet_dir(&unpublished).exists());
-
-        fs::remove_dir_all(live).ok();
-        fs::remove_dir_all(unpublished).ok();
-    }
-
-    #[test]
-    fn unusable_ipv6_and_colon_hosts_are_refused_before_any_credential_is_created() {
-        let data = scratch("ipv6");
-        let error = create(&data, None, "owner", "::1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("IPv6 fleet distribution is not yet supported"),
-            "{error}"
-        );
-        assert!(!fleet_dir(&data).exists());
-
-        for host in ["0.0.0.0", "169.254.1.2", "224.0.0.1", "255.255.255.255"] {
-            let error = create(&data, None, "owner", host, ephemeral_ports())
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains("not a usable fleet machine address"),
-                "{error}"
-            );
-            assert!(!fleet_dir(&data).exists());
-        }
-        let public = create(&data, None, "owner", "8.8.8.8", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(public.contains("public IPv4 address"), "{public}");
-        assert!(public.contains("refuses to expose EPMD/BEAM"), "{public}");
-        assert!(!fleet_dir(&data).exists());
-        assert!(private_fleet_ipv4("100.64.0.1".parse().unwrap()));
-        assert!(private_fleet_ipv4("10.0.0.1".parse().unwrap()));
-        assert!(!private_fleet_ipv4("1.1.1.1".parse().unwrap()));
-        let error = create(&data, None, "owner", "ipv6-only.invalid", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("resolving fleet host"), "{error}");
-        assert!(!fleet_dir(&data).exists());
-
-        // `create` refuses both of these in `validate_host`, before any resolution is
-        // attempted, so neither reaches the "resolving to IPv4" branch the deleted
-        // `invite` arm used to exercise here; that branch is covered by
-        // `fleet_dns_requires_one_canonical_private_ipv4`. Pin each host to the refusal it
-        // actually gets rather than accepting either of two.
-        for (host, refusal) in [
-            (
-                "2001:db8::1",
-                "IPv6 fleet distribution is not yet supported",
-            ),
-            ("host:epmd", "contains `:`"),
-        ] {
-            let error = create(&data, None, "owner", host, ephemeral_ports())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(refusal), "{error}");
-            assert!(!fleet_dir(&data).exists());
-        }
-
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        assert_eq!(load(&data).unwrap().unwrap().members.len(), 1);
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn fleet_dns_requires_one_canonical_private_ipv4() {
-        let error = select_fleet_ipv4(
-            "multi.internal",
-            vec![
-                Ipv4Addr::new(10, 0, 0, 2),
-                Ipv4Addr::new(10, 0, 0, 1),
-                Ipv4Addr::new(10, 0, 0, 2),
-            ],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("2 usable IPv4 addresses"), "{error}");
-        assert!(
-            error.contains("exactly one private canonical address"),
-            "{error}"
-        );
-        let mixed = select_fleet_ipv4(
-            "mixed.internal",
-            vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(8, 8, 8, 8)],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            mixed.contains("10.0.0.1, 8.8.8.8") || mixed.contains("8.8.8.8, 10.0.0.1"),
-            "{mixed}"
-        );
-        assert!(mixed.contains("public A record"), "{mixed}");
+        assert!(tags(&dir, None, None).expect("no tags yet").is_empty());
         assert_eq!(
-            select_fleet_ipv4(
-                "one.internal",
-                vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 1),],
-            )
-            .unwrap(),
-            Ipv4Addr::new(10, 0, 0, 1)
+            tags(&dir, None, Some(("xcode", true))).expect("one tag"),
+            vec!["xcode".to_string()]
         );
-    }
-
-    #[test]
-    fn owned_epmd_readiness_requires_both_protocols_and_rejects_any_wrong_header() {
-        let states = [
-            EpmdProbe::Absent,
-            EpmdProbe::Compatible,
-            EpmdProbe::Incompatible,
-            EpmdProbe::Unresponsive,
-        ];
-        for advertised in states {
-            for loopback in states {
-                let mut scope_checked = false;
-                let result = owned_epmd_probes_ready(advertised, loopback, 14_111, || {
-                    scope_checked = true;
-                    Ok(())
-                });
-                let both_compatible =
-                    advertised == EpmdProbe::Compatible && loopback == EpmdProbe::Compatible;
-                assert_eq!(scope_checked, both_compatible);
-                if [advertised, loopback].contains(&EpmdProbe::Incompatible) {
-                    assert!(result.is_err(), "{advertised:?}, {loopback:?}");
-                } else {
-                    assert_eq!(
-                        result.unwrap(),
-                        both_compatible,
-                        "{advertised:?}, {loopback:?}"
-                    );
-                }
-            }
-        }
-        let error =
-            owned_epmd_probes_ready(EpmdProbe::Compatible, EpmdProbe::Compatible, 14_111, || {
-                bail!("fixture interface exposure")
-            })
-            .unwrap_err();
-        assert_eq!(error.to_string(), "fixture interface exposure");
-    }
-
-    #[test]
-    fn owned_epmd_readiness_waits_for_a_protocol_listener_and_rejects_other_services() {
-        let epmd = EpmdProtocolFixture::new(|stream, port| {
-            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
-        });
-        assert!(owned_epmd_ready(
-            Ipv4Addr::LOCALHOST,
-            epmd.port,
-            Instant::now() + EPMD_START_DEADLINE
-        )
-        .unwrap());
-
-        let other = EpmdProtocolFixture::new(|stream, _| {
-            stream.write_all(b"HTTP").unwrap();
-        });
-        let error = owned_epmd_ready(
-            Ipv4Addr::LOCALHOST,
-            other.port,
-            Instant::now() + EPMD_START_DEADLINE,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("does not speak"), "{error}");
-    }
-
-    #[test]
-    fn owned_epmd_readiness_retries_incomplete_names_only_before_its_deadline() {
-        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
-        let mut first = true;
-        let epmd = EpmdProtocolFixture::new(move |stream, port| {
-            if first {
-                first = false;
-                // Withhold the first response until the probe times out and closes its
-                // own socket. The next connection then gets a complete NAMES header.
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                assert_eq!(stream.read(&mut [0_u8; 1]).unwrap(), 0);
-                closed_tx.send(()).unwrap();
-            } else {
-                stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
-            }
-        });
-        let deadline = Instant::now() + EPMD_START_DEADLINE;
-        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, epmd.port, deadline).unwrap());
-        closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(owned_epmd_ready(Ipv4Addr::LOCALHOST, epmd.port, deadline).unwrap());
-
-        let silent = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
-        let port = silent.local_addr().unwrap().port();
-        let deadline = Instant::now() + Duration::from_millis(40);
-        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port, deadline).unwrap());
-
-        let expired = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
-        let port = expired.local_addr().unwrap().port();
-        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port, Instant::now()).unwrap());
-        expired.set_nonblocking(true).unwrap();
+        // Idempotent: adding the same tag twice is one tag.
         assert_eq!(
-            expired.accept().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
+            tags(&dir, None, Some(("xcode", true))).expect("still one tag"),
+            vec!["xcode".to_string()]
         );
-    }
-
-    #[test]
-    fn epmd_probe_only_treats_connection_refusal_as_absence() {
+        assert!(tags(&dir, None, Some(("Bad Tag", true))).is_err());
         assert_eq!(
-            epmd_connect_error(&io::Error::from(io::ErrorKind::ConnectionRefused)),
-            EpmdProbe::Absent
-        );
-        for kind in [
-            io::ErrorKind::TimedOut,
-            io::ErrorKind::WouldBlock,
-            io::ErrorKind::Interrupted,
-            io::ErrorKind::PermissionDenied,
-            io::ErrorKind::AddrNotAvailable,
-            io::ErrorKind::NetworkUnreachable,
-            io::ErrorKind::HostUnreachable,
-        ] {
-            assert_eq!(
-                epmd_connect_error(&io::Error::from(kind)),
-                EpmdProbe::Unresponsive,
-                "{kind:?} must not prove listener absence"
-            );
-        }
-        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
-            assert_eq!(
-                epmd_connect_error(&io::Error::from_raw_os_error(errno)),
-                EpmdProbe::Unresponsive,
-                "resource exhaustion must not prove listener absence"
-            );
-        }
-    }
-
-    #[test]
-    fn epmd_probe_distinguishes_short_names_from_a_complete_wrong_header() {
-        let epmd = EpmdProtocolFixture::new(|stream, port| {
-            stream
-                .write_all(&u32::from(port).to_be_bytes()[..3])
-                .unwrap();
-        });
-        assert_eq!(
-            epmd_probe(Ipv4Addr::LOCALHOST, epmd.port),
-            EpmdProbe::Unresponsive
-        );
-        let error = ensure_epmd_port_available("127.0.0.1", epmd.port)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("could not be validated"), "{error}");
-
-        // This classifier does not read ownership artifacts or act on the PID. Even an
-        // already-owned listener must remain unclassified until NAMES is validated.
-        let owner = EpmdOwner {
-            schema: EPMD_OWNER_SCHEMA,
-            fleet_id: String::new(),
-            host: "127.0.0.1".into(),
-            address: Ipv4Addr::LOCALHOST,
-            port: epmd.port,
-            pid: 0,
-            executable: PathBuf::new(),
-            executable_dev: 0,
-            executable_ino: 0,
-            lock_dev: 0,
-            lock_ino: 0,
-        };
-        let error = ensure_owned_epmd_listener_state(&owner)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("could not be validated"), "{error}");
-    }
-
-    #[test]
-    fn epmd_preflight_reuses_a_real_lingering_daemon_and_rejects_arbitrary_listeners() {
-        assert!(local_ipv4_interfaces()
-            .unwrap()
-            .contains(&Ipv4Addr::LOCALHOST));
-        let epmd = EpmdProtocolFixture::new(|stream, port| {
-            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
-        });
-        assert_eq!(
-            ensure_epmd_port_available("127.0.0.1", epmd.port).unwrap(),
-            EpmdPortState::CompatibleRunning
-        );
-
-        let arbitrary = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
-        let arbitrary_port = arbitrary.local_addr().unwrap().port();
-        let error = ensure_epmd_port_available("127.0.0.1", arbitrary_port)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("could not be validated"), "{error}");
-        drop(arbitrary);
-    }
-
-    #[test]
-    fn inherited_epmd_lock_survives_exec_and_releases_only_when_the_child_exits() {
-        let data = scratch("epmd-inherited-lock");
-        fs::create_dir_all(fleet_dir(&data)).unwrap();
-        let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_epmd_lock(&lock_path).unwrap();
-        let metadata = lock.metadata().unwrap();
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let mut command = Command::new(sleep);
-        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
-        let mut child = command.arg("30").spawn().unwrap();
-        drop(lock);
-
-        assert!(epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
-        child.kill().unwrap();
-        child.wait().unwrap();
-
-        // `wait` proves this child was reaped; the lock may still outlive it by the
-        // window `assert_epmd_lock_released` describes.
-        assert_epmd_lock_released(&lock_path, &metadata);
-        remove_epmd_owner_artifacts(&data).unwrap();
-        fs::remove_dir_all(data).ok();
-    }
-
-    /// Asserts the lock at `lock_path` is released within production's own bounded window
-    /// rather than at this instant. Another test in this process may have forked while the
-    /// parent still held the descriptor; that child retains the same open-file description
-    /// — and with it the lock — until its exec applies FD_CLOEXEC, which is a window the
-    /// hosted runner's two cores stretch to tens of milliseconds. Production cleanup already
-    /// treats that as a short bounded release, so the tests assert the same contract. An
-    /// unrelated child that had truly inherited the lock would hold it for its whole life,
-    /// well past this window, so the bound keeps the distinction it is there to prove.
-    fn assert_epmd_lock_released(lock_path: &Path, metadata: &fs::Metadata) {
-        let deadline = Instant::now() + EPMD_STOP_DEADLINE;
-        while epmd_lock_held(lock_path, metadata.dev(), metadata.ino()).unwrap()
-            && Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(25));
-        }
-        assert!(
-            !epmd_lock_held(lock_path, metadata.dev(), metadata.ino()).unwrap(),
-            "the EPMD lock remained held after its bounded release window"
-        );
-    }
-
-    #[test]
-    fn unrelated_children_do_not_inherit_the_epmd_ownership_lock() {
-        let data = scratch("epmd-unrelated-lock");
-        fs::create_dir_all(fleet_dir(&data)).unwrap();
-        let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_epmd_lock(&lock_path).unwrap();
-        let metadata = lock.metadata().unwrap();
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let mut child = Command::new(sleep).arg("30").spawn().unwrap();
-        drop(lock);
-
-        // The child lives for thirty seconds; a lock it had inherited would be held for
-        // all of them, so a release inside the bounded window proves it was not.
-        assert_epmd_lock_released(&lock_path, &metadata);
-        child.kill().unwrap();
-        child.wait().unwrap();
-        remove_epmd_owner_artifacts(&data).unwrap();
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn owned_epmd_watch_reaps_a_crash_and_reports_health_loss() {
-        let listener = epmd_probe_test_listener(Ipv4Addr::LOCALHOST);
-        let port = listener.local_addr().unwrap().port();
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let epmd = Command::new(sleep).arg("30").spawn().unwrap();
-        let epmd_pid = epmd.id() as i32;
-        let failure = EpmdRuntimeWatch::new(Some(epmd), Ipv4Addr::LOCALHOST, port).supervise();
-
-        runtime::send_signal(epmd_pid, libc::SIGKILL).unwrap();
-        let reason = failure.blocking_recv().unwrap();
-        assert!(reason.contains("owned EPMD"), "{reason}");
-        assert!(
-            !runtime::pid_alive(epmd_pid),
-            "the EPMD child was not reaped"
-        );
-    }
-
-    #[test]
-    fn failed_startup_validation_reaps_its_own_epmd_and_never_an_incumbent() {
-        let data = scratch("epmd-reap-failed-start");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let profile = assign_free_loopback_epmd_port(&data);
-
-        // The exact shape start_owned_epmd leaves behind: a foreground child holding the
-        // inherited flock, and a durable marker naming that lock's inode.
-        let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_epmd_lock(&lock_path).unwrap();
-        let lock_metadata = lock.metadata().unwrap();
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let mut command = Command::new(sleep);
-        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
-        let child = command.arg("30").spawn().unwrap();
-        let pid = child.id() as i32;
-        drop(lock);
-        assert!(epmd_lock_held(&lock_path, lock_metadata.dev(), lock_metadata.ino()).unwrap());
-
-        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-        let executable_metadata = fs::symlink_metadata(&executable).unwrap();
-        let owner = EpmdOwner {
-            schema: EPMD_OWNER_SCHEMA,
-            fleet_id: profile.fleet_id.clone(),
-            host: profile.host.clone(),
-            address: Ipv4Addr::LOCALHOST,
-            port: profile.epmd_port,
-            pid,
-            executable,
-            executable_dev: executable_metadata.dev(),
-            executable_ino: executable_metadata.ino(),
-            lock_dev: lock_metadata.dev(),
-            lock_ino: lock_metadata.ino(),
-        };
-        write_private_new(
-            &epmd_owner_path(&data),
-            &serde_json::to_vec_pretty(&owner).unwrap(),
-            "test EPMD ownership marker",
-        )
-        .unwrap();
-
-        let watch = EpmdRuntimeWatch::new(Some(child), Ipv4Addr::LOCALHOST, profile.epmd_port);
-        assert!(watch.reap_spawned(&data).unwrap());
-        assert!(
-            !runtime::pid_alive(pid),
-            "the launched EPMD survived the failed start"
-        );
-        assert!(!epmd_owner_path(&data).try_exists().unwrap());
-        assert!(!epmd_owner_lock_path(&data).try_exists().unwrap());
-
-        // A reused compatible incumbent has no child here; reaping must refuse to touch
-        // anything and say that nothing was stopped.
-        let incumbent = EpmdRuntimeWatch::new(None, Ipv4Addr::LOCALHOST, profile.epmd_port);
-        assert!(!incumbent.reap_spawned(&data).unwrap());
-
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn aborting_a_boot_watch_kills_the_spawned_child_and_never_an_incumbent() {
-        let data = scratch("epmd-abort-boot");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let child = Command::new(sleep).arg("30").spawn().unwrap();
-        let pid = child.id() as i32;
-        let mut watch = EpmdRuntimeWatch::new(Some(child), Ipv4Addr::LOCALHOST, 65_301);
-        watch.abort_spawned(&data);
-        assert!(
-            !runtime::pid_alive(pid),
-            "Drop/cancellation must stop the packaged EPMD this start launched"
-        );
-
-        let mut incumbent = EpmdRuntimeWatch::new(None, Ipv4Addr::LOCALHOST, 65_301);
-        incumbent.abort_spawned(&data);
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn doctor_warns_when_pinned_ports_sit_inside_the_ephemeral_range() {
-        let first_generation = Profile {
-            tags: empty_tags(),
-            schema: PROFILE_SCHEMA,
-            fleet_id: "cafecafecafecafecafecafe".into(),
-            name: "lab".into(),
-            machine: "vps".into(),
-            host: "127.0.0.1".into(),
-            node: "ouro-vps@127.0.0.1".into(),
-            role: "core".into(),
-            members: vec![member("vps", "127.0.0.1")],
-            tombstones: Vec::new(),
-            roster_revision: initial_roster_revision(),
-            // The exact exposure a real enrollment died on: gateway and distribution
-            // pinned inside Linux's default ephemeral range, EPMD safely below it.
-            gateway_port: 47_704,
-            epmd_port: 14_321,
-            dist_port_min: 43_700,
-            dist_port_max: 43_729,
-        };
-        let warnings = ephemeral_overlap_warnings(&first_generation, (32_768, 60_999));
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(warnings[0].contains("47704"), "{}", warnings[0]);
-        assert!(warnings[0].contains("eaddrinuse"), "{}", warnings[0]);
-        assert!(warnings[1].contains("43700-43729"), "{}", warnings[1]);
-
-        let current_defaults = Profile {
-            gateway_port: default_gateway_port("cafecafecafecafecafecafe", "vps"),
-            epmd_port: default_epmd_port("cafecafecafecafecafecafe"),
-            dist_port_min: DEFAULT_DIST_PORT_MIN,
-            dist_port_max: DEFAULT_DIST_PORT_MAX,
-            ..first_generation
-        };
-        assert_eq!(
-            ephemeral_overlap_warnings(&current_defaults, (32_768, 60_999)),
+            tags(&dir, None, Some(("xcode", false))).expect("removal"),
             Vec::<String>::new()
         );
     }
 
+    /// §2 and §12: a profile written before the simplification gets one sentence, and
+    /// every surface that reads a profile reaches it through `load`.
     #[test]
-    fn reused_epmd_watch_reports_loss_without_signalling_any_process() {
-        let server = EpmdProtocolFixture::new(|stream, port| {
-            stream.write_all(&u32::from(port).to_be_bytes()).unwrap();
+    fn a_schema_one_profile_is_refused_with_the_one_sentence() {
+        let dir = scratch("schema-1");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let legacy = serde_json::json!({
+            "schema": 1,
+            "fleet_id": "00112233445566778899aabb",
+            "name": "Workshop fleet",
+            "machine": "studio",
+            "host": "127.0.0.1",
+            "node": "ouro-studio@127.0.0.1",
+            "role": "core",
+            "members": [{"machine": "studio", "host": "127.0.0.1", "node": "ouro-studio@127.0.0.1"}],
+            "tombstones": [],
+            "roster_revision": 1,
+            "gateway_port": 17342,
+            "epmd_port": 14001,
+            "dist_port_min": 13700,
+            "dist_port_max": 13729,
         });
-        let port = server.port;
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let mut unrelated = Command::new(sleep).arg("30").spawn().unwrap();
-        let unrelated_pid = unrelated.id() as i32;
-        let failure = EpmdRuntimeWatch::new(None, Ipv4Addr::LOCALHOST, port).supervise();
-
-        assert!(epmd_responds(Ipv4Addr::LOCALHOST, port));
-        drop(server);
-        let reason = failure.blocking_recv().unwrap();
-        assert!(reason.contains("consecutive NAMES probes"), "{reason}");
-        assert!(
-            runtime::pid_alive(unrelated_pid),
-            "the listener watch signalled a process it did not own"
-        );
-        unrelated.kill().unwrap();
-        unrelated.wait().unwrap();
-    }
-
-    #[test]
-    fn leave_preserves_an_unowned_compatible_epmd_and_all_credentials() {
-        let data = scratch("epmd-unowned-leave");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let profile = assign_free_loopback_epmd_port(&data);
-        let stop = Arc::new(AtomicBool::new(false));
-        let server = fake_epmd(profile.epmd_port, stop.clone());
-
-        let error = leave(&data).unwrap_err().to_string();
-        assert!(
-            error.contains("no positive Ouroboros ownership lease"),
-            "{error}"
-        );
-        assert!(error.contains("was not killed"), "{error}");
-        assert!(fleet_dir(&data).join(COOKIE_FILE).exists());
-        assert!(profile_path(&data).exists());
-
-        stop.store(true, Ordering::Relaxed);
-        server.join().unwrap();
-        assert!(leave(&data).unwrap().is_some());
-        assert!(!fleet_dir(&data).exists());
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn stale_epmd_marker_cleanup_ignores_a_reused_numeric_pid_without_lock_or_listener() {
-        let data = scratch("epmd-reused-pid");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let profile = assign_free_loopback_epmd_port(&data);
-        let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_epmd_lock(&lock_path).unwrap();
-        let lock_metadata = lock.metadata().unwrap();
-        drop(lock);
-        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-        let executable_metadata = fs::symlink_metadata(&executable).unwrap();
-        let owner = EpmdOwner {
-            schema: EPMD_OWNER_SCHEMA,
-            fleet_id: profile.fleet_id.clone(),
-            host: profile.host.clone(),
-            address: Ipv4Addr::LOCALHOST,
-            port: profile.epmd_port,
-            pid: std::process::id() as i32,
-            executable,
-            executable_dev: executable_metadata.dev(),
-            executable_ino: executable_metadata.ino(),
-            lock_dev: lock_metadata.dev(),
-            lock_ino: lock_metadata.ino(),
-        };
-        write_private_new(
-            &epmd_owner_path(&data),
-            &serde_json::to_vec_pretty(&owner).unwrap(),
-            "test stale EPMD ownership marker",
+        write_private_atomic(
+            &profile_path(&dir),
+            serde_json::to_string_pretty(&legacy).unwrap().as_bytes(),
         )
         .unwrap();
 
+        let error = load(&dir).expect_err("a schema-1 profile is refused");
         assert!(
-            runtime::pid_alive(owner.pid),
-            "the fixture PID must be live"
+            format!("{error:#}").contains(SCHEMA_1_SENTENCE),
+            "{error:#}"
         );
-        assert!(leave(&data).unwrap().is_some());
+        // The launcher.
+        let error = runtime_env(&dir).expect_err("the launcher refuses it too");
         assert!(
-            runtime::pid_alive(owner.pid),
-            "leave targeted an unrelated PID"
+            format!("{error:#}").contains(SCHEMA_1_SENTENCE),
+            "{error:#}"
         );
-        assert!(!fleet_dir(&data).exists());
-        fs::remove_dir_all(data).ok();
+        // `fleet status`.
+        let error = render_status(&dir).expect_err("status refuses it too");
+        assert!(
+            format!("{error:#}").contains(SCHEMA_1_SENTENCE),
+            "{error:#}"
+        );
+        // `fleet doctor` names it rather than calling the machine standalone.
+        let report = doctor(&dir);
+        assert!(!report.healthy);
+        assert!(report.text.contains(SCHEMA_1_SENTENCE), "{}", report.text);
+        // And `summary`, which is what Settings reads.
+        let summary = summary(&dir);
+        assert!(summary.profile.is_none());
+        assert!(
+            summary
+                .problems
+                .iter()
+                .any(|problem| problem.contains(SCHEMA_1_SENTENCE)),
+            "{:?}",
+            summary.problems
+        );
     }
 
+    /// The whole of §2 and §3 for a machine that has just been created: private files,
+    /// a profile with the fields the contract names, and an environment that carries the
+    /// cookie only by path.
     #[test]
-    fn leave_retires_owned_epmd_after_address_change_and_release_gc() {
-        let data = scratch("epmd-upgrade-leave");
-        create(&data, None, "leaf", "127.0.0.1", ephemeral_ports()).unwrap();
-        let profile = assign_free_loopback_epmd_port(&data);
-        let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_epmd_lock(&lock_path).unwrap();
-        let lock_metadata = lock.metadata().unwrap();
+    fn create_is_private_complete_and_never_places_the_cookie_in_runtime_env() {
+        let (dir, profile) = create_local("create", "studio");
+        assert_eq!(profile.schema, 2);
+        assert_eq!(profile.role, "core");
+        assert_eq!(profile.members.len(), 1);
+        assert_eq!(profile.members[0].dist_port, profile.dist_port);
+        assert_eq!(profile.node, format!("ouro-studio@{}", profile.host));
 
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let mut command = Command::new(sleep);
-        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
-        let mut child = command.arg("30").spawn().unwrap();
-        let pid = child.id() as i32;
-        let waiter = thread::spawn(move || child.wait().unwrap());
-        drop(lock);
-        assert!(epmd_lock_held(&lock_path, lock_metadata.dev(), lock_metadata.ino()).unwrap());
-
-        let historical_program = data.join("deleted-release-epmd");
-        write_private_new(&historical_program, b"#!/bin/sh\nexit 1\n", "test EPMD").unwrap();
-        fs::set_permissions(&historical_program, fs::Permissions::from_mode(0o700)).unwrap();
-        let historical_metadata = fs::symlink_metadata(&historical_program).unwrap();
-        fs::remove_file(&historical_program).unwrap();
-
-        let listener_stopped = data.join("fake-epmd-stopped");
-        let current_program = data.join("current-release-epmd");
-        write_private_new(
-            &current_program,
-            format!(
-                "#!/bin/sh\nkill -TERM {pid}\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
-                listener_stopped.display()
-            )
-            .as_bytes(),
-            "test EPMD control",
-        )
-        .unwrap();
-        fs::set_permissions(&current_program, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let server = fake_epmd(profile.epmd_port, stop.clone());
-        let stop_after_pid = stop.clone();
-        let stopped_after_pid = listener_stopped.clone();
-        let stopped_port = profile.epmd_port;
-        let listener_watcher = thread::spawn(move || {
-            while runtime::pid_alive(pid) {
-                thread::sleep(Duration::from_millis(5));
-            }
-            stop_after_pid.store(true, Ordering::Relaxed);
-            loop {
-                match TcpListener::bind((Ipv4Addr::LOCALHOST, stopped_port)) {
-                    Ok(listener) => {
-                        drop(listener);
-                        fs::write(&stopped_after_pid, b"stopped").unwrap();
-                        break;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("checking fake EPMD shutdown failed: {error}"),
-                }
-            }
-        });
-
-        let owner = EpmdOwner {
-            schema: EPMD_OWNER_SCHEMA,
-            fleet_id: profile.fleet_id.clone(),
-            host: profile.host.clone(),
-            // Model a private DNS/Tailscale change: this is the address recorded when
-            // EPMD started, but only its mandatory loopback listener remains reachable.
-            address: Ipv4Addr::new(10, 255, 254, 253),
-            port: profile.epmd_port,
-            pid,
-            executable: historical_program.clone(),
-            executable_dev: historical_metadata.dev(),
-            executable_ino: historical_metadata.ino(),
-            lock_dev: lock_metadata.dev(),
-            lock_ino: lock_metadata.ino(),
-        };
-        write_private_new(
-            &epmd_owner_path(&data),
-            &serde_json::to_vec_pretty(&owner).unwrap(),
-            "test EPMD ownership marker",
-        )
-        .unwrap();
-        assert_eq!(
-            ensure_owned_epmd_listener_state(&owner).unwrap(),
-            OwnedEpmdListenerState::LoopbackOnly
-        );
-
-        let fallback = leave(&data).unwrap_err().to_string();
-        assert!(
-            fallback.contains("recorded by the ownership marker is unavailable"),
-            "{fallback}"
-        );
-        assert!(profile_path(&data).exists());
-        assert!(runtime::pid_alive(pid));
-
-        assert!(leave_with_epmd(&data, &current_program).unwrap().is_some());
-        assert!(!fleet_dir(&data).exists());
-        assert!(!runtime::pid_alive(pid));
-        waiter.join().unwrap();
-        listener_watcher.join().unwrap();
-        server.join().unwrap();
-
-        fs::remove_file(current_program).unwrap();
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn startup_retires_loopback_only_owned_epmd_before_rebinding_changed_address() {
-        let data = scratch("epmd-address-change-start");
-        create(&data, None, "leaf", "127.0.0.1", ephemeral_ports()).unwrap();
-        let profile = assign_free_loopback_epmd_port(&data);
-        let lock_path = epmd_owner_lock_path(&data);
-        let lock = create_epmd_lock(&lock_path).unwrap();
-        let lock_metadata = lock.metadata().unwrap();
-
-        let sleep = [Path::new("/bin/sleep"), Path::new("/usr/bin/sleep")]
-            .into_iter()
-            .find(|path| path.is_file())
-            .expect("a Unix sleep executable");
-        let mut command = Command::new(sleep);
-        inherit_epmd_lock_on_exec(&mut command, lock.as_raw_fd());
-        let mut child = command.arg("30").spawn().unwrap();
-        let pid = child.id() as i32;
-        let waiter = thread::spawn(move || child.wait().unwrap());
-        drop(lock);
-        assert!(epmd_lock_held(&lock_path, lock_metadata.dev(), lock_metadata.ino()).unwrap());
-
-        let listener_stopped = data.join("fake-epmd-stopped");
-        let current_program = data.join("current-release-epmd");
-        write_private_new(
-            &current_program,
-            format!(
-                "#!/bin/sh\nkill -TERM {pid}\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
-                listener_stopped.display()
-            )
-            .as_bytes(),
-            "test EPMD control",
-        )
-        .unwrap();
-        fs::set_permissions(&current_program, fs::Permissions::from_mode(0o700)).unwrap();
-        let executable = current_program.canonicalize().unwrap();
-        let executable_metadata = fs::symlink_metadata(&executable).unwrap();
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let server = fake_epmd(profile.epmd_port, stop.clone());
-        let stop_after_pid = stop.clone();
-        let stopped_after_pid = listener_stopped.clone();
-        let stopped_port = profile.epmd_port;
-        let listener_watcher = thread::spawn(move || {
-            while runtime::pid_alive(pid) {
-                thread::sleep(Duration::from_millis(5));
-            }
-            stop_after_pid.store(true, Ordering::Relaxed);
-            loop {
-                match TcpListener::bind((Ipv4Addr::LOCALHOST, stopped_port)) {
-                    Ok(listener) => {
-                        drop(listener);
-                        fs::write(&stopped_after_pid, b"stopped").unwrap();
-                        break;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("checking fake EPMD shutdown failed: {error}"),
-                }
-            }
-        });
-
-        let owner = EpmdOwner {
-            schema: EPMD_OWNER_SCHEMA,
-            fleet_id: profile.fleet_id.clone(),
-            host: profile.host.clone(),
-            address: Ipv4Addr::new(10, 255, 254, 252),
-            port: profile.epmd_port,
-            pid,
-            executable,
-            executable_dev: executable_metadata.dev(),
-            executable_ino: executable_metadata.ino(),
-            lock_dev: lock_metadata.dev(),
-            lock_ino: lock_metadata.ino(),
-        };
-        write_private_new(
-            &epmd_owner_path(&data),
-            &serde_json::to_vec_pretty(&owner).unwrap(),
-            "test EPMD ownership marker",
-        )
-        .unwrap();
-
-        let error = match ensure_owned_epmd_for_runtime(&data, &current_program) {
-            Ok(_) => panic!("the replacement fixture should exit before publishing EPMD"),
-            Err(error) => format!("{error:#}"),
-        };
-        assert!(
-            error.contains("packaged EPMD exited before owning 127.0.0.1"),
-            "{error}"
-        );
-        assert!(
-            !epmd_owner_path(&data).exists() && !epmd_owner_lock_path(&data).exists(),
-            "the old ownership identity or failed replacement lock was stranded"
-        );
-        assert_eq!(
-            ensure_epmd_port_available(&profile.host, profile.epmd_port).unwrap(),
-            EpmdPortState::Available
-        );
-        assert!(profile_path(&data).exists());
-
-        waiter.join().unwrap();
-        listener_watcher.join().unwrap();
-        server.join().unwrap();
-        fs::remove_file(current_program).unwrap();
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn ownership_identity_uses_the_recorded_private_address_not_mutable_dns() {
-        let mut profile = sample_profile("studio-mini");
-        profile.host = "changed-after-start.invalid".into();
-        profile.node = member(&profile.machine, &profile.host).node;
-        profile.members = vec![member(&profile.machine, &profile.host)];
-        let owner = EpmdOwner {
-            schema: EPMD_OWNER_SCHEMA,
-            fleet_id: profile.fleet_id.clone(),
-            host: profile.host.clone(),
-            address: Ipv4Addr::new(10, 9, 8, 7),
-            port: profile.epmd_port,
-            pid: 42,
-            executable: PathBuf::from("/deleted/release/erts/bin/epmd"),
-            executable_dev: 1,
-            executable_ino: 2,
-            lock_dev: 3,
-            lock_ino: 4,
-        };
-
-        validate_epmd_owner(&owner, &profile).unwrap();
-    }
-
-    #[test]
-    fn create_refuses_an_advertised_private_address_not_assigned_locally() {
-        let unavailable = (1_u8..=254)
-            .map(|last| Ipv4Addr::new(10, 255, 254, last))
-            .find(|address| TcpListener::bind((*address, 0)).is_err())
-            .expect("at least one RFC1918 test address is not assigned to this test host");
-
-        let created = scratch("nonlocal-create");
-        let error = create(
-            &created,
-            None,
-            "owner",
-            &unavailable.to_string(),
-            ephemeral_ports(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            error.contains("not assigned to a local interface"),
-            "{error}"
-        );
-        assert!(!fleet_dir(&created).exists());
-
-        fs::remove_dir_all(created).ok();
-    }
-
-    #[test]
-    fn installed_cookie_validation_matches_the_beam_exactly() {
-        for malformed in [
-            "a".repeat(63),
-            "A".repeat(64),
-            format!("{}\n", "a".repeat(64)),
+        let root = fleet_dir(&dir);
+        for (name, mode) in [
+            (PROFILE_FILE, 0o600),
+            (COOKIE_FILE, 0o600),
+            (CA_CERT_FILE, 0o600),
+            // §2: `create` keeps the CA key on disk, because it is part of the bundle.
+            (CA_KEY_FILE, 0o600),
+            (NODE_CERT_FILE, 0o600),
+            (NODE_KEY_FILE, 0o600),
+            (TLS_OPTFILE, 0o600),
+            (VM_ARGS_FILE, 0o600),
         ] {
-            let error = validate_cookie(&malformed, "installed cookie")
-                .unwrap_err()
-                .to_string();
+            let metadata = fs::symlink_metadata(root.join(name))
+                .unwrap_or_else(|error| panic!("{name} is missing: {error}"));
+            assert!(metadata.file_type().is_file(), "{name} must be a real file");
+            assert_eq!(metadata.permissions().mode() & 0o777, mode, "{name}");
+        }
+        // Nothing EPMD-shaped is written any more.
+        for name in ["epmd-owner.json", "epmd-owner.lock"] {
+            assert!(!root.join(name).try_exists().unwrap(), "{name}");
+        }
+
+        let cookie = fs::read_to_string(root.join(COOKIE_FILE)).unwrap();
+        let environment = runtime_env(&dir).unwrap().expect("a fleet environment");
+        for (_, value) in &environment {
             assert!(
-                error.contains("exactly 64 lowercase hexadecimal"),
-                "{error}"
+                !value.contains(&cookie),
+                "the cookie reached the environment"
             );
         }
-        validate_cookie(&"a".repeat(64), "installed cookie").unwrap();
 
-        let owner = scratch("cookie-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        write_private_atomic(&fleet_dir(&owner).join(COOKIE_FILE), &[b'A'; 64]).unwrap();
-        let report = doctor(&owner);
-        assert!(!report.healthy);
+        // §3's table.
+        assert_eq!(env_value(&environment, "OUROBOROS_DIST"), "name");
+        assert_eq!(env_value(&environment, "OUROBOROS_NODE"), profile.node);
+        assert_eq!(
+            env_value(&environment, "OUROBOROS_CLUSTER_STRATEGY"),
+            "epmd"
+        );
+        assert_eq!(
+            env_value(&environment, "OUROBOROS_CLUSTER_RECONNECT_MS"),
+            "1000"
+        );
+        assert_eq!(
+            env_value(&environment, "OUROBOROS_DIST_PORT"),
+            profile.dist_port.to_string()
+        );
+        // Keyed by the full node name, including this machine's own.
+        assert_eq!(
+            env_value(&environment, "OUROBOROS_DIST_PORTS"),
+            format!("{}={}", profile.node, profile.dist_port)
+        );
         assert!(
-            report.text.contains("exactly 64 lowercase hexadecimal"),
-            "{}",
-            report.text
+            !environment
+                .iter()
+                .any(|(name, _)| name == "OUROBOROS_DIST_PORT_MIN"
+                    || name == "OUROBOROS_DIST_PORT_MAX"),
+            "the range is gone; vm.args pins one port"
+        );
+        // The single machine is not its own peer.
+        assert_eq!(env_value(&environment, "OUROBOROS_CLUSTER_HOSTS"), "");
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| name.starts_with("ERL_EPMD_")),
+            "§3 removed ERL_EPMD_ADDRESS and ERL_EPMD_PORT"
         );
 
-        fs::remove_dir_all(owner).ok();
-    }
-
-    #[test]
-    fn doctor_rejects_installed_key_mismatches_before_beam_uses_them() {
-        let owner = scratch("tls-installed-owner");
-        let other_owner = scratch("tls-installed-other");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        create(
-            &other_owner,
-            None,
-            "other-owner",
-            "127.0.0.1",
-            ephemeral_ports(),
-        )
-        .unwrap();
-
-        let unrelated_node_key = KeyPair::generate().unwrap().serialize_pem();
-        write_private_atomic(
-            &fleet_dir(&owner).join(NODE_KEY_FILE),
-            unrelated_node_key.as_bytes(),
-        )
-        .unwrap();
-        let report = doctor(&owner);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains("node private key does not match"),
-            "{}",
-            report.text
-        );
-
-        // An unrelated authority's node certificate is not this machine's identity, even
-        // though both are well-formed: doctor compares the installed pair, not its shape.
-        let other_node_cert =
-            fs::read_to_string(fleet_dir(&other_owner).join(NODE_CERT_FILE)).unwrap();
-        let other_node_key =
-            fs::read_to_string(fleet_dir(&other_owner).join(NODE_KEY_FILE)).unwrap();
-        write_private_atomic(
-            &fleet_dir(&owner).join(NODE_CERT_FILE),
-            other_node_cert.as_bytes(),
-        )
-        .unwrap();
-        write_private_atomic(
-            &fleet_dir(&owner).join(NODE_KEY_FILE),
-            other_node_key.as_bytes(),
-        )
-        .unwrap();
-        let report = doctor(&owner);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains("node certificate") || report.text.contains("CA"),
-            "{}",
-            report.text
-        );
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(other_owner).ok();
-    }
-
-    #[test]
-    fn startup_and_doctor_reject_any_generated_tls_or_vm_policy_drift() {
-        let data = scratch("generated-policy-drift");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let root = fleet_dir(&data);
-        let original_tls = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
-        let weakened = original_tls.replace("verify_peer", "verify_none");
-        assert_ne!(weakened, original_tls);
-        write_private_atomic(&root.join(TLS_OPTFILE), weakened.as_bytes()).unwrap();
-
-        let startup = runtime_env(&data).unwrap_err().to_string();
-        assert!(
-            startup.contains("strict generated mutual-TLS policy"),
-            "{startup}"
-        );
-        let report = doctor(&data);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains("strict generated mutual-TLS policy"),
-            "{}",
-            report.text
-        );
-
-        write_private_atomic(&root.join(TLS_OPTFILE), original_tls.as_bytes()).unwrap();
-        let original_vm = fs::read_to_string(root.join(VM_ARGS_FILE)).unwrap();
-        let wrong_path = original_vm.replace("ssl_dist.conf", "other.conf");
-        assert_ne!(wrong_path, original_vm);
-        write_private_atomic(&root.join(VM_ARGS_FILE), wrong_path.as_bytes()).unwrap();
-        let startup = runtime_env(&data).unwrap_err().to_string();
-        assert!(startup.contains("generated TLS/port policy"), "{startup}");
-        let report = doctor(&data);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains("generated TLS/port policy"),
-            "{}",
-            report.text
-        );
-
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn leave_refuses_unknown_files_before_deleting_any_known_secret() {
-        let data = scratch("leave-unknown");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        write_private_atomic(&fleet_dir(&data).join("operator-note"), b"keep me").unwrap();
-        let error = leave(&data).unwrap_err().to_string();
-        assert!(error.contains("unknown entries"), "{error}");
-        assert!(fleet_dir(&data).join(COOKIE_FILE).exists());
-
-        fs::remove_file(fleet_dir(&data).join("operator-note")).unwrap();
-        assert!(leave(&data).unwrap().is_some());
-        assert!(!fleet_dir(&data).exists());
-        assert!(leave(&data).unwrap().is_none());
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn leave_removes_only_the_exact_private_cluster_checkpoint_shape() {
-        let data = scratch("leave-cluster-directory");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let cluster = fleet_dir(&data).join(CLUSTER_DIRECTORY_DIR);
-        let checkpoints = cluster.join(CLUSTER_CHECKPOINTS_DIR);
-        DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&checkpoints)
-            .unwrap();
-        write_private_new(
-            &checkpoints.join(CLUSTER_CHECKPOINT_FILE),
-            b"node-name-only checkpoint",
-            "cluster checkpoint fixture",
-        )
-        .unwrap();
-        write_private_new(
-            &checkpoints.join(format!("{CLUSTER_CHECKPOINT_FILE}.tmp-Abcdefghijkl_123")),
-            b"interrupted atomic checkpoint",
-            "cluster checkpoint temporary fixture",
-        )
-        .unwrap();
-
-        assert!(leave(&data).unwrap().is_some());
-        assert!(!fleet_dir(&data).exists());
-
-        let unsafe_data = scratch("leave-cluster-directory-symlink");
-        create(&unsafe_data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let cluster = fleet_dir(&unsafe_data).join(CLUSTER_DIRECTORY_DIR);
-        let checkpoints = cluster.join(CLUSTER_CHECKPOINTS_DIR);
-        DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&checkpoints)
-            .unwrap();
-        let target = unsafe_data.join("checkpoint-target");
-        write_private_new(&target, b"must remain", "checkpoint target").unwrap();
-        std::os::unix::fs::symlink(&target, checkpoints.join(CLUSTER_CHECKPOINT_FILE)).unwrap();
-        let error = leave(&unsafe_data).unwrap_err().to_string();
-        assert!(error.contains("private regular"), "{error}");
-        assert!(fleet_dir(&unsafe_data).join(COOKIE_FILE).exists());
-        assert_eq!(fs::read(&target).unwrap(), b"must remain");
-
-        fs::remove_dir_all(data).ok();
-        fs::remove_dir_all(unsafe_data).ok();
-    }
-
-    #[test]
-    fn validation_errors_teach_the_expected_shape() {
-        let data = scratch("validation");
-        let machine = create(&data, None, "bad name", "127.0.0.1", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(machine.contains("studio-mini"), "{machine}");
-        let host = create(&data, None, "good", "name@host", ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(host.contains("Tailscale"), "{host}");
-        let port = create(
-            &data,
-            None,
-            "good",
-            "127.0.0.1",
-            Ports {
-                gateway: None,
-                dist: Some(4369),
-                epmd: None,
-            },
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(port.contains("reserved for EPMD"), "{port}");
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn beginner_identity_can_derive_a_safe_machine_label_from_an_explicit_host() {
-        let identity = resolve_identity(None, Some("Studio_Mini.tailnet.ts.net")).unwrap();
-        assert_eq!(identity.machine, "studio-mini");
-        assert_eq!(identity.host, "Studio_Mini.tailnet.ts.net");
-        assert!(identity.inferred_machine);
-        assert!(!identity.inferred_host);
-
-        assert_eq!(machine_from_host("10.2.3.4").unwrap(), "10-2-3-4");
-    }
-
-    #[test]
-    fn inferred_local_only_or_mdns_names_require_an_explicit_host_choice() {
-        for host in ["localhost", "127.0.0.1", "studio-mini", "studio-mini.local"] {
-            let error = validate_inferred_host(host).unwrap_err().to_string();
-            assert!(error.contains("explicit `--host HOST`"), "{host}: {error}");
-            assert!(error.contains("same-host labs"), "{host}: {error}");
+        // §3's generated vm.args.
+        let vm_args = fs::read_to_string(root.join(VM_ARGS_FILE)).unwrap();
+        for required in [
+            "-proto_dist inet_tls",
+            "-start_epmd false",
+            "-epmd_module Elixir.Ouroboros.Cluster.Epmd",
+            &format!(
+                "-kernel inet_dist_listen_min {port} inet_dist_listen_max {port}",
+                port = profile.dist_port
+            ),
+        ] {
+            assert!(
+                vm_args.contains(required),
+                "missing `{required}`:\n{vm_args}"
+            );
         }
     }
 
+    /// §2's whole second-machine story, without a network: one bundle, one leaf minted
+    /// locally, two machines that trust each other.
     #[test]
-    fn stale_publication_status_recommends_restart_not_attach() {
-        let data = scratch("stale-status-guidance");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+    fn a_second_machine_joins_from_a_bundle_and_mints_its_own_leaf() {
+        let (one, first) = create_local("join-one", "studio");
+        let two = scratch("join-two");
+
+        let bundle = bundle(&one).expect("a bundle");
+        assert_eq!(bundle.schema, 2);
+        assert_eq!(bundle.fleet_id, first.fleet_id);
+        assert_eq!(bundle.members.len(), 1);
+        // §2: the bundle's `Debug` prints no secret.
+        let printed = format!("{bundle:?}");
+        assert!(printed.contains("<redacted>"));
+        assert!(!printed.contains(&bundle.cookie));
+        assert!(!printed.contains("BEGIN PRIVATE KEY"));
+
+        let ports = ephemeral_ports();
+        let second = join(&two, &bundle, "buildbox", "127.0.0.1", ports).expect("a joined machine");
+        assert_eq!(second.fleet_id, first.fleet_id);
+        assert_eq!(second.name, first.name);
+        assert_eq!(second.machine, "buildbox");
+        assert_eq!(second.dist_port, ports.dist.unwrap());
+        // members = bundle.members ∪ self
+        let mut names: Vec<&str> = second
+            .members
+            .iter()
+            .map(|entry| entry.machine.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["buildbox", "studio"]);
+        // The first machine's entry keeps its own port, not this one's.
+        let recorded = second
+            .members
+            .iter()
+            .find(|entry| entry.machine == "studio")
+            .expect("the first machine is a dial hint");
+        assert_eq!(recorded.dist_port, first.dist_port);
+
+        // §2: every member holds the CA key, and the leaf validates against the bundle CA.
+        assert!(fleet_dir(&two).join(CA_KEY_FILE).try_exists().unwrap());
+        validate_materials(&two, true).expect("a startable second machine");
+        assert_eq!(
+            fs::read_to_string(fleet_dir(&one).join(CA_CERT_FILE)).unwrap(),
+            fs::read_to_string(fleet_dir(&two).join(CA_CERT_FILE)).unwrap(),
+            "one fleet is one CA"
+        );
+        assert_eq!(
+            fs::read_to_string(fleet_dir(&one).join(COOKIE_FILE)).unwrap(),
+            fs::read_to_string(fleet_dir(&two).join(COOKIE_FILE)).unwrap(),
+            "one fleet is one cookie"
+        );
+        assert_ne!(
+            fs::read_to_string(fleet_dir(&one).join(NODE_KEY_FILE)).unwrap(),
+            fs::read_to_string(fleet_dir(&two).join(NODE_KEY_FILE)).unwrap(),
+            "each machine generates its own node key"
+        );
+
+        // And the operator's own list gains the new machine, here and nowhere else.
+        let added = add_member(&one, "buildbox", "127.0.0.1", second.dist_port, None)
+            .expect("the local roster edit");
+        assert_eq!(added.node, second.node);
+        let reloaded = load(&one).unwrap().expect("a profile");
+        assert_eq!(reloaded.members.len(), 2);
+        let environment = runtime_env(&one).unwrap().expect("a fleet environment");
+        assert_eq!(
+            env_value(&environment, "OUROBOROS_CLUSTER_HOSTS"),
+            second.node,
+            "§3: every member node except self"
+        );
+        // Two nodes on one host: only a full-name key can tell them apart.
+        let ports = env_value(&environment, "OUROBOROS_DIST_PORTS");
+        assert!(
+            ports.contains(&format!("{}={}", second.node, second.dist_port)),
+            "{ports}"
+        );
+        assert!(
+            ports.contains(&format!("{}={}", reloaded.node, reloaded.dist_port)),
+            "{ports}"
+        );
+    }
+
+    /// The two stable refusals §7 branches on, plus the bundle shapes `join` will not
+    /// install at all.
+    #[test]
+    fn join_refuses_an_existing_fleet_and_an_invalid_bundle() {
+        let (one, _first) = create_local("refuse-one", "studio");
+        let two = scratch("refuse-two");
+        let bundle = bundle(&one).expect("a bundle");
+
+        // A machine that already holds a *different* fleet.
+        let other =
+            create(&two, None, "buildbox", "127.0.0.1", ephemeral_ports()).expect("another fleet");
+        let error = join(&two, &bundle, "buildbox", "127.0.0.1", ephemeral_ports())
+            .expect_err("a different fleet is present");
+        assert_eq!(reason_of(&error), "fleet_present");
+        // Nothing was rewritten.
+        assert_eq!(load(&two).unwrap().unwrap().fleet_id, other.fleet_id);
+
+        // The idempotent case: this fleet, this machine.
+        let three = scratch("refuse-three");
+        join(&three, &bundle, "buildbox", "127.0.0.1", ephemeral_ports()).expect("a join");
+        let error = join(&three, &bundle, "buildbox", "127.0.0.1", ephemeral_ports())
+            .expect_err("a second join");
+        assert_eq!(reason_of(&error), "already_installed");
+
+        // The same fleet under another machine's name is still somebody's identity.
+        let error = join(&three, &bundle, "vps", "127.0.0.1", ephemeral_ports())
+            .expect_err("a different machine name");
+        assert_eq!(reason_of(&error), "fleet_present");
+
+        // And the shapes that never reach the disk at all.
+        let four = scratch("refuse-four");
+        let mut broken = Bundle {
+            schema: 2,
+            fleet_id: bundle.fleet_id.clone(),
+            name: bundle.name.clone(),
+            cookie: bundle.cookie.clone(),
+            ca_cert_pem: bundle.ca_cert_pem.clone(),
+            ca_key_pem: bundle.ca_key_pem.clone(),
+            dist_port: bundle.dist_port,
+            members: bundle.members.clone(),
+        };
+        broken.schema = 1;
+        assert_eq!(
+            reason_of(&join(&four, &broken, "vps", "127.0.0.1", ephemeral_ports()).unwrap_err()),
+            "bundle_invalid"
+        );
+        broken.schema = 2;
+        broken.cookie = "not a cookie".into();
+        assert_eq!(
+            reason_of(&join(&four, &broken, "vps", "127.0.0.1", ephemeral_ports()).unwrap_err()),
+            "bundle_invalid"
+        );
+        broken.cookie = bundle.cookie.clone();
+        // §1 mints only lower-case names: two spellings of one machine is two identities.
+        assert_eq!(
+            reason_of(&join(&four, &broken, "VPS", "127.0.0.1", ephemeral_ports()).unwrap_err()),
+            "invalid_request"
+        );
+        assert!(
+            !fleet_dir(&four).try_exists().unwrap(),
+            "nothing was written"
+        );
+    }
+
+    /// §2: `leave` is a stop-gated deletion of `fleet/`, and it works on a directory
+    /// whose `profile.json` never landed.
+    #[test]
+    fn leave_removes_the_whole_directory_including_one_with_no_profile() {
+        let (dir, _profile) = create_local("leave", "studio");
+        // Something the runtime wrote beside the credentials, which used to need a
+        // recognized shape before `leave` would touch it.
+        let durable = fleet_dir(&dir)
+            .join("cluster-directory")
+            .join("checkpoints");
+        fs::create_dir_all(&durable).unwrap();
+        fs::write(durable.join("anything.term"), b"opaque").unwrap();
+
+        let removal = leave(&dir).expect("a removal").expect("a fleet was there");
+        assert_eq!(removal.machine.as_deref(), Some("studio"));
+        assert!(removal.profile_readable);
+        assert!(removal.removed.contains(&PROFILE_FILE.to_string()));
+        assert!(!fleet_dir(&dir).try_exists().unwrap());
+        assert!(load(&dir).unwrap().is_none());
+        // Idempotent.
+        assert!(leave(&dir).expect("a second leave").is_none());
+
+        // A directory whose profile never landed is exactly the one `leave` exists for.
+        let stump = scratch("leave-stump");
+        fs::create_dir(stump.join("fleet")).unwrap();
+        fs::set_permissions(stump.join("fleet"), fs::Permissions::from_mode(0o700)).unwrap();
+        write_private_atomic(&fleet_dir(&stump).join(COOKIE_FILE), b"x").unwrap();
+        let removal = leave(&stump)
+            .expect("a removal")
+            .expect("a directory was there");
+        assert!(!removal.profile_readable);
+        assert_eq!(removal.machine, None);
+        assert!(!fleet_dir(&stump).try_exists().unwrap());
+    }
+
+    /// `ouro fleet forget NAME` is the local roster removal, and nothing else.
+    #[test]
+    fn forgetting_a_machine_edits_only_this_machines_list() {
+        let (dir, profile) = create_local("forget", "studio");
+        add_member(&dir, "vps", "127.0.0.2", profile.dist_port, None).expect("a member");
+        assert_eq!(load(&dir).unwrap().unwrap().members.len(), 2);
+
+        // A machine the roster never had.
+        let error = forget_machine(&dir, "absent").expect_err("an unknown machine");
+        assert!(format!("{error:#}").contains("has no member named absent"));
+        // This machine.
+        let error = forget_machine(&dir, "studio").expect_err("this machine");
+        assert!(format!("{error:#}").contains("`ouro fleet leave`"));
+
+        let removed = forget_machine(&dir, "VPS").expect("a case-insensitive removal");
+        assert_eq!(removed.machine, "vps");
+        assert_eq!(load(&dir).unwrap().unwrap().members.len(), 1);
+    }
+
+    /// The profile a hand edit can produce, and what each refusal teaches.
+    #[test]
+    fn validation_errors_teach_the_expected_shape() {
+        let mut profile = sample_profile("studio");
+        profile.role = "worker".into();
+        assert!(format!("{:#}", validate_profile(&profile).unwrap_err()).contains("`core`"));
+
+        let mut profile = sample_profile("studio");
+        profile.node = "studio@host".into();
+        assert!(validate_profile(&profile).is_err());
+
+        let mut profile = sample_profile("studio");
+        profile.members[0].dist_port = profile.dist_port + 1;
+        assert!(
+            format!("{:#}", validate_profile(&profile).unwrap_err()).contains("distribution port")
+        );
+
+        let mut profile = sample_profile("studio");
+        profile.gateway_port = profile.dist_port;
+        assert!(format!("{:#}", validate_profile(&profile).unwrap_err()).contains("overlaps"));
+
+        let mut profile = sample_profile("studio");
+        profile
+            .members
+            .push(member("studio", "studio.tailnet.ts.net", profile.dist_port));
+        assert!(validate_profile(&profile).is_err());
+
+        assert!(validate_machine("studio-mini").is_ok());
+        assert!(validate_machine("-studio").is_err());
+        assert!(validate_cookie(&"a".repeat(64), "test").is_ok());
+        assert!(validate_cookie(&"A".repeat(64), "test").is_err());
+        assert!(validate_cookie(&"a".repeat(63), "test").is_err());
+    }
+
+    /// Fleet hosts are private IPv4 or names that resolve to exactly one.
+    #[test]
+    fn unusable_hosts_are_refused_before_any_credential_is_created() {
+        for hostile in [
+            "::1",
+            "fd00::1",
+            "host:22",
+            "1.2.3.4",
+            "0.0.0.0",
+            "studio..tailnet",
+            "100.64.0.1.",
+        ] {
+            assert!(validate_host(hostile).is_err(), "{hostile} must be refused");
+        }
+        for fine in [
+            "100.64.0.1",
+            "10.0.0.5",
+            "127.0.0.1",
+            "studio.tailnet.ts.net",
+        ] {
+            assert!(validate_host(fine).is_ok(), "{fine} must be accepted");
+        }
+        // The canonical spelling is what goes in a certificate.
+        assert_eq!(canonical_host("LOCALHOST").unwrap(), "localhost");
+        assert_eq!(canonical_host("127.0.0.1.").unwrap(), "127.0.0.1");
+        assert!(same_name("Vps", "vps"));
+    }
+
+    /// §2's port-isolation convention, minus the EPMD field.
+    #[test]
+    fn ephemeral_ports_avoid_every_production_port_space() {
+        for _ in 0..8 {
+            let ports = ephemeral_ports();
+            let gateway = ports.gateway.expect("a gateway port");
+            let dist = ports.dist.expect("a dist port");
+            assert_ne!(gateway, dist);
+            for port in [gateway, dist] {
+                assert_ne!(port, 4369);
+                assert!(!(DEFAULT_DIST_PORT_MIN..=DEFAULT_DIST_PORT_MAX).contains(&port));
+                assert!(
+                    !(DEFAULT_GATEWAY_BASE..DEFAULT_GATEWAY_BASE + DEFAULT_GATEWAY_SPAN)
+                        .contains(&port)
+                );
+            }
+        }
+        assert_eq!(DEFAULT_DIST_PORT, 13_700);
+        assert_eq!(Ports::DEFAULT.dist, None);
+    }
+
+    /// A generated policy file that does not match the profile stops a boot.
+    #[test]
+    fn startup_and_doctor_reject_generated_policy_drift() {
+        let (dir, _profile) = create_local("drift", "studio");
+        let optfile = fleet_dir(&dir).join(TLS_OPTFILE);
+        let original = fs::read_to_string(&optfile).unwrap();
         write_private_atomic(
-            &data.join(runtime::PUBLICATION_FILE),
-            br#"{"port":47004,"protocol":1,"node":"ouro-owner@127.0.0.1","pid":2147483647,"scope":"operate"}"#,
+            &optfile,
+            original.replace("verify_peer", "verify_none").as_bytes(),
         )
         .unwrap();
+        let error = runtime_env(&dir).expect_err("a weakened policy");
+        assert!(format!("{error:#}").contains("does not match"));
+        let report = doctor(&dir);
+        assert!(!report.healthy);
 
-        let rendered = render_status(&data).unwrap();
-        assert!(rendered.contains("stale publication"), "{rendered}");
-        assert!(rendered.contains("Next: `ouro daemon`"), "{rendered}");
-        assert!(!rendered.contains("`ouro attach --print`"), "{rendered}");
-
-        fs::remove_dir_all(data).ok();
+        write_private_atomic(&optfile, original.as_bytes()).unwrap();
+        runtime_env(&dir).expect("the restored policy starts");
     }
 
+    /// The cookie, the node key and the CA key never reach a status or summary document.
     #[test]
-    fn summary_never_contains_secret_material() {
-        let data = scratch("summary");
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let cookie = fs::read_to_string(fleet_dir(&data).join(COOKIE_FILE)).unwrap();
-        let rendered = format!("{:?}", summary(&data));
-        assert!(!rendered.contains(cookie.trim()));
-        assert!(rendered.contains("owner"));
-        fs::remove_dir_all(data).ok();
+    fn summary_and_status_never_contain_secret_material() {
+        let (dir, _profile) = create_local("secrets", "studio");
+        let root = fleet_dir(&dir);
+        let cookie = fs::read_to_string(root.join(COOKIE_FILE)).unwrap();
+        let node_key = fs::read_to_string(root.join(NODE_KEY_FILE)).unwrap();
+        let ca_key = fs::read_to_string(root.join(CA_KEY_FILE)).unwrap();
+
+        let rendered = serde_json::to_string(&summary(&dir)).unwrap();
+        let status = render_status(&dir).unwrap();
+        let report = doctor(&dir).text;
+        for document in [rendered, status, report] {
+            for secret in [&cookie, &node_key, &ca_key] {
+                assert!(!document.contains(secret.trim()), "a secret was printed");
+            }
+            assert!(!document.contains("BEGIN PRIVATE KEY"));
+            // §12: the revision and the tombstones are gone from every document.
+            assert!(!document.contains("fleet_protocol_revision"));
+            assert!(!document.to_lowercase().contains("tombstone"));
+            assert!(!document.contains("EPMD"));
+        }
     }
 
+    /// A live runtime's checks are merged into the local report rather than replacing it.
     #[test]
     fn doctor_merges_live_errors_into_the_local_report() {
-        let local = build_doctor_report(
-            Path::new("/tmp/fleet-doctor-fixture"),
-            vec![
-                ok("local TLS material is private"),
-                warn("service inactive"),
-            ],
-            "local checks only",
-        );
-        assert!(local.healthy);
-
-        let live = merge_live_doctor(
+        let (dir, _profile) = create_local("live-doctor", "studio");
+        let local = doctor(&dir);
+        let merged = merge_live_doctor(
             local,
             &serde_json::json!({
                 "healthy?": false,
                 "checks": [
-                    {"id": "distribution", "status": "ok", "message": "BEAM distribution is running"},
-                    {
-                        "id": "machine_connectivity",
-                        "status": "error",
-                        "message": "alpha is offline; Ouroboros will keep retrying",
-                        "guidance": "Start Ouroboros on alpha and check EPMD"
-                    }
-                ]
+                    {"status": "error", "message": "two machines disagree about their version",
+                     "guidance": "upgrade both"},
+                ],
             }),
         );
-        assert!(!live.healthy);
-        assert!(live.text.contains("live runtime: alpha is offline"));
-        assert!(live.text.contains("Next: Start Ouroboros on alpha"));
-        assert!(live.text.contains("live runtime + local profile"));
+        assert!(!merged.healthy);
+        assert!(merged.text.contains("live runtime: two machines disagree"));
+        assert!(merged.text.contains("Next: upgrade both"));
+        assert!(merged.scope().starts_with("live"));
 
-        let healthy_live = merge_live_doctor(
-            build_doctor_report(
-                Path::new("/tmp/fleet-doctor-fixture"),
-                vec![ok("local")],
-                "local",
-            ),
-            &serde_json::json!({
-                "healthy?": true,
-                "checks": [{
-                    "id": "distribution",
-                    "status": "ok",
-                    "message": "BEAM distribution is running",
-                    "guidance": "stale compatibility guidance must stay hidden"
-                }]
-            }),
-        );
-        assert!(healthy_live.healthy);
-        assert!(healthy_live
-            .text
-            .contains("live runtime: BEAM distribution is running"));
-        assert!(!healthy_live.text.contains("stale compatibility guidance"));
-
-        let malformed = merge_live_doctor(
-            build_doctor_report(
-                Path::new("/tmp/fleet-doctor-fixture"),
-                vec![ok("local")],
-                "local",
-            ),
-            &serde_json::json!({"healthy?": true, "checks": [{"status": "future"}]}),
-        );
-        assert!(!malformed.healthy);
-        assert!(malformed.text.contains("unreadable response"));
-
-        let stopped = doctor_stopped(build_doctor_report(
-            Path::new("/tmp/fleet-doctor-fixture"),
-            vec![ok("local")],
-            "local",
-        ));
-        assert!(stopped.text.contains("local checks only (runtime stopped)"));
-        assert!(stopped
-            .text
-            .contains("live remote compatibility and connectivity were not checked"));
+        let unavailable = doctor_live_unavailable(doctor(&dir), "connection refused");
+        assert!(!unavailable.healthy);
+        assert!(unavailable.text.contains("connection refused"));
     }
 
-    // -----------------------------------------------------------------------
-    // Admission. The property under every test here is a boundary: the CA key stays
-    // on the issuer, the issuer's own node key stays in its own directory, the
-    // target's key stays on the target, and the cookie travels but is never written
-    // anywhere a reader other than the BEAM would look.
-    // -----------------------------------------------------------------------
-
-    fn issuer_fleet(label: &str) -> PathBuf {
-        let data = scratch(label);
-        create(
-            &data,
-            Some("the lab"),
-            "studio",
-            "127.0.0.1",
-            ephemeral_ports(),
-        )
-        .unwrap();
-        data
-    }
-
-    /// A request built the way `prepare_admission` builds one, with the certificate
-    /// parameters opened up so a test can ask for something it must not get.
-    fn crafted_request(
-        operation: &str,
-        machine: &str,
-        host: &str,
-        mutate: impl FnOnce(&mut CertificateParams),
-    ) -> AdmissionRequest {
-        let local = member(machine, host);
-        let mut params = CertificateParams::new(vec![local.host.clone()]).unwrap();
-        params.distinguished_name = DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, local.node.clone());
-        params.key_usages = vec![
-            KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
-        ];
-        params.extended_key_usages = vec![
-            ExtendedKeyUsagePurpose::ServerAuth,
-            ExtendedKeyUsagePurpose::ClientAuth,
-        ];
-        mutate(&mut params);
-        let key = KeyPair::generate().unwrap();
-        let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
-        AdmissionRequest {
-            schema: ADMISSION_SCHEMA,
-            operation: operation.to_string(),
-            machine: machine.to_string(),
-            host: host.to_string(),
-            node: local.node.clone(),
-            key_fingerprint: public_fingerprint(key.public_key_der().as_ref()),
-            csr_pem,
-        }
-    }
-
-    fn pem_block(label: &str, der: &[u8]) -> String {
-        use base64::Engine as _;
-        let body = base64::engine::general_purpose::STANDARD.encode(der);
-        let mut text = format!("-----BEGIN {label}-----\r\n");
-        for chunk in body.as_bytes().chunks(64) {
-            text.push_str(std::str::from_utf8(chunk).unwrap());
-            text.push_str("\r\n");
-        }
-        text.push_str(&format!("-----END {label}-----\r\n"));
-        text
-    }
-
-    fn reason_of(error: &anyhow::Error) -> &str {
-        admission_error(error)
-            .map(|declared| declared.reason)
-            .unwrap_or_else(|| panic!("an admission refusal must declare a reason: {error:#}"))
-    }
-
-    /// The whole path, and the four boundaries it exists to keep.
-    ///
-    /// The target generates its key and keeps it; the issuer signs a certificate for a
-    /// key it does not hold; the materials that travel carry no private key at all; and
-    /// what lands on the target is a machine the boot path will start.
+    /// A beginner's inputs become a safe identity, or an explicit question.
     #[test]
-    fn a_machine_is_admitted_without_any_private_key_crossing_its_boundary() {
-        let issuer = issuer_fleet("issuer-admits");
-        let target = scratch("target-admitted");
-        let operation = "op-2026-09-17-a1";
-
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        assert_eq!(request.node, "ouro-vps@127.0.0.1");
-
-        // The target's key is on the target, at 0600, and in exactly one place.
-        let staging = admission_dir(&target, operation);
-        ensure_private_file(&staging.join(NODE_KEY_FILE), "staged node key").unwrap();
-        let staged_key = read_private(&staging.join(NODE_KEY_FILE), "staged node key").unwrap();
-        assert!(staged_key.contains("PRIVATE KEY"));
-        assert!(
-            !request.csr_pem.contains("PRIVATE KEY"),
-            "a signing request carries a public key and a signature over it, never the key"
-        );
-        assert!(
-            !serde_json::to_string(&request)
-                .unwrap()
-                .contains("PRIVATE KEY"),
-            "nothing that leaves the target carries the key it just generated"
-        );
-
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        let wire = serde_json::to_string(&materials).unwrap();
-        assert!(
-            !wire.contains("PRIVATE KEY"),
-            "the materials carry the CA certificate, the new leaf and the cookie, and no key"
-        );
-        assert!(
-            !wire.contains("ca_key_pem"),
-            "there is no field on the wire that could hold the authority to sign"
-        );
-        let issuer_node_key = read_private(
-            &fleet_dir(&issuer).join(NODE_KEY_FILE),
-            "the issuer's node key",
-        )
-        .unwrap();
-        assert!(
-            !wire.contains(issuer_node_key.trim()),
-            "the issuer's own node key is not part of anything it sends"
-        );
-        let ca_key =
-            read_private(&fleet_dir(&issuer).join(CA_KEY_FILE), "the fleet CA key").unwrap();
-        assert!(
-            !wire.contains(ca_key.trim()),
-            "the CA key stays on the machine that minted it"
-        );
-        assert!(
-            !wire.contains(&staged_key),
-            "the target's key never travels"
-        );
-
-        let profile = install_admission(&target, &materials, ephemeral_ports()).unwrap();
-        assert_eq!(profile.node, "ouro-vps@127.0.0.1");
-        assert_eq!(profile.fleet_id, load(&issuer).unwrap().unwrap().fleet_id);
-        assert_eq!(
-            profile
-                .members
-                .iter()
-                .map(|member| member.machine.as_str())
-                .collect::<Vec<_>>(),
-            vec!["studio", "vps"],
-            "the newcomer installs the complete agreed roster, itself included"
-        );
-
-        // The admitted machine holds no authority to admit a third.
-        assert!(
-            !fleet_dir(&target).join(CA_KEY_FILE).try_exists().unwrap(),
-            "an admitted machine is given a CA certificate, never the CA key"
-        );
-        assert!(
-            !staging.try_exists().unwrap(),
-            "the operation's staging directory is gone once the fleet directory is complete"
-        );
-        // And it is a machine the boot path will actually start.
-        validate_materials(&target, false).unwrap();
-        assert!(runtime_env(&target).unwrap().is_some());
-        // The cookie it boots with is the fleet's.
-        assert_eq!(
-            read_private(&fleet_dir(&target).join(COOKIE_FILE), "cookie").unwrap(),
-            read_private(&fleet_dir(&issuer).join(COOKIE_FILE), "cookie").unwrap()
-        );
-    }
-
-    /// Repeating a `prepare` answers with what was already prepared, and a second
-    /// operation on a machine with one pending is refused rather than minting a
-    /// second identity nobody will be able to tell from the first.
-    #[test]
-    fn preparing_twice_answers_once_and_a_second_operation_is_refused() {
-        let target = scratch("target-repeat-prepare");
-        let operation = "op-repeat-0001";
-
-        let first = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let second = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        assert_eq!(
-            first, second,
-            "an interrupted answer costs a round trip, not an identity"
-        );
-
-        let other = prepare_admission(&target, "op-repeat-0002", "vps", "127.0.0.1").unwrap_err();
-        assert_eq!(reason_of(&other), "operation_in_progress");
-
-        let renamed = prepare_admission(&target, operation, "laptop", "127.0.0.1").unwrap_err();
-        assert_eq!(
-            reason_of(&renamed),
-            "identity_mismatch",
-            "a prepared identity is not quietly reassigned to another machine name"
-        );
-
-        let installed = issuer_fleet("target-already-in-a-fleet");
-        let refused =
-            prepare_admission(&installed, "op-already-0001", "vps", "127.0.0.1").unwrap_err();
-        assert_eq!(reason_of(&refused), "fleet_exists");
-    }
-
-    /// A request asking for authority, for a name it was not approved for, or signed
-    /// by a key it does not hold.
-    ///
-    /// The privilege case is deliberately *not* a refusal: the issuer builds every
-    /// parameter of the certificate itself, so a request may ask for `CA:true` and for
-    /// the right to sign certificates and simply not receive them. The name cases are
-    /// refusals, because a request for a name that will not be issued is a request
-    /// whose sender is about to be surprised.
-    #[test]
-    fn a_hostile_request_gets_no_authority_no_extra_name_and_no_certificate_at_all() {
-        let issuer = issuer_fleet("issuer-hostile");
-
-        let greedy = crafted_request("op-hostile-0001", "vps", "127.0.0.1", |params| {
-            params
-                .custom_extensions
-                .push(rcgen::CustomExtension::from_oid_content(
-                    // basicConstraints: SEQUENCE { BOOLEAN TRUE }
-                    &[2, 5, 29, 19],
-                    vec![0x30, 0x03, 0x01, 0x01, 0xff],
-                ));
-            params.key_usages = vec![
-                KeyUsagePurpose::KeyCertSign,
-                KeyUsagePurpose::CrlSign,
-                KeyUsagePurpose::DigitalSignature,
-            ];
-        });
-        // The request really does ask for both, or the assertions below would pass
-        // against a request that never asked for anything.
-        let (_, asked) = parse_x509_pem(greedy.csr_pem.as_bytes()).unwrap();
-        let (_, parsed) = X509CertificationRequest::from_der(&asked.contents).unwrap();
-        let requested: Vec<_> = parsed
-            .requested_extensions()
-            .expect("a request carrying extensions")
-            .collect();
-        assert!(
-            requested.iter().any(|extension| matches!(
-                extension,
-                x509_parser::extensions::ParsedExtension::BasicConstraints(constraints)
-                    if constraints.ca
-            )),
-            "the request must actually ask to be a certificate authority"
-        );
-        assert!(
-            requested.iter().any(|extension| matches!(
-                extension,
-                x509_parser::extensions::ParsedExtension::KeyUsage(usage)
-                    if usage.key_cert_sign()
-            )),
-            "and must actually ask for the right to sign certificates"
-        );
-
-        let materials = issue_member_certificate(&issuer, &greedy).unwrap();
-        let (_, block) = parse_x509_pem(materials.node_cert_pem.as_bytes()).unwrap();
-        let issued = block.parse_x509().unwrap();
-        assert!(
-            !issued.is_ca(),
-            "a request that asks to be a CA is answered with a leaf"
-        );
-        let usage = issued.key_usage().unwrap().unwrap();
-        assert!(
-            !usage.value.key_cert_sign() && !usage.value.crl_sign(),
-            "the issuer sets the key usages, so a request cannot ask for the right to sign"
-        );
-        assert!(usage.value.digital_signature() && usage.value.key_encipherment());
-
-        let issuer = issuer_fleet("issuer-hostile-names");
-        for (label, request) in [
-            (
-                "an extra certificate name",
-                crafted_request("op-hostile-0002", "vps", "127.0.0.1", |params| {
-                    params.subject_alt_names.push(rcgen::SanType::DnsName(
-                        "studio.internal".try_into().unwrap(),
-                    ));
-                }),
-            ),
-            (
-                "another machine's node name",
-                crafted_request("op-hostile-0003", "vps", "127.0.0.1", |params| {
-                    params.distinguished_name = DistinguishedName::new();
-                    params
-                        .distinguished_name
-                        .push(DnType::CommonName, "ouro-studio@127.0.0.1");
-                }),
-            ),
-            (
-                "another machine's address",
-                crafted_request("op-hostile-0004", "vps", "127.0.0.1", |params| {
-                    params.subject_alt_names =
-                        vec![rcgen::SanType::IpAddress("10.0.0.9".parse().unwrap())];
-                }),
-            ),
-        ] {
-            let error = issue_member_certificate(&issuer, &request).unwrap_err();
-            assert_eq!(
-                reason_of(&error),
-                "csr_identity_mismatch",
-                "{label} must be refused"
-            );
-        }
-
-        // Proof of possession: a request whose signature is not the key's.
-        let mut forged = crafted_request("op-hostile-0005", "vps", "127.0.0.1", |_| {});
-        let (_, block) = parse_x509_pem(forged.csr_pem.as_bytes()).unwrap();
-        let mut der = block.contents.clone();
-        let last = der.len() - 1;
-        der[last] ^= 0xff;
-        forged.csr_pem = pem_block("CERTIFICATE REQUEST", &der);
-        let error = issue_member_certificate(&issuer, &forged).unwrap_err();
-        assert_eq!(reason_of(&error), "csr_signature_invalid");
-
-        // And a request whose fingerprint describes a different key than it carries.
-        let mut mislabelled = crafted_request("op-hostile-0006", "vps", "127.0.0.1", |_| {});
-        mislabelled.key_fingerprint = public_fingerprint(b"not this key");
-        let error = issue_member_certificate(&issuer, &mislabelled).unwrap_err();
-        assert_eq!(reason_of(&error), "csr_identity_mismatch");
-    }
-
-    #[test]
-    fn retiring_an_undelivered_admission_allows_a_new_operation_but_not_replay() {
-        let issuer = issuer_fleet("issuer-retire");
-        let target = scratch("target-retire");
-        let old = prepare_admission(&target, "op-retire-old", "vps", "127.0.0.1").unwrap();
-        issue_member_certificate(&issuer, &old).unwrap();
-        assert_eq!(remove_member(&issuer, "vps").unwrap().machine, "vps");
-        let receipt = read_receipt(&issuer, &old.operation).unwrap().unwrap();
-        assert!(receipt.has_step("issue") && receipt.has_step("retire"));
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &old).unwrap_err()),
-            "operation_replayed"
-        );
-        let new = crafted_request("op-retire-new", "vps", "127.0.0.1", |_| {});
-        issue_member_certificate(&issuer, &new).unwrap();
-        let duplicate = crafted_request("op-retire-duplicate", "vps", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &duplicate).unwrap_err()),
-            "machine_already_issued"
-        );
-    }
-
-    #[test]
-    fn issuance_releases_the_roster_fence_before_delivery() {
-        let issuer = issuer_fleet("issuer-fence");
-        let target = scratch("target-fence");
-        let request = prepare_admission(&target, "op-fenced", "vps", "127.0.0.1").unwrap();
-        let profile = load(&issuer).unwrap().unwrap();
-        issue_member_certificate_checked(&issuer, &request, Some(&profile)).unwrap();
-        add_member(&issuer, "concurrent", "127.0.0.2", None).unwrap();
-        let error = apply_roster_change(
-            &issuer,
-            "op-fenced-roster",
-            profile.roster_revision,
-            &RosterChange::Add {
-                machine: "vps".into(),
-                host: "127.0.0.1".into(),
-                node: None,
-            },
-        )
-        .unwrap_err();
-        assert_eq!(reason_of(&error), "roster_conflict");
-        let current = load(&issuer).unwrap().unwrap();
-        apply_roster_change(
-            &issuer,
-            "op-fenced-roster",
-            current.roster_revision,
-            &RosterChange::Add {
-                machine: "vps".into(),
-                host: "127.0.0.1".into(),
-                node: None,
-            },
-        )
-        .unwrap();
-        let profile = load(&issuer).unwrap().unwrap();
-        assert!(profile.members.iter().any(|member| member.machine == "vps"));
-        assert!(profile
-            .members
-            .iter()
-            .any(|member| member.machine == "concurrent"));
-    }
-
-    /// One machine, one identity: not twice under one operation id, not twice under
-    /// two, and never for a name the roster or its tombstones already spent.
-    #[test]
-    fn an_issuer_refuses_a_replay_a_second_identity_and_a_name_it_already_knows() {
-        let issuer = issuer_fleet("issuer-replay");
-        let target = scratch("target-replay");
-
-        let request = prepare_admission(&target, "op-replay-0001", "vps", "127.0.0.1").unwrap();
-        issue_member_certificate(&issuer, &request).unwrap();
-
-        let replayed = issue_member_certificate(&issuer, &request).unwrap_err();
-        assert_eq!(reason_of(&replayed), "operation_replayed");
-
-        let again = crafted_request("op-replay-0002", "vps", "127.0.0.1", |_| {});
-        let error = issue_member_certificate(&issuer, &again).unwrap_err();
-        assert_eq!(
-            reason_of(&error),
-            "machine_already_issued",
-            "a second identity for one machine is a duplicate, not a retry"
-        );
-
-        add_member(&issuer, "laptop", "127.0.0.1", None).unwrap();
-        let known = crafted_request("op-replay-0003", "laptop", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &known).unwrap_err()),
-            "machine_known"
-        );
-
-        forget_machine(&issuer, "laptop").unwrap();
-        let gone = crafted_request("op-replay-0004", "laptop", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &gone).unwrap_err()),
-            "machine_known",
-            "a machine declared gone for good does not come back through admission"
-        );
-
-        // A machine that never had a fleet cannot admit anything.
-        let standalone = scratch("standalone-issuer");
-        let nothing = crafted_request("op-replay-0005", "vps", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&standalone, &nothing).unwrap_err()),
-            "no_fleet"
-        );
-    }
-
-    /// The target's half of the boundary: materials that would hand it authority, or
-    /// a certificate for someone else's key, are refused before anything is written.
-    #[test]
-    fn install_refuses_materials_carrying_a_key_an_unknown_field_or_a_foreign_certificate() {
-        let issuer = issuer_fleet("issuer-bad-materials");
-        let target = scratch("target-bad-materials");
-        let request = prepare_admission(&target, "op-materials-001", "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-
-        // A sender that adds the CA key as a field is refused by the shape itself: a
-        // target must notice being handed authority rather than quietly drop it.
-        let mut wire = serde_json::to_value(&materials).unwrap();
-        wire.as_object_mut().unwrap().insert(
-            "ca_key_pem".to_string(),
-            Value::String("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n".into()),
-        );
-        let error = serde_json::from_value::<AdmissionMaterials>(wire).unwrap_err();
-        assert!(
-            error.to_string().contains("ca_key_pem"),
-            "the refusal must name the field that does not belong: {error}"
-        );
-
-        // And a sender that hides one inside a field that does belong.
-        let mut smuggled = materials.clone();
-        smuggled.ca_cert_pem = format!(
-            "{}-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
-            smuggled.ca_cert_pem
-        );
-        assert_eq!(
-            reason_of(&install_admission(&target, &smuggled, ephemeral_ports()).unwrap_err()),
-            "materials_carry_private_key"
-        );
-
-        // A certificate for a key this machine did not prepare cannot be installed
-        // against the key it did.
-        let other = scratch("target-other-key");
-        let other_request =
-            prepare_admission(&other, "op-materials-002", "vps", "127.0.0.1").unwrap();
-        let other_materials =
-            issue_member_certificate(&issuer_fleet("issuer-other-key"), &other_request).unwrap();
-        let mut foreign = materials.clone();
-        foreign.node_cert_pem = other_materials.node_cert_pem.clone();
-        assert_eq!(
-            reason_of(&install_admission(&target, &foreign, ephemeral_ports()).unwrap_err()),
-            "materials_invalid",
-            "a leaf minted for another machine's key is not this machine's identity"
-        );
-        assert!(
-            !fleet_dir(&target).try_exists().unwrap(),
-            "nothing is published while the materials are still being checked"
-        );
-
-        // And a target that never prepared has no key to bind a certificate to.
-        let empty = scratch("target-never-prepared");
-        assert_eq!(
-            reason_of(&install_admission(&empty, &materials, ephemeral_ports()).unwrap_err()),
-            "staging_missing"
-        );
-    }
-
-    /// The one commit point, from both sides of it.
-    ///
-    /// A crash before the rename leaves a staging directory holding some of the final
-    /// files; rerunning with the same materials rewrites them and finishes. A crash
-    /// after the rename leaves a complete fleet whose receipt has not been closed;
-    /// rerunning returns the installed profile and closes it. Neither leaves a second
-    /// identity, and neither needs the issuer again.
-    #[test]
-    fn an_interrupted_install_is_finished_by_repeating_it_with_the_same_materials() {
-        let issuer = issuer_fleet("issuer-crash");
-        let target = scratch("target-crash");
-        let operation = "op-crash-000001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-
-        // The state a crash between the first write and the rename leaves behind: the
-        // cookie and the CA certificate landed, nothing else did.
-        let staging = admission_dir(&target, operation);
-        write_private_atomic(&staging.join(COOKIE_FILE), materials.cookie.as_bytes()).unwrap();
-        write_private_atomic(
-            &staging.join(CA_CERT_FILE),
-            materials.ca_cert_pem.as_bytes(),
-        )
-        .unwrap();
-        assert!(
-            !fleet_dir(&target).try_exists().unwrap(),
-            "a half-written staging directory is not a fleet"
-        );
-        assert!(
-            load(&target).unwrap().is_none(),
-            "and nothing reads it as one"
-        );
-
-        let ports = ephemeral_ports();
-        let profile = install_admission(&target, &materials, ports).unwrap();
-        validate_materials(&target, false).unwrap();
-
-        // The state a crash between the rename and the closing receipt leaves behind.
-        let receipt_path = receipts_dir(&target).join(format!("{operation}.json"));
-        let mut receipt: Receipt =
-            serde_json::from_str(&read_private(&receipt_path, "receipt").unwrap()).unwrap();
-        receipt.steps.retain(|step| step.step != "install");
-        write_private_atomic(&receipt_path, &serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
-
-        let again = install_admission(&target, &materials, ports).unwrap();
-        assert_eq!(again, profile, "a finished install repeats its own answer");
-        assert!(
-            read_receipt(&target, operation)
-                .unwrap()
-                .unwrap()
-                .has_step("install"),
-            "and closes the record the crash left open"
-        );
-
-        let third = install_admission(&target, &materials, ports).unwrap();
-        assert_eq!(third, profile);
-
-        // A machine that belongs to a different fleet is not overwritten by materials
-        // that happen to name the same operation.
-        let stranger = scratch("target-stranger");
-        create(&stranger, None, "vps", "127.0.0.1", ephemeral_ports()).unwrap();
-        assert_eq!(
-            reason_of(&install_admission(&stranger, &materials, ephemeral_ports()).unwrap_err()),
-            "fleet_exists"
-        );
-    }
-
-    /// What gets promoted is a fleet directory and nothing else.
-    ///
-    /// The rename that commits an identity is also what turns this directory into one
-    /// `ouro fleet leave` has to be able to remove, and that command refuses a
-    /// directory holding an entry it does not recognize. A killed earlier attempt can
-    /// leave a half-written temporary behind, and the request record has no business
-    /// surviving either.
-    #[test]
-    fn promotion_carries_no_leftover_of_the_attempt_that_was_interrupted() {
-        let issuer = issuer_fleet("issuer-prune");
-        let target = scratch("target-prune");
-        let operation = "op-prune-0000001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        let staging = admission_dir(&target, operation);
-
-        // Exactly what a SIGKILL between `write_private_atomic`'s create and its
-        // rename leaves in the directory.
-        let orphan = staging.join(format!(
-            ".{COOKIE_FILE}.{}.0123456789ab.tmp",
-            std::process::id()
-        ));
-        write_private_new(&orphan, b"half a cookie", "interrupted write").unwrap();
-        assert!(staging.join(ADMISSION_REQUEST_FILE).try_exists().unwrap());
-
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
-
-        let root = fleet_dir(&target);
-        assert!(unrecognized_fleet_entries(&root).unwrap().is_empty());
-        assert!(!root.join(ADMISSION_REQUEST_FILE).try_exists().unwrap());
-        assert!(!root.join(orphan.file_name().unwrap()).try_exists().unwrap());
-        // Which is to say: this machine can be retired again.
-        leave(&target).unwrap().expect("a retired machine");
-
-        // An entry this code cannot account for stops the promotion instead.
-        let second = scratch("target-prune-unknown");
-        let request = prepare_admission(&second, operation, "vps", "127.0.0.1").unwrap();
-        let materials =
-            issue_member_certificate(&issuer_fleet("issuer-prune-2"), &request).unwrap();
-        write_private_new(
-            &admission_dir(&second, operation).join("somebody-elses-file"),
-            b"not ours",
-            "a planted file",
-        )
-        .unwrap();
-        let error = install_admission(&second, &materials, ephemeral_ports()).unwrap_err();
-        assert_eq!(reason_of(&error), "invalid_staging");
-        assert!(
-            !fleet_dir(&second).try_exists().unwrap(),
-            "nothing was published"
-        );
-    }
-
-    /// A roster edit states the revision it was computed against, so an operator whose
-    /// view is stale is told rather than silently overwriting a later edit.
-    #[test]
-    fn a_roster_change_against_a_stale_revision_is_refused_with_the_revision_it_needs() {
-        let data = issuer_fleet("roster-conflict");
-        let start = load(&data).unwrap().unwrap().roster_revision;
-
-        let outcome = apply_roster_change(
-            &data,
-            "op-roster-00001",
-            start,
-            &RosterChange::Add {
-                machine: "vps".to_string(),
-                host: "127.0.0.1".to_string(),
-                node: None,
-            },
-        )
-        .unwrap();
-        assert!(outcome.changed);
-        assert_eq!(outcome.roster_revision, start + 1);
-        assert_eq!(outcome.member.node, "ouro-vps@127.0.0.1");
-
-        // The same change replayed against the revision it was computed from.
-        let error = apply_roster_change(
-            &data,
-            "op-roster-00002",
-            start,
-            &RosterChange::Remove {
-                machine: "vps".to_string(),
-            },
-        )
-        .unwrap_err();
-        let declared = admission_error(&error).expect("a declared refusal");
-        assert_eq!(declared.reason, "roster_conflict");
-        assert_eq!(
-            declared.roster_revision,
-            Some(start + 1),
-            "the refusal carries the revision the caller has to re-read"
-        );
-        assert_eq!(
-            load(&data).unwrap().unwrap().members.len(),
-            2,
-            "a refused change changes nothing"
-        );
-
-        let removed = apply_roster_change(
-            &data,
-            "op-roster-00003",
-            start + 1,
-            &RosterChange::Remove {
-                machine: "vps".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(removed.roster_revision, start + 2);
-
-        let forgotten = apply_roster_change(
-            &data,
-            "op-roster-00004",
-            start + 2,
-            &RosterChange::Add {
-                machine: "laptop".to_string(),
-                host: "127.0.0.1".to_string(),
-                node: Some("ouro-laptop@127.0.0.1".to_string()),
-            },
-        )
-        .unwrap();
-        let gone = apply_roster_change(
-            &data,
-            "op-roster-00005",
-            forgotten.roster_revision,
-            &RosterChange::Forget {
-                machine: "laptop".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            load(&data).unwrap().unwrap().tombstones[0].machine,
-            "laptop"
-        );
-        assert!(gone.changed);
-
-        // An edit the roster refuses on its own terms keeps its own explanation.
-        let error = apply_roster_change(
-            &data,
-            "op-roster-00006",
-            load(&data).unwrap().unwrap().roster_revision,
-            &RosterChange::Remove {
-                machine: "nobody".to_string(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(reason_of(&error), "roster_refused");
-
-        let standalone = scratch("roster-standalone");
-        assert_eq!(
-            reason_of(
-                &apply_roster_change(
-                    &standalone,
-                    "op-roster-00007",
-                    1,
-                    &RosterChange::Remove {
-                        machine: "vps".to_string(),
-                    },
-                )
-                .unwrap_err()
-            ),
-            "no_fleet"
-        );
-    }
-
-    /// Receipts are the durable record a lost connection is reconciled from, and the
-    /// one file in this feature a person is most likely to read. They carry step
-    /// names, times, outcomes and public fingerprints, and nothing else.
-    #[test]
-    fn receipts_record_every_step_and_never_a_cookie_a_key_or_a_token() {
-        let issuer = issuer_fleet("issuer-receipts");
-        let target = scratch("target-receipts");
-        let operation = "op-receipt-0001";
-
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        // Before the fleet exists the record lives with the key it describes.
-        let staged = read_receipt(&target, operation).unwrap().unwrap();
-        assert!(staged.has_step("prepare"));
-        assert_eq!(
-            staged.key_fingerprint.as_deref(),
-            Some(request.key_fingerprint.as_str())
-        );
-
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        let issued = read_receipt(&issuer, operation).unwrap().unwrap();
-        assert!(issued.has_step("issue"));
-
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
-        let receipt_path = receipts_dir(&target).join(format!("{operation}.json"));
-        ensure_private_file(&receipt_path, "operation receipt").unwrap();
-        let text = read_private(&receipt_path, "operation receipt").unwrap();
-        let installed: Receipt = serde_json::from_str(&text).unwrap();
-        assert_eq!(
-            installed
-                .steps
-                .iter()
-                .map(|step| step.step.as_str())
-                .collect::<Vec<_>>(),
-            vec!["prepare", "install_staged", "install"],
-            "the record survives the rename that commits the identity"
-        );
-        assert!(installed.steps.iter().all(|step| step.at.ends_with('Z')));
-
-        let cookie = read_private(&fleet_dir(&target).join(COOKIE_FILE), "cookie").unwrap();
-        assert!(
-            !text.contains(&cookie),
-            "a receipt never carries the cookie"
-        );
-        assert!(
-            !text.contains("PRIVATE KEY"),
-            "a receipt never carries key material"
-        );
-        assert!(
-            text.contains(&request.key_fingerprint),
-            "it carries the public fingerprint that names the key instead"
-        );
-
-        // An operation this machine never saw has no receipt to append to.
-        assert!(read_receipt(&target, "op-receipt-9999").unwrap().is_none());
-        assert_eq!(
-            reason_of(
-                &append_receipt_step(&target, "op-receipt-9999", "started", "ok", None)
-                    .unwrap_err()
-            ),
-            "unknown_operation"
-        );
-
-        let appended =
-            append_receipt_step(&target, operation, "service_started", "ok", Some("by hand"))
-                .unwrap();
-        assert_eq!(appended.steps.len(), 4);
-        for hostile in ["", "a\nb"] {
-            assert_eq!(
-                reason_of(
-                    &append_receipt_step(&target, operation, hostile, "ok", None).unwrap_err()
-                ),
-                "invalid_request"
-            );
-        }
-        // The file is bounded: a peer cannot grow it without limit.
-        for index in 0..MAX_RECEIPT_STEPS {
-            let step = format!("filler-{index}");
-            if append_receipt_step(&target, operation, &step, "ok", None).is_err() {
-                break;
+    fn identity_resolution_derives_a_label_or_asks() {
+        let identity = resolve_identity(None, Some("studio-mini.tailnet.ts.net"));
+        match identity {
+            Ok(identity) => {
+                assert_eq!(identity.machine, "studio-mini");
+                assert!(identity.inferred_machine);
+                assert!(!identity.inferred_host);
             }
+            // A machine with no resolver for that name is a legitimate environment.
+            Err(error) => assert!(format!("{error:#}").contains("studio-mini")),
         }
         assert_eq!(
-            reason_of(
-                &append_receipt_step(&target, operation, "one-more", "ok", None).unwrap_err()
-            ),
-            "receipt_full"
+            machine_from_host("Build-Linux.local").unwrap(),
+            "build-linux"
         );
+        assert!(host_is_local_only("localhost"));
     }
 
-    /// An operation id names a directory and a file on a machine an operator does not
-    /// have a shell on, so it is checked before it is either.
+    /// Creating a fleet twice, or on an occupied port, refuses before anything is written.
     #[test]
-    fn an_operation_id_cannot_name_a_path() {
-        for hostile in [
-            "../../etc/passwd",
-            "op/../../root",
-            "op.with.dots",
-            "OP-UPPERCASE1",
-            "short",
-            "-leading-hyphen",
-            "trailing-hyphen-",
-            "double--hyphen",
-            "",
-        ] {
-            assert!(
-                validate_operation_id(hostile).is_err(),
-                "`{hostile}` must not be usable as an operation id"
-            );
-        }
-        validate_operation_id("op-2026-09-17-a1").unwrap();
-        validate_operation_id("0123456789abcdef").unwrap();
+    fn create_refuses_an_existing_fleet_and_an_occupied_port() {
+        let (dir, _profile) = create_local("occupied", "studio");
+        let error = create(&dir, None, "studio", "127.0.0.1", ephemeral_ports())
+            .expect_err("a second create");
+        assert!(format!("{error:#}").contains("already has fleet state"));
+
+        let other = scratch("occupied-two");
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+        let ports = Ports {
+            gateway: Some(taken),
+            dist: ephemeral_ports().dist,
+        };
+        let error =
+            create(&other, None, "buildbox", "127.0.0.1", ports).expect_err("an occupied gateway");
+        assert!(format!("{error:#}").contains("already in use"));
+        assert!(!fleet_dir(&other).try_exists().unwrap());
     }
 
-    /// Inspection is what an orchestrator reads before it decides anything, so it
-    /// answers for a standalone machine, one with an operation pending, and one that
-    /// has been admitted — and it answers with no secret at all.
+    /// An interrupted `create` leaves a private staging directory, and the next
+    /// lifecycle command recovers it rather than guessing at it.
     #[test]
-    fn inspection_reports_identity_and_pending_work_and_no_secret() {
-        let target = scratch("target-inspect");
-        let blank = inspect_local(&target).unwrap();
-        assert!(blank.fleet.is_none());
-        assert!(blank.pending_operations.is_empty());
-        assert!(!blank.runtime_running);
-        assert_eq!(blank.data_dir, target.display().to_string());
-        assert_eq!(blank.os, std::env::consts::OS);
-
-        let operation = "op-inspect-0001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        assert_eq!(
-            inspect_local(&target).unwrap().pending_operations,
-            vec![operation.to_string()]
-        );
-
-        let issuer = issuer_fleet("issuer-inspect");
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
-
-        let admitted = inspect_local(&target).unwrap();
-        assert!(admitted.pending_operations.is_empty());
-        let fleet = admitted.fleet.expect("an admitted machine has a fleet");
-        assert_eq!(fleet.node, "ouro-vps@127.0.0.1");
-        assert_eq!(fleet.members, vec!["studio".to_string(), "vps".to_string()]);
-        let rendered = serde_json::to_string(&inspect_local(&target).unwrap()).unwrap();
-        let cookie = read_private(&fleet_dir(&target).join(COOKIE_FILE), "cookie").unwrap();
-        assert!(!rendered.contains(&cookie));
-        assert!(!rendered.contains("PRIVATE KEY"));
-    }
-
-    /// Materials hold the fleet's cookie, so the one way they could leak it is a
-    /// derived `Debug` in a panic message or an error chain. There is not one.
-    #[test]
-    fn admission_materials_redact_their_cookie_when_printed() {
-        let issuer = issuer_fleet("issuer-debug");
-        let target = scratch("target-debug");
-        let request = prepare_admission(&target, "op-debug-000001", "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-
-        let printed = format!("{materials:?}");
-        assert!(!printed.contains(&materials.cookie));
-        assert!(printed.contains("<redacted>"));
-        assert!(printed.contains(&materials.operation));
-    }
-
-    #[test]
-    fn preparation_cleanup_is_scoped_and_refuses_materials() {
-        let target = scratch("discard-prep");
-        let op = "op-discard-prep";
-        prepare_admission(&target, op, "vps", "127.0.0.1").unwrap();
-        discard_preparation(&target, "op-other-prep").unwrap();
-        assert!(admission_dir(&target, op).exists());
-        let cookie = admission_dir(&target, op).join(COOKIE_FILE);
-        write_private_new(&cookie, b"not-yet-installed", "test materials").unwrap();
-        assert!(discard_preparation(&target, op).is_err());
-        assert!(admission_dir(&target, op).join(NODE_KEY_FILE).exists());
-        fs::remove_file(cookie).unwrap();
-        discard_preparation(&target, op).unwrap();
-        assert!(!admission_dir(&target, op).exists());
-        discard_preparation(&target, op).unwrap();
-        let _ = fs::remove_dir_all(target);
-    }
-
-    /// `ouro fleet leave` retires a machine that was admitted, receipts and all. The
-    /// receipts directory is a recognized entry, not an unknown one that would make
-    /// the command refuse to remove a single credential.
-    #[test]
-    fn leave_retires_an_admitted_machine_together_with_its_receipts() {
-        let issuer = issuer_fleet("issuer-leave");
-        let target = scratch("target-leave");
-        let request = prepare_admission(&target, "op-leave-0000001", "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
-
-        assert!(doctor(&target)
-            .text
-            .lines()
-            .all(|line| !line.contains("unknown entries")));
-
-        let removal = leave(&target)
-            .unwrap()
-            .expect("an admitted machine to retire");
-        assert!(removal.removed.iter().any(|name| name == RECEIPTS_DIR));
-        assert!(!fleet_dir(&target).try_exists().unwrap());
-
-        // An unknown entry beside the receipts is still a refusal.
-        let other = scratch("target-leave-unknown");
-        create(&other, None, "vps", "127.0.0.1", ephemeral_ports()).unwrap();
-        fs::create_dir(fleet_dir(&other).join(RECEIPTS_DIR)).unwrap();
-        fs::set_permissions(
-            fleet_dir(&other).join(RECEIPTS_DIR),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        write_private_atomic(
-            &fleet_dir(&other).join(RECEIPTS_DIR).join("notes.txt"),
-            b"hand written",
-        )
-        .unwrap();
-        let error = leave(&other).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("receipts/notes.txt"),
-            "{error:#}"
-        );
-        assert!(fleet_dir(&other).join(COOKIE_FILE).try_exists().unwrap());
-        // And `doctor` names the same entry, by the same predicate: a refusal nothing
-        // reports is a dead end an operator cannot get out of.
-        let report = doctor(&other);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains("receipts/notes.txt"),
-            "doctor must name what leave refuses over:\n{}",
-            report.text
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Adversarial review of the first commit. Each test below is one of the
-    // reviewer's exploits with its assertion turned the other way up.
-    // -----------------------------------------------------------------------
-
-    /// One machine is one identity, however it is spelled.
-    ///
-    /// Every identity comparison here used to be a byte comparison while
-    /// `validate_machine` accepted upper case, so `Vps` was a different machine from
-    /// `vps` to the roster, to the tombstones and to the ledger of machines already
-    /// issued for. A machine the operator had declared gone for good came back under a
-    /// shift key, with the fleet cookie, and `ouro fleet doctor` called it healthy.
-    #[test]
-    fn a_second_spelling_of_a_machine_name_is_the_same_machine() {
-        let issuer = issuer_fleet("issuer-case");
-
-        // Nothing new is minted under a name that is not lower case.
-        let target = scratch("target-case");
-        for spelling in ["Vps", "VPS", "vPs"] {
-            let error =
-                prepare_admission(&target, "op-case-0000001", spelling, "127.0.0.1").unwrap_err();
-            assert_eq!(reason_of(&error), "invalid_request", "{spelling}");
-            assert!(
-                format!("{error:#}").contains("lower case"),
-                "the refusal has to say what to do instead: {error:#}"
-            );
-        }
-        let request = prepare_admission(&target, "op-case-0000001", "vps", "127.0.0.1").unwrap();
-        issue_member_certificate(&issuer, &request).unwrap();
-
-        // A roster written by an older `ouro fleet members add`, which still accepts
-        // either case, still shadows: the entry on disk wins whichever way it is spelled.
-        let legacy = issuer_fleet("issuer-case-legacy");
-        add_member(&legacy, "Vps", "127.0.0.1", None).unwrap();
-        let hand_crafted = crafted_request("op-case-0000002", "vps", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&legacy, &hand_crafted).unwrap_err()),
-            "machine_known",
-            "a lower-case request must not slip past a mixed-case roster entry"
-        );
-        forget_machine(&legacy, "Vps").unwrap();
-        assert_eq!(
-            reason_of(&issue_member_certificate(&legacy, &hand_crafted).unwrap_err()),
-            "machine_known",
-            "and a machine declared gone for good stays gone under any spelling"
-        );
-
-        // The same rule inside the issuer's own ledger of what it has issued.
-        let upper = crafted_request("op-case-0000003", "VPS", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &upper).unwrap_err()),
-            "invalid_request"
-        );
-        let mut folded = crafted_request("op-case-0000004", "vps", "127.0.0.1", |_| {});
-        folded.machine = "vps".to_string();
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &folded).unwrap_err()),
-            "machine_already_issued"
-        );
-
-        // And the issuer's own name is not available as a second spelling.
-        let its_own = crafted_request("op-case-0000005", "studio", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &its_own).unwrap_err()),
-            "machine_known"
-        );
-    }
-
-    /// The same folding on the roster editors an operator types, not only on admission.
-    #[test]
-    fn roster_editors_treat_a_second_spelling_as_the_same_machine() {
-        let dir = scratch("members-case");
-        create(&dir, None, "studio", "127.0.0.1", ephemeral_ports()).unwrap();
-        add_member(&dir, "Vps", "127.0.0.1", None).unwrap();
-
-        let error = add_member(&dir, "vps", "127.0.0.1", None)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("already names"),
-            "vps beside Vps is one machine: {error}"
-        );
-        assert_eq!(
-            load(&dir)
-                .unwrap()
-                .unwrap()
-                .members
-                .iter()
-                .filter(|member| same_name(&member.machine, "vps"))
-                .count(),
-            1,
-            "a refused add must not write a second spelling"
-        );
-
-        let removed = remove_member(&dir, "vps").unwrap();
-        assert_eq!(removed.machine, "Vps");
-        assert!(load(&dir)
-            .unwrap()
-            .unwrap()
-            .members
-            .iter()
-            .all(|member| !same_name(&member.machine, "vps")));
-
-        add_member(&dir, "Vps", "127.0.0.1", None).unwrap();
-        let forgotten = forget_machine(&dir, "vps").unwrap();
-        assert_eq!(forgotten.machine, "Vps");
-        let after = load(&dir).unwrap().unwrap();
-        assert!(after
-            .members
-            .iter()
-            .all(|member| !same_name(&member.machine, "vps")));
-        assert_eq!(after.tombstones, vec![forgotten]);
-
-        fs::remove_dir_all(dir).ok();
-    }
-
-    /// One address is one node name, however it is spelled.
-    ///
-    /// A resolver reads `127.1`, `2130706433` and `0x7f.0.0.1` as `127.0.0.1`, and this
-    /// code used to read all three as DNS names — so a member could be dialed at an
-    /// address and certified under a name, and two members could spell one address two
-    /// ways and be two node names for one machine.
-    #[test]
-    fn a_second_spelling_of_an_address_is_the_same_address() {
-        for numeric in ["127.1", "2130706433", "0x7f.0.0.1", "0x7f000001"] {
-            let error = validate_host(numeric).unwrap_err();
-            assert!(
-                format!("{error:#}").contains("dotted-quad"),
-                "`{numeric}` must be refused as an address written another way: {error:#}"
-            );
-        }
-        for empty_label in ["127.0.0.1.", ".127.0.0.1", "studio..internal"] {
-            assert!(
-                validate_host(empty_label).is_err(),
-                "`{empty_label}` has an empty label"
-            );
-        }
-
-        // What survives canonicalises, and the canonical spelling is what gets minted.
-        assert_eq!(canonical_host("LOCALHOST").unwrap(), "localhost");
-        assert_eq!(canonical_host("localhost.").unwrap(), "localhost");
-        assert_eq!(canonical_host("127.0.0.1.").unwrap(), "127.0.0.1");
-        assert_eq!(
-            canonical_host("Studio.Tailnet.TS.net").unwrap(),
-            "studio.tailnet.ts.net"
-        );
-
-        let target = scratch("target-host-case");
-        let request = prepare_admission(&target, "op-host-0000001", "vps", "127.0.0.1.").unwrap();
-        assert_eq!(
-            request.node, "ouro-vps@127.0.0.1",
-            "the trailing root dot is not part of a node name"
-        );
-        assert_eq!(request.host, "127.0.0.1");
-
-        // An issuer will not accept a request that spells the host another way, even
-        // when the spelling is one a resolver would accept.
-        let issuer = issuer_fleet("issuer-host-case");
-        let mut uncanonical = crafted_request("op-host-0000002", "vps", "127.0.0.1", |_| {});
-        uncanonical.host = "127.0.0.1.".to_string();
-        uncanonical.node = "ouro-vps@127.0.0.1.".to_string();
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &uncanonical).unwrap_err()),
-            "invalid_request"
-        );
-    }
-
-    /// The receipt cannot be filled up to make a completed install report failure.
-    ///
-    /// A peer drives `receipt append` itself, so it can put the file one step from its
-    /// cap and then ask for the install. The rename used to land and the closing step
-    /// used to fail, so the machine was admitted, `doctor`-healthy, and reported as
-    /// failed — for ever, because every retry died on the same cap. Both remaining
-    /// lifecycle steps are now reserved before the first credential is written.
-    #[test]
-    fn a_full_receipt_refuses_the_install_before_a_credential_is_written() {
-        let issuer = issuer_fleet("issuer-receipt-cap");
-        let target = scratch("target-receipt-cap");
-        let operation = "op-cap-00000001";
-
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        // `prepare` wrote one step; pad to 63, one short of the cap.
-        for index in 0..62 {
-            append_receipt_step(&target, operation, &format!("probe-{index}"), "ok", None).unwrap();
-        }
-        assert_eq!(
-            read_receipt(&target, operation)
-                .unwrap()
-                .unwrap()
-                .steps
-                .len(),
-            63
-        );
-
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        let error = install_admission(&target, &materials, ephemeral_ports()).unwrap_err();
-        assert_eq!(reason_of(&error), "receipt_full");
-        assert!(
-            !fleet_dir(&target).try_exists().unwrap(),
-            "a refusal means the machine was not admitted, and this one was refused"
-        );
-        assert!(
-            !admission_dir(&target, operation)
-                .join(COOKIE_FILE)
-                .try_exists()
-                .unwrap(),
-            "and no credential was written on the way to that refusal"
-        );
-
-        // Exactly two steps of headroom is enough, and one fewer is not.
-        let second = scratch("target-receipt-edge");
-        let request = prepare_admission(&second, operation, "vps", "127.0.0.1").unwrap();
-        for index in 0..61 {
-            append_receipt_step(&second, operation, &format!("probe-{index}"), "ok", None).unwrap();
-        }
-        assert_eq!(
-            read_receipt(&second, operation)
-                .unwrap()
-                .unwrap()
-                .steps
-                .len(),
-            62
-        );
-        let materials = issue_member_certificate(&issuer_fleet("issuer-edge"), &request).unwrap();
-        let (profile, warnings) =
-            install_admission_reporting(&second, &materials, ephemeral_ports()).unwrap();
-        assert_eq!(profile.node, "ouro-vps@127.0.0.1");
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let receipt = read_receipt(&second, operation).unwrap().unwrap();
-        assert_eq!(receipt.steps.len(), MAX_RECEIPT_STEPS);
-        assert!(receipt.has_step("install"));
-    }
-
-    /// Nothing after the rename may turn an admitted machine into a failure.
-    ///
-    /// By the time the rename has happened the machine holds the cookie, the CA
-    /// certificate and its own leaf. If the closing record cannot be written — a full
-    /// disk, a receipts directory somebody chmodded — the answer is still "admitted",
-    /// with the problem said out loud.
-    #[test]
-    fn a_record_that_cannot_be_closed_is_a_warning_and_never_a_failure() {
-        let issuer = issuer_fleet("issuer-close");
-        let target = scratch("target-close");
-        let operation = "op-close-0000001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
-
-        // Exactly the state a hostile or broken filesystem leaves: the record is there
-        // and cannot be read back at the mode this code requires.
-        let receipt_path = receipts_dir(&target).join(format!("{operation}.json"));
-        fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o644)).unwrap();
-        let profile = load(&target).unwrap().unwrap();
-        let warnings = close_install_record(
-            &target,
-            &ReceiptSeed {
-                operation: operation.to_string(),
-                machine: profile.machine.clone(),
-                host: profile.host.clone(),
-                node: profile.node.clone(),
-                key_fingerprint: Some(materials.key_fingerprint.clone()),
-            },
-            &profile,
-        );
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].contains("was admitted"),
-            "the warning must say the machine is in the fleet: {warnings:?}"
-        );
-    }
-
-    /// A refused promotion leaves no credential behind, and what it does leave is named.
-    ///
-    /// The fleet cookie used to be written into the staging directory before the
-    /// directory had been proven promotable, so a refusal left the cookie in a private
-    /// namespace that `doctor`, `leave` and orphan-staging recovery all ignored.
-    #[test]
-    fn a_refused_promotion_writes_no_credential_and_the_residue_is_reported_and_retired() {
-        let issuer = issuer_fleet("issuer-residue");
-        let target = scratch("target-residue");
-        let operation = "op-residue-00001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-
-        let staging = admission_dir(&target, operation);
-        write_private_new(&staging.join("notes.txt"), b"planted\n", "a planted file").unwrap();
-        let error = install_admission(&target, &materials, ephemeral_ports()).unwrap_err();
-        assert_eq!(reason_of(&error), "invalid_staging");
-        assert!(
-            !staging.join(COOKIE_FILE).try_exists().unwrap(),
-            "the cookie must not be written before the directory may be promoted"
-        );
-        assert!(
-            !staging.join(CA_CERT_FILE).try_exists().unwrap()
-                && !staging.join(NODE_CERT_FILE).try_exists().unwrap()
-        );
-
-        // What is left is this machine's own prepared key, and doctor says so.
-        let report = doctor(&target);
-        assert!(!report.healthy);
-        assert!(
-            report.text.contains(operation),
-            "doctor must name the pending operation:\n{}",
-            report.text
-        );
-
-        // `leave` is the command that retires this machine's credentials, and a pending
-        // admission is one — but not while it holds something this code did not write.
-        let refused = leave(&target).unwrap_err();
-        assert!(format!("{refused:#}").contains("notes.txt"), "{refused:#}");
-        assert!(staging.join(NODE_KEY_FILE).try_exists().unwrap());
-
-        fs::remove_file(staging.join("notes.txt")).unwrap();
-        let removal = leave(&target)
-            .unwrap()
-            .expect("a pending admission to retire");
-        assert_eq!(
-            removal.removed,
-            vec![format!("{ADMISSION_PREFIX}{operation}")]
-        );
-        assert!(
-            !staging.try_exists().unwrap(),
-            "the prepared key is gone with it"
-        );
-        assert!(
-            !doctor(&target).text.contains(operation),
-            "and doctor has nothing left to name"
-        );
-    }
-
-    /// One unreadable receipt must not stop a fleet ever admitting anything again.
-    ///
-    /// The replay ledger is a directory of files. Reading it used to be fatal to
-    /// `issue_member_certificate`, so a single file dropped in there bricked admission
-    /// for every operation; the weakened check is a warning in the record instead.
-    #[test]
-    fn an_unreadable_receipt_weakens_the_ledger_and_says_so_rather_than_bricking_it() {
-        let issuer = issuer_fleet("issuer-bad-receipt");
-        let target = scratch("target-bad-receipt");
-        let receipts = receipts_dir(&issuer);
-        DirBuilder::new().mode(0o700).create(&receipts).unwrap();
-        write_private_atomic(&receipts.join("op-corrupt-00001.json"), b"{not json").unwrap();
-
-        let request = prepare_admission(&target, "op-ledger-000001", "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request)
-            .expect("one unreadable record must not stop this machine issuing for another machine");
-        assert_eq!(materials.node, "ouro-vps@127.0.0.1");
-
-        let receipt = read_receipt(&issuer, "op-ledger-000001").unwrap().unwrap();
-        let warning = receipt
-            .steps
-            .iter()
-            .find(|step| step.step == "records_unreadable")
-            .expect("the weakened check is recorded");
-        assert_eq!(warning.outcome, "warning");
-        assert!(warning.detail.as_deref().unwrap().contains("op-corrupt"));
-    }
-
-    /// Two roster edits computed against one revision cannot both apply.
-    ///
-    /// The revision was read outside the lifecycle lock and the edit took it
-    /// afterwards, so two callers could both read revision 1, both pass the check and
-    /// both apply — which is the lost update the check exists to prevent.
-    #[test]
-    fn two_roster_changes_against_one_revision_cannot_both_apply() {
-        for attempt in 0..8 {
-            let data = Arc::new(issuer_fleet(&format!("roster-race-{attempt}")));
-            let revision = load(&data).unwrap().unwrap().roster_revision;
-            let barrier = Arc::new(std::sync::Barrier::new(2));
-
-            let handles: Vec<_> = ["alpha", "beta"]
-                .into_iter()
-                .map(|machine| {
-                    let data = Arc::clone(&data);
-                    let barrier = Arc::clone(&barrier);
-                    thread::spawn(move || {
-                        let change = RosterChange::Add {
-                            machine: machine.to_string(),
-                            host: "127.0.0.1".to_string(),
-                            node: None,
-                        };
-                        barrier.wait();
-                        apply_roster_change(
-                            &data,
-                            &format!("op-race-{machine}-01"),
-                            revision,
-                            &change,
-                        )
-                    })
-                })
-                .collect();
-            let results: Vec<_> = handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .collect();
-
-            let winners = results.iter().filter(|result| result.is_ok()).count();
-            assert_eq!(
-                winners,
-                1,
-                "exactly one edit may win a revision, attempt {attempt}: {:?}",
-                results
-                    .iter()
-                    .map(|result| result
-                        .as_ref()
-                        .map(|outcome| outcome.roster_revision)
-                        .map_err(|error| reason_of(error).to_string()))
-                    .collect::<Vec<_>>()
-            );
-            for error in results.iter().filter_map(|result| result.as_ref().err()) {
-                assert!(
-                    matches!(reason_of(error), "roster_conflict" | "lock_unavailable"),
-                    "the loser is told which of the two happened: {}",
-                    reason_of(error)
-                );
-            }
-            assert_eq!(
-                load(&data).unwrap().unwrap().roster_revision,
-                revision + 1,
-                "and the roster moved exactly one revision"
-            );
-        }
-    }
-
-    /// The roster will not hold two spellings of one machine either.
-    #[test]
-    fn a_roster_change_refuses_a_second_spelling_and_finds_the_first() {
-        let data = issuer_fleet("roster-case");
-        let revision = load(&data).unwrap().unwrap().roster_revision;
-
-        // A legacy entry, written by the command that still accepts either case.
-        add_member(&data, "Vps", "127.0.0.1", None).unwrap();
-        let revision = revision + 1;
-        assert_eq!(load(&data).unwrap().unwrap().roster_revision, revision);
-
-        let error = apply_roster_change(
-            &data,
-            "op-roster-case-1",
-            revision,
-            &RosterChange::Add {
-                machine: "vps".to_string(),
-                host: "127.0.0.1".to_string(),
-                node: None,
-            },
-        )
-        .unwrap_err();
-        assert_eq!(reason_of(&error), "roster_refused");
-        assert_eq!(
-            load(&data).unwrap().unwrap().members.len(),
-            2,
-            "a refused change changes nothing"
-        );
-
-        // Naming it in lower case still finds the entry that is there.
-        let removed = apply_roster_change(
-            &data,
-            "op-roster-case-2",
-            revision,
-            &RosterChange::Remove {
-                machine: "vps".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(removed.member.machine, "Vps");
-
-        // And an upper-case name is never accepted from the wire at all.
-        assert_eq!(
-            reason_of(
-                &apply_roster_change(
-                    &data,
-                    "op-roster-case-3",
-                    removed.roster_revision,
-                    &RosterChange::Add {
-                        machine: "Laptop".to_string(),
-                        host: "127.0.0.1".to_string(),
-                        node: None,
-                    },
-                )
-                .unwrap_err()
-            ),
-            "invalid_request"
-        );
-    }
-
-    /// Materials name a key by fingerprint, and it has to be the key this machine has.
-    #[test]
-    fn install_refuses_materials_that_name_a_key_this_machine_did_not_prepare() {
-        let issuer = issuer_fleet("issuer-fingerprint");
-        let target = scratch("target-fingerprint");
-        let operation = "op-print-0000001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-
-        let mut lying = materials.clone();
-        lying.key_fingerprint = public_fingerprint(b"some other key");
-        let error = install_admission(&target, &lying, ephemeral_ports()).unwrap_err();
-        assert_eq!(reason_of(&error), "materials_invalid");
-        assert!(!fleet_dir(&target).try_exists().unwrap());
-
-        // The honest ones still install.
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
-        assert_eq!(
-            read_receipt(&target, operation)
-                .unwrap()
-                .unwrap()
-                .key_fingerprint
-                .as_deref(),
-            Some(materials.key_fingerprint.as_str()),
-            "and the record names the key that was really used"
-        );
-    }
-
-    /// An idempotent answer that ignores what it was handed is not idempotent.
-    ///
-    /// Repeating an install is how a lost connection is resolved, so it answers `ok` —
-    /// but only for the credentials that are actually installed. A second set under the
-    /// same operation id is a different question with the same name.
-    #[test]
-    fn repeating_an_install_with_different_credentials_is_refused() {
-        let issuer = issuer_fleet("issuer-differ");
-        let target = scratch("target-differ");
-        let operation = "op-differ-000001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-        let ports = ephemeral_ports();
-        install_admission(&target, &materials, ports).unwrap();
-        install_admission(&target, &materials, ports).expect("the same materials repeat");
-
-        for (label, mutate) in [
-            (
-                "a different cookie",
-                Box::new(|materials: &mut AdmissionMaterials| {
-                    materials.cookie = "0".repeat(64);
-                }) as Box<dyn Fn(&mut AdmissionMaterials)>,
-            ),
-            (
-                "a different CA",
-                Box::new(|materials: &mut AdmissionMaterials| {
-                    let other = issuer_fleet("issuer-differ-other");
-                    materials.ca_cert_pem =
-                        read_private(&fleet_dir(&other).join(CA_CERT_FILE), "a CA").unwrap();
-                }),
-            ),
-        ] {
-            let mut different = materials.clone();
-            mutate(&mut different);
-            let error = install_admission(&target, &different, ports).unwrap_err();
-            assert_eq!(reason_of(&error), "materials_differ", "{label}");
-        }
-
-        // A machine that belongs to another fleet is not answered for at all.
-        let elsewhere = issuer_fleet("issuer-elsewhere");
-        let stranger = scratch("target-elsewhere");
-        let its_request = prepare_admission(&stranger, operation, "vps", "127.0.0.1").unwrap();
-        let its_materials = issue_member_certificate(&elsewhere, &its_request).unwrap();
-        assert_eq!(
-            reason_of(&install_admission(&target, &its_materials, ports).unwrap_err()),
-            "fleet_exists",
-            "materials for another fleet under this operation id are not this machine's"
-        );
-    }
-
-    /// The guards the mutation harness could reach but no test could.
-    ///
-    /// Each block below is one deleted check made observable: a request naming two
-    /// nodes, a machine holding the CA certificate but not its key, an issuer whose own
-    /// CA is not one this build would accept, a request whose node name does not follow
-    /// from its machine and host, a staged key swapped under a prepared operation, and a
-    /// receipt that belongs to another machine.
-    #[test]
-    fn every_issuer_guard_refuses_something_a_test_can_produce() {
-        let issuer = issuer_fleet("issuer-guards");
-
-        // M03: two common names, the second of which is the approved one.
-        let two_names = crafted_request("op-guard-0000001", "vps", "127.0.0.1", |params| {
-            params.distinguished_name.push(
-                DnType::CustomDnType(vec![2, 5, 4, 3]),
-                "ouro-studio@127.0.0.1",
-            );
-        });
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &two_names).unwrap_err()),
-            "csr_identity_mismatch",
-            "a certificate with two names is a certificate for two machines"
-        );
-
-        // M15: a node name that does not follow from the machine and the host.
-        let mut renamed = crafted_request("op-guard-0000002", "vps", "127.0.0.1", |_| {});
-        renamed.node = "ouro-studio@127.0.0.1".to_string();
-        assert_eq!(
-            reason_of(&issue_member_certificate(&issuer, &renamed).unwrap_err()),
-            "invalid_request"
-        );
-
-        // M11: a machine given the CA certificate and not the key cannot admit.
-        let joiner = scratch("joiner-no-ca-key");
-        let copy = scratch("joiner-copy").join("fleet");
-        copy_fleet_dir(&fleet_dir(&issuer), &copy);
-        create_from(&joiner, &copy, "vps", "127.0.0.1", ephemeral_ports()).unwrap();
-        assert!(!fleet_dir(&joiner).join(CA_KEY_FILE).try_exists().unwrap());
-        let asking = crafted_request("op-guard-0000003", "laptop", "127.0.0.1", |_| {});
-        assert_eq!(
-            reason_of(&issue_member_certificate(&joiner, &asking).unwrap_err()),
-            "no_ca_key"
-        );
-
-        // M13: the issuer validates what it just minted with the rules the runtime
-        // applies, so a CA this build would refuse at boot cannot be used to admit.
-        let hostile = issuer_fleet("issuer-hostile-ca");
-        let year = current_utc_year().unwrap();
-        let mut ca_params = CertificateParams::default();
-        ca_params.not_before = date_time_ymd(year - 1, 1, 1);
-        // Twenty years: longer than `validate_tls_identity` will accept from anyone.
-        ca_params.not_after = date_time_ymd(year + 19, 1, 1);
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        ca_params.distinguished_name = DistinguishedName::new();
-        ca_params
-            .distinguished_name
-            .push(DnType::CommonName, "a CA nobody should accept");
-        let ca_key = KeyPair::generate().unwrap();
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-        write_private_atomic(
-            &fleet_dir(&hostile).join(CA_CERT_FILE),
-            ca_cert.pem().as_bytes(),
-        )
-        .unwrap();
-        write_private_atomic(
-            &fleet_dir(&hostile).join(CA_KEY_FILE),
-            ca_key.serialize_pem().as_bytes(),
-        )
-        .unwrap();
-        let asking = crafted_request("op-guard-0000004", "vps", "127.0.0.1", |_| {});
-        let error = issue_member_certificate(&hostile, &asking).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("unreasonably long"),
-            "the issuer must check its own work: {error:#}"
-        );
-
-        // The same statement about the key rather than the certificate: the leaf that
-        // comes back carries exactly the key the request proved possession of. The
-        // issuer signs the key it was handed, so no input can make this false; the
-        // check inside `issue_member_certificate` is an assertion about rcgen, not a
-        // guard against a caller, and deleting it fails no test. Asserted, not provoked.
-        let honest = crafted_request("op-guard-0000005", "vps", "127.0.0.1", |_| {});
-        let materials = issue_member_certificate(&issuer, &honest).unwrap();
-        let (_, block) = parse_x509_pem(honest.csr_pem.as_bytes()).unwrap();
-        let (_, parsed) = X509CertificationRequest::from_der(&block.contents).unwrap();
-        assert_eq!(
-            certificate_public_key(&materials.node_cert_pem, "the issued leaf").unwrap(),
-            parsed.certification_request_info.subject_pki.raw.to_vec()
-        );
-    }
-
-    /// The guards on the target's side of the same list.
-    #[test]
-    fn every_target_guard_refuses_something_a_test_can_produce() {
-        // One issuer per block: an issuer mints one identity per machine name, which is
-        // the point of `machine_already_issued` and not what these blocks are about.
-        // M30: the staged key is swapped under a prepared operation.
-        let target = scratch("target-swapped-key");
-        let operation = "op-guard-0000010";
-        let first = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let replacement = KeyPair::generate().unwrap();
-        write_private_atomic(
-            &admission_dir(&target, operation).join(NODE_KEY_FILE),
-            replacement.serialize_pem().as_bytes(),
-        )
-        .unwrap();
-        let error = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap_err();
-        assert_eq!(
-            reason_of(&error),
-            "identity_mismatch",
-            "a request is only an answer while the key it names is the staged one"
-        );
-        let _ = &first;
-
-        // M34: a receipt that records another machine is not this operation's receipt.
-        let other = scratch("target-foreign-receipt");
-        let operation = "op-guard-0000011";
-        let request = prepare_admission(&other, operation, "vps", "127.0.0.1").unwrap();
-        let path = admission_dir(&other, operation)
-            .join(RECEIPTS_DIR)
-            .join(format!("{operation}.json"));
-        let mut receipt: Receipt =
-            serde_json::from_str(&read_private(&path, "receipt").unwrap()).unwrap();
-        receipt.node = "ouro-laptop@127.0.0.1".to_string();
-        write_private_atomic(&path, &serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
-        let materials =
-            issue_member_certificate(&issuer_fleet("issuer-foreign-receipt"), &request).unwrap();
-        assert_eq!(
-            reason_of(&install_admission(&other, &materials, ephemeral_ports()).unwrap_err()),
-            "identity_mismatch"
-        );
-
-        // M26: a fleet on disk whose receipt does not say this operation installed it.
-        let third = scratch("target-no-evidence");
-        let operation = "op-guard-0000012";
-        let request = prepare_admission(&third, operation, "vps", "127.0.0.1").unwrap();
-        let materials =
-            issue_member_certificate(&issuer_fleet("issuer-no-evidence"), &request).unwrap();
-        let ports = ephemeral_ports();
-        install_admission(&third, &materials, ports).unwrap();
-        let path = receipts_dir(&third).join(format!("{operation}.json"));
-        let mut receipt: Receipt =
-            serde_json::from_str(&read_private(&path, "receipt").unwrap()).unwrap();
-        receipt
-            .steps
-            .retain(|step| step.step != "install" && step.step != "install_staged");
-        write_private_atomic(&path, &serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
-        assert_eq!(
-            reason_of(&install_admission(&third, &materials, ports).unwrap_err()),
-            "fleet_exists",
-            "without a record of this operation installing it, the fleet here is somebody else's"
-        );
-
-        // M25: the same operation id, a different fleet, an already-installed machine.
-        let fourth = scratch("target-other-fleet");
-        let operation = "op-guard-0000013";
-        let request = prepare_admission(&fourth, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer_fleet("issuer-fourth"), &request).unwrap();
-        install_admission(&fourth, &materials, ephemeral_ports()).unwrap();
-        let elsewhere = issuer_fleet("issuer-other-fleet");
-        let elsewhere_target = scratch("target-other-fleet-src");
-        let its_request =
-            prepare_admission(&elsewhere_target, operation, "vps", "127.0.0.1").unwrap();
-        let its_materials = issue_member_certificate(&elsewhere, &its_request).unwrap();
-        assert_eq!(
-            reason_of(&install_admission(&fourth, &its_materials, ephemeral_ports()).unwrap_err()),
-            "fleet_exists"
-        );
-    }
-
-    /// M20: the spec names the stopped-runtime lock, and `install` takes it.
-    ///
-    /// A running BEAM holds the credentials in this directory open. Replacing them
-    /// under it is how a node ends up with a profile its own runtime disagrees with.
-    #[test]
-    fn install_refuses_while_a_runtime_is_using_the_data_directory() {
-        let issuer = issuer_fleet("issuer-live");
-        let target = scratch("target-live");
-        let operation = "op-live-00000001";
-        let request = prepare_admission(&target, operation, "vps", "127.0.0.1").unwrap();
-        let materials = issue_member_certificate(&issuer, &request).unwrap();
-
-        // The same live-runtime shape `stopped_mutations_share_the_runtime_lock_and_
-        // refuse_every_live_owner_shape` plants for `create`.
-        write_private_atomic(
-            &target.join(runtime::PUBLICATION_FILE),
-            format!(
-                r#"{{"port":47001,"protocol":1,"node":"ouro-vps@127.0.0.1","pid":{},"scope":"operate"}}"#,
-                std::process::id()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-
-        let error = install_admission(&target, &materials, ephemeral_ports()).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("still using this data directory"),
-            "install must take the lock that proves the runtime is stopped: {error:#}"
-        );
-        assert!(!fleet_dir(&target).try_exists().unwrap());
-
-        fs::remove_file(target.join(runtime::PUBLICATION_FILE)).unwrap();
-        install_admission(&target, &materials, ephemeral_ports()).unwrap();
+    fn interrupted_private_setup_is_recovered_but_ambiguous_staging_fails_closed() {
+        let dir = scratch("staging");
+        let staging = dir.join(format!(".fleet.setup.{}.0123456789ab", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&staging).unwrap();
+        write_private_atomic(&staging.join(COOKIE_FILE), &[b'a'; 64]).unwrap();
+        assert!(!inspect_orphan_staging(&dir).unwrap().is_empty());
+        assert_eq!(recover_orphan_staging(&dir).unwrap(), 1);
+        assert!(inspect_orphan_staging(&dir).unwrap().is_empty());
+
+        // A name in the namespace that this code did not write is a hard error.
+        let hostile = dir.join(".fleet.setup.not-a-pid");
+        fs::DirBuilder::new().mode(0o700).create(&hostile).unwrap();
+        assert!(inspect_orphan_staging(&dir).is_err());
     }
 }

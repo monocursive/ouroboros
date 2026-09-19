@@ -1425,7 +1425,7 @@ fn a_late_password_is_refused_after_the_prompt_window_without_leaving_a_blocked_
         fn ask_from(&self, issuer: u64, request: ChallengeRequest) -> anyhow::Result<Answer> {
             let issued = self
                 .registry
-                .issue(request.kind, request.metadata, None, issuer)
+                .issue(request.kind, request.metadata, issuer)
                 .expect("an issued challenge");
             self.registry.wait(&issued.challenge)
         }
@@ -1519,7 +1519,7 @@ exit 255
         "the challenge was advertised while in flight"
     );
     let late = registry
-        .respond(&id, None, &json!({"secret": "too-late"}))
+        .respond(&id, &json!({"secret": "too-late"}))
         .expect_err("a late answer is refused by name");
     assert!(
         matches!(

@@ -677,6 +677,7 @@ mod tests {
         journal
             .fail(
                 OperationState::Failed,
+                "runtime_busy",
                 format!("line one\nline two\r\n{}", "x".repeat(1000)),
             )
             .expect("a failure");
@@ -684,20 +685,26 @@ mod tests {
         let text = std::fs::read_to_string(journal_path(&data, "op-0000000000c3")).expect("a file");
         let record: Record = serde_json::from_str(&text).expect("a decodable journal");
         let error = record.last_error.expect("a recorded error");
-        assert!(!error.contains('\n'), "no raw newlines reach the journal");
-        assert!(error.chars().count() <= 401, "{}", error.chars().count());
-        assert!(error.starts_with("line one line two"));
+        // §6: `last_error` is a stable reason plus a bounded, sanitized detail.
+        assert_eq!(error.reason, "runtime_busy");
+        assert!(
+            !error.detail.contains('\n'),
+            "no raw newlines reach the journal"
+        );
+        assert!(
+            error.detail.chars().count() <= 401,
+            "{}",
+            error.detail.chars().count()
+        );
+        assert!(error.detail.starts_with("line one line two"));
     }
 
-    /// Listing skips the request file that sits beside every journal.
+    /// Listing returns every operation this data directory has a journal for.
     #[test]
-    fn listing_returns_operations_and_not_their_request_files() {
+    fn listing_returns_every_operation() {
         let data = scratch("list");
         for id in ["op-0000000000d4", "op-0000000000e5"] {
             Journal::open(&data, id, OperationKind::Add).expect("a journal");
-            super::super::OperationRequest::new(id, OperationKind::Add, "buildbox")
-                .write(&data)
-                .expect("a request");
         }
         assert_eq!(
             Journal::list(&data).expect("a listing"),
@@ -730,12 +737,12 @@ mod tests {
         let mut failed =
             Journal::open(&data, "op-00000000fail", OperationKind::Add).expect("failed");
         failed
-            .fail(OperationState::Failed, "still resumable")
+            .fail(OperationState::Failed, "failed", "still resumable")
             .expect("failed");
         let mut interrupted =
             Journal::open(&data, "op-00000000intr", OperationKind::Add).expect("interrupted");
         interrupted
-            .fail(OperationState::Interrupted, "still resumable")
+            .fail(OperationState::Interrupted, "failed", "still resumable")
             .expect("interrupted");
 
         let removed =
@@ -769,7 +776,7 @@ mod tests {
             &serde_json::to_vec_pretty(&record).expect("bytes"),
         )
         .expect("rewritten");
-        let _worker = super::super::lock::Lock::acquire(&data, "op-00000000hold.worker.lock")
+        let _worker = super::super::lock::Lock::acquire(&data, "op-00000000hold.lock")
             .expect("a held worker lock");
         assert_eq!(
             Journal::prune_terminal(&data, 0, std::time::Duration::from_secs(30 * 86400))

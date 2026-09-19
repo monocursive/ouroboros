@@ -183,6 +183,30 @@ fn create_fleet(scratch: &Scratch, machine: &str) {
 /// cases on several threads, and the OS will happily assign one freed ephemeral port to
 /// two of them within milliseconds of each other — which is a `fleet create` failing in
 /// whichever case lost, days after the change that is blamed for it.
+/// A second machine on this machine's list.
+///
+/// §5 deleted `ouro fleet members add`: the roster is written by `ouro fleet add`, which
+/// needs a real target over SSH. A test that only needs a dial hint in the profile
+/// writes one, which is exactly what the library's `add_member` does.
+fn add_roster_member(scratch: &Scratch, machine: &str, host: &str) {
+    let path = scratch.data_dir().join("fleet").join("profile.json");
+    let mut profile: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("a profile"))
+            .expect("a decodable profile");
+    let dist_port = profile["dist_port"].clone();
+    profile["members"]
+        .as_array_mut()
+        .expect("a member list")
+        .push(serde_json::json!({
+            "machine": machine,
+            "host": host,
+            "node": format!("ouro-{machine}@{host}"),
+            "dist_port": dist_port,
+        }));
+    std::fs::write(&path, serde_json::to_vec_pretty(&profile).expect("bytes"))
+        .expect("a rewritten profile");
+}
+
 fn ephemeral_ports() -> (u16, u16) {
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, TcpListener};
@@ -240,111 +264,10 @@ fn unchanged(root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-// ------------------------------------------------------------------ the protocol command
-
-#[test]
-fn fleet_protocol_prints_one_revision_in_both_forms() {
-    let scratch = Scratch::new("protocol");
-    let bare = ouro(&scratch, None, &["fleet", "protocol"]);
-    assert!(bare.status.success());
-    assert_eq!(
-        stdout(&bare).trim(),
-        "5",
-        "the human form stays a bare number that a script can read"
-    );
-
-    let json = ouro(&scratch, None, &["fleet", "protocol", "--json"]);
-    assert!(json.status.success());
-    let value = parse(&json);
-    assert_eq!(value["fleet_protocol_revision"], 5);
-    assert_eq!(value["ouroboros_version"], env!("CARGO_PKG_VERSION"));
-    assert!(!value["os"].as_str().expect("an os").is_empty());
-    assert!(!value["arch"].as_str().expect("an arch").is_empty());
-    assert_eq!(
-        value["embedded_release"], false,
-        "a `cargo test` build carries no release"
-    );
-    assert!(
-        value["otp_release"].is_null() && value["elixir_version"].is_null(),
-        "a build with no release reports unknown rather than guessing a peer's OTP"
-    );
-}
-
-/// The command's whole point is that an onboarding preflight can call it before there is
-/// any Ouroboros state. Creating that state to answer the question is not answering it.
-#[test]
-fn fleet_protocol_answers_without_creating_or_requiring_any_state() {
-    let scratch = Scratch::new("protocol-inert");
-
-    // A data directory that does not exist must still not exist afterwards.
-    let absent = scratch.path().join("never-created");
-    for args in [
-        vec!["fleet", "protocol"],
-        vec!["fleet", "protocol", "--json"],
-    ] {
-        let output = ouro_at(&scratch, &absent, None, &args);
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !absent.exists(),
-            "{args:?} created {} just to print a number",
-            absent.display()
-        );
-    }
-
-    // And a data directory that exists but is unusable must not stop it answering: the
-    // compatibility question precedes the state, so it cannot depend on it.
-    let unusable = scratch.path().join("unusable");
-    std::fs::write(&unusable, "this is a file, not a directory").expect("writing the trap");
-    let output = ouro_at(&scratch, &unusable, None, &["fleet", "protocol", "--json"]);
-    assert!(
-        output.status.success(),
-        "an unusable data directory must not stop `fleet protocol`: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(parse(&output)["fleet_protocol_revision"], 5);
-
-    // An existing directory is left exactly as it was found.
-    let before = unchanged(&scratch.data_dir());
-    let output = ouro(&scratch, None, &["fleet", "protocol", "--json"]);
-    assert!(output.status.success());
-    assert_eq!(
-        unchanged(&scratch.data_dir()),
-        before,
-        "`fleet protocol` wrote into the data dir"
-    );
-}
-
-// -------------------------------------------------------------------- the devices command
-
-#[test]
-fn fleet_devices_lists_peers_without_claiming_anything_about_their_installations() {
-    let scratch = Scratch::new("devices");
-    let client = fake_client(&scratch, "running-with-peers.json", true, 0);
-    let output = ouro(&scratch, Some(&client), &["fleet", "devices"]);
-    assert!(output.status.success(), "a read-only listing succeeds");
-
-    let text = stdout(&output);
-    assert!(text.contains("Fleet devices"));
-    assert!(text.contains("Available on this network"));
-    assert!(text.contains("build-linux"));
-    assert!(
-        text.contains("not inspected yet · deploy Ouroboros"),
-        "a discovered peer's Ouroboros state is unknown until it is inspected: {text}"
-    );
-    assert!(
-        !text.to_lowercase().contains("uninstalled"),
-        "nothing here has inspected a peer: {text}"
-    );
-    assert!(
-        !text.contains("discovered_installation_unknown"),
-        "the snake_case code is the --json contract, not a terminal column: {text}"
-    );
-    assert!(text.contains("no device was inspected"));
-}
+// §5 deleted `ouro fleet protocol` and §12 deleted the revision it printed. What is
+// left of that contract — a build metadata document a preflight can compare — is
+// `fleet_protocol::build_metadata`, which `tui/src/fleet_protocol.rs` tests directly and
+// which appears inside `fleet status --json` below.
 
 #[test]
 fn fleet_devices_json_carries_stable_codes_and_null_for_unknown_facts() {
@@ -356,7 +279,10 @@ fn fleet_devices_json_carries_stable_codes_and_null_for_unknown_facts() {
     let value = parse(&output);
     assert_eq!(value["discovery"]["code"], "ok");
     assert_eq!(value["discovery"]["visible_peers"], 4);
-    assert_eq!(value["fleet_protocol_revision"], 5);
+    assert!(
+        value.get("fleet_protocol_revision").is_none(),
+        "§12 deleted the revision from every document"
+    );
 
     let rows = value["devices"].as_array().expect("an array of devices");
     let state = |name: &str| -> String {
@@ -409,16 +335,7 @@ fn fleet_devices_json_carries_stable_codes_and_null_for_unknown_facts() {
 fn fleet_devices_keeps_known_members_when_the_client_cannot_answer() {
     let scratch = Scratch::new("devices-blind");
     create_fleet(&scratch, "studio");
-    let add = ouro(
-        &scratch,
-        None,
-        &["fleet", "members", "add", "attic", "--host", "100.64.12.77"],
-    );
-    assert!(
-        add.status.success(),
-        "{}",
-        String::from_utf8_lossy(&add.stderr)
-    );
+    add_roster_member(&scratch, "attic", "100.64.12.77");
 
     let client = fake_client(&scratch, "stopped.json", true, 0);
     let output = ouro(&scratch, Some(&client), &["fleet", "devices", "--json"]);
@@ -726,16 +643,7 @@ fn a_hostile_name_cannot_forge_a_row_move_a_cursor_or_run_off_the_screen() {
 fn a_device_that_adopts_a_roster_name_never_takes_over_that_members_row_or_probe() {
     let scratch = Scratch::new("roster-spoof");
     create_fleet(&scratch, "studio");
-    let add = ouro(
-        &scratch,
-        None,
-        &["fleet", "members", "add", "attic", "--host", "100.64.12.77"],
-    );
-    assert!(
-        add.status.success(),
-        "{}",
-        String::from_utf8_lossy(&add.stderr)
-    );
+    add_roster_member(&scratch, "attic", "100.64.12.77");
 
     let log = scratch.path().join("spoof-probes");
     let client = write_script(
@@ -846,7 +754,14 @@ fn fleet_status_json_reports_incomplete_setup_with_a_non_zero_exit() {
     assert_eq!(value["ready"], false);
     assert!(value["profile"].is_null());
     assert_eq!(value["network"]["code"], "ok");
-    assert_eq!(value["build"]["fleet_protocol_revision"], 5);
+    assert!(
+        value["build"].get("fleet_protocol_revision").is_none(),
+        "§12 deleted the revision from every document"
+    );
+    assert_eq!(
+        value["build"]["ouroboros_version"],
+        env!("CARGO_PKG_VERSION")
+    );
     assert!(value["live"].is_null(), "no runtime is published");
 
     // The human form is unchanged, including its exit code.
@@ -927,7 +842,14 @@ fn fleet_doctor_reports_the_network_client_layer_in_both_forms() {
         .all(|check| {
             ["ok", "warning", "problem"].contains(&check["level"].as_str().expect("a level"))
         }));
-    assert_eq!(value["build"]["fleet_protocol_revision"], 5);
+    assert!(
+        value["build"].get("fleet_protocol_revision").is_none(),
+        "§12 deleted the revision from every document"
+    );
+    assert_eq!(
+        value["build"]["ouroboros_version"],
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 /// A fleet configured by hand over a private LAN has no network client to find, and that

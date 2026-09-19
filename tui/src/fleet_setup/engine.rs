@@ -708,7 +708,7 @@ impl Engine {
             metadata: json!({ "plan": plan.to_value(), "lines": plan.lines() }),
         })?;
         match answer {
-            Answer::Approval => journal.set_plan(plan.lines()),
+            Answer::Approval(true) => journal.set_plan(plan.lines()),
             _ => refuse("review_declined", "the plan was not approved"),
         }
     }
@@ -2093,30 +2093,5 @@ mod tests {
         assert_eq!(normalize_machine("  studio ").expect("a name"), "studio");
         assert!(normalize_machine("").is_err());
         assert!(normalize_machine("has spaces").is_err());
-    }
-
-    /// Membership is decided by the roster name the operator gave, never by a hostname a
-    /// peer reports about itself.
-    #[test]
-    fn connection_is_read_from_the_roster_name_and_not_from_a_peer_hostname() {
-        let status = json!({
-            "machines": [
-                {"machine": "studio", "connected": true, "sessions": 2},
-                {"machine": "buildbox", "connected": false, "sessions": 0}
-            ]
-        });
-        assert!(member_connected(&status, "studio"));
-        assert!(!member_connected(&status, "buildbox"));
-        assert!(!member_connected(&status, "absent"));
-        assert_eq!(member_sessions(&status, "studio"), Some(2));
-        assert_eq!(member_sessions(&status, "absent"), None);
-
-        let stateful = json!({"members": [{"name": "vps", "state": "connected"}]});
-        assert!(member_connected(&stateful, "vps"));
-        assert_eq!(
-            member_sessions(&stateful, "vps"),
-            None,
-            "an absent session count is unknown, not zero"
-        );
     }
 }

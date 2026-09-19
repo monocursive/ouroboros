@@ -122,7 +122,10 @@ fn number(metadata: &Value, field: &str) -> String {
 pub enum Answer {
     Secret(Zeroizing<String>),
     Trust(bool),
-    Approval,
+    /// A review, answered either way. A decline is an *answer*, not a refusal to
+    /// answer: the operation stops with `review_declined` instead of sitting there
+    /// until the challenge expires.
+    Approval(bool),
 }
 
 impl std::fmt::Debug for Answer {
@@ -130,7 +133,7 @@ impl std::fmt::Debug for Answer {
         match self {
             Self::Secret(_) => formatter.write_str("Answer::Secret(<redacted>)"),
             Self::Trust(accept) => write!(formatter, "Answer::Trust({accept})"),
-            Self::Approval => formatter.write_str("Answer::Approval"),
+            Self::Approval(accept) => write!(formatter, "Answer::Approval({accept})"),
         }
     }
 }
@@ -162,8 +165,7 @@ impl Answer {
                 .or_else(|| response.get("approve"))
                 .and_then(Value::as_bool)
             {
-                Some(true) => Ok(Self::Approval),
-                Some(false) => refuse("review_declined", "the plan was not approved"),
+                Some(accept) => Ok(Self::Approval(accept)),
                 None => refuse(
                     "invalid_response",
                     "a review challenge is answered with `accept`",
@@ -470,11 +472,13 @@ mod tests {
     fn a_review_is_answered_with_accept() {
         assert!(matches!(
             Answer::decode(ChallengeKind::Review, &json!({"accept": true})).expect("approval"),
-            Answer::Approval
+            Answer::Approval(true)
         ));
-        let declined = Answer::decode(ChallengeKind::Review, &json!({"accept": false}))
-            .expect_err("a decline");
-        assert_eq!(super::super::reason_of(&declined), Some("review_declined"));
+        // A decline is delivered, so the operation stops now rather than at the expiry.
+        assert!(matches!(
+            Answer::decode(ChallengeKind::Review, &json!({"accept": false})).expect("a decline"),
+            Answer::Approval(false)
+        ));
         let malformed =
             Answer::decode(ChallengeKind::Review, &json!({})).expect_err("no answer at all");
         assert_eq!(
