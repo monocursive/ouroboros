@@ -44,6 +44,11 @@ defmodule Ouroboros.Test.FleetFramesFake do
     File.cp!(@script, ouro)
     File.chmod!(ouro, 0o755)
 
+    # Both paths are files this fake owns. An earlier layout kept a directory of
+    # scenarios at the second one, and a checkout that ran it keeps that directory in
+    # its build tree, so each is cleared before it is written.
+    File.rm_rf!(devices_path(dir))
+    File.rm_rf!(scenario_path(dir))
     File.write!(devices_path(dir), Keyword.get(opts, :devices, "{}\n"))
     File.write!(scenario_path(dir), "")
     _ = File.rm(argv_path(dir))
