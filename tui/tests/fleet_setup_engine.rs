@@ -27,6 +27,7 @@
 //! manager. Both leave the credentials on the target, and both are asserted from the
 //! journal rather than inferred.
 
+mod fleet_ports;
 mod fleet_setup_support;
 
 use std::collections::BTreeSet;
@@ -35,7 +36,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -49,16 +49,15 @@ use ouro::fleet_setup::{known_hosts_path, OperationKind, OperationState};
 /// A password that appears in no other fixture, so a grep for it is unambiguous.
 const PASSWORD: &str = "kr2-frames-password-9f31c7";
 
-/// `fleet::ephemeral_ports` binds to find free ports, so two threads that call it at the
-/// same moment can be handed the same number. Every test here that chooses ports holds
-/// this for its duration.
-static PORTS: Mutex<()> = Mutex::new(());
-
+/// Claimed ports, so no other test process in this run binds them first. A port is
+/// chosen here and bound seconds later by a child, and that window is long enough for
+/// the kernel to hand the same number to another fleet binary running beside this one.
 fn ephemeral() -> fleet::Ports {
-    let _held = PORTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    fleet::ephemeral_ports()
+    let (gateway, dist) = fleet_ports::reserve();
+    fleet::Ports {
+        gateway: Some(gateway),
+        dist: Some(dist),
+    }
 }
 
 fn data_dir(label: &str) -> PathBuf {
@@ -123,7 +122,7 @@ impl Lab {
             ),
         );
 
-        let lab = Self {
+        let mut lab = Self {
             rig,
             issuer,
             issuer_ports: ephemeral(),
@@ -141,31 +140,43 @@ impl Lab {
     }
 
     /// `ouro fleet setup` on the issuer's data directory: no service, no prompt.
-    fn setup(&self, machine: &str) {
-        let done = self.ouro(
-            &self.issuer,
-            self.issuer_ports,
-            &[
-                "fleet",
-                "setup",
-                "--machine",
-                machine,
-                "--address",
-                "127.0.0.1",
-                "--no-service",
-                "--yes",
-                "--json",
-            ],
-            &[],
-        );
-        assert!(
-            done.success(),
-            "`ouro fleet setup` failed:\n{}\n{}",
-            done.stdout,
-            done.stderr
-        );
-        let document: Value = done.json();
-        assert_eq!(document["state"], json!("completed"), "{document:#}");
+    ///
+    /// Retried while the failure is a lost port. A port is chosen here and bound a
+    /// moment later by `fleet::create`, and another process on this machine may take it
+    /// in between; that is a race this suite loses honestly and retries, not a fleet
+    /// that cannot be created.
+    fn setup(&mut self, machine: &str) {
+        let mut last = String::new();
+        for _ in 0..8 {
+            let done = self.ouro(
+                &self.issuer,
+                self.issuer_ports,
+                &[
+                    "fleet",
+                    "setup",
+                    "--machine",
+                    machine,
+                    "--address",
+                    "127.0.0.1",
+                    "--no-service",
+                    "--yes",
+                    "--json",
+                ],
+                &[],
+            );
+            if done.success() {
+                let document: Value = done.json();
+                assert_eq!(document["state"], json!("completed"), "{document:#}");
+                return;
+            }
+            last = format!("{}\n{}", done.stdout, done.stderr);
+            assert!(
+                last.contains("already in use"),
+                "`ouro fleet setup` failed: {last}"
+            );
+            self.issuer_ports = ephemeral();
+        }
+        panic!("`ouro fleet setup` kept losing its ports to a concurrent bind: {last}");
     }
 
     /// Record the rig's host key in the issuer's private store, the way an accepted

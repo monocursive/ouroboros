@@ -9,6 +9,8 @@
 //! The `add` and `leave --machine` halves of the same front end share this code path
 //! exactly; what differs is the steps between the review and the `done`.
 
+mod fleet_ports;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -43,24 +45,10 @@ fn private_dir(path: &Path) {
 }
 
 /// Two free loopback ports outside every production port space, so a test fleet never
-/// collides with a live same-host lab.
+/// collides with a live same-host lab — and claimed, so no other test process in this
+/// run is handed the same number in the window between choosing it and binding it.
 fn test_ports() -> (u16, u16) {
-    use std::net::{Ipv4Addr, TcpListener};
-    let mut held = Vec::new();
-    let mut ports = Vec::new();
-    while ports.len() < 2 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
-        let port = listener.local_addr().expect("a bound address").port();
-        held.push(listener);
-        if port != 4369
-            && port != 65_358
-            && !(13_700..=13_729).contains(&port)
-            && !(17_000..18_000).contains(&port)
-        {
-            ports.push(port);
-        }
-    }
-    (ports[0], ports[1])
+    fleet_ports::reserve()
 }
 
 /// One `ouro fleet … --frames` process, spoken to the way a port program is.

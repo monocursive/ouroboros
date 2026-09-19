@@ -19,13 +19,14 @@
 //! fence, and three fake managers on the paths `Programs::from_env` reads, so nothing
 //! touches the account's own `~/Library/LaunchAgents` or its real launchd.
 
+mod fleet_ports;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -36,15 +37,13 @@ const OURO: &str = env!("CARGO_BIN_EXE_ouro");
 
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
-/// `fleet::ephemeral_ports` binds to find free ports, so two threads that call it at the
-/// same moment can be handed the same number.
-static PORTS: Mutex<()> = Mutex::new(());
-
+/// Claimed ports, so no other test process in this run binds them first.
 fn ephemeral() -> fleet::Ports {
-    let _held = PORTS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    fleet::ephemeral_ports()
+    let (gateway, dist) = fleet_ports::reserve();
+    fleet::Ports {
+        gateway: Some(gateway),
+        dist: Some(dist),
+    }
 }
 
 fn scratch(label: &str) -> PathBuf {

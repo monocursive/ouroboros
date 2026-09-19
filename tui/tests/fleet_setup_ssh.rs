@@ -1575,9 +1575,23 @@ fn cancelling_kills_an_in_flight_ssh_child() {
         }),
         challenge_window: None,
     };
+    // Cancel once the shim has actually started and written its pid, not after a fixed
+    // wait. The 150ms this used to sleep was a bet that a forked `/bin/sh` would be
+    // scheduled and reach its first redirect inside that window; under a loaded machine
+    // it sometimes is not, and the child was then killed before it recorded the pid this
+    // test goes on to probe — a failure that says nothing about the code under test.
     let flag = Arc::clone(&stop);
+    let watched = pid_file.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(150));
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while std::time::Instant::now() < until {
+            // A non-empty pid file: the shim has written *and* flushed it, so the pid is
+            // readable and the `exec sleep 30` that follows is what gets cancelled.
+            if std::fs::read_to_string(&watched).is_ok_and(|text| !text.trim().is_empty()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         flag.store(true, Ordering::SeqCst);
     });
     let started = std::time::Instant::now();
