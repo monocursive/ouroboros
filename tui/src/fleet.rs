@@ -1667,14 +1667,19 @@ fn validate_profile(profile: &Profile) -> Result<()> {
             profile.dist_port
         );
     }
+    // Folded, because `same_name` is what every *other* reader of this list compares
+    // with: `remove_member`, `add_member` and the engine's roster edits all match a
+    // machine case-insensitively, so a profile holding both `pi` and `Pi` is one where
+    // "the member named pi" has two answers and a removal takes whichever `find` reached
+    // first. Byte-exact de-duplication called that profile valid.
     let mut nodes = BTreeSet::new();
     let mut machines = BTreeSet::new();
     for member in &profile.members {
         validate_member(member)?;
-        if !nodes.insert(&member.node) {
+        if !nodes.insert(member.node.to_ascii_lowercase()) {
             bail!("fleet profile repeats node {}", member.node);
         }
-        if !machines.insert(&member.machine) {
+        if !machines.insert(member.machine.to_ascii_lowercase()) {
             bail!("fleet profile repeats machine {}", member.machine);
         }
     }
@@ -3114,8 +3119,25 @@ fn validate_bundle(bundle: &Bundle) -> Result<()> {
     validate_fleet_name(&bundle.name).map_err(|error| refusing("bundle_invalid", error))?;
     validate_cookie(&bundle.cookie, "the bundle cookie")
         .map_err(|error| refusing("bundle_invalid", error))?;
-    validate_port(bundle.dist_port, "distribution port")
-        .map_err(|error| refusing("bundle_invalid", error))?;
+    // `validate_ports`, not `validate_port`: the fleet's distribution port has one more
+    // rule than "not zero", and it is the rule that matters. 4369 is EPMD's historical
+    // port, refused on `--dist-port` since the day that flag existed — and a bundle
+    // carrying it went straight through, because this was the one caller that checked
+    // the number instead of the policy.
+    validate_ports(Ports {
+        gateway: None,
+        dist: Some(bundle.dist_port),
+    })
+    .map_err(|error| refusing("bundle_invalid", error))?;
+    // §2: `members` always includes the machine that wrote the profile, so a bundle
+    // naming nobody is not a fleet this machine can join — it is a document that would
+    // install a member list with one entry, this machine, and no way to reach anything.
+    if bundle.members.is_empty() {
+        return refuse(
+            "bundle_invalid",
+            "the bundle names no members; a fleet's member list always includes the machine that made it",
+        );
+    }
     if bundle.members.len() > MAX_MEMBERS {
         return refuse(
             "bundle_invalid",
@@ -3546,10 +3568,70 @@ mod tests {
             "nothing was written"
         );
 
+        // §2's member list always includes the machine that wrote it, so a bundle that
+        // names nobody is not a fleet.
+        broken.members = Vec::new();
+        assert_eq!(
+            reason_of(&join(&four, &broken, "vps", "127.0.0.1", ephemeral_ports()).unwrap_err()),
+            "bundle_invalid"
+        );
+        broken.members = bundle.members.clone();
+
+        // The distribution port is checked against the *policy*, not against zero.
+        // `--dist-port 4369` has always been refused — it is EPMD's historical port —
+        // and a bundle carrying the same number went in, because this path validated
+        // one port instead of the pair.
+        broken.dist_port = 4369;
+        let epmd = join(&four, &broken, "vps", "127.0.0.1", ephemeral_ports()).unwrap_err();
+        assert_eq!(reason_of(&epmd), "bundle_invalid", "{epmd:#}");
+        assert!(
+            format!("{epmd:#}").contains("4369"),
+            "the refusal names the port: {epmd:#}"
+        );
+        broken.dist_port = 0;
+        assert_eq!(
+            reason_of(&join(&four, &broken, "vps", "127.0.0.1", ephemeral_ports()).unwrap_err()),
+            "bundle_invalid"
+        );
         assert!(
             !fleet_dir(&four).try_exists().unwrap(),
             "nothing was written"
         );
+    }
+
+    /// A member list is a set of *identities*, and `pi` and `Pi` are one identity.
+    ///
+    /// Every other reader of this list folds case — `same_name` is what `add_member`,
+    /// `remove_member` and the engine's roster edits compare with — so a profile holding
+    /// both spellings is one where "the member named pi" has two answers and a removal
+    /// takes whichever `find` reached first. De-duplicating byte-exactly called that
+    /// profile valid and let it be written.
+    #[test]
+    fn a_profile_that_names_one_machine_twice_is_refused_however_it_is_spelled() {
+        let (data, profile) = create_local("dedupe", "studio");
+        let _ = data;
+
+        let twice = |first: &str, second: &str| {
+            let mut broken = profile.clone();
+            broken.members = vec![
+                member(first, "127.0.0.1", profile.dist_port),
+                member(second, "127.0.0.2", profile.dist_port),
+            ];
+            // The profile's own machine has to stay in its own list.
+            broken.machine = first.to_string();
+            broken.host = "127.0.0.1".to_string();
+            broken.node = member(first, "127.0.0.1", profile.dist_port).node;
+            validate_profile(&broken)
+        };
+
+        // Byte-exact, which was already refused.
+        let exact = twice("studio", "studio").expect_err("one node, twice");
+        assert!(format!("{exact:#}").contains("repeats"), "{exact:#}");
+        // And the spelling that was not: one machine wearing two cases.
+        let folded = twice("studio", "STUDIO").expect_err("one machine, two spellings");
+        assert!(format!("{folded:#}").contains("repeats"), "{folded:#}");
+        // Two genuinely different machines are still a valid list.
+        twice("studio", "buildbox").expect("two machines are two members");
     }
 
     /// §2: `leave` is a stop-gated deletion of `fleet/`, and it works on a directory
