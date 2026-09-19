@@ -542,8 +542,9 @@ defmodule Ouroboros.Web.Live.Devices do
   def status_line(fleet, host_os, standalone?, devices \\ [])
 
   # A profile this build refuses outranks both shapes. `fleet.status` carries `profile` as
-  # `null` or `%{reason, message}`, and the message is §2's own sentence — *this fleet was
-  # created by an older Ouroboros; run `ouro fleet leave` here and set the fleet up again.*
+  # `null` or `%{reason, message}`, and the message is §2's own sentence — *this fleet's
+  # profile was written by a different version of Ouroboros than the one running here; run
+  # `ouro fleet leave` here and set the fleet up again.*
   # A machine in that state is not "not in a fleet yet": it is in one this build cannot read,
   # and the repair is a different one. The runtime's sentence is used rather than one of this
   # page's own, and it goes through the sanitiser like anything else that arrived as data.

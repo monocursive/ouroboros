@@ -88,8 +88,9 @@ frame over SSH: `{"schema": 2, "fleet_id", "name", "cookie", "ca_cert_pem", "ca_
   `Ports { dist: Some(p) }` and `ephemeral_ports()` keep working, minus the EPMD field.
 - Gone: `tombstones`, `roster_revision`, `epmd_port`, `dist_port_min`, `dist_port_max`.
 - A schema-1 profile is refused by the launcher and by every `ouro fleet` command with
-  one sentence: *this fleet was created by an older Ouroboros; run `ouro fleet leave`
-  here and set the fleet up again.* There is no migration.
+  one sentence: *this fleet's profile was written by a different version of Ouroboros
+  than the one running here; run `ouro fleet leave` here and set the fleet up again.*
+  There is no migration.
 
 ## 3. What the launcher sets
 
@@ -422,17 +423,17 @@ two disagree the code is right, and [FLEET.md](../FLEET.md) documents the code.
   it; `devices.rs` prints the per-row recipe and a manual `ouro fleet add USER@ADDRESS
   --machine NAME` line, and nothing about the web.
 
-### Two places the code still disagrees with itself
+### Two places the code disagreed with itself, since resolved
 
-Recorded here because the documents follow the code, and these two cannot both be right.
+Recorded because the documents follow the code, and for a while these two could not both
+be right.
 
-- **The unsupported-profile sentence exists twice, in two wordings.**
-  `lib/ouroboros/cluster.ex` says *this fleet's profile was written by a different version
-  of Ouroboros than the one running here; run `ouro fleet leave` here and set the fleet up
-  again.*; `tui/src/fleet.rs`'s `SCHEMA_1_SENTENCE` still says *this fleet was created by
-  an older Ouroboros; …*. Both modules state that no surface invents its own wording for
-  it, and today the CLI and the runtime do exactly that. FLEET.md quotes the runtime's.
-- **The journal's `state` is not yet §6's five words.** §6 and the broker speak
-  `running|waiting|completed|failed|cancelled`; the Rust `OperationState` still serializes
-  eleven (`inspecting`, `awaiting_host_trust`, `deploying`, `interrupted` and the rest).
-  FLEET.md documents the five, which is the contract and where the code is going.
+- **The unsupported-profile sentence** existed in two wordings, the runtime's in
+  `lib/ouroboros/cluster.ex` and an older one in `tui/src/fleet.rs`. The Rust engine slice
+  made the Rust constant the runtime's sentence, which is the one §2 quotes and every
+  surface now prints.
+- **The journal's `state`** serialised the engine's eleven internal phases while §6 and the
+  broker spoke five words. The same slice made `OperationState` exactly
+  `running|waiting|completed|failed|cancelled`, keeping the finer phase as a non-serialised
+  type for the terminal's progress wording; `interrupted` became `failed` with a stable
+  `last_error.reason` (`start_failed`, `not_connected`).

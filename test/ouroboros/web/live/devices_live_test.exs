@@ -396,11 +396,11 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
         profile: %{
           reason: :unsupported_profile_schema,
           message:
-            "this fleet was created by an older Ouroboros; run `ouro fleet leave` here and set the fleet up again"
+            "this fleet's profile was written by a different version of Ouroboros than the one running here; run `ouro fleet leave` here and set the fleet up again"
         }
       }
 
-      assert Devices.status_line(refused, "darwin", true) =~ "created by an older Ouroboros"
+      assert Devices.status_line(refused, "darwin", true) =~ "a different version of Ouroboros"
       assert Devices.status_line(refused, "darwin", false) =~ "run `ouro fleet leave` here"
 
       # And a runtime that reports no such thing still gets the two ordinary shapes.
