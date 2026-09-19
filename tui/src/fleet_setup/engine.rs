@@ -1210,6 +1210,9 @@ impl Engine {
             Startup::Unsupported => unknown.push(format!(
                 "{machine}'s connection: it has no supported user supervisor, so it must be started there by hand"
             )),
+            Startup::NotStarted => unknown.push(format!(
+                "{machine}'s connection: its startup service was installed and would not start. Its fleet credentials are in place; start it there and run `ouro fleet doctor`"
+            )),
             Startup::Started => {}
         }
 
@@ -1249,11 +1252,12 @@ impl Engine {
 
         // The operation is complete when every step it *intended* to take succeeded. A
         // runtime the operator chose to start themselves has not failed to connect; it
-        // has not been started.
-        let state = if connected || startup != Startup::Started {
-            OperationState::Completed
-        } else {
-            OperationState::Interrupted
+        // has not been started. A `start` this operation intended and that failed is
+        // incomplete, even though the credentials it already delivered stay put.
+        let state = match startup {
+            _ if connected => OperationState::Completed,
+            Startup::Manual | Startup::Unsupported => OperationState::Completed,
+            Startup::Started | Startup::NotStarted => OperationState::Interrupted,
         };
         journal.set_state(state)?;
         self.notify_state(state);
@@ -1270,6 +1274,10 @@ impl Engine {
             },
             next: if connected {
                 format!("Connected; configure a model on {machine}")
+            } else if startup == Startup::NotStarted {
+                format!(
+                    "Joined, and {machine}'s startup service would not start. Its credentials are in place: start it there, then `ouro fleet doctor --peer {target_host}`"
+                )
             } else if startup == Startup::Started {
                 format!(
                     "Joined. Check {machine} with `ouro fleet doctor --peer {target_host}` once its runtime is up"
@@ -1321,6 +1329,16 @@ impl Engine {
         )
     }
 
+    /// §6's `service` and `start`, which are two steps because §6 names two.
+    ///
+    /// They were one step once, and that hid the thing an operator most needs to see:
+    /// a machine whose unit was installed and whose runtime would not come up. Worse, a
+    /// `start` that failed propagated out of this function and failed the whole
+    /// operation *before* the member was appended to this machine's list — so the
+    /// credentials were on the target, the target was not on the roster, and the
+    /// journal never named `start` at all. A start that fails is now a failed `start`
+    /// step: the credentials stay, the member is remembered, `connect` is not attempted,
+    /// and the operation ends incomplete with the reason on the step.
     fn arrange_startup(
         &self,
         journal: &JournalHandle,
@@ -1328,42 +1346,72 @@ impl Engine {
         session: &mut helper::Session,
     ) -> Result<Startup> {
         if !self.request.service {
-            journal.skip_step(
-                machine,
-                "service",
-                "manual startup was chosen with --no-service",
-            )?;
+            if !journal.record().completed(machine, "service") {
+                journal.skip_step(
+                    machine,
+                    "service",
+                    "manual startup was chosen with --no-service",
+                )?;
+            }
+            if !journal.record().completed(machine, "start") {
+                journal.skip_step(
+                    machine,
+                    "start",
+                    "manual startup was chosen with --no-service",
+                )?;
+            }
             return Ok(Startup::Manual);
         }
-        if journal.record().completed(machine, "service") {
-            return Ok(Startup::Started);
-        }
-        journal.begin_step(machine, "service")?;
-        let installed = self.services.remote(session, ServiceAction::Install)?;
-        if !installed.supported {
+        if !journal.record().completed(machine, "service") {
+            journal.begin_step(machine, "service")?;
+            let installed = self.services.remote(session, ServiceAction::Install)?;
+            if !installed.supported {
+                journal.finish_step(
+                    machine,
+                    "service",
+                    "skipped",
+                    Some(format!(
+                        "no supported user supervisor: {}. Start it manually",
+                        installed.detail
+                    )),
+                    None,
+                )?;
+                self.step_event(machine, "service", "skipped", Some(installed.detail));
+                journal.skip_step(
+                    machine,
+                    "start",
+                    "there is no user supervisor on that machine to start it with",
+                )?;
+                return Ok(Startup::Unsupported);
+            }
             journal.finish_step(
                 machine,
                 "service",
-                "skipped",
-                Some(format!(
-                    "no supported user supervisor: {}. Start it manually",
-                    installed.detail
-                )),
+                "ok",
+                Some(installed.detail.clone()),
                 None,
             )?;
-            self.step_event(machine, "service", "skipped", Some(installed.detail));
-            return Ok(Startup::Unsupported);
+            self.step_event(machine, "service", "ok", Some(installed.detail));
         }
-        let started = self.services.remote(session, ServiceAction::Start)?;
-        journal.finish_step(
-            machine,
-            "service",
-            "ok",
-            Some(format!("{}; {}", installed.detail, started.detail)),
-            None,
-        )?;
-        self.step_event(machine, "service", "ok", Some(started.detail));
-        Ok(Startup::Started)
+        if journal.record().completed(machine, "start") {
+            return Ok(Startup::Started);
+        }
+        journal.begin_step(machine, "start")?;
+        match self.services.remote(session, ServiceAction::Start) {
+            Ok(started) => {
+                journal.finish_step(machine, "start", "ok", Some(started.detail.clone()), None)?;
+                self.step_event(machine, "start", "ok", Some(started.detail));
+                Ok(Startup::Started)
+            }
+            // The bundle is already installed at this point. Losing the operation here
+            // would leave the credentials on a machine this roster never names.
+            Err(error) => {
+                let detail = super::sanitize_remote_text(&format!("{error:#}"), 300);
+                journal.finish_step(machine, "start", "failed", Some(detail.clone()), None)?;
+                self.step_event(machine, "start", "failed", Some(detail));
+                Ok(Startup::NotStarted)
+            }
+        }
     }
 
     /// Poll the *target's* own `status` until it reports the fleet connected (§6).
@@ -2012,6 +2060,9 @@ enum Startup {
     Unsupported,
     /// This operation installed and started a managed service.
     Started,
+    /// The unit was installed and the manager would not start it. The credentials are
+    /// on the target and this operation is incomplete.
+    NotStarted,
 }
 
 /// An authenticated channel to one machine, with the bridge that serves its prompts.
@@ -2077,7 +2128,19 @@ pub fn normalize_machine(machine: &str) -> Result<String> {
         return refuse("invalid_request", "a machine needs a short name");
     }
     let lowered = trimmed.to_ascii_lowercase();
-    fleet::validate_machine(&lowered).map_err(|error| super::refusing("invalid_request", error))?;
+    // The refusal quotes the name back, and a name is not always the local operator's
+    // typing: `fleet.deployment.start` takes one over the gateway from whoever is an
+    // administrator on this runtime, and the refusal is printed on somebody's terminal.
+    // `fleet::validate_machine`'s message repeats the name verbatim, so a name carrying
+    // ANSI escapes used to rewrite the terminal it was refused on. It is sanitized the
+    // same way any other text this process did not author is.
+    fleet::validate_machine(&lowered).map_err(|_| super::SetupError {
+        reason: "invalid_request",
+        detail: format!(
+            "machine name `{}` must be 1–40 letters, numbers, or hyphens, starting and ending with a letter or number (example: studio-mini)",
+            super::sanitize_remote_text(&lowered, 60)
+        ),
+    })?;
     Ok(lowered)
 }
 
