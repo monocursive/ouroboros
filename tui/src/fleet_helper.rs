@@ -68,14 +68,35 @@ enum Frame {
 
 /// Serve the helper protocol on this process's own stdin and stdout.
 pub fn serve(data_dir: PathBuf) -> Result<()> {
+    serve_on(
+        data_dir,
+        BufReader::new(std::io::stdin()),
+        std::io::stdout().lock(),
+        IDLE_TIMEOUT,
+    )
+}
+
+/// The same, over any streams and any idle deadline.
+///
+/// Split from [`serve`] for the same reason [`crate::fleet_setup::frames::run`] is: a
+/// harness drives it over a pipe without a terminal, and the idle timeout is a
+/// parameter rather than a constant so the *behaviour* — a connection that stops
+/// speaking does not leave a helper resident — is testable in milliseconds instead of
+/// in the minute production waits.
+#[doc(hidden)]
+pub fn serve_on(
+    data_dir: PathBuf,
+    input: impl BufRead + Send + 'static,
+    mut output: impl Write,
+    idle: Duration,
+) -> Result<()> {
     let helper = Helper::new(data_dir);
     let (sender, receiver) = sync_channel::<Frame>(1);
     thread::Builder::new()
         .name("fleet-helper-stdin".to_string())
-        .spawn(move || read_frames(BufReader::new(std::io::stdin()), &sender))
+        .spawn(move || read_frames(input, &sender))
         .context("starting the helper's input reader")?;
-    let output = std::io::stdout();
-    run(&helper, &receiver, &mut output.lock(), IDLE_TIMEOUT)
+    run(&helper, &receiver, &mut output, idle)
 }
 
 /// The loop itself, over any frame source and any sink, so the timeout and the exit
