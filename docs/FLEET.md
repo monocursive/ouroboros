@@ -35,15 +35,20 @@ named: not consensus, quorum or a partition policy.
 
 `<data dir>/fleet/` holds, on every member:
 
-| File | Mode | What |
-|---|---|---|
-| `profile.json` | 0644 | non-secret facts, schema 2 |
-| `cookie` | 0600 | 64 lowercase hex |
-| `ca-cert.pem` | 0644 | the fleet CA certificate |
-| `ca-key.pem` | 0600 | the fleet CA private key. Shared |
-| `node-cert.pem` | 0644 | this machine's leaf, CN `ouro-<machine>@<host>`, SAN `<host>` |
-| `node-key.pem` | 0600 | this machine's private key, generated here |
-| `ssl_dist.conf`, `vm.args` | 0644 | generated at create and join |
+| File | What |
+|---|---|
+| `profile.json` | non-secret facts, schema 2 |
+| `cookie` | 64 lowercase hex |
+| `ca-cert.pem` | the fleet CA certificate |
+| `ca-key.pem` | the fleet CA private key. Shared |
+| `node-cert.pem` | this machine's leaf, CN `ouro-<machine>@<host>`, SAN `<host>` |
+| `node-key.pem` | this machine's private key, generated here |
+| `ssl_dist.conf`, `vm.args` | generated at create and join |
+
+The directory is 0700 and **every file in it is written and validated at 0600**, the
+non-secret ones included: the two certificates, the profile and the generated files are
+not secrets, but a fleet directory with one world-readable file in it is a directory
+nobody can check at a glance. A file at any other mode is refused rather than repaired.
 
 A node name is always `ouro-<machine>@<host>`. Back that directory up privately: those
 credentials cannot be reissued from anywhere else. A private network is trusted
@@ -90,8 +95,12 @@ this machine's record of admitting it says.
 **`forget NAME`** is the local answer to a machine that cannot be reached: it asks the
 runtime to retire that machine's durable session-owner evidence, then takes the name out
 of this profile's members. The runtime refuses while that machine is connected, and then
-nothing changes. There is no undo — the command name is the operator's statement — and the
-roster is not replicated, so run it on every remaining machine.
+nothing changes. It also refuses **before touching the profile** when no runtime is
+answering here, with one sentence saying to start Ouroboros and run it again: the runtime
+resolves a machine name through the profile's members, so editing the profile first would
+strand evidence nothing can ever name again, under a sentence claiming it had been
+retired. There is no undo — the command name is the operator's statement — and the roster
+is not replicated, so run it on every remaining machine.
 
 **`status`** prints the fleet name and id, this machine's name, address and node, the
 runtime state, the member list, the gateway port and the distribution port. **`doctor`**
@@ -104,7 +113,7 @@ exits non-zero even when some steps succeeded. `--dry-run` prints the plan and c
 nothing: no journal, no credentials, no installation, no roster edit, no recorded host
 trust. `--yes` accepts the resolved plan without a prompt; it never accepts a host key,
 never answers a password and never makes a busy runtime idle. `--frames` is the NDJSON
-front end in §7 and conflicts with `--json`, `--yes` and `--dry-run`.
+front end in §7; it conflicts with `--json` and `--yes`, and it takes `--dry-run`.
 
 Three commands are hidden because nobody should type them: `ouro fleet create`, the
 primitive `setup` uses, kept for the lab; `ouro fleet helper`, the fixed command an
@@ -120,6 +129,14 @@ journal holds no secret: a release is a version and a sha256, the plan is the li
 operator read, an error is a stable reason and a sanitized detail. The request for an
 operation is argv, and nothing on argv is a secret — an address, an account, a port, a
 path, a key path, an agent fingerprint. A password never is.
+
+Its `state` is one of `running`, `waiting`, `completed`, `failed` and `cancelled`.
+Beside `target` it records `service`, the `--no-service` choice, written at the start
+rather than inferred from a `service` step later: a resume has to know what was chosen
+*before* it reaches that step, and the broker rebuilds a resumed command line out of this
+document (§11) and must not guess. `target.identity` is how the operation authenticated —
+a reference, never a secret. `residue` is what an interrupted or cancelled operation left
+behind that it could not clean up, named and never guessed at.
 
 **`setup`** reviews the plan, stops the running runtime through its idle gate, creates the
 fleet, installs the startup service unless `--no-service`, starts it, then waits for the
@@ -190,31 +207,41 @@ exact `ouro` and an explicit `OUROBOROS_DATA_DIR`, never the detaching `ouro dae
 which a service manager reads as a crash and answers with a second runtime.
 
 ```sh
-ouro fleet service install          # generate the unit and hand it to the manager
+ouro fleet service install          # write the unit and hand it to the manager
 ouro fleet service status [--json]  # installed / loaded / running / last exit
 ouro fleet service disable          # stop it and stop it respawning; keep the unit
-ouro fleet service remove           # disable, then delete the one file this wrote
+ouro fleet service remove           # disable, then delete exactly that file
 ```
 
-The path is deterministic per data directory:
+**The path is the identity.** One data directory, one deterministic unit path:
 `~/Library/LaunchAgents/dev.ouroboros.runtime.<digest>.plist` on macOS, or
 `~/.config/systemd/user/ouroboros-<digest>.service` on Linux, where `<digest>` is the
 first twelve hex characters of SHA-256 over the canonical data directory. The same data
-directory always gets the same unit, and a unit installed by an earlier release is that
-same file.
+directory always gets the same unit however its path was spelled, and a unit installed by
+0.1.9 or 0.1.10 is that same file. `install` writes it and loads it, **overwriting
+whatever is at that path**; `status` reads it; `disable` unloads it; `remove` unloads it
+and deletes exactly that one file. There is no ownership marker, no `--adopt`, no
+foreign-or-modified classification and no scan for a second unit: a file at that path is
+this data directory's unit, whoever wrote it, and nothing else in the manager's directory
+is read, written or counted.
+
+Two consequences worth stating. `status` will *say* when the file is not what this build
+would write — "`ouro fleet service install` replaces it" — and acts on it no further.
+And on macOS, `install` reads the `Label` out of a plist it is replacing: a file that had
+loaded a job under a different label leaves that job running with nothing behind it, so
+the replaced label is booted out too and named in the output. That is not an ownership
+decision; it is what "overwrite whatever is there" has to do on launchd.
 
 `install` refuses without a cluster identity, because `service-run` refuses to start
-without one and a unit installed first would only crash-loop. It writes that one path and
-overwrites the unit it wrote there before. A file at that path this code did not write is
-reported with the digest of what is actually there and left alone: `install`, `disable`
-and `remove` all refuse it (`unit_foreign`), and none of them touches any other unit. A
-unit of ours that has been edited by hand since it was written is still ours — every unit
-carries a line naming the data directory it serves and a digest of its own body — so
-`install` refuses it `unit_modified` rather than overwriting the edit, while `remove` does
-delete it and says in its output that the body no longer matched that digest. `remove`
-deletes only the file this code wrote, after gating the runtime with the same idle check
-`ouro stop --require-idle` applies and after asking the manager to unload it. `disable` is
-the first half of taking a supervised runtime down:
+without one and a unit installed first would only crash-loop. It refuses `runtime_running`
+rather than replacing a unit whose runtime owns the data directory — stop it with
+`ouro stop --require-idle` first — and if the manager will not take the unit, a unit
+*this call created* is removed again rather than left as a `RunAtLoad` file for the next
+login, while one that was already there is kept and the refusal names `remove`. `remove`
+gates the runtime with that same idle check, asks the manager to unload first (a unit
+deleted while its manager still supervises it comes straight back), and unlinks the path
+even when the manager refuses, naming what is still loaded and the one command that stops
+it. `disable` is the first half of taking a supervised runtime down:
 
 ```sh
 ouro stop --require-idle
@@ -223,7 +250,7 @@ ouro fleet service disable
 
 | Platform | What it does, and does not |
 |---|---|
-| Linux with `systemctl --user` | a user unit with `Restart=on-failure`, `RestartSec=5` and a `StartLimitIntervalSec=300`/`StartLimitBurst=5` ceiling, wanted by `default.target`. Surviving logout and starting at boot needs lingering, so `install` runs `loginctl enable-linger` once the unit is loaded; refused, `status` says this is a login-scoped service and names the administrator's step |
+| Linux with `systemctl --user` | a user unit with `Restart=on-failure`, `RestartSec=5` and a `StartLimitIntervalSec=300`/`StartLimitBurst=5` ceiling, wanted by `default.target`. Surviving logout and starting at boot needs lingering, so `install` runs `loginctl enable-linger` once the unit is loaded; refused, `status` says this is a login-scoped service and names the administrator's step. `remove` also takes out the `default.target.wants` symlink |
 | macOS with a logged-in session | a LaunchAgent with `RunAtLoad`, `KeepAlive` restricted to unsuccessful exits, a 30 second `ThrottleInterval` and `ProcessType` `Adaptive`. It starts at login and stops with the login session: there is **no pre-login execution** |
 | Anything else | `install` refuses with the prerequisite named and installs nothing. Start the runtime with `ouro daemon` and supervise it yourself |
 
@@ -240,13 +267,19 @@ laptop that boots before its VPN waits visibly rather than looking hung.
 
 `doctor` reports interrupted setup directories, the profile, the security material,
 ephemeral-range overlaps, a stopped-runtime listener preflight, every member's address
-resolution and the runtime's own state. `[ok]`, `[note]` and `[fix]` are the stable
-levels; a problem exits non-zero. Neither command prints a secret, and both say the same
-sentence about a profile written by an older Ouroboros (§12). The `--json` form of each
-also carries this build's metadata — the Ouroboros version, the OTP and Elixir releases
-the embedded release recorded, the OS and the architecture, with `null` rather than a
-guess where there is no embedded release — and `status --json` carries the network
-inventory beside it.
+resolution and the runtime's own state. Against a running runtime it adds the live
+checks, among them **`epmd_module`**: it passes only when the node's epmd module is
+`Ouroboros.Cluster.Epmd` *and* `-start_epmd false` is in force, and otherwise names the
+module actually in use — a node resolving peers through `erl_epmd` is registering with
+and dialling through a port mapper this fleet does not run, and the repair is to start
+the machine with its packaged `ouro`, which writes the `vm.args` that says both. A
+machine not running from a fleet profile is not judged: its distribution is whatever
+started it. `[ok]`, `[note]` and `[fix]` are the stable levels; a problem exits non-zero.
+Neither command prints a secret, and both say the same sentence about a profile this
+build does not read (§12). The `--json` form of each also carries this build's metadata —
+the Ouroboros version, the OTP and Elixir releases the embedded release recorded, the OS
+and the architecture, with `null` rather than a guess where there is no embedded release
+— and `status --json` carries the network inventory beside it.
 
 `--peer NAME|ADDRESS` probes the route to one visible device with a single overlay ping
 and reports `reachable`, `timed_out`, `unknown`, `peer_unknown` or `peer_ambiguous`, with
@@ -300,6 +333,12 @@ Out, one JSON object per line:
 In: `{"op":"respond","challenge":"<id>","accept":true|false}` for `host_trust` and
 `review`, `{"op":"respond","challenge":"<id>","secret":"…"}` for `password` and
 `passphrase`, and `{"op":"cancel"}`.
+
+`--dry-run` works here too: the operation resolves its plan, sends those lines as `log`
+frames — the same lines a review would have carried — and ends `done` with
+`state: "completed"` and a summary beginning *dry run: nothing was changed*. It asks
+nobody anything, so no `challenge` goes out and nothing is written: it is the shape a
+caller uses to show a plan before offering to run it.
 
 The process calls `setsid` and ignores `SIGHUP` and `SIGPIPE`. Once the review is accepted
 it needs nothing more from stdin: **on stdin EOF it finishes the operation, keeps writing
@@ -358,14 +397,26 @@ boot script before kernel starts distribution because releases boot in embedded 
 | `start_link/0` | `:ignore` |
 | `register_node/2,3` | `{:ok, creation}` with a creation in 1..3; nothing is registered anywhere |
 | `listen_port_please/2` | `OUROBOROS_DIST_PORT`, else `{:ok, 0}` |
-| `port_please/2,3` | `OUROBOROS_DIST_PORTS`, tried as `name@host` then as a bare `host`, else `OUROBOROS_DIST_PORT`, else `:noport` |
-| `address_please/3` | `:inet.getaddr/2` |
+| `address_please/3` | `{:ok, ip, port, 5}` when the map names this node, else `{:ok, ip}` |
+| `port_please/2,3` | the map, else `OUROBOROS_DIST_PORT`, else `:noport` |
 | `names/1` | `{:error, :address}` — there is no registry to enumerate |
 
-A host arrives as a charlist, a binary or an IP tuple depending on the caller and is folded
-to one spelling before the lookup. The map is re-read on every lookup rather than cached,
-because the profile is the authority for membership; a malformed entry is ignored rather
-than fatal, and the first entry for a key wins.
+**The port is answered from `address_please/3`.** `inet_tcp_dist` calls it first and,
+unless it answers with a port, calls `port_please/2` with the address it has just
+resolved — so on the dial path `port_please/2` never sees a host's text, and a member
+whose `host` is a private DNS name would be looked up under a key nobody writes and
+dialled on this node's own port instead. That is invisible while one fleet shares one
+port and wrong the moment it does not. `address_please/3` still holds the host as the
+operator wrote it, so the lookup happens there and the four-tuple skips `port_please/2`.
+
+`OUROBOROS_DIST_PORTS` is `name@host=port`, one entry per member including this one: the
+node name is the one string the dialer is holding, and a host-keyed map cannot answer for
+two lab nodes on one host. A bare `host=port` entry is still read, as a documented
+fallback for a hand-written map, and a node-name entry wins where the two disagree. A
+host arrives as a charlist, a binary or an IP tuple depending on the caller and is folded
+to one spelling first. The map is re-read on every lookup rather than cached, because the
+profile is the authority for membership; a malformed entry is ignored rather than fatal,
+and the first entry for a key wins.
 
 One firewall rule: allow the fleet's distribution port (13700 by default) between the
 members' private addresses. The gateway port is loopback-only.
@@ -418,11 +469,11 @@ non-administrator sees `fleet.status`'s membership subset instead.
 | `fleet.status` | read | machines, connectivity, formation, transport security, posture facts, and `profile` — `null`, or `{reason: unsupported_profile_schema, message}` |
 | `fleet.doctor` | read | per-check results with guidance, including the `fleet_profile` check |
 | `fleet.tags` | operate | add / remove / list advisory tags on a connected machine |
-| `fleet.devices` | read | this deployment host and its `capabilities {deploy, reasons}`, discovery, the merged device rows, and the operations this data directory journals, each with `running` |
+| `fleet.devices` | read | this deployment host and its `capabilities {deploy, reasons}`, discovery, the merged device rows, and the operations this data directory journals, each with `running`. No row carries `issuer`, `owner` or `attached` at any level: the three are dropped from inside a device row as well as from the top of the answer, so an older `ouro` that still prints one cannot put it back |
 | `fleet.deployment.start` | operate | mints an operation id, runs `ouro fleet <kind> … --frames --operation <id>` as a port program, and answers `{operation}` |
-| `fleet.deployment.status` | read | `{operation, kind, state, steps, challenge, log, plan, summary, last_error, running, source}` |
+| `fleet.deployment.status` | read | `{operation, kind, state, steps, challenge, log, plan, summary, last_error, residue, running, source}` |
 | `fleet.deployment.respond` | operate | answers one open challenge with `accept` or `secret` |
-| `fleet.deployment.cancel` | operate | stops at a safe boundary and reports residue |
+| `fleet.deployment.cancel` | operate | stops at a safe boundary; answers `{state, residue}` |
 | `fleet.deployment.resume` | operate | runs an interrupted operation's program again against its journal |
 | `fleet.forget_session_owner` | operate | retires one machine's durable session-owner evidence. Takes `machine` and nothing else |
 
@@ -431,9 +482,25 @@ non-administrator sees `fleet.status`'s membership subset instead.
 journal answer's `log` is the scrubbed tail of `deploy/<id>.log` — the only thing a program
 that died before it could journal anything leaves behind — and its `last_error` is
 `{reason: "worker_exited", detail}` when the journal records no error of its own and this
-runtime saw the program exit. `resume` rebuilds the command line from the journal's `kind`,
-`target` and `paths` when this runtime has forgotten it, with the identity and the service
-falling back to their defaults; nothing on that line was ever a secret.
+runtime saw the program exit. Both projections carry `residue`, read from the journal in
+either case, because residue is something the program writes down rather than a frame it
+sends.
+
+`resume` rebuilds the command line from the journal's `kind`, `target` and `paths` —
+including `target.identity` and the top-level `service` — when this runtime has forgotten
+it. **It never defaults either of those two**: a `setup` names no identity and a `leave`
+has no service flag, and anything else missing one is `operation_request_incomplete`,
+because a resume that chose for itself would run a different operation under the same id.
+Nothing on that line was ever a secret, which is what makes rebuilding it safe.
+
+Beside the challenge codes below, the deployment verbs answer with these stable reasons:
+`operation_in_progress` (a program still holds that operation's journal lock, so read its
+status rather than starting a second one), `target_in_progress` (an operation is already
+deploying to that machine; `data.operation` names it), `operation_request_incomplete`,
+`worker_refused` (the program refused the operation outright), `already_attached`,
+`operation_finished`, `operation_state_unknown`, `worker_exited` and `deploy_blocked`. The
+engine's own refusal for argv that contradicts a journal is `resume_mismatch`: a resumed
+operation is the same operation, or it is a new one.
 
 `respond` is the one method whose parameters never reach the audit digest, not even hashed.
 The secret goes from the gateway connection's own process straight to the worker process,
@@ -453,11 +520,13 @@ from it acts on somebody else's installation. The generated per-method reference
 
 ## 12. Compatibility
 
-Profiles are **schema 2 only**. A schema-1 profile is refused by the launcher, by every
-`ouro fleet` command, by `fleet.status` and by `fleet.doctor`, with one sentence and no
-migration: *this fleet was created by an older Ouroboros; run `ouro fleet leave` here and
-set the fleet up again.* Every surface says exactly that, so an operator who reads one and
-then another is not given two accounts of the same thing.
+Profiles are **schema 2 only**. A profile this build does not read is refused by the
+launcher and by every `ouro fleet` command, and named by `fleet.status` (under `profile`)
+and by `fleet.doctor` (the `fleet_profile` check), with no migration and one repair. The
+runtime's sentence for it is: *this fleet's profile was written by a different version of
+Ouroboros than the one running here; run `ouro fleet leave` here and set the fleet up
+again.* `fleet.status` and `fleet.doctor` say exactly that, in those words, so an operator
+who reads one and then the other is not given two accounts of the same thing.
 
 Runtime compatibility is `{ouroboros_version, otp_release}`, compared **exactly**: two
 machines form a fleet when they run the same Ouroboros release on the same OTP release,

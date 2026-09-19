@@ -350,52 +350,89 @@ second machine.
 
 ## 14. Deviations accepted
 
-What the implementation did differently from the text above. Where the two disagree the
-code is right, and [FLEET.md](../FLEET.md) documents the code.
+What the implementation did differently from the text above, as of `7dcbb564`. Where the
+two disagree the code is right, and [FLEET.md](../FLEET.md) documents the code.
 
 - **Node names keep the spelling `ouro-<machine>@<host>`.** §2's `ouro@<host>` example was
   wrong: `fleet::member` has always built `ouro-<machine>@<host>`, and `add_member` refuses
   any other spelling by name.
 - **`OUROBOROS_DIST_PORTS` is keyed by the full node name**, `ouro-studio@100.64.0.1=13700,…`,
   one entry per member including self. Two lab nodes on one host cannot both be true under
-  a host key. `Cluster.Epmd.port_please/2,3` tries `name@host`, then the bare `host`, then
-  `OUROBOROS_DIST_PORT`. The module's own doc still describes the production form as
-  `host=port`; the launcher never writes that form.
+  a host key, and the node name is the one string the dialer holds. A bare `host=port`
+  entry is still read as a documented fallback for a hand-written map, and a node-name
+  entry wins where the two disagree.
+- **The port is answered from `address_please/3`, not `port_please/2`.** §4 puts the lookup
+  in `port_please`, but `inet_tcp_dist` calls `address_please/3` first and then hands
+  `port_please/2` the *resolved address* — so a member whose `host` is a private DNS name
+  would be looked up under a key nobody writes. `address_please/3` answers
+  `{:ok, ip, port, 5}` and the dial path skips `port_please/2` entirely; `port_please/2,3`
+  keeps §4's answer for every other caller.
 - **`RELEASE_VM_ARGS` is still set by the launcher.** §3 left it out of the table, but it
   is how the generated `vm.args` is read at all.
+- **Every file in `<data dir>/fleet/` is mode 0600**, not §2's mixed 0644/0600:
+  `profile.json`, `ca-cert.pem`, `node-cert.pem`, `ssl_dist.conf` and `vm.args` included.
+  They are not secrets, but `fleet.rs` writes and validates the whole directory at one
+  mode, and a file at any other mode is refused rather than repaired. The code is stricter
+  than the contract and wins.
+- **`fleet_id` is 24 hex characters**, `random_hex(12)`. §2's example says 32.
 - **The journal's `target` keeps more than the four keys §6 lists.** Beside `machine`,
   `address`, `ssh_user` and `port` it carries `node`, `host_fingerprint`, `identity`,
   `peer_id`, `stable_id`, and `hostname`, `os`, `arch`. Steps carry `machine`, and a step
   may carry a `fingerprint`.
+- **The journal has a top-level `service`** beside `target.identity`: the `--no-service`
+  choice, written at the start rather than inferred from a `service` step later. §6's
+  document does not list it, and the broker's resume cannot work without it — it rebuilds
+  argv from those two fields and refuses `operation_request_incomplete` when either is
+  absent on an operation whose command line needs it, rather than defaulting.
 - **The step lists differ from §6.** `setup` runs `stop_runtime` before `create`, not
   after. `add` has a seventh step, `remember` — the local roster append — and its `install`
   step is the *binary* install, while the bundle install is journaled as `join`.
 - **The startup service keeps today's unit label and path** — `dev.ouroboros.runtime.<digest>`
   in `~/Library/LaunchAgents`, `ouroboros-<digest>.service` under `~/.config/systemd/user`
-  — so a unit installed by 0.1.9 or 0.1.10 is the same file. §11's other cuts were **not**
-  made: `fleet_service.rs` still writes the ownership marker and still classifies a unit as
-  foreign or modified, `status` still reports a second unit for the same data directory,
-  and `install`/`remove` still refuse a foreign one. What is gone is the `--adopt` flag:
-  every caller passes `adopt: false`, so the refusal text that still names `--adopt` names
-  a flag the CLI no longer has.
+  — rather than §11's `com.ouroboros.<slug>`, so a unit installed by 0.1.9 or 0.1.10 is the
+  same file this build manages; renaming it would strand a loaded LaunchAgent at a path
+  nothing looks at any more. `<digest>` is what §11 calls `<slug>`. Everything else in §11
+  landed as written: no marker, no `--adopt`, no foreign/modified classification, no
+  second-unit scan. One thing §11 does not mention and `install` has to do: on macOS it
+  reads the `Label` out of a plist it replaces and boots that job out too, because
+  overwriting the file would otherwise leave a job running with nothing behind it.
 - **`fleet.status` has a `profile` key** — `null`, or `{reason: unsupported_profile_schema,
-  message}` — and `fleet.doctor` a `fleet_profile` check, both carrying the one schema-1
-  sentence.
+  message}` — and `fleet.doctor` a `fleet_profile` check, both carrying the one unsupported-
+  profile sentence. `fleet.doctor` also gained a live `epmd_module` check §4 does not name:
+  it passes only when the node's epmd module is `Ouroboros.Cluster.Epmd` *and*
+  `-start_epmd false` is in force, and otherwise names the module actually in use.
 - **`fleet.forget_session_owner` takes `machine` only.** No confirmation flag and no
-  tombstone precondition: `ouro fleet forget NAME` is the operator's statement.
-- **`--frames` does not accept `--dry-run`.** `FleetSetupArgs::frames` and
-  `LeaveSetupArgs::frames` conflict with `json`, `yes` *and* `dry_run`, so a dry run is a
-  terminal or `--json` front end only.
-- **`fleet.deployment.status` answers carry `summary`** (from the `done` frame), `log`
-  (live frames, or the scrubbed tail of `deploy/<id>.log` from a journal), `last_error`
-  (the journal's, or `worker_exited` from the broker's memory of program exits) and
-  `running`. A resume rebuilds argv from the journal's `kind`, `target` and `paths`, with
-  the identity and the service falling back to their defaults.
+  tombstone precondition. `ouro fleet forget NAME` additionally refuses, before touching
+  the profile, when no runtime is answering: the runtime resolves a machine name through
+  the profile's members, so the roster edit would strand evidence nothing could name again.
+- **`fleet.deployment.status` answers carry `summary`, `residue` and `running`** beyond
+  §9's list, and `fleet.deployment.cancel` answers `{state, residue}`. Both status
+  projections read `residue` out of the journal, because a program writes residue down
+  rather than sending it as a frame. §9's reason codes gained `operation_in_progress`,
+  `target_in_progress` (carrying `data.operation`), `operation_request_incomplete`,
+  `worker_refused` and `unknown_challenge`; the engine's own refusal for argv that
+  contradicts a journal is `resume_mismatch`.
+- **`fleet.devices` drops `issuer`, `owner` and `attached` from inside each device row** as
+  well as from the top of the answer. §12 only asks for the answer; a row is
+  `ouro fleet devices --json` verbatim, so an older `ouro` beside a newer runtime would
+  otherwise put them back inside the row.
 - **Frames need no `v` field**; a `v` that is present and is not `1` is refused. This is
   the helper protocol (§7). The `--frames` protocol (§8) carries no `v` at all.
-- **`unknown_challenge` is a deployment reason code**, for an id the operation is not
-  waiting on.
 - **The TUI does not print the web address of this runtime's Devices page.** §10 asks for
   it; `devices.rs` prints the per-row recipe and a manual `ouro fleet add USER@ADDRESS
   --machine NAME` line, and nothing about the web.
-- **`fleet_id` is 24 hex characters**, `random_hex(12)`. §2's example says 32.
+
+### Two places the code still disagrees with itself
+
+Recorded here because the documents follow the code, and these two cannot both be right.
+
+- **The unsupported-profile sentence exists twice, in two wordings.**
+  `lib/ouroboros/cluster.ex` says *this fleet's profile was written by a different version
+  of Ouroboros than the one running here; run `ouro fleet leave` here and set the fleet up
+  again.*; `tui/src/fleet.rs`'s `SCHEMA_1_SENTENCE` still says *this fleet was created by
+  an older Ouroboros; …*. Both modules state that no surface invents its own wording for
+  it, and today the CLI and the runtime do exactly that. FLEET.md quotes the runtime's.
+- **The journal's `state` is not yet §6's five words.** §6 and the broker speak
+  `running|waiting|completed|failed|cancelled`; the Rust `OperationState` still serializes
+  eleven (`inspecting`, `awaiting_host_trust`, `deploying`, `interrupted` and the rest).
+  FLEET.md documents the five, which is the contract and where the code is going.
