@@ -311,6 +311,12 @@ fn a_declined_review_changes_nothing_and_exits_non_zero() {
     let done = done.expect("a done frame");
     assert_eq!(done["state"], "failed", "{done}");
     assert_eq!(done["reason"], "review_declined", "{done}");
+    assert!(
+        done["operation"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("op-")),
+        "every terminal frame names its operation: {done}"
+    );
 
     let (code, stderr) = frames.finish();
     assert_ne!(code, 0, "a refused operation exits non-zero");

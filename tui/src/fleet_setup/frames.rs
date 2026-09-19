@@ -192,6 +192,9 @@ pub fn run(
 
     let mut engine = engine;
     engine.conversation = conversation;
+    // The broker keys everything on the operation id, so every terminal frame carries
+    // it — including the one a refusal produces, which has no `Outcome` to read it from.
+    let operation = engine.request.operation.clone();
     sink.emit(json!({"event": "state", "state": "running"}));
     let result = engine.run();
     // The reader thread ends at EOF; it is deliberately not joined on the happy path,
@@ -218,6 +221,7 @@ pub fn run(
             sink.emit(json!({
                 "event": "done",
                 "state": state,
+                "operation": operation,
                 "reason": reason,
                 "summary": super::sanitize_remote_text(&format!("{error:#}"), 400),
             }));
