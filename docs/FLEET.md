@@ -205,12 +205,16 @@ same file.
 
 `install` refuses without a cluster identity, because `service-run` refuses to start
 without one and a unit installed first would only crash-loop. It writes that one path and
-overwrites what it wrote there before. A file at that path this code did not write is
-reported with the digest of what is actually there and left alone — `install` and `remove`
-both refuse it, and neither touches any other unit. `remove` deletes only the file this
-code wrote, after gating the runtime with the same idle check `ouro stop --require-idle`
-applies and after asking the manager to unload it. `disable` is the first half of taking a
-supervised runtime down:
+overwrites the unit it wrote there before. A file at that path this code did not write is
+reported with the digest of what is actually there and left alone: `install`, `disable`
+and `remove` all refuse it (`unit_foreign`), and none of them touches any other unit. A
+unit of ours that has been edited by hand since it was written is still ours — every unit
+carries a line naming the data directory it serves and a digest of its own body — so
+`install` refuses it `unit_modified` rather than overwriting the edit, while `remove` does
+delete it and says in its output that the body no longer matched that digest. `remove`
+deletes only the file this code wrote, after gating the runtime with the same idle check
+`ouro stop --require-idle` applies and after asking the manager to unload it. `disable` is
+the first half of taking a supervised runtime down:
 
 ```sh
 ouro stop --require-idle
