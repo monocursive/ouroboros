@@ -1232,6 +1232,12 @@ defmodule Ouroboros.Cluster do
   # machine left behind by an upgrade is holding. So it names the disagreement rather than
   # its direction, and keeps §2's second half exactly. There is no migration either way,
   # so there is no other advice to give, and no surface invents its own wording for it.
+  # Both epmd postures have the same repair, and it is the same one for every fleet: the
+  # packaged client is what writes the vm.args that name the module and turn the daemon
+  # off, so a node that has neither was started some other way.
+  @epmd_module_repair "Start this machine with its packaged `ouro`, which generates the " <>
+                        "vm.args naming Ouroboros.Cluster.Epmd and passing -start_epmd false"
+
   @unsupported_profile_message "this fleet's profile was written by a different version " <>
                                  "of Ouroboros than the one running here; run " <>
                                  "`ouro fleet leave` here and set the fleet up again."
@@ -2176,6 +2182,11 @@ defmodule Ouroboros.Cluster do
           else: nil
         )
       ),
+      epmd_module_check(
+        running_epmd_module(),
+        start_epmd_disabled?(),
+        fleet_profile_active?()
+      ),
       # A machine on a profile from an older Ouroboros cannot form a fleet with a machine
       # on this one, and the sentence it is told is the same one `fleet.status` carries.
       doctor_check(
@@ -2286,6 +2297,97 @@ defmodule Ouroboros.Cluster do
 
     checks ++ machine_checks
   end
+
+  @doc """
+  Whether this node's distribution is finding peers the way its fleet says it does.
+
+  This is the one fault in the lane an operator could never find for themselves.
+  `inet_tcp_dist:call_epmd_function/3` gates every epmd callback but `register_node/3` on
+  `erlang:function_exported/3`, which answers `false` for a module that is named but has
+  not been *loaded* — and then applies `erl_epmd` instead, with nothing logged anywhere.
+  A node in that state binds an ephemeral port and dials peers through a port mapper this
+  fleet does not run, while every other check here stays green. Nothing inside
+  `Ouroboros.Cluster.Epmd` can report it, because the fallback is taken before that module
+  is reached.
+
+  So what is checked is not what this build *would* answer. It is which module
+  `net_kernel` is actually asking, and whether the daemon was turned off — two readings
+  taken from the running VM, and a decision that is a pure function of them so a test can
+  hold it to each case rather than to the one the test VM happens to be in.
+
+  A machine that is not running from a fleet profile is not judged: its distribution is
+  whatever started it, which is a fact worth printing and not a fault.
+  """
+  @spec epmd_module_check(module() | nil, boolean(), boolean()) :: map()
+  def epmd_module_check(module, daemon_disabled?, profile_active?)
+
+  def epmd_module_check(module, _daemon_disabled?, false) do
+    doctor_check(
+      :epmd_module,
+      :ok,
+      "This machine is not running from a fleet profile, so its distribution is whatever " <>
+        "started it; peer ports come from #{epmd_module_label(module)}",
+      nil
+    )
+  end
+
+  def epmd_module_check(module, true, true) when module == __MODULE__.Epmd do
+    doctor_check(
+      :epmd_module,
+      :ok,
+      "Peer ports are resolved from this fleet's own profile by " <>
+        "#{epmd_module_label(module)}, and no port mapper is started",
+      nil
+    )
+  end
+
+  def epmd_module_check(module, false, true) when module == __MODULE__.Epmd do
+    doctor_check(
+      :epmd_module,
+      :error,
+      "Distribution resolves peers with #{epmd_module_label(module)}, but this node was " <>
+        "not started with `-start_epmd false`, so its launcher may have left an EPMD " <>
+        "daemon running that this fleet does not use",
+      @epmd_module_repair
+    )
+  end
+
+  def epmd_module_check(module, _daemon_disabled?, true) do
+    doctor_check(
+      :epmd_module,
+      :error,
+      "Distribution is resolving peers with #{epmd_module_label(module)} instead of " <>
+        "Ouroboros.Cluster.Epmd, so this node is registering with and dialling through a " <>
+        "port mapper this fleet does not run",
+      @epmd_module_repair
+    )
+  end
+
+  defp epmd_module_label(nil),
+    do: "a module that cannot be determined (`-epmd_module` and `kernel epmd_module` disagree)"
+
+  defp epmd_module_label(module), do: inspect(module)
+
+  # `net_kernel:epmd_module/0` raises when `-epmd_module` and the kernel application
+  # environment disagree, which is itself one of the postures this check exists to name.
+  # It must never be the thing that makes `fleet.doctor` fail to answer.
+  defp running_epmd_module do
+    :net_kernel.epmd_module()
+  rescue
+    _error -> nil
+  catch
+    _kind, _reason -> nil
+  end
+
+  defp start_epmd_disabled? do
+    case :init.get_argument(:start_epmd) do
+      {:ok, values} -> Enum.any?(values, &(&1 == [~c"false"]))
+      _absent -> false
+    end
+  end
+
+  defp fleet_profile_active?,
+    do: match?({:ok, _fleet_id, _profile, _opts}, __MODULE__.Monitor.fleet_profile_storage())
 
   defp doctor_check(id, status, message, guidance, target \\ nil) do
     %{id: id, status: status, message: message}

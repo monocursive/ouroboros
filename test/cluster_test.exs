@@ -870,6 +870,137 @@ defmodule Ouroboros.ClusterTest do
     end
   end
 
+  # The fault an operator could never find for themselves, made visible.
+  # `inet_tcp_dist:call_epmd_function/3` gates on `erlang:function_exported/3` and, for a
+  # module that is named but not loaded, silently applies `erl_epmd` instead. A node in
+  # that state dials through a port mapper the fleet does not run while every other check
+  # in `fleet.doctor` stays green, and nothing inside `Ouroboros.Cluster.Epmd` can say so,
+  # because the fallback is taken before that module is reached.
+  describe "the epmd module doctor check" do
+    test "judges the two readings it takes from the running VM, and nothing else" do
+      # Pure in its three inputs on purpose: the readings are one line each, and every
+      # posture but this test VM's own is unreachable from inside this VM.
+      assert %{id: :epmd_module, status: :ok, message: healthy} =
+               Cluster.epmd_module_check(Cluster.Epmd, true, true)
+
+      assert healthy =~ "Ouroboros.Cluster.Epmd"
+      assert healthy =~ "no port mapper is started"
+
+      # A green check never carries remediation: a newcomer must not be told to repair
+      # working state. `merge_live_doctor` in tui/src/fleet.rs leans on that.
+      refute Map.has_key?(Cluster.epmd_module_check(Cluster.Epmd, true, true), :guidance)
+    end
+
+    test "names the module actually in use when it is not this fleet's" do
+      assert %{id: :epmd_module, status: :error, message: message, guidance: guidance} =
+               Cluster.epmd_module_check(:erl_epmd, true, true)
+
+      assert message =~ ":erl_epmd"
+      assert message =~ "instead of Ouroboros.Cluster.Epmd"
+      assert message =~ "port mapper this fleet does not run"
+      assert guidance =~ "packaged `ouro`"
+
+      # The silent-fallback posture and an outright misconfiguration read the same way,
+      # because to an operator they are the same fault.
+      assert %{status: :error, message: undeterminable} =
+               Cluster.epmd_module_check(nil, true, true)
+
+      assert undeterminable =~ "cannot be determined"
+      assert undeterminable =~ "port mapper this fleet does not run"
+    end
+
+    test "the right module with the daemon left on is its own refusal" do
+      assert %{id: :epmd_module, status: :error, message: message, guidance: guidance} =
+               Cluster.epmd_module_check(Cluster.Epmd, false, true)
+
+      assert message =~ "Ouroboros.Cluster.Epmd"
+      assert message =~ "-start_epmd false"
+      assert message =~ "EPMD daemon"
+      assert guidance =~ "packaged `ouro`"
+    end
+
+    test "a machine with no fleet profile is described, not judged" do
+      # Its distribution is whatever started it. That is a fact worth printing — the
+      # module is still named — and not a fault to fail a doctor over.
+      for module <- [Cluster.Epmd, :erl_epmd, nil] do
+        assert %{id: :epmd_module, status: :ok, message: message} =
+                 Cluster.epmd_module_check(module, false, false)
+
+        assert message =~ "not running from a fleet profile"
+      end
+    end
+
+    test "it is in the live document, in the shape every other check has" do
+      # No profile is active in this VM by default, so this is the described-not-judged
+      # branch — and the point here is the document, not the verdict.
+      doctor = Cluster.fleet_doctor()
+      assert %{id: :epmd_module, status: status, message: message} = find_check(doctor)
+      assert status in [:ok, :error]
+      assert is_binary(message) and message != ""
+
+      # `merge_live_doctor` reads status, message and guidance off every entry without
+      # knowing any check's id, so a new check reaches `ouro fleet doctor` with no Rust
+      # change — provided it has exactly those keys.
+      assert %{id: _, status: _, message: _} = find_check(doctor)
+    end
+
+    test "with a fleet profile active it fails, because this VM has no epmd module" do
+      fleet_id = "5ee5ee5e4dd4dd4d3cc3cc3c"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Cluster.reset_membership_cache()
+
+      with_env(%{"OUROBOROS_FLEET_ID" => fleet_id}, fn ->
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+
+        on_exit(fn ->
+          Cluster.reset_membership_cache()
+
+          if previous_data_dir,
+            do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+            else: Application.delete_env(:ouroboros, :data_dir)
+        end)
+
+        write_test_fleet_profile!(fleet_dir, fleet_id)
+
+        # This test VM was started by `mix`, not by the packaged client: it has no
+        # `-epmd_module` and no `-start_epmd false`, which is exactly the posture the
+        # check exists to name. It is the end-to-end proof that the readings are live.
+        assert :net_kernel.epmd_module() == :erl_epmd
+        assert :init.get_argument(:start_epmd) == :error
+
+        doctor = Cluster.fleet_doctor()
+        assert %{status: :error, message: message} = find_check(doctor)
+        assert message =~ ":erl_epmd"
+        refute doctor.healthy?
+
+        # `kernel epmd_module` is the application-environment half of `-epmd_module`, and
+        # `net_kernel:epmd_module/0` reads it, so naming this fleet's module here is the
+        # only way from inside a `mix`-started VM to reach the second reading. It still
+        # has no `-start_epmd false` — nothing can add an emulator flag to a running
+        # node — which is precisely the posture that branch is for.
+        previous_module = Application.get_env(:kernel, :epmd_module)
+        Application.put_env(:kernel, :epmd_module, Cluster.Epmd)
+
+        on_exit(fn ->
+          if is_nil(previous_module),
+            do: Application.delete_env(:kernel, :epmd_module),
+            else: Application.put_env(:kernel, :epmd_module, previous_module)
+        end)
+
+        assert :net_kernel.epmd_module() == Cluster.Epmd
+
+        assert %{status: :error, message: daemon_message} = find_check(Cluster.fleet_doctor())
+        assert daemon_message =~ "-start_epmd false"
+        assert daemon_message =~ "EPMD daemon"
+      end)
+    end
+
+    defp find_check(doctor), do: Enum.find(doctor.checks, &(&1.id == :epmd_module))
+  end
+
   # The dialer's pacing, observed through the dialer. `Ouroboros.Cluster.DialBackoff` is
   # unit-tested as pure arithmetic in `test/cluster_dial_backoff_test.exs`; what these
   # prove is that `RosterEpmd` is actually wired to it — that the sweeps it skips are
