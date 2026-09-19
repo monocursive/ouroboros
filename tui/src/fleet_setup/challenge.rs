@@ -348,6 +348,27 @@ impl Registry {
         self.signal.notify_all();
     }
 
+    /// Expire every challenge nobody has answered, and leave answered ones alone.
+    ///
+    /// What §8's stdin EOF means for a question still on the wire. The peer that closed
+    /// the pipe was the only one who could ever answer it — there is exactly one, and
+    /// there is no reattach — so the five minutes the deadline would otherwise run are
+    /// five minutes of an operation parked on an answer that cannot arrive, holding its
+    /// flock, refusing every `--operation ID` resume `operation_in_progress`.
+    ///
+    /// An answer that *has* arrived is untouched: a `respond` and an EOF in the same
+    /// breath is the ordinary way a peer says its last word, and that word is kept.
+    pub fn expire_unanswered(&self) {
+        let mut state = self.lock();
+        for pending in state.pending.values_mut() {
+            if pending.consumed || pending.answer.is_some() {
+                continue;
+            }
+            pending.deadline = Instant::now();
+        }
+        self.signal.notify_all();
+    }
+
     /// Drop every pending challenge, so a disconnected session's unconsumed secret has
     /// nothing left to be delivered to. The proposal: "A lost authentication session
     /// invalidates its pending challenge and drops any unconsumed secret."
@@ -436,6 +457,77 @@ pub fn host_key_verification_command(algorithm: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kind is answered by the shape that answers *that* question, and by no other.
+    ///
+    /// The one that matters is `accept` against a secret: §8 gives `respond` two shapes
+    /// and a peer that sends the wrong one is a peer this process must not interpret.
+    /// An `{"accept": true}` treated as an empty password would hand `ssh` a blank
+    /// secret and burn one of its three attempts against the target's account; an
+    /// `{"secret": "..."}` treated as approval would accept a plan nobody read.
+    #[test]
+    fn a_challenge_is_answered_by_the_shape_that_answers_it() {
+        for kind in [ChallengeKind::Password, ChallengeKind::Passphrase] {
+            let refused = Answer::decode(kind, &json!({"accept": true}))
+                .expect_err("`accept` never answers a secret");
+            assert_eq!(super::super::reason_of(&refused), Some("invalid_response"));
+            // Not even `false`, and not an empty secret either.
+            assert!(Answer::decode(kind, &json!({"accept": false})).is_err());
+            assert!(Answer::decode(kind, &json!({"approve": true})).is_err());
+            assert!(Answer::decode(kind, &json!({})).is_err());
+            assert!(matches!(
+                Answer::decode(kind, &json!({"secret": "s"})).expect("a secret"),
+                Answer::Secret(_)
+            ));
+        }
+
+        for kind in [ChallengeKind::HostTrust, ChallengeKind::Review] {
+            let refused = Answer::decode(kind, &json!({"secret": "yes"}))
+                .expect_err("a secret never answers a decision");
+            assert_eq!(super::super::reason_of(&refused), Some("invalid_response"));
+            assert!(Answer::decode(kind, &json!({"accept": "true"})).is_err());
+        }
+        assert!(matches!(
+            Answer::decode(ChallengeKind::HostTrust, &json!({"accept": false}))
+                .expect("a decision"),
+            Answer::Trust(false)
+        ));
+        assert!(matches!(
+            Answer::decode(ChallengeKind::Review, &json!({"accept": true})).expect("a decision"),
+            Answer::Approval(true)
+        ));
+    }
+
+    /// §8's stdin EOF, at the registry: what nobody answered expires now, and what
+    /// somebody did answer is still delivered.
+    #[test]
+    fn expiring_the_unanswered_leaves_an_answer_that_already_arrived() {
+        let registry = Registry::new();
+        let answered = registry
+            .issue(ChallengeKind::Review, json!({}), 0)
+            .expect("a challenge");
+        let unanswered = registry
+            .issue(ChallengeKind::HostTrust, json!({}), 0)
+            .expect("a challenge");
+        registry
+            .respond(&answered.challenge, &json!({"accept": true}))
+            .expect("an answer that arrived before the pipe closed");
+
+        registry.expire_unanswered();
+
+        assert!(matches!(
+            registry.wait(&answered.challenge).expect("the kept answer"),
+            Answer::Approval(true)
+        ));
+        let expired = registry
+            .wait(&unanswered.challenge)
+            .expect_err("nothing can answer this one now");
+        assert_eq!(
+            super::super::reason_of(&expired),
+            Some("challenge_expired"),
+            "{expired:#}"
+        );
+    }
 
     /// An answer is accepted once, and a second one is refused rather than applied.
     #[test]
