@@ -1130,6 +1130,66 @@ fn kr3_a_replace_install_refused_for_its_machine_name_still_destroyed_the_fleet(
     );
 }
 
+/// A machine whose runtime is up refuses a `replace` with its own reason, and keeps
+/// everything it had.
+///
+/// Two findings meet here. The stop gate is the one thing that stood between a
+/// `replace: true` and a fleet directory deleted out from under a live runtime, and it
+/// is now inside `join` — under the same lock as the removal — rather than inside a
+/// `leave` the helper called first. And the refusal says *what is wrong*: every failure
+/// of that `leave` used to be flattened to `fleet_present`, which says "that machine
+/// already belongs to a different fleet" about a machine whose only problem is that it
+/// has not been stopped. An operator reading `fleet_present` looks for another fleet;
+/// an operator reading `runtime_running` runs `ouro stop`.
+#[test]
+fn kr3_a_replace_into_a_running_runtime_says_runtime_running_and_keeps_the_fleet() {
+    let world = World::new("replace-live");
+    let target = private_dir(&world.root.join("data"));
+    let issuer = Issuer::new(&world.root, "studio");
+    let other = Issuer::new(&world.root, "other");
+    let ports = ephemeral();
+
+    let mut helper = Helper::start(&world, &target);
+    assert_eq!(
+        helper.ask(
+            "install",
+            json!({
+                "bundle": issuer.bundle(),
+                "machine": "pi",
+                "host": "127.0.0.1",
+                "ports": { "gateway": ports.gateway, "dist": ports.dist },
+            }),
+        )["ok"],
+        json!(true)
+    );
+    let before = fs::read(target.join("fleet/cookie")).expect("the installed cookie");
+
+    // A runtime owns this data directory now.
+    let _runtime = FakeRuntime::publish(&target);
+    let refused = helper.ask(
+        "install",
+        json!({
+            "bundle": other.bundle(),
+            "machine": "pi",
+            "host": "127.0.0.1",
+            "replace": true,
+        }),
+    );
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+    assert_eq!(refused["reason"], json!("runtime_running"), "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("ouro stop")),
+        "the refusal names the repair: {refused}"
+    );
+    assert_eq!(
+        fs::read(target.join("fleet/cookie")).expect("the cookie that was there"),
+        before,
+        "a refused replace took the credentials of a running machine"
+    );
+}
+
 /// A pipe, as two owned halves. `std::io::pipe` is not on this floor's toolchain, so
 /// this is the two-line `libc` version.
 fn os_pipe() -> (fs::File, fs::File) {

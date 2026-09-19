@@ -549,19 +549,24 @@ impl Helper {
             Some(_) => anyhow::bail!("`ports` must be an object"),
         };
 
-        if replace {
-            // The operator asked for whatever is here to be replaced. `leave` is the
-            // only thing that removes a fleet directory, and it is stop-gated, so a
-            // running runtime still refuses.
-            fleet::leave(data_dir).map_err(|error| fleet::Refusal {
-                reason: "fleet_present",
-                detail: format!(
-                    "the existing fleet directory could not be removed before replacing it: {error:#}"
-                ),
-            })?;
-        }
-
-        let profile = fleet::join(data_dir, &bundle, &machine, &host, ports)?;
+        // The operator's `replace` is handed to `join` rather than performed here.
+        //
+        // It used to be a `fleet::leave` on this line, before `join` — which owns
+        // `validate_bundle`, `validate_joined_machine`, `canonical_host` and
+        // `validate_ports` — had looked at any of it. A request refused for a cookie
+        // that is not 64 hex characters, or for a machine name this build will not
+        // mint, had by then deleted the cookie, the shared CA key and this machine's
+        // node key, and installed nothing in their place. Two operations under two
+        // locks, with a refusal in between.
+        //
+        // One operation now: `join` validates, takes the stop gate once, and removes
+        // the old directory immediately before it publishes the new one.
+        let existing = if replace {
+            fleet::Existing::Replace
+        } else {
+            fleet::Existing::Refuse
+        };
+        let profile = fleet::join_over(data_dir, &bundle, &machine, &host, ports, existing)?;
         Ok(json!({
             "machine": profile.machine,
             "node": profile.node,

@@ -2885,6 +2885,20 @@ pub fn bundle(data_dir: &Path) -> Result<Bundle> {
     Ok(bundle)
 }
 
+/// What a join does about a fleet directory that is already there.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Existing {
+    /// Refuse it: `already_installed` for the idempotent replay, `fleet_present` for a
+    /// profile that is somebody's identity. Nothing on that machine is touched.
+    #[default]
+    Refuse,
+    /// Replace it, because §7's `install` was asked to (`replace: true`). The deletion
+    /// happens under this function's own lock and *after* every check that could refuse
+    /// the request, which is the difference between "the operator asked for this fleet
+    /// to be replaced" and "a malformed request left a machine with nothing".
+    Replace,
+}
+
 /// Give this machine an identity inside a fleet that already exists.
 ///
 /// The bundle's CA signs exactly one leaf — this machine's — and the private key for it
@@ -2898,13 +2912,38 @@ pub fn join(
     host: &str,
     ports: Ports,
 ) -> Result<Profile> {
+    join_over(data_dir, bundle, machine, host, ports, Existing::Refuse)
+}
+
+/// The same, told what to do about a fleet that is already on this machine.
+///
+/// §7's `install` used to reach `Existing::Replace` by calling [`leave`] first, from the
+/// helper, before anything about the request had been looked at — so a bundle with a
+/// cookie that is not 64 hex characters, or a machine name this build will not mint,
+/// deleted the cookie, the shared CA key and this machine's node key and then refused.
+/// The two halves are one operation here: one lock, every refusal raised before the old
+/// directory is touched, and the removal immediately before the rename that publishes
+/// the new one.
+pub fn join_over(
+    data_dir: &Path,
+    bundle: &Bundle,
+    machine: &str,
+    host: &str,
+    ports: Ports,
+    existing: Existing,
+) -> Result<Profile> {
     validate_bundle(bundle)?;
     validate_joined_machine(machine)?;
     let host = canonical_host(host)?;
     validate_ports(ports).map_err(|error| refusing("invalid_request", error))?;
     ensure_usable_ipv4_resolution(&host).map_err(|error| refusing("unusable_host", error))?;
     ensure_data_dir(data_dir)?;
-    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet helper install")?;
+    // The stop gate, and the one lock this whole operation runs under — including the
+    // removal a `replace` performs, which used to take this same lock separately from
+    // inside `leave`. Its refusal carries §7's own reason: an operator told `helper
+    // refused` about a machine whose runtime is simply still up has been told nothing.
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet helper install")
+        .map_err(|error| refusing("runtime_running", error))?;
     ensure_local_bind_address(&host).map_err(|error| refusing("unusable_host", error))?;
 
     let dist_port = ports.dist.unwrap_or(bundle.dist_port);
@@ -2913,11 +2952,19 @@ pub fn join(
     // `symlink_metadata`, because `try_exists` follows a link: a `fleet` symlink
     // pointing anywhere would read as absent and the write would then fail with whatever
     // the filesystem said. This is a state an orchestrator has to be able to branch on.
+    //
+    // A `replace` only *notes* that there is something to remove. What it removes it
+    // with is `remove_fleet_dir`, below, once nothing can refuse any more.
+    let mut replacing = false;
     match fs::symlink_metadata(&final_dir) {
-        Ok(metadata) if metadata.file_type().is_dir() => {
-            return refuse_existing_fleet(data_dir, bundle, machine)
-        }
+        Ok(metadata) if metadata.file_type().is_dir() => match existing {
+            Existing::Refuse => return refuse_existing_fleet(data_dir, bundle, machine),
+            Existing::Replace => replacing = true,
+        },
         Ok(metadata) => {
+            // Never replaced, whatever was asked: a symlink or a file wearing this name
+            // is not a fleet this machine installed, and removing it would be removing
+            // something nobody here can describe.
             return refuse(
                 "fleet_present",
                 format!(
@@ -2925,7 +2972,7 @@ pub fn join(
                     final_dir.display(),
                     metadata.file_type().is_symlink()
                 ),
-            )
+            );
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -2980,6 +3027,13 @@ pub fn join(
         "newly signed node credentials",
     )
     .map_err(|error| refusing("bundle_invalid", error))?;
+    // The last thing before the publishing rename, and the only step between the two.
+    // Everything that could have refused this request has run: the bundle is valid, the
+    // machine name is one this build mints, the host resolves and binds, the ports are
+    // free, and the leaf has been signed and checked against the CA it came with.
+    if replacing {
+        remove_fleet_dir(&final_dir).map_err(|error| refusing("fleet_present", error))?;
+    }
     install_new_profile(data_dir, &profile, &materials)?;
     Ok(profile)
 }
@@ -3487,6 +3541,11 @@ mod tests {
             reason_of(&join(&four, &broken, "VPS", "127.0.0.1", ephemeral_ports()).unwrap_err()),
             "invalid_request"
         );
+        assert!(
+            !fleet_dir(&four).try_exists().unwrap(),
+            "nothing was written"
+        );
+
         assert!(
             !fleet_dir(&four).try_exists().unwrap(),
             "nothing was written"
