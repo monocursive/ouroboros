@@ -1757,7 +1757,13 @@ pub struct FleetSetupArgs {
     /// Speak NDJSON frames on this process's own stdin and stdout instead of talking to
     /// a terminal. This is what the runtime's broker runs as a port program; it is
     /// documented rather than hidden so an operator can drive the same protocol.
-    #[arg(long, conflicts_with_all = ["json", "yes", "dry_run"])]
+    ///
+    /// `--dry-run` is allowed with it, and is how the broker checks that the worker it
+    /// is about to run really is this `ouro` speaking §8: the plan's lines arrive as
+    /// `log` frames, `done` is `completed`, and nothing is written anywhere. `--json`
+    /// and `--yes` are not: stdout is frames, and a review answered by a flag is not a
+    /// review anyone on the other end of the pipe agreed to.
+    #[arg(long, conflicts_with_all = ["json", "yes"])]
     pub frames: bool,
 
     /// Explicitly labelled manual startup instead of a managed user service.
@@ -1795,7 +1801,7 @@ pub struct LeaveSetupArgs {
 
     /// Speak NDJSON frames on this process's own stdin and stdout. See
     /// [`FleetSetupArgs::frames`].
-    #[arg(long, requires = "machine", conflicts_with_all = ["json", "yes", "dry_run"])]
+    #[arg(long, requires = "machine", conflicts_with_all = ["json", "yes"])]
     pub frames: bool,
 
     /// Resume (or name) one operation instead of starting a new one. An operation id is
@@ -2161,6 +2167,41 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["ouro", "fleet", "service", "install", "--adopt"]).is_err());
         assert!(Cli::try_parse_from(["ouro", "fleet", "service", "start"]).is_err());
+    }
+
+    /// `--frames` takes `--dry-run`, and still refuses `--json` and `--yes`.
+    ///
+    /// The broker's smoke test for "is the worker I am about to run really this `ouro`
+    /// speaking §8" is a dry run over frames, so the combination has to parse. The other
+    /// two do not: stdout is frames rather than a document, and a review answered by a
+    /// flag is not a review whoever holds the pipe agreed to.
+    #[test]
+    fn frames_takes_a_dry_run_but_never_json_or_yes() {
+        for kind in [
+            vec!["fleet", "setup", "--machine", "studio"],
+            vec!["fleet", "add", "me@100.64.0.2", "--machine", "pi"],
+            vec!["fleet", "leave", "--machine", "pi", "--user", "me"],
+        ] {
+            let mut dry = vec!["ouro"];
+            dry.extend(kind.iter().copied());
+            dry.extend(["--dry-run", "--frames"]);
+            assert!(
+                Cli::try_parse_from(&dry).is_ok(),
+                "`{}` must parse",
+                dry.join(" ")
+            );
+
+            for refused in ["--json", "--yes"] {
+                let mut argv = vec!["ouro"];
+                argv.extend(kind.iter().copied());
+                argv.extend(["--frames", refused]);
+                assert!(
+                    Cli::try_parse_from(&argv).is_err(),
+                    "`{}` must not parse",
+                    argv.join(" ")
+                );
+            }
+        }
     }
 
     /// `--require-idle` is opt-in, and the plain stop keeps its exact shape.

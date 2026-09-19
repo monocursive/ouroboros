@@ -550,3 +550,176 @@ fn hostile_names_are_refused_without_reaching_stdout_as_control_characters() {
         let _ = std::fs::remove_file(&log);
     }
 }
+
+/// `--dry-run --frames`: the broker's smoke test that the worker it is about to run
+/// really is this `ouro` speaking §8.
+///
+/// It runs before any operation does, against a throwaway data directory, so it must
+/// ask nothing and write nothing. What comes back for every kind is `state running`
+/// first, §8 events and nothing else on stdout, and a terminal `done` — and the data
+/// directory afterwards holds exactly what it held before.
+///
+/// `setup` is the kind that can resolve a whole plan here, because it needs no second
+/// machine: it is the one asserted all the way to `done completed`, exit 0, with the
+/// plan's own lines as `log` frames. A dry-run `add` over frames against a machine that
+/// really answers is in `fleet_setup_engine.rs`, where there is an `sshd` to answer it;
+/// the one here is pointed at a closed loopback port, so it resolves nothing and asks
+/// nothing, and what it proves is that the frames are still §8's and nothing was
+/// written. Deliberately not port 22: a suite that needs no network must not go
+/// knocking on the developer's own `sshd`.
+#[test]
+fn a_dry_run_over_frames_prints_the_plan_asks_nothing_and_writes_nothing() {
+    let (closed, _) = test_ports();
+    let closed = closed.to_string();
+    for (label, args) in [
+        (
+            "setup",
+            vec![
+                "fleet",
+                "setup",
+                "--machine",
+                "lab",
+                "--address",
+                "127.0.0.1",
+                "--no-service",
+            ],
+        ),
+        (
+            "add",
+            vec![
+                "fleet",
+                "add",
+                "me@127.0.0.1",
+                "--machine",
+                "pi",
+                "--port",
+                &closed,
+                "--no-service",
+            ],
+        ),
+        (
+            "leave",
+            vec!["fleet", "leave", "--machine", "pi", "--user", "me"],
+        ),
+    ] {
+        let root = scratch(&format!("dry-{label}"));
+        let data = root.join("data");
+        private_dir(&data);
+        let log = root.join("stderr.log");
+
+        // `add` and `leave` plan against a fleet, so there has to be one here first —
+        // and `setup` is what makes it, through this same binary.
+        if label != "setup" {
+            let (gateway, dist) = test_ports();
+            let made = Command::new(OURO)
+                .args(["fleet", "setup", "--machine", "lab"])
+                .args(["--address", "127.0.0.1", "--no-service", "--yes", "--json"])
+                .env("OUROBOROS_DATA_DIR", &data)
+                .env("OUROBOROS_TEST_GATEWAY_PORT", gateway.to_string())
+                .env("OUROBOROS_TEST_DIST_PORT", dist.to_string())
+                .stdin(Stdio::null())
+                .output()
+                .expect("a fleet to plan against");
+            assert!(
+                made.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+
+        let before = listing(&data);
+        let before_deploy = listing(&data.join("deploy"));
+        let mut dry = args.clone();
+        dry.push("--dry-run");
+        let mut frames = Frames::start(&data, &log, &dry);
+        // A dry run needs nothing from stdin, and §8 says EOF finishes the operation.
+        frames.close_stdin();
+
+        let mut seen: Vec<Value> = Vec::new();
+        while let Some(frame) = frames.next() {
+            seen.push(frame);
+        }
+        let (code, stderr) = frames.finish();
+
+        // Every line is one of §8's five events, and nothing else.
+        for frame in &seen {
+            let event = frame["event"].as_str().unwrap_or_default();
+            assert!(
+                matches!(event, "state" | "step" | "log" | "challenge" | "done"),
+                "{label}: `{event}` is not one of §8's five events: {frame}"
+            );
+        }
+        assert_eq!(seen[0]["event"], "state", "{label}: {seen:?}");
+        assert_eq!(seen[0]["state"], "running", "{label}: {seen:?}");
+        assert!(
+            !seen.iter().any(|frame| frame["event"] == "challenge"),
+            "{label}: a dry run asks nobody anything: {seen:?}"
+        );
+        let done = seen.last().expect("a done frame");
+        assert_eq!(done["event"], "done", "{label}: {seen:?}");
+        assert!(
+            done["operation"].as_str().is_some_and(|id| id.len() == 15),
+            "{label}: every terminal frame names its operation: {done}"
+        );
+
+        // `setup` resolves its whole plan here, so it is the one taken to the end.
+        if label == "setup" {
+            assert_eq!(code, 0, "{label}: a completed dry run exits 0\n{stderr}");
+            assert_eq!(done["state"], "completed", "{label}: {done}");
+            assert!(
+                done["summary"]
+                    .as_str()
+                    .is_some_and(|summary| summary.starts_with("dry run: nothing was changed")),
+                "{label}: {done}"
+            );
+            let logged: Vec<&str> = seen
+                .iter()
+                .filter(|frame| frame["event"] == "log")
+                .filter_map(|frame| frame["line"].as_str())
+                .collect();
+            assert!(
+                logged
+                    .first()
+                    .is_some_and(|line| line.starts_with("Create a fleet on this machine as lab")),
+                "{label}: the plan's lines are the log frames: {logged:?}"
+            );
+        }
+
+        // Nothing was written: not one new name in the data directory, not one new
+        // journal or lock in the deployment namespace, and no fleet where there was
+        // none. `setup` starts with no namespace at all and must still have none —
+        // the other two are run against the fleet the setup above really did make, so
+        // for them the claim is that the namespace did not gain anything.
+        assert_eq!(
+            before,
+            listing(&data),
+            "{label}: a dry run wrote into the data directory"
+        );
+        assert_eq!(
+            before_deploy,
+            listing(&data.join("deploy")),
+            "{label}: a dry run wrote into the deployment namespace"
+        );
+        if label == "setup" {
+            assert!(
+                !data.join("deploy").exists(),
+                "a dry run on a machine that has never deployed made the namespace"
+            );
+        }
+        assert_eq!(
+            data.join("fleet").exists(),
+            label != "setup",
+            "{label}: a dry run changed what fleet is here"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+fn listing(directory: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}

@@ -195,6 +195,7 @@ pub fn run(
     // The broker keys everything on the operation id, so every terminal frame carries
     // it — including the one a refusal produces, which has no `Outcome` to read it from.
     let operation = engine.request.operation.clone();
+    let dry_run = engine.request.dry_run;
     sink.emit(json!({"event": "state", "state": "running"}));
     let result = engine.run();
     // The reader thread ends at EOF; it is deliberately not joined on the happy path,
@@ -203,9 +204,26 @@ pub fn run(
 
     match &result {
         Ok(outcome) => {
+            // A dry run asks nobody anything, so the plan it resolved has no `review`
+            // challenge to travel on. It goes out as `log` lines — the same lines §6
+            // names and the same ones a review would have carried — and the operation
+            // is `completed`, because inspecting and printing is the whole of what it
+            // undertook to do. The engine's own state for a dry run is
+            // `awaiting_review`, which is not one of §8's five terminal words.
+            if dry_run {
+                if let Some(plan) = &outcome.plan {
+                    for line in plan.lines() {
+                        sink.emit(json!({"event": "log", "line": line}));
+                    }
+                }
+            }
             sink.emit(json!({
                 "event": "done",
-                "state": wire_state(outcome.state),
+                "state": if dry_run {
+                    "completed"
+                } else {
+                    wire_state(outcome.state)
+                },
                 "operation": outcome.operation,
                 "summary": outcome.summary,
                 "next": outcome.next,

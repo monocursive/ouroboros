@@ -1021,6 +1021,79 @@ exit 255
     assert!(left.is_empty(), "the password is in {left:?}");
 }
 
+/// `add --dry-run --frames` against a machine that really answers.
+///
+/// `fleet_frames.rs` proves the flag combination and the no-write claim for all three
+/// kinds; what needs an `sshd` is the one case where a dry-run `add` resolves a whole
+/// plan — it inspects the target's effective SSH config, verifies the host key and runs
+/// the preflight before it can say what it would do. The broker's smoke test is this
+/// shape, so `done` has to be `completed` and the exit code 0 even though nothing was
+/// deployed.
+#[test]
+fn a_dry_run_add_over_frames_resolves_the_plan_and_deploys_nothing() {
+    let lab = Lab::new("kr2dry", "studio");
+    let operation = "op-0000000000b3";
+    let mut args = lab.add_args("vps", operation);
+    args.extend(["--no-service".into(), "--dry-run".into(), "--frames".into()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let before = listing(&ouro::fleet_setup::deploy_dir(&lab.issuer));
+    let frames = Frames::start(lab.command(&lab.issuer, lab.target_ports, &borrowed, &[]));
+    let (seen, code, stderr) = frames.finish();
+
+    assert_eq!(code, Some(0), "a resolved dry run exits 0:\n{stderr}");
+    assert_eq!(seen[0], json!({"event": "state", "state": "running"}));
+    assert!(
+        !seen
+            .iter()
+            .any(|frame| frame["event"] == json!("challenge")),
+        "the host is already trusted, so a dry run asks nothing: {seen:?}"
+    );
+    let done = seen.last().expect("a done frame");
+    assert_eq!(done["event"], json!("done"));
+    assert_eq!(done["state"], json!("completed"), "{done:#}");
+    assert_eq!(done["operation"], json!(operation));
+    assert!(
+        done["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.starts_with("dry run: nothing was changed")),
+        "{done:#}"
+    );
+
+    // The plan's own lines, as `log` frames — the same ones a `review` would carry.
+    let logged: Vec<&str> = seen
+        .iter()
+        .filter(|frame| frame["event"] == json!("log"))
+        .filter_map(|frame| frame["line"].as_str())
+        .collect();
+    assert!(
+        logged
+            .iter()
+            .any(|line| line.starts_with("Use the ouro already at")),
+        "{logged:?}"
+    );
+    assert!(
+        logged.iter().any(|line| line.starts_with("Join ")),
+        "{logged:?}"
+    );
+
+    // And nothing happened: no journal, no roster edit, nothing on the target, and no
+    // helper was ever started there.
+    assert!(Journal::read(&lab.issuer, operation)
+        .expect("a readable deploy directory")
+        .is_none());
+    assert_eq!(before, listing(&ouro::fleet_setup::deploy_dir(&lab.issuer)));
+    assert!(fleet::load(&lab.target)
+        .expect("a readable target")
+        .is_none());
+    assert_eq!(lab.issuer_profile().members.len(), 1);
+    assert!(
+        lab.child_argv().is_empty(),
+        "a dry run started no helper on the target: {}",
+        lab.child_argv()
+    );
+}
+
 // ================================================================================ resume
 
 /// §6's resume: a step recorded `ok` is not repeated.
