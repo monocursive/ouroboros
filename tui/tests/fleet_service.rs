@@ -11,7 +11,9 @@
 //!   environment and the whole file stays safe to run in parallel.
 //! * The generated unit is compared against the goldens in `tests/fixtures/service/`
 //!   from `src/fleet_service.rs`; what these tests add is what happens to a unit file
-//!   that is *already there* — somebody else's, or one of ours that somebody edited.
+//!   that is *already there*. `docs/proposals/fleet-kiss.md` §11 deleted the ownership
+//!   marker and everything built on it, so the answer is now the same whoever wrote it:
+//!   `install` overwrites that path, and `remove` deletes exactly that path.
 //! * `ouro stop --require-idle` and `ouro service-run` are driven as the real binary,
 //!   over a real socket and a real signal.
 
@@ -28,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use ouro::fleet_service::{self, Ownership, Plan, Platform, Programs, SupervisorCode};
+use ouro::fleet_service::{self, Plan, Platform, Programs, SupervisorCode};
 
 const OURO: &str = env!("CARGO_BIN_EXE_ouro");
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
@@ -399,10 +401,9 @@ fn installing_a_launchagent_writes_one_private_file_and_bootstraps_exactly_once(
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
-    let report = fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    let report = fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     assert_eq!(report.supervisor, SupervisorCode::LaunchdUserSession);
-    assert_eq!(report.ownership, Ownership::Ours);
     assert!(report.installed);
     assert_eq!(report.loaded, Some(true));
     assert_eq!(report.running, Some(true));
@@ -441,8 +442,8 @@ fn installing_a_launchagent_writes_one_private_file_and_bootstraps_exactly_once(
 
     // Repeating the same install preserves the loaded service, without a restart.
     fakes.forget_calls();
-    let again = fleet_service::install(&plan, &fakes.programs, false).expect("a second install");
-    assert_eq!(again.ownership, Ownership::Ours);
+    let again = fleet_service::install(&plan, &fakes.programs).expect("a second install");
+    assert!(again.installed);
     assert_eq!(fs::read_dir(agents).expect("a listing").count(), 1);
     assert_eq!(fakes.calls().len(), 2);
     assert!(fakes
@@ -458,11 +459,11 @@ fn installing_a_matching_stopped_service_starts_it_on_both_platforms() {
         let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
         let fakes = Fakes::install(&root);
         let plan = plan_for(platform, &root, &data_dir);
-        fleet_service::install(&plan, &fakes.programs, false).expect("initial install");
+        fleet_service::install(&plan, &fakes.programs).expect("initial install");
         fakes.set("stopped", true);
         fakes.forget_calls();
 
-        let report = fleet_service::install(&plan, &fakes.programs, false)
+        let report = fleet_service::install(&plan, &fakes.programs)
             .expect("install should start an unchanged stopped service");
 
         assert_eq!(report.running, Some(true));
@@ -484,7 +485,7 @@ fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     let plan = plan_for(Platform::Linux, &root, &data_dir);
     let unit = format!("{}.service", plan.label());
 
-    let report = fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    let report = fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     assert_eq!(report.supervisor, SupervisorCode::SystemdUser);
     assert_eq!(report.linger, Some(true));
@@ -515,7 +516,7 @@ fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     let second_data = data_dir_with_profile(&second, "buildbox", "127.0.0.1");
     let second_fakes = Fakes::install(&second);
     let second_plan = plan_for(Platform::Linux, &second, &second_data);
-    let report = fleet_service::install(&second_plan, &second_fakes.programs, false)
+    let report = fleet_service::install(&second_plan, &second_fakes.programs)
         .expect("an install that enables lingering");
     assert_eq!(report.linger, Some(true));
     assert!(
@@ -541,7 +542,7 @@ fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     let third_fakes = Fakes::install(&third);
     third_fakes.set("linger_refused", true);
     let third_plan = plan_for(Platform::Linux, &third, &third_data);
-    let report = fleet_service::install(&third_plan, &third_fakes.programs, false)
+    let report = fleet_service::install(&third_plan, &third_fakes.programs)
         .expect("an install whose lingering was refused");
     assert_eq!(report.linger, Some(false));
     assert!(
@@ -560,93 +561,109 @@ fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     );
 }
 
+/// §11: `install` writes the unit at its deterministic path and loads it, **overwriting
+/// whatever is there**, and `remove` deletes exactly that file.
+///
+/// This is the test that replaced the whole ownership grammar. A file at the unit path
+/// this data directory derives is this data directory's service, whoever wrote it; the
+/// refusals `unit_foreign` and `unit_modified`, the `--adopt` flag and the marker they
+/// were read out of are gone, and nothing may reintroduce a "not ours" branch here.
 #[test]
-fn a_foreign_unit_at_our_path_is_described_and_left_exactly_as_it_is() {
-    let root = scratch("foreign");
+fn install_overwrites_whatever_is_at_the_unit_path_and_remove_deletes_only_that_path() {
+    let root = scratch("overwrite");
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
     let unit = plan.unit_path();
-    fs::create_dir_all(unit.parent().expect("an agents directory")).expect("a directory");
-    let theirs = "<?xml version=\"1.0\"?>\n<!-- somebody else's agent -->\n<plist/>\n";
+    let agents = unit.parent().expect("an agents directory").to_path_buf();
+    fs::create_dir_all(&agents).expect("a directory");
+    let theirs = "<?xml version=\"1.0\"?>\n<!-- somebody else's agent -->\n<plist>\n<dict>\n\t<key>Label</key>\n\t<string>com.example.other</string>\n</dict>\n</plist>\n";
     fs::write(&unit, theirs).expect("a foreign unit");
     fs::set_permissions(&unit, fs::Permissions::from_mode(0o644)).expect("their permissions");
 
-    let error = fleet_service::install(&plan, &fakes.programs, false)
-        .expect_err("a preserved foreign unit");
+    // Neighbours in the same directory, so "only that path" is a real claim: another
+    // data directory's Ouroboros agent, and something that is not Ouroboros at all.
+    let neighbour_root = scratch("overwrite-neighbour");
+    let neighbour_data = data_dir_with_profile(&neighbour_root, "other", "127.0.0.1");
+    let mut neighbour_plan = plan.clone();
+    neighbour_plan.data_dir = neighbour_data.clone();
+    let neighbour_unit = neighbour_plan.unit_path();
+    assert_ne!(neighbour_unit, unit, "two data directories, two paths");
+    fs::write(
+        &neighbour_unit,
+        neighbour_plan.render().expect("a neighbour unit"),
+    )
+    .expect("a written neighbour");
+    let stranger = agents.join("com.example.something.plist");
+    fs::write(&stranger, "<plist/>\n").expect("a stranger's agent");
+
+    let report = fleet_service::install(&plan, &fakes.programs).expect("an overwriting install");
+
+    assert!(report.installed);
     assert_eq!(
-        fleet_service::service_error(&error).map(|declared| declared.reason),
-        Some("unit_foreign")
+        fs::read_to_string(&unit).expect("our file"),
+        plan.render().expect("our unit"),
+        "whatever was at the path is replaced by what this build writes"
     );
+    assert_eq!(mode(&unit), 0o600, "and it is private again");
+    // The job the replaced file had loaded under its own label is booted out too, so
+    // nothing is left running with no file behind it.
     assert!(
-        format!("{error:#}").contains("sha256"),
-        "the refusal names the digest of what is there: {error:#}"
+        fakes.calls().contains(&format!(
+            "launchctl bootout gui/{}/com.example.other",
+            plan.uid
+        )),
+        "{:?}",
+        fakes.calls()
     );
-    assert_eq!(fs::read_to_string(&unit).expect("their file"), theirs);
-    assert_eq!(mode(&unit), 0o644);
-    // Nothing was handed to the manager past the one detection call.
-    assert_eq!(
-        fakes.calls(),
-        vec![format!("launchctl print gui/{}", plan.uid)]
-    );
-
-    // `remove` will not delete it either, for the same reason.
-    fakes.forget_calls();
-    let error =
-        fleet_service::remove(&plan, &fakes.programs).expect_err("a preserved foreign unit");
-    assert_eq!(
-        fleet_service::service_error(&error).map(|declared| declared.reason),
-        Some("unit_foreign")
-    );
-    assert_eq!(fs::read_to_string(&unit).expect("their file"), theirs);
-
-    // `--adopt` is the operator saying it outright, and only then is it replaced.
-    fakes.forget_calls();
-    let report = fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
-    assert_eq!(report.ownership, Ownership::Ours);
     assert!(
         report
             .notes
             .iter()
-            .any(|note| note.contains("adopted") && note.contains("sha256")),
+            .any(|note| note.contains("com.example.other")),
         "{:?}",
         report.notes
     );
-    assert_ne!(fs::read_to_string(&unit).expect("our file"), theirs);
-}
 
-#[test]
-fn a_hand_edited_unit_of_ours_is_refused_until_it_is_adopted() {
-    let root = scratch("edited");
-    let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
-    let fakes = Fakes::install(&root);
-    let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
-
-    let unit = plan.unit_path();
-    let ours = fs::read_to_string(&unit).expect("our unit");
+    // An edit to our own unit is the same case, and is replaced without a flag.
     fs::write(
         &unit,
-        ours.replace("<integer>30</integer>", "<integer>5</integer>"),
+        plan.render()
+            .expect("our unit")
+            .replace("<integer>30</integer>", "<integer>5</integer>"),
     )
     .expect("an operator's edit");
-
-    let report = fleet_service::status(&plan, &fakes.programs).expect("a status");
-    assert_eq!(report.ownership, Ownership::Modified);
-    assert!(report.installed, "an edited unit of ours is still ours");
-
-    let error =
-        fleet_service::install(&plan, &fakes.programs, false).expect_err("an unadopted overwrite");
+    let status = fleet_service::status(&plan, &fakes.programs).expect("a status");
+    assert!(status.installed, "a file at the path is installed");
+    assert!(
+        status
+            .notes
+            .iter()
+            .any(|note| note.contains("not what this build would write")),
+        "status says so rather than classifying it: {:?}",
+        status.notes
+    );
+    fleet_service::install(&plan, &fakes.programs).expect("an overwrite of an edited unit");
     assert_eq!(
-        fleet_service::service_error(&error).map(|declared| declared.reason),
-        Some("unit_modified")
+        fs::read_to_string(&unit).expect("our file"),
+        plan.render().expect("our unit")
     );
 
-    fleet_service::install(&plan, &fakes.programs, true).expect("an adopted overwrite");
-    assert_eq!(
-        fleet_service::classify(&plan).expect("a classification").0,
-        Ownership::Ours
+    // And `remove` takes exactly the one path away.
+    fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+    assert!(!unit.exists());
+    assert!(
+        neighbour_unit.exists(),
+        "another data directory's service is not this one's to remove"
+    );
+    assert!(
+        stranger.exists(),
+        "a stranger's agent is not this path and is not removed"
+    );
+    assert!(
+        data_dir.join("fleet").join("profile.json").exists(),
+        "the data directory itself is untouched"
     );
 }
 
@@ -656,7 +673,7 @@ fn remove_disables_first_and_deletes_only_the_file_this_code_wrote() {
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     // A neighbour in the same directory: another data directory's Ouroboros agent, and
     // something that is not ours at all.
@@ -681,7 +698,6 @@ fn remove_disables_first_and_deletes_only_the_file_this_code_wrote() {
     fakes.forget_calls();
     let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
 
-    assert_eq!(report.ownership, Ownership::Absent);
     assert!(!report.installed);
     let label = plan.label();
     assert_eq!(
@@ -710,7 +726,7 @@ fn remove_disables_first_and_deletes_only_the_file_this_code_wrote() {
     let linux_data = data_dir_with_profile(&linux_root, "buildbox", "127.0.0.1");
     let linux_fakes = Fakes::install(&linux_root);
     let linux_plan = plan_for(Platform::Linux, &linux_root, &linux_data);
-    fleet_service::install(&linux_plan, &linux_fakes.programs, false).expect("an install");
+    fleet_service::install(&linux_plan, &linux_fakes.programs).expect("an install");
     linux_fakes.forget_calls();
     fleet_service::remove(&linux_plan, &linux_fakes.programs).expect("a removal");
 
@@ -733,7 +749,7 @@ fn disable_stops_respawn_without_removing_anything() {
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     fakes.forget_calls();
     let report = fleet_service::disable(&plan, &fakes.programs).expect("a disable");
@@ -754,7 +770,7 @@ fn disable_stops_respawn_without_removing_anything() {
 
     // And it is `install` that puts it back, through the same fake.
     fakes.forget_calls();
-    let report = fleet_service::install(&plan, &fakes.programs, false).expect("a reinstall");
+    let report = fleet_service::install(&plan, &fakes.programs).expect("a reinstall");
     assert_eq!(report.loaded, Some(true));
 
     // The systemd side of the same verb.
@@ -762,7 +778,7 @@ fn disable_stops_respawn_without_removing_anything() {
     let linux_data = data_dir_with_profile(&linux_root, "buildbox", "127.0.0.1");
     let linux_fakes = Fakes::install(&linux_root);
     let linux_plan = plan_for(Platform::Linux, &linux_root, &linux_data);
-    fleet_service::install(&linux_plan, &linux_fakes.programs, false).expect("an install");
+    fleet_service::install(&linux_plan, &linux_fakes.programs).expect("an install");
     linux_fakes.forget_calls();
     let report = fleet_service::disable(&linux_plan, &linux_fakes.programs).expect("a disable");
 
@@ -779,19 +795,19 @@ fn disable_stops_respawn_without_removing_anything() {
 }
 
 #[test]
-fn start_kickstarts_only_a_unit_this_code_wrote() {
+fn start_kickstarts_an_installed_unit_and_refuses_when_there_is_none() {
     let root = scratch("start");
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
-    let error = fleet_service::start(&plan, &fakes.programs).expect_err("nothing of ours to start");
+    let error = fleet_service::start(&plan, &fakes.programs).expect_err("nothing to start");
     assert_eq!(
         fleet_service::service_error(&error).map(|declared| declared.reason),
         Some("not_installed")
     );
 
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
     fleet_service::disable(&plan, &fakes.programs).expect("a disable");
     fakes.forget_calls();
     let report = fleet_service::start(&plan, &fakes.programs).expect("a start");
@@ -812,7 +828,7 @@ fn start_kickstarts_only_a_unit_this_code_wrote() {
     let linux_data = data_dir_with_profile(&linux_root, "buildbox", "127.0.0.1");
     let linux_fakes = Fakes::install(&linux_root);
     let linux_plan = plan_for(Platform::Linux, &linux_root, &linux_data);
-    fleet_service::install(&linux_plan, &linux_fakes.programs, false).expect("an install");
+    fleet_service::install(&linux_plan, &linux_fakes.programs).expect("an install");
     linux_fakes.forget_calls();
     fleet_service::start(&linux_plan, &linux_fakes.programs).expect("a start");
     assert_eq!(
@@ -830,7 +846,7 @@ fn a_machine_without_a_cluster_identity_is_refused_a_unit_that_would_crash_loop(
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
-    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("no fleet");
+    let error = fleet_service::install(&plan, &fakes.programs).expect_err("no fleet");
 
     assert_eq!(
         fleet_service::service_error(&error).map(|declared| declared.reason),
@@ -854,7 +870,7 @@ fn detection_names_the_missing_prerequisite_rather_than_promising_recovery() {
     assert_eq!(supervisor.code, SupervisorCode::Unsupported);
     let prerequisite = supervisor.prerequisite.expect("a named prerequisite");
     assert!(prerequisite.contains("Log in"), "{prerequisite}");
-    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("no session");
+    let error = fleet_service::install(&plan, &fakes.programs).expect_err("no session");
     assert_eq!(
         fleet_service::service_error(&error).map(|declared| declared.reason),
         Some("unsupported")
@@ -902,13 +918,12 @@ fn a_status_with_no_manager_reports_the_file_and_leaves_the_rest_unknown() {
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     fakes.set("no_session", true);
     let report = fleet_service::status(&plan, &fakes.programs).expect("a status");
 
     assert!(report.installed);
-    assert_eq!(report.ownership, Ownership::Ours);
     assert_eq!(report.loaded, None, "an unknown is not a no");
     assert_eq!(report.running, None);
     assert_eq!(report.last_exit, None);
@@ -1399,8 +1414,8 @@ fn a_live_launchagent_is_installed_seen_and_removed() {
     assert!(!unit.exists(), "{} already exists", unit.display());
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let report = fleet_service::install(&plan, &programs, false).expect("a live install");
-        assert_eq!(report.ownership, Ownership::Ours);
+        let report = fleet_service::install(&plan, &programs).expect("a live install");
+        assert!(report.installed);
         assert!(unit.exists());
 
         let printed = Command::new("launchctl")
@@ -1541,8 +1556,9 @@ fn listing(directory: &Path) -> std::collections::BTreeSet<String> {
 
 /// F1 (H1). A data directory with a space in it used to install and then read back as
 /// somebody else's file, so neither `install` nor `remove` could ever touch it again.
+/// The marker that made that possible is gone; the property it was failing is kept.
 #[test]
-fn f1_an_awkwardly_named_data_directory_stays_ours_and_can_still_be_removed() {
+fn f1_an_awkwardly_named_data_directory_installs_and_can_still_be_removed() {
     for name in [
         "my data",
         "a--b",
@@ -1557,20 +1573,26 @@ fn f1_an_awkwardly_named_data_directory_stays_ours_and_can_still_be_removed() {
         let fakes = Fakes::install(&root);
         let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
-        let report = fleet_service::install(&plan, &fakes.programs, false)
+        let report = fleet_service::install(&plan, &fakes.programs)
             .unwrap_or_else(|error| panic!("`{name}` must install: {error:#}"));
-        assert_eq!(report.ownership, Ownership::Ours, "`{name}`");
+        assert!(report.installed, "`{name}`");
 
-        // Read back off disk, through the same marker the file carries.
-        let (ownership, _digest) = fleet_service::classify(&plan).expect("a classification");
+        // Read back off disk: the file at this plan's path is byte for byte what the
+        // plan renders, whatever the directory is called.
         assert_eq!(
-            ownership,
-            Ownership::Ours,
-            "`{name}` read back as {ownership:?}"
+            fs::read_to_string(plan.unit_path()).expect("our unit"),
+            plan.render().expect("a rendered unit"),
+            "`{name}` did not read back"
+        );
+        assert!(
+            fleet_service::status(&plan, &fakes.programs)
+                .expect("a status")
+                .installed,
+            "`{name}` did not read back as installed"
         );
 
         // And both verbs still work on it.
-        fleet_service::install(&plan, &fakes.programs, false).expect("a reinstall");
+        fleet_service::install(&plan, &fakes.programs).expect("a reinstall");
         fleet_service::remove(&plan, &fakes.programs)
             .unwrap_or_else(|error| panic!("`{name}` must be removable: {error:#}"));
         assert!(!plan.unit_path().exists(), "`{name}` was stranded");
@@ -1625,15 +1647,15 @@ fn f3_every_generated_plist_is_well_formed_xml_and_a_valid_property_list() {
     }
 }
 
-/// F4 (M1). `remove` still deletes a unit of ours that was edited by hand — leaving it
-/// would be the worse outcome — but it says so, with the digest of what it deleted.
+/// F4 (M1). `remove` deletes a unit that was edited by hand — leaving it would be the
+/// worse outcome — and says which file it deleted.
 #[test]
-fn f4_removing_a_hand_edited_unit_says_that_it_was_edited() {
+fn f4_removing_a_hand_edited_unit_deletes_it_and_names_the_file() {
     let root = scratch("modified-remove");
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     let unit = plan.unit_path();
     let ours = fs::read_to_string(&unit).expect("our unit");
@@ -1649,8 +1671,8 @@ fn f4_removing_a_hand_edited_unit_says_that_it_was_edited() {
         report
             .notes
             .iter()
-            .any(|note| note.contains("edited") && note.contains("sha256")),
-        "the removal must name the edit and the digest it deleted: {:?}",
+            .any(|note| note == &format!("removed {}", unit.display())),
+        "the removal names the file it deleted: {:?}",
         report.notes
     );
 }
@@ -1686,10 +1708,10 @@ fn f5_one_data_directory_is_one_service_however_it_is_spelled() {
     assert_eq!(plain.unit_path(), slashed.unit_path());
     assert_eq!(plain.unit_path(), linked.unit_path());
 
-    fleet_service::install(&plain, &fakes.programs, false).expect("the first install");
-    fleet_service::install(&slashed, &fakes.programs, false).expect("the same install again");
-    fleet_service::install(&dotted, &fakes.programs, false).expect("and again");
-    fleet_service::install(&linked, &fakes.programs, false).expect("and through the link");
+    fleet_service::install(&plain, &fakes.programs).expect("the first install");
+    fleet_service::install(&slashed, &fakes.programs).expect("the same install again");
+    fleet_service::install(&dotted, &fakes.programs).expect("and again");
+    fleet_service::install(&linked, &fakes.programs).expect("and through the link");
 
     let agents = plain
         .unit_path()
@@ -1705,36 +1727,57 @@ fn f5_one_data_directory_is_one_service_however_it_is_spelled() {
     assert_eq!(fs::read_dir(&agents).expect("a listing").count(), 0);
 }
 
-/// F5b (M2). A duplicate left by an older `ouro` — a unit for the same directory under
-/// another spelling — is found and named rather than silently supervising in parallel.
+/// F5b. §11 deleted second-unit detection with the marker it was written in: nothing
+/// reads any file in the service manager's directory but this data directory's own
+/// unit path.
+///
+/// The deviation that keeps that honest is naming: the label is still
+/// `dev.ouroboros.runtime.<digest>`, so a unit installed by 0.1.9 or 0.1.10 *is* this
+/// path and is managed rather than duplicated. This test pins both halves — the
+/// spelling, and that nothing else in the directory is read.
 #[test]
-fn f5b_status_names_another_managed_unit_for_the_same_data_directory() {
-    let root = scratch("duplicate");
+fn f5b_nothing_but_this_data_directorys_own_unit_path_is_read() {
+    let root = scratch("no-scan");
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
 
-    // What an older `ouro` wrote for the trailing-slash spelling: our marker, the same
-    // directory, a different file name.
-    let mut legacy = plan.clone();
-    legacy.data_dir = PathBuf::from(format!("{}/", data_dir.display()));
-    let stale = plan
+    // The spelling 0.1.9 and 0.1.10 wrote, kept deliberately.
+    assert_eq!(
+        plan.unit_path().file_name().and_then(|name| name.to_str()),
+        Some(format!("dev.ouroboros.runtime.{}.plist", plan.digest()).as_str())
+    );
+    let mut linux = plan.clone();
+    linux.platform = Platform::Linux;
+    assert_eq!(
+        linux.unit_path().file_name().and_then(|name| name.to_str()),
+        Some(format!("ouroboros-{}.service", linux.digest()).as_str())
+    );
+
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
+
+    // Neighbours of every shape: a plausible older-looking Ouroboros name, and a unit
+    // rendered for this very data directory under a different file name.
+    let agents = plan
         .unit_path()
         .parent()
         .expect("an agents dir")
-        .join("dev.ouroboros.runtime.0123456789ab.plist");
-    fs::write(&stale, legacy.render().expect("a legacy unit")).expect("a stale unit");
+        .to_path_buf();
+    let lookalike = agents.join("dev.ouroboros.runtime.0123456789ab.plist");
+    fs::write(&lookalike, plan.render().expect("a unit")).expect("a lookalike unit");
+    let stranger = agents.join("com.example.other.plist");
+    fs::write(&stranger, "<plist/>\n").expect("a stranger");
 
     let report = fleet_service::status(&plan, &fakes.programs).expect("a status");
+    let said = format!("{:?}\n{}", report.notes, fleet_service::render(&report));
     assert!(
-        report
-            .notes
-            .iter()
-            .any(|note| note.contains("another managed unit") && note.contains("0123456789ab")),
-        "{:?}",
-        report.notes
+        !said.contains("0123456789ab") && !said.contains("com.example.other"),
+        "status read a file that is not this data directory's unit path: {said}"
     );
+
+    fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+    assert!(lookalike.exists(), "another file is not this path");
+    assert!(stranger.exists(), "and neither is that one");
 }
 
 /// F6 (M3). A manager that refuses the hand-off must not leave a RunAtLoad unit behind
@@ -1747,7 +1790,7 @@ fn f6_a_refused_hand_off_takes_back_the_unit_it_just_wrote() {
     fakes.set("bootstrap_fails", true);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
-    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
+    let error = fleet_service::install(&plan, &fakes.programs).expect_err("a refusal");
     let declared = fleet_service::service_error(&error).expect("a declared reason");
     assert_eq!(declared.reason, "manager_refused");
     assert!(
@@ -1767,10 +1810,10 @@ fn f6_a_refused_hand_off_takes_back_the_unit_it_just_wrote() {
     // An install that *replaced* a unit of ours cannot restore it, so that one stays on
     // disk — and the error says so, and names the verb that removes it.
     fakes.set("bootstrap_fails", false);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
     fakes.set("bootstrap_fails", true);
     fakes.set("loaded", false);
-    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
+    let error = fleet_service::install(&plan, &fakes.programs).expect_err("a refusal");
     assert!(plan.unit_path().exists());
     assert!(
         format!("{error:#}").contains("fleet service remove"),
@@ -1783,8 +1826,8 @@ fn f6_a_refused_hand_off_takes_back_the_unit_it_just_wrote() {
     let linux_fakes = Fakes::install(&linux_root);
     linux_fakes.set("masked", true);
     let linux_plan = plan_for(Platform::Linux, &linux_root, &linux_data);
-    let error = fleet_service::install(&linux_plan, &linux_fakes.programs, false)
-        .expect_err("a masked unit");
+    let error =
+        fleet_service::install(&linux_plan, &linux_fakes.programs).expect_err("a masked unit");
     assert_eq!(
         fleet_service::service_error(&error).map(|declared| declared.reason),
         Some("manager_refused")
@@ -1804,7 +1847,7 @@ fn f7_remove_deletes_its_unit_even_when_the_manager_refuses_the_disable() {
         let data_dir = data_dir_with_profile(&root.join("data"), machine, "127.0.0.1");
         let fakes = Fakes::install(&root);
         let plan = plan_for(platform, &root, &data_dir);
-        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+        fleet_service::install(&plan, &fakes.programs).expect("an install");
 
         fakes.set(flag, true);
         let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal anyway");
@@ -1883,38 +1926,10 @@ fn f8_a_manager_that_stops_answering_is_killed_with_its_children() {
     let _ = plan;
 }
 
-/// F9 (H1). A marker is read only where this code writes one.
+/// F13/M15. A symlink where the unit goes is replaced *as a link*, never written
+/// through, and `remove` unlinks the link rather than the file it points at.
 #[test]
-fn f9_a_marker_somewhere_else_in_the_file_is_not_a_marker() {
-    let root = scratch("forged-place");
-    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
-    let fakes = Fakes::install(&root);
-    let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
-
-    let ours = fs::read_to_string(plan.unit_path()).expect("our unit");
-    let marker = ours.lines().nth(2).expect("a marker line").to_string();
-
-    // The same marker, appended to somebody else's plist instead of written at the top.
-    let theirs = format!("<?xml version=\"1.0\"?>\n<!DOCTYPE plist>\n<plist/>\n{marker}\n");
-    fs::write(plan.unit_path(), &theirs).expect("a forged placement");
-    let (ownership, _digest) = fleet_service::classify(&plan).expect("a classification");
-    assert_eq!(
-        ownership,
-        Ownership::Foreign,
-        "a marker below the file's own content is not this code's marker"
-    );
-    fleet_service::remove(&plan, &fakes.programs).expect_err("and it is not ours to delete");
-    assert_eq!(
-        fs::read_to_string(plan.unit_path()).expect("theirs"),
-        theirs
-    );
-}
-
-/// F13/M15. A symlink where our unit goes is somebody else's arrangement: it is never
-/// written through, and adopting replaces the link itself.
-#[test]
-fn f13_a_symlink_at_the_unit_path_is_foreign_and_adopting_replaces_the_link() {
+fn f13_a_symlink_at_the_unit_path_is_replaced_rather_than_written_through() {
     let root = scratch("symlink-unit");
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
@@ -1926,18 +1941,7 @@ fn f13_a_symlink_at_the_unit_path_is_foreign_and_adopting_replaces_the_link() {
     fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
     std::os::unix::fs::symlink(&target, &unit).expect("a symlink at our unit path");
 
-    assert_eq!(
-        fleet_service::classify(&plan).expect("a classification").0,
-        Ownership::Foreign
-    );
-    fleet_service::remove(&plan, &fakes.programs).expect_err("not ours to delete");
-    assert!(unit.symlink_metadata().is_ok());
-    assert_eq!(
-        fs::read_to_string(&target).expect("the victim"),
-        "PRECIOUS\n"
-    );
-
-    fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install over a link");
     assert_eq!(
         fs::read_to_string(&target).expect("the victim"),
         "PRECIOUS\n",
@@ -1947,6 +1951,21 @@ fn f13_a_symlink_at_the_unit_path_is_foreign_and_adopting_replaces_the_link() {
         .expect("our unit")
         .file_type()
         .is_file());
+    assert_eq!(
+        fs::read_to_string(&unit).expect("our unit"),
+        plan.render().expect("a rendered unit")
+    );
+
+    // And a link put back afterwards is unlinked by `remove`, not followed.
+    fs::remove_file(&unit).expect("a removable unit");
+    std::os::unix::fs::symlink(&target, &unit).expect("a symlink at our unit path");
+    fleet_service::remove(&plan, &fakes.programs).expect("a removal of the link");
+    assert!(fs::symlink_metadata(&unit).is_err(), "the link is gone");
+    assert_eq!(
+        fs::read_to_string(&target).expect("the victim"),
+        "PRECIOUS\n",
+        "what it pointed at is not this path and was not removed"
+    );
 }
 
 /// F13b/M14. A symlinked service log is refused, and what it points at is untouched.
@@ -1961,7 +1980,7 @@ fn f13b_a_symlinked_service_log_is_refused_and_never_followed() {
     fs::write(&victim, "PRECIOUS\n").expect("a victim");
     std::os::unix::fs::symlink(&victim, plan.err_log()).expect("a symlink");
 
-    let error = fleet_service::install(&plan, &fakes.programs, false).expect_err("a refusal");
+    let error = fleet_service::install(&plan, &fakes.programs).expect_err("a refusal");
     assert_eq!(
         fleet_service::service_error(&error).map(|declared| declared.reason),
         Some("unusable_path")
@@ -1991,11 +2010,7 @@ fn f13c_a_directory_where_the_unit_goes_is_named_rather_than_clobbered() {
     fs::create_dir_all(plan.unit_path()).expect("a directory where the unit goes");
     fs::write(plan.unit_path().join("inside"), "stuff").expect("something inside it");
 
-    assert_eq!(
-        fleet_service::classify(&plan).expect("a classification").0,
-        Ownership::Foreign
-    );
-    let error = fleet_service::install(&plan, &fakes.programs, true).expect_err("a directory");
+    let error = fleet_service::install(&plan, &fakes.programs).expect_err("a directory");
     assert_eq!(
         fleet_service::service_error(&error).map(|declared| declared.reason),
         Some("unit_path_is_a_directory")
@@ -2065,7 +2080,7 @@ fn f15_install_says_when_a_runtime_already_owns_this_data_directory() {
 
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    let report = fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    let report = fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     assert!(
         report
@@ -2080,41 +2095,6 @@ fn f15_install_says_when_a_runtime_already_owns_this_data_directory() {
     let _ = child.wait();
 }
 
-/// F17/L1. The marker is forgeable and says so. This pins both halves: the behaviour,
-/// and the sentence in the documentation that stops anybody reading it as a boundary.
-#[test]
-fn f17_the_marker_is_not_a_security_boundary_and_the_documentation_says_so() {
-    let root = scratch("forged");
-    let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
-    let fakes = Fakes::install(&root);
-    let plan = plan_for(Platform::MacOs, &root, &data_dir);
-
-    // Anything that can write the unit path can compute the marker: it is a digest over
-    // the file with no secret in it. The classification is therefore `Ours`.
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
-    let ours = fs::read_to_string(plan.unit_path()).expect("our unit");
-    assert_eq!(
-        fleet_service::classify(&plan).expect("a classification").0,
-        Ownership::Ours
-    );
-    let _ = ours;
-
-    // So the documentation has to say what it does and does not distinguish.
-    let fleet_md = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("docs")
-        .join("FLEET.md");
-    let text = fs::read_to_string(&fleet_md).expect("docs/FLEET.md");
-    assert!(
-        text.contains("not a security boundary"),
-        "docs/FLEET.md must say the ownership marker is not a security boundary"
-    );
-    assert!(
-        text.contains("write access"),
-        "and must say what it does not defend against"
-    );
-}
-
 /// F18/L2/M17. The service's own logs are private, and stay private: recreated when
 /// rotation removed them, and re-privatised when something created them world-readable.
 #[test]
@@ -2123,7 +2103,7 @@ fn f18_the_service_logs_are_put_back_private_by_the_verbs_that_touch_them() {
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
     assert_eq!(mode(&plan.err_log()), 0o600);
 
     // Log rotation, or an operator clearing space.
@@ -2148,7 +2128,7 @@ fn f18_the_service_logs_are_put_back_private_by_the_verbs_that_touch_them() {
     // A log the manager created at its own umask is made private again.
     fs::set_permissions(plan.err_log(), fs::Permissions::from_mode(0o644))
         .expect("a world-readable log");
-    fleet_service::install(&plan, &fakes.programs, false).expect("a reinstall");
+    fleet_service::install(&plan, &fakes.programs).expect("a reinstall");
     assert_eq!(
         mode(&plan.err_log()),
         0o600,
@@ -2206,11 +2186,11 @@ fn f19_the_account_is_the_real_one_and_not_whatever_user_says() {
     );
 }
 
-/// M3 (mutation survivor). Our own marker, naming a *different* data directory, is
-/// another runtime's unit and not ours to rewrite or delete.
+/// M3. A unit rendered for a *different* data directory, sitting at this one's path, is
+/// this data directory's unit: the path is the identity, and the text is overwritten.
 #[test]
-fn m3_our_marker_for_another_data_directory_is_foreign() {
-    let root = scratch("other-marker");
+fn m3_a_unit_written_for_another_data_directory_is_replaced_at_this_path() {
+    let root = scratch("other-unit");
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let other = data_dir_with_profile(&root.join("other"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
@@ -2221,33 +2201,35 @@ fn m3_our_marker_for_another_data_directory_is_foreign() {
     let unit = plan.unit_path();
     fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
     let text = theirs.render().expect("their unit");
+    assert_ne!(text, plan.render().expect("ours"));
     fs::write(&unit, &text).expect("their unit at our path");
 
+    fleet_service::install(&plan, &fakes.programs).expect("an overwriting install");
     assert_eq!(
-        fleet_service::classify(&plan).expect("a classification").0,
-        Ownership::Foreign,
-        "a marker naming {} is not a marker naming {}",
-        other.display(),
+        fs::read_to_string(&unit).expect("ours now"),
+        plan.render().expect("ours"),
+        "the unit at {}'s own path serves {}",
+        data_dir.display(),
         data_dir.display()
     );
-    fleet_service::remove(&plan, &fakes.programs).expect_err("not ours");
-    assert_eq!(fs::read_to_string(&unit).expect("theirs"), text);
-    fleet_service::install(&plan, &fakes.programs, false).expect_err("not ours");
-    assert_eq!(fs::read_to_string(&unit).expect("theirs"), text);
+    // The other data directory's own unit path was never touched.
+    assert!(!theirs.unit_path().exists());
+    fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+    assert!(!unit.exists());
 }
 
-/// M10/M11 (mutation survivors). `remove` on nothing, `remove` on an edited unit, and
-/// `disable` on somebody else's.
+/// M10/M11 (mutation survivors). `remove` on nothing, `disable` on nothing, and both
+/// verbs on a file at the path that this code did not write.
 #[test]
 fn m10_remove_and_disable_act_only_on_what_is_actually_there() {
-    let root = scratch("ownership-verbs");
+    let root = scratch("path-verbs");
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
 
     // Nothing installed: a removal is a report, not a failure, and unlinks nothing.
     let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal of nothing");
-    assert_eq!(report.ownership, Ownership::Absent);
+    assert!(!report.installed);
     assert!(
         report
             .notes
@@ -2262,29 +2244,46 @@ fn m10_remove_and_disable_act_only_on_what_is_actually_there() {
         report.steps
     );
 
-    // Somebody else's file: `disable` will not stop what it supervises.
+    // And a disable of nothing asks the manager for nothing at all.
+    fakes.forget_calls();
+    let report = fleet_service::disable(&plan, &fakes.programs).expect("a disable of nothing");
+    assert!(!report.installed);
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("not installed")),
+        "{:?}",
+        report.notes
+    );
+    assert!(
+        !fakes
+            .calls()
+            .iter()
+            .any(|call| call.contains("bootout") || call.contains("disable")),
+        "{:?}",
+        fakes.calls()
+    );
+
+    // A file at the path this code did not write is still this data directory's unit:
+    // `disable` stops what it supervises, and `remove` deletes it.
     let unit = plan.unit_path();
     fs::create_dir_all(unit.parent().expect("an agents dir")).expect("an agents dir");
     fs::write(&unit, "<plist/>\n").expect("a foreign unit");
-    let error = fleet_service::disable(&plan, &fakes.programs).expect_err("not ours to stop");
-    assert_eq!(
-        fleet_service::service_error(&error).map(|declared| declared.reason),
-        Some("unit_foreign")
-    );
-    assert_eq!(fs::read_to_string(&unit).expect("theirs"), "<plist/>\n");
-
-    // Ours, edited: `disable` is still allowed — stopping is reversible.
-    fs::remove_file(&unit).expect("a removable foreign unit");
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
-    let ours = fs::read_to_string(&unit).expect("our unit");
-    fs::write(
-        &unit,
-        ours.replace("<integer>30</integer>", "<integer>7</integer>"),
-    )
-    .expect("an edit");
+    fakes.forget_calls();
     let report = fleet_service::disable(&plan, &fakes.programs).expect("a disable");
-    assert_eq!(report.ownership, Ownership::Modified);
+    assert!(report.installed, "a file at the path is installed");
+    assert!(
+        fakes
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("launchctl bootout")),
+        "{:?}",
+        fakes.calls()
+    );
     assert!(unit.exists(), "disable keeps the file");
+    fleet_service::remove(&plan, &fakes.programs).expect("a removal");
+    assert!(!unit.exists());
 }
 
 /// M24 (mutation survivor). The unit file is still on disk at the moment the manager is
@@ -2297,7 +2296,7 @@ fn m24_the_unit_is_still_there_when_the_manager_is_told_to_stop_it() {
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
     fakes.watch(&plan);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
 
     fakes.forget_calls();
     let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
@@ -2325,10 +2324,11 @@ fn m24_the_unit_is_still_there_when_the_manager_is_told_to_stop_it() {
     assert!(ran < removed, "{:?}", report.steps);
 }
 
-/// F21 (M7). Adopting a foreign plist boots out the job *that* plist loaded as well as
-/// ours, so nothing is left running with no file behind it.
+/// F21 (M7). Replacing a plist boots out the job *that* plist loaded as well as ours,
+/// so nothing is left running with no file behind it. §11 removed the `--adopt` gate
+/// this used to sit behind; the property is the one part of it worth keeping.
 #[test]
-fn f21_adopting_a_foreign_plist_boots_out_the_job_it_had_loaded() {
+fn f21_replacing_a_plist_boots_out_the_job_it_had_loaded() {
     let root = scratch("adopt-orphan");
     let data_dir = data_dir_with_profile(&root.join("data"), "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
@@ -2343,7 +2343,7 @@ fn f21_adopting_a_foreign_plist_boots_out_the_job_it_had_loaded() {
     .expect("a foreign plist with its own label");
 
     fakes.forget_calls();
-    let report = fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
+    let report = fleet_service::install(&plan, &fakes.programs).expect("an adopted install");
 
     let issued = format!("{:?}", report.commands);
     assert!(issued.contains(&plan.label()), "{issued}");
@@ -2366,7 +2366,7 @@ fn f21_adopting_a_foreign_plist_boots_out_the_job_it_had_loaded() {
     )
     .expect("an implausible label");
     fakes.forget_calls();
-    let report = fleet_service::install(&plan, &fakes.programs, true).expect("an adopted install");
+    let report = fleet_service::install(&plan, &fakes.programs).expect("an adopted install");
     assert!(
         !format!("{:?}", report.commands).contains("two words"),
         "{:?}",
@@ -2549,7 +2549,7 @@ fn l8_remove_takes_out_the_wants_symlink_systemd_left_behind() {
         let data_dir = data_dir_with_profile(&root.join("data"), "buildbox", "127.0.0.1");
         let fakes = Fakes::install(&root);
         let plan = plan_for(Platform::Linux, &root, &data_dir);
-        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+        fleet_service::install(&plan, &fakes.programs).expect("an install");
 
         // Exactly what the real `enable` leaves behind.
         let wants = plan
@@ -2660,7 +2660,7 @@ async fn disabling_a_managed_service_refuses_busy_work_before_any_manager_stop()
         let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
         let fakes = Fakes::install(&root);
         let plan = plan_for(platform, &root, &data_dir);
-        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+        fleet_service::install(&plan, &fakes.programs).expect("an install");
         fakes.watch(&plan);
 
         let (listener, address) = support::listener().await;
@@ -2752,7 +2752,7 @@ async fn removing_a_managed_service_refuses_busy_work_before_any_manager_stop() 
         let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
         let fakes = Fakes::install(&root);
         let plan = plan_for(platform, &root, &data_dir);
-        fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+        fleet_service::install(&plan, &fakes.programs).expect("an install");
         fakes.watch(&plan);
 
         let (listener, address) = support::listener().await;
@@ -2808,7 +2808,7 @@ fn remove_on_an_already_stopped_runtime_proceeds() {
     let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let plan = plan_for(Platform::MacOs, &root, &data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).expect("an install");
+    fleet_service::install(&plan, &fakes.programs).expect("an install");
     fakes.forget_calls();
     let report = fleet_service::remove(&plan, &fakes.programs).expect("a removal");
     assert!(!report.installed);
@@ -2881,7 +2881,7 @@ case "$1" in"#,
         );
         write_script(program, &script);
 
-        let report = fleet_service::install(&plan, &fakes.programs, false).unwrap();
+        let report = fleet_service::install(&plan, &fakes.programs).unwrap();
         assert_eq!(report.running, Some(true));
         assert!(!fakes.state.join("unlocked_stop").exists());
     }
@@ -2896,9 +2896,9 @@ fn reinstall_preserves_a_live_service_and_refuses_to_replace_it() {
     data_dir_with_profile(&root, "studio", "127.0.0.1");
     let fakes = Fakes::install(&root);
     let mut plan = plan_for(Platform::MacOs, &root, &runtime.data_dir);
-    fleet_service::install(&plan, &fakes.programs, false).unwrap();
+    fleet_service::install(&plan, &fakes.programs).unwrap();
     fakes.forget_calls();
-    fleet_service::install(&plan, &fakes.programs, false).unwrap();
+    fleet_service::install(&plan, &fakes.programs).unwrap();
     let calls = fakes.calls();
     assert!(
         !calls
@@ -2911,7 +2911,7 @@ fn reinstall_preserves_a_live_service_and_refuses_to_replace_it() {
     let original = fs::read(plan.unit_path()).unwrap();
     plan.executable = PathBuf::from("/usr/bin/true");
     fakes.forget_calls();
-    let error = fleet_service::install(&plan, &fakes.programs, false).unwrap_err();
+    let error = fleet_service::install(&plan, &fakes.programs).unwrap_err();
     assert_eq!(
         fleet_service::service_error(&error).unwrap().reason,
         "runtime_running"

@@ -518,7 +518,7 @@ impl Helper {
             crate::fleet_service::Plan::for_this_machine(data_dir).map_err(service_refusal)?;
         let programs = crate::fleet_service::Programs::from_env().map_err(service_refusal)?;
         let report = if install {
-            crate::fleet_service::install(&plan, &programs, false)
+            crate::fleet_service::install(&plan, &programs)
         } else {
             crate::fleet_service::status(&plan, &programs)
         }

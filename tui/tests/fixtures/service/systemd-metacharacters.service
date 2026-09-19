@@ -1,4 +1,3 @@
-# ouroboros-managed v1 data-dir=/srv/my%20data/%25h/a%22quoted%22/state content-sha256=364a5d3ce059c0d7b2475582f02c8be27646b4cb5ca223001a4ae429915e3f2d
 [Unit]
 Description=Ouroboros runtime for /srv/my data/%%h/a"quoted"/state
 # No network ordering: `ouro service-run` waits for this machine's own private

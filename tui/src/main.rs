@@ -1584,9 +1584,7 @@ fn fleet_service_command(paths: &Paths, command: FleetServiceCommand) -> Result<
     let plan = fleet_service::Plan::for_this_machine(&paths.data_dir)?;
     let programs = fleet_service::Programs::from_env()?;
     let (report, json) = match command {
-        FleetServiceCommand::Install { json } => {
-            (fleet_service::install(&plan, &programs, false)?, json)
-        }
+        FleetServiceCommand::Install { json } => (fleet_service::install(&plan, &programs)?, json),
         FleetServiceCommand::Status { json } => (fleet_service::status(&plan, &programs)?, json),
         FleetServiceCommand::Disable { json } => (fleet_service::disable(&plan, &programs)?, json),
         FleetServiceCommand::Remove { json } => (fleet_service::remove(&plan, &programs)?, json),

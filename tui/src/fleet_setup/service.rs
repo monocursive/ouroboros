@@ -171,7 +171,7 @@ impl ServiceActions for LocalServiceActions {
         let plan = crate::fleet_service::Plan::for_this_machine(&self.data_dir)?;
         let programs = crate::fleet_service::Programs::from_env()?;
         let report = match action {
-            ServiceAction::Install => crate::fleet_service::install(&plan, &programs, false),
+            ServiceAction::Install => crate::fleet_service::install(&plan, &programs),
             ServiceAction::Status => crate::fleet_service::status(&plan, &programs),
             ServiceAction::Remove => crate::fleet_service::remove(&plan, &programs),
             ServiceAction::Disable => crate::fleet_service::disable(&plan, &programs),
@@ -266,8 +266,13 @@ impl ServiceActions for LocalServiceActions {
 fn known_service_reason(reason: &str) -> &'static str {
     const KNOWN: &[&str] = &[
         "unsupported_platform",
+        "unsupported",
         "unusable_executable",
-        "foreign_unit",
+        "unusable_path",
+        "unusable_manager_program",
+        "outside_service_root",
+        "not_installed",
+        "runtime_running",
         "manager_unavailable",
         "manager_refused",
         "runtime_busy",
@@ -410,9 +415,15 @@ mod tests {
     /// did not declare becomes the generic refusal rather than a code nobody defined.
     #[test]
     fn service_reasons_are_matched_against_the_codes_this_engine_knows() {
-        assert_eq!(known_service_reason("foreign_unit"), "foreign_unit");
         assert_eq!(known_service_reason("manager_refused"), "manager_refused");
+        assert_eq!(known_service_reason("not_installed"), "not_installed");
+        assert_eq!(known_service_reason("runtime_running"), "runtime_running");
         assert_eq!(known_service_reason("something_new"), "service_refused");
+        // §11 deleted the ownership marker, so nothing declares this any more and
+        // nothing downstream may keep branching on it.
+        assert_eq!(known_service_reason("foreign_unit"), "service_refused");
+        assert_eq!(known_service_reason("unit_foreign"), "service_refused");
+        assert_eq!(known_service_reason("unit_modified"), "service_refused");
     }
 
     /// The fake refuses what it was not told to answer.

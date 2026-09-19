@@ -8,21 +8,22 @@
 //! LaunchAgent in a logged-in session, and a systemd user unit — and everything else
 //! is told which prerequisite is missing rather than promised automatic recovery.
 //!
-//! ## Only our own units
+//! ## One unit per data directory, at a path this code decides
 //!
-//! A service manager's directory belongs to the person, not to this program. Every unit
-//! this module writes carries an ownership marker naming the data directory it serves
-//! and a SHA-256 of its own body, on the first line of the unit's body:
+//! `docs/proposals/fleet-kiss.md` §11: one unit per data directory at a deterministic
+//! path, where the name is derived from a digest of the canonical data directory.
+//! `install` writes it and loads it, **overwriting whatever is at that path**; `status`
+//! reads it; `disable` unloads it; `remove` unloads it and deletes exactly that one
+//! file. There is no ownership marker, no `--adopt`, no foreign/modified classification
+//! and no second-unit scan: the path is the identity, and a file at it is this data
+//! directory's unit whoever wrote it.
 //!
-//! ```text
-//! ouroboros-managed v1 data-dir=<absolute path> content-sha256=<64 hex>
-//! ```
-//!
-//! [`classify`] reads that marker back. A file with no marker, or a marker naming a
-//! different data directory, is [`Ownership::Foreign`]: it is described and preserved,
-//! never rewritten and never deleted. A file whose marker is ours but whose body no
-//! longer hashes to the recorded digest is [`Ownership::Modified`] — the operator edited
-//! our unit, so `install` refuses to overwrite it without an explicit `--adopt`.
+//! **Deliberate deviation from §11's spelling.** §11 writes the label as
+//! `com.ouroboros.<slug>`. This keeps today's `dev.ouroboros.runtime.<digest>` on macOS
+//! and `ouroboros-<digest>` on Linux, so a unit installed by 0.1.9 or 0.1.10 is the
+//! *same file* this build manages — renaming it would strand a loaded LaunchAgent at a
+//! path nothing looks at any more. `<digest>` is what §11 calls `<slug>`: the first
+//! twelve hex characters of SHA-256 over the canonical data directory.
 //!
 //! ## What the unit does not carry
 //!
@@ -46,10 +47,6 @@ use anyhow::{anyhow, Context, Result};
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 use serde::Serialize;
-
-/// The marker grammar version. Bumped only if the marker line itself changes shape.
-const MARKER_VERSION: &str = "v1";
-const MARKER_TAG: &str = "ouroboros-managed";
 
 /// How long any one service-manager command is given before it is killed. These are
 /// local queries against a manager on the same machine; a minute is already generous,
@@ -393,7 +390,7 @@ impl Plan {
         self.data_dir.join(SERVICE_ERR_LOG)
     }
 
-    /// The unit's whole text, marker included.
+    /// The unit's whole text.
     pub fn render(&self) -> Result<String> {
         let data_dir = plain_path(&self.data_dir, "data directory")?;
         let executable = plain_path(&self.executable, "ouro executable")?;
@@ -514,24 +511,7 @@ WantedBy=default.target
             }
         };
 
-        // The digest covers everything the file says except the marker line itself, so
-        // removing that one line from the unit on disk reproduces exactly what was
-        // hashed. An edit anywhere else — including the XML preamble — changes it.
-        let content = sha256_hex(format!("{prefix}{body}").as_bytes());
-        // The data directory is percent-encoded, so the marker is one token per field
-        // whatever the path contains — a space, a `#`, a quote, a newline — and so the
-        // encoding can never produce the `--` that XML forbids inside a comment.
-        let encoded = marker_encode(&data_dir);
-        let comment = match self.platform {
-            Platform::MacOs => format!(
-                "<!-- {MARKER_TAG} {MARKER_VERSION} data-dir={encoded} content-sha256={content} -->\n"
-            ),
-            Platform::Linux => format!(
-                "# {MARKER_TAG} {MARKER_VERSION} data-dir={encoded} content-sha256={content}\n"
-            ),
-        };
-
-        Ok(format!("{prefix}{comment}{body}"))
+        Ok(format!("{prefix}{body}"))
     }
 }
 
@@ -635,54 +615,6 @@ fn systemd_literal(value: &str) -> String {
     value.replace('%', "%%")
 }
 
-/// Bytes a marker field may carry unencoded. Everything else becomes `%XX`, and a `-`
-/// that would follow another `-` is encoded too, because XML forbids `--` inside a
-/// comment and the plist's marker is one.
-fn marker_unreserved(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'/' | b':' | b'+' | b'@')
-}
-
-fn marker_encode(value: &str) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(value.len());
-    let mut previous_dash = false;
-    for byte in value.as_bytes() {
-        if *byte == b'-' && !previous_dash {
-            encoded.push('-');
-            previous_dash = true;
-            continue;
-        }
-        if marker_unreserved(*byte) {
-            encoded.push(*byte as char);
-        } else {
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-        previous_dash = false;
-    }
-    encoded
-}
-
-fn marker_decode(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' => {
-                let hex = value.get(index + 1..index + 3)?;
-                decoded.push(u8::from_str_radix(hex, 16).ok()?);
-                index += 3;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -717,156 +649,39 @@ fn random_hex(bytes: usize) -> Result<String> {
         }))
 }
 
-// ------------------------------------------------------------------------- ownership
+// --------------------------------------------------------------------- what is there
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Ownership {
-    /// Nothing is installed at this path.
-    Absent,
-    /// Written by this code for this data directory, and unchanged since.
-    Ours,
-    /// Our marker, our data directory, and a body that no longer matches the recorded
-    /// digest: somebody edited our unit by hand.
-    Modified,
-    /// Not ours. Described, preserved, and never written or deleted without `--adopt`.
-    Foreign,
-}
-
-impl Ownership {
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::Absent => "absent",
-            Self::Ours => "ours",
-            Self::Modified => "modified",
-            Self::Foreign => "foreign",
-        }
-    }
-
-    /// Whether the file at our path carries our marker for our data directory.
-    pub fn is_ours(self) -> bool {
-        matches!(self, Self::Ours | Self::Modified)
-    }
-}
-
-/// The marker line read back out of a unit on disk.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Marker {
-    pub data_dir: String,
-    pub content_sha256: String,
-}
-
-/// The line the marker has to be on, for a unit of this platform's shape.
+/// Whether a regular file is at this plan's unit path, and what it says.
 ///
-/// A marker accepted from anywhere in the file, in either comment syntax, is a marker
-/// that can be appended to somebody else's unit — or hidden below one. It is written at
-/// a fixed place by [`Plan::render`] and it is only read from that place.
-fn marker_line_index(platform: Platform) -> usize {
-    match platform {
-        // After the XML declaration and the DOCTYPE, which are a fixed two lines.
-        Platform::MacOs => 2,
-        Platform::Linux => 0,
-    }
-}
-
-/// Reads the ownership marker out of a unit's text, if it has one, in the one place and
-/// the one comment syntax this platform's units carry it.
+/// §11 deleted the ownership marker along with everything built on it. The path is the
+/// identity: one data directory, one deterministic unit path, and whatever is at that
+/// path is what `install` replaces and `remove` deletes. Nothing else in the service
+/// manager's directory is read, written, or counted.
 ///
-/// The marker is not a security boundary and cannot be: anything that can write the unit
-/// path can compute the digest, because the digest is over the file and has no secret in
-/// it. What it distinguishes is an accident from a deliberate act — another tool's unit,
-/// a hand-written one, an older copy of ours — not an adversary who already has write
-/// access to this account's service directory. `docs/FLEET.md` says so where an operator
-/// will read it.
-pub fn read_marker(platform: Platform, text: &str) -> Option<Marker> {
-    let line = text.lines().nth(marker_line_index(platform))?;
-    let line = match platform {
-        Platform::MacOs => line
-            .trim()
-            .strip_prefix("<!--")?
-            .strip_suffix("-->")?
-            .trim(),
-        Platform::Linux => line.trim().strip_prefix('#')?.trim(),
-    };
-    let mut fields = line.split_whitespace();
-    if fields.next()? != MARKER_TAG || fields.next()? != MARKER_VERSION {
-        return None;
-    }
-    let mut data_dir = None;
-    let mut content_sha256 = None;
-    for field in fields {
-        // Parsed by field name, and a repeated or unknown field makes the whole marker
-        // unreadable rather than letting the last one win.
-        let (name, value) = field.split_once('=')?;
-        let slot = match name {
-            "data-dir" => &mut data_dir,
-            "content-sha256" => &mut content_sha256,
-            _ => return None,
-        };
-        if slot.is_some() {
-            return None;
-        }
-        *slot = Some(value.to_string());
-    }
-    let content_sha256 = content_sha256?;
-    if content_sha256.len() != 64 || !content_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(Marker {
-        data_dir: marker_decode(&data_dir?)?,
-        content_sha256,
-    })
-}
-
-/// What a marker's digest covers: the whole unit with its one marker line taken out.
-fn marked_content(platform: Platform, text: &str) -> Option<String> {
-    let index = marker_line_index(platform);
-    let mut kept = String::with_capacity(text.len());
-    let mut lines = 0;
-    let mut rest = text;
-    while lines < index {
-        let end = rest.find('\n')? + 1;
-        kept.push_str(&rest[..end]);
-        rest = &rest[end..];
-        lines += 1;
-    }
-    let end = rest.find('\n')? + 1;
-    kept.push_str(&rest[end..]);
-    Some(kept)
-}
-
-/// What, if anything, is installed at this plan's unit path.
-pub fn classify(plan: &Plan) -> Result<(Ownership, Option<String>)> {
+/// A symlink or a directory at that path reads as `None` here, because there is no unit
+/// text to compare against — and `write_private_atomic` renames over it, so `install`
+/// still replaces it with a real file the way §11 asks.
+fn installed_unit(plan: &Plan) -> Result<Option<String>> {
     let path = plan.unit_path();
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Ownership::Absent, None))
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let text = fs::read_to_string(&path)
+                .with_context(|| format!("reading the existing unit {}", path.display()))?;
+            Ok(Some(text))
         }
-        Err(error) => return Err(error).with_context(|| format!("inspecting {}", path.display())),
-    };
-    // A symlink or a directory where our unit goes is somebody else's arrangement: it is
-    // reported and left exactly as it is, and nothing follows it.
-    if !metadata.file_type().is_file() {
-        return Ok((Ownership::Foreign, None));
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("inspecting {}", path.display())),
     }
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("reading the existing unit {}", path.display()))?;
-    let Some(marker) = read_marker(plan.platform, &text) else {
-        return Ok((Ownership::Foreign, Some(sha256_hex(text.as_bytes()))));
-    };
-    // A marker of ours for a *different* data directory is another runtime's unit that
-    // happens to sit at this path. It is not ours to rewrite or delete.
-    if canonical_dir(Path::new(&marker.data_dir)) != canonical_dir(&plan.data_dir) {
-        return Ok((Ownership::Foreign, Some(sha256_hex(text.as_bytes()))));
-    }
-    let content = marked_content(plan.platform, &text).unwrap_or_default();
-    let digest = sha256_hex(content.as_bytes());
-    if digest == marker.content_sha256 {
-        Ok((Ownership::Ours, Some(marker.content_sha256)))
-    } else {
-        Ok((Ownership::Modified, Some(digest)))
-    }
+}
+
+/// Whether anything at all sits at this plan's unit path, file or not.
+///
+/// `remove` deletes exactly this path whatever it is; `install` refuses to replace it
+/// while a runtime owns the data directory, and that question is "is something here",
+/// not "is something here that this code wrote".
+fn unit_exists(plan: &Plan) -> bool {
+    fs::symlink_metadata(plan.unit_path()).is_ok()
 }
 
 // ------------------------------------------------------------------------- detection
@@ -1045,8 +860,7 @@ pub struct Report {
     pub unit_path: String,
     pub executable: String,
     pub data_dir: String,
-    pub ownership: Ownership,
-    /// A unit of ours exists at `unit_path`.
+    /// A unit for this data directory exists at `unit_path`.
     pub installed: bool,
     /// `None` wherever the manager did not say.
     pub loaded: Option<bool>,
@@ -1077,7 +891,6 @@ impl Report {
             unit_path: plan.unit_path().display().to_string(),
             executable: plan.executable.display().to_string(),
             data_dir: plan.data_dir.display().to_string(),
-            ownership: Ownership::Absent,
             installed: false,
             loaded: None,
             running: None,
@@ -1118,7 +931,6 @@ pub fn render(report: &Report) -> String {
     text.push_str(&format!("  label        {}\n", report.label));
     text.push_str(&format!("  account      {}\n", report.user));
     text.push_str(&format!("  unit         {}\n", report.unit_path));
-    text.push_str(&format!("  ownership    {}\n", report.ownership.code()));
     text.push_str(&format!(
         "  runs         {} service-run\n",
         report.executable
@@ -1210,8 +1022,7 @@ fn ensure_inside_service_root(path: &Path) -> Result<()> {
 /// Deliberately not a plist parser: it finds the `Label` key's string value, and
 /// accepts it only if it looks like a launchd label — printable, bounded, no
 /// whitespace — because the result becomes an argument to `launchctl`.
-fn launchd_label(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
+fn plist_label(text: &str) -> Option<String> {
     let key = text.find("<key>Label</key>")?;
     let rest = &text[key..];
     let start = rest.find("<string>")? + "<string>".len();
@@ -1229,9 +1040,11 @@ fn launchd_label(path: &Path) -> Option<String> {
 
 /// Generate the unit, write it, and hand it to the manager.
 ///
-/// `adopt` is the operator's explicit statement that the file already at our unit path
-/// may be replaced. Without it, anything this code did not write is preserved untouched.
-pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> {
+/// §11: whatever is at this data directory's deterministic unit path is overwritten.
+/// There is no question about who wrote it and no flag that has to be typed to replace
+/// it — the path names this data directory's service, and this is the command that says
+/// what that service is.
+pub fn install(plan: &Plan, programs: &Programs) -> Result<Report> {
     let supervisor = detect_as(Some(plan.platform), &plan.user, programs);
     let mut report = Report::new("install", plan, &supervisor);
     if supervisor.code == SupervisorCode::Unsupported {
@@ -1252,41 +1065,24 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         );
     }
 
-    let (ownership, digest) = classify(plan)?;
-    report.ownership = ownership;
-    let mut replaced_label: Option<String> = None;
-    match ownership {
-        Ownership::Absent | Ownership::Ours => {}
-        Ownership::Modified if adopt => report.notes.push(format!(
-            "adopted an edited copy of this machine's own unit (body sha256 {}) and replaced it",
-            digest.clone().unwrap_or_else(|| "unknown".to_string())
-        )),
-        Ownership::Foreign if adopt => {
-            replaced_label = launchd_label(&plan.unit_path());
-            report.notes.push(format!(
-                "adopted a preexisting unit this code did not write (sha256 {}) and replaced it",
-                digest.clone().unwrap_or_else(|| "unknown".to_string())
-            ));
-        }
-        Ownership::Modified => {
-            return refuse(
-                "unit_modified",
-                format!(
-                    "{} carries this machine's ownership marker but its body no longer matches the digest in it, so somebody edited it by hand. Inspect it and rerun with `--adopt` to replace it",
-                    plan.unit_path().display()
-                ),
-            )
-        }
-        Ownership::Foreign => {
-            return refuse(
-                "unit_foreign",
-                format!(
-                    "{} already exists and was not written by Ouroboros (sha256 {}). It has been left exactly as it is; inspect it and rerun with `--adopt` if it should be replaced",
-                    plan.unit_path().display(),
-                    digest.unwrap_or_else(|| "unreadable".to_string())
-                ),
-            )
-        }
+    let text = plan.render()?;
+    let present = installed_unit(plan)?;
+    let existed = unit_exists(plan);
+    let unchanged = present.as_deref() == Some(text.as_str());
+    // The file being replaced may have loaded a launchd job under a *different* label.
+    // Booting out only ours would leave that job running with nothing behind it, so the
+    // label that is actually in the file is read and booted out too. This is not an
+    // ownership decision — it is what "overwrite whatever is there" has to do to stay
+    // true on launchd.
+    let replaced_label = present
+        .as_deref()
+        .filter(|_| plan.platform == Platform::MacOs)
+        .and_then(plist_label)
+        .filter(|label| *label != plan.label());
+    if let Some(label) = &replaced_label {
+        report.notes.push(format!(
+            "the unit replaced here had loaded the job `{label}`; it is booted out too, so nothing is left running without a file behind it"
+        ));
     }
 
     let lock = crate::runtime::acquire_spawn_lock(&canonical_dir(&plan.data_dir))?;
@@ -1299,12 +1095,11 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         ));
     }
 
-    let text = plan.render()?;
     let unit_path = plan.unit_path();
     ensure_inside_service_root(&unit_path)?;
     prepare_log(&plan.out_log())?;
     prepare_log(&plan.err_log())?;
-    if ownership == Ownership::Ours && fs::read_to_string(&unit_path)? == text {
+    if unchanged {
         inspect_manager(plan, programs, &mut report)?;
         // A loaded unit can be stopped. Preserve a running (or indeterminate)
         // service, but let installation start a known-stopped unit with no owner.
@@ -1318,7 +1113,7 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
     }
     // Replacing a managed unit can signal its runtime. Installation is not approval
     // for a restart, and the spawn lock closes the gap between this check and handoff.
-    if owner.is_some() && ownership != Ownership::Absent {
+    if owner.is_some() && existed {
         return refuse("runtime_running", "a runtime owns this data directory; the existing service was not replaced. Stop it with `ouro stop --require-idle`, then install again");
     }
     if owner.is_some() && plan.platform == Platform::MacOs {
@@ -1330,21 +1125,13 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
     write_private_atomic(&unit_path, text.as_bytes())?;
     report.step(format!("wrote {}", unit_path.display()));
     report.installed = true;
-    report.ownership = Ownership::Ours;
 
     // If the manager will not take it, this call must not leave a RunAtLoad unit behind
-    // for the next login. Only what this call created is removed: a unit of ours that
-    // was already here is left, and the refusal names `remove`.
-    let handoff = hand_to_manager(
-        plan,
-        programs,
-        adopt,
-        replaced_label.as_deref(),
-        &mut report,
-        lock,
-    );
+    // for the next login. Only what this call created is removed: a unit that was
+    // already at this path is left, and the refusal names `remove`.
+    let handoff = hand_to_manager(plan, programs, replaced_label.as_deref(), &mut report, lock);
     if let Err(error) = handoff {
-        if ownership == Ownership::Absent {
+        if !existed {
             let _ = fs::remove_file(&unit_path);
             report.step(format!("removed {}", unit_path.display()));
             // `systemctl --user enable --now` links the unit into
@@ -1419,7 +1206,6 @@ fn enable_lingering(plan: &Plan, programs: &Programs, report: &mut Report) {
 fn hand_to_manager(
     plan: &Plan,
     programs: &Programs,
-    adopt: bool,
     replaced_label: Option<&str>,
     report: &mut Report,
     lock: crate::runtime::SpawnLock,
@@ -1439,19 +1225,14 @@ fn hand_to_manager(
             );
             // The file being replaced may have loaded a job under its *own* label.
             // Booting out only ours would leave that job running with no file behind it.
-            if adopt {
-                if let Some(label) = replaced_label {
-                    let orphan = format!("gui/{}/{label}", plan.uid);
-                    report.record(&programs.launchctl, &["bootout", orphan.as_str()]);
-                    let _ = run(
-                        &programs.launchctl,
-                        &["bootout", orphan.as_str()],
-                        programs.deadline,
-                    );
-                    report.notes.push(format!(
-                        "the unit replaced here had loaded the job `{label}`; it was booted out too, so nothing is left running without a file behind it"
-                    ));
-                }
+            if let Some(label) = replaced_label {
+                let orphan = format!("gui/{}/{label}", plan.uid);
+                report.record(&programs.launchctl, &["bootout", orphan.as_str()]);
+                let _ = run(
+                    &programs.launchctl,
+                    &["bootout", orphan.as_str()],
+                    programs.deadline,
+                );
             }
             let plist = plan.unit_path();
             let plist = plist.to_str().ok_or_else(|| {
@@ -1506,34 +1287,19 @@ fn hand_to_manager(
 pub fn status(plan: &Plan, programs: &Programs) -> Result<Report> {
     let supervisor = detect_as(Some(plan.platform), &plan.user, programs);
     let mut report = Report::new("status", plan, &supervisor);
-    let (ownership, digest) = classify(plan)?;
-    report.ownership = ownership;
-    report.installed = ownership.is_ours();
-    if ownership == Ownership::Foreign {
+    let installed = unit_exists(plan);
+    report.installed = installed;
+    if installed && installed_unit(plan)?.as_deref() != Some(plan.render()?.as_str()) {
+        // Said, not acted on: §11 has no modified/foreign classification, and `install`
+        // overwrites this file whatever it says. A reader still deserves to know that
+        // what is loaded is not what this build would write.
         report.notes.push(format!(
-            "{} exists and was not written by Ouroboros (sha256 {}); it is reported and otherwise untouched",
-            plan.unit_path().display(),
-            digest.clone().unwrap_or_else(|| "unreadable".to_string())
-        ));
-    }
-    if ownership == Ownership::Modified {
-        report.notes.push(format!(
-            "{} is this machine's own unit, edited since it was written (body sha256 {})",
-            plan.unit_path().display(),
-            digest.unwrap_or_else(|| "unreadable".to_string())
-        ));
-    }
-    // Units for the same data directory under another spelling. A plan is canonical
-    // now, but one written by an older `ouro` — or by hand from a path with a trailing
-    // slash — is a second RunAtLoad service for one runtime, and only a scan finds it.
-    for duplicate in duplicate_units(plan) {
-        report.notes.push(format!(
-            "{} is another managed unit for this same data directory; two of them supervise one runtime. Remove the one you do not want",
-            duplicate.display()
+            "{} is not what this build would write; `ouro fleet service install` replaces it",
+            plan.unit_path().display()
         ));
     }
     // The manager appends to these and creates them at its own umask if they are gone.
-    if ownership.is_ours() {
+    if installed {
         relog(plan, &mut report);
     }
     if supervisor.code == SupervisorCode::Unsupported {
@@ -1550,21 +1316,10 @@ pub fn status(plan: &Plan, programs: &Programs) -> Result<Report> {
 pub fn disable(plan: &Plan, programs: &Programs) -> Result<Report> {
     let supervisor = detect_as(Some(plan.platform), &plan.user, programs);
     let mut report = Report::new("disable", plan, &supervisor);
-    let (ownership, _digest) = classify(plan)?;
-    report.ownership = ownership;
-    report.installed = ownership.is_ours();
-    if ownership == Ownership::Foreign {
-        return refuse(
-            "unit_foreign",
-            format!(
-                "{} was not written by Ouroboros, so this will not stop what it supervises. Use the manager directly if that is what you meant",
-                plan.unit_path().display()
-            ),
-        );
-    }
-    // A unit we never installed is not this verb's business: a runtime the operator
-    // started by hand stays running. Gate-then-disable applies only to a unit we own.
-    if ownership == Ownership::Absent {
+    report.installed = unit_exists(plan);
+    // Nothing at this path is not this verb's business: a runtime the operator started
+    // by hand stays running. Gate-then-disable applies only to an installed unit.
+    if !report.installed {
         report.notes.push(format!(
             "{} is not installed, so nothing was disabled. A runtime this account started by hand was left running",
             plan.unit_path().display()
@@ -1592,34 +1347,11 @@ pub fn disable(plan: &Plan, programs: &Programs) -> Result<Report> {
 pub fn remove(plan: &Plan, programs: &Programs) -> Result<Report> {
     let supervisor = detect_as(Some(plan.platform), &plan.user, programs);
     let mut report = Report::new("remove", plan, &supervisor);
-    let (ownership, digest) = classify(plan)?;
-    report.ownership = ownership;
-    match ownership {
-        Ownership::Foreign => {
-            return refuse(
-                "unit_foreign",
-                format!(
-                    "{} was not written by Ouroboros (sha256 {}); it has been left exactly as it is. Remove it yourself if that is what you meant",
-                    plan.unit_path().display(),
-                    digest.unwrap_or_else(|| "unreadable".to_string())
-                ),
-            )
-        }
-        Ownership::Absent => {
-            report.notes.push(format!(
-                "{} did not exist; nothing was removed",
-                plan.unit_path().display()
-            ));
-        }
-        Ownership::Ours | Ownership::Modified => {}
-    }
-
-    if ownership == Ownership::Modified {
-        // Still ours — our marker, our data directory — so it goes. But an operator who
-        // edited it is owed the digest of what is about to be deleted.
+    let installed = unit_exists(plan);
+    if !installed {
         report.notes.push(format!(
-            "the unit removed here no longer matched the digest in its own marker (body sha256 {}): it had been edited since this code wrote it",
-            digest.unwrap_or_else(|| "unreadable".to_string())
+            "{} did not exist; nothing was removed",
+            plan.unit_path().display()
         ));
     }
 
@@ -1654,7 +1386,9 @@ pub fn remove(plan: &Plan, programs: &Programs) -> Result<Report> {
         ));
     }
 
-    if ownership.is_ours() {
+    // Exactly this path, and nothing else. `remove_file` unlinks a symlink rather than
+    // following it, so a link planted here takes the link away and leaves its target.
+    if installed {
         let path = plan.unit_path();
         ensure_inside_service_root(&path)?;
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -1662,7 +1396,6 @@ pub fn remove(plan: &Plan, programs: &Programs) -> Result<Report> {
         report.notes.push(format!("removed {}", path.display()));
     }
     report.installed = false;
-    report.ownership = Ownership::Absent;
 
     if plan.platform == Platform::Linux {
         // `systemctl --user enable` installs a symlink under `default.target.wants`.
@@ -1715,37 +1448,6 @@ fn stop_idle_under_lock(
     })
 }
 
-/// Other units in this plan's own unit directory that carry our marker for the same
-/// data directory under a different spelling.
-fn duplicate_units(plan: &Plan) -> Vec<PathBuf> {
-    let unit_path = plan.unit_path();
-    let Some(directory) = unit_path.parent() else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let ours = canonical_dir(&plan.data_dir);
-    let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == unit_path || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(marker) = read_marker(plan.platform, &text) else {
-            continue;
-        };
-        if canonical_dir(Path::new(&marker.data_dir)) == ours {
-            found.push(path);
-        }
-    }
-    found.sort();
-    found
-}
-
 /// Put the service's own logs back if they are gone. Log rotation and an operator
 /// clearing space both remove them, and the manager recreates them at its own umask —
 /// which is how a private log becomes a world-readable one.
@@ -1770,9 +1472,7 @@ fn relog(plan: &Plan, report: &mut Report) {
 pub fn start(plan: &Plan, programs: &Programs) -> Result<Report> {
     let supervisor = detect_as(Some(plan.platform), &plan.user, programs);
     let mut report = Report::new("start", plan, &supervisor);
-    let (ownership, _digest) = classify(plan)?;
-    report.ownership = ownership;
-    report.installed = ownership.is_ours();
+    report.installed = unit_exists(plan);
     if supervisor.code == SupervisorCode::Unsupported {
         return refuse(
             "unsupported",
@@ -1781,11 +1481,11 @@ pub fn start(plan: &Plan, programs: &Programs) -> Result<Report> {
                 .unwrap_or_else(|| "this machine has no user supervisor".to_string()),
         );
     }
-    if !ownership.is_ours() {
+    if !report.installed {
         return refuse(
             "not_installed",
             format!(
-                "{} is not a unit this code wrote, so there is nothing of ours to start",
+                "{} does not exist, so there is no service for this data directory to start. Run `ouro fleet service install` first",
                 plan.unit_path().display()
             ),
         );
@@ -2613,8 +2313,7 @@ mod tests {
             "StandardError=append:/srv/my data/%%h/a\"quoted\"/state/service.err.log"
         );
         // No *directive* carries a single `%` that systemd would expand. Comments are
-        // not directives — the ownership marker is one, and it is percent-encoded for
-        // its own reasons.
+        // not directives.
         for line in text
             .lines()
             .filter(|line| line.contains('%') && !line.starts_with('#') && line.contains('='))
@@ -2687,135 +2386,53 @@ mod tests {
         assert_eq!(first.label(), repeat);
     }
 
+    /// §11 deleted the marker grammar. Nothing this code writes carries one, so nothing
+    /// downstream can start reading one back by accident.
     #[test]
-    fn the_marker_names_this_data_directory_and_hashes_the_body() {
+    fn no_unit_carries_an_ownership_marker_any_more() {
+        for platform in [Platform::MacOs, Platform::Linux] {
+            let text = plan(platform).render().expect("a rendered unit");
+            for gone in ["ouroboros-managed", "content-sha256", "data-dir="] {
+                assert!(!text.contains(gone), "`{gone}` survives in:\n{text}");
+            }
+        }
+        // A plist now starts at its declaration and a systemd unit at `[Unit]`: there is
+        // no comment line between the preamble and the body to be mistaken for one.
+        let plist = plan(Platform::MacOs).render().expect("a plist");
+        assert!(plist.starts_with("<?xml version=\"1.0\""), "{plist}");
+        assert_eq!(
+            plist.lines().nth(2),
+            Some("<plist version=\"1.0\">"),
+            "{plist}"
+        );
+        let unit = plan(Platform::Linux).render().expect("a unit");
+        assert!(unit.starts_with("[Unit]\n"), "{unit}");
+    }
+
+    /// The unit is a pure function of the plan, so "is what is on disk what this build
+    /// would write" is a byte comparison and needs no digest recorded anywhere.
+    #[test]
+    fn the_unit_is_a_pure_function_of_the_plan() {
         for platform in [Platform::MacOs, Platform::Linux] {
             let plan = plan(platform);
-            let text = plan.render().expect("a rendered unit");
-            let marker = read_marker(platform, &text).expect("an ownership marker");
-
-            assert_eq!(marker.data_dir, plan.data_dir.display().to_string());
-            let content = marked_content(platform, &text).expect("a marked body");
-            assert_eq!(marker.content_sha256, sha256_hex(content.as_bytes()));
-            assert_eq!(marker.content_sha256.len(), 64);
-            assert!(!content.contains(MARKER_TAG), "{content}");
-        }
-    }
-
-    #[test]
-    fn a_hand_edited_body_stops_matching_its_own_marker() {
-        let plan = plan(Platform::Linux);
-        let text = plan.render().expect("a rendered unit");
-        let edited = text.replace("RestartSec=5", "RestartSec=1");
-        let marker = read_marker(Platform::Linux, &edited).expect("the marker survives an edit");
-        let content = marked_content(Platform::Linux, &edited).expect("a body");
-
-        assert_ne!(sha256_hex(content.as_bytes()), marker.content_sha256);
-    }
-
-    #[test]
-    fn a_unit_with_no_marker_is_not_ours() {
-        let digest = "0".repeat(64);
-        let linux = Platform::Linux;
-        assert!(read_marker(linux, "[Unit]\nDescription=somebody else's\n").is_none());
-        assert!(read_marker(
-            linux,
-            &format!("# ouroboros-managed v9 data-dir=/x content-sha256={digest}")
-        )
-        .is_none());
-        assert!(read_marker(linux, "# ouroboros-managed v1 data-dir=/x").is_none());
-        // A digest that is not a digest is not a marker.
-        assert!(read_marker(
-            linux,
-            "# ouroboros-managed v1 data-dir=/x content-sha256=ff"
-        )
-        .is_none());
-        // A field nobody wrote, and a field written twice, make the whole line
-        // unreadable rather than letting the last one win.
-        assert!(read_marker(
-            linux,
-            &format!("# ouroboros-managed v1 data-dir=/a data-dir=/b content-sha256={digest}")
-        )
-        .is_none());
-        assert!(read_marker(
-            linux,
-            &format!("# ouroboros-managed v1 data-dir=/a content-sha256={digest} extra=1")
-        )
-        .is_none());
-        // The real one still reads.
-        assert_eq!(
-            read_marker(
-                linux,
-                &format!("# ouroboros-managed v1 data-dir=/a content-sha256={digest}")
-            )
-            .expect("a marker")
-            .data_dir,
-            "/a"
-        );
-    }
-
-    /// The marker is read from the one line and the one comment syntax the platform's
-    /// units carry it on. Anywhere else is somebody appending to, or hiding under,
-    /// another tool's file.
-    #[test]
-    fn a_marker_is_only_read_where_this_code_writes_one() {
-        let digest = "0".repeat(64);
-        // A systemd-shaped marker inside a plist.
-        let cross =
-            format!("<plist/>\n# ouroboros-managed v1 data-dir=/nowhere content-sha256={digest}\n");
-        assert!(read_marker(Platform::MacOs, &cross).is_none(), "{cross}");
-        assert!(read_marker(Platform::Linux, &cross).is_none(), "{cross}");
-        // A real marker moved one line down.
-        let moved = format!(
-            "# nothing\n# ouroboros-managed v1 data-dir=/nowhere content-sha256={digest}\n"
-        );
-        assert!(read_marker(Platform::Linux, &moved).is_none(), "{moved}");
-        // And a plist marker anywhere but after the DOCTYPE.
-        let late = format!(
-            "<?xml version=\"1.0\"?>\n<!DOCTYPE plist>\n<plist/>\n<!-- ouroboros-managed v1 data-dir=/nowhere content-sha256={digest} -->\n"
-        );
-        assert!(read_marker(Platform::MacOs, &late).is_none(), "{late}");
-    }
-
-    /// Every path a real machine can have, through the marker and back.
-    #[test]
-    fn a_marker_round_trips_every_path_a_directory_can_be_called() {
-        for raw in [
-            "/Users/tester/.ouroboros",
-            "/Users/my tester/my data",
-            "/srv/a\u{a0}b/data",
-            "/srv/100%/data",
-            "/srv/#hash/data",
-            "/srv/a--b/data",
-            "/srv/a-b-c/data",
-            "/srv/quote\"here/data",
-            "/srv/back\\slash/data",
-            "/srv/héllo/データ",
-            "/srv/-->escape/data",
-        ] {
-            let encoded = marker_encode(raw);
-            assert!(
-                !encoded.contains(char::is_whitespace),
-                "`{raw}` encoded to `{encoded}`, which is not one token"
-            );
-            assert!(
-                !encoded.contains("--"),
-                "`{raw}` encoded to `{encoded}`, which XML forbids inside a comment"
-            );
             assert_eq!(
-                marker_decode(&encoded).as_deref(),
-                Some(raw),
-                "`{raw}` did not survive `{encoded}`"
+                plan.render().expect("a unit"),
+                plan.render().expect("the same unit"),
+            );
+            let mut other = plan.clone();
+            other.data_dir = other.home.join(".ouroboros-two");
+            assert_ne!(
+                plan.render().expect("a unit"),
+                other.render().expect("a unit")
             );
         }
-        // A broken encoding is not a marker.
-        assert_eq!(marker_decode("%ZZ"), None);
-        assert_eq!(marker_decode("%2"), None);
     }
 
-    /// The unit this code wrote reads back as its own, whatever the directory is called.
+    /// A directory name that would once have needed percent-encoding to survive a
+    /// marker comment now simply never reaches one — but a control character still has
+    /// no spelling any unit format can carry, so that stays a refusal.
     #[test]
-    fn a_unit_for_an_awkwardly_named_directory_is_still_ours() {
+    fn an_awkwardly_named_directory_renders_and_a_control_character_does_not() {
         for name in [
             "my data",
             "a--b",
@@ -2823,56 +2440,60 @@ mod tests {
             "quote\"here",
             "back\\slash",
             "hash#tag",
+            "-->evil--data",
         ] {
             for platform in [Platform::MacOs, Platform::Linux] {
                 let mut plan = plan(platform);
                 plan.data_dir = plan.home.join(name);
-                let text = plan.render().expect("a rendered unit");
-                let marker = read_marker(platform, &text).expect("our own marker");
-                assert_eq!(
-                    Path::new(&marker.data_dir),
-                    plan.data_dir,
-                    "`{name}` on {:?}",
-                    platform
-                );
-                assert_eq!(
-                    sha256_hex(marked_content(platform, &text).expect("a body").as_bytes()),
-                    marker.content_sha256
+                let text = plan
+                    .render()
+                    .unwrap_or_else(|error| panic!("`{name}` on {platform:?}: {error:#}"));
+                // Whatever the path contains, no comment in the file carries it — so
+                // nothing has to be escaped to keep a `--` out of an XML comment.
+                assert!(!text.contains("<!-- "), "{text}");
+                assert!(
+                    plan.unit_path().ends_with(match platform {
+                        Platform::MacOs => format!("{}.plist", plan.label()),
+                        Platform::Linux => format!("{}.service", plan.label()),
+                    }),
+                    "`{name}` on {platform:?}"
                 );
             }
         }
-    }
 
-    /// A path that would once have broken the file it was written into now survives it.
-    #[test]
-    fn a_path_that_could_break_a_unit_is_encoded_rather_than_refused() {
         let mut plan = plan(Platform::MacOs);
-        plan.data_dir = PathBuf::from("/Users/tester/-->evil--data");
-        let text = plan.render().expect("a rendered plist");
-        let marker = text.lines().nth(2).expect("a marker line");
-
-        assert!(
-            !marker
-                .trim_start_matches("<!--")
-                .trim_end_matches("-->")
-                .contains("--"),
-            "XML forbids `--` inside a comment: {marker}"
-        );
-        assert_eq!(
-            read_marker(Platform::MacOs, &text)
-                .expect("our marker")
-                .data_dir,
-            "/Users/tester/-->evil--data"
-        );
-
-        // A control character has no encoding that keeps a unit file readable, so it
-        // stays a refusal.
         plan.data_dir = PathBuf::from("/Users/tester/two\nlines");
         let error = plan.render().expect_err("a control character");
         assert_eq!(
             service_error(&error).map(|declared| declared.reason),
             Some("unusable_path")
         );
+    }
+
+    /// The one thing still read out of a file at our path: the launchd job it loaded,
+    /// so replacing it does not leave that job running with nothing behind it.
+    #[test]
+    fn a_plists_label_is_read_only_when_it_looks_like_a_label() {
+        let ours = plan(Platform::MacOs).render().expect("a plist");
+        assert_eq!(
+            plist_label(&ours).as_deref(),
+            Some(plan(Platform::MacOs).label().as_str())
+        );
+        assert_eq!(
+            plist_label("<key>Label</key>\n<string>com.example.agent</string>").as_deref(),
+            Some("com.example.agent")
+        );
+        assert_eq!(plist_label("[Unit]\nDescription=a systemd unit\n"), None);
+        // Anything that would become a hostile `launchctl` argument is not a label.
+        assert_eq!(
+            plist_label("<key>Label</key>\n<string>one two</string>"),
+            None
+        );
+        assert_eq!(
+            plist_label("<key>Label</key>\n<string>../../etc/x</string>"),
+            None
+        );
+        assert_eq!(plist_label("<key>Label</key>\n<string></string>"), None);
     }
 
     #[test]
@@ -2913,17 +2534,6 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(code).expect("encodable"),
                 serde_json::json!(code.code())
-            );
-        }
-        for ownership in [
-            Ownership::Absent,
-            Ownership::Ours,
-            Ownership::Modified,
-            Ownership::Foreign,
-        ] {
-            assert_eq!(
-                serde_json::to_value(ownership).expect("encodable"),
-                serde_json::json!(ownership.code())
             );
         }
     }

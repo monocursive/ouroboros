@@ -1,4 +1,3 @@
-# ouroboros-managed v1 data-dir=/home/tester/.ouroboros content-sha256=4b9daf55135b2a40558d2f6fff22d63f815c2d94c08c807fdd8fa9506115a3e4
 [Unit]
 Description=Ouroboros runtime for /home/tester/.ouroboros
 # No network ordering: `ouro service-run` waits for this machine's own private
