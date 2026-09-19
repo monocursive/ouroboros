@@ -431,7 +431,9 @@ impl DeviceRow {
             | Some(DeviceState::NoUsableIpv4) => Recipe::None,
             // A member this runtime is talking to is a member: the same command as any
             // other, and never the "nothing to do here" an unrecognised code would get.
-            None if self.state == "fleet_member_connected" => Recipe::leave(self.machine_argument()),
+            None if self.state == "fleet_member_connected" => {
+                Recipe::leave(self.machine_argument())
+            }
             None => Recipe::None,
         }
     }
@@ -439,17 +441,20 @@ impl DeviceRow {
     /// What `--machine` gets: the runtime's own suggestion, or the placeholder.
     ///
     /// Never `name`. A display name is not a machine name, and a recipe that printed one
-    /// would be a command line that fails when it is pasted.
+    /// would be a command line that fails when it is pasted. And never an unvalidated
+    /// one: see [`machine_argument`].
     fn machine_argument(&self) -> String {
         self.machine
-            .clone()
-            .or_else(|| self.suggested_machine.clone())
+            .as_deref()
+            .and_then(machine_argument)
+            .or_else(|| self.suggested_machine.as_deref().and_then(machine_argument))
             .unwrap_or_else(|| Recipe::MACHINE_PLACEHOLDER.to_string())
     }
 
     fn address_argument(&self) -> String {
         self.address
-            .clone()
+            .as_deref()
+            .and_then(address_argument)
             .unwrap_or_else(|| Recipe::ADDRESS_PLACEHOLDER.to_string())
     }
 }
@@ -1372,7 +1377,10 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     blank(lines);
     lines.push(Line::from(vec![
         Span::styled("Not listed?  ", Style::default().fg(theme::muted())),
-        Span::styled(Recipe::manual(), Style::default().fg(theme::action_colour())),
+        Span::styled(
+            Recipe::manual(),
+            Style::default().fg(theme::action_colour()),
+        ),
     ]));
 
     if !inventory.unknown.is_empty() {
@@ -1427,19 +1435,32 @@ const OWN_WORDS_COLUMNS: usize = 96;
 const OS_COLUMNS: usize = 6;
 const ADDRESS_COLUMNS: usize = 16;
 /// "○ offline, seen 3 days ago" is twenty-six columns; "● online" is the other shape.
-const PRESENCE_COLUMNS: usize = 26;
-/// "in the fleet · not connected" is twenty-eight, and is the longest of §5.1's words.
-const STATE_COLUMNS: usize = 28;
+/// Two over, because [`human`] keeps one column back for the cut marker and a cell that
+/// fits its longest value exactly is a cell that truncates it.
+const PRESENCE_COLUMNS: usize = 28;
+/// "in the fleet · not connected" is twenty-eight, the longest of §5.1's words, and the
+/// same one-column allowance applies.
+const STATE_COLUMNS: usize = 30;
 
-/// The command column's floor: what `ouro fleet setup --machine <a short name>` needs,
-/// and what the row gives it on a terminal only just wide enough for one-line rows.
-const COMMAND_COLUMNS: usize = 33;
+/// The command column's floor: what the row gives a command on a terminal only just wide
+/// enough for one-line rows at all. The whole command is always in the details pane, so
+/// this is where a long one is cut rather than where it is lost.
+const COMMAND_COLUMNS: usize = 29;
 
 /// The command column's ceiling. A recipe is composed here out of fields that were each
 /// bounded on the way in, so this is a layout bound rather than a safety one — but it is
 /// still a bound, because the cell is the last one on the row and an unbounded width on
 /// a terminal that reports a silly one is a padding loop nobody asked for.
 const COMMAND_LIMIT: usize = 72;
+
+/// What the details pane gives a command, which is all of it.
+///
+/// The longest one this client can compose is
+/// `ouro fleet add USER@<64-column address> --machine <40-column name>`, which is 135
+/// columns — [`address_argument`] and [`machine_argument`] are what hold those two to 64
+/// and 40. Wider than that, so the pane is the one place a recipe is never cut, which is
+/// what makes cutting it on the row safe.
+const COMMAND_PANE_COLUMNS: usize = 160;
 
 /// One cell of the list, bounded to its width and padded out to it.
 ///
@@ -1607,7 +1628,7 @@ fn details_lines(
             detail_field(
                 lines,
                 "to run",
-                scrub(command, OWN_WORDS_COLUMNS),
+                scrub(command, COMMAND_PANE_COLUMNS),
                 Style::default().fg(theme::action_colour()),
             );
             detail_field(
@@ -1900,6 +1921,53 @@ fn last_error(value: Option<&Value>) -> Option<String> {
         }
         _absent => None,
     }
+}
+
+/// A machine name as an argument of a printed command, or `None` for anything that is
+/// not one.
+///
+/// The one place where scrubbing is not enough. Everywhere else a remote string is drawn
+/// *as* a remote string, inside its own cell, and the worst it can do is look like
+/// something; here it is drawn inside a command line a person is being invited to run,
+/// and a space in it is a second argument. [`scrub`] answers an escape sequence by
+/// deleting the escape byte — which turns `pi\u{1b}[2K\u{1b}[1G--machine pwned` into
+/// `pi [2K [1G--machine pwned`, a perfectly runnable second `--machine`. A newline
+/// collapses to a space and does the same with a whole second command.
+///
+/// So the argument is *validated*, not repaired: §5.2's rule, letters, digits and
+/// hyphens, beginning with a letter or a digit, at most forty characters. A value that
+/// is not one is not a name this client will print, and the placeholder says so. The
+/// runtime's `suggested_machine` is specified to be exactly this already; a value that
+/// is not is a runtime being wrong or a device being clever, and neither is a reason to
+/// write a command for somebody.
+fn machine_argument(raw: &str) -> Option<String> {
+    let name = raw.trim();
+
+    (!name.is_empty()
+        && name.len() <= 40
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then(|| name.to_string())
+}
+
+/// An address as an argument of a printed command, or `None`.
+///
+/// The same rule for the same reason, over the characters an IPv4 address, an IPv6
+/// address and a DNS name are made of. An `@` is excluded deliberately: the recipe puts
+/// one there itself, and an address carrying a second one is a command line whose account
+/// is not the one this client wrote.
+fn address_argument(raw: &str) -> Option<String> {
+    let address = raw.trim();
+
+    (!address.is_empty()
+        && address.len() <= 64
+        && address.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && address
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_')))
+    .then(|| address.to_string())
 }
 
 /// A sentence this client did not write, from a gateway message or an error.
@@ -2237,6 +2305,61 @@ mod tests {
         );
     }
 
+    /// An argument of a printed command is validated, not repaired.
+    #[test]
+    fn an_argument_that_is_not_one_becomes_the_placeholder() {
+        for good in ["pi", "build-linux", "studio2", "a", "under_score"] {
+            assert_eq!(machine_argument(good).as_deref(), Some(good), "{good}");
+        }
+
+        for bad in [
+            "",
+            " ",
+            "-leading-hyphen",
+            "two words",
+            // What `scrub` leaves of an escape sequence is still a second argument.
+            "pi [2K [1G--machine pwned",
+            "pi ouro fleet add USER@evil.example --machine pwned",
+            "pi;rm -rf ~",
+            "pi$(id)",
+            "pi\u{a0}--machine pwned",
+            &"g".repeat(41),
+        ] {
+            assert_eq!(machine_argument(bad), None, "{bad:?} was printed as a name");
+        }
+
+        for good in ["100.64.0.11", "fd7a::1", "pi.tailnet-example.ts.net"] {
+            assert_eq!(address_argument(good).as_deref(), Some(good), "{good}");
+        }
+
+        for bad in [
+            "",
+            "100.64.0.11 --machine pwned",
+            // The recipe writes the `@` itself; a second one moves the account.
+            "evil@100.64.0.11",
+            "100.64.0.11;curl evil",
+            &"1".repeat(65),
+        ] {
+            assert_eq!(
+                address_argument(bad),
+                None,
+                "{bad:?} was printed as an address"
+            );
+        }
+
+        // And the row falls back rather than printing either of them.
+        let hostile = DeviceRow {
+            state: "discovered_installation_unknown".into(),
+            address: Some("100.64.0.11 --machine pwned".into()),
+            suggested_machine: Some("pi ouro fleet add USER@evil --machine pwned".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            hostile.recipe(),
+            Recipe::Command("ouro fleet add USER@ADDRESS --machine NAME".into())
+        );
+    }
+
     /// A device the runtime is mid-operation on has nothing for a person to type; one it
     /// has stopped working on gets its command back.
     #[test]
@@ -2336,7 +2459,10 @@ mod tests {
             inventory("deploying").ouroboros_word(&member),
             "removing\u{2026}"
         );
-        assert_eq!(inventory("failed").ouroboros_word(&member), "removal failed");
+        assert_eq!(
+            inventory("failed").ouroboros_word(&member),
+            "removal failed"
+        );
         assert_eq!(
             inventory("completed").ouroboros_word(&member),
             "removed just now"
@@ -2444,7 +2570,10 @@ mod tests {
         assert_eq!(inventory.devices.len(), 1);
         assert!(inventory.operations[0].running);
         assert!(inventory.operations[0].underway());
-        assert_eq!(inventory.unknown, vec!["fleet_protocol_revision".to_string()]);
+        assert_eq!(
+            inventory.unknown,
+            vec!["fleet_protocol_revision".to_string()]
+        );
 
         // And a document that still carries the withdrawn keys is read without them.
         let legacy = Inventory::decode(&json!({
@@ -2456,7 +2585,10 @@ mod tests {
             }],
         }));
         assert_eq!(legacy.operations[0].operation, "op-5");
-        assert!(!legacy.operations[0].running, "no `running` key is not running");
+        assert!(
+            !legacy.operations[0].running,
+            "no `running` key is not running"
+        );
         assert!(!legacy.operations[0].underway(), "no state is not underway");
     }
 
@@ -2535,7 +2667,10 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(fleet.status_line(), "studio \u{b7} 1 of 2 machines connected");
+        assert_eq!(
+            fleet.status_line(),
+            "studio \u{b7} 1 of 2 machines connected"
+        );
     }
 
     #[test]
@@ -2646,7 +2781,10 @@ mod tests {
         let busy = devices_refusal(&refused(ErrorCode::InvalidParams, Some("devices_busy")));
         match busy {
             Refusal::Other(sentence) => {
-                assert!(sentence.contains("as many device inventories"), "{sentence}");
+                assert!(
+                    sentence.contains("as many device inventories"),
+                    "{sentence}"
+                );
                 assert!(!sentence.contains("devices_busy"), "{sentence}");
             }
             other => panic!("expected a sentence, got {other:?}"),
@@ -2679,12 +2817,32 @@ mod tests {
         assert!(wide.contains('\u{2026}'), "the cut is invisible: {wide}");
     }
 
-    /// The command column has a floor and a ceiling, and the full row budget is the sum.
+    /// The row budget is 140 columns, and the pane is where a command is never cut.
     #[test]
-    fn the_row_budget_is_one_hundred_and_forty_columns() {
+    fn the_row_budget_is_one_hundred_and_forty_and_the_pane_cuts_nothing() {
         assert_eq!(FULL_ROW_COLUMNS, 140);
         assert_eq!(ROW_COLUMNS_BEFORE_COMMAND + COMMAND_COLUMNS, 140);
-        assert!(COMMAND_COLUMNS < COMMAND_LIMIT);
+
+        // The longest recipe this client can compose, from arguments at their own bounds.
+        let longest = DeviceRow {
+            state: "discovered_installation_unknown".into(),
+            address: Some("a".repeat(64)),
+            suggested_machine: Some("m".repeat(40)),
+            ..Default::default()
+        };
+        let command = longest.recipe().command().expect("a command").to_string();
+
+        assert!(
+            command.chars().count() > COMMAND_LIMIT,
+            "the row's ceiling is above the longest command, which would make the pane \
+             pointless: {} columns",
+            command.chars().count()
+        );
+        assert_eq!(
+            scrub(&command, COMMAND_PANE_COLUMNS),
+            command,
+            "the pane cut a command this client composed"
+        );
     }
 
     #[test]

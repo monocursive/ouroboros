@@ -1,23 +1,24 @@
-//! Slice 6, the terminal half: the Devices view and the deployment flow through it.
+//! Slice K5, the terminal half: the Devices view as an inventory that runs no operation.
 //!
 //! A scripted gateway, in the shape `tui/tests/fleet_triage.rs` established: messages go
 //! in, the outbound queue and the drawn frame come out, and the Elixir side is stood in
-//! for by answers shaped like the ones `docs/TUI.md` §2.4 documents. What is *not* stood
-//! in for is the device data — the rows below are built from the sanitized
+//! for by answers shaped like the ones the `fleet.devices` contract documents. What is
+//! *not* stood in for is the device data — the rows below are built from the sanitized
 //! `tailscale status --json` captures under `tests/fixtures/tailscale/`, so the names,
 //! addresses, platforms and last-seen times this view renders are the ones a real client
 //! reported, including the capture whose hostnames are hostile on purpose.
 //!
 //! ## The claim each group of tests makes
 //!
-//!   * **Inventory** — the two sections, the observed-state table, the search, the filter
-//!     and a distinct empty state for each way discovery can fail.
-//!   * **Deploy** — select and connect, all three challenge kinds, the reviewed plan and
-//!     its digest, progress, and finishing or recovering.
-//!   * **Authority** — read scope, a non-administrator, an absent capability, and one
-//!     identity taking over another's setup.
-//!   * **The secret** — a unique password is typed, submitted, and then looked for in the
-//!     frame, in the App's own `Debug`, and in every request this client queued.
+//!   * **The list** — one row per device, §5.1's columns and words, the status line, the
+//!     deploying-from line, a distinct empty state for each way discovery can fail, and
+//!     the search and filter that appear only past eight rows.
+//!   * **The command** — the one thing to do about each row, printed as the command that
+//!     does it, filled from the runtime's own suggestion and never from a display name.
+//!   * **The pane** — what Enter opens: the command in full, whose shell it belongs in,
+//!     the exact times, and any operation the runtime is already running, read-only.
+//!   * **Authority** — a read-scope listener, a non-administrator, an absent capability.
+//!   * **Nothing is sent** — the two reads are the only calls this view can make.
 
 mod support;
 
@@ -114,34 +115,19 @@ fn refuse(app: &mut App, tag: Tag, code: ErrorCode, data: Option<Value>) {
     });
 }
 
-/// How many characters the masked field is drawing.
+/// The frame, drawn wide.
 ///
-/// The one property of the secret buffer a test can actually see from outside it: the
-/// `Debug` is redacted by design, so an assertion about the `Debug` passes whether the
-/// bytes are there or not.
-fn bullets(app: &mut App) -> usize {
-    screen(app)
-        .rows
-        .iter()
-        .map(|row| row.matches('\u{2022}').count())
-        .sum()
-}
-
-/// The secret buffer's character count, observed directly rather than through `Debug`.
-fn secret_chars(app: &App) -> usize {
-    app.devices
-        .operation
-        .as_ref()
-        .map(|operation| operation.secret.len())
-        .unwrap_or(0)
-}
-
+/// Two hundred columns rather than the eighty a person has, because the row budget is
+/// 140 and a narrower pane folds every device onto two lines on purpose — which is its
+/// own test, below. A wide frame is also what shows a whole command in the action
+/// column, so an assertion about the command is about the command rather than about
+/// where this build happened to cut it.
 fn screen(app: &mut App) -> Screen {
-    render(app, 150, 60)
+    app.terminal_width = 200;
+    render(app, 200, 60)
 }
 
-/// Every request this client has queued since the last drain, as whole frames — which is
-/// what a secret-placement assertion has to look at, not just the methods.
+/// Every request this client has queued since the last drain.
 fn drained(app: &mut App) -> Vec<Call> {
     app.drain()
 }
@@ -176,27 +162,16 @@ fn prose(app: &mut App) -> String {
     flowed(&screen(app))
 }
 
-/// Every button §5.1's action column can put on a row, plus the dash a row with no
-/// action carries instead of one.
-const ACTIONS: [&str; 7] = [
-    "Add to fleet",
-    "Set up this Mac",
-    "Set up this machine",
-    "Open",
-    "Continue",
-    "Retry",
-    "\u{2014}",
-];
-
-/// The *inventory line* for a device: the one carrying both its name and an action.
+/// The *inventory line* for a device: the one carrying both its name and the action
+/// column, which is either a command or the dash a row with nothing to do carries.
 ///
 /// Not `Screen::row`, which finds the first line containing the needle — and the first
-/// line containing "studio" is the permanent header naming the deployment host.
+/// line containing "studio" is the deploying-from line naming the host.
 fn device_row<'a>(drawn: &'a Screen, name: &str) -> &'a str {
     drawn
         .rows
         .iter()
-        .find(|row| row.contains(name) && ACTIONS.iter().any(|action| row.contains(action)))
+        .find(|row| row.contains(name) && (row.contains("ouro fleet") || row.contains('\u{2014}')))
         .map(String::as_str)
         .unwrap_or_else(|| panic!("no device row for {name}\n{}", drawn.text()))
 }
@@ -278,16 +253,15 @@ fn rows_from(name: &str) -> Vec<Value> {
             json!({
                 "name": peer.get("HostName"),
                 "machine": Value::Null,
-                // §5.5: the runtime folds the display name into a machine name, or
-                // answers `null`. It is the only thing the name field is ever seeded
-                // from, so the fixtures carry it exactly as the contract describes it.
+                // The runtime folds the display name into a machine name, or answers
+                // `null`. It is the only thing a printed `--machine` is ever filled from,
+                // so the fixtures carry it exactly as the contract describes it.
                 "suggested_machine": suggested(peer.get("HostName").and_then(Value::as_str)),
                 "os": os,
                 "address": address,
                 "online": online,
                 "last_seen": last_seen,
                 "state": state,
-                "action": "deploy Ouroboros",
                 "name_conflicts_with_roster": Value::Null,
             })
         })
@@ -297,12 +271,13 @@ fn rows_from(name: &str) -> Vec<Value> {
     rows
 }
 
-/// A display name folded to a machine name, as §5.5 specifies the runtime does it:
-/// lowercased, every run of non-alphanumerics to one hyphen, trimmed, 40 characters,
+/// A display name folded to a machine name, as the contract specifies the runtime does
+/// it: lowercased, every run of non-alphanumerics to one hyphen, trimmed, 40 characters,
 /// `null` when nothing valid remains.
 ///
 /// Reproduced here rather than imported because the folding runs on the deployment host;
-/// what this file tests is that the view pre-fills from the answer and never from `name`.
+/// what this file tests is that the command is filled from the answer and never from
+/// `name`.
 fn suggested(name: Option<&str>) -> Value {
     let Some(name) = name else {
         return Value::Null;
@@ -326,7 +301,7 @@ fn suggested(name: Option<&str>) -> Value {
     json!(folded)
 }
 
-/// This machine's own row, in the roster.
+/// This machine's own row, in the fleet.
 fn self_row() -> Value {
     json!({
         "name": "studio",
@@ -338,23 +313,20 @@ fn self_row() -> Value {
         "connected": true,
         "last_seen": Value::Null,
         "state": "this_device",
-        "action": "view device",
         "name_conflicts_with_roster": Value::Null,
     })
 }
 
-/// A host block with the capabilities a test wants, for a reply built by hand.
-fn host_with(deploy: bool, reasons: &[&str]) -> Value {
-    host(deploy, reasons)
-}
-
+/// A host block with the capabilities a test wants.
+///
+/// No `issuer`: §1 withdrew the per-member PKI, so "which machine may admit" is not a
+/// fact any document reports any more.
 fn host(deploy: bool, reasons: &[&str]) -> Value {
     json!({
         "hostname": "studio",
         "user": "ada",
         "os": "darwin",
         "arch": "aarch64-apple-darwin",
-        "issuer": true,
         "capabilities": { "deploy": deploy, "reasons": reasons },
     })
 }
@@ -375,7 +347,6 @@ fn devices_reply(fixture: &str, code: &str, detail: Option<&str>, rows: Vec<Valu
             "visible_peers": peers,
         },
         "devices": rows,
-        "fleet_protocol_revision": 5,
         "operations": [],
         "unknown": [],
     })
@@ -410,6 +381,33 @@ fn with_inventory(reply: Value) -> App {
     app
 }
 
+/// Moves the cursor onto a named row, without pressing anything.
+fn select(app: &mut App, name: &str) {
+    for _ in 0..40 {
+        let drawn = screen(app);
+        // The cursor marker, not the start of the line: the line starts with the pane's
+        // own border, and in screen-reader mode the name is preceded by its number.
+        let selected = device_row(&drawn, name).contains("> ");
+        drop(drawn);
+
+        if selected {
+            return;
+        }
+
+        app.apply(key(KeyCode::Char('j')));
+    }
+    panic!("never reached the {name} row");
+}
+
+/// Moves the cursor onto a named row and opens its details pane.
+fn open_details(app: &mut App, name: &str) {
+    select(app, name);
+    if !app.devices.details {
+        app.apply(key(KeyCode::Enter));
+    }
+    assert!(app.devices.details, "Enter did not open the pane");
+}
+
 // ---------------------------------------------------------------------------------------
 // navigation
 // ---------------------------------------------------------------------------------------
@@ -440,8 +438,8 @@ fn the_view_is_reachable_from_the_palette_the_keymap_and_the_settings_runtime_se
         "the palette row did not open the view"
     );
 
-    // The keymap: the leader, then the bound verb. Read through the map rather than
-    // hardcoded, so a rebound key fails this loudly instead of silently.
+    // The keymap: the leader, then the bound verb. `ctrl+x D` stays (§10). Read through
+    // the map rather than hardcoded, so a rebound key fails this loudly.
     client.apply(key(KeyCode::Esc));
     let spec = client.keymap.label(ouro::keymap::Action::LeaderDevices);
     assert!(
@@ -495,6 +493,11 @@ fn the_dashboard_names_the_view_and_the_key_that_opens_it() {
         hint.contains(&client.command_shortcut(Command::Devices)),
         "the hint does not print the bound key: {hint}"
     );
+    // The page no longer deploys anything, and the Dashboard no longer says it does.
+    assert!(
+        !hint.contains("deploy"),
+        "the hint still advertises a deployment: {hint}"
+    );
 
     let drawn = screen(&mut client);
     assert!(drawn.contains("devices"), "{}", drawn.text());
@@ -508,32 +511,39 @@ fn the_dashboard_names_the_view_and_the_key_that_opens_it() {
         .contains(&Command::Devices));
 }
 
-/// Opening reads the inventory; opening again closes, and never cancels anything.
+/// Opening reads the inventory; opening again closes, and nothing is sent either way.
 #[test]
-fn opening_reads_the_inventory_and_closing_cancels_nothing() {
+fn opening_reads_the_inventory_and_closing_sends_nothing() {
     let _mode = normal();
     let mut app = opened(full_hello());
     let calls = drained(&mut app);
 
     assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.method.starts_with("fleet."))
+            .count(),
+        1,
+        "opening the view issued more than the one read"
+    );
 
     answer(&mut app, Tag::Devices(DevicesTag::Inventory), populated());
     app.apply(key(KeyCode::Esc));
 
     assert!(app.overlay.is_none());
-    let after = drained(&mut app);
     assert!(
-        !after.iter().any(|call| call.method.contains("cancel")),
-        "closing the view sent a cancel"
+        drained(&mut app).is_empty(),
+        "closing the view sent something"
     );
 }
 
 // ---------------------------------------------------------------------------------------
-// the inventory
+// the list
 // ---------------------------------------------------------------------------------------
 
 /// On a narrow terminal each device folds onto two deliberate lines — name, address and
-/// presence, then the Ouroboros word and the action under the name — rather than one
+/// presence, then the Ouroboros word and the command under the name — rather than one
 /// long line the pane wraps mid-word, and the hint says the same keys in fewer words.
 #[test]
 fn a_narrow_terminal_folds_each_device_onto_two_lines() {
@@ -560,18 +570,18 @@ fn a_narrow_terminal_folds_each_device_onto_two_lines() {
         "the presence stays on the name line: {first}"
     );
     assert!(
-        !first.contains("Add to fleet") && !first.contains("not set up"),
-        "the state and the action fold onto the second line: {first}"
+        !first.contains("ouro fleet") && !first.contains("not set up"),
+        "the state and the command fold onto the second line: {first}"
     );
     assert!(
-        second.contains("not set up") && second.contains("Add to fleet"),
-        "the second line carries the Ouroboros word and the action: {second}"
+        second.contains("not set up") && second.contains("ouro fleet add"),
+        "the second line carries the Ouroboros word and the command: {second}"
     );
     // A fold is not a wrap: "seen 3 days" and "ago" stay together.
     assert!(!text.contains("seen 3 days\nago"), "{text}");
     // The footer draws the hint's separators as commas.
     assert!(
-        text.contains("Enter act, a add, x remove, r refresh"),
+        text.contains("Enter details, r refresh"),
         "the short hint: {text}"
     );
 }
@@ -592,7 +602,7 @@ fn the_inventory_draws_one_line_per_device_under_a_status_line() {
     // The one quiet line, not a boxed paragraph.
     assert!(
         text.contains("Actions run on studio as ada."),
-        "the deployment-host line is missing:\n{text}"
+        "the deploying-from line is missing:\n{text}"
     );
     // No sections, no legend.
     assert!(!text.contains("Fleet devices"), "{text}");
@@ -611,7 +621,7 @@ fn the_inventory_draws_one_line_per_device_under_a_status_line() {
         .expect("a peer row");
     assert!(first < peer, "the self row is not first:\n{text}");
 
-    // One row, every column §5.1 lists.
+    // One row, every column §5.1 lists, with the command in the action column.
     let row = device_row(&screen, "build-linux");
     assert!(row.contains("linux"), "the OS column: {row}");
     assert!(row.contains("100.64.12.44"), "the address column: {row}");
@@ -620,9 +630,12 @@ fn the_inventory_draws_one_line_per_device_under_a_status_line() {
         "the presence column: {row}"
     );
     assert!(row.contains("not set up"), "the Ouroboros column: {row}");
-    assert!(row.contains("Add to fleet"), "the action column: {row}");
+    assert!(
+        row.contains("ouro fleet add USER@100.64.12.44 --machine build-linux"),
+        "the action column: {row}"
+    );
 
-    // Six lines per device is what this replaced: every device fits on one row.
+    // One row per device.
     for name in ["build-linux", "pocket-phone", "old-pi"] {
         assert_eq!(
             screen.rows.iter().filter(|row| row.contains(name)).count(),
@@ -638,67 +651,88 @@ fn the_inventory_draws_one_line_per_device_under_a_status_line() {
     );
     assert!(text.contains("offline, seen"), "{text}");
 
-    // And the exact time in the details panel, for the row under the cursor.
+    // The recipe for a device the network client never listed, under the list.
     assert!(
-        text.contains("Not listed? a Add a device by address"),
+        text.contains("Not listed? ouro fleet add USER@ADDRESS --machine NAME"),
         "{text}"
     );
-}
 
-/// The details panel under the list carries what the row does not.
-#[test]
-fn the_details_panel_carries_the_exact_time_and_the_runtime_facts() {
-    let _mode = normal();
-    let mut app = with_inventory(populated());
-
-    // The self row is selected first.
-    let text = prose(&mut app);
-    assert!(text.contains("in the roster as studio"), "{text}");
-    assert!(text.contains("presence online now"), "{text}");
-    assert!(text.contains("runtime runtime connected"), "{text}");
-
-    // Move onto the offline peer: the exact observation time is here, not on the row.
-    activate_cursor(&mut app, "old-pi");
-    let text = prose(&mut app);
+    // And no pane until somebody asks for one.
+    assert!(!app.devices.details);
     assert!(
-        text.contains("offline, last seen 2026-09-17T07:50:00.1Z"),
-        "the exact time is not in the details:\n{text}"
-    );
-    assert!(
-        text.contains("Offline is not powered off"),
-        "a row with no action does not say why:\n{text}"
+        !text.contains("to run"),
+        "the pane was open before Enter:\n{text}"
     );
 }
 
-/// §5.1's Ouroboros column and action column, as the capture's own peers land on them.
+/// §5.1's Ouroboros column, and the one command each state gets.
 #[test]
-fn every_state_gets_one_word_and_one_action() {
+fn every_state_gets_one_word_and_one_command() {
     let _mode = normal();
     let mut app = with_inventory(populated());
     let screen = screen(&mut app);
 
-    // A visible, supported, online peer is offered admission, never called uninstalled.
+    // A visible, supported, online peer is told how to be added, never called uninstalled.
     let build = device_row(&screen, "build-linux");
     assert!(build.contains("not set up"), "{build}");
-    assert!(build.contains("Add to fleet"), "{build}");
+    assert!(
+        build.contains("ouro fleet add USER@100.64.12.44 --machine build-linux"),
+        "{build}"
+    );
 
-    // iOS: a platform no release targets. No button, and a dash where one would be.
+    // iOS: a platform no release targets. No command, and a dash where one would be.
     let phone = device_row(&screen, "pocket-phone");
     assert!(phone.contains("can't run Ouroboros"), "{phone}");
     assert!(phone.contains('\u{2014}'), "{phone}");
-    assert!(!phone.contains("Add to fleet"), "{phone}");
+    assert!(!phone.contains("ouro fleet"), "{phone}");
 
-    // Offline, and explicitly not "powered off".
+    // Offline: nothing to reach, so nothing to run.
     let pi = device_row(&screen, "old-pi");
     assert!(pi.contains("offline"), "{pi}");
+    assert!(!pi.contains("ouro fleet"), "{pi}");
 
-    // This machine, in the roster.
+    // This machine, in the fleet: the local leave, with no account and no address,
+    // because there is no SSH to itself.
     let this = device_row(&screen, "This Mac");
     assert!(this.contains("in the fleet"), "{this}");
-    assert!(this.contains("Open"), "{this}");
+    assert!(this.contains("ouro fleet leave"), "{this}");
+    assert!(
+        !this.contains("--machine"),
+        "this machine was told to reach itself over SSH: {this}"
+    );
 }
 
-/// Each way discovery can fail is one line quoting the client's own words.
+/// A member that is not this machine is told how to be taken out, by name and account.
+#[test]
+fn a_member_is_told_how_to_leave_by_name_with_the_account_left_to_the_operator() {
+    let _mode = normal();
+    let mut reply = populated();
+    reply["devices"] = json!([
+        self_row(),
+        {
+            "name": "raspberrypi", "machine": "pi", "suggested_machine": "pi",
+            "os": "linux", "address": "100.64.12.60", "online": true,
+            "connected": true, "state": "fleet_member",
+            "name_conflicts_with_roster": Value::Null,
+        }
+    ]);
+
+    let mut app = with_inventory(reply);
+    let drawn = screen(&mut app);
+    let row = device_row(&drawn, "raspberrypi");
+
+    // The fleet name, not the display name; the account is the operator's to supply.
+    assert!(
+        row.contains("ouro fleet leave --machine pi --user USER"),
+        "{row}"
+    );
+    assert!(
+        !row.contains("--machine raspberrypi"),
+        "the display name reached the command: {row}"
+    );
+}
+
+/// A discovery failure is one inline notice in the client's own words.
 #[test]
 fn a_discovery_failure_is_one_line_quoting_the_client() {
     let _mode = normal();
@@ -735,7 +769,7 @@ fn a_discovery_failure_is_one_line_quoting_the_client() {
             "{code} still guesses at a version mismatch:\n{text}"
         );
         // Known members are retained when discovery is unavailable.
-        assert!(text.contains("This Mac"), "{code} lost the roster:\n{text}");
+        assert!(text.contains("This Mac"), "{code} lost the fleet:\n{text}");
     }
 
     // A client that answered is not a failure, so there is no notice at all.
@@ -743,25 +777,25 @@ fn a_discovery_failure_is_one_line_quoting_the_client() {
     assert!(!prose(&mut app).contains("Tailscale did not answer"));
 }
 
-/// A machine with no fleet says so in the status line, not in a second paragraph.
+/// A machine with no fleet says so in the status line, and is told the one command.
 #[test]
-fn a_standalone_machine_says_so_in_its_status_line() {
+fn a_standalone_machine_says_so_in_its_status_line_and_is_told_how_to_start_one() {
     let _mode = normal();
     let mut reply = devices_reply("no-peers", "no_visible_peers", None, vec![]);
     reply["devices"] = json!([{
-        "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
+        "name": "studio", "machine": Value::Null, "suggested_machine": "operator-laptop",
         "os": "macos", "address": "100.64.12.21", "online": true,
         "state": "this_device_without_profile",
         "name_conflicts_with_roster": Value::Null,
     }]);
-    reply["host"] = host_with(false, &["no_ca_key"]);
 
     let mut app = with_inventory(reply);
     let text = prose(&mut app);
 
     assert!(text.contains("This Mac is not in a fleet yet"), "{text}");
     assert!(
-        device_row(&screen(&mut app), "This Mac").contains("Set up this Mac"),
+        device_row(&screen(&mut app), "This Mac")
+            .contains("ouro fleet setup --machine operator-laptop"),
         "{text}"
     );
     // The blocker is the status line; it is not said twice.
@@ -769,6 +803,11 @@ fn a_standalone_machine_says_so_in_its_status_line() {
         text.matches("not in a fleet yet").count(),
         1,
         "the blocker sentence is drawn twice:\n{text}"
+    );
+    // And nothing left over from the PKI that was withdrawn.
+    assert!(
+        !text.contains("certificate authority"),
+        "a standalone machine was told about a CA key:\n{text}"
     );
 }
 
@@ -784,8 +823,8 @@ fn search_and_filter_appear_past_eight_rows_and_refresh_always_works() {
     let hint = ouro::ui::app::devices_hint_line(&app);
     assert!(!hint.contains("/ search"), "{hint}");
     assert!(!hint.contains("f filter"), "{hint}");
-    assert!(hint.contains("a add by address"), "{hint}");
-    assert!(hint.contains("x remove (members)"), "{hint}");
+    assert!(hint.contains("Enter show details"), "{hint}");
+    assert!(hint.contains("r refresh"), "{hint}");
 
     app.apply(key(KeyCode::Char('/')));
     assert!(
@@ -846,14 +885,54 @@ fn search_and_filter_appear_past_eight_rows_and_refresh_always_works() {
     );
 }
 
+/// The search field is the one thing left on this page that takes a paste.
+#[test]
+fn a_pasted_query_reaches_the_search_field_and_nothing_else_takes_text() {
+    let _mode = normal();
+    let mut rows = vec![self_row()];
+    for index in 0..9 {
+        rows.push(json!({
+            "name": format!("peer-{index}"),
+            "machine": Value::Null,
+            "suggested_machine": format!("peer-{index}"),
+            "os": "linux",
+            "address": format!("100.64.9.{index}"),
+            "online": true,
+            "state": "discovered_installation_unknown",
+            "name_conflicts_with_roster": Value::Null,
+        }));
+    }
+    let mut app = with_inventory(devices_reply("running-with-peers", "ok", None, rows));
+    let _settled = drained(&mut app);
+
+    // Closed: the paste is refused and the client says so rather than swallowing it.
+    app.apply(Msg::Paste("peer-3".into()));
+    let text = prose(&mut app);
+    assert!(
+        text.contains("nothing here is taking text right now"),
+        "{text}"
+    );
+
+    // Open: it goes into the query.
+    app.apply(key(KeyCode::Char('/')));
+    app.apply(Msg::Paste("peer-3".into()));
+    let text = prose(&mut app);
+    assert!(text.contains("peer-3"), "{text}");
+    assert!(
+        !text.contains("peer-4"),
+        "the paste did not narrow:\n{text}"
+    );
+    assert!(drained(&mut app).is_empty(), "a paste sent something");
+}
+
 /// A device that adopts a member's name is its own row with a note, never a merge.
 #[test]
 fn a_device_impersonating_a_member_is_listed_separately_with_a_note() {
     let _mode = normal();
     let mut rows = vec![json!({
-        "name": "attic", "machine": "attic", "os": "linux",
+        "name": "attic", "machine": "attic", "suggested_machine": "attic", "os": "linux",
         "address": "100.64.12.77", "online": Value::Null,
-        "state": "fleet_member_not_visible", "action": "diagnose",
+        "state": "fleet_member_not_visible",
         "name_conflicts_with_roster": Value::Null,
     })];
     rows.extend(rows_from("roster-spoof"));
@@ -879,7 +958,8 @@ fn a_device_impersonating_a_member_is_listed_separately_with_a_note() {
         "the real member lost its state:\n{text}"
     );
 
-    // The note is in the impostor's own details, under its own row.
+    // The note is in the impostor's own pane, under its own row.
+    app.apply(key(KeyCode::Enter));
     let mut found = false;
     for _ in 0..8 {
         if prose(&mut app).contains("It is not that machine.") {
@@ -929,1193 +1009,328 @@ fn a_hostile_device_name_cannot_forge_a_row_or_move_the_cursor() {
 }
 
 // ---------------------------------------------------------------------------------------
-// the deploy flow
+// the details pane
 // ---------------------------------------------------------------------------------------
 
-/// Moves the cursor onto a named row, without pressing anything.
-fn activate_cursor(app: &mut App, name: &str) {
-    for _ in 0..40 {
-        let drawn = screen(app);
-        // The cursor marker, not the start of the line: the line starts with the pane's
-        // own border, and in screen-reader mode the name is preceded by its number.
-        let selected = device_row(&drawn, name).contains("> ");
-        drop(drawn);
-
-        if selected {
-            return;
-        }
-
-        app.apply(key(KeyCode::Char('j')));
-    }
-    panic!("never reached the {name} row");
-}
-
-/// Moves the cursor onto a named row and presses Enter.
-fn activate(app: &mut App, name: &str) {
-    activate_cursor(app, name);
-    app.apply(key(KeyCode::Enter));
-}
-
-/// Moves the cursor onto a named row and presses `x`.
-fn remove(app: &mut App, name: &str) {
-    activate_cursor(app, name);
-    app.apply(key(KeyCode::Char('x')));
-}
-
-/// Moves the connect form's cursor onto its submit row.
-fn focus_submit(app: &mut App) {
-    for _ in 0..16 {
-        let drawn = screen(app);
-        // The three forms label their button differently, so the helper looks for
-        // whichever one this form is drawing.
-        let focused = drawn.rows.iter().any(|row| {
-            (row.contains("[ Connect ]")
-                || row.contains("[ Set up ]")
-                || row.contains("[ Remove ]"))
-                && row.contains("> ")
-        });
-        drop(drawn);
-
-        if focused {
-            return;
-        }
-
-        app.apply(key(KeyCode::Tab));
-    }
-    panic!("never reached the submit row:\n{}", screen(app).text());
-}
-
-/// Moves the form's cursor onto a named field and types into it.
-fn fill(app: &mut App, label: &str, value: &str) {
-    for _ in 0..16 {
-        let drawn = screen(app);
-        let focused = drawn
-            .rows
-            .iter()
-            .any(|row| row.contains(label) && row.contains("> "));
-        drop(drawn);
-
-        if focused {
-            for message in typed(value) {
-                app.apply(message);
-            }
-            return;
-        }
-
-        app.apply(key(KeyCode::Tab));
-    }
-    panic!("never reached the {label} field:\n{}", screen(app).text());
-}
-
-/// Empties whatever text field has the cursor.
-fn clear_field(app: &mut App) {
-    for _ in 0..80 {
-        app.apply(key(KeyCode::Backspace));
-    }
-}
-
-/// Step 1: the form of §5.2, its required fields, and the call it makes.
+/// Enter opens the pane; it carries the command in full, whose shell it belongs in, and
+/// the facts a row cannot hold. Esc closes it before it closes the view.
 #[test]
-fn add_to_fleet_asks_for_a_name_and_an_account_and_prepares_the_operation() {
+fn enter_opens_a_pane_with_the_command_the_host_and_the_exact_time() {
     let _mode = normal();
     let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
 
-    activate(&mut app, "build-linux");
+    // The self row is selected first, and nothing is open.
+    assert!(!prose(&mut app).contains("to run"));
 
+    app.apply(key(KeyCode::Enter));
     let text = prose(&mut app);
-    assert!(text.contains("Add build-linux to your fleet"), "{text}");
+    assert!(text.contains("to run ouro fleet leave"), "{text}");
     assert!(
         text.contains("Actions run on studio as ada."),
-        "the deployment-host caption is not on the form:\n{text}"
+        "the pane does not say whose shell the command is for:\n{text}"
     );
-    assert!(text.contains("Name in the fleet"), "{text}");
-    assert!(
-        text.contains("letters, digits, hyphens"),
-        "the name rule is missing:\n{text}"
-    );
-    // Pre-filled from `suggested_machine`, never from the display name.
-    assert!(text.contains("build-linux"), "{text}");
-    assert!(text.contains("SSH user"), "{text}");
-    assert!(text.contains("(required)"), "{text}");
-    assert!(
-        text.contains("the account on build-linux"),
-        "the account hint is missing:\n{text}"
-    );
-    // No authentication picker on the face of the form.
-    assert!(
-        !text.contains("authenticate with"),
-        "an identity picker is still drawn:\n{text}"
-    );
-    assert!(
-        text.contains("\u{25b8} Advanced \u{2014} port, SSH key"),
-        "the Advanced disclosure is missing:\n{text}"
-    );
-    assert!(text.contains("[ Connect ]"), "{text}");
-
-    // Submitting with no username refuses, inline, without a call.
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
+    assert!(text.contains("in the fleet as studio"), "{text}");
+    assert!(text.contains("presence online now"), "{text}");
+    assert!(text.contains("runtime runtime connected"), "{text}");
     assert!(
         drained(&mut app).is_empty(),
-        "an empty username still reached the runtime"
-    );
-    assert!(prose(&mut app).contains("An SSH username is required"));
-
-    // With one, `prepare` goes out with the target, the account and no secret.
-    fill(&mut app, "SSH user", "deploy");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-
-    assert_eq!(prepare.params["target"]["address"], json!("100.64.12.44"));
-    assert_eq!(prepare.params["target"]["machine"], json!("build-linux"));
-    ouro::fleet::validate_machine(prepare.params["target"]["machine"].as_str().unwrap()).unwrap();
-    assert_eq!(prepare.params["ssh_user"], json!("deploy"));
-    assert_eq!(prepare.params["port"], json!(22));
-    assert!(
-        prepare.params.get("secret").is_none(),
-        "prepare carried a secret: {}",
-        prepare.params
-    );
-}
-
-#[test]
-fn fixed_add_and_setup_addresses_are_visible_without_keyboard_stops() {
-    let _mode = normal();
-    let mut setup = populated();
-    setup["devices"] = json!([{
-        "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
-        "os": "macos", "address": "100.64.12.21", "online": true,
-        "state": "this_device_without_profile", "action": "set up this device"
-    }]);
-
-    for (reply, name, address) in [
-        (populated(), "build-linux", "100.64.12.44"),
-        (setup, "This Mac", "100.64.12.21"),
-    ] {
-        let mut app = with_inventory(reply);
-        activate(&mut app, name);
-        let _ = drained(&mut app);
-        for _ in 0..8 {
-            let drawn = screen(&mut app);
-            let destination = drawn.row(address);
-            assert!(destination.contains("address"), "{}", drawn.text());
-            assert!(!destination.contains("> "), "fixed address took focus");
-            app.apply(key(KeyCode::Tab));
-        }
-        assert!(drained(&mut app).is_empty(), "tabbing submitted the form");
-    }
-}
-
-/// `a`: *Add a device by address* — the address is typed, and the name is required.
-///
-/// Finding 2: the manual form had no machine-name field at all, so the worker took the
-/// address as the name and refused it. There was no way for that path to succeed.
-#[test]
-fn a_adds_a_device_by_address_with_the_address_typed_and_the_name_required() {
-    let _mode = normal();
-    let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
-
-    app.apply(key(KeyCode::Char('a')));
-
-    let text = prose(&mut app);
-    assert!(text.contains("Add a device by address"), "{text}");
-    assert!(text.contains("Name in the fleet"), "{text}");
-    assert!(text.contains("Address"), "{text}");
-    assert!(text.contains("SSH user"), "{text}");
-    assert!(
-        !text.contains("from the list"),
-        "a typed address was drawn as read-only:\n{text}"
+        "opening the pane sent something"
     );
 
-    // Nothing is pre-filled: there is no device to take a suggestion from.
-    assert_eq!(
-        app.devices
-            .connect
-            .as_ref()
-            .map(|form| (form.machine.clone(), form.address.clone())),
-        Some((String::new(), String::new()))
-    );
-
-    // An address and an account, and no name: refused on the name field, with no call.
-    fill(&mut app, "Address", "100.83.203.10");
-    fill(&mut app, "SSH user", "monocursive");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    assert!(
-        drained(&mut app).is_empty(),
-        "a nameless manual add reached the runtime"
-    );
-    assert!(
-        prose(&mut app).contains("A name in the fleet is required"),
-        "{}",
-        prose(&mut app)
-    );
-
-    // A name that is not one is refused on the same field rather than sent.
-    fill(&mut app, "Name in the fleet", "Not A Machine Name");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-    assert!(drained(&mut app).is_empty(), "an invalid name was sent");
-
-    fill(&mut app, "Name in the fleet", "");
-    clear_field(&mut app);
-    for message in typed("raspberrypi") {
-        app.apply(message);
-    }
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-
-    assert_eq!(prepare.params["kind"], json!("add"));
-    assert_eq!(prepare.params["target"]["machine"], json!("raspberrypi"));
-    assert_eq!(prepare.params["target"]["address"], json!("100.83.203.10"));
-    assert_eq!(prepare.params["ssh_user"], json!("monocursive"));
-    assert!(prepare.params.get("identity").is_none());
-}
-
-/// An operation in flight, from `prepare` to a first snapshot.
-fn deploying() -> App {
-    let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    fill(&mut app, "SSH user", "deploy");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-    answer(
-        &mut app,
-        prepare.tag.clone(),
-        json!({ "operation_id": "abcdef0123456789" }),
-    );
-
-    app
-}
-
-fn snapshot(state: &str, challenges: Value, extra: Value) -> Value {
-    let mut reply = json!({
-        "operation": "abcdef0123456789",
-        "source": "worker",
-        "attached": true,
-        "state": state,
-        "owner": "local-owner",
-        "steps": [],
-        "log": [],
-        "challenges": challenges,
-    });
-
-    if let Some(object) = extra.as_object() {
-        for (key, value) in object {
-            reply[key] = value.clone();
-        }
-    }
-
-    reply
-}
-
-/// One challenge, in the shape the real worker puts on the wire.
-///
-/// `fleet_setup::worker::challenge_event` nests what the metadata builders produced under
-/// a `metadata` key, and the broker forwards that frame with `challenge`/`kind`/
-/// `expires_at` written over the top. Every challenge fixture in this file goes through
-/// here, so the shape these tests drive is the shape the worker sends — the first version
-/// of this file spelled the metadata flat and passed against a shape nothing produces.
-fn challenge(id: &str, kind: &str, metadata: Value) -> Value {
-    json!({
-        "operation": "abcdef0123456789",
-        "challenge": id,
-        "kind": kind,
-        "expires_at": 4102444800u64,
-        "metadata": metadata,
-    })
-}
-
-fn status_tag() -> Tag {
-    Tag::Devices(DevicesTag::Status {
-        operation: "abcdef0123456789".into(),
-    })
-}
-
-/// The unknown-host question: what it shows, and that trust is an explicit key.
-#[test]
-fn an_unknown_host_key_shows_its_fingerprint_and_is_trusted_only_on_purpose() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_host_trust",
-            json!([challenge(
-                "c-host",
-                "host_trust",
-                json!({ "address": "100.64.12.44",
-                "port": 22,
-                "algorithm": "ssh-ed25519",
-                "sha256_fingerprint": "SHA256:0Yp1rL8mQe3xTgH2vKd9NcZaWbXuJiOpQrStUvWxYz0",
-                "user": "deploy" })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
+    // Move onto the offline peer: the exact observation time is here, not on the row,
+    // and the reason there is no command is here too.
+    select(&mut app, "old-pi");
     let text = prose(&mut app);
     assert!(
-        text.contains("First time connecting to 100.64.12.44"),
-        "{text}"
+        text.contains("offline, last seen 2026-09-17T07:50:00.1Z"),
+        "the exact time is not in the pane:\n{text}"
     );
     assert!(
-        text.contains("ssh-ed25519"),
-        "the algorithm is missing:\n{text}"
+        text.contains("Offline is not powered off"),
+        "a row with no command does not say why:\n{text}"
     );
-    assert!(
-        text.contains("SHA256:0Yp1rL8mQe3xTgH2vKd9NcZaWbXuJiOpQrStUvWxYz0"),
-        "the fingerprint is missing:\n{text}"
-    );
-    assert!(text.contains("100.64.12.44"), "{text}");
-    assert!(text.contains("deploy"), "the account is missing:\n{text}");
-    assert!(
-        text.contains("Verify this fingerprint independently"),
-        "the verify-independently line is missing:\n{text}"
-    );
-    assert!(text.contains("Trust and continue"), "{text}");
+    assert!(text.contains("to run \u{2014}"), "{text}");
 
-    // Enter is not an answer. Only `t` is.
-    app.apply(key(KeyCode::Enter));
-    assert!(
-        drained(&mut app).is_empty(),
-        "Enter accepted an unknown host key"
-    );
-
-    app.apply(key(KeyCode::Char('t')));
-    let calls = drained(&mut app);
-    let confirm = call_for(&calls, "fleet.deployment.confirm_host");
-
-    assert_eq!(confirm.params["operation_id"], json!("abcdef0123456789"));
-    assert_eq!(confirm.params["challenge"], json!("c-host"));
-    assert_eq!(confirm.params["accept"], json!(true));
+    // Esc closes the pane, and only then the view.
+    app.apply(key(KeyCode::Esc));
+    assert!(matches!(app.overlay, Some(Overlay::Devices)));
+    assert!(!prose(&mut app).contains("to run"));
+    app.apply(key(KeyCode::Esc));
+    assert!(app.overlay.is_none());
 }
 
-/// Declining sends a refusal rather than nothing, so the attempt fails cleanly.
+/// An operation the runtime is running shows on the row and in the pane, and is
+/// read-only: there is no key that answers it, continues it or cancels it.
 #[test]
-fn declining_an_unknown_host_refuses_it_explicitly() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_host_trust",
-            json!([challenge(
-                "c-host",
-                "host_trust",
-                json!({ "address": "100.64.12.44", "port": 22, "user": "deploy",
-                     "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:aaa" })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    app.apply(key(KeyCode::Char('n')));
-    let calls = drained(&mut app);
-
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.confirm_host").params["accept"],
-        json!(false)
-    );
-}
-
-/// A changed key is never offered as a question; it blocks, in words.
-#[test]
-fn a_changed_host_key_blocks_rather_than_asking() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    app.apply(Msg::Answer {
-        tag: status_tag(),
-        result: Err(ClientError::Rpc(RpcError {
-            code: ErrorCode::UpstreamError,
-            message: "refused".into(),
-            data: Some(json!({
-                "reason": "worker_refused",
-                "worker_reason": "host_key_changed",
-            })),
-        })),
-    });
-
-    let text = prose(&mut app);
-    assert!(text.contains("host's key has changed"), "{text}");
-    assert!(text.contains("never accepted here"), "{text}");
-    assert!(
-        !text.contains("Trust and continue"),
-        "a changed key was offered as a trust prompt:\n{text}"
-    );
-}
-
-/// The password question, and the passphrase question, drawn from metadata only.
-#[test]
-fn both_secret_challenges_are_labelled_from_their_own_metadata() {
-    let _mode = normal();
-    // Password: the account, the target and the bounded attempt count.
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44",
-                     "user": "deploy", "port": 22, "attempt": 2, "max_attempts": 3 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("Password for deploy@100.64.12.44"), "{text}");
-    assert!(text.contains("deploy"), "{text}");
-    assert!(text.contains("100.64.12.44"), "{text}");
-    assert!(
-        text.contains("2 of 3"),
-        "the attempt budget is missing:\n{text}"
-    );
-    assert!(text.contains("not kept for a reconnection"), "{text}");
-
-    // Passphrase: a different question, labelled with the key rather than the account.
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pp",
-                "passphrase",
-                json!({ "key_label": "id_ed25519", "public_fingerprint": "SHA256:bbb" })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("Passphrase for a private key"), "{text}");
-    assert!(text.contains("id_ed25519"), "{text}");
-    assert!(text.contains("SHA256:bbb"), "{text}");
-    assert!(
-        !text.contains("Password for this connection"),
-        "a passphrase was labelled a password:\n{text}"
-    );
-}
-
-/// The plan is shown whole, and approval carries exactly the digest reviewed.
-#[test]
-fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    let plan = json!({
-        "schema": 1,
-        "operation": "abcdef0123456789",
-        "kind": "add",
-        "deployment_host": {
-            "hostname": "studio", "user": "ada",
-            "os": "darwin", "arch": "aarch64-apple-darwin", "issuer": true
-        },
-        "target": {
-            "machine": "build-linux", "address": "100.64.12.44", "port": 2222,
-            "ssh_user": "deploy", "identity": "agent: id_ed25519",
-            "install_path": "bin/ouro", "data_dir": "/srv/reviewed-fleet",
-            "host_fingerprint": "SHA256:0Yp1rL8m"
-        },
-        "release": {
-            "version": "0.1.8", "target": "x86_64-unknown-linux-gnu",
-            "asset": "ouro-linux.tar.gz",
-            "sha256": "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef",
-            "official_origin": true
-        },
-        "service": "managed",
-        "test_workspace": "/srv/model-check",
-        "restart": "the local idle runtime will restart",
-        "members": [
-            { "machine": "studio", "host": "100.64.12.21",
-              "reached_by": "local", "change": "add build-linux to the roster" },
-            { "machine": "relay", "host": "100.64.12.55", "reached_by": "ssh",
-              "ssh": "ops@100.64.12.55 port 2200", "change": "add build-linux to the roster" }
-        ],
-        "grants": ["broad fleet trust between every member"]
-    });
-
-    // The digest the worker would send: sha256 over the canonical JSON of the document,
-    // computed here with the same two public helpers `Plan::digest` uses. A hand-written
-    // constant would be a test that only proves this client echoes whatever it is told.
-    let digest = ouro::fleet_setup::sha256_hex(ouro::fleet_setup::canonical_json(&plan).as_bytes());
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_review",
-            json!([challenge(
-                "c-review",
-                "review",
-                json!({ "plan_digest": digest, "plan": plan })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    // The summary is followed by every resolved destination, account and path.
-    let text = prose(&mut app);
-    assert!(text.contains("Ready to deploy"), "{text}");
-    assert!(
-        text.contains("Install ouro 0.1.8 (x86_64-unknown-linux-gnu) to bin/ouro"),
-        "the install line is missing:\n{text}"
-    );
-    assert!(
-        text.contains("Join the fleet as build-linux."),
-        "the join line is missing:\n{text}"
-    );
-    assert!(
-        text.contains("Start at login as a user service"),
-        "the startup line is missing:\n{text}"
-    );
-    assert!(
-        text.contains("Update 2 rosters (studio, relay)."),
-        "the roster line is missing:\n{text}"
-    );
-    assert!(
-        text.contains("broad fleet trust between every member"),
-        "the trust sentence is not stated:\n{text}"
-    );
-    assert!(text.contains(&digest), "the digest is not shown:\n{text}");
-    assert!(
-        !text.contains("does not match"),
-        "an honest plan was reported as a mismatch:\n{text}"
-    );
-
-    // On a short terminal the details must remain reachable by paging before approval.
-    let mut paged = String::new();
-    for _ in 0..7 {
-        paged.push_str(&flowed(&render(&mut app, 100, 24)));
-        paged.push(' ');
-        app.apply(key(KeyCode::PageDown));
-    }
-    for fact in [
-        "deploy@100.64.12.44 port 2222",
-        "agent: id_ed25519",
-        "executable bin/ouro",
-        "data dir /srv/reviewed-fleet",
-        "model check /srv/model-check",
-        "asset ouro-linux.tar.gz",
-        "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef",
-        "studio at 100.64.12.21",
-        "ops@100.64.12.55 port 2200",
-        "the local idle runtime will restart",
-        "applies exactly this plan",
-    ] {
-        assert!(paged.contains(fact), "missing {fact}:\n{paged}");
-    }
-    assert!(drained(&mut app).is_empty(), "paging answered the review");
-
-    app.apply(key(KeyCode::Char('a')));
-    let calls = drained(&mut app);
-    let start = call_for(&calls, "fleet.deployment.start");
-
-    // What is approved is the digest this client computed over the plan it drew.
-    assert_eq!(start.params["plan_digest"], json!(digest));
-    assert_eq!(start.params["operation_id"], json!("abcdef0123456789"));
-
-    let key = start.params["idempotency_key"]
-        .as_str()
-        .expect("an idempotency key");
-    assert!(
-        key.starts_with("abcdef0123456789-"),
-        "the key is not derived from the operation: {key}"
-    );
-}
-
-/// A plan this client cannot read is never approved by pressing a key next to it.
-#[test]
-fn an_unreadable_plan_is_refused_rather_than_approved_blind() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_review",
-            json!([challenge(
-                "c-review",
-                "review",
-                json!({ "plan_digest": "abc", "plan": { "not": "a plan" } })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("could not read the plan"), "{text}");
-    assert!(text.contains("Cancel the setup"), "{text}");
-    assert!(
-        !text.contains("a  Deploy \u{2014} applies exactly this plan"),
-        "an unreadable plan still offered approval:\n{text}"
-    );
-
-    // And pressing the key that would approve one sends nothing at all.
-    app.apply(key(KeyCode::Char('a')));
-    let calls = drained(&mut app);
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.method == "fleet.deployment.start"),
-        "a plan nobody could read was approved anyway: {:?}",
-        calls.iter().map(|call| &call.method).collect::<Vec<_>>()
-    );
-}
-
-/// Progress: every state has words, and per-step outcomes are drawn.
-#[test]
-fn progress_draws_each_state_in_words_with_its_step_outcomes() {
-    let _mode = normal();
-    for (state, expected) in [
-        ("attaching", "connecting to the deployment worker"),
-        ("inspecting", "inspecting the target"),
-        ("deploying", "deploying"),
-        ("restarting_host", "restarting this runtime"),
-        ("checking_readiness", "checking readiness"),
-    ] {
-        let mut app = deploying();
-        answer(
-            &mut app,
-            status_tag(),
-            snapshot(
-                state,
-                json!([]),
-                json!({
-                    "steps": [
-                        { "machine": "build-linux", "step": "inspect", "outcome": "ok" },
-                        { "machine": "build-linux", "step": "install_binary",
-                          "outcome": "failed", "detail": "the archive did not verify" }
-                    ]
-                }),
-            ),
-        );
-        let _polled = drained(&mut app);
-
-        let text = prose(&mut app);
-        assert!(text.contains(expected), "{state}:\n{text}");
-        assert!(text.contains("inspect"), "{state} lost its steps:\n{text}");
-        assert!(
-            text.contains("the archive did not verify"),
-            "{state} lost a step detail:\n{text}"
-        );
-        assert!(text.contains("a live worker"), "{state}:\n{text}");
-
-        // §5.2 step 4: the six-stage strip, with a mark per stage and the current
-        // step's detail under it. `inspect` finished, `install` is where it stopped.
-        assert!(
-            text.contains("\u{2713} Inspect \u{b7} \u{d7} Install"),
-            "{state} did not draw the stage strip:\n{text}"
-        );
-        for stage in ["Join fleet", "Start at login", "Connect", "Ready"] {
-            assert!(
-                text.contains(&format!("\u{25cb} {stage}")),
-                "{state} lost the {stage} stage:\n{text}"
-            );
-        }
-    }
-
-    // A stage the worker is *on* is marked as the current one rather than as done.
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "deploying",
-            json!([]),
-            json!({
-                "steps": [
-                    { "machine": "build-linux", "step": "inspect", "outcome": "ok" },
-                    { "machine": "build-linux", "step": "install_binary",
-                      "outcome": "started", "detail": "downloading ouro 0.1.9" }
-                ]
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains("\u{2713} Inspect \u{b7} \u{25cf} Install"),
-        "the running stage is not marked as the current one:\n{text}"
-    );
-    assert!(
-        text.contains("downloading ouro 0.1.9"),
-        "the current step's detail is missing:\n{text}"
-    );
-}
-
-/// Finishing names the machine and offers Open and Done, and nothing it did not do.
-#[test]
-fn a_completed_setup_names_the_machine_and_offers_open_and_done() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("completed", json!([]), json!({})),
-    );
-
-    let text = prose(&mut app);
-    assert!(text.contains("build-linux is in your fleet"), "{text}");
-    assert!(text.contains("Open"), "{text}");
-    assert!(text.contains("b Done"), "{text}");
-    // The two follow-ups this view has no action for are gone: a model is configured
-    // per machine and a first task is an explicit thing somebody does, and naming them
-    // as steps of this screen was naming actions it does not have.
-    assert!(!text.contains("Configure model"), "{text}");
-    assert!(!text.contains("Run test task"), "{text}");
-}
-
-/// A failure shows the steps that did run, the cause, the residue, and offers retry.
-#[test]
-fn a_failed_setup_shows_its_cause_and_residue_and_offers_a_retry() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "failed",
-            json!([]),
-            json!({
-                "last_error": "the target refused the key",
-                "residue": ["a partial archive at /home/deploy/.cache/ouro"],
-                "steps": [{ "machine": "build-linux", "step": "inspect", "outcome": "ok" }]
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("This setup did not finish"), "{text}");
-    assert!(text.contains("the target refused the key"), "{text}");
-    assert!(text.contains("Left behind"), "{text}");
-    assert!(
-        text.contains("a partial archive at /home/deploy/.cache/ouro"),
-        "{text}"
-    );
-    assert!(text.contains("Retry"), "{text}");
-    assert!(
-        text.contains("puts the plan up for review"),
-        "the screen does not say what Retry does:\n{text}"
-    );
-
-    // Retry resumes this operation by its id. That is what makes it safe to offer after
-    // a failure: a resume re-inspects and puts the plan up for review, so nothing is
-    // applied that has not been read again — and it is never a second `start`.
-    app.apply(key(KeyCode::Char('R')));
-    let calls = drained(&mut app);
-
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.method == "fleet.deployment.start"),
-        "retry resent an approval"
-    );
-
-    let resume = call_for(&calls, "fleet.deployment.resume");
-    assert_eq!(resume.params, json!({ "operation_id": "abcdef0123456789" }));
-    assert!(
-        resume.params.get("takeover").is_none(),
-        "retry took an operation over without asking"
-    );
-}
-
-/// The proposal's step 5 on the row: a failure offers Retry and reads as a failure.
-#[test]
-fn a_failed_setup_offers_retry_on_its_row_and_a_cancelled_one_offers_a_fresh_deployment() {
+fn an_operation_in_progress_is_drawn_on_its_row_and_answered_by_nothing() {
     let _mode = normal();
 
-    for (state, word, label, method) in [
-        (
-            "failed",
-            "setup failed",
-            "Retry",
-            Some("fleet.deployment.resume"),
-        ),
-        (
-            "interrupted",
-            "setting up\u{2026}",
-            "Continue",
-            Some("fleet.deployment.resume"),
-        ),
-        // The broker's own terminal set is completed and cancelled: a resume of one
-        // answers `operation_finished`, so the row offers a new operation instead of a
-        // call that would be refused.
-        ("cancelled", "not set up", "Add to fleet", None),
-    ] {
+    let underway = |state: &str, last_error: Value| {
         let mut reply = populated();
         reply["operations"] = json!([{
-            "operation": "abcdef0123456789", "state": state, "kind": "add",
-            "owner": "local-owner", "attached": false, "readable": true,
-            "target": { "machine": "build-linux", "address": "100.64.12.44",
-                        "ssh_user": "deploy", "port": 22 }
+            "operation": "op-7", "kind": "add", "state": state,
+            "running": state != "failed", "readable": true,
+            "created_at": "2026-09-18T08:00:00Z",
+            "updated_at": "2026-09-18T08:05:00Z",
+            "target": { "machine": "build-linux", "address": "100.64.12.44" },
+            "last_error": last_error,
+        }]);
+        reply
+    };
+
+    // Going: the Ouroboros column says so, and the action column has nothing to type.
+    let mut app = with_inventory(underway("deploying", Value::Null));
+    let drawn = screen(&mut app);
+    let row = device_row(&drawn, "build-linux");
+    assert!(row.contains("setting up\u{2026}"), "{row}");
+    assert!(
+        !row.contains("ouro fleet"),
+        "a device being set up was still offered the command: {row}"
+    );
+    drop(drawn);
+
+    open_details(&mut app, "build-linux");
+    let text = prose(&mut app);
+    assert!(text.contains("op-7"), "{text}");
+    assert!(text.contains("deploying"), "{text}");
+    assert!(text.contains("a worker is running it"), "{text}");
+
+    // Waiting on somebody: still read-only, and the state says what it is waiting for.
+    let mut waiting = with_inventory(underway("awaiting_auth", Value::Null));
+    open_details(&mut waiting, "build-linux");
+    let text = prose(&mut waiting);
+    assert!(text.contains("waiting for a credential"), "{text}");
+    for code in [
+        KeyCode::Char('t'),
+        KeyCode::Char('n'),
+        KeyCode::Char('c'),
+        KeyCode::Char('y'),
+        KeyCode::Enter,
+    ] {
+        waiting.apply(key(code));
+        assert!(
+            drained(&mut waiting).is_empty(),
+            "{code:?} answered a challenge from the terminal"
+        );
+    }
+
+    // Failed: the row says so, offers the command again, and the pane has the cause.
+    let mut failed = with_inventory(underway(
+        "failed",
+        json!({ "reason": "worker_timeout", "detail": "no reply after 120s" }),
+    ));
+    let drawn = screen(&mut failed);
+    let row = device_row(&drawn, "build-linux");
+    assert!(row.contains("setup failed"), "{row}");
+    assert!(
+        row.contains("ouro fleet add USER@100.64.12.44 --machine build-linux"),
+        "a stopped operation did not give the row its command back: {row}"
+    );
+    drop(drawn);
+
+    open_details(&mut failed, "build-linux");
+    let text = prose(&mut failed);
+    assert!(text.contains("last error"), "{text}");
+    assert!(text.contains("did not answer in time"), "{text}");
+    assert!(text.contains("no reply after 120s"), "{text}");
+}
+
+/// The member facts are in the pane, the fleet's own words stay on the row, and `r` still
+/// asks the runtime again.
+#[test]
+fn a_connected_member_reads_as_connected_and_keeps_the_network_facts_separate() {
+    let _mode = normal();
+
+    let mut reply = populated();
+    reply["devices"] = json!([
+        {
+            "name": "build-linux", "machine": "build-linux",
+            "suggested_machine": "build-linux", "os": "linux",
+            "address": "100.64.12.44",
+            // The network client cannot see it...
+            "online": false, "last_seen": "2026-09-17T07:50:00.1Z",
+            // ...and this runtime is talking to it.
+            "state": "fleet_member_connected",
+            "connected": true, "compatible": true, "runtime_running": true,
+            "last_probe": "2026-09-17T08:10:00Z",
+            "name_conflicts_with_roster": Value::Null
+        },
+        {
+            "name": "old-pi", "machine": "old-pi", "suggested_machine": "old-pi",
+            "os": "linux",
+            "address": "100.64.12.10", "online": true, "last_seen": Value::Null,
+            "state": "fleet_member",
+            "connected": false, "compatible": Value::Null,
+            "runtime_running": Value::Null, "last_probe": Value::Null,
+            "name_conflicts_with_roster": Value::Null
+        },
+        {
+            // A peer that has never been in a fleet: this runtime knows nothing about it,
+            // and says nothing rather than reporting it as disconnected.
+            "name": "vps", "machine": Value::Null, "suggested_machine": "vps",
+            "os": "linux",
+            "address": "100.64.12.99", "online": true, "last_seen": Value::Null,
+            "state": "discovered_installation_unknown",
+            "connected": Value::Null, "compatible": Value::Null,
+            "runtime_running": Value::Null, "last_probe": Value::Null,
+            "name_conflicts_with_roster": Value::Null
+        }
+    ]);
+
+    let mut app = with_inventory(reply);
+    let _settled = drained(&mut app);
+
+    let drawn = screen(&mut app);
+    let row = device_row(&drawn, "build-linux").to_string();
+    assert!(row.contains("in the fleet"), "{row}");
+    assert!(
+        row.contains("ouro fleet leave --machine build-linux --user USER"),
+        "{row}"
+    );
+    drop(drawn);
+    let text = prose(&mut app);
+    assert!(
+        !text.contains("not visible on this network"),
+        "a connected member still read as invisible:\n{text}"
+    );
+
+    // The runtime's facts, in that row's pane, kept apart from the network's.
+    open_details(&mut app, "build-linux");
+    let text = prose(&mut app);
+    assert!(
+        text.contains("runtime connected \u{b7} compatible build \u{b7} runtime running \u{b7} probed 2026-09-17T08:10:00Z"),
+        "the live facts are not drawn:\n{text}"
+    );
+
+    // And the network's facts are still the network's: `online: false` is not overwritten
+    // by the runtime being connected, because those are two different questions.
+    assert!(
+        text.contains("offline, last seen 2026-09-17T07:50:00.1Z"),
+        "the network fact was replaced by the cluster's:\n{text}"
+    );
+
+    // A member this runtime is not connected to says that much and no more.
+    select(&mut app, "old-pi");
+    let text = prose(&mut app);
+    assert!(text.contains("runtime not connected"), "{text}");
+    assert!(
+        device_row(&screen(&mut app), "old-pi").contains("in the fleet \u{b7} not connected"),
+        "{text}"
+    );
+
+    // A non-member carries no runtime line at all — null is "not known", not "absent".
+    select(&mut app, "vps");
+    let text = prose(&mut app);
+    assert!(
+        !text.contains("runtime runtime") && !text.contains("runtime not connected"),
+        "a device that has never been in a fleet was given cluster facts:\n{text}"
+    );
+
+    // `r` still asks the runtime again, and asks for nothing else.
+    app.apply(key(KeyCode::Char('r')));
+    let calls = drained(&mut app);
+    assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
+    assert_eq!(calls.len(), 1, "{:?}", calls);
+}
+
+/// A state string this build has never seen is a sentence, never a blank column.
+#[test]
+fn an_unreadable_state_is_named_rather_than_left_blank() {
+    let _mode = normal();
+
+    for (state, expected) in [
+        ("quantum_entangled", "quantum_entangled"),
+        ("", "reported no state"),
+    ] {
+        let mut reply = populated();
+        reply["devices"] = json!([{
+            "name": "mystery", "machine": Value::Null, "suggested_machine": "mystery",
+            "os": "linux",
+            "address": "100.64.12.50", "online": true, "last_seen": Value::Null,
+            "state": state, "name_conflicts_with_roster": Value::Null
         }]);
 
         let mut app = with_inventory(reply);
         let _settled = drained(&mut app);
+        app.apply(key(KeyCode::Enter));
+        let text = prose(&mut app);
 
+        assert!(text.contains(expected), "{state:?}:\n{text}");
+
+        // The row is still a row, with its own fields drawn and no command invented.
         let drawn = screen(&mut app);
-        let row = device_row(&drawn, "build-linux").to_string();
+        assert!(device_row(&drawn, "mystery").contains('\u{2014}'));
         drop(drawn);
-
-        assert!(row.contains(label), "{state}: {row:?}");
+        assert!(text.contains("100.64.12.50"), "{state:?}:\n{text}");
         assert!(
-            row.contains(word),
-            "{state} did not read as itself: {row:?}"
+            text.contains("which this client has no command for"),
+            "{state:?} left the reason unsaid:\n{text}"
         );
-
-        activate(&mut app, "build-linux");
-        let calls = drained(&mut app);
-
-        match method {
-            Some(expected) => {
-                assert_eq!(
-                    call_for(&calls, expected).params,
-                    json!({ "operation_id": "abcdef0123456789" }),
-                    "{state}"
-                );
-            }
-            None => {
-                assert!(
-                    !calls
-                        .iter()
-                        .any(|call| call.method.starts_with("fleet.deployment.")),
-                    "{state} issued a call the broker would refuse: {:?}",
-                    calls.iter().map(|call| &call.method).collect::<Vec<_>>()
-                );
-                // It opens the ordinary connect form: a new operation, reviewed from the
-                // beginning.
-                assert!(prose(&mut app).contains("SSH user"), "{state}");
-            }
-        }
     }
-
-    // A completed operation says nothing at all; the row describes the device again.
-    let mut reply = populated();
-    reply["operations"] = json!([{
-        "operation": "abcdef0123456789", "state": "completed", "kind": "add",
-        "owner": "local-owner", "attached": false, "readable": true,
-        "target": { "machine": "build-linux", "address": "100.64.12.44",
-                    "ssh_user": "deploy", "port": 22 }
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-    let drawn = screen(&mut app);
-
-    let row = device_row(&drawn, "build-linux");
-    assert!(row.contains("set up just now"), "{row}");
-    assert!(row.contains("Add to fleet"), "{row}");
 }
 
-/// Cancel stops at a boundary and says what it does not claim.
+/// Paging leaves the selection alone so a pane below the fold can be read, and no key
+/// that pages acts on anything.
 #[test]
-fn cancelling_stops_at_a_boundary_and_does_not_claim_to_undo() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("deploying", json!([]), json!({})),
-    );
-    let _polled = drained(&mut app);
-
-    app.apply(key(KeyCode::Char('c')));
-    let calls = drained(&mut app);
-    let cancel = call_for(&calls, "fleet.deployment.cancel");
-    assert_eq!(cancel.params, json!({ "operation_id": "abcdef0123456789" }));
-
-    answer(&mut app, cancel.tag.clone(), json!({}));
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("cancelled", json!([]), json!({ "residue": [] })),
-    );
-
-    let text = prose(&mut app);
-    assert!(text.contains("This setup was cancelled"), "{text}");
-    assert!(
-        text.contains("a credential already delivered stays delivered"),
-        "the page claimed an undo:\n{text}"
-    );
-}
-
-/// Leaving does not cancel, and coming back is still following the same operation.
-#[test]
-fn leaving_keeps_the_operation_and_returning_is_still_following_it() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("deploying", json!([]), json!({})),
-    );
-    let _polled = drained(&mut app);
-
-    app.apply(key(KeyCode::Esc));
-    assert!(app.overlay.is_none());
-    assert!(
-        !drained(&mut app)
-            .iter()
-            .any(|call| call.method.contains("cancel")),
-        "leaving cancelled the operation"
-    );
-
-    // Reopening reads that operation by its id, which is what "reloads by operation id"
-    // means for a client that never forgot it.
-    app.open_devices();
-    let calls = drained(&mut app);
-    let status = call_for(&calls, "fleet.deployment.status");
-    assert_eq!(status.params, json!({ "operation_id": "abcdef0123456789" }));
-
-    let text = prose(&mut app);
-    assert!(text.contains("operation abcdef0123456789"), "{text}");
-    assert!(text.contains("deploying"), "{text}");
-
-    // `b` goes back to the list without stopping anything.
-    app.apply(key(KeyCode::Char('b')));
-    let calls = drained(&mut app);
-    assert!(
-        !calls.iter().any(|call| call.method.contains("cancel")),
-        "going back to the list cancelled the operation"
-    );
-}
-
-/// A client that never saw the operation finds it on the row, and continues it by id.
-///
-/// This is acceptance 15's case: the page was closed, or this client was restarted, and
-/// the only record is the one the deployment host holds.
-#[test]
-fn a_fresh_client_finds_the_open_setup_on_the_row_and_continues_it_by_id() {
+fn paging_a_long_inventory_reaches_the_pane_without_acting() {
     let _mode = normal();
     let mut reply = populated();
-    reply["operations"] = json!([{
-        "operation": "abcdef0123456789", "state": "deploying", "kind": "add",
-        "owner": "local-owner", "attached": true, "readable": true,
-        "updated_at": "2026-09-17T08:00:00Z",
-        "target": { "machine": "build-linux", "address": "100.64.12.44",
-                    "ssh_user": "deploy", "port": 22 }
-    }]);
+    reply["devices"] = json!((0..30)
+        .map(|index| json!({
+            "name": format!("peer-{index:02}"),
+            "machine": format!("peer-{index:02}"),
+            "suggested_machine": format!("peer-{index:02}"),
+            "address": format!("100.64.1.{}", index + 1),
+            "os": "linux", "state": "fleet_member", "online": true,
+            "connected": true,
+            "last_probe": if index == 0 { "2026-09-17T08:10:00Z" } else { "other probe" }
+        }))
+        .collect::<Vec<_>>());
 
     let mut app = with_inventory(reply);
+    app.terminal_width = 80;
+    let _ = drained(&mut app);
+    let initial = render(&mut app, 80, 24);
+    assert!(initial.rows.iter().any(|row| row.contains("> peer-00")));
+    assert!(!flowed(&initial).contains("probed 2026-09-17T08:10:00Z"));
 
-    // The operation is on the row it is about, in that row's own Ouroboros column.
-    let drawn = screen(&mut app);
-    let row = device_row(&drawn, "build-linux").to_string();
-    drop(drawn);
-    assert!(row.contains("setting up\u{2026}"), "{row}");
-    assert!(row.contains("Continue"), "{row}");
-
-    // Its id and its owner are in that row's details, not in a banner over the list.
-    activate_cursor(&mut app, "build-linux");
-    let text = prose(&mut app);
-    assert!(text.contains("abcdef0123456789"), "{text}");
-    assert!(
-        text.contains("started by local-owner"),
-        "the owner is not named:\n{text}"
+    // Open the pane for the selected row, then page away from it.
+    app.apply(key(KeyCode::Enter));
+    let mut pages = String::new();
+    for _ in 0..10 {
+        app.apply(key(KeyCode::PageDown));
+        pages.push_str(&flowed(&render(&mut app, 80, 24)));
+        pages.push(' ');
+    }
+    assert!(pages.contains("runtime connected"), "{pages}");
+    assert!(pages.contains("probed 2026-09-17T08:10:00Z"), "{pages}");
+    assert_eq!(
+        app.devices.cursor, 0,
+        "paging changed the selected destination"
     );
+    assert!(drained(&mut app).is_empty(), "paging acted on a device");
 
-    // Pressing it reads that operation by id. A worker is attached, so nothing resumes.
-    let _settled = drained(&mut app);
-    activate(&mut app, "build-linux");
-
-    let calls = drained(&mut app);
-    let status = call_for(&calls, "fleet.deployment.status");
-    assert_eq!(status.params, json!({ "operation_id": "abcdef0123456789" }));
+    // Ordinary cursor movement follows the destination below the fold, and the pane
+    // follows the cursor.
+    for _ in 0..25 {
+        app.apply(key(KeyCode::Down));
+    }
+    let moved = render(&mut app, 80, 24);
+    assert!(moved.rows.iter().any(|row| row.contains("> peer-25")));
+    let text = flowed(&render(&mut app, 80, 24));
     assert!(
-        !calls.iter().any(|call| call.method.contains("resume")),
-        "an attached operation was resumed"
+        text.contains("ouro fleet leave --machine peer-25 --user USER"),
+        "{text}"
     );
-}
-
-/// An operation whose worker is gone is resumed — and never with a silent takeover.
-#[test]
-fn an_operation_with_no_worker_is_resumed_without_asking_for_a_takeover() {
-    let _mode = normal();
-    let mut app = with_inventory({
-        let mut reply = populated();
-        reply["operations"] = json!([{
-            "operation": "abcdef0123456789", "state": "interrupted", "kind": "add",
-            "owner": "local-owner", "attached": false, "readable": true,
-            "target": { "machine": "build-linux", "address": "100.64.12.44",
-                        "ssh_user": "deploy", "port": 22 }
-        }]);
-        reply
-    });
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    let calls = drained(&mut app);
-    let resume = call_for(&calls, "fleet.deployment.resume");
-
-    assert_eq!(resume.params, json!({ "operation_id": "abcdef0123456789" }));
-    assert!(
-        resume.params.get("takeover").is_none(),
-        "a resume carried takeover without being asked: {}",
-        resume.params
-    );
+    assert!(drained(&mut app).is_empty());
 }
 
 // ---------------------------------------------------------------------------------------
 // authority
 // ---------------------------------------------------------------------------------------
 
-/// Another identity's setup is never inherited quietly.
-#[test]
-fn taking_over_another_identitys_setup_is_an_explicit_answer_naming_its_owner() {
-    let _mode = normal();
-    let mut app = with_inventory({
-        let mut reply = populated();
-        reply["operations"] = json!([{
-            "operation": "abcdef0123456789", "state": "awaiting_auth", "kind": "add",
-            "owner": "grace", "attached": false, "readable": true,
-            "target": { "machine": "build-linux", "address": "100.64.12.44",
-                        "ssh_user": "deploy", "port": 22 }
-        }]);
-        reply
-    });
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    let calls = drained(&mut app);
-    let resume = call_for(&calls, "fleet.deployment.resume");
-    assert!(resume.params.get("takeover").is_none());
-
-    // The runtime says it is not ours.
-    refuse(
-        &mut app,
-        resume.tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({ "reason": "operation_not_yours" })),
-    );
-
-    let text = prose(&mut app);
-    assert!(text.contains("Take over this setup?"), "{text}");
-    assert!(text.contains("grace"), "the owner is not named:\n{text}");
-    assert!(
-        text.contains("inheriting someone else's password prompt"),
-        "the consequence is not stated:\n{text}"
-    );
-    assert!(text.contains("Take over this setup"), "{text}");
-    assert!(text.contains("Leave it alone"), "{text}");
-
-    // Nothing is sent while the question is open, not even a poll.
-    app.apply(Msg::Tick);
-    let idle = drained(&mut app);
-    assert!(
-        !idle
-            .iter()
-            .any(|call| call.method.starts_with("fleet.deployment")),
-        "the view kept calling while the takeover question was open: {:?}",
-        idle.iter().map(|call| &call.method).collect::<Vec<_>>()
-    );
-
-    // Only `t` sends it, and only then does `takeover` appear.
-    app.apply(key(KeyCode::Char('t')));
-    let calls = drained(&mut app);
-    let takeover = call_for(&calls, "fleet.deployment.resume");
-
-    assert_eq!(takeover.params["takeover"], json!(true));
-    assert_eq!(takeover.params["operation_id"], json!("abcdef0123456789"));
-}
-
-/// Declining a takeover leaves the operation where it was.
-#[test]
-fn declining_a_takeover_sends_nothing_and_says_so() {
-    let _mode = normal();
-    let mut app = with_inventory({
-        let mut reply = populated();
-        reply["operations"] = json!([{
-            "operation": "abcdef0123456789", "state": "awaiting_auth",
-            "owner": "grace", "attached": false, "readable": true,
-            "target": { "machine": "build-linux", "address": "100.64.12.44",
-                        "ssh_user": "deploy", "port": 22 }
-        }]);
-        reply
-    });
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    let calls = drained(&mut app);
-    refuse(
-        &mut app,
-        call_for(&calls, "fleet.deployment.resume").tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({ "reason": "operation_not_yours" })),
-    );
-
-    app.apply(key(KeyCode::Char('n')));
-    let calls = drained(&mut app);
-
-    assert!(
-        !calls.iter().any(|call| call.method.contains("resume")),
-        "declining still resumed"
-    );
-    assert!(screen(&mut app).contains("still running under the identity"));
-}
-
-/// An unattributable operation is the same question, with the gap named.
-#[test]
-fn an_operation_with_no_recorded_owner_still_asks_before_taking_over() {
-    let _mode = normal();
-    let mut app = with_inventory({
-        let mut reply = populated();
-        reply["operations"] = json!([{
-            "operation": "abcdef0123456789", "state": "interrupted",
-            "owner": Value::Null, "attached": false, "readable": true,
-            "target": { "machine": "build-linux", "address": "100.64.12.44",
-                        "ssh_user": "deploy", "port": 22 }
-        }]);
-        reply
-    });
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    let calls = drained(&mut app);
-    refuse(
-        &mut app,
-        call_for(&calls, "fleet.deployment.resume").tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({ "reason": "operation_not_yours" })),
-    );
-
-    assert!(prose(&mut app).contains("an identity this runtime could not establish"));
-}
-
-/// A runtime that does not serve the inventory is a different fact from one that
-/// refuses this identity, and both fall back to the membership subset.
+/// A runtime that does not serve the method, and one that refuses this identity, say
+/// different things — and both fall back to the membership subset.
 #[test]
 fn an_absent_capability_and_a_denied_permission_say_different_things() {
     let _mode = normal();
@@ -2177,14 +1392,14 @@ fn an_absent_capability_and_a_denied_permission_say_different_things() {
     );
 }
 
-/// A read-scope listener sees the inventory and cannot start a deployment.
+/// A read-scope listener sees the whole inventory, because it is a read — and there is
+/// nothing on the page for its scope to refuse.
 #[test]
-fn a_read_scope_listener_shows_the_devices_and_refuses_to_deploy() {
+fn a_read_scope_listener_sees_the_whole_list() {
     let _mode = normal();
     let mut app = opened(read_hello(&[
         "fleet.devices",
         "fleet.status",
-        "fleet.deployment.prepare",
         "runtime.status",
     ]));
     let calls = drained(&mut app);
@@ -2197,2856 +1412,102 @@ fn a_read_scope_listener_shows_the_devices_and_refuses_to_deploy() {
 
     assert!(screen(&mut app).contains("build-linux"));
 
-    activate(&mut app, "build-linux");
-
+    open_details(&mut app, "build-linux");
+    let text = prose(&mut app);
+    assert!(
+        text.contains("ouro fleet add USER@100.64.12.44 --machine build-linux"),
+        "a read-scope listener was not told what to run:\n{text}"
+    );
     assert!(
         drained(&mut app).is_empty(),
-        "a read-scope listener started a deployment"
+        "a read-scope listener sent something"
     );
-    assert!(prose(&mut app).contains("started at read scope"));
+    // There is no "started at read scope" sentence left, because there is no verb it
+    // could apply to.
+    assert!(!text.contains("started at read scope"), "{text}");
 }
 
-/// A runtime that cannot deploy explains why rather than offering an inert action.
+/// Whatever this runtime says it cannot do is said once, above the list, and gates
+/// nothing: the commands are for a shell, not for this client.
 #[test]
-fn a_runtime_that_cannot_deploy_explains_the_blocker_instead_of_offering_deploy() {
+fn a_runtime_that_cannot_deploy_says_so_once_and_still_prints_the_commands() {
     let _mode = normal();
     for (reason, expected) in [
-        (
-            "no_ca_key",
-            "does not hold the fleet's certificate authority key",
-        ),
-        (
-            "ouro_path_unknown",
-            "cannot say where its own ouro executable is",
-        ),
-        ("no_data_dir", "serves no durable data directory"),
-        ("cleartext_web_bind", "credential entry is refused"),
+        ("dev_runtime", "development runtime"),
+        ("ouro_path_unknown", "where its own ouro executable is"),
+        ("no_data_dir", "no durable data directory"),
+        ("cleartext_web_bind", "non-loopback"),
     ] {
         let mut reply = populated();
         reply["host"] = host(false, &[reason]);
 
         let mut app = with_inventory(reply);
-        let _settled = drained(&mut app);
-
         let text = prose(&mut app);
+
         assert!(text.contains(expected), "{reason}:\n{text}");
-        assert!(
-            !text.contains(reason),
-            "{reason} was printed as its own code:\n{text}"
-        );
-
-        // The row carries no button at all rather than one the gate would refuse.
-        let drawn = screen(&mut app);
-        let row = device_row(&drawn, "build-linux").to_string();
-        drop(drawn);
-        assert!(!row.contains("Add to fleet"), "{reason}: {row}");
-        assert!(row.contains('\u{2014}'), "{reason}: {row}");
-
-        activate(&mut app, "build-linux");
-        assert!(
-            drained(&mut app).is_empty(),
-            "{reason} still let a deployment start"
-        );
-    }
-}
-
-/// "Set up this Mac" is the first local fleet: no account, no host key, same review.
-#[test]
-fn setting_up_this_machine_asks_for_no_ssh_and_prepares_a_setup_operation() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["devices"] = json!([{
-        "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
-        "os": "macos", "address": "100.64.12.21", "online": true,
-        "state": "this_device_without_profile", "action": "set up this device",
-        "name_conflicts_with_roster": Value::Null,
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    let drawn = screen(&mut app);
-    assert!(device_row(&drawn, "This Mac").contains("Set up this Mac"));
-    drop(drawn);
-
-    activate(&mut app, "This Mac");
-
-    // The form has a machine name and a service choice, and none of the SSH fields.
-    let text = prose(&mut app);
-    assert!(text.contains("Set up this Mac"), "{text}");
-    assert!(text.contains("Name in the fleet"), "{text}");
-    assert!(text.contains("start at login"), "{text}");
-    assert!(
-        text.contains("this view reconnects by itself"),
-        "the restart sentence is missing from the setup form:\n{text}"
-    );
-    assert!(
-        !text.contains("SSH user"),
-        "the local setup asked for an SSH account:\n{text}"
-    );
-    assert!(
-        text.contains("without SSH to itself"),
-        "the screen does not say why there is no account:\n{text}"
-    );
-
-    // And the required-username refusal does not fire on a form with no username.
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-
-    assert_eq!(prepare.params["kind"], json!("setup"));
-    assert_eq!(prepare.params["machine"], json!("studio"));
-    assert_eq!(prepare.params["address"], json!("100.64.12.21"));
-    assert_eq!(prepare.params["service"], json!(true));
-    assert!(
-        prepare.params.get("ssh_user").is_none(),
-        "a local setup carried an SSH account: {}",
-        prepare.params
-    );
-    assert!(prepare.params.get("target").is_none(), "{}", prepare.params);
-    assert!(
-        prepare.params.get("identity").is_none(),
-        "{}",
-        prepare.params
-    );
-    assert!(
-        !prose(&mut app).contains("An SSH username is required"),
-        "the add-only refusal fired on a setup form"
-    );
-}
-
-/// A first local setup restarts the runtime this client is attached to (finding 4).
-///
-/// The worker is detached, so the deployment does not stop when the runtime does — but
-/// this client's connection does. Three things must be true across that gap, and none of
-/// them were: the view must not draw the snapshot it had as though it were current, it
-/// must not spin on a runtime that is gone, and when the client reconnects it must reload
-/// *this* operation by its id and carry on from whatever the broker says.
-///
-/// The gap is driven the way the transport drives it: the in-flight read fails with
-/// `ConnectionClosed`, which is what the socket closing produces, and the return is the
-/// `Msg::Reconnected` the real reconnect hook sends after a fresh handshake
-/// (`src/ui/mod.rs`'s `StreamHook::after_reconnect`).
-#[test]
-fn the_hosting_runtimes_restart_is_drawn_as_a_reconnect_and_reloads_by_operation_id() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["devices"] = json!([{
-        "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
-        "os": "macos", "address": "100.64.12.21", "online": true,
-        "state": "this_device_without_profile", "action": "set up this device",
-        "name_conflicts_with_roster": Value::Null,
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-    activate(&mut app, "This Mac");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    answer(
-        &mut app,
-        call_for(&calls, "fleet.deployment.prepare").tag.clone(),
-        json!({ "operation_id": "abcdef0123456789" }),
-    );
-
-    // The runtime restarts itself as part of the plan, and says so while it still can.
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "restarting_host",
-            json!([]),
-            json!({ "kind": "setup",
-                    "steps": [{ "machine": "studio", "step": "create", "outcome": "ok" }] }),
-        ),
-    );
-    let _polled = drained(&mut app);
-    assert!(prose(&mut app).contains("restarting this runtime"));
-
-    // The connection goes. The operation is not cancelled by that, and nothing is sent.
-    app.apply(Msg::Answer {
-        tag: status_tag(),
-        result: Err(ClientError::ConnectionClosed),
-    });
-    let during = drained(&mut app);
-    assert!(
-        !during.iter().any(|call| call.method.contains("cancel")),
-        "losing the connection cancelled the setup"
-    );
-
-    // What is on the screen is what is true: the runtime is away, and this is waiting.
-    let text = prose(&mut app);
-    assert!(
-        text.contains("Ouroboros is restarting\u{2026} reconnecting"),
-        "the gap is not drawn:\n{text}"
-    );
-    assert!(
-        text.contains("abcdef0123456789"),
-        "the operation id was dropped across the gap:\n{text}"
-    );
-    // Never the last snapshot redrawn as though it were current.
-    assert!(
-        !text.contains("restarting this runtime"),
-        "the stale snapshot is still drawn as the live state:\n{text}"
-    );
-    assert!(
-        !text.contains("create"),
-        "the stale steps are still drawn as the live ones:\n{text}"
-    );
-    assert!(
-        ouro::ui::app::devices_hint_line(&app).contains("waiting for the runtime to come back"),
-        "{}",
-        ouro::ui::app::devices_hint_line(&app)
-    );
-
-    // And it does not spin: the failed read backs off by the snapshot cadence rather
-    // than issuing a call on every tick at a runtime that is not there.
-    for _ in 0..3 {
-        app.apply(Msg::Tick);
-    }
-    assert!(
-        drained(&mut app).is_empty(),
-        "the view kept calling a runtime that is gone"
-    );
-
-    // The client reconnects. The operation is reloaded by its own id, and nothing else
-    // about it is assumed: `fleet.deployment.status` is a read.
-    app.apply(Msg::Reconnected(Box::new(full_hello())));
-    let calls = drained(&mut app);
-    let status = call_for(&calls, "fleet.deployment.status");
-    assert_eq!(status.params, json!({ "operation_id": "abcdef0123456789" }));
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.method == "fleet.deployment.prepare"),
-        "the reconnect started a second operation: {:?}",
-        calls.iter().map(|call| &call.method).collect::<Vec<_>>()
-    );
-
-    // Until it answers, the screen still says what it is doing rather than pretending.
-    let text = prose(&mut app);
-    assert!(
-        text.contains("Ouroboros is back\u{2026} reading this setup again"),
-        "{text}"
-    );
-
-    // The worker carried on across the restart and is asking the next question. The view
-    // picks the flow up there.
-    answer(
-        &mut app,
-        status_tag(),
-        json!({
-            "operation": "abcdef0123456789", "source": "worker", "attached": true,
-            "kind": "setup", "state": "checking_readiness", "owner": "local-owner",
-            "steps": [
-                { "machine": "studio", "step": "create", "outcome": "ok" },
-                { "machine": "studio", "step": "connect", "outcome": "started" }
-            ],
-            "log": [], "challenges": []
-        }),
-    );
-
-    let text = prose(&mut app);
-    assert!(!text.contains("reconnecting"), "{text}");
-    assert!(text.contains("checking readiness"), "{text}");
-    assert!(
-        text.contains("create"),
-        "the steps that did run are gone:\n{text}"
-    );
-}
-
-#[test]
-fn reconnect_status_refusal_replaces_completion_and_allows_return_to_inventory() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("completed", json!([]), json!({})),
-    );
-    app.apply(Msg::Reconnected(Box::new(full_hello())));
-    let calls = drained(&mut app);
-    let status = call_for(&calls, "fleet.deployment.status");
-    refuse(
-        &mut app,
-        status.tag.clone(),
-        ErrorCode::UpstreamError,
-        Some(json!({ "reason": "unknown_operation" })),
-    );
-    let text = prose(&mut app);
-    assert!(
-        text.contains("this runtime has no operation with that id"),
-        "{text}"
-    );
-    assert!(!text.contains("reading this setup again"), "{text}");
-    app.apply(key(KeyCode::Char('b')));
-    let drawn = screen(&mut app);
-    assert!(device_row(&drawn, "build-linux").contains("Add to fleet"));
-    assert!(matches!(app.overlay, Some(Overlay::Devices)));
-}
-
-#[test]
-fn reconnect_status_refusal_does_not_reactivate_cached_challenges() {
-    let _mode = normal();
-    for (state, kind, metadata) in [
-        (
-            "awaiting_host_trust",
-            "host_trust",
-            json!({
-                "address": "100.64.12.44", "port": 22, "user": "deploy",
-                "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:cached"
-            }),
-        ),
-        (
-            "awaiting_auth",
-            "password",
-            json!({ "user": "deploy", "address": "100.64.12.44" }),
-        ),
-    ] {
-        let mut app = deploying();
-        answer(
-            &mut app,
-            status_tag(),
-            snapshot(
-                state,
-                json!([challenge("cached", kind, metadata)]),
-                json!({}),
-            ),
-        );
-        app.apply(Msg::Reconnected(Box::new(full_hello())));
-        refuse(
-            &mut app,
-            status_tag(),
-            ErrorCode::UpstreamError,
-            Some(json!({ "reason": "unknown_operation" })),
-        );
-        let _ = drained(&mut app);
-        assert!(prose(&mut app).contains("this runtime has no operation with that id"));
-        app.apply(Msg::Paste("never answer a cached question".into()));
-        for code in [
-            KeyCode::Char('t'),
-            KeyCode::Char('n'),
-            KeyCode::Char('a'),
-            KeyCode::Enter,
-        ] {
-            app.apply(key(code));
-        }
-        assert_eq!(secret_chars(&app), 0);
-        assert!(drained(&mut app).is_empty(), "answered cached {kind}");
-        app.apply(key(KeyCode::Char('b')));
-        assert!(app.devices.operation.is_none());
-    }
-}
-
-#[test]
-fn hidden_challenges_take_no_input_until_fresh_status_arrives() {
-    let _mode = normal();
-    let plan = json!({
-        "kind": "add",
-        "deployment_host": { "hostname": "studio", "user": "ada", "issuer": true },
-        "target": { "machine": "build-linux", "address": "100.64.12.44" }
-    });
-    let digest = ouro::fleet_setup::sha256_hex(ouro::fleet_setup::canonical_json(&plan).as_bytes());
-    for reconnected in [false, true] {
-        for (state, kind, metadata) in [
-            (
-                "awaiting_host_trust",
-                "host_trust",
-                json!({
-                    "address": "100.64.12.44", "port": 22, "user": "deploy",
-                    "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:example"
-                }),
-            ),
-            (
-                "awaiting_review",
-                "review",
-                json!({ "plan": plan, "plan_digest": digest }),
-            ),
-            (
-                "awaiting_auth",
-                "password",
-                json!({ "user": "deploy", "address": "100.64.12.44" }),
-            ),
-            (
-                "awaiting_auth",
-                "passphrase",
-                json!({ "key_label": "id_ed25519" }),
-            ),
-        ] {
-            let mut app = deploying();
-            answer(
-                &mut app,
-                status_tag(),
-                snapshot(
-                    state,
-                    json!([challenge("hidden", kind, metadata)]),
-                    json!({}),
-                ),
-            );
-            let _ = drained(&mut app);
-            app.apply(Msg::Answer {
-                tag: status_tag(),
-                result: Err(ClientError::ConnectionClosed),
-            });
-            if reconnected {
-                app.apply(Msg::Reconnected(Box::new(full_hello())));
-            }
-            let _ = drained(&mut app);
-            let text = prose(&mut app);
-            assert!(
-                text.contains(if reconnected {
-                    "reading this setup again"
-                } else {
-                    "reconnecting"
-                }),
-                "{text}"
-            );
-            for code in [
-                KeyCode::Char('t'),
-                KeyCode::Char('n'),
-                KeyCode::Char('a'),
-                KeyCode::Char('c'),
-                KeyCode::Enter,
-            ] {
-                app.apply(key(code));
-            }
-            app.apply(Msg::Paste("invisible secret".into()));
-            assert_eq!(secret_chars(&app), 0, "hidden {kind} stored input");
-            assert!(
-                drained(&mut app).is_empty(),
-                "hidden {kind} accepted an answer"
-            );
-            app.apply(key(KeyCode::Esc));
-            assert!(app.overlay.is_none(), "Escape did not leave hidden {kind}");
-            assert!(
-                drained(&mut app).is_empty(),
-                "Escape answered hidden {kind}"
-            );
-        }
-    }
-}
-
-#[test]
-fn reconnect_rechecks_ownership_before_offering_takeover() {
-    let _mode = normal();
-    let mut app = asking_to_take_over();
-    let _ = drained(&mut app);
-    app.apply(Msg::Reconnected(Box::new(full_hello())));
-    let _ = drained(&mut app);
-    assert!(prose(&mut app).contains("reading this setup again"));
-    app.apply(key(KeyCode::Char('t')));
-    assert!(drained(&mut app).is_empty());
-    refuse(
-        &mut app,
-        status_tag(),
-        ErrorCode::ScopeDenied,
-        Some(json!({ "reason": "operation_not_yours" })),
-    );
-    assert!(!prose(&mut app).contains("reading this setup again"));
-    app.apply(key(KeyCode::Char('t')));
-    let calls = drained(&mut app);
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.resume").params["takeover"],
-        json!(true)
-    );
-}
-
-/// An interrupted operation still reads as one, from the journal, by the same id.
-#[test]
-fn an_interruption_is_reported_from_the_journal_with_the_steps_that_ran() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    app.apply(Msg::Answer {
-        tag: status_tag(),
-        result: Err(ClientError::ConnectionClosed),
-    });
-    app.apply(Msg::Reconnected(Box::new(full_hello())));
-    let _reloaded = drained(&mut app);
-
-    answer(
-        &mut app,
-        status_tag(),
-        json!({
-            "operation": "abcdef0123456789", "source": "journal", "attached": false,
-            "state": "interrupted", "owner": "local-owner",
-            "steps": [{ "machine": "studio", "step": "create", "outcome": "ok" }],
-            "log": [], "challenges": [],
-            "last_error": "the runtime this operation is running from restarted"
-        }),
-    );
-
-    let text = prose(&mut app);
-    assert!(text.contains("This setup was interrupted"), "{text}");
-    assert!(
-        text.contains("create"),
-        "the steps that did run are gone:\n{text}"
-    );
-    assert!(
-        text.contains("R Retry"),
-        "an interruption is not offered a retry:\n{text}"
-    );
-}
-
-/// A worker that is gone with an unfinished journal says so, in its own last words.
-///
-/// The live failure: a worker died before attaching, the broker logged
-/// `lost its worker: :normal`, and the page said nothing at all while the operation sat
-/// reading "inspecting". The reason — a Unix socket path over 104 bytes — was in the
-/// worker's private log, which §5.5 now hands to the surface as `worker_exit`.
-#[test]
-fn a_worker_that_stopped_says_so_in_its_own_words_and_offers_a_retry() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    answer(
-        &mut app,
-        status_tag(),
-        json!({
-            "operation": "abcdef0123456789", "source": "journal", "attached": false,
-            "state": "inspecting", "owner": "local-owner",
-            "steps": [], "log": [], "challenges": [],
-            "worker_exit": {
-                "code": 1,
-                "last_lines": [
-                    "bind: the socket path is 118 bytes and the limit is 104",
-                    "the worker exited before it attached"
-                ]
-            }
-        }),
-    );
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains("The setup worker stopped:"),
-        "the worker's exit is not reported:\n{text}"
-    );
-    assert!(
-        text.contains("the socket path is 118 bytes and the limit is 104"),
-        "the worker's own words were dropped:\n{text}"
-    );
-    // A worker that is gone is a finished operation, whatever the state field says.
-    assert!(
-        text.contains("R Retry"),
-        "no retry was offered for a stopped worker:\n{text}"
-    );
-    assert!(
-        !text.contains("inspecting the target"),
-        "a dead worker still read as working:\n{text}"
-    );
-
-    // `R` resumes by id: a fresh inspection and a fresh review, never a second start.
-    app.apply(key(KeyCode::Char('R')));
-    let calls = drained(&mut app);
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.resume").params,
-        json!({ "operation_id": "abcdef0123456789" })
-    );
-}
-
-/// A dev runtime can add a machine and cannot set this one up, and says which.
-#[test]
-fn a_development_runtime_is_blocked_from_setting_this_machine_up_only() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["host"] = host(false, &["dev_runtime"]);
-    reply["devices"] = json!([
-        {
-            "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
-            "os": "macos", "address": "100.64.12.21", "online": true,
-            "state": "this_device_without_profile",
-            "name_conflicts_with_roster": Value::Null
-        },
-        {
-            "name": "build-linux", "machine": Value::Null,
-            "suggested_machine": "build-linux", "os": "linux",
-            "address": "100.64.12.44", "online": true,
-            "state": "discovered_installation_unknown",
-            "name_conflicts_with_roster": Value::Null
-        }
-    ]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains(
-            "This is a development runtime; the packaged ouro is what sets a machine up."
-        ),
-        "the dev-runtime blocker is not in words:\n{text}"
-    );
-    assert!(
-        !text.contains("dev_runtime"),
-        "the code was printed as itself:\n{text}"
-    );
-
-    // Setting this machine up is refused; adding another one is not.
-    let drawn = screen(&mut app);
-    assert!(
-        !device_row(&drawn, "This Mac").contains("Set up this Mac"),
-        "{:?}",
-        device_row(&drawn, "This Mac")
-    );
-    assert!(
-        device_row(&drawn, "build-linux").contains("Add to fleet"),
-        "{:?}",
-        device_row(&drawn, "build-linux")
-    );
-    drop(drawn);
-
-    activate(&mut app, "This Mac");
-    assert!(drained(&mut app).is_empty(), "a dev runtime set itself up");
-    assert!(app.devices.connect.is_none());
-
-    activate(&mut app, "build-linux");
-    assert!(
-        app.devices.connect.is_some(),
-        "a dev runtime was stopped from adding another machine:\n{}",
-        prose(&mut app)
-    );
-}
-
-// ---------------------------------------------------------------------------------------
-// the secret
-// ---------------------------------------------------------------------------------------
-
-/// The one string in this file that must never be found anywhere but the call that
-/// consumes it. Unique, so a search for it cannot match anything incidental.
-const SECRET: &str = "zx9Qv-unique-secret-Kp4w";
-
-/// Typed, masked, sent once, and then gone from everywhere this client can be looked at.
-#[test]
-fn a_typed_secret_is_masked_sent_once_and_retained_nowhere() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44",
-                     "user": "deploy", "port": 22, "attempt": 1, "max_attempts": 3 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-
-    // While it is being typed it is bullets, and it is already not in the frame.
-    let text = prose(&mut app);
-    assert!(
-        text.contains(&"\u{2022}".repeat(SECRET.chars().count())),
-        "the field is not masked:\n{text}"
-    );
-    assert!(
-        !text.contains(SECRET),
-        "the secret was drawn while being typed:\n{text}"
-    );
-    assert!(
-        !format!("{:?}", app.devices).contains(SECRET),
-        "the secret is in the view's Debug while being typed"
-    );
-
-    app.apply(key(KeyCode::Enter));
-
-    // It reached exactly one call, in the parameter that consumes it.
-    let calls = drained(&mut app);
-    let authenticate = call_for(&calls, "fleet.deployment.authenticate");
-
-    assert_eq!(authenticate.params["secret"], json!(SECRET));
-    assert_eq!(authenticate.params["challenge"], json!("c-pw"));
-    assert_eq!(
-        authenticate.params["operation_id"],
-        json!("abcdef0123456789")
-    );
-
-    let carrying = calls
-        .iter()
-        .filter(|call| {
-            serde_json::to_string(&call.params)
-                .unwrap()
-                .contains(SECRET)
-        })
-        .count();
-    assert_eq!(carrying, 1, "the secret is in more than one request");
-
-    // And it is not on the tag, which is cloned, hashed and Debug-printed.
-    assert!(
-        !format!("{:?}", authenticate.tag).contains(SECRET),
-        "the secret is on the correlation tag: {:?}",
-        authenticate.tag
-    );
-
-    // After the submit: not in the frame, not in the view's state, not in a notice.
-    let text = prose(&mut app);
-    assert!(!text.contains(SECRET), "the secret is still drawn:\n{text}");
-    assert!(
-        !format!("{:?}", app.devices).contains(SECRET),
-        "the secret survived the submit in the view's Debug"
-    );
-
-    // A second Enter cannot resend it: the buffer is empty and the call is in flight.
-    app.apply(key(KeyCode::Enter));
-    let again = drained(&mut app);
-    assert!(
-        !again.iter().any(|call| serde_json::to_string(&call.params)
-            .unwrap()
-            .contains(SECRET)),
-        "a second Enter resent the secret"
-    );
-}
-
-/// Cancelling the question clears the buffer without sending anything.
-#[test]
-fn leaving_a_challenge_clears_what_was_typed_without_sending_it() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-    app.apply(key(KeyCode::Esc));
-
-    let calls = drained(&mut app);
-    assert!(
-        !calls.iter().any(|call| serde_json::to_string(&call.params)
-            .unwrap()
-            .contains(SECRET)),
-        "Esc sent the secret"
-    );
-    assert!(
-        !calls.iter().any(|call| call.method.contains("cancel")),
-        "Esc cancelled the operation"
-    );
-    assert_eq!(secret_chars(&app), 0, "Esc left the secret in the buffer");
-    assert!(app.overlay.is_none(), "Esc did not leave the view");
-}
-
-/// A consumed challenge takes its buffer with it, so a stale answer cannot be resent to
-/// the next question.
-#[test]
-fn a_new_challenge_never_inherits_the_previous_ones_buffer() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-first",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-
-    // The worker replaces the question before the operator pressed Enter — a retry after
-    // a wrong password is exactly this.
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-second",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22,
-                     "attempt": 2, "max_attempts": 3 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    // The Debug check alone is vacuous here: `SecretInput`'s `Debug` redacts, so it
-    // reads the same whether the buffer was cleared or not. What is actually observable
-    // is the field, which draws one bullet per character — and after the swap there are
-    // none, because there is nothing left to draw.
-    assert_eq!(
-        bullets(&mut app),
-        0,
-        "the buffer survived its challenge being replaced"
-    );
-    assert_eq!(secret_chars(&app), 0);
-
-    app.apply(key(KeyCode::Enter));
-    let calls = drained(&mut app);
-    assert!(
-        !calls.iter().any(|call| serde_json::to_string(&call.params)
-            .unwrap()
-            .contains(SECRET)),
-        "the previous question's answer was sent to the new one"
-    );
-}
-
-/// A refused answer is reported where the answer went, with the broker's own reason.
-#[test]
-fn a_refused_answer_is_explained_in_the_place_the_answer_went() {
-    let _mode = normal();
-    for (reason, expected) in [
-        ("challenge_consumed", "already been answered once"),
-        ("challenge_expired", "expired before it was answered"),
-        ("challenge_not_bound", "asked of a different session"),
-    ] {
-        let mut app = deploying();
-        answer(
-            &mut app,
-            status_tag(),
-            snapshot(
-                "awaiting_auth",
-                json!([challenge(
-                    "c-pw",
-                    "password",
-                    json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-                )]),
-                json!({}),
-            ),
-        );
-        let _polled = drained(&mut app);
-
-        for message in typed(SECRET) {
-            app.apply(message);
-        }
-        app.apply(key(KeyCode::Enter));
-
-        let calls = drained(&mut app);
-        refuse(
-            &mut app,
-            call_for(&calls, "fleet.deployment.authenticate")
-                .tag
-                .clone(),
-            ErrorCode::UpstreamError,
-            Some(json!({ "reason": reason })),
-        );
-
-        let text = prose(&mut app);
-        assert!(text.contains(expected), "{reason}:\n{text}");
-        assert!(
-            !text.contains(SECRET),
-            "{reason} echoed the secret:\n{text}"
-        );
-    }
-}
-
-/// A plan that changed between review and approval is refused in words, not applied.
-#[test]
-fn a_plan_that_changed_since_review_is_reported_rather_than_applied() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_review",
-            json!([challenge(
-                "c-review",
-                "review",
-                json!({ "plan_digest": "abc",
-                     "plan": { "not": "a plan" } })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    // Approving an unreadable plan is already refused, so drive `start` through the
-    // refusal path the runtime answers with.
-    app.apply(Msg::Answer {
-        tag: Tag::Devices(DevicesTag::Answer {
-            operation: "abcdef0123456789".into(),
-            label: "fleet.deployment.start",
-        }),
-        result: Err(ClientError::Rpc(RpcError {
-            code: ErrorCode::UpstreamError,
-            message: "refused".into(),
-            data: Some(json!({
-                "reason": "worker_refused",
-                "worker_reason": "plan_changed"
-            })),
-        })),
-    });
-
-    assert!(prose(&mut app).contains("changed after it was reviewed"));
-}
-
-// ---------------------------------------------------------------------------------------
-// screen-reader mode
-// ---------------------------------------------------------------------------------------
-
-/// A10, on this view: labelled lines, numbered menus, a digit that selects, and a bell
-/// when the deployment stops for a person.
-///
-/// Serialised on the same mutex `tests/accessibility.rs` uses, and for the same reason:
-/// screen-reader mode is a process-wide flag and `cargo test` runs these on many threads.
-#[test]
-fn screen_reader_mode_numbers_the_rows_drops_the_box_and_rings_for_a_question() {
-    let _mode = screen_reader();
-
-    let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
-    let drawn = screen(&mut app);
-    let text = drawn.text();
-
-    // No box drawing at all: a rule character is a cell with no word in it.
-    for glyph in ['\u{2502}', '\u{250c}', '\u{2510}', '\u{2514}', '\u{2518}'] {
-        assert!(
-            !text.contains(glyph),
-            "{glyph:?} survived screen-reader mode:\n{text}"
-        );
-    }
-
-    // The rows are numbered, and a digit picks one.
-    assert!(
-        drawn.rows.iter().any(|row| row.contains("1. This Mac")),
-        "the rows are not numbered:\n{text}"
-    );
-    assert!(
-        drawn.rows.iter().any(|row| row.contains("2. build-linux")),
-        "the rows are not numbered:\n{text}"
-    );
-    drop(drawn);
-
-    app.apply(key(KeyCode::Char('2')));
-    let drawn = screen(&mut app);
-    assert!(
-        device_row(&drawn, "build-linux").contains("> 2. build-linux"),
-        "a digit did not select its row:\n{}",
-        drawn.text()
-    );
-    drop(drawn);
-
-    // The middle dot this client writes is spoken, not punctuation nobody can hear.
-    let hint = ouro::ui::app::devices_hint_line(&app);
-    assert!(hint.contains('\u{b7}'), "the raw hint lost its separator");
-
-    // A question rings the bell. `notify::permitted` returns true in this mode whether or
-    // not the terminal has focus, and `channel` resolves `auto` to the bell.
-    let mut app = deploying();
-    let before = app.take_notifications().len();
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-
-    let signals = app.take_notifications();
-    assert!(
-        signals.len() > before,
-        "the agent asked for a credential and nothing rang"
-    );
-
-    // And it rings once per question, not once per poll.
-    let _polled = drained(&mut app);
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    assert!(
-        app.take_notifications().is_empty(),
-        "the same question rang twice"
-    );
-
-    // But a *second* question after a working stretch rings again. A wrong password is
-    // exactly this shape — ask, work, ask — and a bell that went quiet after the first
-    // attempt would leave someone listening waiting on a prompt nobody announced.
-    let _polled = drained(&mut app);
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("deploying", json!([]), json!({})),
-    );
-    let _polled = drained(&mut app);
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-again",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22,
-                     "attempt": 2, "max_attempts": 3 })
-            )]),
-            json!({}),
-        ),
-    );
-    assert!(
-        !app.take_notifications().is_empty(),
-        "the second question did not ring"
-    );
-}
-
-/// A challenge in screen-reader mode is a numbered menu too.
-#[test]
-fn a_host_trust_question_is_a_numbered_menu_in_screen_reader_mode() {
-    let _mode = screen_reader();
-
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_host_trust",
-            json!([challenge(
-                "c-host",
-                "host_trust",
-                json!({ "address": "100.64.12.44", "port": 22, "user": "deploy",
-                     "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:aaa" })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("1. t Trust and continue"), "{text}");
-    assert!(text.contains("2. n Cancel"), "{text}");
-}
-
-// ---------------------------------------------------------------------------------------
-// the properties the adversarial review's surviving mutations found nothing guarding
-// ---------------------------------------------------------------------------------------
-
-/// A second Enter while the first answer is in flight sends nothing — *because* of the
-/// in-flight guard, not because the buffer happens to be empty.
-///
-/// The earlier version of this could not tell those apart: it pressed Enter on an empty
-/// field and watched nothing happen. Here the field is refilled first, so the only thing
-/// standing between the second Enter and a second `authenticate` is the guard.
-#[test]
-fn a_second_answer_is_refused_while_the_first_is_still_in_flight() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-    app.apply(key(KeyCode::Enter));
-    let first = drained(&mut app);
-    assert_eq!(
-        first
-            .iter()
-            .filter(|call| call.method == "fleet.deployment.authenticate")
-            .count(),
-        1
-    );
-
-    // Type a whole second secret and press Enter again, with the first still unanswered.
-    for message in typed("a-second-secret-entirely") {
-        app.apply(message);
-    }
-    assert_eq!(
-        bullets(&mut app),
-        0,
-        "a challenge with an answer in flight is still taking keystrokes"
-    );
-
-    app.apply(key(KeyCode::Enter));
-    let second = drained(&mut app);
-    assert!(
-        !second
-            .iter()
-            .any(|call| call.method == "fleet.deployment.authenticate"),
-        "a second answer was sent while the first was in flight: {:?}",
-        second.iter().map(|call| &call.method).collect::<Vec<_>>()
-    );
-}
-
-/// An empty field sends nothing, and says so rather than sending an empty secret.
-#[test]
-fn an_empty_secret_is_refused_rather_than_sent() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    app.apply(key(KeyCode::Enter));
-    let calls = drained(&mut app);
-
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.method == "fleet.deployment.authenticate"),
-        "an empty secret was sent"
-    );
-    assert!(prose(&mut app).contains("Nothing was typed"));
-}
-
-/// Enter is not an answer to the takeover question. There is no default.
-#[test]
-fn enter_does_not_take_over_another_identitys_setup() {
-    let _mode = normal();
-    let mut app = asking_to_take_over();
-
-    app.apply(key(KeyCode::Enter));
-    let calls = drained(&mut app);
-
-    assert!(
-        !calls.iter().any(|call| call.method.contains("resume")),
-        "Enter answered the takeover question: {:?}",
-        calls.iter().map(|call| &call.method).collect::<Vec<_>>()
-    );
-    assert!(
-        prose(&mut app).contains("Take over this setup?"),
-        "Enter dismissed the question"
-    );
-}
-
-/// Declining a takeover, and closing the view, both forget what was typed.
-#[test]
-fn leaving_by_either_door_forgets_the_typed_secret() {
-    // Declining the takeover.
-    let _mode = normal();
-    let mut app = asking_to_take_over();
-    app.apply(key(KeyCode::Char('n')));
-    assert!(app.devices.operation.is_none());
-    assert_eq!(bullets(&mut app), 0);
-    assert_eq!(secret_chars(&app), 0);
-
-    // Closing the view on an open password question — through the Cancel chord, not
-    // `close_devices()` directly. Ctrl+C used to drop the overlay without clearing the
-    // buffer, so a half-typed password survived until the next open.
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-    assert_eq!(bullets(&mut app), SECRET.chars().count());
-    assert_eq!(secret_chars(&app), SECRET.chars().count());
-
-    app.apply(chord(KeyCode::Char('c')));
-    assert!(app.overlay.is_none());
-    assert_eq!(
-        secret_chars(&app),
-        0,
-        "Ctrl+C left the typed secret in the buffer"
-    );
-
-    // Reopening draws an empty field rather than the one that was typed into.
-    app.open_devices();
-    let _polled = drained(&mut app);
-    assert_eq!(
-        bullets(&mut app),
-        0,
-        "the field came back with what was typed into it before"
-    );
-    assert_eq!(secret_chars(&app), 0);
-}
-
-/// An answer for another operation never lands on the one being followed.
-#[test]
-fn an_answer_for_another_operation_is_ignored() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("deploying", json!([]), json!({})),
-    );
-    let _polled = drained(&mut app);
-    assert!(prose(&mut app).contains("deploying"));
-
-    // A snapshot for a long-gone operation, in a state that would be very visible.
-    app.apply(Msg::Answer {
-        tag: Tag::Devices(DevicesTag::Status {
-            operation: "0000000000000000".into(),
-        }),
-        result: Ok(json!({
-            "operation": "0000000000000000", "source": "worker", "attached": true,
-            "state": "completed", "owner": "local-owner",
-            "steps": [], "log": [], "challenges": []
-        })),
-    });
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains("deploying"),
-        "another operation's snapshot overwrote this one:\n{text}"
-    );
-    assert!(!text.contains("This device is set up"), "{text}");
-}
-
-/// Two open questions are answered in the order the snapshot lists them.
-#[test]
-fn the_first_open_challenge_is_the_one_answered() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([
-                challenge(
-                    "c-aaa",
-                    "password",
-                    json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-                ),
-                challenge(
-                    "c-zzz",
-                    "password",
-                    json!({ "target": "100.64.12.44", "user": "other", "port": 22 })
-                ),
-            ]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    // The broker sorts its open challenges by id, so the first one listed is the one on
-    // the screen — and the one a typed answer is addressed to.
-    assert!(prose(&mut app).contains("deploy"));
-
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.authenticate").params["challenge"],
-        json!("c-aaa")
-    );
-}
-
-/// An operation another identity owns, with the takeover question on the screen.
-fn asking_to_take_over() -> App {
-    let mut reply = populated();
-    reply["operations"] = json!([{
-        "operation": "abcdef0123456789", "state": "awaiting_auth", "kind": "add",
-        "owner": "grace", "attached": false, "readable": true,
-        "target": { "machine": "build-linux", "address": "100.64.12.44",
-                    "ssh_user": "deploy", "port": 22 }
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-    activate(&mut app, "build-linux");
-
-    let calls = drained(&mut app);
-    refuse(
-        &mut app,
-        call_for(&calls, "fleet.deployment.resume").tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({ "reason": "operation_not_yours" })),
-    );
-
-    app
-}
-
-/// A blocked runtime does not open the form, not merely skip the call.
-#[test]
-fn a_blocked_runtime_opens_no_connect_form_at_all() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["host"] = host(false, &["no_ca_key"]);
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-
-    let text = prose(&mut app);
-    assert!(
-        !text.contains("SSH user"),
-        "a form opened on a runtime that cannot deploy:\n{text}"
-    );
-    assert!(text.contains("studio \u{b7}"), "the list was left:\n{text}");
-    assert!(drained(&mut app).is_empty());
-
-    // And at read scope, the same.
-    let mut app = opened(read_hello(&[
-        "fleet.devices",
-        "fleet.status",
-        "fleet.deployment.prepare",
-        "runtime.status",
-    ]));
-    let calls = drained(&mut app);
-    answer(
-        &mut app,
-        call_for(&calls, "fleet.devices").tag.clone(),
-        populated(),
-    );
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    let text = prose(&mut app);
-    assert!(
-        !text.contains("SSH user"),
-        "a form opened at read scope:\n{text}"
-    );
-    assert!(drained(&mut app).is_empty());
-}
-
-/// Enter walks the connect form and never submits from a field.
-#[test]
-fn enter_moves_through_the_connect_form_and_submits_only_from_its_button() {
-    let _mode = normal();
-    let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "build-linux");
-    fill(&mut app, "SSH user", "deploy");
-
-    // Enter from every row but the button moves on and sends nothing — including the
-    // Advanced disclosure, where it opens the fields rather than reaching a machine.
-    let rows = app
-        .devices
-        .connect
-        .as_ref()
-        .map(|form| form.rows().len())
-        .expect("a form");
-
-    for _ in 0..(rows * 2) {
-        let on_button = app
-            .devices
-            .connect
-            .as_ref()
-            .is_some_and(|form| form.field == ouro::ui::app::ConnectField::Submit);
-
-        if on_button {
-            break;
-        }
-
-        app.apply(key(KeyCode::Enter));
-        assert!(
-            drained(&mut app).is_empty(),
-            "Enter submitted the form from a field"
-        );
-    }
-
-    // Now the cursor is on the button, and Enter is the submission.
-    app.apply(key(KeyCode::Enter));
-    let calls = drained(&mut app);
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.prepare").params["ssh_user"],
-        json!("deploy")
-    );
-}
-
-/// A runtime that does not serve the verb behind an action does not offer the action.
-///
-/// The three gates are separate questions and this is the one with no other symptom: a
-/// runtime holding the CA key, at operate scope, whose `hello.methods` simply does not
-/// list `fleet.deployment.prepare` because its `ouro` predates the worker.
-#[test]
-fn a_runtime_that_does_not_serve_the_verb_says_so_rather_than_opening_a_form() {
-    let _mode = normal();
-
-    let mut app = opened(support::hello(&[
-        "fleet.devices",
-        "fleet.status",
-        "runtime.status",
-    ]));
-    let calls = drained(&mut app);
-    answer(
-        &mut app,
-        call_for(&calls, "fleet.devices").tag.clone(),
-        populated(),
-    );
-    let _settled = drained(&mut app);
-
-    // The inventory is there — the gate is about the deployment verb, not the read.
-    assert!(screen(&mut app).contains("build-linux"));
-
-    activate(&mut app, "build-linux");
-
-    let text = prose(&mut app);
-    assert!(
-        !text.contains("SSH user"),
-        "a form opened for a verb this runtime does not serve:\n{text}"
-    );
-    assert!(
-        text.contains("does not serve fleet.deployment.prepare"),
-        "the missing method is not named:\n{text}"
-    );
-    assert!(drained(&mut app).is_empty());
-}
-
-/// A question with no id is not a question anybody can answer, so it is not drawn.
-#[test]
-fn a_challenge_with_no_id_is_never_drawn_as_a_prompt() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    // The worker's own `pending` list has this shape — id and kind and nothing else —
-    // and a frame that lost its id in transit has it too. Either way there is nothing to
-    // address an answer to.
-    answer(
-        &mut app,
-        status_tag(),
-        json!({
-            "operation": "abcdef0123456789", "source": "worker", "attached": true,
-            "state": "awaiting_auth", "owner": "local-owner",
-            "steps": [], "log": [],
-            "challenges": [{ "kind": "password",
-                             "metadata": { "user": "deploy", "target": "100.64.12.44" } }]
-        }),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(
-        !text.contains("Password for this connection"),
-        "a prompt was drawn for a question with no id:\n{text}"
-    );
-    assert_eq!(bullets(&mut app), 0);
-
-    // And nothing typed at it goes anywhere.
-    for message in typed(SECRET) {
-        app.apply(message);
-    }
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.method == "fleet.deployment.authenticate"),
-        "an answer was addressed to a challenge with no id"
-    );
-    assert!(
-        !calls.iter().any(|call| serde_json::to_string(&call.params)
-            .unwrap()
-            .contains(SECRET)),
-        "the secret left the client anyway"
-    );
-}
-
-/// The live-run failure: a machine with no fleet could never set itself up.
-///
-/// `capabilities.deploy` is false with `no_ca_key` on exactly the machine "Set up this
-/// device" exists for — it has no fleet, so it has no certificate authority — and gating
-/// the setup path on it meant pressing Enter did nothing at all. Found by driving the
-/// packaged client against a real runtime, which is the only place the two facts appear
-/// together.
-#[test]
-fn a_machine_with_no_fleet_can_still_set_itself_up() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["host"] = host(false, &["no_ca_key"]);
-    reply["devices"] = json!([{
-        "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
-        "os": "macos", "address": "100.64.12.21", "online": true,
-        "state": "this_device_without_profile", "action": "set up this device",
-        "name_conflicts_with_roster": Value::Null,
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    // The page says what is true of *this* machine, not "go and open Devices somewhere
-    // else": there is nowhere else, and the thing to do is on this screen.
-    let text = prose(&mut app);
-    assert!(
-        text.contains("This Mac is not in a fleet yet"),
-        "the standalone case still reads as a CA-key misconfiguration:\n{text}"
-    );
-    assert!(
-        !text.contains("Open Devices on the machine that does"),
-        "the page sent the operator to a machine that does not exist:\n{text}"
-    );
-
-    let drawn = screen(&mut app);
-    assert!(device_row(&drawn, "This Mac").contains("Set up this Mac"));
-    drop(drawn);
-
-    // Enter opens the setup form rather than refusing.
-    activate(&mut app, "This Mac");
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains("Name in the fleet"),
-        "Enter on Set up this device did nothing:\n{text}"
-    );
-    assert!(!text.contains("SSH user"), "{text}");
-
-    // And it submits `kind: "setup"`.
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-
-    assert_eq!(prepare.params["kind"], json!("setup"));
-    assert_eq!(prepare.params["machine"], json!("studio"));
-    assert_eq!(prepare.params["address"], json!("100.64.12.21"));
-    assert!(
-        prepare.params.get("ssh_user").is_none(),
-        "{}",
-        prepare.params
-    );
-}
-
-/// Every other blocker still stops a first setup, because those are reasons this runtime
-/// cannot run any deployment at all — including one against itself.
-#[test]
-fn a_first_setup_is_still_stopped_by_every_blocker_but_the_missing_ca_key() {
-    let _mode = normal();
-
-    for (reason, expected) in [
-        ("cleartext_web_bind", "credential entry is refused"),
-        (
-            "ouro_path_unknown",
-            "cannot say where its own ouro executable is",
-        ),
-        ("no_data_dir", "serves no durable data directory"),
-    ] {
-        let mut reply = populated();
-        reply["host"] = host(false, &["no_ca_key", reason]);
-        reply["devices"] = json!([{
-            "name": "studio", "machine": Value::Null, "os": "macos",
-            "address": "100.64.12.21", "online": true,
-            "state": "this_device_without_profile", "action": "set up this device",
-            "name_conflicts_with_roster": Value::Null,
-        }]);
-
-        let mut app = with_inventory(reply);
-        let _settled = drained(&mut app);
-
-        activate(&mut app, "This Mac");
-
-        let text = prose(&mut app);
-        assert!(
-            !text.contains("machine name"),
-            "{reason} let a setup form open:\n{text}"
-        );
-        assert!(text.contains(expected), "{reason}:\n{text}");
-        assert!(drained(&mut app).is_empty(), "{reason} issued a call");
-    }
-}
-
-/// No action is ever refused in silence.
-///
-/// The notice draws at the foot of the inventory, under the rows and the no-SSH
-/// sentence, which on a real screen is below the fold — so a refusal that only went
-/// there was a keypress that visibly did nothing. The hint line is the one row always on
-/// the page, and every refusal says so there.
-#[test]
-fn a_refused_action_always_says_so_on_a_row_that_is_on_the_page() {
-    let _mode = normal();
-
-    // A row nothing can be done with.
-    let mut reply = populated();
-    reply["devices"] = json!([{
-        "name": "pocket-phone", "machine": Value::Null, "os": "iOS",
-        "address": "100.64.12.31", "online": true,
-        "state": "unsupported_platform", "action": "nothing to deploy",
-        "name_conflicts_with_roster": Value::Null,
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    // A row with no button is not a refusal: Enter does nothing, and the reason it has
-    // nothing to do is already under the list, where somebody looking at the row is.
-    let before = ouro::ui::app::devices_hint_line(&app);
-    activate(&mut app, "pocket-phone");
-    let after = ouro::ui::app::devices_hint_line(&app);
-
-    assert_eq!(before, after, "an inert row wrote to the hint line");
-    assert!(
-        prose(&mut app).contains("No Ouroboros release targets this platform"),
-        "the row with no action does not say why:\n{}",
-        prose(&mut app)
-    );
-
-    // And a blocked add says its blocker there. `a` is the key that is always an
-    // attempt to act, whatever the row under the cursor is, so it is the one that has
-    // to answer rather than doing nothing visible.
-    let mut reply = populated();
-    reply["host"] = host(false, &["cleartext_web_bind"]);
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    app.apply(key(KeyCode::Char('a')));
-    let hint = ouro::ui::app::devices_hint_line(&app);
-
-    assert!(
-        hint.contains("credential entry is refused"),
-        "the blocker is not on the hint line: {hint:?}"
-    );
-
-    // `r` puts the keys back.
-    app.apply(key(KeyCode::Char('r')));
-    assert!(ouro::ui::app::devices_hint_line(&app).contains("r refresh"));
-}
-
-/// A member this runtime is connected to says so, in its own state and its own line.
-///
-/// `ouro fleet devices` merges the roster with what the *network client* can see, which
-/// is not the runtime's answer to "is that machine here, now" — so a member whose runtime
-/// this one is connected to still read "in the fleet, not visible on this network"
-/// whenever the client could not see it. The broker merges the cluster's facts onto
-/// member rows and promotes the state; this is the row that draws it.
-#[test]
-fn a_connected_member_reads_as_connected_and_keeps_the_network_facts_separate() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["devices"] = json!([
-        {
-            "name": "build-linux", "machine": "build-linux", "os": "linux",
-            "address": "100.64.12.44",
-            // The network client cannot see it...
-            "online": false, "last_seen": "2026-09-17T07:50:00.1Z",
-            // ...and this runtime is talking to it.
-            "state": "fleet_member_connected",
-            "connected": true, "compatible": true, "runtime_running": true,
-            "last_probe": "2026-09-17T08:10:00Z",
-            "name_conflicts_with_roster": Value::Null
-        },
-        {
-            "name": "old-pi", "machine": "old-pi", "os": "linux",
-            "address": "100.64.12.10", "online": true, "last_seen": Value::Null,
-            "state": "fleet_member",
-            "connected": false, "compatible": Value::Null,
-            "runtime_running": Value::Null, "last_probe": Value::Null,
-            "name_conflicts_with_roster": Value::Null
-        },
-        {
-            // A peer that has never been in a fleet: this runtime knows nothing about it,
-            // and says nothing rather than reporting it as disconnected.
-            "name": "vps", "machine": Value::Null, "os": "linux",
-            "address": "100.64.12.99", "online": true, "last_seen": Value::Null,
-            "state": "discovered_installation_unknown",
-            "connected": Value::Null, "compatible": Value::Null,
-            "runtime_running": Value::Null, "last_probe": Value::Null,
-            "name_conflicts_with_roster": Value::Null
-        }
-    ]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    let drawn = screen(&mut app);
-    let text = flowed(&drawn);
-
-    // The state, in words, and the action a member gets.
-    assert!(
-        device_row(&drawn, "build-linux").contains("Open"),
-        "{:?}",
-        device_row(&drawn, "build-linux")
-    );
-    assert!(
-        device_row(&drawn, "build-linux").contains("in the fleet"),
-        "{:?}",
-        device_row(&drawn, "build-linux")
-    );
-    drop(drawn);
-    assert!(
-        !text.contains("not visible on this network"),
-        "a connected member still read as invisible:\n{text}"
-    );
-
-    // The runtime's facts, in that row's details, kept apart from the network's.
-    activate_cursor(&mut app, "build-linux");
-    let text = prose(&mut app);
-    assert!(
-        text.contains("runtime connected \u{b7} compatible build \u{b7} runtime running \u{b7} probed 2026-09-17T08:10:00Z"),
-        "the live facts are not drawn:\n{text}"
-    );
-
-    // And the network's facts are still the network's: `online: false` is not overwritten
-    // by the runtime being connected, because those are two different questions.
-    assert!(
-        text.contains("offline, last seen 2026-09-17T07:50:00.1Z"),
-        "the network fact was replaced by the cluster's:\n{text}"
-    );
-
-    // A member this runtime is not connected to says that much and no more.
-    activate_cursor(&mut app, "old-pi");
-    let text = prose(&mut app);
-    assert!(text.contains("runtime not connected"), "{text}");
-    assert!(
-        device_row(&screen(&mut app), "old-pi").contains("in the fleet \u{b7} not connected"),
-        "{text}"
-    );
-
-    // A non-member carries no runtime line at all — null is "not known", not "absent".
-    activate_cursor(&mut app, "vps");
-    let text = prose(&mut app);
-    assert!(
-        !text.contains("runtime runtime") && !text.contains("runtime not connected"),
-        "a device that has never been in a fleet was given cluster facts:\n{text}"
-    );
-}
-
-/// A state string this build has never seen is a sentence, never a blank column.
-#[test]
-fn an_unreadable_state_is_named_rather_than_left_blank() {
-    let _mode = normal();
-
-    for (state, expected) in [
-        ("quantum_entangled", "quantum_entangled"),
-        ("", "reported no state"),
-    ] {
-        let mut reply = populated();
-        reply["devices"] = json!([{
-            "name": "mystery", "machine": Value::Null, "os": "linux",
-            "address": "100.64.12.50", "online": true, "last_seen": Value::Null,
-            "state": state, "name_conflicts_with_roster": Value::Null
-        }]);
-
-        let mut app = with_inventory(reply);
-        let _settled = drained(&mut app);
-        let text = prose(&mut app);
-
-        assert!(text.contains(expected), "{state:?}:\n{text}");
-
-        // The row is still a row, with its own fields drawn and no button invented.
-        let drawn = screen(&mut app);
-        assert!(device_row(&drawn, "mystery").contains('\u{2014}'));
-        drop(drawn);
-        assert!(text.contains("100.64.12.50"), "{state:?}:\n{text}");
-        assert!(
-            text.contains("which this client has no action for"),
-            "{state:?} left the reason unsaid:\n{text}"
-        );
-    }
-}
-
-/// The server's own refusal speaks the same words the capability list does.
-///
-/// `deploy_blocked` carries `data.blockers` in exactly `capabilities.reasons`'
-/// vocabulary, and it is the authority: a blocker can appear between the inventory being
-/// read and the action being pressed, so the client-side gate passing means nothing by
-/// the time the call lands. It goes to the hint line like every other refusal.
-#[test]
-fn a_server_side_deploy_blocked_reads_as_the_same_blocker_the_list_would_name() {
-    let _mode = normal();
-
-    for (code, expected) in [
-        ("cleartext_web_bind", "credential entry is refused"),
-        (
-            "no_ca_key",
-            "does not hold the fleet's certificate authority key",
-        ),
-        ("no_data_dir", "serves no durable data directory"),
-    ] {
-        // The inventory says this host *can* deploy, so the client-side gate lets the
-        // call through and only the server refuses it.
-        let mut app = with_inventory(populated());
-        let _settled = drained(&mut app);
-
-        activate(&mut app, "build-linux");
-        fill(&mut app, "SSH user", "deploy");
-        focus_submit(&mut app);
-        app.apply(key(KeyCode::Enter));
-
-        let calls = drained(&mut app);
-        refuse(
-            &mut app,
-            call_for(&calls, "fleet.deployment.prepare").tag.clone(),
-            ErrorCode::ScopeDenied,
-            Some(json!({ "reason": "deploy_blocked", "blockers": [code] })),
-        );
-
-        let hint = ouro::ui::app::devices_hint_line(&app);
-        assert!(hint.contains(expected), "{code}: {hint:?}");
-
-        // The form is gone: this is not a field to correct, it is the host saying no.
-        let text = prose(&mut app);
-        assert!(!text.contains("SSH user"), "{code}:\n{text}");
-        assert!(text.contains(expected), "{code}:\n{text}");
-    }
-
-    // A refusal naming a code this build predates is still a sentence, not an identifier.
-    let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
-    activate(&mut app, "build-linux");
-    fill(&mut app, "SSH user", "deploy");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    refuse(
-        &mut app,
-        call_for(&calls, "fleet.deployment.prepare").tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({ "reason": "deploy_blocked", "blockers": ["a_reason_from_the_future"] })),
-    );
-
-    let hint = ouro::ui::app::devices_hint_line(&app);
-    assert!(hint.contains("a reason from the future"), "{hint:?}");
-    assert!(!hint.contains("a_reason_from_the_future"), "{hint:?}");
-}
-
-#[test]
-fn local_setup_can_resume_and_retry_without_a_ca() {
-    let _mode = normal();
-    let operation = "abcdef0123456789";
-    let mut reply = populated();
-    reply["host"] = host(false, &["no_ca_key"]);
-    reply["devices"] = json!([{
-        "name": "studio", "machine": Value::Null, "os": "macos",
-        "address": "100.64.12.21", "online": true,
-        "state": "this_device_without_profile", "action": "set up this device"
-    }]);
-    reply["operations"] = json!([{
-        "operation": operation, "state": "failed", "kind": "setup",
-        "owner": "local-owner", "attached": false, "readable": true,
-        "target": { "machine": "studio", "address": "100.64.12.21" }
-    }]);
-    let mut app = with_inventory(reply);
-    drained(&mut app);
-    activate(&mut app, "This Mac");
-    let calls = drained(&mut app);
-    let resume = call_for(&calls, "fleet.deployment.resume");
-    assert_eq!(resume.params["operation_id"], operation);
-    refuse(
-        &mut app,
-        resume.tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({"reason":"operation_not_yours"})),
-    );
-    app.apply(key(KeyCode::Char('t')));
-    let calls = drained(&mut app);
-    let takeover = call_for(&calls, "fleet.deployment.resume");
-    assert_eq!(takeover.params["takeover"], true);
-    answer(
-        &mut app,
-        takeover.tag.clone(),
-        json!({"operation_id":operation}),
-    );
-    answer(
-        &mut app,
-        Tag::Devices(DevicesTag::Status {
-            operation: operation.into(),
-        }),
-        json!({"source":"journal", "kind":"setup", "state":"failed", "attached":false}),
-    );
-    drained(&mut app);
-    app.apply(key(KeyCode::Char('R')));
-    let calls = drained(&mut app);
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.resume").params["operation_id"],
-        operation
-    );
-}
-
-/// The name field is seeded from `suggested_machine` and never from the display name.
-///
-/// Finding 3: both surfaces pre-filled it with a display name ("Monocursive\u{2019}s MacBook
-/// Pro", or the `this device` a failed discovery invented), which is not a valid machine
-/// name; the web submitted it. The runtime now answers with a name it folded itself, or
-/// with `null`, and `null` leaves the field empty for somebody to fill in.
-#[test]
-fn the_name_field_comes_from_the_runtimes_suggestion_and_never_from_the_display_name() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["devices"] = json!([
-        {
-            "name": "Build Linux", "machine": Value::Null,
-            "suggested_machine": "build-linux", "os": "linux",
-            "address": "100.64.12.44", "online": true,
-            "state": "discovered_installation_unknown", "action": "deploy Ouroboros",
-            "name_conflicts_with_roster": Value::Null
-        },
-        {
-            // The runtime could fold nothing valid out of this one.
-            "name": "\u{2026}\u{2026}\u{2026}", "machine": Value::Null,
-            "suggested_machine": Value::Null, "os": "linux",
-            "address": "100.64.12.88", "online": true,
-            "state": "discovered_installation_unknown", "action": "deploy Ouroboros",
-            "name_conflicts_with_roster": "studio"
-        }
-    ]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    activate(&mut app, "Build Linux");
-    assert_eq!(
-        app.devices
-            .connect
-            .as_ref()
-            .map(|form| form.machine.as_str()),
-        Some("build-linux"),
-        "the field was not seeded from suggested_machine"
-    );
-    let text = prose(&mut app);
-    assert!(
-        !text.contains("Name in the fleet Build Linux"),
-        "the display name reached the name field:\n{text}"
-    );
-    app.apply(key(KeyCode::Esc));
-
-    // `null` is an empty field, and submitting it is refused on that field.
-    activate_cursor(&mut app, "100.64.12.88");
-    app.apply(key(KeyCode::Enter));
-    assert_eq!(
-        app.devices
-            .connect
-            .as_ref()
-            .map(|form| form.machine.as_str()),
-        Some(""),
-        "a name the runtime could not fold was invented here instead"
-    );
-
-    fill(&mut app, "SSH user", "deploy");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    assert!(
-        drained(&mut app).is_empty(),
-        "a nameless add reached the runtime"
-    );
-    assert!(
-        prose(&mut app).contains("A name in the fleet is required"),
-        "{}",
-        prose(&mut app)
-    );
-}
-
-/// Spaces in a pasted password survive; flattening used to trim them through a
-/// non-zeroized String before the masked field saw them.
-#[test]
-fn a_pasted_password_keeps_its_leading_and_trailing_spaces() {
-    let _mode = normal();
-    let mut app = deploying();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_auth",
-            json!([challenge(
-                "c-pw",
-                "password",
-                json!({ "target": "100.64.12.44", "user": "deploy", "port": 22 })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    const PADDED: &str = "  zx9Qv-padded-secret  ";
-    app.apply(Msg::Paste(PADDED.into()));
-
-    assert_eq!(secret_chars(&app), PADDED.chars().count());
-    assert_eq!(bullets(&mut app), PADDED.chars().count());
-    assert!(
-        !prose(&mut app).contains(PADDED),
-        "the pasted secret was drawn in the clear"
-    );
-
-    app.apply(key(KeyCode::Enter));
-    let calls = drained(&mut app);
-    let authenticate = call_for(&calls, "fleet.deployment.authenticate");
-    assert_eq!(authenticate.params["secret"], json!(PADDED));
-}
-
-/// A member's facts are under the list, and Enter goes to where its sessions are.
-#[test]
-fn a_member_carries_its_facts_in_the_details_panel_and_opens_the_machines_panel() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["devices"] = json!([{
-        "name": "studio", "machine": "studio", "suggested_machine": "studio",
-        "os": "macos", "address": "100.64.12.21", "online": true, "path": "direct",
-        "state": "this_device", "action": "view device",
-        "connected": true, "compatible": true, "runtime_running": true,
-        "last_probe": "2026-09-17T08:10:00Z",
-        "name_conflicts_with_roster": Value::Null
-    }]);
-    reply["operations"] = json!([{
-        "operation": "op-old", "state": "completed", "kind": "setup",
-        "owner": "ada", "attached": false, "readable": true,
-        "created_at": "2026-09-16T08:00:00Z",
-        "updated_at": "2026-09-16T09:00:00Z",
-        "target": { "machine": "studio", "address": "100.64.12.21" }
-    }]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    // No second screen to open: the facts are already under the row.
-    let text = prose(&mut app);
-    assert!(text.contains("in the roster as studio"), "{text}");
-    assert!(text.contains("direct"), "{text}");
-    assert!(text.contains("100.64.12.21"), "{text}");
-    assert!(text.contains("runtime connected"), "{text}");
-    assert!(text.contains("probed 2026-09-17T08:10:00Z"), "{text}");
-    assert!(text.contains("op-old"), "{text}");
-    assert!(text.contains("started by ada"), "{text}");
-    assert!(!text.contains("SSH user"), "the list drew a form:\n{text}");
-
-    // `r` still asks the runtime again.
-    app.apply(key(KeyCode::Char('r')));
-    let calls = drained(&mut app);
-    assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
-
-    // Enter on a member is **Open**: its sessions are the Dashboard's machines panel,
-    // which is a place this view does not contain.
-    activate(&mut app, "This Mac");
-    assert!(app.overlay.is_none(), "Open left the view over the screen");
-    assert!(
-        prose(&mut app).contains("its machines and sessions are on this panel"),
-        "{}",
-        prose(&mut app)
-    );
-}
-
-#[test]
-fn paging_a_long_inventory_reaches_selected_details_without_hidden_row_actions() {
-    let _mode = normal();
-    let mut reply = populated();
-    reply["devices"] = json!((0..30)
-        .map(|index| json!({
-            "name": format!("peer-{index:02}"),
-            "machine": format!("peer-{index:02}"),
-            "suggested_machine": format!("peer-{index:02}"),
-            "address": format!("100.64.1.{}", index + 1),
-            "os": "linux", "state": "fleet_member", "online": true,
-            "connected": true,
-            "last_probe": if index == 0 { "2026-09-17T08:10:00Z" } else { "other probe" }
-        }))
-        .collect::<Vec<_>>());
-
-    for action in [KeyCode::Enter, KeyCode::Char('x')] {
-        let mut app = with_inventory(reply.clone());
-        app.terminal_width = 80;
-        let _ = drained(&mut app);
-        let initial = render(&mut app, 80, 24);
-        assert!(initial.rows.iter().any(|row| row.contains("> peer-00")));
-        assert!(!flowed(&initial).contains("probed 2026-09-17T08:10:00Z"));
-
-        let mut pages = String::new();
-        for _ in 0..10 {
-            app.apply(key(KeyCode::PageDown));
-            pages.push_str(&flowed(&render(&mut app, 80, 24)));
-            pages.push(' ');
-        }
-        assert!(pages.contains("runtime connected"), "{pages}");
-        assert!(pages.contains("probed 2026-09-17T08:10:00Z"), "{pages}");
         assert_eq!(
-            app.devices.cursor, 0,
-            "paging changed the selected destination"
+            text.matches(expected).count(),
+            1,
+            "{reason} is said more than once:\n{text}"
         );
-        assert!(drained(&mut app).is_empty(), "paging acted on a device");
-
-        // A row action first brings its destination back into view, without opening
-        // that member or starting its removal while its name is off screen.
-        app.apply(key(action));
-        assert!(matches!(app.overlay, Some(Overlay::Devices)));
-        assert!(app.devices.connect.is_none());
-        let returned = render(&mut app, 80, 24);
-        assert!(returned.rows.iter().any(|row| row.contains("> peer-00")));
-        assert!(drained(&mut app).is_empty());
-
-        // Ordinary cursor movement still follows the destination below the fold.
-        for _ in 0..25 {
-            app.apply(key(KeyCode::Down));
-        }
-        let moved = render(&mut app, 80, 24);
-        assert!(moved.rows.iter().any(|row| row.contains("> peer-25")));
-        app.apply(key(KeyCode::Char('x')));
-        let form = prose(&mut app);
-        assert!(form.contains("Remove peer-25 from the fleet"), "{form}");
-        assert!(form.contains("100.64.1.26"), "{form}");
-    }
-}
-
-/// `x` on a member is `kind: "leave"`, by roster name, with its own account question.
-#[test]
-fn x_on_a_member_prepares_a_leave_for_its_roster_name() {
-    let _mode = normal();
-
-    let mut reply = populated();
-    reply["devices"] = json!([
-        {
-            "name": "studio", "machine": "studio", "suggested_machine": "studio",
-            "os": "macos", "address": "100.64.12.21", "online": true,
-            "state": "this_device", "connected": true,
-            "name_conflicts_with_roster": Value::Null
-        },
-        {
-            "name": "attic", "machine": "attic", "suggested_machine": "attic",
-            "os": "linux", "address": "100.64.12.77", "online": false,
-            "last_seen": "2026-09-17T07:50:00Z",
-            "state": "fleet_member_not_visible", "action": "diagnose",
-            "connected": false, "compatible": true, "runtime_running": false,
-            "last_probe": Value::Null,
-            "name_conflicts_with_roster": Value::Null
-        }
-    ]);
-
-    let mut app = with_inventory(reply);
-    let _settled = drained(&mut app);
-
-    // The offer is in the member's own details, not on its row.
-    activate_cursor(&mut app, "attic");
-    let text = prose(&mut app);
-    assert!(text.contains("x Remove attic from the fleet"), "{text}");
-    assert!(text.contains("runtime not connected"), "{text}");
-
-    app.apply(key(KeyCode::Char('x')));
-    let text = prose(&mut app);
-    assert!(text.contains("Remove attic from the fleet"), "{text}");
-    assert!(
-        text.contains("Its sessions and data stay on that machine"),
-        "the departure does not say what it leaves behind:\n{text}"
-    );
-    assert!(text.contains("SSH user"), "{text}");
-    assert!(text.contains("[ Remove ]"), "{text}");
-
-    // The account is required, exactly as it is for an admission.
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-    assert!(drained(&mut app).is_empty(), "a nameless leave was sent");
-    assert!(prose(&mut app).contains("An SSH username is required"));
-
-    fill(&mut app, "SSH user", "pi");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-
-    assert_eq!(prepare.params["kind"], json!("leave"));
-    assert_eq!(prepare.params["target"]["machine"], json!("attic"));
-    assert_eq!(prepare.params["ssh_user"], json!("pi"));
-    assert_eq!(prepare.params["port"], json!(22));
-    assert!(
-        prepare.params["target"]["address"].is_null(),
-        "a leave named an address rather than a roster member: {}",
-        prepare.params
-    );
-}
-
-/// This machine does not leave its own fleet from here, and a device that is not a
-/// member has nothing to leave.
-#[test]
-fn x_on_a_row_that_is_not_a_member_says_so_rather_than_opening_a_form() {
-    let _mode = normal();
-    let mut app = with_inventory(populated());
-    let _settled = drained(&mut app);
-
-    for (row, expected) in [
-        ("This Mac", "nothing to remove it from"),
-        ("build-linux", "nothing to remove it from"),
-    ] {
-        remove(&mut app, row);
-
+        // The list is unchanged: this client is not the thing that would be blocked.
         assert!(
-            app.devices.connect.is_none(),
-            "{row} opened a departure form"
-        );
-        assert!(drained(&mut app).is_empty(), "{row} sent a call");
-        assert!(
-            ouro::ui::app::devices_hint_line(&app).contains(expected),
-            "{row}: {}",
-            ouro::ui::app::devices_hint_line(&app)
+            device_row(&screen(&mut app), "build-linux").contains("ouro fleet add"),
+            "{reason} took the command off a row:\n{text}"
         );
     }
 }
 
 // ---------------------------------------------------------------------------------------
-// removing a member: the words, the stages and the fallback
-//
-// Every test below came out of one live run — a real **Remove from fleet** against a
-// Raspberry Pi — where the surfaces described the whole operation as an *add*: the row
-// said the machine had been set up, the review offered to deploy it, and the strip filed
-// the roster removal under *Join fleet*. The kind of an operation is not decoration; it
-// is what every sentence on these screens is about.
+// the contract
 // ---------------------------------------------------------------------------------------
 
-/// A fleet with one member, which is the only kind of row a removal starts from.
-fn with_member() -> Value {
+/// The `--machine` argument comes from the runtime's own suggestion, never from a
+/// display name, and never from an unvalidated string.
+#[test]
+fn the_command_is_filled_from_the_runtimes_suggestion_only() {
+    let _mode = normal();
+
+    // The capture's own display names, and what the contract folds them to.
     let mut reply = populated();
-    reply["devices"] = json!([
-        {
-            "name": "studio", "machine": "studio", "suggested_machine": "studio",
-            "os": "macos", "address": "100.64.12.21", "online": true,
-            "state": "this_device", "connected": true,
-            "name_conflicts_with_roster": Value::Null
-        },
-        {
-            "name": "attic", "machine": "attic", "suggested_machine": "attic",
-            "os": "linux", "address": "100.64.12.77", "online": true,
-            "state": "fleet_member", "action": "view device",
-            "connected": true, "compatible": true, "runtime_running": true,
-            "last_probe": Value::Null,
-            "name_conflicts_with_roster": Value::Null
-        }
-    ]);
-    reply
-}
-
-#[test]
-fn a_non_issuer_can_prepare_and_retry_a_removal() {
-    let _mode = normal();
-    for reasons in [vec!["no_ca_key"], vec!["no_ca_key", "dev_runtime"]] {
-        let mut reply = with_member();
-        reply["host"] = host(false, &reasons);
-        reply["host"]["issuer"] = json!(false);
-        let mut app = with_inventory(reply);
-        drained(&mut app);
-
-        remove(&mut app, "attic");
-        assert!(app.devices.connect.is_some(), "{}", prose(&mut app));
-        fill(&mut app, "SSH user", "pi");
-        focus_submit(&mut app);
-        app.apply(key(KeyCode::Enter));
-        let calls = drained(&mut app);
-        let prepare = call_for(&calls, "fleet.deployment.prepare");
-        assert_eq!(prepare.params["kind"], "leave");
-        answer(
-            &mut app,
-            prepare.tag.clone(),
-            json!({"operation_id": "abcdef0123456789"}),
-        );
-        answer(
-            &mut app,
-            status_tag(),
-            snapshot(
-                "failed",
-                json!([]),
-                json!({"kind": "leave", "attached": false}),
-            ),
-        );
-        drained(&mut app);
-
-        app.apply(key(KeyCode::Char('R')));
-        let calls = drained(&mut app);
-        assert_eq!(
-            call_for(&calls, "fleet.deployment.resume").params["operation_id"],
-            "abcdef0123456789"
-        );
-    }
-}
-
-#[test]
-fn a_non_issuer_can_continue_and_take_over_a_removal() {
-    let _mode = normal();
-    let operation = "abcdef0123456789";
-    let mut reply = with_member();
-    reply["host"] = host(false, &["no_ca_key"]);
-    reply["host"]["issuer"] = json!(false);
-    reply["operations"] = json!([{
-        "operation": operation, "kind": "leave", "state": "failed",
-        "attached": false, "readable": true, "owner": "another-admin",
-        "target": {"machine": "attic", "address": "100.64.12.77"}
+    reply["devices"] = json!([{
+        "name": "Monocursive's MacBook Pro",
+        "machine": Value::Null,
+        "suggested_machine": "monocursive-s-macbook-pro",
+        "os": "macOS", "address": "100.64.12.70", "online": true,
+        "state": "discovered_installation_unknown",
+        "name_conflicts_with_roster": Value::Null,
     }]);
+
     let mut app = with_inventory(reply);
-    drained(&mut app);
-    activate(&mut app, "attic");
-    let calls = drained(&mut app);
-    let resume = call_for(&calls, "fleet.deployment.resume");
-    assert_eq!(resume.params["operation_id"], operation);
-
-    refuse(
-        &mut app,
-        resume.tag.clone(),
-        ErrorCode::ScopeDenied,
-        Some(json!({"reason": "operation_not_yours"})),
-    );
-    app.apply(key(KeyCode::Char('t')));
-    let calls = drained(&mut app);
-    let takeover = call_for(&calls, "fleet.deployment.resume");
-    assert_eq!(takeover.params["operation_id"], operation);
-    assert_eq!(takeover.params["takeover"], true);
-}
-
-#[test]
-fn removal_keeps_the_other_deployment_blockers() {
-    let _mode = normal();
-    for reason in [
-        "no_data_dir",
-        "ouro_path_unknown",
-        "cleartext_web_bind",
-        "new_blocker",
-    ] {
-        let mut reply = with_member();
-        reply["host"] = host(false, &["no_ca_key", reason]);
-        let mut app = with_inventory(reply);
-        drained(&mut app);
-        remove(&mut app, "attic");
-        assert!(
-            app.devices.connect.is_none(),
-            "{reason} did not block removal"
-        );
-        assert!(drained(&mut app).is_empty());
-    }
-}
-
-/// `x` on `attic`, through the form, to an open removal this view is following.
-fn removing() -> App {
-    let mut app = with_inventory(with_member());
-    let _settled = drained(&mut app);
-
-    remove(&mut app, "attic");
-    fill(&mut app, "SSH user", "pi");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-    answer(
-        &mut app,
-        prepare.tag.clone(),
-        json!({ "operation_id": "abcdef0123456789" }),
-    );
-
-    app
-}
-
-/// One leave plan, as the worker puts it on the wire.
-fn leave_plan() -> Value {
-    json!({
-        "schema": 1,
-        "operation": "abcdef0123456789",
-        "kind": "leave",
-        "deployment_host": {
-            "hostname": "studio", "user": "ada",
-            "os": "darwin", "arch": "aarch64-apple-darwin", "issuer": true
-        },
-        "target": {
-            "machine": "attic", "address": "100.64.12.77", "port": 22,
-            "ssh_user": "pi", "identity": "agent: id_ed25519",
-            "install_path": "bin/ouro",
-            "host_fingerprint": "SHA256:0Yp1rL8m"
-        },
-        "release": Value::Null,
-        // `plan_leave` builds a removal with no service to propose. The document still
-        // carries the field, which is exactly how the startup sentence got onto a screen
-        // about a machine that is being taken out.
-        "service": "manual",
-        "members": [
-            { "machine": "studio", "host": "100.64.12.21",
-              "reached_by": "local", "change": "remove attic from the roster" }
-        ],
-        "grants": ["no new trust is granted; attic's credentials are retired"]
-    })
-}
-
-/// Defect 1: the row's words come from the operation's *kind*, not only its state.
-#[test]
-fn a_removal_reads_as_a_removal_on_the_row_it_is_about() {
-    let _mode = normal();
-
-    for (state, word, label) in [
-        // A finished removal, on a row the runtime now reports as an ordinary device:
-        // it was removed, and what can be done with it is to add it back.
-        ("completed", "removed just now", "Add to fleet"),
-        ("failed", "removal failed", "Retry"),
-        ("deploying", "removing\u{2026}", "Continue"),
-    ] {
-        let mut reply = populated();
-        reply["operations"] = json!([{
-            "operation": "abcdef0123456789", "state": state, "kind": "leave",
-            "owner": "local-owner", "attached": false, "readable": true,
-            "target": { "machine": "build-linux", "address": "100.64.12.44",
-                        "ssh_user": "pi", "port": 22 }
-        }]);
-
-        let mut app = with_inventory(reply);
-        let _settled = drained(&mut app);
-
-        let drawn = screen(&mut app);
-        let row = device_row(&drawn, "build-linux").to_string();
-        drop(drawn);
-
-        assert!(
-            row.contains(word),
-            "{state} did not read as a removal: {row:?}"
-        );
-        assert!(row.contains(label), "{state}: {row:?}");
-        for setting_up in ["set up just now", "setup failed", "setting up\u{2026}"] {
-            assert!(
-                !row.contains(setting_up),
-                "{state} described a removal as a setup: {row:?}"
-            );
-        }
-    }
-}
-
-/// Defects 2 and 3: the review screen for a removal names removal, and says nothing
-/// about starting at login on a machine it is taking out of the fleet.
-#[test]
-fn the_review_before_a_removal_offers_to_remove_and_not_to_deploy() {
-    let _mode = normal();
-    let mut app = removing();
-
-    let plan = leave_plan();
-    let digest = ouro::fleet_setup::sha256_hex(ouro::fleet_setup::canonical_json(&plan).as_bytes());
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "awaiting_review",
-            json!([challenge(
-                "c-review",
-                "review",
-                json!({ "plan_digest": digest, "plan": plan })
-            )]),
-            json!({}),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("Ready to remove"), "{text}");
+    let drawn = screen(&mut app);
+    let row = device_row(&drawn, "Monocursive");
     assert!(
-        text.contains("a Remove \u{2014} applies exactly this plan"),
-        "the key that applies a removal is labelled as a deployment:\n{text}"
+        row.contains("--machine monocursive-s-macbook-pro"),
+        "the suggestion was not used: {row}"
     );
     assert!(
-        !text.contains("Ready to deploy") && !text.contains("a Deploy"),
-        "the removal screen still offers a deployment:\n{text}"
+        !row.contains("--machine Monocursive's"),
+        "a display name reached the command: {row}"
     );
+    drop(drawn);
 
-    // §5.4's own sentences, and nothing about installing or starting anything.
-    assert!(
-        text.contains("Stop Ouroboros on attic and disable its start at login."),
-        "{text}"
-    );
-    assert!(text.contains("Retire attic's credentials."), "{text}");
-    assert!(text.contains("Update 1 roster (studio)."), "{text}");
-    assert!(
-        text.contains("Its sessions and data stay on that machine."),
-        "{text}"
-    );
-    for absent in [
-        "Start at login as a user service",
-        "Start manually; no service is installed",
-        "The plan does not say how it starts",
-        "Join the fleet as",
-        "Install ouro",
-    ] {
-        assert!(
-            !text.contains(absent),
-            "a removal's plan drew the add flow's `{absent}` line:\n{text}"
-        );
-    }
+    // `null`: nothing valid remained, and the placeholder says so out loud.
+    let mut reply = populated();
+    reply["devices"] = json!([{
+        "name": "\u{2603}\u{2603}\u{2603}",
+        "machine": Value::Null,
+        "suggested_machine": Value::Null,
+        "os": "linux", "address": "100.64.12.71", "online": true,
+        "state": "discovered_installation_unknown",
+        "name_conflicts_with_roster": Value::Null,
+    }]);
 
-    // The footer says the same word as the key above it.
-    let hint = ouro::ui::app::devices_hint_line(&app);
-    assert!(hint.contains("a remove"), "the footer disagrees: {hint}");
-
-    // And `a` still approves exactly the digest this client computed.
-    app.apply(key(KeyCode::Char('a')));
-    let calls = drained(&mut app);
-    assert_eq!(
-        call_for(&calls, "fleet.deployment.start").params["plan_digest"],
-        json!(digest)
-    );
-}
-
-/// Defect 4, first half: the strip is the engine's own `run_leave` steps, in its order.
-///
-/// The step names are pinned here because they are a contract with
-/// `fleet_setup::engine`'s `run_leave` and `stop_and_retire`: `inspect`, `stop_runtime`,
-/// `disable_service`, `verify_disconnected`, `leave`, then `member_preflight`/`roster`
-/// for every roster the removal edits. A rename there that is not made here shows up as
-/// a strip where nothing ever advances.
-#[test]
-fn a_removals_stage_strip_is_the_engines_own_leave_steps() {
-    let _mode = normal();
-    let mut app = removing();
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "deploying",
-            json!([]),
-            json!({
-                "steps": [
-                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
-                    { "machine": "attic", "step": "stop_runtime", "outcome": "ok" },
-                    { "machine": "attic", "step": "disable_service", "outcome": "ok" },
-                    { "machine": "attic", "step": "verify_disconnected",
-                      "outcome": "started", "detail": "waiting for attic to disconnect" }
-                ]
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains(
-            "\u{2713} Inspect \u{b7} \u{2713} Stop \u{b7} \u{2713} Disable startup \u{b7} \
-             \u{25cf} Leave \u{b7} \u{25cb} Update rosters"
-        ),
-        "the removal drew somebody else's stages:\n{text}"
-    );
-    // The add flow's stages are not what a removal does, and a roster removal is not a
-    // machine joining anything.
-    for stage in ["Join fleet", "Install", "Connect", "Ready"] {
-        assert!(
-            !text.contains(stage),
-            "the removal strip still carries `{stage}`:\n{text}"
-        );
-    }
-    assert!(
-        text.contains("waiting for attic to disconnect"),
-        "the current step's detail is missing:\n{text}"
-    );
-
-    // The rosters are their own stage, and `roster` is the step that fills it.
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "deploying",
-            json!([]),
-            json!({
-                "steps": [
-                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
-                    { "machine": "attic", "step": "stop_runtime", "outcome": "ok" },
-                    { "machine": "attic", "step": "disable_service", "outcome": "ok" },
-                    { "machine": "attic", "step": "verify_disconnected", "outcome": "ok" },
-                    { "machine": "attic", "step": "leave", "outcome": "ok" },
-                    { "machine": "studio", "step": "roster", "outcome": "started" }
-                ]
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(
-        text.contains("\u{2713} Leave \u{b7} \u{25cf} Update rosters"),
-        "the roster edit is not the stage it belongs to:\n{text}"
-    );
-}
-
-/// Defect 4, second half: what a finished removal says, and what it does not offer.
-#[test]
-fn a_finished_removal_says_the_machine_is_out_and_offers_only_the_way_back() {
-    let _mode = normal();
-    let mut app = removing();
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "completed",
-            json!([]),
-            json!({
-                "steps": [
-                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
-                    { "machine": "attic", "step": "stop_runtime", "outcome": "ok" },
-                    { "machine": "attic", "step": "disable_service", "outcome": "ok" },
-                    { "machine": "attic", "step": "verify_disconnected", "outcome": "ok" },
-                    { "machine": "attic", "step": "leave", "outcome": "ok" },
-                    { "machine": "studio", "step": "roster", "outcome": "ok" }
-                ],
-                "done": {
-                    "ok": true, "state": "completed",
-                    "summary": "attic left the fleet; its work and session history stay on it",
-                    "next": "No tombstone is recorded."
-                }
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("attic is out of your fleet"), "{text}");
-    assert!(
-        text.contains("attic left the fleet; its work and session history stay on it"),
-        "the worker's own summary is missing:\n{text}"
-    );
-    assert!(text.contains("No tombstone is recorded."), "{text}");
-    assert!(text.contains("b back to the device list"), "{text}");
-
-    // Nothing to open, nothing to configure, nothing to run: the machine this screen
-    // names is not in the fleet any more.
-    for absent in [
-        "is in your fleet",
-        "Open \u{2014}",
-        "Done \u{2014}",
-        "Configure model",
-        "Run test task",
-    ] {
-        assert!(
-            !text.contains(absent),
-            "a finished removal still offered `{absent}`:\n{text}"
-        );
-    }
-}
-
-#[test]
-fn failed_removal_fallback_preserves_the_complete_machine_argument() {
-    let _mode = normal();
-    let machine = "production-build-linux";
-    let mut reply = with_member();
-    reply["devices"][1]["name"] = json!(machine);
-    reply["devices"][1]["machine"] = json!(machine);
-    reply["devices"][1]["suggested_machine"] = json!(machine);
     let mut app = with_inventory(reply);
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Char('x')));
-    fill(&mut app, "SSH user", "deploy");
-    focus_submit(&mut app);
-    app.apply(key(KeyCode::Enter));
-    let calls = drained(&mut app);
-    let prepare = call_for(&calls, "fleet.deployment.prepare");
-    answer(
-        &mut app,
-        prepare.tag.clone(),
-        json!({ "operation_id": "abcdef0123456789" }),
-    );
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "failed",
-            json!([]),
-            json!({ "done": { "ok": false, "reason": "failed", "detail": "No route to host" } }),
-        ),
-    );
     let text = prose(&mut app);
     assert!(
-        text.contains(
-            "ouro fleet sessions forget --machine production-build-linux --accept-state-loss"
-        ),
-        "{text}"
-    );
-}
-
-/// Defect 5: the `sessions forget` recipe, only where it is the answer, spelled the way
-/// the CLI actually takes it.
-#[test]
-fn only_a_removal_that_never_reached_the_machine_names_the_cli_fallback() {
-    let _mode = normal();
-    let recipe = "ouro fleet sessions forget --machine attic --accept-state-loss";
-
-    // Before anything has failed — the form, and the operation while it is running —
-    // there is no such sentence: the removal has not failed, so there is nothing to fall
-    // back from.
-    let mut app = with_inventory(with_member());
-    let _settled = drained(&mut app);
-    remove(&mut app, "attic");
-    let text = prose(&mut app);
-    assert!(!text.contains("did not answer"), "on the form:\n{text}");
-    assert!(!text.contains("sessions forget"), "on the form:\n{text}");
-
-    let mut app = removing();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot("deploying", json!([]), json!({})),
-    );
-    let _polled = drained(&mut app);
-    assert!(
-        !prose(&mut app).contains("did not answer"),
-        "a running removal already told the operator the machine is gone"
-    );
-
-    // A failure with no step against the machine at all: it was never reached.
-    let mut app = removing();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "failed",
-            json!([]),
-            json!({
-                "steps": [],
-                "done": { "ok": false, "reason": "failed",
-                          "detail": "ssh: connect to host 100.64.12.77 port 22: No route to host" }
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("This removal did not finish"), "{text}");
-    assert!(text.contains("attic did not answer"), "{text}");
-    assert!(
-        text.contains(recipe),
-        "the fallback is not the command the CLI takes:\n{text}"
-    );
-
-    // A failure that *did* reach the machine is a different failure, and the roster
-    // recipe is not its answer: the machine answered, and something else went wrong.
-    let mut app = removing();
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "failed",
-            json!([]),
-            json!({
-                "steps": [
-                    { "machine": "attic", "step": "inspect", "outcome": "ok" },
-                    { "machine": "attic", "step": "stop_runtime", "outcome": "failed",
-                      "detail": "attic is working, so it was not stopped" }
-                ],
-                "done": { "ok": false, "reason": "runtime_busy",
-                          "detail": "attic is working, so it was not stopped" }
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("attic is working"), "{text}");
-    assert!(
-        !text.contains("did not answer") && !text.contains("sessions forget"),
-        "a machine that answered was reported as unreachable:\n{text}"
-    );
-}
-
-/// A completed operation whose steps stop at `connect` checked no readiness, and the
-/// strip says so rather than ticking a stage nothing reported.
-///
-/// From a successful live add: the worker finished at `connect`, wrote its summary, and
-/// the finish screen drew a tick against *Ready* — a check nobody had made.
-#[test]
-fn a_completed_setup_that_never_checked_readiness_does_not_claim_it_did() {
-    let _mode = normal();
-    let mut app = deploying();
-
-    answer(
-        &mut app,
-        status_tag(),
-        snapshot(
-            "completed",
-            json!([]),
-            json!({
-                "steps": [
-                    { "machine": "build-linux", "step": "inspect", "outcome": "ok" },
-                    { "machine": "build-linux", "step": "install_binary", "outcome": "ok" },
-                    { "machine": "build-linux", "step": "issue", "outcome": "ok" },
-                    { "machine": "build-linux", "step": "service", "outcome": "ok" },
-                    { "machine": "build-linux", "step": "connect", "outcome": "ok" }
-                ],
-                "done": {
-                    "ok": true, "state": "completed",
-                    "summary": "build-linux joined the fleet and answered on its node name",
-                    "next": "Open the machines panel to give it a model"
-                }
-            }),
-        ),
-    );
-    let _polled = drained(&mut app);
-
-    let text = prose(&mut app);
-    assert!(text.contains("build-linux is in your fleet"), "{text}");
-    assert!(
-        text.contains("build-linux joined the fleet and answered on its node name"),
-        "the worker's own summary is missing:\n{text}"
-    );
-    assert!(
-        text.contains("Open the machines panel to give it a model"),
-        "the worker's own next step is missing:\n{text}"
-    );
-    assert!(
-        text.contains("\u{2713} Connect \u{b7} \u{2013} Ready (not checked)"),
-        "an unreported readiness was drawn as done:\n{text}"
-    );
-    assert!(
-        !text.contains("\u{2713} Ready"),
-        "readiness was ticked without a step to tick it:\n{text}"
-    );
-    // And it is not reported as something missing either: nothing failed, nothing is
-    // left behind, and the operation finished.
-    assert!(
-        !text.contains("did not finish") && !text.contains("Left behind"),
-        "a completed setup was drawn as a problem:\n{text}"
+        text.contains("ouro fleet add USER@100.64.12.71 --machine NAME"),
+        "a name the runtime could not fold was invented:\n{text}"
     );
 }
 
@@ -5058,20 +1519,17 @@ fn every_code_the_fixtures_emit_has_a_sentence() {
         blocker_known, blocker_sentence, operation_state, operation_state_known, reason_sentence,
     };
 
-    // Refusal / blocker codes this file actually sends.
     for code in [
-        "operation_not_yours",
         "host_key_changed",
-        "plan_changed",
-        "challenge_consumed",
-        "challenge_expired",
-        "challenge_not_bound",
-        "deploy_blocked",
-        "no_ca_key",
+        "version_mismatch",
+        "worker_timeout",
+        "worker_unavailable",
+        "devices_busy",
+        "journal_unreadable",
         "ouro_path_unknown",
         "no_data_dir",
         "cleartext_web_bind",
-        "worker_refused",
+        "dev_runtime",
         "a_reason_from_the_future",
     ] {
         let sentence = if blocker_known(code) {
@@ -5087,7 +1545,6 @@ fn every_code_the_fixtures_emit_has_a_sentence() {
     }
 
     for code in [
-        "attaching",
         "inspecting",
         "awaiting_host_trust",
         "awaiting_auth",
@@ -5107,4 +1564,92 @@ fn every_code_the_fixtures_emit_has_a_sentence() {
             "{code} fell through: {sentence}"
         );
     }
+
+    // The codes the deleted flow owned are gone with it, and a document that still sends
+    // one is named rather than explained by a sentence this build no longer believes.
+    for gone in ["no_ca_key", "operation_not_yours", "challenge_not_bound"] {
+        assert!(!blocker_known(gone), "{gone} is still a blocker");
+        let sentence = blocker_sentence(gone);
+        assert!(
+            sentence.contains(&gone.replace('_', " ")),
+            "{gone} did not fall through to its own name: {sentence}"
+        );
+    }
+}
+
+/// Reconnecting reads the list again rather than redrawing what a runtime said before it
+/// restarted.
+#[test]
+fn a_reconnect_reads_the_list_again() {
+    let _mode = normal();
+    let mut app = with_inventory(populated());
+    let _settled = drained(&mut app);
+
+    // Nothing is due yet: the inventory is read when the view opens and when `r` asks.
+    for _ in 0..50 {
+        app.apply(Msg::Tick);
+    }
+    assert!(drained(&mut app).is_empty());
+
+    app.apply(Msg::Reconnected(Box::new(full_hello())));
+    let calls = drained(&mut app);
+    assert_eq!(call_for(&calls, "fleet.devices").params, json!({}));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.method.starts_with("fleet."))
+            .count(),
+        1,
+        "a reconnect issued more than the one read: {calls:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// screen-reader mode
+// ---------------------------------------------------------------------------------------
+
+/// The rows are a numbered menu, the numbers select, and the box is gone.
+#[test]
+fn screen_reader_mode_numbers_the_rows_and_the_numbers_select() {
+    let _mode = screen_reader();
+    let mut app = with_inventory(populated());
+    let _settled = drained(&mut app);
+
+    let text = prose(&mut app);
+    assert!(
+        text.contains("1. This Mac"),
+        "the rows are not numbered:\n{text}"
+    );
+    assert!(!text.contains('\u{2502}'), "the box survived:\n{text}");
+
+    // The number selects the row it numbers.
+    app.apply(key(KeyCode::Char('2')));
+    assert_eq!(app.devices.cursor, 1);
+
+    // And Enter reads its command out, with the host the command is for.
+    app.apply(key(KeyCode::Enter));
+    let text = prose(&mut app);
+    assert!(text.contains("to run ouro fleet"), "{text}");
+    assert!(text.contains("Actions run on studio as ada."), "{text}");
+    assert!(drained(&mut app).is_empty(), "a number sent something");
+}
+
+/// The keys the hint line names are the keys that work, in both modes.
+#[test]
+fn the_hint_line_names_the_keys_that_work() {
+    let _mode = normal();
+    let mut app = with_inventory(populated());
+    let _settled = drained(&mut app);
+
+    let hint = ouro::ui::app::devices_hint_line(&app);
+    assert!(hint.contains("Enter show details"), "{hint}");
+    assert!(hint.contains("Esc close"), "{hint}");
+    // Nothing the view cannot do.
+    for gone in ["add by address", "remove", "cancel", "take over", "retry"] {
+        assert!(!hint.contains(gone), "the hint still offers {gone}: {hint}");
+    }
+
+    app.apply(key(KeyCode::Enter));
+    let hint = ouro::ui::app::devices_hint_line(&app);
+    assert!(hint.contains("Enter hide details"), "{hint}");
 }
