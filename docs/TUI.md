@@ -1132,7 +1132,9 @@ ouro fleet tag list [--machine NAME]
 ouro fleet status [--json]
                       this machine's fleet id, name, address, node, runtime state,
                       members and ports, plus the live roster when a runtime
-                      answers. --json exits non-zero on incomplete setup
+                      answers. --json adds this build's metadata (versions, OS,
+                      arch, whether a release is embedded) and the network
+                      inventory, and exits non-zero on incomplete setup
 ouro fleet devices [--json]
                       this machine's members beside the devices the installed
                       Tailscale client can see. One `tailscale status --json`,

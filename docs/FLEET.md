@@ -238,7 +238,11 @@ laptop that boots before its VPN waits visibly rather than looking hung.
 ephemeral-range overlaps, a stopped-runtime listener preflight, every member's address
 resolution and the runtime's own state. `[ok]`, `[note]` and `[fix]` are the stable
 levels; a problem exits non-zero. Neither command prints a secret, and both say the same
-sentence about a profile written by an older Ouroboros (§12).
+sentence about a profile written by an older Ouroboros (§12). The `--json` form of each
+also carries this build's metadata — the Ouroboros version, the OTP and Elixir releases
+the embedded release recorded, the OS and the architecture, with `null` rather than a
+guess where there is no embedded release — and `status --json` carries the network
+inventory beside it.
 
 `--peer NAME|ADDRESS` probes the route to one visible device with a single overlay ping
 and reports `reachable`, `timed_out`, `unknown`, `peer_unknown` or `peer_ambiguous`, with
