@@ -480,7 +480,10 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       |> render_submit()
 
       # And it arrived, which is what makes the page's silence about it evidence.
-      assert Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, "hunter2"))
+      assert Enum.any?(
+               FleetFramesFake.await_response(context.bin, "hunter2"),
+               &String.contains?(&1, "hunter2")
+             )
 
       # 3. The plan, as the lines it is. No digest, and nothing behind a disclosure.
       html = await(view, "Ready to deploy")

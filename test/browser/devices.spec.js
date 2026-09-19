@@ -22,9 +22,10 @@ const TOKEN = "ouroboros-browser-test-token-000000000000";
 // server serves both projects, so the row has to be private to the test *and* the project
 // or the second run looks at the first run's leftovers.
 //
-// `peer(5)` is the one the fixture scripts as a failure, on either project.
+// Six rows per project, and the fixture scripts three of them: `peer(3)` asks for a key's
+// passphrase, `peer(4)` waits to be cancelled, and `peer(5)` fails.
 function peer(index) {
-  const offset = test.info().project.name === "mobile-chromium" ? 5 : 0;
+  const offset = test.info().project.name === "mobile-chromium" ? 6 : 0;
   const number = index + offset;
   const name = "fixture-peer-" + String(number).padStart(2, "0");
   return { name: name, address: "100.100.7." + number };
@@ -161,7 +162,9 @@ test("the Advanced disclosure stays open while the form above it is typed in", a
 }) => {
   await openDevices(page);
 
-  const device = peer(4);
+  // peer(2) is the one the happy script runs for; opening its form and never submitting it
+  // leaves no journal, so this test and that one can share a row.
+  const device = peer(2);
   await page
     .locator('button[phx-click="deploy"][phx-value-address="' + device.address + '"]')
     .click();
@@ -327,13 +330,18 @@ test("add by address is the same form with the address to type in", async ({ pag
   await expect(page.locator("#deploy-machine")).toHaveValue("");
 
   // A name that is not a machine name is refused here rather than three steps later.
-  await page.locator("#deploy-address").fill("100.100.9.9");
+  // A destination of this project's own. The two projects share one server, and a manual add
+  // leaves an operation running against the name it was given — which the runtime now
+  // refuses a second operation for, correctly.
+  const manual = test.info().project.name === "mobile-chromium" ? "2" : "1";
+
+  await page.locator("#deploy-address").fill("100.100.9." + manual);
   await page.locator("#deploy-machine").fill("not a name");
   await page.locator("#deploy-ssh-user").fill("fixture");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(drawer).toContainText("Letters, digits and hyphens only");
 
-  await page.locator("#deploy-machine").fill("typed-by-hand");
+  await page.locator("#deploy-machine").fill("typed-by-hand-" + manual);
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(page.getByRole("heading", { name: /First time connecting/ })).toBeVisible();
 });
@@ -435,10 +443,83 @@ test("setting this machine up takes no account and reviews before it changes any
   await expect(drawer.locator('[data-step="inspect"]')).toHaveCount(0);
 });
 
+test("Cancel setup stops the program and says what it left behind", async ({ page }) => {
+  await openDevices(page);
+
+  // peer(4) is scripted to raise a host-key question and then wait, so there is something
+  // running for Cancel to stop.
+  const device = peer(4);
+  await startAdd(page, device);
+
+  const drawer = page.locator("#ouro-deploy");
+  await expect(page.getByRole("heading", { name: /First time connecting/ })).toBeVisible();
+
+  // Close is not Cancel: the footer offers both, and the one beside "keeps running" leaves
+  // the operation alone.
+  await expect(drawer).toContainText("keeps running");
+  await drawer.getByRole("button", { name: "Cancel setup", exact: true }).click();
+
+  // The runtime answered with the state and the residue the program recorded, which is the
+  // only path to this panel.
+  await expect(drawer).toContainText("What this left behind");
+  await expect(drawer).toContainText("a partial download at /tmp/ouro.partial");
+
+  await expect(drawer.getByRole("heading", { name: "Cancelled" })).toBeVisible({
+    timeout: 15000
+  });
+
+  await expect(drawer).toContainText("stopped at a safe boundary");
+  await expect(drawer).not.toContainText("Setup failed");
+
+  // A cancelled operation leaves the row offering to start again rather than to continue.
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+  const row = page.locator('[data-address="' + device.address + '"]');
+  await expect(row).toHaveAttribute("data-operation-state", "cancelled");
+  await expect(row.getByRole("button", { name: "Continue" })).toHaveCount(0);
+});
+
+test("a passphrase is asked for as a passphrase, not as a password", async ({ page }) => {
+  await openDevices(page);
+
+  // peer(3) is scripted to ask for a key's passphrase instead of an account's password.
+  const device = peer(3);
+  await startAdd(page, device);
+
+  const drawer = page.locator("#ouro-deploy");
+
+  // The heading and the field's own label both name the key, because an operator who reads
+  // "Password" over this field types the wrong secret — and tells a remote machine the
+  // passphrase of a key on their own laptop.
+  await expect(
+    page.getByRole("heading", { name: "Passphrase for the selected key" })
+  ).toBeVisible();
+
+  await expect(drawer).toContainText("Passphrase for the key ~/.ssh/id_ed25519");
+  await expect(drawer).toContainText("SHA256:fixturePublicFingerprint");
+
+  // No attempt counter: a passphrase carries neither `attempt` nor `max_attempts`, and a
+  // page that invented a first attempt would be reporting something nobody said.
+  await expect(drawer).not.toContainText("attempt 1 of");
+
+  const secret = page.locator("[data-ouro-secret]");
+  await expect(secret).toHaveAttribute("type", "password");
+  await expect(secret).toBeFocused();
+
+  const passphrase = "browser-fixture-passphrase-" + Date.now();
+  await page.keyboard.type(passphrase);
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { name: "Ready to deploy" })).toBeVisible();
+  await expect(page.locator("[data-ouro-secret]")).toHaveCount(0);
+  expect(await page.content()).not.toContain(passphrase);
+});
+
 test("a finished operation changes what its row says", async ({ page }) => {
   await openDevices(page);
 
-  const device = peer(3);
+  const device = peer(1);
   const row = page.locator('[data-address="' + device.address + '"]');
   await expect(row).toContainText("not set up");
 
@@ -458,7 +539,7 @@ test("a finished operation changes what its row says", async ({ page }) => {
 test("closing the drawer keeps the operation, and the address reopens it", async ({ page }) => {
   await openDevices(page);
 
-  const device = peer(1);
+  const device = peer(6);
   await startAdd(page, device);
   await expect(page.getByRole("heading", { name: /First time connecting/ })).toBeVisible();
 

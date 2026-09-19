@@ -92,8 +92,8 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
   # ---------------------------------------------------------------------------
 
   describe "F1 argv/2 under attacker values" do
-    test "an ssh_user carrying its own @ reaches the destination word whole" do
-      assert {:ok, argv} =
+    test "an ssh_user carrying its own @ is refused rather than made a destination" do
+      assert {:error, {:invalid_request, why}} =
                Deployment.argv(
                  %{
                    "kind" => "add",
@@ -105,27 +105,49 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
                  "0123456789abcdef"
                )
 
-      assert Enum.at(argv, 2) == "root@attacker.example@100.64.0.2",
-             "`word/2` never refuses an `@`, so the destination word carries two of them " <>
-               "and which host is contacted is decided by whichever end the CLI splits on"
-    end
+      assert why =~ "an account, not a destination",
+             "a destination word with two `@` in it is contacted at whichever end the CLI " <>
+               "splits on, which is not the address this runtime validated"
 
-    test "a tab inside a word is not one of the four characters `word/2` refuses" do
+      # And the same account without the `@` is the ordinary case, unchanged.
       assert {:ok, argv} =
                Deployment.argv(
                  %{
                    "kind" => "add",
                    "machine" => "pi",
-                   "address" => "100.64.0.2\tmore",
-                   "ssh_user" => "deploy",
+                   "address" => "100.64.0.2",
+                   "ssh_user" => "root",
                    "port" => 22
                  },
                  "0123456789abcdef"
                )
 
-      assert Enum.at(argv, 2) == "deploy@100.64.0.2\tmore",
-             "the multi-word check names \\n \\r \\0 and space; \\t \\v \\f and U+00A0 are " <>
-               "not in it"
+      assert Enum.at(argv, 2) == "root@100.64.0.2"
+    end
+
+    test "every space character is a second word, not only the four that were easy to name" do
+      for {label, space} <- [
+            {"tab", "\t"},
+            {"vertical tab", "\v"},
+            {"form feed", "\f"},
+            {"no-break space", "\u00A0"},
+            {"line separator", "\u2028"}
+          ] do
+        assert {:error, {:invalid_request, why}} =
+                 Deployment.argv(
+                   %{
+                     "kind" => "add",
+                     "machine" => "pi",
+                     "address" => "100.64.0.2" <> space <> "more",
+                     "ssh_user" => "deploy",
+                     "port" => 22
+                   },
+                   "0123456789abcdef"
+                 ),
+               "a #{label} inside an address should be refused"
+
+        assert why =~ "must be one word"
+      end
     end
 
     test "install_path and data_dir may traverse" do
@@ -320,19 +342,85 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       :sys.replace_state(Deployment, fn state -> %{state | argv: %{}} end)
 
       FleetFramesFake.write_scenario!(context.bin, ["state running", "done completed ok"])
+
+      # The argv file is what the next run writes; removed first, its reappearance is the
+      # second run rather than a difference from the first — which, once the rebuild is
+      # faithful, there is not one of.
+      File.rm(FleetFramesFake.argv_path(context.bin))
+
       assert {:ok, %{"operation" => ^operation}} = Deployment.resume(operation)
 
       argv_two =
         await(fn ->
           current = FleetFramesFake.argv(context.bin)
-          if current != argv_one, do: {:ok, current}
+          if current != [], do: {:ok, current}
         end)
 
-      refute "--no-service" in argv_two,
-             "a resume of an operation the operator started with `service: false` installs " <>
-               "a startup service on their machine, and the answer to `.resume` says nothing"
+      assert argv_two == argv_one,
+             "a resume is the same command line again: the journal records everything the " <>
+               "first one was built from"
 
-      refute "--key" in argv_two
+      # §6's journal records `target.identity` and a top-level `service`, so the rebuilt
+      # command line is the one the operator asked for rather than the one the defaults
+      # would have picked: their key, and no startup service.
+      assert "--no-service" in argv_two
+      assert "--key" in argv_two
+
+      assert Enum.slice(argv_two, Enum.find_index(argv_two, &(&1 == "--key")), 2) ==
+               ["--key", "/home/me/.ssh/id_ed25519"]
+    end
+
+    test "a journal that records neither is refused rather than resumed differently",
+         context do
+      deploy = Journal.deploy_dir(context.root)
+      File.mkdir_p!(deploy)
+
+      # What an older program wrote, and what a resume must not fill in for itself.
+      File.write!(
+        Path.join(deploy, "adversarial0030.json"),
+        JSON.encode!(%{
+          "schema" => 2,
+          "operation" => "adversarial0030",
+          "kind" => "add",
+          "state" => "failed",
+          "target" => %{
+            "machine" => "pi",
+            "address" => "100.64.0.2",
+            "ssh_user" => "deploy",
+            "port" => 22
+          }
+        })
+      )
+
+      assert {:error, {:operation_request_incomplete, why}} =
+               Deployment.resume("adversarial0030")
+
+      assert why =~ "identity"
+      assert FleetFramesFake.argv(context.bin) == []
+
+      # With the identity recorded and the service still missing, the other half.
+      File.write!(
+        Path.join(deploy, "adversarial0031.json"),
+        JSON.encode!(%{
+          "schema" => 2,
+          "operation" => "adversarial0031",
+          "kind" => "add",
+          "state" => "failed",
+          "target" => %{
+            "machine" => "pi",
+            "address" => "100.64.0.2",
+            "ssh_user" => "deploy",
+            "port" => 22,
+            "identity" => %{"kind" => "default"}
+          }
+        })
+      )
+
+      assert {:error, {:operation_request_incomplete, why}} =
+               Deployment.resume("adversarial0031")
+
+      assert why =~ "startup service"
+      assert FleetFramesFake.argv(context.bin) == []
     end
   end
 
@@ -369,21 +457,14 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
 
       state = :sys.get_state(Deployment)
 
-      # `state.operations` empties and `state.exits` is capped at 32. `state.argv` is capped
-      # by nothing at all — and because the broker is a runtime-lifetime singleton, the map
-      # already carries every operation every earlier case in this run started.
-      assert map_size(state.argv) >= 6
-      for id <- ids, do: assert(Map.has_key?(state.argv, id))
+      # `state.argv` is bounded by the operations that are live, because the `:DOWN` that
+      # drops an operation drops its command line beside it. The broker is a
+      # runtime-lifetime singleton, so a map nothing ever deleted from held every command
+      # line — each with `--key <path>` and an SSH destination in it — that every case in
+      # every earlier suite had started.
+      for id <- ids, do: refute(Map.has_key?(state.argv, id))
+      assert map_size(state.argv) == map_size(state.operations)
       assert map_size(state.exits) <= 32
-
-      flunk(
-        "`state.argv` is written by `open/4` and deleted by nothing: not on `:DOWN`, not " <>
-          "by `trim_exits/2`, not by `retain/1`, not when the journal is pruned. It holds " <>
-          "#{map_size(state.argv)} command lines after this case, against " <>
-          "#{map_size(state.operations)} live operations and a capped " <>
-          "#{map_size(state.exits)} remembered exits. Each entry is a full argv including " <>
-          "`--key <path>` and the SSH destination."
-      )
     end
   end
 
@@ -491,7 +572,7 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       assert log =~ "lost its worker: :killed"
     end
 
-    test "the belts cover the report's message and state, and not its stacktrace", context do
+    test "the belts cover the report's message, its state and its stacktrace", context do
       FleetFramesFake.write_scenario!(context.bin, [
         "state running",
         "challenge secret-1 password {}",
@@ -524,17 +605,25 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
           Process.sleep(400)
         end)
 
-      # The two belts the moduledoc names do hold exactly where it says they do.
+      # A call this process does not serve still crashes — a caller must not wait out the
+      # ceiling for an answer nobody will give — and the terminate report is still written.
       assert log =~ "Last message (from", "the terminate report was written"
       assert log =~ ":redacted", "`format_status/1` replaced the message and the state"
 
-      # And the stacktrace, which neither belt touches, prints the argument list in full.
-      assert log =~ marker,
-             "an Erlang `function_clause` stacktrace carries the real arguments, so the " <>
-               "raised exception and the exit reason both name the secret even though " <>
-               "`:sensitive` and `format_status/1` scrubbed the mailbox and the state"
+      # And the third belt, which is the one the review found missing: the process crashes
+      # on a term of its own rather than on the one it was sent, so the `function_clause`
+      # stacktrace that used to print `handle_call({:respond, …, %{"secret" => …}}, …)` in
+      # full no longer exists to print.
+      refute log =~ marker,
+             "an Erlang stacktrace prints its arguments, and this process's arguments are " <>
+               "where a password is; `:sensitive` and `format_status/1` cover the mailbox " <>
+               "and the state and neither touches a stacktrace"
 
-      assert log =~ "handle_call({:respond,"
+      refute log =~ "handle_call({:respond,"
+      assert log =~ "does not serve :respond/4", "the crash names the shape and nothing else"
+
+      # And the broker's own line about it says the shape of the exit reason, not the term.
+      assert log =~ "lost its worker: ArgumentError"
     end
   end
 
@@ -610,7 +699,8 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
   # ---------------------------------------------------------------------------
 
   describe "F7 journal projection" do
-    test "last_error.detail keeps its ANSI escapes", context do
+    test "a terminal escape in a journal value is stripped the way one in a log line is",
+         context do
       operation = "adversarial0001"
       deploy = Journal.deploy_dir(context.root)
       File.mkdir_p!(deploy)
@@ -632,12 +722,15 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
 
       assert {:ok, document} = Journal.read(context.root, operation)
 
-      assert document["last_error"]["detail"] =~ "\e[",
-             "`sanitize/1` bounds and drops credential-named keys but never strips control " <>
-               "characters; `scrub_line/2` (which does) is applied to the stderr tail only"
+      # `scrub_line/2` is the string leaf of `scrub/2` now, so every value in a journal gets
+      # what a log line gets. Before, an operator reading a failed operation in a terminal
+      # saw a sentence the program did not write, in a colour it chose, after a clear-screen.
+      refute document["last_error"]["detail"] =~ "\e["
+      refute hd(document["steps"])["detail"] =~ "\e["
+      refute hd(document["plan"]) =~ "\e["
 
-      assert hd(document["steps"])["detail"] =~ "\e["
-      assert hd(document["plan"]) =~ "\e["
+      # The words survive; only the bytes a terminal would have acted on are gone.
+      assert document["last_error"]["detail"] =~ "SPOOFED: your fleet is compromised"
     end
 
     test "a credential in a journal *value* is not redacted the way one in a log line is",
@@ -852,22 +945,36 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       }
 
       assert {:ok, %{"operation" => first}} = Deployment.start(request)
-      assert {:ok, %{"operation" => second}} = Deployment.start(request)
-      assert first != second
 
       await(fn ->
-        with {:ok, _a} <- Deployment.worker(first), {:ok, _b} <- Deployment.worker(second) do
-          {:ok, :yes}
-        else
-          _not_yet -> nil
+        case Deployment.worker(first) do
+          {:ok, _pid} -> {:ok, :yes}
+          _other -> nil
         end
       end)
 
-      flunk(
-        "nothing in the broker or the gateway refuses a second `start` against a machine " <>
-          "an operation is already deploying to: #{first} and #{second} are both live " <>
-          "`ouro fleet add deploy@100.64.0.2 --machine pi`"
-      )
+      # Two live `ouro fleet add deploy@100.64.0.2 --machine pi` are two programs installing
+      # onto one machine, two journals describing it, and two sets of challenges an operator
+      # has to tell apart — and each would have had an operation id of its own, so nothing
+      # downstream would have called it a duplicate.
+      assert {:error, {:target_in_progress, ^first}} = Deployment.start(request)
+
+      # A different machine is a different operation, and is not refused.
+      assert {:ok, %{"operation" => elsewhere}} =
+               Deployment.start(%{request | "machine" => "pi2", "address" => "100.64.0.3"})
+
+      assert elsewhere != first
+
+      # And the target is free again once its operation's worker is gone.
+      {:ok, pid} = Deployment.worker(first)
+      :ok = DynamicSupervisor.terminate_child(Ouroboros.Fleet.Deployment.WorkerSupervisor, pid)
+
+      await(fn ->
+        case Deployment.start(request) do
+          {:ok, %{"operation" => third}} -> {:ok, third}
+          _refused -> nil
+        end
+      end)
     end
   end
 
@@ -935,29 +1042,28 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       # The journal still says `running`, which is what makes it resumable.
       assert {:ok, %{"state" => "running", "running" => false}} = Deployment.status(operation)
 
+      # What the real program does when a second run finds the first still holding the
+      # journal's lock: it refuses, promptly, and names the refusal. `resume/1` waits for
+      # that `done` rather than reporting a deployment it did not start.
       FleetFramesFake.write_scenario!(context.bin, [
-        "state running",
-        "step install ok the SECOND program",
-        "done completed the second program"
+        "error operation_in_progress another run of this operation holds its journal",
+        "done failed another run of this operation holds its journal"
       ])
 
-      assert {:ok, %{"operation" => ^operation}} = Deployment.resume(operation),
-             "resume is refused only by the broker's own registry, so it cannot see the " <>
-               "program that is still running"
+      assert {:error, :operation_in_progress} = Deployment.resume(operation),
+             "the broker's in-memory registry cannot see a program a restarted runtime did " <>
+               "not start, so the program's own refusal is what has to be passed on"
 
-      second =
-        await(fn ->
-          case Deployment.worker(operation) do
-            {:ok, second} -> {:ok, second}
-            _other -> nil
-          end
-        end)
+      # Nothing is left holding a port for an operation this runtime is not running.
+      await(fn ->
+        case Deployment.worker(operation) do
+          {:error, :no_worker} -> {:ok, :yes}
+          _other -> nil
+        end
+      end)
 
-      assert :sys.get_state(second).os_pid != os_pid
-
-      assert alive?(os_pid),
-             "two `ouro fleet add … --operation #{operation}` processes are now running " <>
-               "against one machine and writing one journal file"
+      # And the first program is untouched: it is still the one doing the work.
+      assert alive?(os_pid)
     end
 
     test "resume of a finished operation, an unknown id and a malformed id", context do
@@ -1442,15 +1548,16 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       assert Map.has_key?(row, "running")
       assert row["target"]["machine"] == "pi"
 
-      # A *device* row is `ouro fleet devices --json` verbatim, so anything the binary
-      # prints inside one comes straight through — including the three names §9 and §12 say
-      # the answer loses.
+      # A *device* row is `ouro fleet devices --json` verbatim, and the three names §9 and
+      # §12 take out of this answer are taken out of a row as well as off the top of it —
+      # an older `ouro` beside a newer runtime is the whole case the version fence exists
+      # for, and it is the one that would have put them back.
       device = hd(inventory["devices"])
 
-      assert device["issuer"] == "old" and device["owner"] == "someone" and
-               device["attached"] == true,
-             "§12 says `fleet.devices` loses `issuer`; it is dropped at the top level and " <>
-               "passed through inside a device row"
+      refute Map.has_key?(device, "issuer")
+      refute Map.has_key?(device, "owner")
+      refute Map.has_key?(device, "attached")
+      assert device["machine"] == "pi"
     end
   end
 end

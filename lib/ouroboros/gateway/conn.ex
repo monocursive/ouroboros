@@ -618,7 +618,7 @@ defmodule Ouroboros.Gateway.Conn do
   #
   # `Ouroboros.Gateway.AuditLine` owns what that field may contain, shared with
   # `Ouroboros.Web.Call` so the two surfaces cannot redact differently. For
-  # `fleet.deployment.authenticate` it never computes a digest at all: hashing a human's
+  # `fleet.deployment.respond` it never computes a digest at all: hashing a human's
   # SSH password is not a redaction of it.
   defp audit(state, method, params, %{scope: :operate}) do
     Logger.info([

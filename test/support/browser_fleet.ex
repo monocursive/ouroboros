@@ -98,12 +98,13 @@ defmodule Ouroboros.Test.BrowserFleet do
     ]
   }
 
-  # Ten identical uninspected peers. A deployment leaves a journal behind, and a journal is
-  # what makes a row stop reading as an untouched peer — correctly, and permanently for the
-  # life of this fixture runtime. Playwright runs this spec once per project against one
-  # server, so a spec that reused one row would have its second test looking at the first
-  # test's leftovers. A row each is the cheap, honest way out.
-  @peers 10
+  # Twelve identical uninspected peers, six per Playwright project. A deployment leaves a
+  # journal behind, and a journal is what makes a row stop reading as an untouched peer —
+  # correctly, and permanently for the life of this fixture runtime. Playwright runs this
+  # spec once per project against one server, so a spec that reused one row would have its
+  # second test looking at the first test's leftovers. A row each is the cheap, honest way
+  # out, and the spec's own `peer/1` offsets the second project past the first's.
+  @peers 12
 
   defp peers do
     for index <- 1..@peers do
@@ -203,6 +204,48 @@ defmodule Ouroboros.Test.BrowserFleet do
     ]
   end
 
+  @doc """
+  One that waits, so **Cancel setup** has something to stop.
+
+  The program is holding a host-key question and then sitting on its stdin; a cancel is a
+  `{"op":"cancel"}` frame written to it, and what the operator sees afterwards is the
+  `done cancelled` it answers with. Nothing about that is reachable from a script that
+  finishes on its own.
+  """
+  @spec cancellable_scenario() :: [String.t()]
+  def cancellable_scenario do
+    [
+      "state running",
+      "state waiting",
+      "challenge trust-1 host_trust {\"address\":\"100.100.7.1\",\"port\":22,\"algorithm\":\"ssh-ed25519\",\"sha256_fingerprint\":\"SHA256:fixtureFingerprintNotARealHostKey\",\"user\":\"fixture\"}",
+      "residue a partial download at /tmp/ouro.partial",
+      "await trust-1",
+      "sleep 30"
+    ]
+  end
+
+  @doc """
+  One whose key is protected, which is the other secret a deployment can ask for.
+
+  A `passphrase` challenge is not a `password` challenge: it is for a key *this operator*
+  chose rather than for an account on another machine, it carries no attempt count, and the
+  label over the masked field has to say which of the two is being asked for — an operator
+  who types the wrong one has told a remote machine their local key's passphrase.
+  """
+  @spec passphrase_scenario() :: [String.t()]
+  def passphrase_scenario do
+    [
+      "state running",
+      "state waiting",
+      "challenge key-1 passphrase {\"key_label\":\"~/.ssh/id_ed25519\",\"public_fingerprint\":\"SHA256:fixturePublicFingerprint\"}",
+      "await key-1",
+      "plan Install ouro 0.1.10 (Linux arm64) to /usr/local/bin/ouro",
+      "challenge review-1 review {}",
+      "await review-1",
+      "done completed the key was unlocked"
+    ]
+  end
+
   @doc "A local setup: no host key and no password, straight to the review."
   @spec setup_scenario() :: [String.t()]
   def setup_scenario do
@@ -252,7 +295,12 @@ defmodule Ouroboros.Test.BrowserFleet do
       # The spec's own `peer/1` offsets the mobile project by five, so these are its
       # `peer(5)` on either.
       "add-fixture-peer-05" => failing_scenario(),
-      "add-fixture-peer-10" => failing_scenario(),
+      "add-fixture-peer-11" => failing_scenario(),
+      # One that waits to be cancelled, and one whose key is protected, per project.
+      "add-fixture-peer-04" => cancellable_scenario(),
+      "add-fixture-peer-10" => cancellable_scenario(),
+      "add-fixture-peer-03" => passphrase_scenario(),
+      "add-fixture-peer-09" => passphrase_scenario(),
       "leave" => leave_scenario(),
       "setup" => setup_scenario(),
       "default" => scenario()

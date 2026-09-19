@@ -201,7 +201,10 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
         end)
 
       # It arrived, which is what makes the absences below evidence rather than a tautology.
-      assert Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, secret))
+      assert Enum.any?(
+               FleetFramesFake.await_response(context.bin, secret),
+               &String.contains?(&1, secret)
+             )
 
       refute log =~ secret
       assert log =~ "web operate #{@method} params=redacted"

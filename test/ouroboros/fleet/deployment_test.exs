@@ -335,7 +335,10 @@ defmodule Ouroboros.Fleet.DeploymentTest do
         end)
 
       # It arrived, which is what makes the absences below evidence rather than a tautology.
-      assert Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, @secret))
+      assert Enum.any?(
+               FleetFramesFake.await_response(context.bin, @secret),
+               &String.contains?(&1, @secret)
+             )
 
       # And it is nowhere this runtime keeps anything.
       refute log =~ @secret
@@ -376,7 +379,12 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       {:ok, operation} = start_add()
       await_challenge(operation, "trust-1")
 
-      assert {:ok, %{"cancelling" => true}} = Deployment.cancel(operation)
+      # §9's table answers `{state}`, and the contract text beside it says a cancel reports
+      # residue. Both, or the page's "What this left behind" panel has no path to it.
+      assert {:ok, reply} = Deployment.cancel(operation)
+      assert Map.has_key?(reply, "state")
+      assert reply["residue"] == []
+
       assert {:ok, final} = await_state(operation, "cancelled")
       assert final["state"] == "cancelled"
 
@@ -384,7 +392,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       await_no_worker(operation)
       assert %{"state" => "cancelled"} = FleetFramesFake.journal(context.root, operation)
 
-      assert {:ok, %{"source" => "journal", "state" => "cancelled"}} =
+      assert {:ok, %{"source" => "journal", "state" => "cancelled", "residue" => []}} =
                Deployment.status(operation)
     end
 

@@ -80,17 +80,19 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   callers parse the stdout as JSON, and a warning line mixed into it would be reported as
   unreadable output instead of as the warning it is.
   """
-  @spec run([String.t()], pos_integer(), pos_integer()) ::
+  @spec run([String.t()], pos_integer(), keyword()) ::
           {:ok, String.t()}
           | {:error, path_error()}
           | {:error, {:ouro_failed, integer(), String.t()}}
           | {:error, {:ouro_crashed, term()}}
           | {:error, {:ouro_output_too_large, pos_integer()}}
           | {:error, :ouro_timeout}
-  def run(args, timeout, max_bytes \\ @max_output_bytes)
-      when is_list(args) and is_integer(timeout) and timeout > 0 and is_integer(max_bytes) do
+  def run(args, timeout, opts \\ [])
+      when is_list(args) and is_integer(timeout) and timeout > 0 and is_list(opts) do
+    max_bytes = Keyword.get(opts, :max_bytes, @max_output_bytes)
+
     with {:ok, ouro} <- executable() do
-      case command(ouro, args, timeout, max_bytes) do
+      case command(ouro, args, timeout, max_bytes, Keyword.get(opts, :data_dir)) do
         {:ok, {output, 0}} -> {:ok, output}
         {:ok, {output, status}} -> {:error, {:ouro_failed, status, excerpt(output)}}
         {:error, reason} -> {:error, reason}
@@ -113,7 +115,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   #
   # stderr is deliberately not redirected: these callers parse stdout as JSON, and a warning
   # folded into it would be reported as unreadable output rather than as the warning it is.
-  defp command(executable, args, timeout, max_bytes) do
+  defp command(executable, args, timeout, max_bytes, data_dir) do
     port =
       Port.open({:spawn_executable, executable}, [
         :binary,
@@ -121,7 +123,7 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
         :hide,
         :stream,
         {:args, args},
-        {:env, inherited_env()}
+        {:env, child_env(data_dir)}
       ])
 
     os_pid =
@@ -224,8 +226,6 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
 
     if allowed_env?(key), do: {name, String.to_charlist(value)}, else: {name, false}
   end
-
-  defp inherited_env, do: child_env()
 
   defp allowed_env?(key) when is_binary(key) do
     key in ~w(PATH HOME USER LOGNAME LANG TMPDIR SSH_AUTH_SOCK) or

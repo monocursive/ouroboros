@@ -71,11 +71,14 @@ defmodule Ouroboros.Fleet.Deployment.Frame do
              | :frame_not_object
              | :frame_version}
   def decode(line) when is_binary(line) do
-    if byte_size(line) > @max_bytes do
-      {:error, {:frame_too_large, byte_size(line)}}
-    else
-      line |> String.trim_trailing("\n") |> decode_body()
-    end
+    # The cap is the whole line, newline included, on both sides of this module: `encode/1`
+    # measures `[json, ?\n]`, and the port hands a line over with the newline already
+    # removed. So the byte it removed is added back before the measurement rather than
+    # quietly forgiven — a body of exactly the cap is a line of one byte more than it.
+    body = String.trim_trailing(line, "\n")
+    size = byte_size(body) + 1
+
+    if size > @max_bytes, do: {:error, {:frame_too_large, size}}, else: decode_body(body)
   end
 
   defp decode_body(body) do

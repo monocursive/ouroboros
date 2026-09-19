@@ -34,7 +34,9 @@
 #   raw <text…>                  written to stdout as it is, which is how a line that is not
 #                                a frame gets there
 #   bigline                      one line past the 1 MiB frame cap
-#   error <reason> <detail…>     the journal's last_error from here on
+#   error <reason> <detail…>     the journal's last_error from here on, and the `reason` a
+#                                failing `done` then carries
+#   residue <text…>              one entry of what the operation left behind
 #   sleep <seconds>
 #   drain                        read stdin to EOF and keep going
 #   exit <status>
@@ -58,6 +60,14 @@ machine=""
 ssh_user=""
 address=""
 port="22"
+# §6's journal records what the command line was built from, because a resume rebuilds that
+# line from the journal and a default chosen there is a key the operator did not name or a
+# service they declined.
+identity_kind="default"
+identity_ref=""
+install_path=""
+target_data_dir=""
+service="true"
 previous=""
 
 for arg in "$@"; do
@@ -66,7 +76,17 @@ for arg in "$@"; do
     --machine) machine="$arg" ;;
     --user) ssh_user="$arg" ;;
     --port) port="$arg" ;;
+    --key) identity_kind="key"; identity_ref="$arg" ;;
+    --agent) identity_kind="agent"; identity_ref="$arg" ;;
+    --install-path) install_path="$arg" ;;
+    --data-dir) target_data_dir="$arg" ;;
   esac
+
+  case "$arg" in
+    --ask-password) identity_kind="password"; identity_ref="" ;;
+    --no-service) service="false" ;;
+  esac
+
   previous="$arg"
 done
 
@@ -106,16 +126,24 @@ exec 2>> "$log"
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 steps=""
 plan=""
+residue=""
 state="running"
 last_error="null"
 eof=0
 cancelled=0
 
 write_journal() {
-  printf '{"schema":2,"operation":"%s","kind":"%s","state":"%s","created_at":"%s","updated_at":"%s","target":{"machine":"%s","address":"%s","ssh_user":"%s","port":%s},"paths":{},"plan":[%s],"steps":[%s],"residue":[],"last_error":%s}\n' \
-    "$operation" "$kind" "$state" "$now" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "$machine" "$address" "$ssh_user" "${port:-22}" \
-    "$plan" "$steps" "$last_error" > "$journal.tmp"
+  if [ -n "$identity_ref" ]; then
+    identity="{\"kind\":\"$identity_kind\",\"ref\":\"$identity_ref\"}"
+  else
+    identity="{\"kind\":\"$identity_kind\"}"
+  fi
+
+  printf '{"schema":2,"operation":"%s","kind":"%s","state":"%s","service":%s,"created_at":"%s","updated_at":"%s","target":{"machine":"%s","address":"%s","ssh_user":"%s","port":%s,"identity":%s},"paths":{"install_path":"%s","data_dir":"%s"},"plan":[%s],"steps":[%s],"residue":[%s],"last_error":%s}\n' \
+    "$operation" "$kind" "$state" "$service" "$now" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$machine" "$address" "$ssh_user" "${port:-22}" "$identity" \
+    "$install_path" "$target_data_dir" \
+    "$plan" "$steps" "$residue" "$last_error" > "$journal.tmp"
   chmod 600 "$journal.tmp"
   mv "$journal.tmp" "$journal"
 }
@@ -242,7 +270,21 @@ while IFS= read -r line <&3; do
       summary=${summary# }
       state="$dstate"
       write_journal
-      emit "{\"event\":\"done\",\"state\":\"$dstate\",\"summary\":\"$summary\"}"
+
+      # A `done` that ends badly names why in a stable code beside its sentence, which is
+      # what lets a refusal be recognised as one. `error <reason> <detail>` before the
+      # `done` is where that code comes from.
+      if [ "$dstate" = "failed" ] && [ "$last_error" != "null" ]; then
+        reason=${last_error#*\"reason\":\"}
+        reason=${reason%%\"*}
+        emit "{\"event\":\"done\",\"state\":\"$dstate\",\"reason\":\"$reason\",\"summary\":\"$summary\"}"
+      else
+        emit "{\"event\":\"done\",\"state\":\"$dstate\",\"summary\":\"$summary\"}"
+      fi
+      ;;
+    residue)
+      if [ -z "$residue" ]; then residue="\"$rest\""; else residue="$residue,\"$rest\""; fi
+      write_journal
       ;;
     raw)
       emit "$rest"

@@ -2758,13 +2758,19 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     """
   end
 
-  # The step the worker is on, in its own words — which is the line an operator watches.
+  # The step the program is on, in its own words — which is the line an operator watches.
+  #
+  # `state`, and `attempted`. Both halves of that were wrong: the key the page looked for was
+  # `outcome` and the value was `started`, and §6 names neither on either side of the seam —
+  # a `step` frame carries `step`/`state`/`detail` and a schema-2 journal carries those plus
+  # `at`, with the four values `ok|failed|skipped|attempted`. So this never found a running
+  # step and always fell through to the last one reported, which is right only by accident.
   defp current_detail(drawer) do
     steps = List.wrap((drawer.status || %{})["steps"])
 
     running =
       Enum.find(Enum.reverse(steps), fn step ->
-        is_map(step) and step["outcome"] == "started"
+        is_map(step) and step["state"] == "attempted"
       end) || List.last(Enum.filter(steps, &is_map/1))
 
     case running do

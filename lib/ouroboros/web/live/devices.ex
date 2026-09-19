@@ -1101,62 +1101,6 @@ defmodule Ouroboros.Web.Live.Devices do
 
   def attempt(_absent), do: nil
 
-  @doc """
-  What the operation said about readiness, as `{sentence, offer a test task?}`, where the
-  sentence is `nil` when there is nothing worth saying.
-
-  There is no `ready` flag on the wire. The worker's `done` frame carries `ok`, a state, a
-  summary, a next step and what it could not establish, so readiness is read from the
-  `readiness` step's own outcome — and where that step says `skipped`, which is what the
-  engine records today because the owner-local readiness methods answer for the runtime
-  they are asked rather than for the new member, this says so rather than claiming either
-  answer.
-
-  **Silence where the operation already answered.** A setup that finished with its
-  `connect` step done has said what it did: the heading names the machine, the worker's
-  summary says it joined and is connected. Following that with "The setup finished.
-  Readiness was not reported, so this page does not claim it." is an epistemological
-  disclaimer about a fact the two lines above just established — the 2026-09-18 live add
-  showed all three stacked. So a completed operation whose connection is done says nothing
-  more unless the `readiness` step itself reported and *failed*, which is the one case where
-  the reader is being told something they do not already have.
-  """
-  @spec readiness(term(), term()) :: {String.t() | nil, boolean()}
-  def readiness(steps, done) do
-    steps = List.wrap(steps)
-    step = Enum.find(steps, &(is_map(&1) and &1["step"] == "readiness"))
-    finished? = is_map(done) and done["ok"] == true
-    settled? = finished? and connected?(steps)
-
-    case {step && step["outcome"], finished?, settled?} do
-      {"failed", _finished?, _settled?} ->
-        {"This machine did not report itself ready. What is missing is below.", false}
-
-      {_any, _finished?, true} ->
-        {nil, true}
-
-      {"ok", _finished?, _settled?} ->
-        {"This machine reported that it is ready.", true}
-
-      {"skipped", _finished?, _settled?} ->
-        {"Readiness was not established from here. " <>
-           (plain(step["detail"]) || "The steps below say what was and was not checked."), true}
-
-      {_unreported, true, _settled?} ->
-        {"The setup finished. Readiness was not reported, so this page does not claim it.", true}
-
-      {_unreported, _unfinished, _settled?} ->
-        {"Readiness was not reported.", false}
-    end
-  end
-
-  # Whether the operation got as far as connecting, from the `connect` step's own outcome.
-  defp connected?(steps) do
-    Enum.any?(steps, fn step ->
-      is_map(step) and step["step"] == "connect" and step["outcome"] in ["ok", "skipped"]
-    end)
-  end
-
   # ------------------------------------------------------------------------------------
   # The plan
   # ------------------------------------------------------------------------------------

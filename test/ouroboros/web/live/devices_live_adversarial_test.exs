@@ -462,20 +462,17 @@ defmodule Ouroboros.Web.Live.DevicesLiveAdversarialTest do
       """
     end
 
-    test "readiness/2 also names a step §6 does not have" do
-      # §6's setup steps are create, stop_runtime, service, start, ready — never "readiness".
-      steps = [%{"step" => "ready", "state" => "ok", "detail" => nil}]
+    test "readiness/2 is gone, because nothing could ever have called it correctly" do
+      # §6's setup steps are create, stop_runtime, service, start, ready — never "readiness"
+      # — and a step's key is `state`, never `outcome`. The function looked for both, and for
+      # a `done["ok"]` that §8's `done` frame does not carry either. It had no caller in
+      # `lib/`, so what it answered was never drawn; what it would have answered was the
+      # "nothing was reported" clause for a setup whose readiness step said `ok`.
+      refute function_exported?(Ouroboros.Web.Live.Devices, :readiness, 2)
 
-      assert Ouroboros.Web.Live.Devices.readiness(steps, %{"ok" => true}) ==
-               {"This machine reported that it is ready.", true},
-             """
-             The function looks for a step named `readiness` and for an `outcome` key on it.
-             §6 names that step `ready` and that key `state`, so with the engine's own shape
-             it answers #{inspect(Ouroboros.Web.Live.Devices.readiness(steps, %{"ok" => true}))}
-             — the "nothing was reported" clause — for a setup whose readiness step says
-             `ok`. Its `done["ok"]` is not a field §8's `done` frame has either, and the
-             function has no caller in lib/.
-             """
+      # And the one place that did read `outcome` reads what both sources write.
+      assert Ouroboros.Web.Live.Devices.outcome("attempted") == {"running", :running}
+      assert Ouroboros.Web.Live.Devices.stage_mark("attempted") == "●"
     end
   end
 end

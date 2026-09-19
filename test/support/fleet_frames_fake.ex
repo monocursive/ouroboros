@@ -149,6 +149,36 @@ defmodule Ouroboros.Test.FleetFramesFake do
   @spec responses(Path.t()) :: [String.t()]
   def responses(dir), do: lines(responses_path(dir))
 
+  @doc """
+  The same, once one of them contains `needle`, or `[]` after the deadline.
+
+  The file is written by another operating-system process at the far end of a pipe, so a
+  read taken the instant after `respond/3` answers is a read taken before the program has
+  been scheduled. "It is not there yet" and "it will never be there" are different facts,
+  and asserting on the first of them is a test that passes on a fast machine.
+  """
+  @spec await_response(Path.t(), String.t(), pos_integer()) :: [String.t()]
+  def await_response(dir, needle, timeout \\ 3_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    poll_response(dir, needle, deadline)
+  end
+
+  defp poll_response(dir, needle, deadline) do
+    written = responses(dir)
+
+    cond do
+      Enum.any?(written, &String.contains?(&1, needle)) ->
+        written
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        written
+
+      true ->
+        Process.sleep(25)
+        poll_response(dir, needle, deadline)
+    end
+  end
+
   @doc "The journal the program wrote for one operation, decoded, or `nil`."
   @spec journal(Path.t(), String.t()) :: map() | nil
   def journal(data_dir, operation) do
