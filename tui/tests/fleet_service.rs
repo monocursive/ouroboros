@@ -112,9 +112,14 @@ impl Fakes {
                 launchctl,
                 systemctl,
                 loginctl,
-                // Short, because several tests below drive the deadline deliberately and
-                // the real twenty seconds is not a thing to wait for in a suite.
-                deadline: Duration::from_secs(5),
+                // The production deadline. It used to be five seconds, on the reasoning
+                // that the real twenty are not a thing to wait for in a suite — but
+                // nothing here waits for it except the one test that *wants* a deadline
+                // to fire, and that test sets its own. What the short value bought
+                // instead was a flake: under a loaded machine a `/bin/sh` fake can take
+                // longer than five seconds to be scheduled, and a manager that timed
+                // out reads as a machine with no supervisor.
+                deadline: Duration::from_secs(20),
             },
             log,
             state,

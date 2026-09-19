@@ -67,6 +67,14 @@ pub struct Sshd {
     /// Every test here runs against localhost as the developer's own account, so
     /// without this the missing-binary path would install into their real home
     /// directory. Verified to take effect on OpenSSH 10.3 on this machine.
+    ///
+    /// The config also turns `PerSourcePenalties` off. OpenSSH 9.8 and later penalise a
+    /// source address that opens connections and does not authenticate, and
+    /// `ssh-keyscan` never authenticates — it opens one connection per key type and
+    /// hangs up. Every client here is 127.0.0.1, so a rig that scans its own server
+    /// twice in quick succession gets its second scan dropped and the test reports "did
+    /// not answer a host key scan" about a server that is running perfectly. The
+    /// penalty is a defence against a public Internet this rig is not on.
     pub home: PathBuf,
     child: Option<Child>,
 }
@@ -128,6 +136,7 @@ impl Sshd {
                  UsePAM no\n\
                  StrictModes no\n\
                  SetEnv HOME={home}\n\
+                 PerSourcePenalties no\n\
                  LogLevel VERBOSE\n",
                 authorized = dir.join("authorized_keys").display(),
                 home = home.display(),

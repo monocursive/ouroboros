@@ -1809,11 +1809,29 @@ fn run(program: &Path, args: &[&str], deadline: Duration) -> Result<Outcome> {
         .context("starting the waiter for a service-manager command")?;
 
     match receiver.recv_timeout(deadline) {
-        Ok(Ok(status)) => Ok(Outcome {
-            status: status.code(),
-            stdout: join_bounded(stdout_reader, "stdout")?,
-            stderr: join_bounded(stderr_reader, "stderr")?,
-        }),
+        Ok(Ok(status)) => {
+            // A manager that was *killed* did not answer, and must not be read as one
+            // that answered "no". `ExitStatus::code()` is `None` for a signalled child,
+            // and every caller here compares it against `Some(0)` — so without this a
+            // `launchctl` the kernel killed under memory pressure read as "launchd has
+            // no gui/<uid> domain: log in to the desktop session", which is a confident
+            // and wrong statement about the machine.
+            if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+                return Err(ServiceError::new(
+                    "manager_unavailable",
+                    format!(
+                        "{} was killed by signal {signal} instead of answering; nothing was changed",
+                        program.display()
+                    ),
+                )
+                .into());
+            }
+            Ok(Outcome {
+                status: status.code(),
+                stdout: join_bounded(stdout_reader, "stdout")?,
+                stderr: join_bounded(stderr_reader, "stderr")?,
+            })
+        }
         Ok(Err(error)) => Err(error).with_context(|| format!("waiting for {}", program.display())),
         Err(_) => {
             // The waiter still owns the child, so the deadline is enforced by

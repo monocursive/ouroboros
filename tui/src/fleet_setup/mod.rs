@@ -74,8 +74,23 @@ pub const DEPLOY_DIR: &str = "deploy";
 /// The private per-deployment-host known-hosts store (seam S7).
 pub const KNOWN_HOSTS_FILE: &str = "known_hosts";
 
-/// Seam S3: one frame per line, never more than this many bytes.
+/// Seam S3: one frame per line, never more than this many bytes — **including the
+/// newline that ends it**.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// The most a frame's JSON body may be, which is one byte less: the line is the body
+/// plus its newline, and the line is what the cap is about. An emitter that writes a
+/// body of exactly [`MAX_FRAME_BYTES`] has written a line of one more than the limit,
+/// and the reader on the other side is entitled to hang up on it.
+pub const MAX_FRAME_BODY_BYTES: usize = MAX_FRAME_BYTES - 1;
+
+/// How much free text one frame field carries: a log line, a step's detail, a summary.
+///
+/// Far below the frame cap on purpose. Nothing this protocol says needs two thousand
+/// characters, and a field that *could* grow to a megabyte is a field that turns a
+/// remote's output, or a long error chain, into a frame nobody can read and a line the
+/// peer may refuse. The cap on the whole body stays as the backstop it is.
+pub const MAX_FRAME_TEXT: usize = 2_000;
 
 /// A challenge nobody answers expires rather than holding the issuer's locks.
 pub const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);

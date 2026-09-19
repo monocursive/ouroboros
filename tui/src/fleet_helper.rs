@@ -47,8 +47,17 @@ pub const WIRE_VERSION: u64 = 1;
 /// This helper's own version, answered by `hello`.
 pub const HELPER_VERSION: u64 = 1;
 /// A line over this is refused and the helper exits rather than buffering whatever a
-/// peer decides to send.
+/// peer decides to send. **The newline that ends the line counts towards it.**
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// The most a frame's JSON body may be, which is one byte less than the line may be.
+/// A reply of exactly [`MAX_FRAME_BYTES`] is a line of one more, and the issuer on the
+/// other side is entitled to hang up on it.
+pub const MAX_FRAME_BODY_BYTES: usize = MAX_FRAME_BYTES - 1;
+
+/// How much free text one reply field carries. Far below the frame cap: a `detail` is a
+/// sentence for a person, and an error chain that grew to a megabyte is not one.
+const MAX_DETAIL_BYTES: usize = 2_000;
 /// An SSH connection that stops speaking does not leave a helper resident.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -182,7 +191,9 @@ fn read_frames(mut input: impl BufRead, sender: &SyncSender<Frame>) {
                 }
             };
             input.consume(consumed);
-            if buffer.len() > MAX_FRAME_BYTES {
+            // `buffer` is the body; the cap is on the line, which is the body plus the
+            // newline that ended it.
+            if buffer.len() > MAX_FRAME_BODY_BYTES {
                 let _ = sender.send(Frame::TooLarge);
                 return;
             }
@@ -225,8 +236,22 @@ fn success(id: Value, fields: Value) -> String {
 fn refusal(id: Value, reason: &str, detail: impl Into<String>) -> String {
     let mut reply = envelope(id, false);
     reply.insert("reason".to_string(), json!(reason));
-    reply.insert("detail".to_string(), json!(detail.into()));
+    // A `detail` is one sentence for a person. An error chain, a remote's output or a
+    // path list that grew past that is cut here rather than turned into a frame the
+    // issuer refuses to read.
+    reply.insert("detail".to_string(), json!(bounded_detail(detail.into())));
     Value::Object(reply).to_string()
+}
+
+/// One reply field's free text, bounded on character count so a multi-byte cut never
+/// lands inside a character.
+fn bounded_detail(detail: String) -> String {
+    if detail.len() <= MAX_DETAIL_BYTES {
+        return detail;
+    }
+    let mut short: String = detail.chars().take(MAX_DETAIL_BYTES).collect();
+    short.push('…');
+    short
 }
 
 /// Turn a library error into a refusal, preferring the stable reason it declared.
@@ -391,7 +416,26 @@ impl Helper {
         };
 
         match answer {
-            Ok(fields) => (success(id, fields), true),
+            Ok(fields) => {
+                // The `service` op embeds a whole report, and `status` a peer list.
+                // Neither is unbounded in practice, but a reply that would not fit the
+                // line cap must become a refusal the issuer can read rather than a line
+                // it hangs up on: a frame that never arrives is the worst answer here.
+                let reply = success(id.clone(), fields);
+                if reply.len() > MAX_FRAME_BODY_BYTES {
+                    return (
+                        refusal(
+                            id,
+                            "frame_too_large",
+                            format!(
+                                "this machine's answer to `{op}` does not fit the protocol's {MAX_FRAME_BYTES} byte frame"
+                            ),
+                        ),
+                        true,
+                    );
+                }
+                (reply, true)
+            }
             Err(error) => (refused(id, &error), true),
         }
     }
@@ -774,6 +818,44 @@ mod tests {
             connected_nodes(&status, Some("studio")),
             vec!["ouro-studio@100.64.0.1"]
         );
+    }
+
+    /// The cap is on the *line*, which is the body plus its newline.
+    ///
+    /// Settled with the Elixir side: a frame line is at most `MAX_FRAME_BYTES` bytes
+    /// including the newline, so a body of exactly that many is one byte too long. This
+    /// helper must neither accept one nor emit one.
+    #[test]
+    fn a_body_of_exactly_the_cap_is_one_byte_too_long_in_both_directions() {
+        assert_eq!(MAX_FRAME_BODY_BYTES + 1, MAX_FRAME_BYTES);
+
+        // Reading: a body of `MAX_FRAME_BODY_BYTES` is framed, one more is `TooLarge`.
+        for (body, fits) in [(MAX_FRAME_BODY_BYTES, true), (MAX_FRAME_BYTES, false)] {
+            let line = format!("{}\n", "x".repeat(body));
+            assert_eq!(line.len(), body + 1);
+            let (sender, receiver) = sync_channel::<Frame>(1);
+            std::thread::spawn(move || read_frames(std::io::Cursor::new(line), &sender));
+            let framed = matches!(
+                receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("a frame"),
+                Frame::Line(_)
+            );
+            assert_eq!(framed, fits, "a body of {body} bytes");
+        }
+
+        // Writing: a refusal's detail is bounded far below the cap, so no reply this
+        // helper builds can approach it through free text.
+        let reply = refusal(json!("x"), "failed", "z".repeat(MAX_FRAME_BYTES));
+        assert!(
+            reply.len() <= MAX_FRAME_BODY_BYTES,
+            "a body of {} bytes was emitted",
+            reply.len()
+        );
+        let decoded: Value = serde_json::from_str(&reply).expect("one JSON object");
+        let detail = decoded["detail"].as_str().expect("a detail");
+        assert_eq!(detail.chars().count(), MAX_DETAIL_BYTES + 1);
+        assert!(detail.ends_with('…'));
     }
 
     /// A path outside the helper's own data directory is refused before anything opens

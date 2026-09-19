@@ -39,7 +39,7 @@ use zeroize::Zeroizing;
 
 use super::challenge::{Answer, Registry};
 use super::engine::{Engine, Outcome};
-use super::{ChallengeRequest, Conversation, Event, OperationState, MAX_FRAME_BYTES};
+use super::{ChallengeRequest, Conversation, Event, OperationState, MAX_FRAME_BODY_BYTES};
 
 /// Everything the frames front end writes, in one place so a secret cannot reach it by
 /// accident: this is the only thing that touches stdout.
@@ -55,6 +55,7 @@ impl Sink {
     }
 
     fn emit(&self, frame: Value) {
+        let line = bounded_line(frame);
         let mut held = self
             .out
             .lock()
@@ -65,7 +66,7 @@ impl Sink {
         // §8: after stdin EOF the operation keeps going and stops writing to stdout. A
         // broken pipe is the same thing arriving the other way round, so it closes the
         // sink rather than failing the operation.
-        if writeln!(out, "{frame}").and_then(|()| out.flush()).is_err() {
+        if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
             *held = None;
         }
     }
@@ -78,6 +79,43 @@ impl Sink {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *held = None;
     }
+}
+
+/// One frame's body, never longer than a body may be.
+///
+/// The fields that can grow are bounded where they are built, so this is a backstop
+/// rather than the mechanism — but a backstop that has to hold, because the line this
+/// returns plus its newline is what the peer's reader measures against the cap. A body
+/// that would not fit is replaced by the routing fields of the same frame and a
+/// `truncated` marker: a `done` that loses its summary is still a `done` the broker can
+/// branch on, and a frame that never arrives is not.
+fn bounded_line(frame: Value) -> String {
+    let line = frame.to_string();
+    if line.len() <= MAX_FRAME_BODY_BYTES {
+        return line;
+    }
+    let mut minimal = serde_json::Map::new();
+    for key in [
+        "event",
+        "state",
+        "operation",
+        "challenge",
+        "kind",
+        "machine",
+        "step",
+        "reason",
+        "expires_at",
+    ] {
+        if let Some(value) = frame.get(key).filter(|value| !value.is_object()) {
+            minimal.insert(key.to_string(), value.clone());
+        }
+    }
+    minimal.insert("truncated".to_string(), json!(true));
+    let line = Value::Object(minimal).to_string();
+    if line.len() <= MAX_FRAME_BODY_BYTES {
+        return line;
+    }
+    json!({"event": "log", "line": "a frame was too large to send", "truncated": true}).to_string()
 }
 
 /// The [`Conversation`] the engine talks to when it is speaking frames.
@@ -136,7 +174,9 @@ impl Conversation for FramesConversation {
                 "machine": machine,
                 "step": step,
                 "state": outcome,
-                "detail": detail,
+                // A step's detail quotes what a target said, so it is bounded and
+                // stripped like any other text this process did not author.
+                "detail": detail.map(|detail| super::sanitize_remote_text(&detail, super::MAX_FRAME_TEXT)),
             })),
             Event::Log(line) => self.sink.emit(json!({
                 "event": "log",
@@ -213,7 +253,10 @@ pub fn run(
             if dry_run {
                 if let Some(plan) = &outcome.plan {
                     for line in plan.lines() {
-                        sink.emit(json!({"event": "log", "line": line}));
+                        sink.emit(json!({
+                            "event": "log",
+                            "line": super::sanitize_remote_text(&line, 400),
+                        }));
                     }
                 }
             }
@@ -225,8 +268,8 @@ pub fn run(
                     wire_state(outcome.state)
                 },
                 "operation": outcome.operation,
-                "summary": outcome.summary,
-                "next": outcome.next,
+                "summary": super::sanitize_remote_text(&outcome.summary, super::MAX_FRAME_TEXT),
+                "next": super::sanitize_remote_text(&outcome.next, super::MAX_FRAME_TEXT),
             }));
         }
         Err(error) => {
@@ -384,7 +427,10 @@ fn read_line_bounded(input: &mut impl BufRead, out: &mut String) -> std::io::Res
             }
         };
         input.consume(consumed);
-        if total > MAX_FRAME_BYTES {
+        // `total` counts the body; the cap is on the line, which is the body plus the
+        // newline that ends it. A body of exactly `MAX_FRAME_BYTES` arrived on a line
+        // one byte over the limit.
+        if total > MAX_FRAME_BODY_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "a request line over the frame cap is not read",
@@ -398,6 +444,7 @@ fn read_line_bounded(input: &mut impl BufRead, out: &mut String) -> std::io::Res
 
 #[cfg(test)]
 mod tests {
+    use super::super::MAX_FRAME_BYTES;
     use super::*;
 
     /// §8's five wire states, and nothing else on the wire.
@@ -423,10 +470,75 @@ mod tests {
     /// A line over the cap is refused rather than buffered.
     #[test]
     fn an_oversized_line_is_refused() {
-        let huge = format!("{}\n", "x".repeat(MAX_FRAME_BYTES + 16));
+        let huge = format!("{}\n", "x".repeat(MAX_FRAME_BODY_BYTES + 16));
         let mut input = std::io::BufReader::new(huge.as_bytes());
         let mut line = String::new();
         assert!(read_line_bounded(&mut input, &mut line).is_err());
+    }
+
+    /// The cap is on the *line*, which is the body plus its newline.
+    ///
+    /// The boundary is settled with the Elixir side: a frame line is at most
+    /// `MAX_FRAME_BYTES` bytes including the newline, so a body of exactly that many is
+    /// one byte too long — in both directions. Nothing this process emits may sit on
+    /// the wrong side of it, and nothing it reads may be accepted there.
+    #[test]
+    fn a_body_of_exactly_the_cap_is_one_byte_too_long_in_both_directions() {
+        assert_eq!(MAX_FRAME_BODY_BYTES + 1, MAX_FRAME_BYTES);
+
+        // Reading: a body of `MAX_FRAME_BODY_BYTES` fits, one more does not.
+        for (body, fits) in [(MAX_FRAME_BODY_BYTES, true), (MAX_FRAME_BYTES, false)] {
+            let line = format!("{}\n", "x".repeat(body));
+            assert_eq!(line.len(), body + 1);
+            let mut input = std::io::BufReader::new(line.as_bytes());
+            let mut read = String::new();
+            assert_eq!(
+                read_line_bounded(&mut input, &mut read).is_ok(),
+                fits,
+                "a body of {body} bytes"
+            );
+        }
+
+        // Writing: a frame whose body would not fit is replaced by one that does, and
+        // the replacement keeps the fields a broker branches on.
+        let huge = json!({
+            "event": "done",
+            "state": "failed",
+            "operation": "op-0123456789ab",
+            "reason": "failed",
+            "summary": "x".repeat(MAX_FRAME_BYTES),
+        });
+        assert!(huge.to_string().len() > MAX_FRAME_BODY_BYTES);
+        let line = bounded_line(huge);
+        assert!(
+            line.len() <= MAX_FRAME_BODY_BYTES,
+            "a body of {} bytes was emitted",
+            line.len()
+        );
+        let shrunk: Value = serde_json::from_str(&line).expect("still one JSON object");
+        assert_eq!(shrunk["event"], json!("done"));
+        assert_eq!(shrunk["state"], json!("failed"));
+        assert_eq!(shrunk["operation"], json!("op-0123456789ab"));
+        assert_eq!(shrunk["reason"], json!("failed"));
+        assert_eq!(shrunk["truncated"], json!(true));
+        assert!(shrunk.get("summary").is_none(), "{shrunk}");
+
+        // A frame that already fits is emitted exactly as it was built.
+        let small = json!({"event": "state", "state": "running"});
+        assert_eq!(bounded_line(small.clone()), small.to_string());
+    }
+
+    /// The fields that can grow are bounded long before the frame cap is in sight.
+    #[test]
+    fn free_text_in_a_frame_is_bounded_well_below_the_cap() {
+        let long = "y".repeat(50_000);
+        let bounded = super::super::sanitize_remote_text(&long, super::super::MAX_FRAME_TEXT);
+        assert_eq!(bounded.chars().count(), super::super::MAX_FRAME_TEXT + 1);
+        assert!(bounded.ends_with('…'));
+        // A field cap that approaches the frame cap is not a field cap. Written as a
+        // `const` assertion because both sides are constants and an `assert!` over two
+        // constants is a lint, not a test.
+        const _: () = assert!(super::super::MAX_FRAME_TEXT * 8 < MAX_FRAME_BODY_BYTES);
     }
 
     /// The sink stops writing after a broken pipe instead of failing the operation.
