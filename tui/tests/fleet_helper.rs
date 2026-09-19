@@ -1030,8 +1030,8 @@ fn kr3_no_reply_frame_carries_the_cookie_or_the_ca_key() {
     let issuer = Issuer::new(&world.root, "studio");
     let ports = ephemeral();
     let cookie = issuer.cookie();
-    let ca_key = fs::read_to_string(issuer.data_dir.join("fleet/ca-key.pem"))
-        .expect("the issuer's CA key");
+    let ca_key =
+        fs::read_to_string(issuer.data_dir.join("fleet/ca-key.pem")).expect("the issuer's CA key");
     let ca_key_body: String = ca_key
         .lines()
         .filter(|line| !line.starts_with("-----"))

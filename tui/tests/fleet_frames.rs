@@ -907,8 +907,7 @@ fn kr3_stdin_eof_with_an_unanswered_challenge_parks_the_operation_and_locks_it_o
     // what it costs is what the rest of this proves: the journal still says the
     // operation is under way, and the lock still refuses a resume.
     let journal: Value = serde_json::from_slice(
-        &std::fs::read(data.join("deploy").join(format!("{operation}.json")))
-            .expect("the journal"),
+        &std::fs::read(data.join("deploy").join(format!("{operation}.json"))).expect("the journal"),
     )
     .expect("a journal document");
     let journalled = journal["state"].as_str().unwrap_or_default().to_string();
