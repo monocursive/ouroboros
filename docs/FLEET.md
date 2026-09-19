@@ -135,7 +135,7 @@ Beside `target` it records `service`, the `--no-service` choice, written at the 
 rather than inferred from a `service` step later: a resume has to know what was chosen
 *before* it reaches that step, and the broker rebuilds a resumed command line out of this
 document (§11) and must not guess. `target.identity` is how the operation authenticated —
-a reference, never a secret. `residue` is what an interrupted or cancelled operation left
+a reference, never a secret. `residue` is what a failed or cancelled operation left
 behind that it could not clean up, named and never guessed at.
 
 **`setup`** reviews the plan, stops the running runtime through its idle gate, creates the

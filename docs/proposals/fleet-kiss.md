@@ -412,7 +412,8 @@ two disagree the code is right, and [FLEET.md](../FLEET.md) documents the code.
   rather than sending it as a frame. §9's reason codes gained `operation_in_progress`,
   `target_in_progress` (carrying `data.operation`), `operation_request_incomplete`,
   `worker_refused` and `unknown_challenge`; the engine's own refusal for argv that
-  contradicts a journal is `resume_mismatch`.
+  contradicts a journal is `resume_mismatch` for the identity or the service choice, and
+  `plan_changed` for the target's address, account, port, machine or kind.
 - **`fleet.devices` drops `issuer`, `owner` and `attached` from inside each device row** as
   well as from the top of the answer. §12 only asks for the answer; a row is
   `ouro fleet devices --json` verbatim, so an older `ouro` beside a newer runtime would
