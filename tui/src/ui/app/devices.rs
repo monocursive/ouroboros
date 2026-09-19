@@ -20,16 +20,22 @@
 //!
 //! ## Every remote string goes through one funnel
 //!
-//! A device's name, its address, a fleet's name, a gateway's refusal message and an
-//! operation's recorded error are all chosen by something that is not this client. Each
-//! one reaches a [`Line`] through [`scrub`], which drops what a terminal would obey
-//! (control characters, the C1 block, bidi overrides), drops what a person cannot see
-//! (zero-width spaces, joiners, soft hyphens — the characters that make one device name
-//! look like another's), collapses whitespace, and cuts the result to the column it is
-//! drawn in. The columns then *end*, visibly, well before anything this build composed:
-//! `tui/tests/fixtures/tailscale/hostile-names.json` is a peer list whose names are ANSI
-//! escapes and a forged four-line device row, and the answer to it is that a name cannot
-//! reach past its own cell.
+//! A device's name, its address, a fleet's name, a gateway's refusal message *and its
+//! reason code* are all chosen by something that is not this client. Each one reaches a
+//! [`Line`] through [`scrub`], which is [`human`] and nothing else: it drops what a
+//! terminal would obey (control characters, the C1 block, bidi overrides), drops what a
+//! person cannot see (zero-width spaces, joiners, soft hyphens — the characters that make
+//! one device name look like another's), collapses whitespace, and cuts the result to the
+//! column it is drawn in. The columns then *end*, visibly, well before anything this
+//! build composed: `tui/tests/fixtures/tailscale/hostile-names.json` is a peer list whose
+//! names are ANSI escapes and a forged four-line device row, and the answer to it is that
+//! a name cannot reach past its own cell.
+//!
+//! Two kinds of string are deliberately outside the funnel, and neither is ever drawn.
+//! [`identity`] keeps an address and a fleet name whole, because scrubbing and bounding
+//! destroy the thing an identity comparison needs. And a `--machine` or an address that
+//! is about to be printed *inside a command line* is not scrubbed but **validated**, by
+//! `crate::fleet`'s own rules: see [`machine_argument`].
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -42,9 +48,14 @@ use super::*;
 
 use super::devices_catalogue as catalogue;
 pub use catalogue::{
-    blocker_known, blocker_sentence, operation_state, operation_state_known, reason_known,
-    reason_sentence, BLOCKER_CODES, OPERATION_STATES, REASON_CODES,
+    blocker_sentence, operation_state, reason_sentence, BLOCKER_CODES, OPERATION_STATES,
+    REASON_CODES,
 };
+
+/// The drift predicates, for the suites that walk a fixture's codes against the
+/// catalogue. Not part of what the view does — see the note above them.
+#[cfg(test)]
+pub use catalogue::{blocker_known, operation_state_known, reason_known};
 
 /// The inventory is not on a cadence at all: `fleet.devices` shells out to the network
 /// client under a ten-second ceiling, and polling that every few seconds would fork a
@@ -67,12 +78,16 @@ pub struct DeploymentHost {
     pub hostname: String,
     pub user: String,
     pub os: Option<String>,
-    pub arch: Option<String>,
-    pub deploy: bool,
     pub reasons: Vec<String>,
 }
 
 impl DeploymentHost {
+    /// `arch` and `capabilities.deploy` are in the document and are not read here.
+    ///
+    /// The architecture belonged to the release line of a plan this view no longer draws,
+    /// and `deploy` is the boolean summary of `reasons` — which this view prints in full,
+    /// because it gates nothing and a summary of a list it is already showing would be
+    /// the same fact twice.
     fn decode(value: &Value) -> Self {
         let capabilities = value.get("capabilities");
 
@@ -80,11 +95,6 @@ impl DeploymentHost {
             hostname: text(value.get("hostname")).unwrap_or_else(|| "this machine".into()),
             user: text(value.get("user")).unwrap_or_else(|| "unknown".into()),
             os: text(value.get("os")),
-            arch: text(value.get("arch")),
-            deploy: capabilities
-                .and_then(|capabilities| capabilities.get("deploy"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
             reasons: capabilities
                 .and_then(|capabilities| capabilities.get("reasons"))
                 .and_then(Value::as_array)
@@ -223,6 +233,16 @@ pub struct DeviceRow {
     /// reported one. Kept as the string the runtime sent: this view does not re-derive it.
     pub path: Option<String>,
     pub name_conflict: Option<String>,
+    /// `address` and `machine` as the runtime sent them, for identity only.
+    ///
+    /// Never drawn: the two above are the drawable ones, and they are cut at
+    /// `FIELD_COLUMNS` on the way in. That cut is right for a cell and wrong for an
+    /// answer to "is this operation about this device" — two hosts that differ only
+    /// after column 71 are one string once it has been made, and [`OperationTarget::is`]
+    /// would then draw one device's setup on the other. So the comparison uses these,
+    /// and the screen uses those.
+    pub address_key: Option<String>,
+    pub machine_key: Option<String>,
 }
 
 impl DeviceRow {
@@ -242,7 +262,24 @@ impl DeviceRow {
             last_probe: text(value.get("last_probe")),
             path: text(value.get("path")),
             name_conflict: text(value.get("name_conflicts_with_roster")),
+            address_key: identity(value.get("address")),
+            machine_key: identity(value.get("machine")),
         }
+    }
+
+    /// This row's address for comparison, whole.
+    ///
+    /// Falls back to the drawable field for a row built by hand rather than decoded —
+    /// a test's row, which has no key because it never had a document. A decoded row
+    /// always has the key whenever it has the field, so the fallback is never what a
+    /// real comparison uses.
+    pub fn address_identity(&self) -> Option<&str> {
+        self.address_key.as_deref().or(self.address.as_deref())
+    }
+
+    /// This row's fleet name for comparison, whole. Never its display name.
+    pub fn machine_identity(&self) -> Option<&str> {
+        self.machine_key.as_deref().or(self.machine.as_deref())
     }
 
     /// The state this build understands, or `None` for a code a newer `ouro` grew.
@@ -559,22 +596,30 @@ pub struct OperationSummary {
 }
 
 /// Enough of an operation's target to put it on the row it belongs to.
+///
+/// **Both fields are identity, not text.** They are the strings the runtime sent, kept
+/// whole, and nothing draws them: what a person reads about an operation comes from the
+/// row it was matched to and from [`OperationSummary`]'s own bounded fields. Bounding
+/// these would be the bug — [`text`] cuts a field at `FIELD_COLUMNS`, so two hosts that
+/// differ only after column 71 are one string by the time they are compared, and an
+/// operation against one would take the other row's command away and put `setting up…`
+/// on a device nothing is happening to.
+///
+/// [`IDENTITY_LIMIT`] is the one bound, and it is about not holding a megabyte per row
+/// rather than about what a person sees; `crate::fleet`'s own host rule stops well short
+/// of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OperationTarget {
     pub machine: Option<String>,
     pub address: Option<String>,
-    pub ssh_user: Option<String>,
-    pub port: Option<u64>,
 }
 
 impl OperationTarget {
     fn decode(value: &Value) -> Option<Self> {
         let target = value.as_object()?;
         let decoded = Self {
-            machine: text(target.get("machine").map(|v| v as &Value)),
-            address: text(target.get("address").map(|v| v as &Value)),
-            ssh_user: text(target.get("ssh_user").map(|v| v as &Value)),
-            port: target.get("port").and_then(Value::as_u64),
+            machine: identity(target.get("machine").map(|v| v as &Value)),
+            address: identity(target.get("address").map(|v| v as &Value)),
         };
 
         // A target naming neither a machine nor an address identifies no row.
@@ -585,26 +630,20 @@ impl OperationTarget {
     ///
     /// The address first, because that is what the worker actually talks to and what a
     /// machine name can be made to collide with; the machine name only when both sides
-    /// have one.
+    /// have one — and **never** a display name. `row.name` is what the device calls
+    /// itself, and matching an operation on it would let any peer on the network put
+    /// `setting up…` on a member's row by renaming itself.
     pub fn is(&self, row: &DeviceRow) -> bool {
-        if let (Some(mine), Some(theirs)) = (self.address.as_deref(), row.address.as_deref()) {
+        if let (Some(mine), Some(theirs)) = (self.address.as_deref(), row.address_identity()) {
             if mine == theirs {
                 return true;
             }
         }
 
-        match (self.machine.as_deref(), row.machine.as_deref()) {
+        match (self.machine.as_deref(), row.machine_identity()) {
             (Some(mine), Some(theirs)) => mine == theirs,
             _unnamed => false,
         }
-    }
-
-    /// The device this operation is about, for a header.
-    pub fn label(&self) -> String {
-        self.machine
-            .clone()
-            .or_else(|| self.address.clone())
-            .unwrap_or_else(|| "a device this runtime could not name".into())
     }
 }
 
@@ -789,18 +828,49 @@ impl Inventory {
             .collect()
     }
 
+    /// Whether the status line is describing a fleet at all.
+    ///
+    /// False for a document with no rows, and for one whose rows name no machine of this
+    /// fleet. The renderer colours the line neutrally then: the green is the "your fleet
+    /// is here, and this much of it is connected" colour, and a green line saying nothing
+    /// is reassurance attached to nothing.
+    pub fn describes_a_fleet(&self) -> bool {
+        !self.members().is_empty()
+    }
+
     /// The line above the list: either this machine has no fleet, or the fleet's name
-    /// and how much of it is here.
+    /// and how much of it is here — or, when the runtime reported neither, that.
     ///
     /// This *is* the blocker sentence for a standalone host — §5.1 is explicit that it
     /// is the status line rather than a second paragraph underneath one.
+    ///
+    /// The arithmetic is drawn only when there is something to count. `devices: null`, a
+    /// `[]`, a `{}` and a document this client could read no row out of all used to reach
+    /// it and print *Fleet of this machine · 0 of 0 machines connected*, in the colour of
+    /// a healthy fleet — a sentence about a fleet the runtime never mentioned, assembled
+    /// entirely out of this client's own fallbacks.
     pub fn status_line(&self) -> String {
         if self.standalone() {
             return format!("{} is not in a fleet yet", self.host.self_label());
         }
 
+        if self.devices.is_empty() {
+            return "This runtime reported no devices.".into();
+        }
+
         let members = self.members();
         let total = members.len();
+
+        if total == 0 {
+            return match self.fleet_name.as_deref() {
+                Some(name) => format!(
+                    "{} \u{b7} this runtime listed none of its machines",
+                    scrub(name, 40)
+                ),
+                None => "This runtime reported no fleet.".into(),
+            };
+        }
+
         let connected = members
             .iter()
             .filter(|row| {
@@ -1301,9 +1371,13 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(Span::styled(
         inventory.status_line(),
         Style::default().fg(if inventory.standalone() {
+            // The one line that is an invitation rather than a report.
             theme::accent()
-        } else {
+        } else if inventory.describes_a_fleet() {
             theme::good()
+        } else {
+            // Nothing to be reassured about: the runtime named no machine of a fleet.
+            theme::muted()
         }),
     )));
 
@@ -1385,13 +1459,50 @@ fn inventory_lines(app: &App, lines: &mut Vec<Line<'static>>) {
 
     if !inventory.unknown.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!(
-                "this runtime also reported {}, which this client does not read",
-                inventory.unknown.join(", ")
-            ),
+            access::speakable(&unknown_keys_line(&inventory.unknown)),
             Style::default().fg(theme::muted()),
         )));
     }
+}
+
+/// How many of the keys this build did not read are named before the line gives up and
+/// counts the rest.
+///
+/// A list is bounded by how long it is as well as by how wide each entry is. Each key
+/// arrives through [`text`] and is at most `FIELD_COLUMNS` wide, and five thousand of
+/// them were still joined into one 370 000-character `Line` — a paste of the whole
+/// document into the pane, in the colour of an aside.
+const UNKNOWN_KEYS_NAMED: usize = 4;
+
+/// How wide a named key may be here.
+///
+/// Narrower than `FIELD_COLUMNS`, which is what it arrived bounded to. Four keys at full
+/// width leave no room in a `MESSAGE_COLUMNS` sentence for the number at the end — and
+/// the number is the part that matters, because it is the one thing a reader cannot work
+/// out from what is shown. A key is an identifier; thirty-two columns name it.
+const UNKNOWN_KEY_COLUMNS: usize = 32;
+
+/// The keys this client does not read, named while they fit and counted after that.
+fn unknown_keys_line(keys: &[String]) -> String {
+    let named = keys
+        .iter()
+        .take(UNKNOWN_KEYS_NAMED)
+        .map(|key| scrub(key, UNKNOWN_KEY_COLUMNS))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sentence = match keys.len().saturating_sub(UNKNOWN_KEYS_NAMED) {
+        0 => format!("this runtime also reported {named}, which this client does not read"),
+        more => format!(
+            "this runtime also reported {named} and {more} other key{}, which this client \
+             does not read",
+            if more == 1 { "" } else { "s" }
+        ),
+    };
+
+    // Named keys are bounded one by one; the sentence they are in is bounded as a whole,
+    // like every other sentence this view composes out of somebody else's words.
+    scrub(&sentence, MESSAGE_COLUMNS)
 }
 
 /// What an empty list says. The distinct discovery failures keep their own sentences.
@@ -1456,11 +1567,11 @@ const COMMAND_LIMIT: usize = 72;
 /// What the details pane gives a command, which is all of it.
 ///
 /// The longest one this client can compose is
-/// `ouro fleet add USER@<64-column address> --machine <40-column name>`, which is 135
-/// columns — [`address_argument`] and [`machine_argument`] are what hold those two to 64
-/// and 40. Wider than that, so the pane is the one place a recipe is never cut, which is
-/// what makes cutting it on the row safe.
-const COMMAND_PANE_COLUMNS: usize = 160;
+/// `ouro fleet add USER@<host> --machine <name>`, and the two arguments are bounded by
+/// the validators that accept them: `crate::fleet`'s host rule allows 253 characters and
+/// its machine rule 40, so the line is at most 324. Wider than that, so the pane is the
+/// one place a recipe is never cut — which is what makes cutting it on the row safe.
+const COMMAND_PANE_COLUMNS: usize = 340;
 
 /// Pads a value out to `columns` *display* columns.
 ///
@@ -1871,30 +1982,23 @@ pub fn devices_hint_line(app: &App) -> String {
 
 // ------------------------------------------------------------------------- small parts
 
-/// Everything a terminal would obey, and everything a person cannot see.
-///
-/// [`human`] already drops control characters, the C1 block and the bidi overrides, which
-/// is what stops an escape sequence from repainting the screen. It keeps the *invisible*
-/// characters — a zero-width space, a joiner, a soft hyphen — and those are how one device
-/// name is made to look like another's (`bui\u{200b}ld-linux` reads as `build-linux` and is
-/// a different string). Default-ignorable code points are removed before the bounding, so
-/// what reaches a `Line` is what a person can actually see.
-fn ignorable(character: char) -> bool {
-    crate::fleet_network::ignorable(character)
-}
-
 /// One remote string, made safe to draw and bounded to `columns`.
 ///
 /// **Every** string this view draws that some other machine chose goes through here: a
 /// device's hostname and address, a fleet's name, an operation's recorded error, a
-/// gateway's refusal message. `tui/tests/fixtures/tailscale/hostile-names.json` is a peer
-/// list whose names carry ANSI escapes, bidi overrides and a forged four-line device row,
-/// and the CLI's own row renderer answers it with [`human`]; this adds the invisible
-/// characters that bounding alone leaves behind.
+/// gateway's refusal message and its reason code.
+///
+/// It is [`human`] and nothing else. That function drops what a terminal would obey
+/// (C0 and C1 controls, ESC, the newlines and tabs that would let one field draw several
+/// rows), drops what a person cannot see (default-ignorable code points — a zero-width
+/// space, a joiner, a soft hyphen, which are how `bui\u{200b}ld-linux` is made to read as
+/// `build-linux`), collapses the whitespace around what it removed, and cuts the result
+/// to `columns` of *display* width with a visible marker. This wrapper used to pre-filter
+/// the ignorables itself and claim in its own documentation that bounding alone left them
+/// behind; it does not, and `human`'s first statement is that filter.
+/// `tui/tests/fixtures/tailscale/hostile-names.json` is the peer list all of this is for.
 pub fn scrub(raw: &str, columns: usize) -> String {
-    let visible: String = raw.chars().filter(|c| !ignorable(*c)).collect();
-
-    human(&visible, columns)
+    human(raw, columns)
 }
 
 /// A string field of a reply, scrubbed and bounded.
@@ -1903,6 +2007,28 @@ fn text(value: Option<&Value>) -> Option<String> {
         .and_then(Value::as_str)
         .map(|raw| scrub(raw, FIELD_COLUMNS))
         .filter(|text| !text.is_empty())
+}
+
+/// How much of a string kept for comparison is kept.
+///
+/// Not a presentation bound — nothing built with [`identity`] is drawn. It is here so a
+/// document cannot make this client hold a megabyte per row, and it is far above
+/// anything the grammar on the other side allows: `crate::fleet`'s host rule stops at
+/// 253 characters and its machine rule at 40.
+const IDENTITY_LIMIT: usize = 512;
+
+/// A string field kept for comparison rather than for the screen.
+///
+/// Deliberately **not** [`text`]. Scrubbing and bounding are what make a string safe to
+/// draw, and both of them destroy identity: `human` collapses whitespace, drops
+/// invisible characters and cuts at `FIELD_COLUMNS`, so two values that differ only in
+/// what it removed become one. That is the right trade for a cell and the wrong one for
+/// the question "is this operation about this device".
+fn identity(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| raw.chars().take(IDENTITY_LIMIT).collect())
 }
 
 /// A sentence rather than a field: longer, and scrubbed the same way.
@@ -1949,40 +2075,33 @@ fn last_error(value: Option<&Value>) -> Option<String> {
 /// `pi [2K [1G--machine pwned`, a perfectly runnable second `--machine`. A newline
 /// collapses to a space and does the same with a whole second command.
 ///
-/// So the argument is *validated*, not repaired: §5.2's rule, letters, digits and
-/// hyphens, beginning with a letter or a digit, at most forty characters. A value that
-/// is not one is not a name this client will print, and the placeholder says so. The
-/// runtime's `suggested_machine` is specified to be exactly this already; a value that
-/// is not is a runtime being wrong or a device being clever, and neither is a reason to
-/// write a command for somebody.
+/// So the argument is *validated*, not repaired — and validated by the code that will
+/// read the line when it is pasted, [`crate::fleet::validate_machine`], rather than by a
+/// copy of its rule. A copy drifted the moment it was written: this one allowed `_` and a
+/// trailing hyphen, which `ouro` refuses, so the view printed command lines that fail.
+/// A value the parser would reject is worse than the placeholder, because the placeholder
+/// says "choose one" and a rejected name says the command is broken.
 fn machine_argument(raw: &str) -> Option<String> {
     let name = raw.trim();
 
-    (!name.is_empty()
-        && name.len() <= 40
-        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-    .then(|| name.to_string())
+    crate::fleet::validate_machine(name)
+        .ok()
+        .map(|()| name.to_string())
 }
 
 /// An address as an argument of a printed command, or `None`.
 ///
-/// The same rule for the same reason, over the characters an IPv4 address, an IPv6
-/// address and a DNS name are made of. An `@` is excluded deliberately: the recipe puts
-/// one there itself, and an address carrying a second one is a command line whose account
-/// is not the one this client wrote.
+/// The same rule for the same reason, from the same place:
+/// [`crate::fleet::canonical_host`] is what `ouro fleet add` puts in a certificate, and
+/// what it refuses — an IPv6 literal, anything carrying `:`, a public IPv4, an all-numeric
+/// top label, an `@`. The copy this replaced allowed `:` outright, so the view printed
+/// `USER@fd7a::1` under a device `ouro` will not add.
+///
+/// Canonical rather than as-reported: a DNS name is case-insensitive and may carry the
+/// root dot, and the spelling that goes in the command should be the spelling the parser
+/// will settle on rather than a third one.
 fn address_argument(raw: &str) -> Option<String> {
-    let address = raw.trim();
-
-    (!address.is_empty()
-        && address.len() <= 64
-        && address.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && address
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_')))
-    .then(|| address.to_string())
+    crate::fleet::canonical_host(raw.trim()).ok()
 }
 
 /// A sentence this client did not write, from a gateway message or an error.
@@ -2130,15 +2249,17 @@ fn headline_for_count(code: &str, visible_peers: usize) -> String {
 }
 
 /// The stable reason code a refusal carries, when it carries one.
+///
+/// Through [`text`], like every other string that arrives from the wire. A reason is
+/// supposed to be a snake_case identifier out of one small catalogue, but "supposed to"
+/// is what the gateway sends rather than what this client can rely on, and the one arm
+/// that prints an uncatalogued one prints it as itself.
 fn refusal_reason(error: &ClientError) -> Option<String> {
     let ClientError::Rpc(rpc) = error else {
         return None;
     };
 
-    let data = rpc.data.as_ref()?;
-    let reason = data.get("reason").and_then(Value::as_str)?;
-
-    Some(reason.to_string())
+    text(rpc.data.as_ref()?.get("reason"))
 }
 
 /// Why the inventory is not here, from what the gateway answered.
@@ -2157,10 +2278,15 @@ fn devices_refusal(error: &ClientError) -> Refusal {
                  stop working; press r to ask again."
                     .into(),
             ),
-            _other => Refusal::Other(match refusal_reason(error) {
+            // Both arms go through [`clean`]. The `message` one always did; the `reason`
+            // one did not, and an uncatalogued code is interpolated into a sentence by
+            // [`reason_sentence`], so a gateway that answered `reason: "<ESC>[2J…"` drew
+            // it. A reason is a remote string like any other, and there is exactly one
+            // way a remote string reaches a `Line`.
+            _other => Refusal::Other(clean(&match refusal_reason(error) {
                 Some(reason) => reason_sentence(&reason),
-                None => clean(&rpc.message),
-            }),
+                None => rpc.message.clone(),
+            })),
         },
         other => Refusal::Other(clean(&other.to_string())),
     }
@@ -2320,40 +2446,63 @@ mod tests {
         );
     }
 
-    /// An argument of a printed command is validated, not repaired.
+    /// An argument of a printed command is validated, not repaired — by the parser's own
+    /// rule, so a line this view prints is a line `ouro` accepts.
     #[test]
     fn an_argument_that_is_not_one_becomes_the_placeholder() {
-        for good in ["pi", "build-linux", "studio2", "a", "under_score"] {
+        for good in ["pi", "build-linux", "studio2", "a", &"g".repeat(40)] {
             assert_eq!(machine_argument(good).as_deref(), Some(good), "{good}");
+            // The property, not the copy of the rule: whatever this prints, `ouro` takes.
+            assert!(crate::fleet::validate_machine(good).is_ok(), "{good}");
         }
 
         for bad in [
             "",
             " ",
             "-leading-hyphen",
+            // `ouro` requires the *last* character to be alphanumeric too, and forbids
+            // `_` outright. A copy of the rule allowed both, and printed lines that fail.
+            "trailing-",
+            "under_score",
+            "a_b-c",
             "two words",
-            // What `scrub` leaves of an escape sequence is still a second argument.
+            // The raw escape, and what `scrub` would have left of it: both are a second
+            // argument, and neither is a name.
+            "pi\u{1b}[2K\u{1b}[1G--machine pwned",
             "pi [2K [1G--machine pwned",
             "pi ouro fleet add USER@evil.example --machine pwned",
             "pi;rm -rf ~",
             "pi$(id)",
             "pi\u{a0}--machine pwned",
+            "pi\u{200b}x",
             &"g".repeat(41),
         ] {
             assert_eq!(machine_argument(bad), None, "{bad:?} was printed as a name");
         }
 
-        for good in ["100.64.0.11", "fd7a::1", "pi.tailnet-example.ts.net"] {
+        for good in ["100.64.0.11", "10.0.0.2", "pi.tailnet-example.ts.net"] {
             assert_eq!(address_argument(good).as_deref(), Some(good), "{good}");
+            assert!(crate::fleet::canonical_host(good).is_ok(), "{good}");
         }
+
+        // Canonical, so the printed spelling is the one the parser settles on.
+        assert_eq!(
+            address_argument("PI.Tailnet-Example.TS.NET.").as_deref(),
+            Some("pi.tailnet-example.ts.net")
+        );
 
         for bad in [
             "",
+            // `ouro fleet add` refuses these outright, so printing them would be a
+            // command line that fails when it is pasted.
+            "fd7a::1",
+            "8.8.8.8",
             "100.64.0.11 --machine pwned",
             // The recipe writes the `@` itself; a second one moves the account.
             "evil@100.64.0.11",
             "100.64.0.11;curl evil",
-            &"1".repeat(65),
+            "100.64.0.11\u{1b}[1G",
+            &"1".repeat(255),
         ] {
             assert_eq!(
                 address_argument(bad),
@@ -2523,6 +2672,86 @@ mod tests {
 
         // A target naming neither a machine nor an address belongs to no row at all.
         assert_eq!(OperationTarget::decode(&json!({"port": 22})), None);
+
+        // **Never by display name.** `name` is what a device calls itself, so matching on
+        // it would let any peer on this network put `setting up…` on a member's row, and
+        // take that row's command away, by renaming itself.
+        let member = DeviceRow {
+            state: "fleet_member".into(),
+            name: "raspberrypi".into(),
+            machine: Some("pi".into()),
+            ..Default::default()
+        };
+        let by_hostname = OperationTarget {
+            machine: Some("raspberrypi".into()),
+            address: None,
+        };
+        assert!(
+            !by_hostname.is(&member),
+            "an operation was matched to a member by its display name"
+        );
+        assert!(OperationTarget {
+            machine: Some("pi".into()),
+            address: None,
+        }
+        .is(&member));
+    }
+
+    /// Identity is the string the runtime sent, not the string the screen gets.
+    ///
+    /// `text` cuts a field at `FIELD_COLUMNS` and `human` keeps one column back for the
+    /// marker, so two hosts differing only after column 71 are one string once bounded.
+    /// An operation against one was then drawn on the other: `setting up…` on a device
+    /// nothing was happening to, and no command on the row that needed one.
+    #[test]
+    fn two_hosts_that_differ_past_the_column_budget_are_two_rows() {
+        let prefix = "a".repeat(75);
+        let mine = format!("{prefix}1.example.ts.net");
+        let theirs = format!("{prefix}2.example.ts.net");
+
+        let row = |address: &str| {
+            DeviceRow::decode(&json!({
+                "name": "peer", "state": "discovered_installation_unknown",
+                "address": address, "online": true,
+            }))
+        };
+
+        let (alpha, bravo) = (row(&mine), row(&theirs));
+
+        // The drawn field is one string for both; the identity is not.
+        assert_eq!(alpha.address, bravo.address, "the cut is what it was");
+        assert_ne!(alpha.address_identity(), bravo.address_identity());
+
+        let target = OperationTarget::decode(&json!({ "address": theirs }))
+            .expect("a target with an address");
+
+        assert!(target.is(&bravo), "the operation lost its own row");
+        assert!(
+            !target.is(&alpha),
+            "an operation against {theirs} was matched to {mine}"
+        );
+
+        // Nothing kept for identity is ever drawn, and it is still bounded — against a
+        // document holding a megabyte per row rather than against a screen.
+        assert_eq!(
+            identity(Some(&json!("z".repeat(4_000))))
+                .expect("an identity")
+                .chars()
+                .count(),
+            IDENTITY_LIMIT
+        );
+        assert_eq!(identity(Some(&json!(""))), None);
+        assert_eq!(identity(Some(&json!(7))), None);
+
+        // A row built by hand rather than decoded has no key, and falls back to the
+        // field it does have rather than matching nothing.
+        let handmade = DeviceRow {
+            address: Some("100.64.0.1".into()),
+            machine: Some("pi".into()),
+            ..Default::default()
+        };
+        assert_eq!(handmade.address_identity(), Some("100.64.0.1"));
+        assert_eq!(handmade.machine_identity(), Some("pi"));
     }
 
     /// The journal's `last_error` is read out of either shape, and an unreadable one is
@@ -2686,6 +2915,55 @@ mod tests {
             fleet.status_line(),
             "studio \u{b7} 1 of 2 machines connected"
         );
+        assert!(fleet.describes_a_fleet());
+    }
+
+    /// A document that names no machine of a fleet does not announce one.
+    ///
+    /// `0 of 0 machines connected`, in the colour reserved for a healthy fleet, was a
+    /// sentence assembled entirely out of this client's own fallbacks: the runtime had
+    /// said nothing about a fleet at all.
+    #[test]
+    fn a_document_with_no_machines_states_that_rather_than_a_fleet() {
+        for devices in [Vec::new(), vec![row("discovered_installation_unknown")]] {
+            let empty = devices.is_empty();
+            let inventory = Inventory {
+                devices,
+                ..Default::default()
+            };
+
+            let line = inventory.status_line();
+            assert!(
+                !line.contains("0 of 0 machine"),
+                "a document with no machines drew `{line}`"
+            );
+            assert!(
+                !inventory.describes_a_fleet(),
+                "`{line}` would be drawn in the healthy colour"
+            );
+            assert_eq!(
+                line,
+                if empty {
+                    "This runtime reported no devices."
+                } else {
+                    "This runtime reported no fleet."
+                },
+                "{line}"
+            );
+        }
+
+        // A named fleet whose machines this runtime did not list says which of the two
+        // facts it has.
+        let named = Inventory {
+            fleet_name: Some("studio".into()),
+            devices: vec![row("discovered_installation_unknown")],
+            ..Default::default()
+        };
+        assert_eq!(
+            named.status_line(),
+            "studio \u{b7} this runtime listed none of its machines"
+        );
+        assert!(!named.describes_a_fleet());
     }
 
     #[test]
@@ -2927,20 +3205,53 @@ mod tests {
         assert_eq!(Filter::Available.next(), Filter::All);
     }
 
-    /// This machine without a profile is filed under the fleet, so it is the first row.
+    /// The self row is first, ahead of a machine of the fleet as well as a peer.
+    ///
+    /// Both halves, because §5.1's order is *self, then the fleet's machines, then what
+    /// discovery found* and the sort key has to separate all three. Pinning it only
+    /// against peers left "self before a member" free: `in_fleet()` is true of the self
+    /// row too, so a key that answered 1 for both would pass and put this machine
+    /// wherever the input happened to have it.
     #[test]
-    fn this_machine_without_a_profile_is_first() {
-        let inventory = Inventory {
-            devices: vec![
-                row("discovered_installation_unknown"),
-                row("this_device_without_profile"),
-            ],
+    fn the_self_row_is_first_ahead_of_a_member_and_a_peer() {
+        let member = DeviceRow {
+            state: "fleet_member".into(),
+            machine: Some("pi".into()),
             ..Default::default()
         };
 
-        let ordered = inventory.ordered();
-        assert_eq!(ordered[0].state, "this_device_without_profile");
-        assert!(ordered[0].in_fleet());
+        // Both shapes of self row: this machine before it has a fleet, and after.
+        for this_machine in [
+            DeviceRow {
+                state: "this_device_without_profile".into(),
+                ..Default::default()
+            },
+            DeviceRow {
+                state: "this_device".into(),
+                machine: Some("studio".into()),
+                ..Default::default()
+            },
+        ] {
+            let state = this_machine.state.clone();
+            let inventory = Inventory {
+                devices: vec![
+                    row("discovered_installation_unknown"),
+                    member.clone(),
+                    this_machine,
+                ],
+                ..Default::default()
+            };
+
+            let ordered = inventory.ordered();
+            assert_eq!(ordered[0].state, state, "the self row is not first");
+            assert_eq!(ordered[1].state, "fleet_member", "the member is not second");
+            assert_eq!(
+                ordered[2].state, "discovered_installation_unknown",
+                "the peer is not last"
+            );
+            assert!(inventory.is_self(ordered[0]));
+            assert!(ordered[0].in_fleet(), "the self row sorted with the peers");
+        }
     }
 
     /// A relative time on the row, the exact one in the pane.
@@ -2960,5 +3271,56 @@ mod tests {
         assert_eq!(relative_time("2999-01-01T00:00:00Z"), None);
         assert_eq!(relative_time("not a timestamp"), None);
         assert_eq!(epoch_seconds("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    /// `last_seen` goes through the funnel like every other field.
+    ///
+    /// It is the field most easily mistaken for a number: it is a timestamp, and a
+    /// timestamp is not something a device writes freely — except that it is, because it
+    /// arrives as a string and this client draws it verbatim in the details pane when it
+    /// cannot parse it as a time.
+    #[test]
+    fn a_hostile_last_seen_is_scrubbed_like_any_other_field() {
+        let row = DeviceRow::decode(&json!({
+            "name": "peer",
+            "state": "peer_offline",
+            "online": false,
+            "last_seen": "\u{1b}[2J\u{202e}2020-01-01T00:00:00Z\n\n  studio  in the fleet",
+        }));
+
+        for drawn in [row.presence(), row.presence_short()] {
+            assert!(!drawn.contains('\u{1b}'), "{drawn:?}");
+            assert!(!drawn.contains('\u{202e}'), "{drawn:?}");
+            assert!(!drawn.contains('\n'), "{drawn:?}");
+            assert!(
+                drawn.chars().count() <= FIELD_COLUMNS + 32,
+                "the field is unbounded: {drawn:?}"
+            );
+        }
+    }
+
+    /// The `unknown` list is bounded by how long it is, not only by how wide each key is.
+    #[test]
+    fn the_unknown_key_list_names_a_few_and_counts_the_rest() {
+        let one = unknown_keys_line(&["fleet_protocol_revision".to_string()]);
+        assert!(one.contains("fleet_protocol_revision"), "{one}");
+        assert!(!one.contains("other key"), "{one}");
+
+        let five: Vec<String> = (0..5).map(|index| format!("key_{index}")).collect();
+        let line = unknown_keys_line(&five);
+        assert!(line.contains("key_0") && line.contains("key_3"), "{line}");
+        assert!(!line.contains("key_4"), "{line}");
+        assert!(line.contains("and 1 other key,"), "{line}");
+
+        // Five thousand of them, each as wide as a key can be, were one 370 000-character
+        // span. The count is what survives the cut, because it is the one thing a reader
+        // cannot work out from what is shown.
+        let many: Vec<String> = (0..5_000)
+            .map(|index| format!("key_{index}_{}", "z".repeat(80)))
+            .collect();
+        let line = unknown_keys_line(&many);
+        assert!(line.chars().count() <= MESSAGE_COLUMNS, "{}", line.len());
+        assert!(line.contains("4996 other keys"), "{line}");
+        assert!(line.contains("key_0_zzz"), "{line}");
     }
 }

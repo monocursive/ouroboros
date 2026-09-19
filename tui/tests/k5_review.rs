@@ -185,12 +185,19 @@ fn k5_1_a_refusal_reason_from_the_gateway_is_drawn_unscrubbed() {
     }
 
     // And the frame a terminal is handed, not only the Line behind it.
+    //
+    // Row by row rather than on `Screen::text()`: that helper joins the rows *with a
+    // newline*, so the assertion as first written found the harness's own separator and
+    // could not have passed for any frame taller than one row. The property is about the
+    // cells the backend holds, and those are the rows.
     let drawn = screen(&mut a);
-    assert!(
-        forbidden(&drawn.text()).is_none(),
-        "a refusal reason reached the drawn frame carrying {:?}",
-        forbidden(&drawn.text()).unwrap()
-    );
+    for row in &drawn.rows {
+        assert!(
+            forbidden(row).is_none(),
+            "a refusal reason reached the drawn frame carrying {:?}: {row:?}",
+            forbidden(row).unwrap()
+        );
+    }
 }
 
 /// And it is unbounded: `clean` cuts a message to `MESSAGE_COLUMNS`, this arm cuts

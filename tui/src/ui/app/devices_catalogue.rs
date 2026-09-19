@@ -163,17 +163,26 @@ pub fn operation_state(state: &str) -> String {
     }
 }
 
+// The three predicates below are for the drift tests and for nothing else: the view
+// itself never asks whether a code is catalogued, because the answer changes nothing —
+// an uncatalogued code gets the fallback sentence and is drawn like any other. They are
+// `cfg(test)` so that stays true, and so a future caller has to say out loud that it is
+// branching on a fact the renderer does not.
+
 /// Whether `code` has a dedicated arm rather than the unknown-code fallback.
+#[cfg(test)]
 pub fn reason_known(code: &str) -> bool {
     REASON_CODES.contains(&code)
 }
 
 /// Whether `code` has a dedicated blocker sentence.
+#[cfg(test)]
 pub fn blocker_known(code: &str) -> bool {
     BLOCKER_CODES.contains(&code)
 }
 
 /// Whether `code` has a dedicated operation-state sentence.
+#[cfg(test)]
 pub fn operation_state_known(code: &str) -> bool {
     OPERATION_STATES.contains(&code)
 }

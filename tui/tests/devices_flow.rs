@@ -1513,11 +1513,19 @@ fn the_command_is_filled_from_the_runtimes_suggestion_only() {
 
 /// Every reason, blocker and operation-state code the fixtures in this file put on the
 /// wire has a sentence in the TUI catalogue.
+///
+/// Against the published lists rather than against the `*_known` predicates, which are
+/// `cfg(test)` in the lib: the view never asks whether a code is catalogued, because the
+/// answer changes nothing it draws, and a helper that exists only so a test can ask is a
+/// helper a test can own.
 #[test]
 fn every_code_the_fixtures_emit_has_a_sentence() {
     use ouro::ui::app::devices::{
-        blocker_known, blocker_sentence, operation_state, operation_state_known, reason_sentence,
+        blocker_sentence, operation_state, reason_sentence, BLOCKER_CODES, OPERATION_STATES,
     };
+
+    let blocker_known = |code: &str| BLOCKER_CODES.contains(&code);
+    let operation_state_known = |code: &str| OPERATION_STATES.contains(&code);
 
     for code in [
         "host_key_changed",
