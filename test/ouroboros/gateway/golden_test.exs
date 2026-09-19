@@ -17,10 +17,15 @@ defmodule Ouroboros.Gateway.GoldenTest do
     # The deployment family and the network inventory. Additive in the sense this list
     # means: a client written against the historical contract still gets every method it
     # knew, and one that has never heard of Devices simply does not call these.
-    "fleet.deployment.authenticate",
+    #
+    # The family has changed shape since — `fleet-kiss` §9 replaces `.prepare`,
+    # `.authenticate` and `.confirm_host` with `.start` and `.respond` — and that is not a
+    # compatibility break in the sense this fixture protects: the historical contract these
+    # bytes record never contained any of them, so a client written against it is not
+    # affected either way. What this list has to stay is *exactly* the difference between
+    # then and now, which is why the three that went are gone from it.
     "fleet.deployment.cancel",
-    "fleet.deployment.confirm_host",
-    "fleet.deployment.prepare",
+    "fleet.deployment.respond",
     "fleet.deployment.resume",
     "fleet.deployment.start",
     "fleet.deployment.status",
