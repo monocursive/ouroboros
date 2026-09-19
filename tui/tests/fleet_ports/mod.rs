@@ -63,23 +63,71 @@ fn claim(port: u16) -> bool {
         .is_ok()
 }
 
-/// A port outside every production port space that nothing in this test run has claimed.
+/// The window a port is drawn from: outside every production port space, and — the
+/// point — outside the kernel's own ephemeral range.
 ///
-/// The listener stays bound while the claim is taken, so two processes racing here
-/// cannot both be handed the same number by the kernel *and* both claim it.
+/// Asking the kernel for a free port (`bind` to 0, read the number back, let go) picks
+/// from that ephemeral range, which is exactly the range it hands to every *other*
+/// `bind(0)` on the machine, including this suite's own. So a number reserved that way
+/// could be handed to somebody else between the moment it was let go and the moment the
+/// fleet that reserved it binds it — and two of this suite's own tests, racing inside
+/// `one`, do precisely that to each other: the loser of a claim holds the winner's port
+/// bound while it retries. What that looks like is `already in use` in a test with
+/// nothing wrong in the code it is testing.
+///
+/// macOS draws ephemeral ports from 49152 and Linux from 32768, so a window well below
+/// both is one the kernel never allocates on its own. A number here is taken only by a
+/// program that asked for it by name.
+const WINDOW: std::ops::Range<u16> = 20_000..30_000;
+
+/// Whether a port is one this suite may use at all.
+fn usable(port: u16) -> bool {
+    port != 4369
+        && port != 65_358
+        && !(13_700..=13_729).contains(&port)
+        && !(17_000..18_000).contains(&port)
+}
+
+/// A number from [`WINDOW`], spread by time, process and call so two processes starting
+/// together do not walk the same sequence. No crate for this: what is needed is spread,
+/// not randomness.
+fn candidate() -> u16 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or(0);
+    let mixed = nanos
+        ^ (std::process::id().wrapping_mul(2_654_435_761))
+        ^ NEXT.fetch_add(1, Ordering::Relaxed).wrapping_mul(97);
+    let span = (WINDOW.end - WINDOW.start) as u32;
+    WINDOW.start + (mixed % span) as u16
+}
+
+/// A port outside every production port space that nothing in this test run has claimed
+/// and nothing on this machine is listening on.
+///
+/// The claim comes first and is kept whether or not the bind succeeds: a port this run
+/// found occupied is a port this run should stop offering. The bind that follows is the
+/// proof, and it is let go immediately — the fleet that reserved this number is the one
+/// that binds it for real, seconds later, and until then nothing but an explicit request
+/// for this exact number can take it.
 fn one() -> u16 {
-    for _ in 0..256 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free loopback port");
-        let port = listener.local_addr().expect("a bound address").port();
-        let usable = port != 4369
-            && port != 65_358
-            && !(13_700..=13_729).contains(&port)
-            && !(17_000..18_000).contains(&port);
-        if usable && claim(port) {
-            return port;
+    for _ in 0..512 {
+        let port = candidate();
+        if !usable(port) || !claim(port) {
+            continue;
+        }
+        match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+            Ok(listener) => {
+                drop(listener);
+                return port;
+            }
+            Err(_occupied) => continue,
         }
     }
-    panic!("no unclaimed loopback port was free after 256 attempts");
+    panic!("no unclaimed loopback port was free after 512 attempts");
 }
 
 /// A gateway port and a distribution port, distinct and claimed.

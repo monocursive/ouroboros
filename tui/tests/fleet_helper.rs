@@ -46,6 +46,31 @@ fn ephemeral() -> fleet::Ports {
     }
 }
 
+/// `fleet::create` on a fresh pair of ports, retried.
+///
+/// `fleet_ports` claims a number so this suite cannot hand the same one to two tests,
+/// and the fleet that reserved it binds it for real seconds later. Nothing can close
+/// that window entirely — the claim is this run's word, not the kernel's — so the
+/// caller that loses it takes another number rather than reporting "already in use"
+/// about a build that is working perfectly. Bounded, and the last failure is the one
+/// that panics, so a machine that genuinely cannot bind still fails the test.
+fn create_fleet(data_dir: &Path, name: Option<&str>, machine: &str) -> fleet::Profile {
+    let mut last = None;
+    for attempt in 0..4 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(50 * attempt));
+        }
+        match fleet::create(data_dir, name, machine, "127.0.0.1", ephemeral()) {
+            Ok(profile) => return profile,
+            Err(error) => last = Some(error),
+        }
+    }
+    panic!(
+        "a created fleet, after four attempts: {:#}",
+        last.expect("four attempts leave an error")
+    );
+}
+
 fn scratch(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "ouro-helper-{label}-{}-{}",
@@ -266,14 +291,7 @@ struct Issuer {
 impl Issuer {
     fn new(root: &Path, machine: &str) -> Self {
         let data_dir = private_dir(&root.join(format!("issuer-{machine}")));
-        let profile = fleet::create(
-            &data_dir,
-            Some("the lab"),
-            machine,
-            "127.0.0.1",
-            ephemeral(),
-        )
-        .expect("a created fleet");
+        let profile = create_fleet(&data_dir, Some("the lab"), machine);
         Self { data_dir, profile }
     }
 
@@ -388,8 +406,7 @@ fn inspect_answers_for_an_empty_directory_a_fleet_and_a_running_runtime() {
     drop(helper);
 
     // ---- a fleet, made by this same binary's library
-    let profile = fleet::create(&data_dir, Some("the lab"), "pi", "127.0.0.1", ephemeral())
-        .expect("a created fleet");
+    let profile = create_fleet(&data_dir, Some("the lab"), "pi");
     let mut helper = Helper::start(&world, &data_dir);
     let joined = helper.ask("inspect", json!({}));
     assert_eq!(joined["fleet"]["fleet_id"], json!(profile.fleet_id));
@@ -603,8 +620,7 @@ fn a_malformed_install_request_installs_nothing() {
 fn service_reports_without_installing_and_status_answers_for_a_stopped_runtime() {
     let world = World::new("service");
     let target = private_dir(&world.root.join("data"));
-    fleet::create(&target, Some("the lab"), "pi", "127.0.0.1", ephemeral())
-        .expect("a created fleet");
+    create_fleet(&target, Some("the lab"), "pi");
     let mut helper = Helper::start(&world, &target);
 
     // `install` is required and is a boolean; nothing else is a default.
@@ -664,8 +680,7 @@ fn service_reports_without_installing_and_status_answers_for_a_stopped_runtime()
 fn leave_on_a_stopped_target_removes_the_fleet_directory() {
     let world = World::new("leave");
     let target = private_dir(&world.root.join("data"));
-    fleet::create(&target, Some("the lab"), "pi", "127.0.0.1", ephemeral())
-        .expect("a created fleet");
+    create_fleet(&target, Some("the lab"), "pi");
     let cookie = fs::read_to_string(target.join("fleet/cookie")).expect("a cookie");
     assert!(target.join("fleet").exists());
 
@@ -787,8 +802,7 @@ fn a_line_that_is_not_json_is_refused_and_the_conversation_continues() {
 fn a_duplicate_id_is_answered_twice_and_never_confused() {
     let world = World::new("dupid");
     let data_dir = private_dir(&world.root.join("data"));
-    fleet::create(&data_dir, Some("the lab"), "pi", "127.0.0.1", ephemeral())
-        .expect("a created fleet");
+    create_fleet(&data_dir, Some("the lab"), "pi");
     let mut helper = Helper::start(&world, &data_dir);
 
     let first = helper.ask_with_id("same", "hello", json!({}));
