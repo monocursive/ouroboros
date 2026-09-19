@@ -1452,7 +1452,7 @@ defmodule Ouroboros.ClusterTest do
       end)
     end
 
-    test "a profile from an older Ouroboros is named by status and doctor, in one sentence" do
+    test "a profile this build does not speak is named by status and doctor, in one sentence" do
       fleet_id = "0f0f0f0f1e1e1e1e2d2d2d2d"
       data_dir = tmp_dir!()
       fleet_dir = Path.join(data_dir, "fleet")
@@ -1480,13 +1480,20 @@ defmodule Ouroboros.ClusterTest do
         assert %{status: :ok} =
                  Enum.find(Cluster.fleet_doctor().checks, &(&1.id == :fleet_profile))
 
+        # §2 words this for the case that happens today — a profile from an older
+        # Ouroboros — but the same file, the same repair and the same sentence have to
+        # serve a machine left behind by an upgrade, holding a schema this build has not
+        # learned yet. So it names the disagreement rather than its direction, and keeps
+        # §2's second half exactly.
         sentence =
-          "this fleet was created by an older Ouroboros; run `ouro fleet leave` here " <>
-            "and set the fleet up again."
+          "this fleet's profile was written by a different version of Ouroboros than " <>
+            "the one running here; run `ouro fleet leave` here and set the fleet up again."
 
-        # Every other schema is one named condition with one sentence of repair. There is
-        # no migration, and a schema-1 profile is the file this actually happens with.
-        for schema <- [1, 0, 3, 99] do
+        # Every other schema is one named condition with one sentence of repair, and so is
+        # a file with no `schema` key at all — a hand edit, or a truncated write. There is
+        # no migration in either direction, and a schema-1 profile is the file this
+        # actually happens with.
+        for schema <- [1, 0, 3, 99, "2", nil] do
           write_test_fleet_profile!(fleet_dir, fleet_id,
             schema: schema,
             local: local,

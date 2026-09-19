@@ -702,8 +702,8 @@ defmodule Ouroboros.Cluster.Monitor do
         {:error, {:fleet_profile_unavailable, reason}}
 
       {:ok, fleet_id, profile, opts} ->
-        with {:ok, owner} <- resolve_session_owner(state, profile, machine),
-             do: forget_named_session_owner(state, machine, owner, fleet_id, opts)
+        with {:ok, named, owner} <- resolve_session_owner(state, profile, machine),
+             do: forget_named_session_owner(state, named, owner, fleet_id, opts)
     end
   end
 
@@ -712,31 +712,58 @@ defmodule Ouroboros.Cluster.Monitor do
   # directory, which keeps an offline machine and its operator-given label after it has
   # left `members`; and the evidence itself, whose owners are node names a label can be
   # derived from. A name that resolves to two nodes is refused rather than half retired.
+  #
+  # The answer carries the name as the *profile* spells it, not as the caller typed it,
+  # because the match is case-insensitive and an operator who typed `VPS` should be told
+  # which member that was.
   defp resolve_session_owner(state, profile, machine) do
+    case members_named(profile.members, machine) do
+      [{named, owner}] ->
+        {:ok, named, owner}
+
+      [_ | _] = several ->
+        {:error,
+         {:ambiguous_session_owner_machine, machine,
+          several |> Enum.map(fn {_named, owner} -> owner end) |> Enum.sort()}}
+
+      [] ->
+        resolve_forgotten_session_owner(state, machine)
+    end
+  end
+
+  defp resolve_forgotten_session_owner(state, machine) do
     from_directory =
       state.machines
       |> Map.values()
-      |> Enum.filter(&(&1.machine == machine))
+      |> Enum.filter(&same_machine_name?(&1.machine, machine))
       |> Enum.map(&Atom.to_string(&1.node))
 
     from_evidence =
       state
       |> session_owners()
       |> Map.fetch!(:interactive)
-      |> Enum.filter(&(Ouroboros.Cluster.default_machine_label(&1) == machine))
+      |> Enum.filter(&same_machine_name?(Ouroboros.Cluster.default_machine_label(&1), machine))
 
-    case Map.get(profile.members, machine) do
-      owner when is_binary(owner) ->
-        {:ok, owner}
-
-      nil ->
-        case from_directory |> Enum.concat(from_evidence) |> Enum.uniq() |> Enum.sort() do
-          [owner] -> {:ok, owner}
-          [] -> {:error, {:unknown_session_owner_machine, machine}}
-          owners -> {:error, {:ambiguous_session_owner_machine, machine, owners}}
-        end
+    case from_directory |> Enum.concat(from_evidence) |> Enum.uniq() |> Enum.sort() do
+      [owner] -> {:ok, machine, owner}
+      [] -> {:error, {:unknown_session_owner_machine, machine}}
+      owners -> {:error, {:ambiguous_session_owner_machine, machine, owners}}
     end
   end
+
+  defp members_named(members, machine),
+    do: Enum.filter(members, fn {named, _owner} -> same_machine_name?(named, machine) end)
+
+  # `tui/src/fleet.rs`'s `same_name/2` is `eq_ignore_ascii_case` and is what `ouro fleet
+  # forget` edits the roster with. This runtime is asked first, with the string the
+  # operator typed, so matching case-sensitively here would refuse a machine the very next
+  # step would have removed — and say "is not a member of this fleet" about one that is.
+  # ASCII only, deliberately: `valid_profile_machine?/1` admits `[A-Za-z0-9-]` and nothing
+  # else, so there is no locale in a machine name to get wrong.
+  defp same_machine_name?(left, right) when is_binary(left) and is_binary(right),
+    do: String.downcase(left, :ascii) == String.downcase(right, :ascii)
+
+  defp same_machine_name?(_left, _right), do: false
 
   defp forget_named_session_owner(state, machine, owner, fleet_id, opts) do
     if session_owner_connected?(owner) do
@@ -747,13 +774,30 @@ defmodule Ouroboros.Cluster.Monitor do
       updated = %{interactive: MapSet.delete(current.interactive, owner)}
 
       with :ok <- validate_session_owners(updated),
-           :ok <- write_session_owner_checkpoint(updated, fleet_id, opts) do
+           :ok <- checkpoint_unless_connected(updated, machine, owner, fleet_id, opts) do
         result = %{machine: machine, node: owner, removed: updated != current}
 
         {:ok, result, Map.put(state, :session_owners, updated)}
       else
-        {:error, reason} -> {:error, {:session_owner_forget_checkpoint_failed, reason}}
+        {:error, {:session_owner_connected, _machine, _owner}} = refusal ->
+          refusal
+
+        {:error, reason} ->
+          {:error, {:session_owner_forget_checkpoint_failed, reason}}
       end
+    end
+  end
+
+  # The check above is what refuses the ordinary case with a message an operator can act
+  # on. This one is what makes the refusal *true at the moment the evidence is destroyed*:
+  # between the two there is a profile read, a validation and a `Node.list/0`, and that is
+  # exactly the window a partitioned owner reappears in. The write is irreversible and the
+  # node is holding sessions again, so the last word belongs to the last look.
+  defp checkpoint_unless_connected(owners, machine, owner, fleet_id, opts) do
+    if session_owner_connected?(owner) do
+      {:error, {:session_owner_connected, machine, owner}}
+    else
+      write_session_owner_checkpoint(owners, fleet_id, opts)
     end
   end
 
@@ -973,18 +1017,27 @@ defmodule Ouroboros.Cluster.Monitor do
     end
   end
 
-  defp decode_fleet_roster(%{"fleet_id" => recorded}, fleet_id)
+  defp decode_fleet_roster(%{"schema" => 2, "fleet_id" => recorded}, fleet_id)
        when is_binary(recorded) and recorded != fleet_id,
        do: {:error, :fleet_profile_identity_mismatch}
 
-  # A schema this build does not speak is its own answer, separate from a malformed file,
-  # because the repair is different: there is no migration from the replicated-roster
-  # profile, only `ouro fleet leave` here and a fresh `setup` or `add`.
-  # `Ouroboros.Cluster.profile_problem/0` turns this into the sentence `fleet.status` and
-  # `fleet.doctor` say.
-  defp decode_fleet_roster(%{"schema" => schema}, _fleet_id) when schema != 2,
+  # Schema 2, this fleet, and something else about it is wrong.
+  defp decode_fleet_roster(%{"schema" => 2}, _fleet_id),
+    do: {:error, :invalid_fleet_profile_roster}
+
+  # Anything whose schema is not the integer 2, *including a file with no `schema` key at
+  # all*, and whatever fleet it claims. This clause is deliberately reached before the
+  # identity check above can see a schema-1 file: a machine moved between fleets while
+  # carrying an old profile is exactly the machine that needs the sentence, and a
+  # mismatch it cannot act on separately would take it away. A schema this build does not
+  # speak is also its own answer, separate from a malformed file, because the repair is
+  # different — there is no migration in either direction, only `ouro fleet leave` here
+  # and a fresh `setup` or `add`. `Ouroboros.Cluster.profile_problem/0` turns it into the
+  # sentence `fleet.status` and `fleet.doctor` say.
+  defp decode_fleet_roster(profile, _fleet_id) when is_map(profile),
     do: {:error, :unsupported_profile_schema}
 
+  # Valid JSON that is not an object at all: not a profile of any schema.
   defp decode_fleet_roster(_invalid, _fleet_id),
     do: {:error, :invalid_fleet_profile}
 
@@ -1172,10 +1225,15 @@ defmodule Ouroboros.Cluster do
   # bumped by hand, and it never said anything the application version did not already.
   @runtime_contract_keys [:ouroboros_version, :otp_release]
 
-  # The one sentence every surface says about a profile written by an older Ouroboros
-  # (docs/proposals/fleet-kiss.md §2). There is no migration, so there is no other advice
-  # to give, and no surface invents its own wording for it.
-  @unsupported_profile_message "this fleet was created by an older Ouroboros; run " <>
+  # The one sentence every surface says about a profile this build does not speak
+  # (docs/proposals/fleet-kiss.md §2). §2 words it for the case that actually happens
+  # today — a profile from an older Ouroboros — but the same file, the same repair and the
+  # same sentence have to serve a schema *newer* than this build's, which is what a
+  # machine left behind by an upgrade is holding. So it names the disagreement rather than
+  # its direction, and keeps §2's second half exactly. There is no migration either way,
+  # so there is no other advice to give, and no surface invents its own wording for it.
+  @unsupported_profile_message "this fleet's profile was written by a different version " <>
+                                 "of Ouroboros than the one running here; run " <>
                                  "`ouro fleet leave` here and set the fleet up again."
 
   @type role :: :core | :builder | :signer

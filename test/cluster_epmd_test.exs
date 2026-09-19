@@ -97,8 +97,9 @@ defmodule Ouroboros.ClusterEpmdTest do
     test "the host may be a charlist, a binary or an IPv4 tuple" do
       System.put_env("OUROBOROS_DIST_PORTS", "100.64.0.2=13701")
 
-      # `inet_tcp_dist` resolves the host through `address_please/3` first and then hands
-      # this callback the *address*, so the tuple is the shape that matters most.
+      # Not the dial path — `address_please/3` answers the port there, before a host has
+      # been resolved to an address. This callback still takes whatever shape a hand call
+      # or another caller hands it, and folds all three to one key.
       assert Epmd.port_please(~c"ouro-a", ~c"100.64.0.2") == {:port, 13_701, 5}
       assert Epmd.port_please(~c"ouro-a", "100.64.0.2") == {:port, 13_701, 5}
       assert Epmd.port_please(~c"ouro-a", {100, 64, 0, 2}) == {:port, 13_701, 5}
@@ -156,9 +157,10 @@ defmodule Ouroboros.ClusterEpmdTest do
     end
 
     test "two nodes on one host are told apart by a whole node name" do
-      # The production map is one entry per host, because a fleet has one member per
-      # host. A lab and this suite put two nodes on 127.0.0.1, where a host-keyed map
-      # cannot answer for both, so an entry may name the node instead.
+      # The launcher writes one `name@host=port` entry per member, including this one. A
+      # bare `host=port` entry is read too, as a fallback for a hand-written map, and a
+      # node-name entry wins wherever the two disagree — which is what lets a lab, and
+      # this suite, put two nodes on 127.0.0.1.
       System.put_env(
         "OUROBOROS_DIST_PORTS",
         "ouro-a@127.0.0.1=13710,ouro-b@127.0.0.1=13711,127.0.0.1=13712"
@@ -167,9 +169,39 @@ defmodule Ouroboros.ClusterEpmdTest do
       assert Epmd.port_please(~c"ouro-a", ~c"127.0.0.1") == {:port, 13_710, 5}
       assert Epmd.port_please(~c"ouro-b", {127, 0, 0, 1}) == {:port, 13_711, 5}
 
-      # A name with no entry of its own still reads the host's, so a map written the
-      # production way answers every node on that host exactly as the table says.
+      # A node the map does not name reads the host's entry.
       assert Epmd.port_please(~c"ouro-c", ~c"127.0.0.1") == {:port, 13_712, 5}
+    end
+
+    test "the node-name entry wins whichever order the two are written in" do
+      # The map is built before anything is looked up, so where an entry sits in the
+      # string cannot decide which of two different keys answers.
+      for map <- [
+            "127.0.0.1=13712,ouro-a@127.0.0.1=13710",
+            "ouro-a@127.0.0.1=13710,127.0.0.1=13712"
+          ] do
+        System.put_env("OUROBOROS_DIST_PORTS", map)
+
+        assert Epmd.port_please(~c"ouro-a", ~c"127.0.0.1") == {:port, 13_710, 5},
+               "the bare host key won in #{inspect(map)}"
+      end
+    end
+
+    test "a trailing dot folds onto the same key, from either side" do
+      # A node name may carry a fully qualified host while the profile's `host` may not,
+      # and `valid_profile_host?/1` admits either, so the fold is applied to the map's own
+      # keys as well as to the host being looked up.
+      for {map, host} <- [
+            {"ouro-a@pi.internal=13701", ~c"pi.internal."},
+            {"ouro-a@pi.internal.=13701", ~c"pi.internal"},
+            {"pi.internal.=13701", "pi.internal"},
+            {"pi.internal=13701", "pi.internal."}
+          ] do
+        System.put_env("OUROBOROS_DIST_PORTS", map)
+
+        assert Epmd.port_please(~c"ouro-a", host) == {:port, 13_701, 5},
+               "#{inspect(host)} did not fold onto #{inspect(map)}"
+      end
     end
 
     test "the first entry for a key is the answer a later duplicate cannot change" do
@@ -193,6 +225,33 @@ defmodule Ouroboros.ClusterEpmdTest do
                  ~c"ouroboros-no-such-host.invalid",
                  :inet
                )
+    end
+
+    test "answers the port too, because it is the last place that holds the host's text" do
+      # This is the dial path. `inet_tcp_dist:fam_setup/4` calls this first and, unless it
+      # answers a port, calls `port_please/2` with the address it just resolved — by which
+      # point a member named by a private DNS name can no longer be found in a map keyed
+      # by what the operator wrote. The four-tuple is what skips that step.
+      System.put_env("OUROBOROS_DIST_PORTS", "ouro-a@127.0.0.1=13700,ouro-b@localhost=13701")
+
+      assert Epmd.address_please(~c"ouro-a", ~c"127.0.0.1", :inet) ==
+               {:ok, {127, 0, 0, 1}, 13_700, 5}
+
+      # Two members that resolve to the same address are still two members, because the
+      # lookup happens before the resolution collapses them.
+      assert Epmd.address_please(~c"ouro-b", ~c"localhost", :inet) ==
+               {:ok, {127, 0, 0, 1}, 13_701, 5}
+
+      # A node the map does not name resolves without a port, which sends `inet_tcp_dist`
+      # on to `port_please/2` and its `OUROBOROS_DIST_PORT` fallback — §4's chain, intact.
+      assert Epmd.address_please(~c"ouro-c", ~c"127.0.0.1", :inet) == {:ok, {127, 0, 0, 1}}
+
+      # And a host that does not resolve is an error even when the map names it: there is
+      # no address to carry the port on.
+      System.put_env("OUROBOROS_DIST_PORTS", "ouro-a@ouroboros-no-such-host.invalid=13700")
+
+      assert {:error, _reason} =
+               Epmd.address_please(~c"ouro-a", ~c"ouroboros-no-such-host.invalid", :inet)
     end
   end
 

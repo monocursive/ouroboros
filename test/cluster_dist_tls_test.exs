@@ -138,9 +138,10 @@ defmodule Ouroboros.ClusterDistTlsTest do
       node_a = :"#{name_a}@127.0.0.1"
       node_b = :"#{name_b}@127.0.0.1"
 
-      # One map, given to both, naming every member including self. It is keyed by whole
-      # node name here because both nodes are on one host; a fleet with one member per
-      # host writes `host=port` and reads the same way.
+      # One map, given to both, naming every member including self — exactly what the
+      # launcher writes: one `name@host=port` per member. Two nodes on one host is the
+      # case that needs the node name to be the key, and it is the shape a fleet with one
+      # member per host uses too.
       ports = "#{node_a}=#{port_a},#{node_b}=#{port_b}"
 
       a = start_epmdless_peer!(optfile)

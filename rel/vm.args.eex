@@ -54,7 +54,8 @@
 ## Ouroboros.Cluster.Epmd answers with it in place of a port mapper. A fleet has one
 ## number per machine, so a firewall rule is one line and nothing has to be opened for
 ## 4369 — there is no epmd daemon to reach, here or on any peer. Peers are resolved from
-## OUROBOROS_DIST_PORTS (host=port for every member) and this node's own OUROBOROS_DIST_PORT.
+## OUROBOROS_DIST_PORTS (name@host=port for every member, including this one) and, for a
+## member it does not name, this node's own OUROBOROS_DIST_PORT.
 -start_epmd false
 -epmd_module Elixir.Ouroboros.Cluster.Epmd
 -kernel inet_dist_listen_min <%= dist_port %> inet_dist_listen_max <%= dist_port %>
