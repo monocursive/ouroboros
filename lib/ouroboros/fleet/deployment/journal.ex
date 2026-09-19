@@ -123,7 +123,8 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
          {:ok, %File.Stat{type: :regular, size: size}} when size <= @max_bytes <-
            File.lstat(file),
          {:ok, body} <- File.read(file),
-         {:ok, document} when is_map(document) <- JSON.decode(body) do
+         {:ok, document} when is_map(document) <- JSON.decode(body),
+         :ok <- supported_schema(document) do
       {:ok, sanitize(document)}
     else
       {:error, :enoent} -> {:error, :unknown_operation}
@@ -133,6 +134,15 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
       {:error, reason} -> {:error, {:journal_unreadable, reason}}
     end
   end
+
+  # A journal this build did not write is a record it cannot read: the worker of an older
+  # Ouroboros wrote a different shape with a different state vocabulary, and projecting it
+  # as if it were §6's would put words on a row that no source of this build produces. It
+  # is listed as unreadable, by id, which is what the listing already promises for a record
+  # this build cannot read.
+  defp supported_schema(%{"schema" => 2}), do: :ok
+  defp supported_schema(%{"schema" => other}), do: {:error, {:unsupported_schema, other}}
+  defp supported_schema(_document), do: {:error, {:unsupported_schema, nil}}
 
   # How long a `completed`/`cancelled` journal is kept, and how many of those terminal
   # records survive even when they are younger. `failed`/`waiting`/`running` are resumable and

@@ -817,6 +817,43 @@ defmodule Ouroboros.Fleet.DeploymentAdversarialTest do
       assert {:error, {:journal_unreadable, :not_a_regular_file_or_too_large}} =
                Journal.read(context.root, "adversarial0004")
     end
+
+    test "a journal from an older Ouroboros is listed as unreadable, not projected", context do
+      deploy = Path.join(context.root, "deploy")
+      File.mkdir_p!(deploy)
+
+      # The worker of the previous design: a different shape and a state no source of this
+      # build produces. Neither its state nor its fields may reach a row.
+      File.write!(
+        Path.join(deploy, "olderworker001.json"),
+        JSON.encode!(%{
+          "schema" => 1,
+          "operation" => "olderworker001",
+          "kind" => "add",
+          "state" => "awaiting_review",
+          "owner" => "someone",
+          "created_at" => "2026-09-18T10:00:00Z",
+          "target" => %{"machine" => "pi", "address" => "100.64.0.2"}
+        })
+      )
+
+      File.write!(
+        Path.join(deploy, "noschema00001.json"),
+        JSON.encode!(%{"operation" => "noschema00001", "state" => "failed"})
+      )
+
+      assert {:error, {:journal_unreadable, {:unsupported_schema, 1}}} =
+               Journal.read(context.root, "olderworker001")
+
+      assert {:error, {:journal_unreadable, {:unsupported_schema, nil}}} =
+               Journal.read(context.root, "noschema00001")
+
+      {summaries, _total, _cache} = Journal.list(context.root)
+      older = Enum.find(summaries, &(&1["operation"] == "olderworker001"))
+      assert older["readable"] == false
+      refute older["state"] == "awaiting_review"
+      refute Map.has_key?(older, "owner")
+    end
   end
 
   # ---------------------------------------------------------------------------
