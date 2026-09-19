@@ -670,16 +670,17 @@ impl OperationSummary {
 
     /// Whether this operation is still going, or waiting on somebody.
     ///
-    /// Only the four states that have *stopped* say no. A state this build has never seen
-    /// is still going, for the same reason [`Inventory::ouroboros_word`] already calls it
-    /// `setting up…`: of the two ways to be wrong about a code from the future, printing
-    /// "run this" next to a machine something may be halfway through installing on is the
-    /// worse one. A journal with no state at all is not an operation in progress — it is
-    /// a record nobody could read, and the details pane says so.
+    /// Only the three states that have *stopped* say no; `running` and `waiting` are the
+    /// other two of §6's five. A state this build has never seen is still going, for the
+    /// same reason [`Inventory::ouroboros_word`] already calls it `setting up…`: of the
+    /// two ways to be wrong about a code from the future, printing "run this" next to a
+    /// machine something may be halfway through installing on is the worse one. A journal
+    /// with no state at all is not an operation in progress — it is a record nobody could
+    /// read, and the details pane says so.
     pub fn underway(&self) -> bool {
         match self.state.as_deref() {
             None => false,
-            Some("completed") | Some("failed") | Some("cancelled") | Some("interrupted") => false,
+            Some("completed") | Some("failed") | Some("cancelled") => false,
             Some(_going) => true,
         }
     }
@@ -795,14 +796,19 @@ impl Inventory {
 
         let leaving = operation.kind.as_deref() == Some("leave");
 
+        // §6's five. `interrupted` was a sixth that only the engine ever wrote, and the
+        // half-finished operation it named — a machine that joined and would not start —
+        // is `failed` with its reason now. So it lands on "setup failed" rather than
+        // falling back to the device's own word, which is what a row describing a
+        // half-deployed machine should have said all along.
         match operation.state.as_deref() {
             Some("failed") if leaving => "removal failed".into(),
             Some("failed") => "setup failed".into(),
             Some("completed") if leaving => "removed just now".into(),
             Some("completed") => "set up just now".into(),
-            Some("cancelled") | Some("interrupted") | None => row.ouroboros_word(),
-            Some(_running) if leaving => "removing\u{2026}".into(),
-            Some(_running) => "setting up\u{2026}".into(),
+            Some("cancelled") | None => row.ouroboros_word(),
+            Some(_running_or_waiting) if leaving => "removing\u{2026}".into(),
+            Some(_running_or_waiting) => "setting up\u{2026}".into(),
         }
     }
 
@@ -811,7 +817,7 @@ impl Inventory {
     /// A device the runtime is mid-operation on has nothing for a person to type: the
     /// command that would start it has been run. What it has instead is a state, which
     /// the Ouroboros column is already saying, and a last error, which the details pane
-    /// carries. An operation that has *stopped* — failed, cancelled, interrupted —
+    /// carries. An operation that has *stopped* — completed, failed or cancelled —
     /// leaves the row its ordinary command, because running it again is the repair.
     pub fn recipe(&self, row: &DeviceRow) -> Recipe {
         match latest_operation_for(self, row) {
@@ -2551,7 +2557,7 @@ mod tests {
             ..Default::default()
         };
 
-        for going in ["inspecting", "deploying", "awaiting_review"] {
+        for going in ["running", "waiting"] {
             let inventory = with_state(going);
             assert_eq!(
                 inventory.recipe(&peer),
@@ -2620,7 +2626,7 @@ mod tests {
         };
 
         assert_eq!(
-            inventory("deploying").ouroboros_word(&member),
+            inventory("running").ouroboros_word(&member),
             "removing\u{2026}"
         );
         assert_eq!(
@@ -2654,7 +2660,7 @@ mod tests {
             devices: vec![alpha.clone(), bravo.clone()],
             operations: vec![OperationSummary {
                 operation: "op-3".into(),
-                state: Some("deploying".into()),
+                state: Some("running".into()),
                 kind: Some("add".into()),
                 target: Some(OperationTarget {
                     address: Some("100.64.0.2".into()),
@@ -2804,7 +2810,7 @@ mod tests {
                 "address": "100.64.0.2", "online": true, "state": "fleet_member"
             }],
             "operations": [{
-                "operation": "op-4", "kind": "add", "state": "deploying",
+                "operation": "op-4", "kind": "add", "state": "running",
                 "target": { "address": "100.64.0.2" }, "running": true
             }],
             "unknown": ["fleet_protocol_revision"]

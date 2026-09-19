@@ -352,7 +352,7 @@ fn k5_3_two_long_addresses_are_one_row_after_the_bounding() {
             row("bravo", &theirs, "discovered_installation_unknown"),
         ],
         json!([{
-            "operation": "op-1", "kind": "add", "state": "deploying",
+            "operation": "op-1", "kind": "add", "state": "running",
             "running": true, "readable": true,
             "target": { "address": theirs },
         }]),

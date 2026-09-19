@@ -1079,7 +1079,7 @@ fn an_operation_in_progress_is_drawn_on_its_row_and_answered_by_nothing() {
     };
 
     // Going: the Ouroboros column says so, and the action column has nothing to type.
-    let mut app = with_inventory(underway("deploying", Value::Null));
+    let mut app = with_inventory(underway("running", Value::Null));
     let drawn = screen(&mut app);
     let row = device_row(&drawn, "build-linux");
     assert!(row.contains("setting up\u{2026}"), "{row}");
@@ -1092,14 +1092,16 @@ fn an_operation_in_progress_is_drawn_on_its_row_and_answered_by_nothing() {
     open_details(&mut app, "build-linux");
     let text = prose(&mut app);
     assert!(text.contains("op-7"), "{text}");
-    assert!(text.contains("deploying"), "{text}");
+    assert!(text.contains("running"), "{text}");
     assert!(text.contains("a worker is running it"), "{text}");
 
-    // Waiting on somebody: still read-only, and the state says what it is waiting for.
-    let mut waiting = with_inventory(underway("awaiting_auth", Value::Null));
+    // Waiting on somebody: still read-only, and the state says it is waiting. §6 has
+    // five states and `waiting` is one of them; *what* it waits for is the live
+    // challenge, which this client neither receives nor answers.
+    let mut waiting = with_inventory(underway("waiting", Value::Null));
     open_details(&mut waiting, "build-linux");
     let text = prose(&mut waiting);
-    assert!(text.contains("waiting for a credential"), "{text}");
+    assert!(text.contains("waiting for somebody"), "{text}");
     for code in [
         KeyCode::Char('t'),
         KeyCode::Char('n'),
@@ -1552,7 +1554,23 @@ fn every_code_the_fixtures_emit_has_a_sentence() {
         );
     }
 
-    for code in [
+    // §6 and §8: an operation's state is one of five words, in the journal and on the
+    // wire alike. The engine's finer phases never leave the process that runs it, so
+    // this list is the whole vocabulary a row can carry.
+    for code in ["running", "waiting", "completed", "failed", "cancelled"] {
+        assert!(operation_state_known(code), "{code} is not catalogued");
+        let sentence = operation_state(code);
+        assert!(
+            !sentence.contains("does not know"),
+            "{code} fell through: {sentence}"
+        );
+    }
+
+    // And the words that used to be states are not catalogued any more: a document
+    // carrying one is a document from a build that predates the five, and it is named
+    // rather than explained.
+    for gone in [
+        "spawning",
         "inspecting",
         "awaiting_host_trust",
         "awaiting_auth",
@@ -1560,16 +1578,12 @@ fn every_code_the_fixtures_emit_has_a_sentence() {
         "deploying",
         "restarting_host",
         "checking_readiness",
-        "completed",
         "interrupted",
-        "failed",
-        "cancelled",
     ] {
-        assert!(operation_state_known(code), "{code} is not catalogued");
-        let sentence = operation_state(code);
+        assert!(!operation_state_known(gone), "{gone} is still catalogued");
         assert!(
-            !sentence.contains("does not know"),
-            "{code} fell through: {sentence}"
+            operation_state(gone).contains("does not know"),
+            "{gone} still has a sentence of its own"
         );
     }
 

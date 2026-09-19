@@ -47,22 +47,18 @@ pub const BLOCKER_CODES: &[&str] = &[
 
 /// The journal's `state` values, as `fleet.devices`'s operation rows carry them.
 ///
+/// §6 and §8 give an operation five states and the journal now writes exactly those, so
+/// this is that list and no longer a transcription of the engine's internal sequencing.
+/// The finer words — `inspecting`, `deploying`, `checking_readiness` — never leave the
+/// process that runs the operation; a row that showed one of them was showing a word
+/// this client had to be taught separately, and `interrupted` reached it as *a state
+/// this build does not recognise*.
+///
 /// `attaching` is gone with the client that attached: there is no worker connection for a
-/// terminal to be partway through making.
-pub const OPERATION_STATES: &[&str] = &[
-    "spawning",
-    "inspecting",
-    "awaiting_host_trust",
-    "awaiting_auth",
-    "awaiting_review",
-    "deploying",
-    "restarting_host",
-    "checking_readiness",
-    "completed",
-    "interrupted",
-    "failed",
-    "cancelled",
-];
+/// terminal to be partway through making. `spawning` went with it — the broker runs the
+/// operation's own program, and there is no worker being started for a row to be waiting
+/// on.
+pub const OPERATION_STATES: &[&str] = &["running", "waiting", "completed", "failed", "cancelled"];
 
 /// The runtime's stable reason codes, as sentences. An unrecognised code is printed as
 /// itself: a runtime that grew a refusal this build predates must still be legible.
@@ -140,22 +136,16 @@ pub fn blocker_sentence(reason: &str) -> String {
 
 /// A journal's `state`, as a person reads it. The codes stay in the data.
 ///
-/// The waiting states keep their words even though this client answers none of them: an
-/// operation *is* waiting for somebody, and a row that said only "deploying" while a
-/// worker sat on an unanswered host-key question would be describing the wrong thing.
-/// Where it is answered is the web page, not here.
+/// `waiting` keeps its own words even though this client answers none of them: an
+/// operation that is waiting for somebody is not the same row as one that is working,
+/// and where it is answered is the web page, not here. What it is waiting *for* — a
+/// host key, a credential, a plan — is no longer in the state, because it never was a
+/// state: it is the live challenge, which the surface that can answer it reads.
 pub fn operation_state(state: &str) -> String {
     match state {
-        "spawning" => "starting the deployment worker".into(),
-        "inspecting" => "inspecting the target".into(),
-        "awaiting_host_trust" => "waiting for somebody to verify the host key".into(),
-        "awaiting_auth" => "waiting for a credential".into(),
-        "awaiting_review" => "waiting for somebody to review the plan".into(),
-        "deploying" => "deploying".into(),
-        "restarting_host" => "restarting this runtime".into(),
-        "checking_readiness" => "checking readiness".into(),
+        "running" => "running".into(),
+        "waiting" => "waiting for somebody".into(),
         "completed" => "completed".into(),
-        "interrupted" => "interrupted".into(),
         "failed" => "failed".into(),
         "cancelled" => "cancelled".into(),
         "" => "state not reported".into(),
