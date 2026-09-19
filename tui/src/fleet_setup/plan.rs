@@ -145,8 +145,9 @@ pub struct Plan {
     /// The surfaces render the document's fields rather than [`Self::render`]'s text, so
     /// the sentence a person actually decides on has to *be* a field. Defaulted so a
     /// journal written by an older build still parses; every plan this build makes has
-    /// one, and it is inside the digest like every other fact.
-    #[serde(default)]
+    /// one, and it is inside the digest like every other fact. Preserve the old shape
+    /// when absent so its recorded approval can still be checked before migration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
     pub deployment_host: DeploymentHost,
     pub target: PlanTarget,
@@ -421,6 +422,18 @@ mod tests {
             digest,
             "different startup behaviour is a different plan"
         );
+    }
+
+    #[test]
+    fn a_plan_without_a_summary_preserves_its_approved_digest() {
+        let mut legacy = plan().to_value();
+        legacy.as_object_mut().unwrap().remove("summary");
+        let digest = sha256_hex(canonical_json(&legacy).as_bytes());
+        let mut decoded: Plan = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(decoded.to_value(), legacy);
+        assert_eq!(decoded.digest(), digest);
+        decoded.refresh_summary();
+        assert_ne!(decoded.digest(), digest);
     }
 
     /// Everything the proposal requires a review to show is on the page, and nothing a

@@ -239,8 +239,10 @@ impl Engine {
                 // A waiter that never mutated must not keep a review bound to a roster
                 // the holder is about to change; the retry re-plans against current
                 // members.
-                if reason == "operation_in_progress"
-                    && !journal.record().completed(&self.request.machine, "issue")
+                if matches!(
+                    reason,
+                    "operation_in_progress" | "roster_changed" | "roster_conflict"
+                ) && self.can_review_again(journal)?
                 {
                     journal.forget_review()?;
                 }
@@ -249,6 +251,56 @@ impl Engine {
                 self.notify_state(state);
                 Err(error)
             }
+        }
+    }
+
+    /// A roster can be reviewed again only before any credentials or roster changes.
+    /// The issuer receipt also covers a crash after issuance but before journal flush.
+    fn can_review_again(&self, journal: &JournalHandle) -> Result<bool> {
+        let record = journal.record();
+        if record.completed(&self.request.machine, "issue")
+            || record.attempted(&self.request.machine, "install")
+            || record.steps.iter().any(|step| step.step == "roster")
+        {
+            return Ok(false);
+        }
+        Ok(
+            !fleet::read_receipt(&self.data_dir, &self.request.operation)?
+                .is_some_and(|receipt| receipt.has_step("issue")),
+        )
+    }
+
+    fn transfer_progress<'a>(
+        &'a self,
+        machine: &'a str,
+        phase: &'static str,
+        total: Option<usize>,
+    ) -> impl FnMut(usize) + 'a {
+        let began = Instant::now();
+        let mut last = None;
+        move |bytes| {
+            if last.is_some_and(|at: Instant| at.elapsed() < Duration::from_secs(1)) {
+                return;
+            }
+            last = Some(Instant::now());
+            let amount = match total {
+                Some(total) => format!(
+                    "{:.1} / {:.1} MB ({}%)",
+                    bytes as f64 / 1_000_000.0,
+                    total as f64 / 1_000_000.0,
+                    bytes.saturating_mul(100) / total.max(1)
+                ),
+                None => format!("{:.1} MB received", bytes as f64 / 1_000_000.0),
+            };
+            self.step_event(
+                machine,
+                "install_binary",
+                "started",
+                Some(format!(
+                    "{phase}: {amount} · {}s elapsed",
+                    began.elapsed().as_secs()
+                )),
+            );
         }
     }
 
@@ -635,7 +687,7 @@ impl Engine {
         self.notify_state(OperationState::AwaitingAuth);
         runner.check_access()?;
         Ok(Connection {
-            runner,
+            runner: Arc::new(runner),
             _bridge: bridge,
             host_fingerprint: fingerprint,
         })
@@ -784,8 +836,22 @@ impl Engine {
     /// The plan digest a resumed operation has to still match (seam S6).
     fn bind_plan(&self, journal: &JournalHandle, plan: &Plan) -> Result<()> {
         let digest = plan.digest();
-        if let Some(recorded) = journal.record().plan_digest.clone() {
+        let before = journal.record();
+        if let Some(recorded) = before.plan_digest {
             if !super::constant_time_eq(&recorded, &digest) {
+                // Older plans had no derived summary. Migrate only when both the
+                // recorded document and every freshly resolved fact still hash to
+                // the original approval with that one field omitted. A changed
+                // destination, service, release, or any other fact still refuses.
+                if let Some(approved) = before.plan.filter(|plan| plan.summary.is_empty()) {
+                    let mut legacy = plan.clone();
+                    legacy.summary.clear();
+                    if super::constant_time_eq(&recorded, &approved.digest())
+                        && super::constant_time_eq(&recorded, &legacy.digest())
+                    {
+                        return journal.set_plan(plan);
+                    }
+                }
                 return refuse(
                     "plan_changed",
                     "the facts behind this operation changed since it was approved — the target, the roster or the selected release is not what was reviewed. Review the new plan rather than continuing the old one",
@@ -851,9 +917,9 @@ impl Engine {
                         }
                     }
                 }
-                OperationKind::Leave => {
-                    expected.retain(|member| member.machine != self.request.machine)
-                }
+                OperationKind::Leave => expected.retain(|member| {
+                    !fleet::same_name(&member.machine, self.request.machine.trim())
+                }),
                 OperationKind::Setup => {}
             }
             expected.sort_by(|a, b| a.machine.cmp(&b.machine));
@@ -875,7 +941,7 @@ impl Engine {
             return refuse(
                 "roster_changed",
                 format!(
-                    "this machine's roster moved from revision {} to {} since the plan was reviewed. Re-run the operation so the change is reconciled rather than overwritten",
+                    "this machine's roster moved from revision {} to {} since the plan was reviewed. Retry this operation to review the updated plan if no credentials were issued; any prepared identity remains bound to this operation",
                     recorded.roster_revision, current.roster_revision
                 ),
             );
@@ -1072,7 +1138,7 @@ impl Engine {
             .request
             .install_path
             .clone()
-            .filter(|_| machine == self.request.machine)
+            .filter(|_| fleet::same_name(machine, self.request.machine.trim()))
         {
             if requested.starts_with('/') {
                 return Ok(requested);
@@ -1140,8 +1206,17 @@ impl Engine {
 
     fn run_add(&self, journal: &JournalHandle) -> Result<Outcome> {
         let (mut plan, mut prepared) = self.plan_add()?;
+        if let Err(error) = self.ensure_roster_unchanged(journal, &prepared.profile) {
+            if super::reason_of(&error) == Some("roster_changed")
+                && self.can_review_again(journal)?
+            {
+                journal.forget_review()?;
+                self.note("The roster changed before credentials were issued. Review the updated plan; this operation will reuse its prepared identity.");
+            } else {
+                return Err(error);
+            }
+        }
         let before = journal.record();
-        self.ensure_roster_unchanged(journal, &prepared.profile)?;
         if let Some(roster) = &before.roster {
             // The new member is contacted as the target, never as an old member on retry.
             prepared.profile.members.retain(|member| {
@@ -1234,25 +1309,36 @@ impl Engine {
                 journal.begin_step(&machine, "install_binary")?;
                 self.step_event(&machine, "install_binary", "started", None);
                 let cancelled = AtomicBool::new(false);
-                let bytes = release::fetch_verified(
+                let mut download = self.transfer_progress(&machine, "Downloading", None);
+                let bytes = release::fetch_verified_with_progress(
                     &self.origin,
                     &release.version,
                     &release.asset,
                     &release.sha256,
                     &cancelled,
+                    &mut |received| {
+                        cancelled.store(
+                            self.conversation.cancelled(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        download(received);
+                    },
                 )?;
+                self.check_cancelled()?;
                 let install_relative = self
                     .request
                     .install_path
                     .clone()
                     .filter(|path| !path.starts_with('/'))
                     .unwrap_or_else(|| super::bootstrap::DEFAULT_INSTALL_PATH.to_string());
-                let installed = super::bootstrap::install(
+                let mut upload = self.transfer_progress(&machine, "Uploading", Some(bytes.len()));
+                let installed = super::bootstrap::install_with_progress(
                     &prepared.connection.runner,
                     &release.asset,
                     &bytes,
                     &release.sha256,
                     &install_relative,
+                    &mut upload,
                 )?;
                 journal.finish_step(
                     &machine,
@@ -1269,7 +1355,13 @@ impl Engine {
 
         // Member preflight before the target helper: the helper exits after a minute
         // idle, and authenticating to every current member can take longer than that.
-        let mut member_sessions = self.preflight_members(journal, &prepared.profile)?;
+        let mut member_sessions =
+            self.preflight_members(journal, &prepared.profile, Some(&prepared))?;
+        let _issuer_lock = self.lock_issuer(journal)?;
+        let current = self
+            .local_profile()?
+            .context("the local fleet disappeared during setup")?;
+        self.ensure_roster_unchanged(journal, &current)?;
 
         // ---- inspect the target through its own helper
         let mut session = helper::Session::open(
@@ -1409,21 +1501,23 @@ impl Engine {
             // not delivered cannot be reissued, so cancelling in that window would cost
             // the target its identity rather than save it.
             if self.conversation.cancelled() {
-                journal.note_residue(format!(
-                    "{machine} holds a prepared key for operation {}; resuming this operation uses it, and `ouro fleet doctor` there names it until then",
-                    self.request.operation
-                ))?;
-                return refuse(
-                    "cancelled",
-                    format!(
-                        "the operation stopped before any credential was issued. {machine} holds a prepared key for it and is otherwise unchanged"
-                    ),
-                );
+                let cleanup = session.discard_preparation(&self.request.operation);
+                let detail = match cleanup {
+                    Ok(_) => {
+                        journal.finish_step(&machine, "prepare", "skipped", Some("cancelled before issuance; removed this operation's prepared identity".into()), None)?;
+                        "the operation stopped before any credentials were issued; its prepared identity was removed".to_string()
+                    }
+                    Err(error) => {
+                        let detail = format!("{machine} still holds the prepared identity for operation {}: {error:#}. Run `ouro fleet doctor` there; `ouro fleet leave` retires an uninstalled preparation", self.request.operation);
+                        journal.note_residue(&detail)?;
+                        detail
+                    }
+                };
+                return refuse("cancelled", detail);
             }
             admission = Some(prepared_request);
         }
 
-        let _issuer_lock = self.lock_issuer(journal)?;
         if let Some(admission) = admission {
             journal.begin_step(&machine, "issue")?;
             let materials = fleet::issue_member_certificate_checked(
@@ -1644,6 +1738,7 @@ impl Engine {
         &self,
         journal: &JournalHandle,
         profile: &fleet::Profile,
+        target: Option<&Prepared>,
     ) -> Result<Vec<MemberSession>> {
         let mut sessions = Vec::new();
         for member in &profile.members {
@@ -1653,8 +1748,12 @@ impl Engine {
             self.check_cancelled()?;
             journal.begin_step(&member.machine, "member_preflight")?;
             let (access, identity) = self.member_access(&member.machine);
-            let destination = self.member_destination(&member.host, &access)?;
-            let connection = self.connect_with_identity(destination, &identity).map_err(|error| {
+            let existing_target = target.filter(|target| target.machine == member.machine);
+            let connection = if let Some(target) = existing_target {
+                target.connection.clone()
+            } else {
+                let destination = self.member_destination(&member.host, &access)?;
+                self.connect_with_identity(destination, &identity).map_err(|error| {
                 super::SetupError {
                     reason: "member_unreachable",
                     detail: format!(
@@ -1662,26 +1761,35 @@ impl Engine {
                         member.machine
                     ),
                 }
-            })?;
-            let preflight = super::bootstrap::preflight(&connection.runner)?;
-            let executable = match access.install_path.as_deref() {
-                Some(path) if path.starts_with('/') => path.to_string(),
-                Some(path) => {
-                    super::bootstrap::validate_install_path(path)?;
-                    preflight.install_path(path)
-                }
-                // Each member's own admission record, not the target's path.
-                None => self.remote_executable_for(&member.machine, &preflight)?,
+            })?
             };
-            let mut session =
-                helper::Session::open(&connection.runner, &executable, access.data_dir.as_deref())
-                    .map_err(|error| super::SetupError {
-                        reason: "member_unreachable",
-                        detail: format!(
-                            "{}'s setup helper did not start: {error:#}",
-                            member.machine
-                        ),
-                    })?;
+            let preflight = super::bootstrap::preflight(&connection.runner)?;
+            let executable = match existing_target {
+                Some(target) => target.executable.clone(),
+                None => match access.install_path.as_deref() {
+                    Some(path) if path.starts_with('/') => path.to_string(),
+                    Some(path) => {
+                        super::bootstrap::validate_install_path(path)?;
+                        preflight.install_path(path)
+                    }
+                    // Each member's own admission record, not the target's path.
+                    None => self.remote_executable_for(&member.machine, &preflight)?,
+                },
+            };
+            let member_data_dir = if existing_target.is_some() {
+                self.request.remote_data_dir.as_deref()
+            } else {
+                access.data_dir.as_deref()
+            };
+            let mut session = helper::Session::open(
+                &connection.runner,
+                &executable,
+                member_data_dir,
+            )
+            .map_err(|error| super::SetupError {
+                reason: "member_unreachable",
+                detail: format!("{}'s setup helper did not start: {error:#}", member.machine),
+            })?;
             let inspection = session.ask("inspect", json!({}))?;
             let pending = inspection
                 .get("pending_operations")
@@ -2284,6 +2392,14 @@ impl Engine {
             ..TargetIdentity::default()
         })?;
         self.bind_plan(journal, &plan)?;
+        journal.finish_step(
+            &machine,
+            "inspect",
+            "ok",
+            Some("checked the local fleet, address and startup plan".into()),
+            None,
+        )?;
+        self.step_event(&machine, "inspect", "ok", None);
 
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
@@ -2406,7 +2522,7 @@ impl Engine {
             reason: "no_fleet",
             detail: "this machine is standalone; there is no member to remove".into(),
         })?;
-        if machine == profile.machine {
+        if fleet::same_name(&machine, &profile.machine) {
             return refuse(
                 "identity_mismatch",
                 "`ouro fleet leave --machine` takes another machine's name. To retire this one, stop its runtime and run `ouro fleet leave`",
@@ -2436,13 +2552,14 @@ impl Engine {
             .cloned()
             .or_else(|| {
                 let record = journal?.record();
+                let target = record.target.as_ref()?;
                 if !record.attempted(&profile.machine, "roster")
-                    || !record.completed(&machine, "leave")
+                    || !record.completed(&target.machine, "leave")
                 {
                     return None;
                 }
                 let target = record.target?;
-                if target.machine != machine {
+                if !fleet::same_name(&target.machine, &machine) {
                     return None;
                 }
                 Some(fleet::Member {
@@ -2458,6 +2575,9 @@ impl Engine {
             );
         };
 
+        // The roster's spelling is the identity recorded in steps, access records and
+        // runtime status. Keep it after matching the operator's case-insensitive input.
+        let machine = member.machine.clone();
         let mut members: Vec<PlanMember> = profile
             .members
             .iter()
@@ -2546,7 +2666,7 @@ impl Engine {
                 self.destination(&plan.target.address, self.request.ssh_user.as_deref())?;
             let connection = self.connect(destination)?;
             let preflight = super::bootstrap::preflight(&connection.runner)?;
-            let executable = self.remote_executable(&preflight)?;
+            let executable = self.remote_executable_for(&machine, &preflight)?;
             let mut session = helper::Session::open(
                 &connection.runner,
                 &executable,
@@ -2588,7 +2708,8 @@ impl Engine {
             &profile,
             &mut members,
             fleet::RosterChange::Remove {
-                machine: machine.clone(),
+                // Roster requests require a canonical name and resolve its stored spelling.
+                machine: machine.to_ascii_lowercase(),
             },
         )?;
         drop(_issuer_lock);
@@ -2731,7 +2852,7 @@ impl Engine {
                 .collect(),
             ..profile.clone()
         };
-        self.preflight_members(journal, &remaining)
+        self.preflight_members(journal, &remaining, None)
     }
 
     fn await_disconnection(&self, journal: &JournalHandle, machine: &str) -> Result<bool> {
@@ -2819,8 +2940,9 @@ enum Startup {
 }
 
 /// An authenticated channel to one machine, with the bridge that serves its prompts.
+#[derive(Clone)]
 struct Connection {
-    runner: Runner,
+    runner: Arc<Runner>,
     /// Held for the connection's lifetime: dropping it removes the askpass socket.
     _bridge: Arc<Bridge>,
     host_fingerprint: String,

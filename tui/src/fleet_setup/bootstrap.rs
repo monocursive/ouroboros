@@ -252,8 +252,23 @@ pub fn install(
     sha256: &str,
     install_path: &str,
 ) -> Result<Installed> {
+    install_with_progress(runner, asset, bytes, sha256, install_path, &mut |_| {})
+}
+
+/// Progress counts executable bytes written into SSH, not remote verification.
+pub fn install_with_progress(
+    runner: &Runner,
+    asset: &str,
+    bytes: &[u8],
+    sha256: &str,
+    install_path: &str,
+    progress: &mut dyn FnMut(usize),
+) -> Result<Installed> {
     let frame = upload_frame(asset, bytes, sha256, install_path)?;
-    let completed = runner.run_with_timeout(BOOTSTRAP, Some(&frame), UPLOAD_TIMEOUT)?;
+    let header_len = frame.len() - bytes.len();
+    let mut report = |sent: usize| progress(sent.saturating_sub(header_len).min(bytes.len()));
+    let completed =
+        runner.run_with_progress(BOOTSTRAP, Some(&frame), UPLOAD_TIMEOUT, Some(&mut report))?;
     parse_receipt(&completed)
 }
 

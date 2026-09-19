@@ -519,7 +519,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   # and its form is `#ouro-deploy-leave`.
   defp prepared_leave(view, address \\ "100.64.0.2", user \\ "deploy") do
     view
-    |> element(~s{button[phx-click="inspect-device"][phx-value-address="#{address}"]})
+    |> element(~s{[data-address="#{address}"] button[phx-click="inspect-device"]})
     |> render_click()
 
     view
@@ -701,7 +701,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       assert has_element?(
                view,
-               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.5"]}
+               ~s{[data-address="100.64.0.5"] button[phx-click="inspect-device"]}
              )
 
       assert html =~ "run Ouroboros"
@@ -712,7 +712,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       assert has_element?(
                view,
-               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]}
+               ~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]}
              )
 
       assert html =~ "Details"
@@ -725,7 +725,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.5"]})
+        |> element(~s{[data-address="100.64.0.5"] button[phx-click="inspect-device"]})
         |> render_click()
 
       # Section 5.1 promises the reason is in its details, so there has to be a way in and
@@ -736,6 +736,48 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       # And a device with nothing to remove does not offer to remove it.
       refute html =~ "Remove from fleet"
+    end
+
+    test "two IPv6-only peers open their own details without a deployment address", context do
+      peers = [
+        %{
+          "name" => "ipv6-one",
+          "stable_id" => "peer-one",
+          "address" => nil,
+          "state" => "no_usable_ipv4",
+          "os" => "linux",
+          "online" => true
+        },
+        %{
+          "name" => "ipv6-two",
+          "node_key" => "nodekey:peer-two",
+          "address" => nil,
+          "state" => "no_usable_ipv4",
+          "os" => "macos",
+          "online" => true
+        }
+      ]
+
+      ouro!(context, devices: put_in(@devices["devices"], peers))
+      {:ok, view, _html} = live(context.conn, "/devices")
+
+      for {peer, index} <- Enum.with_index(peers, 1) do
+        view
+        |> element(~s{.ouro-devices-row:nth-child(#{index}) button[phx-click="inspect-device"]})
+        |> render_click()
+
+        details = view |> element("#ouro-deploy") |> render()
+        assert details =~ peer["name"]
+        refute details =~ Enum.at(peers, rem(index, 2))["name"]
+        assert details =~ "no address"
+        refute has_element?(view, ~s{#ouro-deploy button[phx-click="leave-device"]})
+        view |> element(~s{#ouro-deploy button[phx-click="drawer-close"]}) |> render_click()
+      end
+
+      refute has_element?(view, ~s{button[phx-click="deploy"]})
+      html = render_click(view, "deploy", %{"address" => nil})
+      assert html =~ "does not list that address"
+      refute has_element?(view, "#ouro-deploy-connect")
     end
 
     test "pre-fills the name from suggested_machine and never from the display name",
@@ -950,6 +992,40 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       # cursor of the person typing into it.
       assert html =~ ~s(id="devices-search")
       assert html =~ "No device matches"
+    end
+
+    test "a search can be cleared after a refresh shrinks the inventory",
+         %{conn: conn} = context do
+      {:ok, view, _html} = live(conn, "/devices")
+      render_change(view, "search", %{"query" => "filler"})
+
+      ouro!(context, devices: @devices)
+      render_click(view, "refresh")
+
+      assert has_element?(view, "#devices-search")
+      refute has_element?(view, ~s([data-address="100.64.0.1"]))
+
+      view |> form("#ouro-devices-search", %{"query" => ""}) |> render_change()
+
+      assert has_element?(view, ~s([data-address="100.64.0.1"]))
+      refute has_element?(view, "#devices-search")
+    end
+
+    test "a filter can be cleared after a refresh shrinks the inventory",
+         %{conn: conn} = context do
+      {:ok, view, _html} = live(conn, "/devices")
+      render_click(view, "filter", %{"filter" => "available"})
+
+      ouro!(context, devices: @devices)
+      render_click(view, "refresh")
+
+      assert has_element?(view, "#devices-search")
+      refute has_element?(view, ~s([data-address="100.64.0.1"]))
+
+      view |> element(~s(button[phx-value-filter="all"])) |> render_click()
+
+      assert has_element?(view, ~s([data-address="100.64.0.1"]))
+      refute has_element?(view, "#devices-search")
     end
 
     test "the filter keeps one list and changes which rows are in it", %{conn: conn} do
@@ -1642,6 +1718,16 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
       _ = await(view, "Setting up")
 
+      FleetWorkerFake.emit(worker, %{
+        "event" => "step",
+        "machine" => "vps-1",
+        "step" => "install_binary",
+        "outcome" => "started",
+        "detail" => "Uploading: 4 / 90 MB (4%) · 2s elapsed"
+      })
+
+      _ = await(view, "Uploading: 4 / 90 MB")
+
       # `install_binary` is the engine's name, and it belongs to the "install if missing"
       # stage even though it is not spelled `install` — which is why the stage table names
       # the worker's steps instead of matching on a prefix.
@@ -1671,6 +1757,9 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       # than claiming a result.
       for {_key, label, _names} <- Devices.stages(), do: assert(html =~ label)
       assert html =~ "not reported yet"
+      assert has_element?(view, ~s{li[data-step="install"][data-outcome="ok"]})
+      refute has_element?(view, ~s{#ouro-deploy-live span.ouro-visually-hidden})
+      refute html =~ "Uploading: 4 / 90 MB"
       assert html =~ ~s(data-step="install")
       assert html =~ ~s(data-step="membership")
       assert html =~ "Install the `ouro` binary on vps-1"
@@ -2635,7 +2724,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
         |> render_click()
 
       # Four different questions, never collapsed into one another. This runtime's cluster
@@ -2708,7 +2797,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
         |> render_click()
 
       # `nil` is "not reported", which is a different answer from "no".
@@ -2995,21 +3084,21 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       # to the machines panel instead.
       refute has_element?(
                view,
-               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.1"]}
+               ~s{[data-address="100.64.0.1"] button[phx-click="inspect-device"]}
              )
 
       assert html =~ ~s(<a class="ouro-button" href="/status">Open</a>)
 
       assert has_element?(
                view,
-               ~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]}
+               ~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]}
              )
 
       assert html =~ "Details"
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
         |> render_click()
 
       assert html =~ "Name in the fleet"
@@ -3026,7 +3115,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
         |> render_click()
 
       assert html =~ "Name in the fleet"
@@ -3313,7 +3402,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
         |> render_click()
 
       assert html =~ "Remove from fleet"
@@ -3329,7 +3418,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       {:ok, view, _html} = live(conn, "/devices")
 
       view
-      |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+      |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
       |> render_click()
 
       html =
@@ -3479,7 +3568,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       html =
         view
-        |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+        |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
         |> render_click()
 
       assert html =~ "Remove from fleet"
@@ -3577,6 +3666,74 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       issuer!(context.root)
       roster!(context.root, [%{"machine" => "buildbox", "host" => "100.64.0.2"}])
       %{worker: worker!(context), conn: web!(context)}
+    end
+
+    test "a connected member keeps its failed removal reachable after closing the drawer",
+         context do
+      {:ok, view, _html} = live(context.conn, "/devices")
+      operation = prepared_leave(view)
+
+      journal!(context.root, operation, %{
+        "state" => "failed",
+        "kind" => "leave",
+        "target" => %{"machine" => "buildbox", "address" => "100.64.0.2"},
+        "steps" => [
+          %{"machine" => "buildbox", "step" => "inspect", "outcome" => "ok"},
+          %{"machine" => "buildbox", "step" => "stop_runtime", "outcome" => "failed"}
+        ],
+        "last_error" => %{
+          "reason" => "runtime_busy",
+          "detail" => "buildbox is working; let the work finish and retry"
+        }
+      })
+
+      detach!(operation)
+
+      inventory =
+        update_in(@devices["devices"], fn rows ->
+          Enum.map(rows, fn row ->
+            if row["machine"] == "buildbox",
+              do: Map.merge(row, %{"state" => "fleet_member_connected", "connected" => true}),
+              else: row
+          end)
+        end)
+
+      File.write!(Path.join(context.fake_dir, "devices.json"), JSON.encode!(inventory))
+      view |> element(~s{#ouro-deploy button[phx-click="drawer-close"]}) |> render_click()
+
+      row = view |> element(~s{[data-address="100.64.0.2"]}) |> render()
+      assert row =~ "in the fleet"
+      assert row =~ "removal failed"
+      refute row =~ "last setup stopped"
+
+      view
+      |> element(~s{[data-address="100.64.0.2"] button[phx-click="open-operation"]})
+      |> render_click()
+
+      assert has_element?(
+               view,
+               ~s{#ouro-deploy button[phx-click="resume"][phx-value-operation="#{operation}"]}
+             )
+
+      assert render(view) =~ "buildbox is working"
+      view |> element(~s{#ouro-deploy button[phx-click="drawer-close"]}) |> render_click()
+
+      view
+      |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
+      |> render_click()
+
+      refute has_element?(view, ~s{#ouro-deploy button[phx-click="leave-device"]})
+
+      assert has_element?(
+               view,
+               ~s{#ouro-deploy button[phx-click="open-operation"]},
+               "Retry removal"
+             )
+
+      view |> element(~s{#ouro-deploy button[phx-click="open-operation"]}) |> render_click()
+      view |> element(~s{#ouro-deploy button[phx-click="resume"]}) |> render_click()
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      assert operation(view) == operation
     end
 
     test "the row a finished removal speaks for never reads as a setup",
@@ -3759,7 +3916,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       {:ok, view, _html} = live(conn, "/devices")
 
       view
-      |> element(~s{button[phx-click="inspect-device"][phx-value-address="100.64.0.2"]})
+      |> element(~s{[data-address="100.64.0.2"] button[phx-click="inspect-device"]})
       |> render_click()
 
       html =
@@ -3794,6 +3951,36 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
                  "on this machine"
 
       refute html =~ "forget buildbox`"
+    end
+
+    test "a timeout after target inspection and a stop attempt never recommends forgetting",
+         %{conn: conn, worker: worker} do
+      {:ok, view, _html} = live(conn, "/devices")
+      _operation = prepared_leave(view)
+
+      for {step, outcome} <- [{"inspect", "ok"}, {"stop_runtime", "started"}] do
+        :ok =
+          FleetWorkerFake.emit(worker, %{
+            "event" => "step",
+            "machine" => "buildbox",
+            "step" => step,
+            "outcome" => outcome
+          })
+      end
+
+      :ok =
+        FleetWorkerFake.emit(worker, %{
+          "event" => "done",
+          "ok" => false,
+          "reason" => "ssh_timeout",
+          "detail" => "the stop command timed out"
+        })
+
+      html = await(view, "the stop command timed out")
+      refute html =~ "nothing on it was changed"
+      refute html =~ "did not answer"
+      refute html =~ "sessions forget"
+      assert has_element?(view, ~s{#ouro-deploy button[phx-click="resume"]})
     end
 
     test "a removal that failed for a reason other than silence is not told to forget it",
@@ -3899,6 +4086,12 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       # `stages/0` is still the add flow's six, which is what every other reading of "the
       # stages" on this page means.
+      assert Enum.map(Devices.stages("setup"), &elem(&1, 1)) == [
+               "Inspect",
+               "Create fleet",
+               "Start at login"
+             ]
+
       assert Enum.map(Devices.stages(), &elem(&1, 1)) ==
                ["Inspect", "Install", "Join fleet", "Start at login", "Connect", "Ready"]
 
@@ -4138,7 +4331,7 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
 
       {:ok, _view, html} = live(conn, "/devices?operation=#{operation}")
 
-      assert html =~ "Set up this Mac"
+      assert html =~ setup_label()
     end
   end
 
@@ -4207,6 +4400,8 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
       # The heading and the worker's own summary have both said it. A third line holding
       # back a claim neither of them made is noise stacked on an answer.
       refute html =~ "The setup finished. Readiness was not reported"
+      refute html =~ "keeps running"
+      refute html =~ "Cancel setup"
 
       # And the stage nothing reported is not waiting for anything: this operation has
       # stopped, so there is no "yet" left in it.

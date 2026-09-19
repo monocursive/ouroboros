@@ -1306,11 +1306,13 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
     prepare_log(&plan.err_log())?;
     if ownership == Ownership::Ours && fs::read_to_string(&unit_path)? == text {
         inspect_manager(plan, programs, &mut report)?;
-        if report.loaded == Some(true) {
+        // A loaded unit can be stopped. Preserve a running (or indeterminate)
+        // service, but let installation start a known-stopped unit with no owner.
+        if report.loaded == Some(true) && (report.running != Some(false) || owner.is_some()) {
             report.installed = true;
             report
                 .notes
-                .push("the matching service is already loaded; it was left running".into());
+                .push("the matching service is already loaded; it was left unchanged".into());
             return Ok(report);
         }
     }

@@ -75,8 +75,18 @@ pub fn start(data_dir: &Path, operation: &str) -> Result<Started> {
     super::ensure_deploy_dir(data_dir)?;
     let _launch_lock = super::lock::Lock::acquire(data_dir, &format!("{operation}.launch.lock"))?;
     let socket = super::socket_path(data_dir, operation);
-    if let Some(instance) = probe_instance(&socket) {
-        return Ok(Started { socket, instance });
+    let retiring_deadline = Instant::now() + PROBE_TIMEOUT;
+    while let Some((instance, finished)) = probe_status(&socket) {
+        if !finished {
+            return Ok(Started { socket, instance });
+        }
+        if Instant::now() >= retiring_deadline {
+            return refuse(
+                "worker_retiring",
+                "the finished worker is still closing its connections; retry shortly",
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
     // A silent live worker must not have its socket or capability replaced.
     let worker_lock = super::lock::Lock::acquire(data_dir, &format!("{operation}.worker.lock"))?;
@@ -233,6 +243,10 @@ fn unpublish(path: &Path, made: Option<(u64, u64)>) {
 /// accept loop, the uid check and the frame reader, and therefore the only honest answer
 /// to "is it serving yet?".
 fn probe_instance(socket: &Path) -> Option<String> {
+    probe_status(socket).map(|(instance, _finished)| instance)
+}
+
+fn probe_status(socket: &Path) -> Option<(String, bool)> {
     let Ok(stream) = UnixStream::connect(socket) else {
         return None;
     };
@@ -263,7 +277,15 @@ fn probe_instance(socket: &Path) -> Option<String> {
                 .and_then(Value::as_str)
                 .filter(|reason| *reason == "not_attached")
                 .and_then(|_| frame.get("instance").and_then(Value::as_str))
-                .map(str::to_string)
+                .map(|instance| {
+                    (
+                        instance.to_string(),
+                        frame
+                            .get("finished")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    )
+                })
         })
 }
 
@@ -624,7 +646,7 @@ pub fn run(config: WorkerConfig, operation: &str) -> Result<()> {
                     Err(error) => json!({
                         "v": 1, "event": "done", "ok": false,
                         "reason": super::reason_of(error).unwrap_or("failed"),
-                        "detail": super::sanitize_remote_text(&format!("{error:#}"), 400),
+                        "detail": super::sanitize_remote_text(&format!("{error:#}"), 2_000),
                     }),
                 };
                 *shared.finished.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame.clone());
@@ -812,7 +834,7 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
                     &mut writer,
                     &id_value,
                     false,
-                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`", "instance": shared.instance}),
+                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`", "instance": shared.instance, "finished": shared.finished.lock().unwrap_or_else(|p| p.into_inner()).is_some()}),
                 );
                 continue;
             }
@@ -877,7 +899,7 @@ fn serve_client(stream: UnixStream, id: u64, shared: Arc<Shared>) -> Result<()> 
                     &mut writer,
                     &id_value,
                     false,
-                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`", "instance": shared.instance}),
+                    json!({"reason": "not_attached", "detail": "the first frame on a connection is `attach`", "instance": shared.instance, "finished": shared.finished.lock().unwrap_or_else(|p| p.into_inner()).is_some()}),
                 );
                 continue;
             }

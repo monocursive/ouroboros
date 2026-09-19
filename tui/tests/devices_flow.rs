@@ -1083,6 +1083,34 @@ fn add_to_fleet_asks_for_a_name_and_an_account_and_prepares_the_operation() {
     );
 }
 
+#[test]
+fn fixed_add_and_setup_addresses_are_visible_without_keyboard_stops() {
+    let _mode = normal();
+    let mut setup = populated();
+    setup["devices"] = json!([{
+        "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
+        "os": "macos", "address": "100.64.12.21", "online": true,
+        "state": "this_device_without_profile", "action": "set up this device"
+    }]);
+
+    for (reply, name, address) in [
+        (populated(), "build-linux", "100.64.12.44"),
+        (setup, "This Mac", "100.64.12.21"),
+    ] {
+        let mut app = with_inventory(reply);
+        activate(&mut app, name);
+        let _ = drained(&mut app);
+        for _ in 0..8 {
+            let drawn = screen(&mut app);
+            let destination = drawn.row(address);
+            assert!(destination.contains("address"), "{}", drawn.text());
+            assert!(!destination.contains("> "), "fixed address took focus");
+            app.apply(key(KeyCode::Tab));
+        }
+        assert!(drained(&mut app).is_empty(), "tabbing submitted the form");
+    }
+}
+
 /// `a`: *Add a device by address* — the address is typed, and the name is required.
 ///
 /// Finding 2: the manual form had no machine-name field at all, so the worker took the
@@ -1412,9 +1440,9 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
             "os": "darwin", "arch": "aarch64-apple-darwin", "issuer": true
         },
         "target": {
-            "machine": "build-linux", "address": "100.64.12.44", "port": 22,
+            "machine": "build-linux", "address": "100.64.12.44", "port": 2222,
             "ssh_user": "deploy", "identity": "agent: id_ed25519",
-            "install_path": "bin/ouro",
+            "install_path": "bin/ouro", "data_dir": "/srv/reviewed-fleet",
             "host_fingerprint": "SHA256:0Yp1rL8m"
         },
         "release": {
@@ -1424,9 +1452,13 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
             "official_origin": true
         },
         "service": "managed",
+        "test_workspace": "/srv/model-check",
+        "restart": "the local idle runtime will restart",
         "members": [
             { "machine": "studio", "host": "100.64.12.21",
-              "reached_by": "local", "change": "add build-linux to the roster" }
+              "reached_by": "local", "change": "add build-linux to the roster" },
+            { "machine": "relay", "host": "100.64.12.55", "reached_by": "ssh",
+              "ssh": "ops@100.64.12.55 port 2200", "change": "add build-linux to the roster" }
         ],
         "grants": ["broad fleet trust between every member"]
     });
@@ -1451,7 +1483,7 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
     );
     let _polled = drained(&mut app);
 
-    // §5.2 step 3: five plain lines, then the digest.
+    // The summary is followed by every resolved destination, account and path.
     let text = prose(&mut app);
     assert!(text.contains("Ready to deploy"), "{text}");
     assert!(
@@ -1467,7 +1499,7 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
         "the startup line is missing:\n{text}"
     );
     assert!(
-        text.contains("Update 1 roster (studio)."),
+        text.contains("Update 2 rosters (studio, relay)."),
         "the roster line is missing:\n{text}"
     );
     assert!(
@@ -1479,6 +1511,30 @@ fn the_reviewed_plan_is_drawn_and_approved_by_its_own_digest() {
         !text.contains("does not match"),
         "an honest plan was reported as a mismatch:\n{text}"
     );
+
+    // On a short terminal the details must remain reachable by paging before approval.
+    let mut paged = String::new();
+    for _ in 0..7 {
+        paged.push_str(&flowed(&render(&mut app, 100, 24)));
+        paged.push(' ');
+        app.apply(key(KeyCode::PageDown));
+    }
+    for fact in [
+        "deploy@100.64.12.44 port 2222",
+        "agent: id_ed25519",
+        "executable bin/ouro",
+        "data dir /srv/reviewed-fleet",
+        "model check /srv/model-check",
+        "asset ouro-linux.tar.gz",
+        "9f2c1b7ae4d60358aa1f2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef",
+        "studio at 100.64.12.21",
+        "ops@100.64.12.55 port 2200",
+        "the local idle runtime will restart",
+        "applies exactly this plan",
+    ] {
+        assert!(paged.contains(fact), "missing {fact}:\n{paged}");
+    }
+    assert!(drained(&mut app).is_empty(), "paging answered the review");
 
     app.apply(key(KeyCode::Char('a')));
     let calls = drained(&mut app);
@@ -2405,6 +2461,202 @@ fn the_hosting_runtimes_restart_is_drawn_as_a_reconnect_and_reloads_by_operation
     );
 }
 
+#[test]
+fn reconnect_status_refusal_replaces_completion_and_allows_return_to_inventory() {
+    let _mode = normal();
+    let mut app = deploying();
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot("completed", json!([]), json!({})),
+    );
+    app.apply(Msg::Reconnected(Box::new(full_hello())));
+    let calls = drained(&mut app);
+    let status = call_for(&calls, "fleet.deployment.status");
+    refuse(
+        &mut app,
+        status.tag.clone(),
+        ErrorCode::UpstreamError,
+        Some(json!({ "reason": "unknown_operation" })),
+    );
+    let text = prose(&mut app);
+    assert!(
+        text.contains("this runtime has no operation with that id"),
+        "{text}"
+    );
+    assert!(!text.contains("reading this setup again"), "{text}");
+    app.apply(key(KeyCode::Char('b')));
+    let drawn = screen(&mut app);
+    assert!(device_row(&drawn, "build-linux").contains("Add to fleet"));
+    assert!(matches!(app.overlay, Some(Overlay::Devices)));
+}
+
+#[test]
+fn reconnect_status_refusal_does_not_reactivate_cached_challenges() {
+    let _mode = normal();
+    for (state, kind, metadata) in [
+        (
+            "awaiting_host_trust",
+            "host_trust",
+            json!({
+                "address": "100.64.12.44", "port": 22, "user": "deploy",
+                "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:cached"
+            }),
+        ),
+        (
+            "awaiting_auth",
+            "password",
+            json!({ "user": "deploy", "address": "100.64.12.44" }),
+        ),
+    ] {
+        let mut app = deploying();
+        answer(
+            &mut app,
+            status_tag(),
+            snapshot(
+                state,
+                json!([challenge("cached", kind, metadata)]),
+                json!({}),
+            ),
+        );
+        app.apply(Msg::Reconnected(Box::new(full_hello())));
+        refuse(
+            &mut app,
+            status_tag(),
+            ErrorCode::UpstreamError,
+            Some(json!({ "reason": "unknown_operation" })),
+        );
+        let _ = drained(&mut app);
+        assert!(prose(&mut app).contains("this runtime has no operation with that id"));
+        app.apply(Msg::Paste("never answer a cached question".into()));
+        for code in [
+            KeyCode::Char('t'),
+            KeyCode::Char('n'),
+            KeyCode::Char('a'),
+            KeyCode::Enter,
+        ] {
+            app.apply(key(code));
+        }
+        assert_eq!(secret_chars(&app), 0);
+        assert!(drained(&mut app).is_empty(), "answered cached {kind}");
+        app.apply(key(KeyCode::Char('b')));
+        assert!(app.devices.operation.is_none());
+    }
+}
+
+#[test]
+fn hidden_challenges_take_no_input_until_fresh_status_arrives() {
+    let _mode = normal();
+    let plan = json!({
+        "kind": "add",
+        "deployment_host": { "hostname": "studio", "user": "ada", "issuer": true },
+        "target": { "machine": "build-linux", "address": "100.64.12.44" }
+    });
+    let digest = ouro::fleet_setup::sha256_hex(ouro::fleet_setup::canonical_json(&plan).as_bytes());
+    for reconnected in [false, true] {
+        for (state, kind, metadata) in [
+            (
+                "awaiting_host_trust",
+                "host_trust",
+                json!({
+                    "address": "100.64.12.44", "port": 22, "user": "deploy",
+                    "algorithm": "ssh-ed25519", "sha256_fingerprint": "SHA256:example"
+                }),
+            ),
+            (
+                "awaiting_review",
+                "review",
+                json!({ "plan": plan, "plan_digest": digest }),
+            ),
+            (
+                "awaiting_auth",
+                "password",
+                json!({ "user": "deploy", "address": "100.64.12.44" }),
+            ),
+            (
+                "awaiting_auth",
+                "passphrase",
+                json!({ "key_label": "id_ed25519" }),
+            ),
+        ] {
+            let mut app = deploying();
+            answer(
+                &mut app,
+                status_tag(),
+                snapshot(
+                    state,
+                    json!([challenge("hidden", kind, metadata)]),
+                    json!({}),
+                ),
+            );
+            let _ = drained(&mut app);
+            app.apply(Msg::Answer {
+                tag: status_tag(),
+                result: Err(ClientError::ConnectionClosed),
+            });
+            if reconnected {
+                app.apply(Msg::Reconnected(Box::new(full_hello())));
+            }
+            let _ = drained(&mut app);
+            let text = prose(&mut app);
+            assert!(
+                text.contains(if reconnected {
+                    "reading this setup again"
+                } else {
+                    "reconnecting"
+                }),
+                "{text}"
+            );
+            for code in [
+                KeyCode::Char('t'),
+                KeyCode::Char('n'),
+                KeyCode::Char('a'),
+                KeyCode::Char('c'),
+                KeyCode::Enter,
+            ] {
+                app.apply(key(code));
+            }
+            app.apply(Msg::Paste("invisible secret".into()));
+            assert_eq!(secret_chars(&app), 0, "hidden {kind} stored input");
+            assert!(
+                drained(&mut app).is_empty(),
+                "hidden {kind} accepted an answer"
+            );
+            app.apply(key(KeyCode::Esc));
+            assert!(app.overlay.is_none(), "Escape did not leave hidden {kind}");
+            assert!(
+                drained(&mut app).is_empty(),
+                "Escape answered hidden {kind}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reconnect_rechecks_ownership_before_offering_takeover() {
+    let _mode = normal();
+    let mut app = asking_to_take_over();
+    let _ = drained(&mut app);
+    app.apply(Msg::Reconnected(Box::new(full_hello())));
+    let _ = drained(&mut app);
+    assert!(prose(&mut app).contains("reading this setup again"));
+    app.apply(key(KeyCode::Char('t')));
+    assert!(drained(&mut app).is_empty());
+    refuse(
+        &mut app,
+        status_tag(),
+        ErrorCode::ScopeDenied,
+        Some(json!({ "reason": "operation_not_yours" })),
+    );
+    assert!(!prose(&mut app).contains("reading this setup again"));
+    app.apply(key(KeyCode::Char('t')));
+    let calls = drained(&mut app);
+    assert_eq!(
+        call_for(&calls, "fleet.deployment.resume").params["takeover"],
+        json!(true)
+    );
+}
+
 /// An interrupted operation still reads as one, from the journal, by the same id.
 #[test]
 fn an_interruption_is_reported_from_the_journal_with_the_steps_that_ran() {
@@ -2504,7 +2756,7 @@ fn a_development_runtime_is_blocked_from_setting_this_machine_up_only() {
     let _mode = normal();
 
     let mut reply = populated();
-    reply["host"] = host(true, &["dev_runtime"]);
+    reply["host"] = host(false, &["dev_runtime"]);
     reply["devices"] = json!([
         {
             "name": "studio", "machine": Value::Null, "suggested_machine": "studio",
@@ -4032,6 +4284,66 @@ fn a_member_carries_its_facts_in_the_details_panel_and_opens_the_machines_panel(
     );
 }
 
+#[test]
+fn paging_a_long_inventory_reaches_selected_details_without_hidden_row_actions() {
+    let _mode = normal();
+    let mut reply = populated();
+    reply["devices"] = json!((0..30)
+        .map(|index| json!({
+            "name": format!("peer-{index:02}"),
+            "machine": format!("peer-{index:02}"),
+            "suggested_machine": format!("peer-{index:02}"),
+            "address": format!("100.64.1.{}", index + 1),
+            "os": "linux", "state": "fleet_member", "online": true,
+            "connected": true,
+            "last_probe": if index == 0 { "2026-09-17T08:10:00Z" } else { "other probe" }
+        }))
+        .collect::<Vec<_>>());
+
+    for action in [KeyCode::Enter, KeyCode::Char('x')] {
+        let mut app = with_inventory(reply.clone());
+        app.terminal_width = 80;
+        let _ = drained(&mut app);
+        let initial = render(&mut app, 80, 24);
+        assert!(initial.rows.iter().any(|row| row.contains("> peer-00")));
+        assert!(!flowed(&initial).contains("probed 2026-09-17T08:10:00Z"));
+
+        let mut pages = String::new();
+        for _ in 0..10 {
+            app.apply(key(KeyCode::PageDown));
+            pages.push_str(&flowed(&render(&mut app, 80, 24)));
+            pages.push(' ');
+        }
+        assert!(pages.contains("runtime connected"), "{pages}");
+        assert!(pages.contains("probed 2026-09-17T08:10:00Z"), "{pages}");
+        assert_eq!(
+            app.devices.cursor, 0,
+            "paging changed the selected destination"
+        );
+        assert!(drained(&mut app).is_empty(), "paging acted on a device");
+
+        // A row action first brings its destination back into view, without opening
+        // that member or starting its removal while its name is off screen.
+        app.apply(key(action));
+        assert!(matches!(app.overlay, Some(Overlay::Devices)));
+        assert!(app.devices.connect.is_none());
+        let returned = render(&mut app, 80, 24);
+        assert!(returned.rows.iter().any(|row| row.contains("> peer-00")));
+        assert!(drained(&mut app).is_empty());
+
+        // Ordinary cursor movement still follows the destination below the fold.
+        for _ in 0..25 {
+            app.apply(key(KeyCode::Down));
+        }
+        let moved = render(&mut app, 80, 24);
+        assert!(moved.rows.iter().any(|row| row.contains("> peer-25")));
+        app.apply(key(KeyCode::Char('x')));
+        let form = prose(&mut app);
+        assert!(form.contains("Remove peer-25 from the fleet"), "{form}");
+        assert!(form.contains("100.64.1.26"), "{form}");
+    }
+}
+
 /// `x` on a member is `kind: "leave"`, by roster name, with its own account question.
 #[test]
 fn x_on_a_member_prepares_a_leave_for_its_roster_name() {
@@ -4156,6 +4468,103 @@ fn with_member() -> Value {
         }
     ]);
     reply
+}
+
+#[test]
+fn a_non_issuer_can_prepare_and_retry_a_removal() {
+    let _mode = normal();
+    for reasons in [vec!["no_ca_key"], vec!["no_ca_key", "dev_runtime"]] {
+        let mut reply = with_member();
+        reply["host"] = host(false, &reasons);
+        reply["host"]["issuer"] = json!(false);
+        let mut app = with_inventory(reply);
+        drained(&mut app);
+
+        remove(&mut app, "attic");
+        assert!(app.devices.connect.is_some(), "{}", prose(&mut app));
+        fill(&mut app, "SSH user", "pi");
+        focus_submit(&mut app);
+        app.apply(key(KeyCode::Enter));
+        let calls = drained(&mut app);
+        let prepare = call_for(&calls, "fleet.deployment.prepare");
+        assert_eq!(prepare.params["kind"], "leave");
+        answer(
+            &mut app,
+            prepare.tag.clone(),
+            json!({"operation_id": "abcdef0123456789"}),
+        );
+        answer(
+            &mut app,
+            status_tag(),
+            snapshot(
+                "failed",
+                json!([]),
+                json!({"kind": "leave", "attached": false}),
+            ),
+        );
+        drained(&mut app);
+
+        app.apply(key(KeyCode::Char('R')));
+        let calls = drained(&mut app);
+        assert_eq!(
+            call_for(&calls, "fleet.deployment.resume").params["operation_id"],
+            "abcdef0123456789"
+        );
+    }
+}
+
+#[test]
+fn a_non_issuer_can_continue_and_take_over_a_removal() {
+    let _mode = normal();
+    let operation = "abcdef0123456789";
+    let mut reply = with_member();
+    reply["host"] = host(false, &["no_ca_key"]);
+    reply["host"]["issuer"] = json!(false);
+    reply["operations"] = json!([{
+        "operation": operation, "kind": "leave", "state": "failed",
+        "attached": false, "readable": true, "owner": "another-admin",
+        "target": {"machine": "attic", "address": "100.64.12.77"}
+    }]);
+    let mut app = with_inventory(reply);
+    drained(&mut app);
+    activate(&mut app, "attic");
+    let calls = drained(&mut app);
+    let resume = call_for(&calls, "fleet.deployment.resume");
+    assert_eq!(resume.params["operation_id"], operation);
+
+    refuse(
+        &mut app,
+        resume.tag.clone(),
+        ErrorCode::ScopeDenied,
+        Some(json!({"reason": "operation_not_yours"})),
+    );
+    app.apply(key(KeyCode::Char('t')));
+    let calls = drained(&mut app);
+    let takeover = call_for(&calls, "fleet.deployment.resume");
+    assert_eq!(takeover.params["operation_id"], operation);
+    assert_eq!(takeover.params["takeover"], true);
+}
+
+#[test]
+fn removal_keeps_the_other_deployment_blockers() {
+    let _mode = normal();
+    for reason in [
+        "no_data_dir",
+        "ouro_path_unknown",
+        "cleartext_web_bind",
+        "new_blocker",
+    ] {
+        let mut reply = with_member();
+        reply["host"] = host(false, &["no_ca_key", reason]);
+        let mut app = with_inventory(reply);
+        drained(&mut app);
+        remove(&mut app, "attic");
+        assert!(
+            app.devices.connect.is_none(),
+            "{reason} did not block removal"
+        );
+        assert!(drained(&mut app).is_empty());
+    }
 }
 
 /// `x` on `attic`, through the form, to an open removal this view is following.
@@ -4456,6 +4865,45 @@ fn a_finished_removal_says_the_machine_is_out_and_offers_only_the_way_back() {
             "a finished removal still offered `{absent}`:\n{text}"
         );
     }
+}
+
+#[test]
+fn failed_removal_fallback_preserves_the_complete_machine_argument() {
+    let _mode = normal();
+    let machine = "production-build-linux";
+    let mut reply = with_member();
+    reply["devices"][1]["name"] = json!(machine);
+    reply["devices"][1]["machine"] = json!(machine);
+    reply["devices"][1]["suggested_machine"] = json!(machine);
+    let mut app = with_inventory(reply);
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Char('x')));
+    fill(&mut app, "SSH user", "deploy");
+    focus_submit(&mut app);
+    app.apply(key(KeyCode::Enter));
+    let calls = drained(&mut app);
+    let prepare = call_for(&calls, "fleet.deployment.prepare");
+    answer(
+        &mut app,
+        prepare.tag.clone(),
+        json!({ "operation_id": "abcdef0123456789" }),
+    );
+    answer(
+        &mut app,
+        status_tag(),
+        snapshot(
+            "failed",
+            json!([]),
+            json!({ "done": { "ok": false, "reason": "failed", "detail": "No route to host" } }),
+        ),
+    );
+    let text = prose(&mut app);
+    assert!(
+        text.contains(
+            "ouro fleet sessions forget --machine production-build-linux --accept-state-loss"
+        ),
+        "{text}"
+    );
 }
 
 /// Defect 5: the `sessions forget` recipe, only where it is the answer, spelled the way

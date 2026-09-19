@@ -42,6 +42,16 @@ requirements and upgrade instructions are in the
   flows: one line per device, the details of the selected one underneath, `a` to add a
   device by address, `x` to remove a member, and a setup that keeps following its
   operation across the restart it causes.
+- Failed removals stay retryable even while the member is connected. Roster-forgetting
+  advice is shown only when the failed attempt recorded no target steps, and recovery
+  commands preserve the full machine name.
+- Web details open for IPv6-only peers without a deployment address. Terminal setup
+  forms show fixed addresses; paging can reach the selected device's details without
+  acting on a hidden row. A refused status read after reconnect shows the error and
+  lets the operator return to the list instead of reviving a cached prompt.
+- Deployment attachment preserves the journal owner's access controls. Retrying a
+  slow worker no longer blocks unrelated broker reads, and bounded worker-log tails
+  discard partial first lines before redaction so truncated credential lines cannot leak.
 
 ### Fleet
 

@@ -244,6 +244,15 @@ impl DeploymentHost {
             .collect()
     }
 
+    /// Removing a member neither issues credentials nor configures this runtime.
+    pub fn leave_reasons(&self) -> Vec<String> {
+        self.reasons
+            .iter()
+            .filter(|reason| !matches!(reason.as_str(), "no_ca_key" | "dev_runtime"))
+            .cloned()
+            .collect()
+    }
+
     /// The first reason a local first setup is unavailable, in words.
     ///
     /// Its own list, not [`DeploymentHost::blocker`]'s: the two filter opposite codes,
@@ -778,6 +787,7 @@ pub struct PlanView {
     pub data_dir: Option<String>,
     pub host_fingerprint: Option<String>,
     pub node: Option<String>,
+    pub test_workspace: Option<String>,
     pub release: Option<PlanRelease>,
     pub service: Option<String>,
     pub members: Vec<PlanMember>,
@@ -792,6 +802,7 @@ pub struct PlanView {
 pub struct PlanRelease {
     pub version: String,
     pub target: String,
+    pub asset: Option<String>,
     /// Held to 64 lowercase hex: a checksum is not free text, and the one place this is
     /// abbreviated for the screen is safe to cut only because of that.
     pub sha256: String,
@@ -804,6 +815,7 @@ pub struct PlanMember {
     pub host: String,
     pub reached_by: String,
     pub change: String,
+    pub ssh: Option<String>,
 }
 
 /// A sha256 as this client will accept one: exactly 64 lowercase hex characters.
@@ -836,6 +848,7 @@ impl PlanView {
             Some(release) => Some(PlanRelease {
                 version: text(release.get("version")).unwrap_or_else(unknown),
                 target: text(release.get("target")).unwrap_or_else(unknown),
+                asset: text(release.get("asset")),
                 // A release whose checksum is not a checksum is not a release this client
                 // will draw an `install` line for.
                 sha256: release
@@ -863,6 +876,7 @@ impl PlanView {
             data_dir: text(target.get("data_dir")),
             host_fingerprint: text(target.get("host_fingerprint")),
             node: text(target.get("node")),
+            test_workspace: text(document.get("test_workspace")),
             release,
             service: text(document.get("service")),
             members: array(document.get("members"))
@@ -872,6 +886,7 @@ impl PlanView {
                     host: text(member.get("host")).unwrap_or_else(unknown),
                     reached_by: text(member.get("reached_by")).unwrap_or_else(unknown),
                     change: sentence(member.get("change")).unwrap_or_else(unknown),
+                    ssh: text(member.get("ssh")),
                 })
                 .collect(),
             restart: sentence(document.get("restart")),
@@ -900,9 +915,8 @@ impl PlanView {
 
     /// §5.2 step 3: the five plain lines an operator reads before approving.
     ///
-    /// Sentences rather than a field table. The table was every decoded field, one per
-    /// row, which is a specification; these are the four things that will happen to two
-    /// machines and the one sentence about trust.
+    /// These introduce the resolved details below them: what happens and what trust
+    /// it grants, followed by the addresses, accounts and paths it will actually use.
     pub fn review_lines(&self) -> Vec<String> {
         if self.kind == "leave" {
             return vec![
@@ -1524,6 +1538,11 @@ impl Snapshot {
             // records them: `inspect`, `stop_runtime`, `disable_service`,
             // `verify_disconnected`, `leave`, then `member_preflight`/`roster` for every
             // roster this removal edits.
+            Some("setup") => &[
+                ("Inspect", &["inspect"]),
+                ("Create fleet", &["create"]),
+                ("Start at login", &["stop_runtime", "service"]),
+            ],
             Some("leave") => &[
                 ("Inspect", &["inspect"]),
                 ("Stop", &["stop_runtime"]),
@@ -1559,7 +1578,11 @@ impl Snapshot {
                 .any(|step| matches!(step.outcome.as_str(), "started" | "running"))
             {
                 reached = true;
-                Marker::Current
+                if self.terminal() {
+                    Marker::Failed
+                } else {
+                    Marker::Current
+                }
             } else if !mine.is_empty() {
                 Marker::Done
             } else if !reached && self.succeeded() {
@@ -2358,6 +2381,9 @@ pub struct DevicesState {
     /// How far the page is scrolled. The list follows its cursor; the longer screens —
     /// a plan under review, a deployment's steps — are paged explicitly.
     pub scroll: usize,
+    /// Manual inventory paging leaves selection alone. A row action first returns to
+    /// the cursor so it cannot act on a destination that is off screen.
+    pub inventory_paging: bool,
     pub connect: Option<Box<ConnectForm>>,
     pub operation: Option<Box<Operation>>,
     /// A sentence about the last thing that happened, shown in the view rather than in
@@ -2434,6 +2460,7 @@ impl App {
 
         self.devices.notice = None;
         self.devices.refusal_line = None;
+        self.devices.inventory_paging = false;
         // Re-read on every open: the whole point of an inventory is that it is what is
         // there now, and a cached list of machines is a list of machines that were. An
         // operation this view was following is re-read for the same reason — coming back
@@ -2547,6 +2574,7 @@ impl App {
             // that has since restarted, and drawing it as current is the bug.
             operation.stale = true;
             operation.submitting = false;
+            operation.takeover = None;
             operation.snapshot.invalidate();
         }
 
@@ -2746,7 +2774,14 @@ impl App {
                     devices_error_sentence(&error, "fleet.deployment.status", &self.hello);
 
                 if let Some(current) = self.devices.operation.as_mut() {
-                    current.stale = current.stale || lost;
+                    current.stale = lost;
+                    if !lost {
+                        // A fresh refusal replaces the cached snapshot, not just its
+                        // loading placeholder. Its old challenges are no longer input.
+                        current.snapshot.value = None;
+                        current.secret.clear();
+                        current.answering = None;
+                    }
                     current.snapshot.failed(sentence, ticks, SNAPSHOT_TICKS);
                 }
             }
@@ -2874,6 +2909,8 @@ impl App {
             operation.answering = None;
             operation.error = None;
             operation.takeover = Some(Takeover { owner, refused });
+            // This refusal is a fresh ownership check, including after reconnection.
+            operation.stale = false;
             // Stop asking: every poll would re-refuse until the question is answered.
             operation.snapshot.failed(
                 "this operation belongs to another identity".into(),
@@ -2928,7 +2965,7 @@ impl App {
     /// The takeover question's gate, applied before the answer rather than after it.
     fn devices_takeover_refused(&mut self) -> bool {
         let Some(refusal) =
-            self.devices_deploy_refusal("fleet.deployment.resume", self.devices_local_setup())
+            self.devices_deploy_refusal("fleet.deployment.resume", self.devices_operation_kind())
         else {
             return false;
         };
@@ -3002,6 +3039,17 @@ impl App {
             return;
         }
 
+        if !matches!(key.code, KeyCode::PageDown | KeyCode::PageUp) {
+            let returning = self.devices.inventory_paging;
+            self.devices.inventory_paging = false;
+            if returning {
+                self.devices.scroll = 0;
+                if matches!(key.code, KeyCode::Enter | KeyCode::Char('x')) {
+                    return;
+                }
+            }
+        }
+
         // The search field owns every printable character while it is open, so `r` and
         // `a` cannot be typed into a query and swallowed as verbs.
         if self.devices.searching {
@@ -3058,8 +3106,14 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.devices.cursor = self.devices.cursor.saturating_sub(1)
             }
-            KeyCode::PageDown => self.devices.scroll = self.devices.scroll.saturating_add(10),
-            KeyCode::PageUp => self.devices.scroll = self.devices.scroll.saturating_sub(10),
+            KeyCode::PageDown => {
+                self.devices.inventory_paging = true;
+                self.devices.scroll = self.devices.scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                self.devices.inventory_paging = true;
+                self.devices.scroll = self.devices.scroll.saturating_sub(10);
+            }
             // A10: a numbered menu is only a numbered menu if the number selects.
             KeyCode::Char(digit)
                 if access::screen_reader()
@@ -3129,40 +3183,43 @@ impl App {
         );
     }
 
-    fn devices_local_setup(&self) -> bool {
+    fn devices_operation_kind(&self) -> Option<&str> {
         self.devices
             .operation
             .as_ref()
-            .is_some_and(|operation| operation.kind.as_deref() == Some("setup"))
+            .and_then(|operation| operation.kind.as_deref())
     }
 
     /// The three gates every mutating deployment verb passes, in words.
     ///
     /// One function rather than three checks at each call site: `prepare` had them and the
-    /// continue path did not, so an operation in the journal was a way around all three —
-    /// a read-scope listener issued `resume`, and a runtime holding no CA key attached a
-    /// worker it had already said it could not run.
-    fn devices_deploy_refusal(&self, method: &str, setup: bool) -> Option<String> {
-        let inventory = self.devices.inventory.value.as_ref();
-        let host = inventory
-            .map(|inventory| inventory.host.clone())
-            .unwrap_or_default();
+    /// continue path did not, so an operation in the journal was a way around all three.
+    /// Apply the host's reasons for this operation kind: adding needs the CA key, while
+    /// removing a member does not.
+    fn devices_deploy_refusal(&self, method: &str, kind: Option<&str>) -> Option<String> {
+        let Some(inventory) = self.devices.inventory.value.as_ref() else {
+            return Some("This runtime cannot deploy from here.".into());
+        };
+        let host = &inventory.host;
 
-        // First setup answers to a shorter list: see `DeploymentHost::setup_reasons`.
-        let blocker = if setup {
-            host.setup_blocker()
-        } else if host.deploy {
-            None
-        } else {
-            Some(
-                inventory
-                    .and_then(Inventory::deploy_blocker)
-                    .unwrap_or_else(|| "This runtime cannot deploy from here.".into()),
-            )
+        let reasons = match kind {
+            Some("setup") => host.setup_reasons(),
+            Some("leave") => host.leave_reasons(),
+            _add => host.add_reasons(),
         };
 
-        if let Some(blocker) = blocker {
-            return Some(blocker);
+        if let Some(reason) = reasons.first() {
+            return Some(match kind {
+                Some("setup" | "leave") => blocker_sentence(reason),
+                _add => inventory
+                    .deploy_blocker()
+                    .unwrap_or_else(|| blocker_sentence(reason)),
+            });
+        }
+
+        // An unexplained refusal is not an operation-specific exemption.
+        if !host.deploy && host.reasons.is_empty() {
+            return Some("This runtime cannot deploy from here.".into());
         }
 
         if !self.hello.serves(method) {
@@ -3179,7 +3236,8 @@ impl App {
         None
     }
     fn devices_begin_add(&mut self, row: &DeviceRow) {
-        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", false) {
+        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", Some("add"))
+        {
             self.devices_refuse(refusal);
             return;
         }
@@ -3198,7 +3256,8 @@ impl App {
     /// the worker took the address as the machine name and refused it, which is finding
     /// 2: a manual destination that could not succeed.
     fn devices_begin_manual(&mut self) {
-        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", false) {
+        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", Some("add"))
+        {
             self.devices_refuse(refusal);
             return;
         }
@@ -3224,7 +3283,9 @@ impl App {
             return;
         }
 
-        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", false) {
+        if let Some(refusal) =
+            self.devices_deploy_refusal("fleet.deployment.prepare", Some("leave"))
+        {
             self.devices_refuse(refusal);
             return;
         }
@@ -3243,7 +3304,9 @@ impl App {
     /// same plan — with the SSH fields gone, because this machine does not reach itself
     /// over SSH. The spec is explicit about that, and the method now says so too.
     fn devices_begin_setup(&mut self, row: &DeviceRow) {
-        if let Some(refusal) = self.devices_deploy_refusal("fleet.deployment.prepare", true) {
+        if let Some(refusal) =
+            self.devices_deploy_refusal("fleet.deployment.prepare", Some("setup"))
+        {
             self.devices_refuse(refusal);
             return;
         }
@@ -3282,10 +3345,9 @@ impl App {
         // "Retry" becomes a fresh inspection and a fresh review rather than a second go
         // at a plan nobody re-read.
         if !open.attached {
-            if let Some(refusal) = self.devices_deploy_refusal(
-                "fleet.deployment.resume",
-                open.kind.as_deref() == Some("setup"),
-            ) {
+            if let Some(refusal) =
+                self.devices_deploy_refusal("fleet.deployment.resume", open.kind.as_deref())
+            {
                 self.devices.notice = Some(refusal);
                 return;
             }
@@ -3411,7 +3473,8 @@ impl App {
         };
     }
 
-    /// Whether a password or passphrase challenge currently owns the keyboard.
+    /// Whether a paste might be a secret, including a cached challenge hidden during
+    /// reconnection. Keep that paste zeroized even when `devices_paste` will refuse it.
     pub(super) fn devices_secret_open(&self) -> bool {
         self.devices
             .operation
@@ -3427,6 +3490,13 @@ impl App {
     /// taking text" notice. The secret buffer is preferred when a secret challenge is the
     /// screen: that is the only field drawn at the time.
     pub(super) fn devices_paste(&mut self, flattened: &str) -> bool {
+        if self.devices.operation.as_ref().is_some_and(|operation| {
+            !matches!(self.connection, Connection::Live)
+                || operation.stale
+                || operation.takeover.is_some()
+        }) {
+            return false;
+        }
         let challenge = self
             .devices
             .operation
@@ -3497,6 +3567,17 @@ impl App {
 
     fn devices_operation_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
+
+        // No cached question owns input while the screen is waiting for fresh status.
+        // In particular Escape leaves this view; it must not decline a hidden host key.
+        if self.devices.operation.as_ref().is_some_and(|operation| {
+            !matches!(self.connection, Connection::Live) || operation.stale
+        }) {
+            if key.code == KeyCode::Esc {
+                self.close_devices();
+            }
+            return;
+        }
 
         // The takeover question owns the screen while it is open: nothing else can be
         // answered on an operation this identity has not taken over.
@@ -3858,8 +3939,8 @@ impl App {
         // *cancelled* or *completed* operation goes back to the list, because the broker
         // will not resume either.
         if state == "failed" || (stopped && !matches!(state.as_str(), "cancelled" | "completed")) {
-            if let Some(refusal) =
-                self.devices_deploy_refusal("fleet.deployment.resume", self.devices_local_setup())
+            if let Some(refusal) = self
+                .devices_deploy_refusal("fleet.deployment.resume", self.devices_operation_kind())
             {
                 if let Some(operation) = self.devices.operation.as_mut() {
                     operation.error = Some(refusal);
@@ -4530,7 +4611,7 @@ fn connect_lines(app: &App, form: &ConnectForm, lines: &mut Vec<Line<'static>>) 
 
     // A read-only address is still a fact about where this is going, so it is drawn even
     // though the cursor does not stop on it.
-    if !form.address.is_empty() && form.address_fixed && form.kind == FormKind::Leave {
+    if !form.address.is_empty() && form.address_fixed {
         detail_field(lines, "address", scrub(&form.address, ROW_FIELD_COLUMNS));
     }
 
@@ -4581,11 +4662,6 @@ fn operation_lines(app: &App, operation: &Operation, lines: &mut Vec<Line<'stati
     )));
     caption(app, lines);
 
-    if let Some(takeover) = operation.takeover.as_ref() {
-        takeover_lines(operation, takeover, lines);
-        return;
-    }
-
     // Finding 4. The runtime this client is attached to is gone — a local setup stops it
     // by design — so whatever snapshot is in hand describes a moment that has passed.
     // Drawing it as if it were current is the failure; so is spinning on it forever.
@@ -4619,6 +4695,11 @@ fn operation_lines(app: &App, operation: &Operation, lines: &mut Vec<Line<'stati
             )));
         }
 
+        return;
+    }
+
+    if let Some(takeover) = operation.takeover.as_ref() {
+        takeover_lines(operation, takeover, lines);
         return;
     }
 
@@ -4873,6 +4954,19 @@ fn host_trust_lines(challenge: &Challenge, lines: &mut Vec<Line<'static>>) {
          trust.",
         Style::default().fg(theme::warn()),
     )));
+    if let Some(command) = challenge
+        .field("algorithm")
+        .as_deref()
+        .and_then(crate::fleet_setup::challenge::host_key_verification_command)
+    {
+        lines.push(Line::from(
+            "On the device's console or an already trusted SSH connection:",
+        ));
+        lines.push(Line::from(command));
+        lines.push(Line::from(
+            "Compare its SHA256 fingerprint with the one above.",
+        ));
+    }
     blank(lines);
     lines.push(Line::from(Span::styled(
         access::numbered(0, "t  Trust and continue"),
@@ -4951,7 +5045,7 @@ fn secret_lines(operation: &Operation, challenge: &Challenge, lines: &mut Vec<Li
     )));
 }
 
-/// §5.2 step 3: five plain lines, the digest, and two answers.
+/// §5.2 step 3: a short summary, the resolved details, the digest, and two answers.
 ///
 /// Every line is built here, from a decoded field, rather than by splitting a rendered
 /// block on newlines: a `machine` carrying its own newlines and column padding is how a
@@ -4990,6 +5084,74 @@ fn review_lines(challenge: &Challenge, lines: &mut Vec<Line<'static>>) {
             format!("  {}", access::speakable(&sentence)),
             Style::default(),
         )));
+    }
+
+    blank(lines);
+    lines.push(Line::from(Span::styled(
+        "Resolved deployment details · ↑/↓ or PgUp/PgDn to scroll",
+        theme::heading(),
+    )));
+    let mut field = |label: &str, value: String| {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {label:<14}"), theme::label()),
+            Span::styled(access::speakable(&value), Style::default()),
+        ]));
+    };
+    field("action", plan.kind.clone());
+    field("machine", plan.machine.clone());
+    field("address", plan.address.clone());
+    if let Some(user) = &plan.ssh_user {
+        field(
+            "ssh",
+            format!("{user}@{} port {}", plan.address, plan.port.unwrap_or(22)),
+        );
+    }
+    for (label, value) in [
+        ("identity", &plan.identity),
+        ("host key", &plan.host_fingerprint),
+        ("node", &plan.node),
+        ("executable", &plan.install_path),
+        ("data dir", &plan.data_dir),
+        ("model check", &plan.test_workspace),
+    ] {
+        if let Some(value) = value {
+            field(label, value.clone());
+        }
+    }
+    if let Some(release) = &plan.release {
+        field(
+            "release",
+            format!("ouro {} ({})", release.version, release.target),
+        );
+        if let Some(asset) = &release.asset {
+            field("asset", asset.clone());
+        }
+        field("sha256", release.sha256.clone());
+        field(
+            "origin",
+            if release.official_origin {
+                "official release"
+            } else {
+                "not the official release"
+            }
+            .into(),
+        );
+    }
+    field("startup", plan.service.clone().unwrap_or_else(unknown));
+    for member in &plan.members {
+        field(
+            "member",
+            format!(
+                "{} at {} ({}) — {}",
+                member.machine, member.host, member.reached_by, member.change
+            ),
+        );
+        if let Some(ssh) = &member.ssh {
+            field("member ssh", ssh.clone());
+        }
+    }
+    if let Some(restart) = &plan.restart {
+        field("restart", restart.clone());
     }
 
     blank(lines);
@@ -5173,12 +5335,16 @@ fn finish_lines(
     // a removal that never reached the machine it was about. §5.4 asks for the recipe
     // there; showing it any earlier is a screen telling an operator a machine is gone
     // while the operation that would prove it is still running.
-    if unreached_removal(leaving, snapshot, &operation.device) {
+    if unreached_removal(leaving, snapshot, &operation.device)
+        && crate::fleet::validate_machine(&operation.device).is_ok()
+    {
+        // Executable advice uses the complete validated identifier, not a table cell.
+        let target = scrub(&operation.device, FIELD_COLUMNS);
         lines.push(Line::from(Span::styled(
             access::speakable(&format!(
                 "{machine} did not answer, so nothing on it was changed. To take it out \
                  of this fleet's roster anyway, run `ouro fleet sessions forget --machine \
-                 {machine} --accept-state-loss` on this machine, and on every other \
+                 {target} --accept-state-loss` on this machine, and on every other \
                  machine in the fleet.",
             )),
             Style::default().fg(theme::warn()),
@@ -5248,13 +5414,13 @@ pub fn devices_hint_line(app: &App) -> String {
     }
 
     if let Some(operation) = state.operation.as_ref() {
-        if operation.takeover.is_some() {
-            return "t take over this setup \u{b7} n leave it alone".into();
-        }
-
         if !matches!(app.connection, Connection::Live) || operation.stale {
             return "waiting for the runtime to come back \u{b7} Esc leave (nothing is cancelled)"
                 .into();
+        }
+
+        if operation.takeover.is_some() {
+            return "t take over this setup \u{b7} n leave it alone".into();
         }
 
         let open = operation
@@ -5279,7 +5445,7 @@ pub fn devices_hint_line(app: &App) -> String {
                 );
 
                 format!(
-                    "a {} \u{b7} c cancel \u{b7} Esc leave",
+                    "a {} \u{b7} c cancel \u{b7} PgUp/PgDn scroll \u{b7} Esc leave",
                     approve.to_lowercase()
                 )
             }
@@ -5298,6 +5464,10 @@ pub fn devices_hint_line(app: &App) -> String {
     if state.searching {
         return "type to search by name or address \u{b7} Enter keeps it \u{b7} Esc clears it"
             .into();
+    }
+
+    if state.inventory_paging {
+        return "PgUp/PgDn scroll \u{b7} Enter returns to selection \u{b7} Esc close".into();
     }
 
     let narrowing = state

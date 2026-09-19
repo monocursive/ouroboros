@@ -855,6 +855,27 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   describe "events" do
+    test "a session can stop and restart event delivery without dropping its presence", context do
+      %{worker: worker} = arrange_worker(context)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      :ok = Deployment.subscribe(operation, "events-tab")
+      settle(operation)
+      :ok = Deployment.unsubscribe(operation)
+      settle(operation)
+      :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "awaiting_auth"})
+      refute_receive {:ouroboros_fleet_deployment, ^operation, _event}, 300
+
+      :ok = Deployment.subscribe(operation, "events-tab")
+      settle(operation)
+      :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
+
+      assert_receive {:ouroboros_fleet_deployment, ^operation,
+                      %{"event" => "state", "state" => "deploying"}},
+                     @receive_timeout
+    end
+
     test "reach a subscriber and stop when it goes away", context do
       %{worker: worker} = arrange_worker(context)
       assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
@@ -990,6 +1011,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       # Mutating the `Enum.any?` guard in `release_session/2` away passed every other case
       # here, because every other case has exactly one subscriber per session.
       tab_a_again = subscriber(operation, "tab-a")
+      unsubscribe(tab_a_again, operation)
 
       close(tab_a)
       settle(operation)
@@ -1099,7 +1121,7 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert log =~ "outcome=session_released"
     end
 
-    test "an explicit unsubscribe is not a tab that is gone", %{
+    test "an unsubscribe retains the binding only until the tab goes away", %{
       operation: operation,
       tab_a: tab_a
     } do
@@ -1111,6 +1133,12 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
       assert {:error, :challenge_not_bound} =
                Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-after-close", tab("b"))
     end
 
     test "a subscriber that named no session releases nothing", %{
@@ -1158,6 +1186,22 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
       assert elapsed < 400, "devices/operations waited #{elapsed} ms behind a 3s spawn"
       assert_receive {:prepared, {:ok, %{"state" => "spawning"}}}, 1_000
+    end
+
+    test "a second resume cannot stall unrelated reads behind the client's slow spawn",
+         context do
+      arrange_worker(context, spawn_sleep: 3)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      resumer = Task.async(fn -> Deployment.resume(operation, bound()) end)
+
+      Process.sleep(100)
+      started = System.monotonic_time(:millisecond)
+      assert {:ok, _inventory} = Deployment.devices()
+      {_summaries, _total} = Deployment.operations(context.root)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert elapsed < 1_000, "devices/operations waited #{elapsed} ms behind another resume"
+      assert {:error, :already_attached} = Task.await(resumer, @receive_timeout)
     end
 
     test "a spawn timeout does not unlink the request the grandchild may still be reading",
@@ -1291,34 +1335,27 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert Journal.scrub_line("keep\ta tab", 300) == "keep\ta tab"
     end
 
-    test "redacts the four shapes a secret takes on a command line" do
-      # The assignment, with a prefix on the name.
-      assert Journal.scrub_line("ssh_password=hunter2 was passed", 300) ==
-               "ssh_password=[redacted] was passed"
-
-      # The same name as a long option, where the value is simply the next word.
-      assert Journal.scrub_line("ssh --password hunter2 host", 300) ==
-               "ssh --password [redacted] host"
-
-      # A flag whose own name says nothing; the program is what makes it a secret. Both
-      # spellings, because `-p` takes its value attached or detached.
-      assert Journal.scrub_line("sshpass -p hunter2 ssh deploy@host", 300) ==
-               "sshpass -p [redacted] ssh deploy@host"
-
-      assert Journal.scrub_line("sshpass -phunter2 ssh deploy@host", 300) ==
-               "sshpass -p[redacted] ssh deploy@host"
-
-      # And the one where the giveaway comes *after* the value.
-      assert Journal.scrub_line("echo hunter2 | sudo -S systemctl restart ouro", 300) ==
-               "echo [redacted] | sudo -S systemctl restart ouro"
-
+    test "discards credential-bearing diagnostics regardless of value quoting" do
       for line <- [
             "ssh_password=hunter2 was passed",
             "ssh --password hunter2 host",
             "sshpass -p hunter2 ssh deploy@host",
-            "echo hunter2 | sudo -S systemctl restart ouro"
+            "sshpass -phunter2 ssh deploy@host",
+            "echo hunter2 | sudo -S systemctl restart ouro",
+            ~s(password="alpha beta"),
+            ~s(password='alpha beta'),
+            ~s(password="alpha beta),
+            ~S(password=alpha\ beta),
+            ~s({"password":"alpha-beta"}),
+            ~s(error: {"ssh_password": "alpha beta", "status": "failed"}),
+            ~S({"token":"alpha \"beta\" gamma"}),
+            ~s({'private_key': 'alpha beta'}),
+            ~s(ssh --password "alpha beta" host),
+            ~s(sshpass -p "alpha beta" ssh host),
+            ~s(sshpass -p'alpha beta' ssh host),
+            ~s(printf '%s' 'alpha beta' | sudo -S command)
           ] do
-        refute Journal.scrub_line(line, 300) =~ "hunter2"
+        assert Journal.scrub_line(line, 300) == "[redacted credential-bearing diagnostic]"
       end
     end
 
@@ -1327,7 +1364,8 @@ defmodule Ouroboros.Fleet.DeploymentTest do
             "connecting to 100.64.12.44 port 22",
             "bind: path is 112 bytes, the limit is 104",
             "ssh: debug1: reading configuration data /etc/ssh/ssh_config",
-            "echo done | tee /tmp/x"
+            "echo done | tee /tmp/x",
+            "password authentication failed"
           ] do
         assert Journal.scrub_line(line, 300) == line
       end
@@ -1356,14 +1394,43 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert first == "ssh: debug1: reading configuration"
 
       # The log is whatever the worker printed, and a worker that printed a password is a
-      # worker bug that must not become a browser's problem. The name stays — it is what
-      # makes the line legible — and the value does not.
-      assert second == "ssh_password=[redacted] was passed to the child"
+      # worker bug that must not become a browser's problem. The whole line is replaced.
+      assert second == "[redacted credential-bearing diagnostic]"
       refute second =~ "hunter2"
 
       # And a line nobody bounded is bounded here: 300 characters, not 600.
       assert String.length(third) == 300
       assert String.starts_with?(third, "error: socket path")
+    end
+
+    test "JSON and quoted secrets never reach the public worker log tail", context do
+      operation = plant_journal(context.root, "inspecting")
+
+      write_worker_log(context.root, operation, [
+        ~s({"password":"alpha-beta"}),
+        ~s(password="alpha beta"),
+        ~s(sshpass -p "alpha beta" ssh host)
+      ])
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+
+      assert snapshot["worker_exit"]["last_lines"] ==
+               List.duplicate("[redacted credential-bearing diagnostic]", 3)
+    end
+
+    test "a truncated credential line is discarded without hiding complete diagnostics",
+         context do
+      operation = plant_journal(context.root, "inspecting")
+      secret_line = "password=" <> String.duplicate("S", 9_000)
+
+      for {suffix, expected} <- [
+            {"", []},
+            {"\nssh: connection closed\n", ["ssh: connection closed"]}
+          ] do
+        File.write!(Journal.log_path(context.root, operation), secret_line <> suffix)
+        assert {:ok, snapshot} = Deployment.status(operation, bound())
+        assert snapshot["worker_exit"]["last_lines"] == expected
+      end
     end
 
     test "a worker log that is not text, and one that is enormous, are both answers",
@@ -1535,6 +1602,116 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
   # ---------------------------------------------------------------------------
   # Helpers
+
+  describe "live acceptance regressions" do
+    test "named CLI journals appear after a fresh listing and can be read", context do
+      assert {[], 0} = Deployment.operations(context.root)
+      operation = "pi-manual-20260918"
+
+      write_journal(context.root, operation, %{
+        "operation" => operation,
+        "kind" => "add",
+        "state" => "completed",
+        "created_at" => "2026-09-18T20:00:00Z",
+        "target" => %{"machine" => "raspberrypi"}
+      })
+
+      assert {[%{"operation" => ^operation}], 1} = Deployment.operations(context.root)
+      assert {:ok, %{"state" => "completed"}} = Deployment.status(operation, bound())
+
+      for invalid <- ["short", "-operation", "operation-", "op--test", "op.test00", "UPPERCASE"] do
+        assert {:error, :invalid_operation} = Journal.validate_operation(invalid)
+      end
+    end
+
+    test "step updates replace running events and retain progress after reattachment", context do
+      operation = plant_journal(context.root, "interrupted")
+      %{worker: worker} = arrange_worker(context)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      for outcome <- ["started", "started", "ok"] do
+        FleetWorkerFake.emit(worker, %{
+          "event" => "step",
+          "machine" => "vps",
+          "step" => "install_binary",
+          "outcome" => outcome
+        })
+      end
+
+      settle(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert Enum.count(snapshot["steps"], &(&1["step"] == "install_binary")) == 1
+
+      assert Enum.any?(
+               snapshot["steps"],
+               &(&1["step"] == "install_binary" and &1["outcome"] == "ok")
+             )
+
+      assert Enum.any?(snapshot["steps"], &(&1["step"] == "inspect" and &1["outcome"] == "ok"))
+    end
+
+    test "a journal's owner still gates reads while its worker is attaching", context do
+      operation = plant_journal(context.root, "interrupted")
+      outsider = %{subject: "orson", session: "tab-b"}
+      assert {:error, :operation_not_yours} = Deployment.status(operation, outsider)
+
+      cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+      socket_path = Path.join([context.root, "deploy", "late.sock"])
+
+      ouro =
+        FleetOuroFake.write!(context.fake_dir,
+          spawn_line:
+            JSON.encode!(%{"socket" => socket_path, "instance" => "1234567890abcdef"}) <> "\n",
+          cap: cap
+        )
+
+      System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert {:ok, pid} = Deployment.client(operation)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert {:ok, %{"owner" => "adele", "attached" => false}} =
+               Deployment.status(operation, bound())
+
+      assert {:error, :operation_not_yours} = Deployment.status(operation, outsider)
+    end
+
+    test "CLI history is readable without silently taking over its mutations", context do
+      operation = plant_journal(context.root, "failed")
+      {:ok, document} = Journal.read(context.root, operation)
+
+      write_journal(
+        context.root,
+        operation,
+        Map.put(document, "owner", System.get_env("USER") || System.get_env("LOGNAME"))
+      )
+
+      assert {:ok, %{"source" => "journal", "state" => "failed"}} =
+               Deployment.status(operation, bound())
+
+      arrange_worker(context)
+      assert {:error, :operation_not_yours} = Deployment.resume(operation, bound())
+    end
+
+    test "Retry retires a finished attached worker immediately", context do
+      operation = plant_journal(context.root, "failed")
+      %{worker: worker} = arrange_worker(context)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      FleetWorkerFake.emit(worker, %{
+        "event" => "done",
+        "ok" => false,
+        "state" => "failed",
+        "detail" => "start refused"
+      })
+
+      settle(operation)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+    end
+  end
 
   defp bound, do: %{subject: "adele", session: "session-one"}
 

@@ -33,11 +33,8 @@ defmodule Ouroboros.Fleet.Deployment do
   those bytes are the one that received them from the wire and the one that writes them to
   the socket.
 
-  ## Not yet shipped in a release
-
-  The Rust worker this talks to is built alongside this module and is not in a released
-  `ouro`. On a runtime whose `ouro` does not serve `fleet worker start`, every verb here
-  answers a stable reason code rather than appearing to work.
+  The Rust worker ships with `ouro`. A runtime paired with an older executable that
+  does not serve `fleet worker start` returns a stable refusal.
   """
 
   use GenServer
@@ -540,7 +537,7 @@ defmodule Ouroboros.Fleet.Deployment do
   def status(operation, binding) when is_binary(operation) and is_map(binding) do
     with :ok <- Journal.validate_operation(operation),
          {:ok, snapshot} <- snapshot(operation),
-         :ok <- owned_by?(snapshot["owner"], binding) do
+         :ok <- readable_by?(snapshot, binding) do
       {:ok, snapshot}
     end
   end
@@ -552,7 +549,7 @@ defmodule Ouroboros.Fleet.Deployment do
           # `worker_exit` is a journal-only field, and saying so on every answer is what
           # makes a missing key and a null one the same fact to a renderer.
           {:ok, snapshot} ->
-            {:ok, Map.put(snapshot, "worker_exit", nil)}
+            {:ok, reconcile_journal(snapshot, operation) |> Map.put("worker_exit", nil)}
 
           # The client process is gone. The broker has not necessarily handled its `:DOWN`
           # yet — a status call and a monitor message race each other — and answering
@@ -572,6 +569,37 @@ defmodule Ouroboros.Fleet.Deployment do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # A reattached worker only knows events since attachment. Keep durable progress,
+  # including steps written without a broadcast, and use live details for progress
+  # updates only when the journal agrees about the step's outcome.
+  defp reconcile_journal(snapshot, operation) do
+    case journal_status(operation) do
+      {:ok, journal} ->
+        live = List.wrap(snapshot["steps"])
+        durable = List.wrap(journal["steps"])
+        key = fn step -> {step["machine"], step["step"]} end
+
+        steps =
+          Enum.map(durable, fn step ->
+            case Enum.find(live, &(key.(&1) == key.(step) and &1["outcome"] == step["outcome"])) do
+              nil -> step
+              event -> Map.merge(step, event)
+            end
+          end)
+
+        extra = Enum.reject(live, fn step -> Enum.any?(durable, &(key.(&1) == key.(step))) end)
+
+        journal
+        |> Map.merge(snapshot)
+        |> Map.put("owner", snapshot["owner"] || journal["owner"])
+        |> Map.put("steps", steps ++ extra)
+        |> Map.put("last_error", journal["last_error"] || snapshot["last_error"])
+
+      _unavailable ->
+        snapshot
     end
   end
 
@@ -605,6 +633,18 @@ defmodule Ouroboros.Fleet.Deployment do
   # runtime whose `ouro` predates the field would be a gate that protects nothing and breaks
   # recovery. What it does not do is let an unknown owner authorize a *takeover* — `resume/3`
   # holds the stricter rule, because that is the verb that inherits the credential prompt.
+  # CLI operations use the local OS account as owner; a web administrator has a
+  # gateway subject instead. They may read that same account's sanitized journal,
+  # never its live worker or challenges. Resume/cancel keep the ownership gate.
+  defp readable_by?(%{"source" => "journal", "owner" => owner}, binding)
+       when is_binary(owner) do
+    if owner == (System.get_env("USER") || System.get_env("LOGNAME")),
+      do: :ok,
+      else: owned_by?(owner, binding)
+  end
+
+  defp readable_by?(snapshot, binding), do: owned_by?(snapshot["owner"], binding)
+
   defp owned_by?(nil, _binding), do: :ok
   defp owned_by?(owner, %{subject: subject}) when owner == subject, do: :ok
   defp owned_by?(_owner, _binding), do: {:error, :operation_not_yours}
@@ -657,10 +697,10 @@ defmodule Ouroboros.Fleet.Deployment do
       {:ok, io} ->
         try do
           {:ok, size} = :file.position(io, :eof)
-          {:ok, _from} = :file.position(io, {:bof, max(size - @worker_log_tail, 0)})
+          {:ok, offset} = :file.position(io, {:bof, max(size - @worker_log_tail, 0)})
 
           case IO.binread(io, @worker_log_tail) do
-            tail when is_binary(tail) -> tail_lines(tail)
+            tail when is_binary(tail) -> tail_lines(tail, offset > 0)
             _eof_or_error -> []
           end
         after
@@ -672,7 +712,16 @@ defmodule Ouroboros.Fleet.Deployment do
     end
   end
 
-  defp tail_lines(tail) do
+  # A partial first line may have lost the label that makes a credential recognizable.
+  # Never expose that fragment, even when it would otherwise fit the output width.
+  defp tail_lines(tail, true) do
+    case :binary.split(tail, "\n") do
+      [_fragment, complete] -> tail_lines(complete, false)
+      [_fragment] -> []
+    end
+  end
+
+  defp tail_lines(tail, false) do
     tail
     |> :binary.split(["\n", "\r\n"], [:global])
     |> Enum.map(&Journal.scrub_line(&1, @worker_log_width))
@@ -844,6 +893,7 @@ defmodule Ouroboros.Fleet.Deployment do
     with {:ok, pid} <- client(operation),
          {:ok, snapshot} <- Client.snapshot(pid),
          :ok <- owned_by?(snapshot["owner"], binding),
+         :ok <- still_running(snapshot),
          {:ok, reply} <- Client.cancel(pid) do
       # And then let go of the socket. A finished worker stays reachable for a minute so an
       # attached client can read its result, and it leaves as soon as nothing is attached —
@@ -855,6 +905,9 @@ defmodule Ouroboros.Fleet.Deployment do
       {:ok, reply}
     end
   end
+
+  defp still_running(%{"done" => done}) when is_map(done), do: {:error, :operation_finished}
+  defp still_running(_snapshot), do: :ok
 
   @doc """
   Brings an interrupted operation back under a new worker.
@@ -869,7 +922,9 @@ defmodule Ouroboros.Fleet.Deployment do
       when is_binary(operation) and is_map(binding) and is_boolean(takeover?) do
     with :ok <- Journal.validate_operation(operation),
          :ok <- unblocked(operation_kind(operation)) do
-      GenServer.call(__MODULE__, {:resume, operation, binding, takeover?}, @call_timeout)
+      retired = retire_finished_client(operation, binding)
+
+      GenServer.call(__MODULE__, {:resume, operation, binding, takeover?, retired}, @call_timeout)
     end
   end
 
@@ -969,7 +1024,19 @@ defmodule Ouroboros.Fleet.Deployment do
     open(state, operation, request, binding)
   end
 
-  def handle_call({:resume, operation, binding, takeover?}, _from, state) do
+  def handle_call({:resume, operation, binding, takeover?, retired}, _from, state) do
+    # Only remove the client this caller stopped. A concurrent resume may already have
+    # replaced it, and its new worker must remain attached.
+    state =
+      case state.operations[operation] do
+        %{pid: ^retired, ref: ref} when is_pid(retired) ->
+          Process.demonitor(ref, [:flush])
+          %{state | operations: Map.delete(state.operations, operation)}
+
+        _other ->
+          state
+      end
+
     if Map.has_key?(state.operations, operation) do
       {:reply, {:error, :already_attached}, state}
     else
@@ -1063,6 +1130,25 @@ defmodule Ouroboros.Fleet.Deployment do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # Runs in the caller, not the singleton: a client still spawning or handshaking can
+  # take seconds to answer. Unrelated inventory and deployment calls must remain usable.
+  defp retire_finished_client(operation, binding) do
+    with {:ok, pid} <- client(operation),
+         {:ok, snapshot} <- Client.snapshot(pid),
+         :ok <- owned_by?(snapshot["owner"], binding),
+         done when is_map(done) <- snapshot["done"] do
+      # Closing this result reader lets the exact finished worker release its lock.
+      :ok = GenServer.stop(pid, :normal, 5_000)
+      pid
+    else
+      _live_or_not_owned -> nil
+    end
+  catch
+    # Another caller may already have retired it. The broker still arbitrates resume
+    # against its current entry; a failed stop never authorizes dropping that entry.
+    :exit, _reason -> nil
+  end
 
   defp drop_devices(state, pid) do
     case Map.pop(state.devices, pid) do

@@ -1230,3 +1230,49 @@ fn write_request_json(data_dir: &Path, operation: &str, request: &Value) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .expect("a private request");
 }
+
+#[test]
+fn retry_after_a_done_frame_starts_a_new_worker_without_waiting_for_linger() {
+    let data = data_dir("wretry");
+    let operation = "op-immediate-retry";
+    let mut request = OperationRequest::new(operation, OperationKind::Setup, "studio");
+    request.address = Some("127.0.0.1".into());
+    request.service = false;
+    request.ports = Some(ephemeral());
+    write_request(&data, &request);
+    let started = spawn_detached(&data, operation);
+    let capability =
+        std::fs::read_to_string(ouro::fleet_setup::capability_path(&data, operation)).unwrap();
+    let mut client = Client::connect(&started.socket);
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": capability.trim(), "subject": "operator", "session": "retry"})
+        )["ok"],
+        true
+    );
+    let review = client.await_event("challenge");
+    assert_eq!(review["kind"], "review");
+    client.ask(
+        "respond",
+        json!({"challenge": review["challenge"], "response": {"approve": true, "plan_digest": "0".repeat(64)}}),
+    );
+    let done = client.await_event("done");
+    assert_eq!(done["ok"], false);
+    drop(client);
+    let began = Instant::now();
+    let next = spawn_detached(&data, operation);
+    assert_ne!(next.instance, started.instance);
+    assert!(began.elapsed() < Duration::from_secs(5));
+    let capability =
+        std::fs::read_to_string(ouro::fleet_setup::capability_path(&data, operation)).unwrap();
+    let mut client = Client::connect(&next.socket);
+    assert_eq!(
+        client.ask(
+            "attach",
+            json!({"cap": capability.trim(), "subject": "operator", "session": "retry"})
+        )["ok"],
+        true
+    );
+    client.ask("cancel", json!({}));
+}

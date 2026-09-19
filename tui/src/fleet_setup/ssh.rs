@@ -454,6 +454,16 @@ impl Runner {
         stdin: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Completed> {
+        self.run_with_progress(remote, stdin, timeout, None)
+    }
+
+    pub fn run_with_progress(
+        &self,
+        remote: &str,
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+        progress: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<Completed> {
         let argv = self.argv(remote);
         let command = self.command_from_argv(&argv);
         run_bounded_for(
@@ -463,6 +473,7 @@ impl Runner {
             self.bridge.as_ref(),
             self.cancelled.as_ref(),
             self.challenge_window,
+            progress,
         )
     }
 
@@ -507,6 +518,7 @@ impl Runner {
             self.connect_timeout,
             None,
             self.cancelled.as_ref(),
+            None,
             None,
         )?;
         if !completed.success() {
@@ -1022,7 +1034,7 @@ const STDERR_CAP: usize = 256 * 1024;
 /// passes or this function is unwound, so an `ssh` that hangs on a dead network does not
 /// outlive the step that started it.
 pub fn run_bounded(command: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<Completed> {
-    run_bounded_for(command, stdin, timeout, None, None, None)
+    run_bounded_for(command, stdin, timeout, None, None, None, None)
 }
 
 /// The same, with the askpass window opened for exactly this child and closed when it
@@ -1035,6 +1047,7 @@ fn run_bounded_for(
     bridge: Option<&Arc<Bridge>>,
     cancelled: Option<&Arc<dyn Fn() -> bool + Send + Sync>>,
     challenge_window: Option<Duration>,
+    mut progress: Option<&mut dyn FnMut(usize)>,
 ) -> Result<Completed> {
     use std::io::Write as _;
 
@@ -1057,7 +1070,9 @@ fn run_bounded_for(
     let _armed = bridge.map(|bridge| bridge.arm(child.id() as i32));
     let mut guard = ChildGuard::new(child);
 
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     if let Some(bytes) = stdin {
+        let sent = Arc::clone(&sent);
         let mut input = guard
             .child
             .stdin
@@ -1070,7 +1085,12 @@ fn run_bounded_for(
         let writer = std::thread::Builder::new()
             .name("ouro-ssh-stdin".to_string())
             .spawn(move || {
-                let _ = input.write_all(&bytes);
+                for chunk in bytes.chunks(64 * 1024) {
+                    if input.write_all(chunk).is_err() {
+                        break;
+                    }
+                    sent.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = input.flush();
                 drop(input);
             })
@@ -1096,6 +1116,9 @@ fn run_bounded_for(
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = loop {
+        if let Some(report) = progress.as_mut() {
+            report(sent.load(std::sync::atomic::Ordering::Relaxed));
+        }
         if cancelled.is_some_and(|flag| flag()) {
             if let Some(bridge) = bridge {
                 bridge.abort_active("cancelled");

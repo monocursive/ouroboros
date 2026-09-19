@@ -2733,6 +2733,8 @@ naming both is refused rather than guessed between.
 **Add a device by address** (`a`) is the same form with nothing pre-filled and the
 address editable. The name is required here too: without a name field at all the worker
 took the address as the machine name and refused it, so that path could never succeed.
+Fixed addresses on discovered-device and local-setup forms remain visible as read-only
+context, without adding a keyboard stop.
 
 **Set up this Mac** (`kind: "setup"`) is the first local fleet: a name, the address
 discovery gave, a *start at login* checkbox, and the sentence *Ouroboros restarts once
@@ -2757,6 +2759,7 @@ fleet's roster anyway, run `ouro fleet sessions forget --machine ‹machine›
 sentence appears nowhere else: on the form, during the operation, or after a failure the
 machine itself answered, it would be telling an operator a machine is gone while the
 thing that would prove it is still running.
+The command uses the full validated roster machine name, never the shortened list label.
 
 **Then the broker is the authority** for every screen after `prepare`:
 `fleet.deployment.status` is polled about once a second, its `state` names the stage, and
@@ -2840,6 +2843,9 @@ and carries on from whatever it answers, including a challenge that is waiting. 
 that answer lands the screen says *Ouroboros is back… reading this setup again* rather
 than pretending. Before this, the view kept polling a runtime that was gone and drew
 "waiting for you to review the plan" over an empty body for ever.
+A non-transport refusal ends the reconnect wait, discards cached completion and challenge
+state, and shows the current error. `b` returns to the inventory; a stale password or
+approval prompt cannot become actionable again.
 
 **Leaving never cancels.** `Esc` closes the view and stops nothing; the operation keeps
 running on the deployment host, and the row it is about reads `setting up…` /
@@ -2903,10 +2909,11 @@ progress marks as words, and rings the bell when the deployment stops for a pers
 per question, through the existing `notify::Signal::NeedsInput` path, which resolves
 `auto` to the bell in this mode whether or not the terminal has focus.
 
-**The list follows its cursor.** `PageUp`/`PageDown` are the operator's own scrolling, but
-a selected row below the fold is a row `Enter` acts on and nobody can see, so the renderer
-keeps the marked line on the page. A bracketed paste reaches the masked field and the
-connect form's text fields.
+**The list follows its cursor except while paging.** `PageUp`/`PageDown` scroll without
+moving the selection, so the details under a long inventory remain reachable. Cursor
+navigation restores selection-following. After paging, the first `Enter` or `x` returns
+to the selected row without acting; a second press can act on the now-visible selection.
+A bracketed paste reaches the masked field and the connect form's text fields.
 
 ### Names on screen, never wire words (T2.8)
 

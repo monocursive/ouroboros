@@ -46,28 +46,19 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
 
   # The same vocabulary, matched against free text rather than against object keys: a line of
   # a worker's stdio log has no keys, so this is where a credential would be if one were
-  # printed. The *name* survives every one of these, because the name is what makes the line
-  # legible; the value does not.
-  #
-  # Four shapes, because a log tail is mostly command lines and shell traces, and a secret on
-  # one of those does not look like `password=`:
+  # printed. Discard the whole matching line: shell quoting, JSON strings and truncated
+  # diagnostics do not have a common value boundary that is safe to guess at.
   @secret_names Enum.join(@forbidden, "|")
 
-  #   * `password=x`, `ssh_password: x` — the assignment, with an optional prefix on the
-  #     name and a value that runs to the next whitespace.
-  @secret_assignment ~r/([A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*\s*[:=]\s*)(\S+)/i
+  # Assignments and quoted object keys, including JSON embedded in a diagnostic.
+  @secret_assignment ~r/[A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*["']?\s*[:=]/i
 
-  #   * `--password x` — the same name as a long option, where the value is the next word
-  #     rather than something after a separator.
-  @secret_option ~r/(--?[A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*\s+)(\S+)/i
+  @secret_option ~r/--?[A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*\s+/i
 
-  #   * `sshpass -p x` — a flag whose *name* says nothing at all. The program is what makes
-  #     it a secret, so the program is what this matches on.
-  @sshpass_option ~r/(\bsshpass\b.*?\s-p?\s*)(\S+)/i
+  # Attached and detached values for sshpass's otherwise unrecognizable flag.
+  @sshpass_option ~r/\bsshpass\b.*?\s-p/i
 
-  #   * `echo x | sudo -S …` — the secret is before the pipe, which is the one form where
-  #     the giveaway comes after the value rather than before it.
-  @piped_secret ~r/(\b(?:echo|printf)\s+)(.*?)(\|\s*sudo\b.*?-S\b)/i
+  @piped_secret ~r/\b(?:echo|printf)\s+.*?\|\s*sudo\b.*?-S\b/i
 
   # Escape sequences, stripped as sequences rather than character by character: dropping the
   # `\e` alone out of `\e[1;31m` leaves `[1;31m` on the line, which is noise where the whole
@@ -226,7 +217,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     end)
   end
 
-  # `.request.json` also ends in `.json`; an operation id is hex, so those names never
+  # `.request.json` also ends in `.json`; operation ids cannot contain dots, so those names never
   # survive `validate_operation/1`. Matching the suffix the worker actually writes is still
   # cheaper than opening them.
   defp journal_name?(name),
@@ -386,14 +377,13 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @doc """
   An operation id this runtime will touch a path with.
 
-  The id names a file and a socket, so it is held to hex rather than to "no slashes": a
-  validated alphabet is the only form of path safety that does not depend on remembering
-  every way a string can escape a directory.
+  Match the worker and CLI: 8 to 64 lowercase letters, digits and single hyphens,
+  with no leading or trailing hyphen. The bounded alphabet excludes path traversal.
   """
   @spec validate_operation(String.t()) :: :ok | {:error, :invalid_operation}
   def validate_operation(operation) when is_binary(operation) do
-    if operation != "" and byte_size(operation) <= 64 and
-         String.match?(operation, ~r/\A[0-9a-f]+\z/),
+    if byte_size(operation) in 8..64 and
+         String.match?(operation, ~r/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/),
        do: :ok,
        else: {:error, :invalid_operation}
   end
@@ -471,11 +461,14 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   end
 
   defp redact(line) do
-    line
-    |> then(&Regex.replace(@secret_assignment, &1, "\\1[redacted]"))
-    |> then(&Regex.replace(@secret_option, &1, "\\1[redacted]"))
-    |> then(&Regex.replace(@sshpass_option, &1, "\\1[redacted]"))
-    |> then(&Regex.replace(@piped_secret, &1, "\\1[redacted] \\3"))
+    if Enum.any?(
+         [@secret_assignment, @secret_option, @sshpass_option, @piped_secret],
+         &Regex.match?(&1, line)
+       ) do
+      "[redacted credential-bearing diagnostic]"
+    else
+      line
+    end
   end
 
   defp scrub(value, depth) when depth >= @max_depth and (is_map(value) or is_list(value)),

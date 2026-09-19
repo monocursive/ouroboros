@@ -5475,6 +5475,69 @@ pub fn prepare_admission(
     result
 }
 
+/// Retire only this operation's prepared key, before any materials were installed.
+/// The issuer calls this only while holding its admission lock and before issuance.
+pub fn discard_preparation(data_dir: &Path, operation: &str) -> Result<()> {
+    validate_operation_id(operation)?;
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet discard preparation")?;
+    if fleet_dir(data_dir).try_exists()? {
+        return refuse(
+            "fleet_exists",
+            "an installed fleet identity cannot be discarded as a preparation",
+        );
+    }
+    let dir = admission_dir(data_dir, operation);
+    if !dir.try_exists()? {
+        return Ok(());
+    }
+    ensure_private_dir(&dir)?;
+    let request: AdmissionRequest = serde_json::from_str(&read_private(
+        &dir.join(ADMISSION_REQUEST_FILE),
+        "admission request",
+    )?)?;
+    validate_admission_request(&request)?;
+    if request.operation != operation {
+        return refuse(
+            "identity_mismatch",
+            "the prepared identity belongs to another operation",
+        );
+    }
+    // Validate every entry before deleting any: installed materials, symlinks,
+    // hardlinks and unexpected files all refuse, leaving inspection possible.
+    let mut files = Vec::new();
+    let mut receipts = None;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        match name.to_str() {
+            Some(NODE_KEY_FILE | ADMISSION_REQUEST_FILE) => {
+                ensure_private_file(&entry.path(), "prepared identity")?;
+                if fs::symlink_metadata(entry.path())?.nlink() != 1 {
+                    bail!("a prepared identity file has multiple links; it was not removed");
+                }
+                files.push(entry.path());
+            }
+            Some(RECEIPTS_DIR) => {
+                receipts = Some((entry.path(), validate_receipts_directory(&entry.path())?));
+            }
+            _ => {
+                return refuse(
+                    "install_in_progress",
+                    "the preparation contains additional data; it was not removed",
+                )
+            }
+        }
+    }
+    for path in files {
+        fs::remove_file(path)?;
+    }
+    if let Some((home, files)) = receipts {
+        remove_validated_receipts_directory(&home, files)?;
+    }
+    fs::remove_dir(&dir)?;
+    sync_parent(&dir)
+}
+
 /// Check everything about a request that does not need this machine's fleet.
 fn validate_admission_request(request: &AdmissionRequest) -> Result<()> {
     if request.schema != ADMISSION_SCHEMA {
@@ -9983,6 +10046,24 @@ mod tests {
         assert!(!printed.contains(&materials.cookie));
         assert!(printed.contains("<redacted>"));
         assert!(printed.contains(&materials.operation));
+    }
+
+    #[test]
+    fn preparation_cleanup_is_scoped_and_refuses_materials() {
+        let target = scratch("discard-prep");
+        let op = "op-discard-prep";
+        prepare_admission(&target, op, "vps", "127.0.0.1").unwrap();
+        discard_preparation(&target, "op-other-prep").unwrap();
+        assert!(admission_dir(&target, op).exists());
+        let cookie = admission_dir(&target, op).join(COOKIE_FILE);
+        write_private_new(&cookie, b"not-yet-installed", "test materials").unwrap();
+        assert!(discard_preparation(&target, op).is_err());
+        assert!(admission_dir(&target, op).join(NODE_KEY_FILE).exists());
+        fs::remove_file(cookie).unwrap();
+        discard_preparation(&target, op).unwrap();
+        assert!(!admission_dir(&target, op).exists());
+        discard_preparation(&target, op).unwrap();
+        let _ = fs::remove_dir_all(target);
     }
 
     /// `ouro fleet leave` retires a machine that was admitted, receipts and all. The

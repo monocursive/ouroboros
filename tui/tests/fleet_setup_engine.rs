@@ -40,6 +40,7 @@ struct Operator {
     accept_hosts: bool,
     asked: Mutex<Vec<ChallengeKind>>,
     events: Mutex<Vec<String>>,
+    progress: Mutex<Vec<String>>,
     cancel_after: Mutex<Option<String>>,
     cancelled: AtomicBool,
     refusals: AtomicU32,
@@ -51,6 +52,7 @@ impl Operator {
             accept_hosts: true,
             asked: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
+            progress: Mutex::new(Vec::new()),
             cancel_after: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             refusals: AtomicU32::new(0),
@@ -73,6 +75,7 @@ impl Operator {
             accept_hosts: false,
             asked: Mutex::new(Vec::new()),
             events: Mutex::new(Vec::new()),
+            progress: Mutex::new(Vec::new()),
             cancel_after: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             refusals: AtomicU32::new(0),
@@ -118,7 +121,16 @@ impl Conversation for Operator {
     }
 
     fn notify(&self, event: Event) {
-        if let Event::Step { step, outcome, .. } = &event {
+        if let Event::Step {
+            step,
+            outcome,
+            detail,
+            ..
+        } = &event
+        {
+            if let Some(detail) = detail {
+                self.progress.lock().unwrap().push(detail.clone());
+            }
             self.events
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -518,19 +530,19 @@ fn an_interrupted_operation_resumes_from_its_durable_boundary() {
         .expect("a readable journal")
         .expect("a written journal");
     assert_eq!(mid.state, OperationState::Cancelled);
-    assert!(mid.completed("vps", "prepare"));
+    assert!(mid
+        .steps
+        .iter()
+        .any(|step| step.step == "prepare" && step.outcome == "skipped"));
     assert!(!mid.completed("vps", "issue"), "nothing was issued");
-    assert!(
-        mid.residue.iter().any(|note| note.contains("prepared key")),
-        "the residue a cancellation left is named: {:?}",
-        mid.residue
-    );
+    assert!(mid.residue.is_empty(), "the prepared identity was retired");
+    assert!(!target.join(".fleet.admission.op-0000000000c3").exists());
     assert!(
         fleet::load(&target).expect("a readable target").is_none(),
         "a cancelled operation leaves the target standalone"
     );
 
-    // Resuming the same operation id finishes it, and `prepare` is not repeated.
+    // A direct engine resume can prepare a new key; no credentials were issued before cancellation.
     let resumed = lab
         .engine(
             lab.request("op-0000000000c3", "vps", &target),
@@ -562,7 +574,7 @@ fn an_interrupted_operation_resumes_from_its_durable_boundary() {
 /// A roster that moved under a reviewed plan is a reconciliation refusal, never a lost
 /// update.
 #[test]
-fn a_roster_that_moved_under_the_plan_is_refused_rather_than_overwritten() {
+fn a_roster_that_moved_before_issuance_requires_a_fresh_review() {
     let lab = Lab::new("roster", "studio");
     let target = data_dir("roster-t");
 
@@ -580,19 +592,21 @@ fn a_roster_that_moved_under_the_plan_is_refused_rather_than_overwritten() {
     // An ordinary roster edit lands while the operation is paused.
     fleet::add_member(&lab.issuer, "laptop", "127.0.0.2", None).expect("an unrelated roster edit");
 
+    let reviewer = Operator::new();
     let refused = lab
         .engine(
             lab.request("op-0000000000d4", "vps", &target),
-            Operator::new(),
+            Arc::new(DeclineNewReview(reviewer.clone())),
             gateway(&["studio"]),
             services(),
         )
         .run()
         .expect_err("the source roster changed under the plan");
     assert!(
-        matches!(reason_of(&refused), Some("roster_changed" | "plan_changed")),
+        reason_of(&refused) == Some("review_declined"),
         "a moved roster is reconciled, not overwritten: {refused:#}"
     );
+    assert!(reviewer.asked().contains(&ChallengeKind::Review));
     assert!(
         fleet::load(&target).expect("a readable target").is_none(),
         "nothing was delivered to the target"
@@ -873,6 +887,20 @@ fn a_target_without_ouro_gets_the_exact_release_through_the_bootstrap_command() 
     let selected = record.release.clone().expect("a recorded release");
     assert_eq!(selected.sha256, ReleaseServer::sha256_of(&bytes));
     assert!(record.completed("vps", "install_binary"));
+
+    let progress = operator.progress.lock().unwrap();
+    assert!(
+        progress.iter().any(|line| line.starts_with("Downloading:")
+            && line.contains("MB received")
+            && line.contains("elapsed")),
+        "{progress:?}"
+    );
+    assert!(
+        progress.iter().any(|line| line.starts_with("Uploading:")
+            && line.contains('%')
+            && line.contains("elapsed")),
+        "{progress:?}"
+    );
 
     // And it refuses to replace what it just installed.
     let replaced = ouro::fleet_setup::bootstrap::install(
@@ -1351,6 +1379,11 @@ fn a_moved_roster_and_a_changed_plan_are_two_separate_refusals() {
         .run()
         .expect_err("cancelled at the prepare boundary");
 
+    // Simulate a crash after the durable issuer receipt but before the engine records it.
+    let admission =
+        fleet::prepare_admission(&target, "op-000000005700", "vps", "127.0.0.1").unwrap();
+    fleet::issue_member_certificate(&lab.issuer, &admission).unwrap();
+
     // A roster edit that does not change any fact the plan carries: the plan's member
     // list is rendered from the profile, so this is the case where only the recorded
     // snapshot can notice.
@@ -1640,6 +1673,20 @@ fn resume_verifies_and_reuses_the_installed_release() {
 }
 #[test]
 fn setup_resumes_after_service_installation_failure() {
+    assert_setup_resume(false, false);
+}
+
+#[test]
+fn an_approved_setup_from_before_plan_summaries_resumes() {
+    assert_setup_resume(true, false);
+}
+
+#[test]
+fn a_legacy_approval_still_refuses_changed_deployment_facts() {
+    assert_setup_resume(true, true);
+}
+
+fn assert_setup_resume(legacy: bool, changed_service: bool) {
     let lab = Lab::new("rvsetup", "studio");
     let local = data_dir("rvlocal");
     let mut request = OperationRequest::new("op-review-setup", OperationKind::Setup, "local");
@@ -1660,20 +1707,51 @@ fn setup_resumes_after_service_installation_failure() {
     .unwrap_err();
     println!("first: {first:#}");
     assert!(fleet::load(&local).unwrap().is_some());
+    let approved = Journal::read(&local, &request.operation).unwrap().unwrap();
+    if legacy {
+        let path = ouro::fleet_setup::journal_path(&local, &request.operation);
+        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["plan"].as_object_mut().unwrap().remove("summary");
+        record["plan_digest"] = json!(ouro::fleet_setup::sha256_hex(
+            ouro::fleet_setup::canonical_json(&record["plan"]).as_bytes()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+    if changed_service {
+        request.service = !request.service;
+    }
     let actions = services();
+    let operator = Operator::new();
     let second = Engine {
         data_dir: local.clone(),
         token_file: local.join("gateway.token"),
-        ..lab.engine(request, Operator::new(), stopped, actions.clone())
+        ..lab.engine(request.clone(), operator.clone(), stopped, actions.clone())
     }
-    .run()
-    .unwrap();
+    .run();
+    if changed_service {
+        assert_eq!(reason_of(&second.unwrap_err()), Some("plan_changed"));
+        assert!(actions.local_calls().is_empty());
+        return;
+    }
+    let second = second.unwrap();
     assert!(
         actions.local_calls().contains(&ServiceAction::Install),
         "reported {:?} with no service retry: {:?}",
         second.state,
         actions.local_calls()
     );
+    assert!(!operator.asked().contains(&ChallengeKind::Review));
+    let resumed = Journal::read(&local, &request.operation).unwrap().unwrap();
+    assert!(!resumed.plan.as_ref().unwrap().summary.is_empty());
+    assert_eq!(
+        resumed.plan_digest,
+        Some(resumed.plan.as_ref().unwrap().digest())
+    );
+    assert_eq!(
+        resumed.roster.as_ref().unwrap().fleet_id,
+        approved.roster.as_ref().unwrap().fleet_id
+    );
+    assert!(resumed.completed("local", "create"));
 }
 
 struct HeldAdmission {
@@ -1961,6 +2039,114 @@ fn a_running_target_refuses_before_issuance_and_can_retry_after_stopping() {
         .unwrap();
     assert_eq!(second.state, OperationState::Completed);
 }
+#[test]
+fn removal_cannot_target_this_machine_with_different_casing() {
+    let lab = Lab::new("leave-self-case", "Studio");
+    for machine in ["studio", "Studio", "STUDIO"] {
+        let mut request = lab.request("op-leave-self-case", machine, &lab.issuer);
+        request.kind = OperationKind::Leave;
+        request.dry_run = true;
+        let operator = Operator::new();
+        let error = lab
+            .engine(request, operator.clone(), gateway(&[]), services())
+            .run()
+            .unwrap_err();
+        assert_eq!(reason_of(&error), Some("identity_mismatch"));
+        assert!(operator.asked().is_empty());
+        assert_eq!(fleet::load(&lab.issuer).unwrap().unwrap().machine, "Studio");
+    }
+}
+
+#[test]
+fn mixed_case_removal_preserves_the_roster_identity_through_resume() {
+    let lab = Lab::new("leave-case", "studio");
+    let second = data_dir("leave-case-2");
+    let third = data_dir("leave-case-3");
+    lab.engine(
+        lab.request("op-admit-third", "buildbox", &third),
+        Operator::new(),
+        gateway(&["studio", "buildbox"]),
+        services(),
+    )
+    .run()
+    .unwrap();
+    // The older create/from workflow allows names with capitals. Keep that spelling
+    // in the real target profile, its certificate and each machine's roster.
+    fleet::create_from(
+        &second,
+        &lab.issuer.join("fleet"),
+        "Vps",
+        "127.0.0.1",
+        ephemeral().into(),
+    )
+    .unwrap();
+    for data in [&lab.issuer, &third] {
+        fleet::add_member(data, "Vps", "127.0.0.1", None).unwrap();
+    }
+
+    let mut request = lab.request("op-leave-case", "vps", &second);
+    request.kind = OperationKind::Leave;
+    let mut preview = request.clone();
+    preview.dry_run = true;
+    let plan = lab
+        .engine(preview, Operator::new(), gateway(&[]), services())
+        .run()
+        .unwrap()
+        .plan
+        .unwrap();
+    assert_eq!(plan.target.machine, "Vps");
+    assert_eq!(
+        plan.members.iter().filter(|m| m.machine == "Vps").count(),
+        1
+    );
+
+    let interrupted = lab
+        .engine(
+            request.clone(),
+            Operator::stopping_after("roster"),
+            gateway(&["studio", "buildbox"]),
+            services(),
+        )
+        .run()
+        .unwrap_err();
+    assert_eq!(reason_of(&interrupted), Some("cancelled"));
+    assert!(fleet::load(&second).unwrap().is_none());
+    assert!(!fleet::load(&lab.issuer)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|m| m.machine == "Vps"));
+    assert!(fleet::load(&third)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|m| m.machine == "Vps"));
+
+    let outcome = lab
+        .engine(
+            request,
+            Operator::new(),
+            gateway(&["studio", "buildbox"]),
+            services(),
+        )
+        .run()
+        .unwrap();
+    assert_eq!(outcome.state, OperationState::Completed);
+    assert!(!fleet::load(&third)
+        .unwrap()
+        .unwrap()
+        .members
+        .iter()
+        .any(|m| m.machine == "Vps"));
+    let record = Journal::read(&lab.issuer, "op-leave-case")
+        .unwrap()
+        .unwrap();
+    assert!(record.completed("Vps", "leave"));
+    assert!(!record.completed("vps", "leave"));
+}
+
 #[test]
 fn removal_resumes_after_the_local_roster_entry_has_gone() {
     let lab = Lab::new("rvleave", "studio");
@@ -2370,9 +2556,53 @@ fn roster_changes_during_approval_refuse_before_credential_issuance() {
         .run()
         .unwrap_err();
     println!("STALE_REVIEW={result:#}");
-    assert_eq!(reason_of(&result), Some("roster_conflict"));
+    assert_eq!(reason_of(&result), Some("roster_changed"));
     assert!(fleet::load(&target).unwrap().is_none());
     assert!(fleet::read_receipt(&lab.issuer, "op-stale-review")
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn a_new_operation_reuses_the_existing_targets_authenticated_connection() {
+    let lab = Lab::new("reuse", "studio");
+    let target = data_dir("reuse-t");
+    lab.engine(
+        lab.request("op-reuse-first", "vps", &target),
+        Operator::new(),
+        gateway(&["studio", "vps"]),
+        services(),
+    )
+    .run()
+    .expect("first admission");
+    let outcome = lab
+        .engine(
+            lab.request("op-reuse-second", "vps", &target),
+            Operator::new(),
+            gateway(&["studio", "vps"]),
+            services(),
+        )
+        .run()
+        .expect("already admitted target reuses the same SSH connection and data directory");
+    assert_eq!(outcome.state, OperationState::Completed);
+    assert!(outcome.steps.iter().any(|step| step.machine == "vps"
+        && step.step == "member_preflight"
+        && step.outcome == "ok"));
+}
+
+struct DeclineNewReview(Arc<Operator>);
+impl Conversation for DeclineNewReview {
+    fn ask(&self, request: ChallengeRequest) -> anyhow::Result<Answer> {
+        if request.kind == ChallengeKind::Review {
+            self.0.asked.lock().unwrap().push(request.kind);
+            return ouro::fleet_setup::refuse("review_declined", "the new roster must be reviewed");
+        }
+        self.0.ask(request)
+    }
+    fn notify(&self, event: Event) {
+        self.0.notify(event);
+    }
+    fn cancelled(&self) -> bool {
+        false
+    }
 }

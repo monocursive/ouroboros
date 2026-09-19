@@ -5,11 +5,13 @@ native subagents placed across it. This document is the whole of it — what a n
 what it reads from its environment, how nodes find each other, and what an operator
 types to bring a second machine up.
 
-There is no enrollment product. Nothing here copies a binary to another machine, opens
-an SSH connection, mints an invitation, or installs a service. An operator builds `ouro`
-on each machine (`make ouro`), copies the binary the way they copy any other binary, and
-then either copies one cluster-identity directory between the machines or sets the
-environment below by hand. `docs/proposals/core.md` §3 records that decision.
+Use **Devices** in the web or terminal client, or `ouro fleet setup` followed by
+`ouro fleet add`, for guided onboarding over OpenSSH. The deployment host installs a
+missing binary from a checksummed release, reviews the target and roster changes,
+issues a certificate for the target's own key, and configures a startup service.
+Tailscale or Headscale must already be installed and connected on both machines.
+See [Guided setup](#two-machines-over-ssh) for the ordinary path. The manual identity-copy and
+environment recipes below are advanced alternatives and transfer broader authority.
 
 ## Roles
 
@@ -240,16 +242,29 @@ reason that never asked for a password — a key the target will not take — is
 three times: there is nothing for anyone to retype. Host-trust and review challenges use
 the same five-minute window.
 
-On this branch the Devices views (the web page at `/devices`, the terminal client's
-`ctrl+x D`) and the `fleet.devices` / `fleet.deployment.*` gateway methods drive this
-same engine through a detached worker; none of it is in a tagged release yet. "What has
-been exercised" below says which parts have run against real programs and which rest
+The Devices views (the web page at `/devices`, the terminal client's `ctrl+x D`) and
+the `fleet.devices` / `fleet.deployment.*` gateway methods drive this same engine
+through a detached worker. These commands and views are available in v0.1.9; fixes
+in an unreleased working tree reach clean targets only when matching Linux/macOS
+artifacts are built and distributed. "What has been exercised" below says which parts have run against real programs and which rest
 on tests alone.
 
-## Two machines, by hand
+If another admission changes the roster while a binary is transferring, Retry the
+same operation and review the updated plan. The prepared identity stays bound to
+that operation; credentials that were already issued are never silently reissued.
+Cancellation before issuance removes only that operation's uninstalled preparation.
+An older target that cannot perform that cleanup reports the residue and the
+`ouro fleet doctor` / `ouro fleet leave` recovery commands.
 
-Nothing below contacts a machine. An operator copies one directory, types four commands,
-and the two runtimes find each other.
+The download and upload stages report bytes and elapsed time. Upload progress counts
+bytes sent into SSH; the step completes only after the target verifies the checksum.
+
+## Two machines, by hand (advanced)
+
+The guided flow above keeps the CA key on the deployment host. This alternative
+copies it to the target and is intended for administrators managing identities by
+hand. The fleet commands below do not contact peers; the operator transfers the
+identity and updates each roster explicitly.
 
 `ouro fleet create` gives the first machine a cluster identity in `<data dir>/fleet/`: a
 fleet id, a node name, a private 64-hex cookie at mode 0600, a self-signed CA, a node
@@ -629,12 +644,12 @@ Fleet views are *observations*: bounded per-node answers merged at read time, wi
 unreachable nodes named. Nothing here is membership consensus, quorum, or a partition
 policy.
 
-## Deploying onto another machine — not yet shipped in a release
+## Deployment worker and gateway
 
-**This section describes work in progress.** The Elixir broker below is in the tree; the
-Rust deployment worker it talks to is being built alongside it and is not in a released
-`ouro`. On a runtime whose `ouro` does not serve `fleet worker start`, every verb here
-answers a stable reason code — it does not appear to work.
+The web and terminal Devices views use the deployment worker through these gateway
+methods. The worker ships with `ouro`; its executable must match the runtime. A
+runtime paired with an older executable that lacks `fleet worker start` reports a
+stable refusal rather than starting an incomplete operation.
 
 A deployment is long, interruptible, and carries an SSH credential, so the work does not
 happen inside the runtime that was asked for it. `Ouroboros.Fleet.Deployment` is a broker,

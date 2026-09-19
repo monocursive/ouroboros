@@ -45,6 +45,10 @@ const MAX_PROMPT_BYTES: usize = 4 * 1024;
 /// How long the accept loop sleeps between polls while nothing is connecting.
 const POLL: Duration = Duration::from_millis(20);
 
+// Every bridge in an operation shares one conversation/registry. Reusing issuer 1
+// for the next host made its first prompt inherit the previous host's withdrawal.
+static NEXT_ISSUER: AtomicU64 = AtomicU64::new(1);
+
 /// How long one connection may take to send its prompt. OpenSSH's helper connects and
 /// writes at once; anything slower is not it.
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -145,7 +149,6 @@ pub struct Bridge {
     prompt_began: Arc<Mutex<Option<Instant>>>,
     last_reason: Arc<Mutex<Option<&'static str>>>,
     conversation: Arc<dyn Conversation>,
-    next_issuer: AtomicU64,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -252,7 +255,6 @@ impl Bridge {
             prompt_began,
             last_reason,
             conversation,
-            next_issuer: AtomicU64::new(1),
             thread: Some(thread),
         })
     }
@@ -293,7 +295,7 @@ impl Bridge {
             state.refs += 1;
             state.issuer
         } else {
-            let issuer = self.next_issuer.fetch_add(1, Ordering::Relaxed);
+            let issuer = NEXT_ISSUER.fetch_add(1, Ordering::Relaxed);
             groups.insert(group, GroupState { refs: 1, issuer });
             issuer
         };
@@ -990,6 +992,56 @@ mod tests {
         assert_eq!(
             classify("Enter passphrase for key (password-protected): "),
             Prompt::Passphrase
+        );
+    }
+
+    #[test]
+    fn closing_one_hosts_connection_does_not_withdraw_the_next_hosts_prompt() {
+        use super::super::challenge::Registry;
+        #[derive(Default)]
+        struct Prompts(Registry);
+        impl Conversation for Prompts {
+            fn ask(&self, _: ChallengeRequest) -> Result<Answer> {
+                unreachable!()
+            }
+            fn notify(&self, _: super::super::Event) {}
+            fn withdraw(&self, issuer: u64, reason: &'static str) {
+                self.0.invalidate_issuer(issuer, reason);
+            }
+        }
+        let conversation = Arc::new(Prompts::default());
+        let make = |host: &str| {
+            Arc::new(
+                Bridge::start(
+                    Path::new("ouro"),
+                    PromptContext {
+                        target: host.into(),
+                        user: "tester".into(),
+                        port: 22,
+                        key_label: None,
+                        key_fingerprint: None,
+                    },
+                    conversation.clone(),
+                )
+                .unwrap(),
+            )
+        };
+        let first = make("127.0.0.1");
+        let armed = first.arm(100);
+        let old_issuer = armed.issuer;
+        drop(armed);
+        let next = make("127.0.0.2");
+        let armed = next.arm(200);
+        assert!(conversation
+            .0
+            .issue(ChallengeKind::Password, json!({}), None, old_issuer)
+            .is_err());
+        assert!(
+            conversation
+                .0
+                .issue(ChallengeKind::Password, json!({}), None, armed.issuer)
+                .is_ok(),
+            "a new host must be able to ask for its own password"
         );
     }
 

@@ -210,7 +210,11 @@ case "$1" in
     case "$2" in
       gui/*/*)
         if [ -f "$state/loaded" ]; then
-          printf '%s = {{\n\tstate = running\n\tpid = 4321\n\tlast exit code = 0\n}}\n' "$2"
+          if [ -f "$state/stopped" ]; then
+            printf '%s = {{\n\tstate = not running\n\tlast exit code = 0\n}}\n' "$2"
+          else
+            printf '%s = {{\n\tstate = running\n\tpid = 4321\n\tlast exit code = 0\n}}\n' "$2"
+          fi
           exit 0
         fi
         echo "Could not find service" >&2
@@ -245,6 +249,7 @@ case "$1" in
       exit 5
     fi
     touch "$state/loaded"
+    rm -f "$state/stopped"
     exit 0 ;;
   kickstart)
     case "$2" in
@@ -279,7 +284,11 @@ case "$1" in
         exit 0 ;;
       *.service)
         if [ -f "$state/enabled" ]; then
-          printf 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4321\nExecMainStatus=0\nUnitFileState=enabled\n'
+          if [ -f "$state/stopped" ]; then
+            printf 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nExecMainStatus=0\nUnitFileState=enabled\n'
+          else
+            printf 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4321\nExecMainStatus=0\nUnitFileState=enabled\n'
+          fi
         else
           printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nUnitFileState=\n'
         fi
@@ -290,7 +299,7 @@ case "$1" in
   enable)
     if [ "$2" != "--now" ]; then echo "unexpected enable: $*" >&2; exit 64; fi
     if [ -f "$state/masked" ]; then echo "Unit file is masked." >&2; exit 1; fi
-    touch "$state/enabled"; exit 0 ;;
+    touch "$state/enabled"; rm -f "$state/stopped"; exit 0 ;;
   disable)
     if [ "$2" != "--now" ]; then echo "unexpected disable: $*" >&2; exit 64; fi
     if [ -f "$state/disable_fails" ]; then echo "Failed to disable: unit is masked" >&2; exit 1; fi
@@ -443,6 +452,30 @@ fn installing_a_launchagent_writes_one_private_file_and_bootstraps_exactly_once(
         .calls()
         .iter()
         .all(|call| call.starts_with("launchctl print")));
+}
+
+#[test]
+fn installing_a_matching_stopped_service_starts_it_on_both_platforms() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let root = scratch("stopped-service");
+        let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &data_dir);
+        fleet_service::install(&plan, &fakes.programs, false).expect("initial install");
+        fakes.set("stopped", true);
+        fakes.forget_calls();
+
+        let report = fleet_service::install(&plan, &fakes.programs, false)
+            .expect("install should start an unchanged stopped service");
+
+        assert_eq!(report.running, Some(true));
+        assert!(!fakes.state.join("stopped").exists());
+        assert!(fakes.calls().iter().any(|call| {
+            call.starts_with("launchctl bootstrap")
+                || call.starts_with("systemctl --user enable --now")
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[test]

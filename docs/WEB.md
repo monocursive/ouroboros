@@ -537,10 +537,14 @@ you can do about it.**
   found unreadable. An operation this machine is holding is the fresher fact and outranks
   discovery's `state` — except a cancelled one, which left the device exactly as discovery
   found it.
+  A failed or interrupted removal stays retryable even when discovery still reports the
+  member connected; its details reopen that operation rather than preparing another removal.
 - **Presence is a dot, a word and a relative time.** `● online`, `○ offline, seen 3 days
   ago`. `Devices.relative_time/2` takes `now` as an argument so a test states the moment it
   is asking about. The exact instant is in the details panel, where somebody asked for it.
   A client that reported nothing reads "presence not reported", which is not "offline".
+  Details are selected by inventory row identity, not by deployment address, so separate
+  IPv6-only peers without a usable IPv4 address still open their own panels.
 - **Search and the filter appear only past eight rows**, and from the *unfiltered* count, so
   the box does not vanish from under the cursor of the person typing into it.
 - **Discovery failure is one notice in the client's own words** — *Tailscale did not answer
@@ -571,21 +575,10 @@ member's details panel rather than from its row, and names a **roster machine** 
 address — aiming a removal at whatever answers at an address is not something this page will
 do.
 
-**Three of these need the runtime half of §5.5, which lands separately.** The page is
-written against the documented shape and degrades honestly without it, but until each
-arrives the behaviour is inert rather than broken:
-
-| What the page does | What it needs | Where |
-|---|---|---|
-| The **Remove from fleet** drawer sends `kind: "leave"` with `target.machine` | `prepare`'s `kind` enum accepts `leave`, and `target.address` stops being required for it | `lib/ouroboros/gateway/methods/contract.ex` |
-| **The setup worker stopped: …** with a **Retry** | `worker_exit` survives `Journal`'s field allowlist and is put in the live snapshot | `lib/ouroboros/fleet/deployment/journal.ex`, `.../deployment/client.ex` |
-| *This is a development runtime; the packaged `ouro` is what sets a machine up.* | `dev_runtime` is emitted as a capability reason | `Deployment.deploy_blockers/2` |
-
-Pressing **Connect** in the leave drawer today returns `params.kind must be one of add,
-setup`, which the drawer reports as a refusal rather than hanging. The tests for these three
-say so where they cannot drive the real path: the leave test asserts on
-`DevicesLive.prepare_params/1` — the request document this page owns — rather than on what a
-fake worker received, and the `worker_exit` test injects the snapshot it would be handed.
+The roster-forgetting fallback is offered only after a failed, unreachable removal whose
+snapshot explicitly records no steps. A timeout after inspection or a stop attempt is not
+evidence that nothing changed, so it never recommends `--accept-state-loss`. The failed
+operation and its recorded steps remain available through **Retry**.
 
 Everything in [`FLEET.md`](FLEET.md)'s "Trust" section is unchanged and is the reason several
 of these choices look roundabout: no secret on a command line or in a journal, one masked

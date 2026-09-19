@@ -258,6 +258,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
     {:noreply,
      socket
      |> close_drawer()
+     |> load()
      |> push_patch(to: "/devices", replace: true)}
   end
 
@@ -451,8 +452,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   def handle_event("open-operation", _params, socket), do: {:noreply, socket}
 
-  def handle_event("inspect-device", %{"address" => address}, socket) when is_binary(address) do
-    case Enum.find(devices(socket), &(&1["address"] == address)) do
+  def handle_event("inspect-device", %{"row" => row}, socket) when is_binary(row) do
+    case Enum.find(devices(socket), &(&1["row_id"] == row)) do
       device when is_map(device) ->
         if Devices.inspectable?(device),
           do: {:noreply, open_inspect(socket, device)},
@@ -660,6 +661,13 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   defp read_inventory(socket) do
     case read(socket, @inventory) do
       {:ok, inventory} when is_map(inventory) ->
+        inventory =
+          Map.update(inventory, "devices", [], fn rows ->
+            rows
+            |> Enum.filter(&is_map/1)
+            |> Enum.map(&Map.put(&1, "row_id", Devices.row_id(&1)))
+          end)
+
         socket
         |> assign(:inventory, inventory)
         |> assign(:inventory_error, nil)
@@ -1003,7 +1011,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
 
   # The row a `deploy` may be aimed at: one this listing says nothing has inspected. The
   # event carries an address, and an address is a string a client chose.
-  defp deployable(socket, address) do
+  defp deployable(socket, address) when is_binary(address) and address != "" do
     case Enum.find(devices(socket), &(&1["address"] == address)) do
       device when is_map(device) ->
         if Devices.deployable?(device) or left?(socket, device),
@@ -1014,6 +1022,9 @@ defmodule Ouroboros.Web.Live.DevicesLive do
         {:refused, "This machine's inventory does not list that address."}
     end
   end
+
+  defp deployable(_socket, _address),
+    do: {:refused, "This machine's inventory does not list that address."}
 
   # A member this fleet has just removed is a machine it can add again, whatever discovery
   # still says: `fleet.devices` goes on calling it a member until the network client
@@ -1504,10 +1515,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # necessarily the first self row the listing carries.
       |> assign(:setup_device, Enum.find(all, &Devices.setup?/1))
       |> assign(:rows, rows(assigns, all))
-      # §5.1: the controls appear only past eight rows, and from the *unfiltered* count, so
-      # that typing a query that matches two devices does not take the search box away from
-      # under the cursor.
-      |> assign(:controls?, length(all) > @search_rows)
+      # Keep active controls reachable even if a refresh shrinks the inventory.
+      |> assign(
+        :controls?,
+        length(all) > @search_rows or assigns.query != "" or assigns.filter != "all"
+      )
       |> then(fn assigns ->
         {shown, hidden} = orphans(assigns, all)
 
@@ -1809,12 +1821,35 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       # now · Open" after a removal was this call throwing the difference away.
       |> assign(
         :words,
-        Devices.operation_words(state, operation["kind"]) || Devices.ouroboros_words(device)
+        if(
+          device["state"] == "fleet_member_connected" and
+            state in ["failed", "interrupted", "completed", "cancelled"],
+          do:
+            Devices.ouroboros_words(device) <>
+              if(state in ["failed", "interrupted"],
+                do:
+                  " · " <>
+                    if(operation["kind"] == "leave",
+                      do: "removal failed",
+                      else: "last setup stopped"
+                    ),
+                else: ""
+              ),
+          else:
+            Devices.operation_words(state, operation["kind"]) || Devices.ouroboros_words(device)
+        )
       )
       |> assign(
         :action,
-        Devices.operation_action(state, operation["kind"]) ||
-          Devices.row_action(device, assigns.host && assigns.host["os"])
+        if(
+          device["state"] == "fleet_member_connected" and
+            (state in ["completed", "cancelled"] or
+               (state in ["failed", "interrupted"] and operation["kind"] != "leave")),
+          do: Devices.row_action(device, assigns.host && assigns.host["os"]),
+          else:
+            Devices.operation_action(state, operation["kind"]) ||
+              Devices.row_action(device, assigns.host && assigns.host["os"])
+        )
       )
       |> assign(:operation_id, operation["operation"])
 
@@ -1865,7 +1900,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           type="button"
           class="ouro-quiet-button"
           phx-click="inspect-device"
-          phx-value-address={@device["address"]}
+          phx-value-row={@device["row_id"]}
         >
           Details
         </button>
@@ -1916,7 +1951,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       title={@blocked? && @blocked}
       aria-describedby={@blocked? && "ouro-devices-blocked"}
       phx-click={not @blocked? && @event}
-      phx-value-address={@device["address"]}
+      phx-value-address={if @event == "deploy", do: @device["address"]}
+      phx-value-row={if @event == "inspect-device", do: @device["row_id"]}
       phx-value-operation={@operation}
     >
       {@label}
@@ -2041,8 +2077,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           aria-live="polite"
           aria-atomic="true"
         >
-          <span>{@announcement}</span>
-          <span class="ouro-visually-hidden">{@announced}</span>
+          <span id={"ouro-deploy-announcement-#{@announced}"}>{@announcement}</span>
         </p>
 
         <p :if={@drawer.error} id="ouro-deploy-error" class="ouro-refusal" role="alert">
@@ -2092,11 +2127,14 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           <button type="button" class="ouro-quiet-button" phx-click="drawer-close">
             Close
           </button>
-          <span class="ouro-devices-quiet">keeps running</span>
+          <span
+            :if={@drawer.operation && @step not in [:select, :inspect, :finish]}
+            class="ouro-devices-quiet"
+          >keeps running</span>
           <button
             :if={
               not is_nil(@drawer.operation) and @can_operate? and
-                Devices.unfinished?(state_of(@drawer))
+                @step != :finish and Devices.unfinished?(state_of(@drawer))
             }
             type="button"
             class="ouro-quiet-button"
@@ -2375,13 +2413,28 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       </p>
 
       <p :if={@operation != %{}} class="ouro-devices-quiet">
-        Latest setup <span class="ouro-mono">{Devices.plain(@operation["operation"], 32)}</span>
-        — {Devices.operation_state(@operation["state"])}
+        Latest {if @operation["kind"] == "leave", do: "removal", else: "setup"}
+        <span class="ouro-mono">{Devices.plain(@operation["operation"], 32)}</span>
+        — {if @operation["kind"] == "leave",
+          do: Devices.operation_words(@operation["state"], "leave"),
+          else: Devices.operation_state(@operation["state"])}
       </p>
 
       <div class="ouro-devices-actions">
         <button
-          :if={Devices.removable?(@device)}
+          :if={@operation["kind"] == "leave" and @operation["state"] in ["failed", "interrupted"]}
+          type="button"
+          class="ouro-button"
+          phx-click="open-operation"
+          phx-value-operation={@operation["operation"]}
+        >
+          Retry removal
+        </button>
+        <button
+          :if={
+            Devices.removable?(@device) and
+              not (@operation["kind"] == "leave" and @operation["state"] in ["failed", "interrupted"])
+          }
           type="button"
           class="ouro-quiet-button"
           phx-click="leave-device"
@@ -2786,9 +2839,11 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       </dl>
 
       <p id="ouro-deploy-trust-hint">
-        Check this fingerprint on the device itself before continuing. Nothing on this page
-        can tell you whether this key is the right one.
+        Check this fingerprint on the device itself before continuing. Use the device's
+        console or an already trusted SSH connection, then compare the SHA256 fingerprint.
+        Nothing on this page can establish that trust for you.
       </p>
+      <pre :if={Devices.host_key_command(@facts["algorithm"])} class="ouro-mono">{Devices.host_key_command(@facts["algorithm"])}</pre>
 
       <div class="ouro-devices-actions">
         <button
@@ -3129,9 +3184,12 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # reached. Every other failure has its own repair and this one would be wrong advice:
   # a roster tombstone is irreversible, and offering it for an authentication refusal or a
   # busy runtime is offering to throw away a machine that is still there.
+  # A leave records its target inspection before attempting stop or retirement. Require an
+  # explicitly empty step history: a timeout after that point can follow target mutations.
   defp leave_fallback(%{kind: "leave"} = drawer, done) when is_map(done) do
-    if Devices.unreachable?(done["reason"]),
-      do: Devices.leave_fallback(target_machine(drawer))
+    if done["ok"] == false and Devices.unreachable?(done["reason"]) and
+         get_in(drawer, [:status, "steps"]) == [],
+       do: Devices.leave_fallback(target_machine(drawer))
   end
 
   defp leave_fallback(_other, _done), do: nil
@@ -3185,7 +3243,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # truthy — a `||` chain written over it stops at nothing at all, which is the same trap
   # `Devices.name/2` exists for. A cause that sanitises away is not a cause.
   defp cause_text(value) do
-    case Devices.plain(value) do
+    case Devices.plain(value, 2_000) do
       "" -> nil
       sanitized -> sanitized
     end
@@ -3197,7 +3255,17 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # be an ordered list of six headed rows with a sentence each, under every step of the
   # drawer.
   defp steps(assigns) do
-    reported = List.wrap((assigns.drawer.status || %{})["steps"])
+    reported =
+      List.wrap((assigns.drawer.status || %{})["steps"])
+      |> Enum.reverse()
+      |> Enum.uniq_by(&{&1["machine"], &1["step"]})
+      |> Enum.reverse()
+      |> Enum.map(fn step ->
+        if step["outcome"] == "started" and finished?(assigns.drawer),
+          do: Map.put(step, "outcome", "failed"),
+          else: step
+      end)
+
     kind = assigns.drawer.kind
 
     assigns =

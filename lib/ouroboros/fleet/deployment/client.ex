@@ -125,7 +125,7 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   def subscribe(pid, subscriber, session \\ nil),
     do: GenServer.cast(pid, {:subscribe, subscriber, session})
 
-  @doc "Stops sending events to `pid`."
+  @doc "Stops sending events to `pid`, retaining its session presence until the process dies."
   @spec unsubscribe(pid(), pid()) :: :ok
   def unsubscribe(pid, subscriber), do: GenServer.cast(pid, {:unsubscribe, subscriber})
 
@@ -188,7 +188,8 @@ defmodule Ouroboros.Fleet.Deployment.Client do
       counter: 0,
       pending: %{},
       timers: %{},
-      subscribers: %{},
+      subscribers: MapSet.new(),
+      presences: %{},
       challenges: %{},
       challenge_seq: 0,
       steps: [],
@@ -568,15 +569,24 @@ defmodule Ouroboros.Fleet.Deployment.Client do
 
   @impl true
   def handle_cast({:subscribe, pid, session}, state) do
-    if Map.has_key?(state.subscribers, pid) do
-      {:noreply, state}
-    else
-      ref = Process.monitor(pid)
-      {:noreply, put_in(state.subscribers[pid], %{ref: ref, session: session})}
-    end
+    state =
+      if Map.has_key?(state.presences, pid) do
+        state
+      else
+        ref = Process.monitor(pid)
+        put_in(state.presences[pid], %{ref: ref, session: session})
+      end
+
+    {:noreply, %{state | subscribers: MapSet.put(state.subscribers, pid)}}
   end
 
-  def handle_cast({:unsubscribe, pid}, state), do: {:noreply, drop_subscriber(state, pid)}
+  def handle_cast({:unsubscribe, pid}, state) do
+    state = %{state | subscribers: MapSet.delete(state.subscribers, pid)}
+
+    # A closed drawer stops receiving events, but its tab still owns its prompts until
+    # the process dies. Anonymous subscribers carry no session binding to preserve.
+    {:noreply, if(is_nil(session_of(state, pid)), do: drop_presence(state, pid), else: state)}
+  end
 
   @impl true
   # A frame is a line, and `packet_size` is what stops one from being buffered without
@@ -625,10 +635,14 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   # A subscriber that died is a tab that was closed, a listener connection that dropped, or a
   # LiveView whose browser navigated away. Whichever it was, the session it spoke for is not
   # coming back to answer anything.
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    session = session_of(state, pid)
-    state = drop_subscriber(state, pid)
-    {:noreply, release_session(state, session)}
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    case state.presences[pid] do
+      %{ref: ^ref, session: session} ->
+        {:noreply, state |> drop_presence(pid) |> release_session(session)}
+
+      _other ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -755,7 +769,10 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   defp apply_event(state, %{"event" => "step"} = frame) do
     step = Journal.scrub_value(Map.drop(frame, ["v", "event"]))
 
-    %{state | steps: Enum.take(state.steps ++ [step], -@max_steps)}
+    previous =
+      Enum.reject(state.steps, &(&1["machine"] == step["machine"] and &1["step"] == step["step"]))
+
+    %{state | steps: Enum.take(previous ++ [step], -@max_steps)}
     |> announce(frame)
   end
 
@@ -895,24 +912,24 @@ defmodule Ouroboros.Fleet.Deployment.Client do
     event = Journal.scrub_value(Map.drop(frame, ["v"]))
 
     Enum.each(
-      Map.keys(state.subscribers),
+      state.subscribers,
       &send(&1, {:ouroboros_fleet_deployment, state.operation, event})
     )
   end
 
-  defp drop_subscriber(state, pid) do
-    case Map.pop(state.subscribers, pid) do
-      {nil, _subscribers} ->
+  defp drop_presence(state, pid) do
+    case Map.pop(state.presences, pid) do
+      {nil, _presences} ->
         state
 
-      {%{ref: ref}, subscribers} ->
+      {%{ref: ref}, presences} ->
         Process.demonitor(ref, [:flush])
-        %{state | subscribers: subscribers}
+        %{state | presences: presences, subscribers: MapSet.delete(state.subscribers, pid)}
     end
   end
 
   defp session_of(state, pid) do
-    case Map.fetch(state.subscribers, pid) do
+    case Map.fetch(state.presences, pid) do
       {:ok, %{session: session}} -> session
       :error -> nil
     end
@@ -944,7 +961,7 @@ defmodule Ouroboros.Fleet.Deployment.Client do
   defp release_session(state, nil), do: state
 
   defp release_session(state, session) do
-    if Enum.any?(state.subscribers, fn {_pid, entry} -> entry.session == session end) do
+    if Enum.any?(state.presences, fn {_pid, entry} -> entry.session == session end) do
       state
     else
       now = state.clock.()

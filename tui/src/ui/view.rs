@@ -4314,17 +4314,22 @@ fn devices(frame: &mut Frame, area: Rect, app: &App) {
     let height = rows[0].height as usize;
     let hidden = lines.len().saturating_sub(height);
 
-    // The page follows its cursor. `PageUp`/`PageDown` move `scroll` and that is the
-    // operator's intent, but a selected row below the fold is a row `Enter` acts on and
-    // nobody can see — which on this screen means starting a deployment against a machine
-    // whose name is off the page. The marked line is found rather than counted, so the
-    // list, the connect form and the menus are all followed by the same three lines.
+    // Cursor navigation keeps the destination visible. Explicit inventory paging may
+    // leave it behind to read the details; row actions then return to the cursor before
+    // they can act. Forms still always follow their active input.
     let mut scroll = app.devices.scroll.min(hidden);
-    let cursor = lines.iter().position(|line| {
-        line.spans
-            .first()
-            .is_some_and(|span| span.content.starts_with("> "))
-    });
+    let manual_inventory = app.devices.inventory_paging
+        && app.devices.connect.is_none()
+        && app.devices.operation.is_none();
+    let cursor = (!manual_inventory)
+        .then(|| {
+            lines.iter().position(|line| {
+                line.spans
+                    .first()
+                    .is_some_and(|span| span.content.starts_with("> "))
+            })
+        })
+        .flatten();
 
     if let Some(cursor) = cursor {
         if cursor < scroll {

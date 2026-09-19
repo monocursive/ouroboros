@@ -98,6 +98,26 @@ defmodule Ouroboros.Web.Live.Devices do
   # offering something that refuses when pressed.
   @blocked_states ~w(peer_offline unsupported_platform no_usable_ipv4)
 
+  @doc "An independent host-key check, using only known OpenSSH key filenames."
+  def host_key_command(algorithm) do
+    file =
+      case algorithm do
+        algo when algo in ["ssh-rsa", "rsa-sha2-256", "rsa-sha2-512"] ->
+          "rsa"
+
+        "ssh-ed25519" ->
+          "ed25519"
+
+        algo when algo in ["ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"] ->
+          "ecdsa"
+
+        _ ->
+          nil
+      end
+
+    if file, do: "ssh-keygen -lf /etc/ssh/ssh_host_#{file}_key.pub -E sha256"
+  end
+
   @doc """
   One string that came from somewhere this runtime does not control, made safe to read.
 
@@ -177,6 +197,23 @@ defmodule Ouroboros.Web.Live.Devices do
   # ------------------------------------------------------------------------------------
   # The list
   # ------------------------------------------------------------------------------------
+
+  @doc """
+  A selection key for a web inventory row, independent of its deployment address.
+
+  Network identity survives address and presence changes. Rows without any identity get a
+  key scoped to this inventory read, rather than sharing an absent address with another row.
+  This key is for Details only; deployment authorization still uses the address.
+  """
+  @spec row_id(map()) :: String.t()
+  def row_id(device) do
+    Enum.find_value(~w(stable_id node_key address machine), fn field ->
+      case device[field] do
+        value when is_binary(value) and value != "" -> field <> ":" <> value
+        _absent -> nil
+      end
+    end) || "row:" <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+  end
 
   @doc """
   What this machine is called on its own row: **This Mac** on a Mac, **This machine**
@@ -693,7 +730,7 @@ defmodule Ouroboros.Web.Live.Devices do
   def operation_state("attached"), do: "Connected to the setup worker"
   def operation_state("inspecting"), do: "Reading the machine"
   def operation_state("awaiting_host_trust"), do: "Waiting for you to check the host key"
-  def operation_state("awaiting_auth"), do: "Waiting for a password"
+  def operation_state("awaiting_auth"), do: "Connecting over SSH"
   def operation_state("awaiting_review"), do: "Waiting for you to approve the plan"
   def operation_state("deploying"), do: "Setting up"
   def operation_state("restarting_host"), do: "Restarting Ouroboros on this machine"
@@ -916,6 +953,13 @@ defmodule Ouroboros.Web.Live.Devices do
   @spec stages() :: [{String.t(), String.t(), [String.t()]}]
   @spec stages(term()) :: [{String.t(), String.t(), [String.t()]}]
   def stages(kind \\ nil)
+
+  def stages("setup"),
+    do: [
+      {"inspect", "Inspect", ~w(inspect)},
+      {"membership", "Create fleet", ~w(create)},
+      {"startup", "Start at login", ~w(service stop_runtime)}
+    ]
 
   def stages("leave"), do: @leave_stages
   def stages(_add_or_setup), do: @stages
@@ -1335,15 +1379,13 @@ defmodule Ouroboros.Web.Live.Devices do
       "--accept-state-loss` on this machine."
   end
 
-  # A session was never established: nothing on the far machine was touched, so the roster
-  # is the only thing left to repair and the CLI recipe is the way to do it. An
-  # authentication refusal is deliberately *not* one of these — that machine answered, and
-  # the repair is a working credential rather than a tombstone. Nor are the host-key
-  # reasons, whose repair is verifying the key.
+  # These reasons can also occur after a session was established. Callers must additionally
+  # establish from the recorded steps that the target was never reached before offering
+  # the irreversible fallback. Authentication and host-key refusals have their own repairs.
   @unreachable ~w(ssh_unavailable ssh_timeout connection_lost)
 
   @doc """
-  Whether a failure's stable reason says the member could not be reached at all.
+  Whether a failure's stable reason can describe an unreachable member.
 
   The `reason` on the worker's failure `done` frame (`worker.rs`: `reason_of(error)`), which
   is a code rather than a sentence — the sentence beside it is the operator's, this is the
