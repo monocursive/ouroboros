@@ -133,8 +133,8 @@ pub struct Record {
     pub plan: Vec<String>,
     #[serde(default)]
     pub steps: Vec<StepRecord>,
-    /// What an interrupted or cancelled operation left behind that it could not clean
-    /// up. Named, never guessed at.
+    /// What a failed or cancelled operation left behind that it could not clean up.
+    /// Named, never guessed at.
     #[serde(default)]
     pub residue: Vec<String>,
     #[serde(default)]
