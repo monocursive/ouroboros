@@ -4288,12 +4288,12 @@ fn help_sections(app: &App) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     (rows, limits)
 }
 
-/// The Devices view: the machines this runtime can see, and the deployment of Ouroboros
-/// onto one of them.
+/// The Devices view: the machines this runtime can see, and the one command to run about
+/// each of them.
 ///
 /// Nearly the whole screen, because it is a page rather than a dialog, and drawn from
 /// [`super::app::devices_lines`] so a test can read every row of it without a terminal.
-/// The list follows its own cursor; the longer screens page with `PageUp`/`PageDown`.
+/// The list follows its own cursor; a long one pages with `PageUp`/`PageDown`.
 fn devices(frame: &mut Frame, area: Rect, app: &App) {
     let popup = centered(area, 92, area.height.saturating_sub(2).max(8));
     frame.render_widget(Clear, popup);
@@ -4314,13 +4314,11 @@ fn devices(frame: &mut Frame, area: Rect, app: &App) {
     let height = rows[0].height as usize;
     let hidden = lines.len().saturating_sub(height);
 
-    // Cursor navigation keeps the destination visible. Explicit inventory paging may
-    // leave it behind to read the details; row actions then return to the cursor before
-    // they can act. Forms still always follow their active input.
+    // Cursor navigation keeps the destination visible. Explicit paging may leave it
+    // behind so that a details pane below the fold can be read; the next arrow key
+    // brings the cursor back.
     let mut scroll = app.devices.scroll.min(hidden);
-    let manual_inventory = app.devices.inventory_paging
-        && app.devices.connect.is_none()
-        && app.devices.operation.is_none();
+    let manual_inventory = app.devices.inventory_paging;
     let cursor = (!manual_inventory)
         .then(|| {
             lines.iter().position(|line| {

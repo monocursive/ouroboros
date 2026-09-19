@@ -6,30 +6,25 @@
 //! surface has its own copy on purpose: the two clients do not share a crate, and a
 //! sentence that drifted would be a review finding rather than a silent coupling.
 
-/// Broker / worker reason codes this client has words for. The drift test in
-/// `tests/devices_flow.rs` walks the fixtures against this list so a new code on the
-/// wire cannot land as an identifier.
+/// Reason codes this client has words for: the ones a `fleet.devices` or `fleet.status`
+/// read can be refused with, and the ones a journal's `last_error` can record. The drift
+/// test in `tests/devices_flow.rs` walks the fixtures against this list so a new code on
+/// the wire cannot land as an identifier.
+///
+/// The challenge, approval and takeover codes went with the flow that raised them: this
+/// client answers no challenge, approves no plan and takes over nothing (§10), so a
+/// sentence for `challenge_not_bound` would be a sentence about a screen that no longer
+/// exists. What survives is what a read can still be told, plus what a worker can still
+/// have written down before it stopped.
 pub const REASON_CODES: &[&str] = &[
-    "plan_changed",
-    "operation_in_progress",
-    "start_in_flight",
-    "challenge_not_bound",
-    "challenge_consumed",
-    "challenge_expired",
-    "challenge_kind_mismatch",
     "host_key_changed",
-    "already_attached",
-    "operation_finished",
-    "operation_state_unknown",
-    "operation_not_yours",
-    "deploy_blocked",
-    "no_worker",
-    "worker_attaching",
+    "version_mismatch",
+    "fleet_present",
+    "already_installed",
+    "challenge_expired",
     "worker_unavailable",
     "worker_unreachable",
     "worker_timeout",
-    "no_review_pending",
-    "session_unbound",
     "unknown_operation",
     "devices_busy",
     "no_data_dir",
@@ -37,21 +32,25 @@ pub const REASON_CODES: &[&str] = &[
     "journal_unreadable",
 ];
 
-/// `capabilities.reasons` / `deploy_blocked` blockers. Same codes can appear as broker
-/// reasons with a different sentence: a host that cannot deploy is not the same statement
-/// as a verb that was refused for that reason after the fact.
+/// `capabilities.reasons`: what this runtime says it cannot do, and why.
+///
+/// `no_ca_key` is gone with the per-member PKI (§1): one fleet is one shared bundle, every
+/// member holds the CA key, and "this machine cannot admit" stopped being a fact about
+/// any machine. A document that still sends it is named by the fallback rather than
+/// explained by a sentence this build no longer believes.
 pub const BLOCKER_CODES: &[&str] = &[
-    "no_ca_key",
     "ouro_path_unknown",
     "no_data_dir",
     "cleartext_web_bind",
     "dev_runtime",
 ];
 
-/// `fleet.deployment.status`'s `state` values, including the client-only `attaching`.
+/// The journal's `state` values, as `fleet.devices`'s operation rows carry them.
+///
+/// `attaching` is gone with the client that attached: there is no worker connection for a
+/// terminal to be partway through making.
 pub const OPERATION_STATES: &[&str] = &[
     "spawning",
-    "attaching",
     "inspecting",
     "awaiting_host_trust",
     "awaiting_auth",
@@ -65,52 +64,27 @@ pub const OPERATION_STATES: &[&str] = &[
     "cancelled",
 ];
 
-/// The broker's stable reason codes, as sentences. An unrecognised code is printed as
+/// The runtime's stable reason codes, as sentences. An unrecognised code is printed as
 /// itself: a runtime that grew a refusal this build predates must still be legible.
 pub fn reason_sentence(reason: &str) -> String {
     match reason {
-        "plan_changed" => "the plan changed after it was reviewed, so it was not applied. \
-                           Read the new one and approve that."
-            .into(),
-        "operation_in_progress" => {
-            "this operation is already running under a different approval.".into()
-        }
-        "start_in_flight" => "an approval for this operation is still in flight.".into(),
-        "challenge_not_bound" => "this question was asked of a different session, so this \
-                                  one cannot answer it."
-            .into(),
-        "challenge_consumed" => "this question has already been answered once. A challenge \
-                                 is consumed when it is sent, so this is not a second guess."
-            .into(),
-        "challenge_expired" => "this question expired before it was answered.".into(),
-        "challenge_kind_mismatch" => "this answer is the wrong shape for the question.".into(),
         "host_key_changed" => "this host's key has changed. That blocks the deployment and \
                                needs a separate, verified repair; it is never accepted here."
             .into(),
-        "already_attached" => "a worker is already attached to this operation.".into(),
-        "operation_finished" => "this operation has already finished.".into(),
-        "operation_state_unknown" => "this operation's record cannot be read, so resuming \
-                                      it would be starting a second worker against a \
-                                      machine whose state nobody knows."
+        "version_mismatch" => "that machine runs a different Ouroboros from this one, and \
+                               nothing was replaced. Upgrade one of them to match."
             .into(),
-        "operation_not_yours" => "this operation belongs to another identity, and taking \
-                                  it over is a decision to make out loud."
+        "fleet_present" => "that machine already belongs to a different fleet.".into(),
+        "already_installed" => "that machine is already in this fleet under this name, so \
+                                nothing was rewritten."
             .into(),
-        // Named here too so the code never reaches the fallback; the sentence a caller
-        // actually draws comes from the blocker list, which has the names.
-        "deploy_blocked" => "this host cannot deploy right now.".into(),
-        "no_worker" => "no worker is attached to this operation; read its status, then \
-                        continue it."
+        "challenge_expired" => "a question the deployment asked went unanswered for five \
+                                minutes, so the operation stopped."
             .into(),
-        "worker_attaching" => "this operation's worker is still being connected to.".into(),
         "worker_unavailable" | "worker_unreachable" => {
             "the deployment worker is no longer reachable from this runtime.".into()
         }
         "worker_timeout" => "the deployment worker did not answer in time.".into(),
-        "no_review_pending" => "this operation has no plan waiting for approval.".into(),
-        "session_unbound" => "this connection carries no client session, and a deployment \
-                              question is answered by the session it was issued to."
-            .into(),
         "unknown_operation" => "this runtime has no operation with that id.".into(),
         "devices_busy" => "this runtime is already running as many device inventories as \
                            it allows. Try again in a moment."
@@ -134,16 +108,12 @@ pub fn reason_sentence(reason: &str) -> String {
 
 /// One blocker code, in words.
 ///
-/// The single vocabulary for both places the codes arrive: `fleet.devices`'s
-/// `capabilities.reasons`, which says in advance what this host cannot do, and a
-/// `deploy_blocked` refusal, which says the same thing at the moment something is
-/// attempted.
+/// `fleet.devices`'s `capabilities.reasons`: what this runtime says in advance it cannot
+/// do. The terminal client no longer gates anything on them — it runs nothing — but they
+/// are still facts the runtime reported about itself, and one of them changes what a
+/// printed recipe means.
 pub fn blocker_sentence(reason: &str) -> String {
     match reason {
-        "no_ca_key" => "This machine does not hold the fleet's certificate authority key, \
-                        so it can describe the fleet but cannot admit a member. Open \
-                        Devices on the machine that does."
-            .into(),
         "ouro_path_unknown" => "This runtime cannot say where its own ouro executable is, \
                                 so it has nothing to hand a deployment worker."
             .into(),
@@ -168,15 +138,19 @@ pub fn blocker_sentence(reason: &str) -> String {
     }
 }
 
-/// The deployment snapshot's state, as a person reads it. The codes stay in the data.
+/// A journal's `state`, as a person reads it. The codes stay in the data.
+///
+/// The waiting states keep their words even though this client answers none of them: an
+/// operation *is* waiting for somebody, and a row that said only "deploying" while a
+/// worker sat on an unanswered host-key question would be describing the wrong thing.
+/// Where it is answered is the web page, not here.
 pub fn operation_state(state: &str) -> String {
     match state {
         "spawning" => "starting the deployment worker".into(),
-        "attaching" => "connecting to the deployment worker".into(),
         "inspecting" => "inspecting the target".into(),
-        "awaiting_host_trust" => "waiting for you to verify the host key".into(),
-        "awaiting_auth" => "waiting for your credential".into(),
-        "awaiting_review" => "waiting for you to review the plan".into(),
+        "awaiting_host_trust" => "waiting for somebody to verify the host key".into(),
+        "awaiting_auth" => "waiting for a credential".into(),
+        "awaiting_review" => "waiting for somebody to review the plan".into(),
         "deploying" => "deploying".into(),
         "restarting_host" => "restarting this runtime".into(),
         "checking_readiness" => "checking readiness".into(),

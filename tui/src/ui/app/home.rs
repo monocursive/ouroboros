@@ -658,27 +658,6 @@ impl App {
     /// look broken in a way nothing on screen explained. Every overlay with a text field
     /// takes it; the rest say so rather than swallowing it.
     fn overlay_paste(&mut self, text: &str) {
-        // A secret challenge is not a one-line form field: leading and trailing spaces
-        // are part of the password, and flattening through a non-zeroized String would
-        // copy them into the allocator's leftover. Branch before that rewrite.
-        if matches!(self.overlay, Some(Overlay::Devices)) && self.devices_secret_open() {
-            use zeroize::Zeroizing;
-
-            let mut pasted = Zeroizing::new(String::new());
-            for character in text.chars() {
-                if character != '\n' && character != '\r' {
-                    pasted.push(character);
-                }
-            }
-            if pasted.is_empty() {
-                return;
-            }
-            if !self.devices_paste(&pasted) {
-                self.inform("nothing here is taking text right now", NoticeKind::Info);
-            }
-            return;
-        }
-
         // These are one-line fields. A multi-line clipboard becomes one line rather than
         // being refused, because the alternative is a field that silently holds a newline
         // it cannot draw.
@@ -714,11 +693,9 @@ impl App {
                 true
             }
             Some(Overlay::Prompt { buffer, .. }) => push_into(Some(buffer), &flattened),
-            // The Devices view has two kinds of field and both take a paste: a masked
-            // secret, which is exactly the thing an operator holds in a password manager
-            // rather than in their head, and the connect form's text fields. Dropping a
-            // pasted passphrase with a notice saying nothing takes text was telling
-            // somebody their terminal was broken while they tried to authenticate.
+            // The Devices view has one field left — the search box — and it takes a
+            // paste like any other. Everywhere else on that page is read-only, and says
+            // so rather than swallowing the text.
             Some(Overlay::Devices) => self.devices_paste(&flattened),
             _ => false,
         };

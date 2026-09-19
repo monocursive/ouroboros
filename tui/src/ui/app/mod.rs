@@ -75,9 +75,8 @@ use session::{
 
 pub use cluster::{MachineChoice, MachineSecurity, MachineSummary};
 pub use devices::{
-    devices_hint_line, devices_lines, ConnectField, DeploymentHost, DeviceRow, DevicesState,
-    Discovery, Filter, FormKind, Inventory as DeviceInventory, Marker, OperationSummary, Primary,
-    Refusal, SecretInput, Snapshot as DeploymentSnapshot, Takeover, WorkerExit,
+    devices_hint_line, devices_lines, DeploymentHost, DeviceRow, DevicesState, Discovery, Filter,
+    Inventory as DeviceInventory, OperationSummary, OperationTarget, Recipe, Refusal,
 };
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use location::Location;
@@ -410,38 +409,22 @@ pub enum Tag {
         id: String,
         command: String,
     },
-    /// The Devices view's eight methods, under one variant so the correlation map stays
-    /// readable. See [`DevicesTag`] for what each one is, and for the reason none of
-    /// them carries a secret.
+    /// The Devices view's two reads, under one variant so the correlation map stays
+    /// readable. See [`DevicesTag`].
     Devices(DevicesTag),
 }
 
 /// Which Devices call an answer belongs to.
 ///
-/// **No variant here carries a credential, and none ever may.** A tag is cloned into the
-/// in-flight set, compared, hashed and `Debug`-printed; a secret on one would be a secret
-/// in every one of those places. `Answer` carries the operation and the method's name —
-/// enough to route the reply and to say which verb was refused — and the secret travels
-/// only in the parameters of the one call that consumes it.
+/// Two reads, and nothing else. The view runs no operation (§10), so there is no
+/// `prepare`, no `status`, no `respond` and no `resume` to correlate — and, with them,
+/// nothing this client sends that could carry a credential at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DevicesTag {
     /// `fleet.devices` — the inventory.
     Inventory,
     /// `fleet.status` — the membership subset a non-administrator sees instead.
     FleetStatus,
-    /// `fleet.deployment.prepare` — the answer carries an operation id that did not
-    /// exist when the call was made, which is why this is not a generic action tag.
-    Prepare,
-    /// `fleet.deployment.status` for one operation.
-    Status { operation: String },
-    /// `fleet.deployment.resume` for one operation, with or without a takeover.
-    Resume { operation: String },
-    /// One answer to the broker: `start`, `authenticate`, `confirm_host` or `cancel`.
-    /// `label` is the method, so a refusal can name the verb it refused.
-    Answer {
-        operation: String,
-        label: &'static str,
-    },
 }
 
 /// B7. A `workspace.exec` the runtime would not run, as the composer states it.
@@ -2027,10 +2010,8 @@ impl App {
                 self.connection = Connection::Live;
                 self.hello = *hello;
                 self.note_all_watches(Note::Reconnected);
-                // A Devices operation outlives the runtime it was started from — a local
-                // setup stops that runtime by design — so coming back is the moment to
-                // read the operation again by its own id rather than to keep drawing the
-                // snapshot from before the restart.
+                // The device inventory is a fact about a runtime that has just restarted,
+                // so it is read again rather than redrawn from before the restart.
                 self.devices_reconnected();
                 self.inform(
                     "the connection was re-established; resubscribing",
