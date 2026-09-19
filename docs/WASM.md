@@ -281,9 +281,9 @@ template `ouro-wasm` was built from, not code that still ships.
   this. It receives a `cwd`" (`worktree.ex:137-138`).
 - Fleet facts: `local_fleet_posture/0` = `%{node, role, running, machine, runtime}`
   (`cluster.ex:1408-1415`); consumers pattern-match open maps, so **adding keys is a
-  rolling-safe change** (FLEET.md verified this); tags are FLEET.md §6 design, not
+  rolling-safe change** (FLEET.md verified this); tags are FLEET.md §13 design, not
   code. `ensure_placeable/1` = connected `:core` + runtime contract
-  (`fleet_protocol_revision`, `ouroboros_version`, `otp_release`); architecture is
+  (`ouroboros_version`, `otp_release`, compared exactly); architecture is
   deliberately inventory, never a placement fence (`cluster.ex:1445-1448`).
 - Remote subagents: spec crosses the wire as a plain map; provisioning, validation,
   and session open all run on the child's node (`native/subagent.ex:77-83,174-179`);
@@ -1581,8 +1581,8 @@ machinery — it is a backend, not a lane (D9).
       spawned, which `HelperBinary` — a newtype only `vet` can construct and the only thing
       `Helper::start` accepts — makes unskippable rather than remembered. Pinned by
       `a_bare_helper_name_is_not_resolved_through_the_path`.
-    * **Nothing checked who owned it.** `vet` now applies the shape `fleet.rs`'s
-      packaged-EPMD check applies: a regular file, executable, owned by this account **or by
+    * **Nothing checked who owned it.** `vet` now applies the shape `fleet.rs` applied
+      to the packaged EPMD binary it once launched: a regular file, executable, owned by this account **or by
       root**, and not group- or world-writable. Root is accepted because a helper installed
       by a package manager into `/usr/local/bin` is *more* trustworthy than one owned by this
       account, not less, and refusing the safest install would push a developer to `--helper`,

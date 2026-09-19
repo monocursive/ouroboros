@@ -1,5 +1,12 @@
 # Proposal: fleet-aware subagents
 
+> **Status, 2026-09-19.** Still current, except for the runtime contract it cites:
+> `@fleet_protocol_revision` is deleted by [fleet-kiss.md](fleet-kiss.md) §12, and
+> `runtime_identity/0` now carries `{ouroboros_version, otp_release}` — compared exactly —
+> beside `elixir_version` and `system_architecture`. Read "no `fleet_protocol_revision`
+> bump" below as "no change to the runtime contract", which is still true: nothing here
+> changes placement, routing or ownership semantics.
+
 **Status:** slices A–E implemented on `codex/fleet-aware-subagents`;
 [final acceptance completed 2026-09-07](fleet-aware-subagents-validation.md)
 **Written against:** `ffded0b` (dev, 2026-09-05); every citation below was read at that ref

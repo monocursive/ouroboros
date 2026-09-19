@@ -114,8 +114,9 @@ the handler its logical ID and actual server PID. `Ouroboros.Mesh.ReceiveMessage
 is an opt-in receive convention with a 64-message and byte-bounded inbox; the WASM
 wrapper keeps only its domain state, last message, and last answer.
 
-The fleet protocol revision changes with this contract. Drain and stop participating
-nodes before upgrading; mixed mesh contracts are refused before remote dispatch.
+Two machines form a fleet only when their `{ouroboros_version, otp_release}` match
+exactly, so this contract travels with the release. Drain and stop participating nodes
+before upgrading; mixed mesh contracts are refused before remote dispatch.
 Duplicate starts use the existing healthy-cluster lock, with no partition-safe
 consensus claim.
 
@@ -904,9 +905,11 @@ Implemented:
   anything about the build. A component is one artifact for every node, forever, so a
   builder need not be runtime-identical to its targets — which is exactly the property
   the removed BEAM lane could not have;
-- formation itself (libcluster: static epmd, gossip, DNS polling), off by default, plus
-  a release whose distribution posture is explicit: long names, a refused blank
-  node/cookie, optional TLS distribution baked into `vm.args`, and a boot that fails
+- formation itself — one libcluster strategy, the roster dialer that re-reads this
+  machine's own fleet profile every sweep, off by default — plus a release whose
+  distribution posture is explicit: long names, a refused blank node/cookie, TLS
+  distribution baked into `vm.args`, no EPMD daemon at all (`-start_epmd false` and
+  `Ouroboros.Cluster.Epmd` answer a peer's port out of the profile), and a boot that fails
   closed when a clustering node ends up on cleartext distribution.
 
 Still external:

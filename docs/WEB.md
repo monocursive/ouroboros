@@ -569,24 +569,32 @@ file or agent fingerprint lives under Advanced — a disclosure whose `open` is 
 `advanced?` assign, because an unbound `<details>` collapses on every `phx-change` and this one
 sits under the fields that fire them.
 
-Review shows five plain lines and the digest, with the whole plan behind a disclosure: the
-digest covers the document, not the five lines. Removal (`kind: "leave"`) is reached from the
-member's details panel rather than from its row, and names a **roster machine** rather than an
-address — aiming a removal at whatever answers at an address is not something this page will
-do.
+Review shows the plan's own lines, and approving them answers the `review` challenge with
+`accept: true`. There is **no plan digest**: the plan is the lines on screen, so there is
+no second artefact to check a click against, and the challenge id is what says which plan
+is being approved. There is no idempotency key either — a challenge is consumed when it is
+answered, so a second click is `challenge_consumed` rather than a replay. Removal
+(`kind: "leave"`) is reached from the member's details panel rather than from its row, and
+names a **roster machine** rather than an address: aiming a removal at whatever answers at
+an address is not something this page will do.
 
-The roster-forgetting fallback is offered only after a failed, unreachable removal whose
-snapshot explicitly records no steps. A timeout after inspection or a stop attempt is not
-evidence that nothing changed, so it never recommends `--accept-state-loss`. The failed
-operation and its recorded steps remain available through **Retry**.
+The forgetting fallback is offered only after a failed, unreachable removal whose snapshot
+explicitly records no steps, and it is the CLI recipe `ouro fleet forget NAME` — the
+operator's own statement about a machine that cannot be reached, with no tombstone and no
+restore behind it. A timeout after inspection or a stop attempt is not evidence that
+nothing changed, so it is never offered there. The failed operation and its recorded steps
+remain available through **Retry**.
 
-Everything in [`FLEET.md`](FLEET.md)'s "Trust" section is unchanged and is the reason several
-of these choices look roundabout: no secret on a command line or in a journal, one masked
-field per challenge, **no `phx-change` on it**, the plan digest computed by the client and
-checked against the plan on screen, host keys always an explicit question, the detached
-worker, the per-tab challenge binding, and take-over as an explicit answer rather than a
-button that simply works. `data-state`, `data-operation-state` and `data-discovery` stay on
-the markup so a test can name a row by its code without depending on a word.
+[`FLEET.md`](FLEET.md) §1 is the trust model these choices sit inside, and it is why
+several of them look roundabout: no secret on a command line or in a journal, one masked
+field per challenge, **no `phx-change` on it**, and host keys always an explicit question.
+What is *not* here any more, since `fleet-kiss.md` §10: the per-tab challenge binding and
+the take-over question it needed. A challenge is answered by whoever is an administrator
+on this runtime, so a second tab, a reload, this page's own `?operation=` round trip and
+the restart a local setup performs all answer the prompt in front of them, where each used
+to be a `challenge_not_bound` with a reconnect button behind it that the broker then
+refused. `data-state`, `data-operation-state` and `data-discovery` stay on the markup so a
+test can name a row by its code without depending on a word.
 
 ### Names and refusals (D7's sixth ground rule)
 

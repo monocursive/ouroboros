@@ -332,7 +332,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture, optional OS/arch/tags/toolchains |
 | `fleet.tags` | Operator-scoped add/remove/list of advisory tags on a connected machine; target-owned atomic profile writer |
 | `fleet.doctor` | `Cluster.fleet_doctor/0` — live fleet checks merged with host-local certificate/interface/port/log/service facts |
-| `fleet.devices` | `Fleet.Deployment.devices/1` — the Devices inventory. `host` is this deployment host (hostname, local account, os, arch) plus `issuer` — whether the fleet CA **private** key is on this machine, which is what makes it able to admit a member rather than merely describe one — and `capabilities` `{deploy, reasons}`. `deploy` is false with a named reason when there is no CA key (`no_ca_key`), when this runtime cannot say where its own `ouro` is (`ouro_path_unknown`), when it serves no durable data directory (`no_data_dir`), or when it publishes a cleartext non-loopback web endpoint (`cleartext_web_bind`) — the spec decides credential entry on the bind, the one transport fact a server can verify, and a forwarded header never enters it. `discovery` and `devices` are `ouro fleet devices --json` verbatim, run under a ten-second ceiling and bounded on the way through; a visible peer is never labelled uninstalled, because nothing has inspected one. Member rows also carry this runtime's own view of that machine as a BEAM peer — `connected`, `compatible`, `runtime_running`, `last_probe` — with `state` becoming `fleet_member_connected` when connected; `online`/`path` remain the network client's separate answer, and a non-member row carries `null` for all four. `operations` is every deployment operation this data directory holds a journal for: `operation`, `kind`, `state`, `owner`, `created_at`/`updated_at`, whether a worker is `attached`, and the `target` it is about — `machine`, `address`, `ssh_user` and `port` — which is what lets a surface put an interrupted operation on the device row it belongs to rather than in a list of ids. Newest first by `created_at` (the id breaking ties), at most 200, with `operations_total` beside it: sorting the file names and taking 200 showed the 200 lexically smallest ids, and an operation id is random hex, so past 200 journals that was an arbitrary sample of everything this machine had ever run presented as the current ones. Every field is present on every row, `null` where this build could not establish it, and a journal it cannot read at all is listed with `readable: false` and a reason rather than dropped. A top-level key `ouro` printed that this build does not read is named in `unknown` rather than passed through. **Administrator-only by the identity rule even at read scope** — this is every machine on an operator's private network — and a non-administrator reader sees `fleet.status`'s membership subset in Devices instead |
+| `fleet.devices` | `Fleet.Deployment.devices/1` — the Devices inventory. `host` is this deployment host (hostname, local account, os, arch) plus `capabilities` `{deploy, reasons}`. `deploy` is false with a named reason when this runtime serves no durable data directory (`no_data_dir`), cannot say where its own `ouro` is (`ouro_path_unknown`), publishes a cleartext non-loopback web endpoint (`cleartext_web_bind`) — the spec decides credential entry on the bind, the one transport fact a server can verify, and a forwarded header never enters it — or is a development runtime rather than a packaged one (`dev_runtime`), which blocks a `setup` and nothing else. There is no `issuer` and no `no_ca_key`: one fleet is one shared bundle held by every member, so holding the CA key stopped being what makes a machine able to admit another. `discovery` and `devices` are `ouro fleet devices --json` verbatim, run under a ten-second ceiling and bounded on the way through; a visible peer is never labelled uninstalled, because nothing has inspected one. Member rows also carry this runtime's own view of that machine as a BEAM peer — `connected`, `compatible`, `runtime_running`, `last_probe` — with `state` becoming `fleet_member_connected` when connected; `online`/`path` remain the network client's separate answer, and a non-member row carries `null` for all four. Every row carries `suggested_machine`, because `fleet.deployment.start` requires a machine name and will not invent one. `operations` is every deployment operation this data directory holds a journal for: `operation`, `kind`, `state`, `created_at`/`updated_at`, whether a worker process is `running` here and now, and the `target` it is about — `machine`, `address`, `ssh_user` and `port` — which is what lets a surface put an interrupted operation on the device row it belongs to rather than in a list of ids. Newest first by `created_at` (the id breaking ties), at most 200, with `operations_total` beside it. Every field is present on every row, `null` where this build could not establish it, and a journal it cannot read at all is listed with `readable: false` and a reason rather than dropped. A top-level key `ouro` printed that this build does not read is named in `unknown` rather than passed through. **Administrator-only by the identity rule even at read scope** — this is every machine on an operator's private network — and a non-administrator reader sees `fleet.status`'s membership subset in Devices instead |
 | `fleet.deployment.status` `{operation}` | `Fleet.Deployment.status/1` — the sanitized snapshot. `source` is `worker` when a process on this runtime is holding the operation's port program and `journal` when none is, which is the operator's whole question after an interruption: a journal says what was durably recorded, and only a live process says what is happening now. Carries `kind`, `state`, `steps`, the one open `challenge` with its secret-free metadata, the last fifty `log` lines, the reviewed `plan` as the lines an operator approves, a `done` frame's `summary`, `last_error` and `running`. A read cannot obtain or answer a secret. A `journal` answer's `log` is the tail of the program's own stderr file, scrubbed the way the journal is, because that file is the only thing a program that died before it could journal anything leaves behind |
 | `ledger.list` `{principal?, effect?, status?, since_sequence?, order?, limit?, node?, fleet?}` | `Agent.EffectLedger.list/2` with its own bounds (limit 1..500, default 100). Answers `{entries, nodes}`: `nodes` names every machine that was asked and whether it answered, so an unreachable one is a row saying `unavailable` rather than a shorter list that looks complete. `fleet: true` fans out to every connected core node with the same bounded `:erpc` the `fleet.*` verbs use. Sequences are minted per node, so there is no cross-node total order; entries are ordered by `{node, sequence}` and every row carries `origin_node`. **`effect` is the kind filter** and is matched against the terms this build actually records rather than converted, so an unknown one is `-32602` naming the whole list. I1 added two: `tool_call` — one tool the native agent was admitted to run, written *before* it ran, with `attempt.subject` (the paths, a `command_sha256`, the hosts, the `mcp_server`/`mcp_tool`) and `result.status` one of `completed`/`failed`/`refused`/`timed_out` beside `duration_ms` and `output_bytes` — and `approval` — one answer a *person* gave on any provider, with `result` `{decision, scope, actor, rule_id?, origin}`. Neither ever carries a command line, a tool's arguments, or a file's contents |
 | `ledger.get` `{id, node?}` | `Agent.EffectLedger.get/2`. Unknown id → `-32007`. These are exactly the two parameters a `ledger_ref` on an event carries (§2.5), so resolving a row a client drew needs no translation |
@@ -351,7 +351,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 
 | method | maps to |
 |---|---|
-| `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's roster *tombstones*, which `ouro fleet sessions forget --accept-state-loss` writes on this machine immediately before calling — the operator's statement that the machine is gone, never inferred from a disconnect. Refuses a connected node (the client then puts the member back), and syncs the checkpoint before success. A client that dies between the two leaves the tombstone standing; `ouro fleet status` and `ouro fleet doctor` name it and `ouro fleet sessions restore NAME` undoes it. This removes local discoverability evidence, not remote files or credentials. |
+| `fleet.forget_session_owner` `{machine}` | Explicit local retirement of that machine's durable session-owner evidence, which is irreversible. There is no tombstone precondition and no confirmation flag: `ouro fleet forget NAME` is the operator's own statement about a machine that cannot be reached, and the client calls this first and takes the name out of this profile's members only if it succeeds. Refuses a connected node, and then nothing changes anywhere. It removes local discoverability evidence, not remote files or credentials, and the roster is not replicated, so the command is run on each remaining machine |
 | `fleet.deployment.start` `{kind?, target?, machine?, address?, ssh_user?, port?, identity?, install_path?, data_dir?, service?}` | `Fleet.Deployment.start/1` — mints an operation id and runs `ouro fleet <kind> … --frames --operation <id>` as a port program of this runtime, then answers `{operation}` immediately. **The request is the argv**: every parameter here becomes a word on that command line, nothing on it is a secret, and a value that is empty, multi-word or begins with `-` is refused rather than passed. `ouro` is the absolute path the launcher exported, never a `PATH` lookup, because this is the process that will be handed a password. The program calls `setsid`, ignores `SIGHUP` and `SIGPIPE`, and on stdin EOF finishes the operation and keeps writing its journal — so closing the page does not cancel a deployment and neither does stopping this runtime, which is what lets first local fleet setup restart the runtime serving the UI. Inspection, host verification, authentication and the plan review all happen behind the returned id as challenges. Refused `-32003` `deploy_blocked` with `data.blockers` when this host cannot deploy — the same list `fleet.devices` reports — and so are `.respond` and `.resume`; `.cancel` never is, because stopping a deployment must stay possible on a host that may no longer start one. `dev_runtime` blocks a `setup` and nothing else. No secret is a parameter — an identity is named by reference (`agent`/`key`/`password` plus a `ref`), never by key material. **`kind`** is `add` by default, which deploys onto another machine and requires `target.address`, `target.machine` and `ssh_user`; `kind: "setup"` is the first *local* fleet, which configures this machine without SSH to itself and takes neither a target nor an account; `kind: "leave"` removes a machine this profile's members name, and the program reads its address out of that profile rather than taking one here |
 | `fleet.deployment.respond` `{operation, challenge, accept?, secret?}` | **The one method in this protocol whose parameters never reach the audit digest.** The spec names `Web.Call` and gateway parameter digests among the places a secret may never appear, *even hashed* — a hash of a human's password is that password in a form somebody can look up — so `Ouroboros.Gateway.AuditLine` writes `params=redacted operation=… challenge=…` for this verb on both surfaces and never calls the digest at all; the challenge's kind and the outcome are logged by the worker process, which knows them. Exactly one of `accept` and `secret` is given, and which one is fixed by the challenge's own kind — `accept` answers `host_trust` and `review`, `secret` answers `password` and `passphrase`, and the wrong one is `challenge_kind_mismatch` and is never written. A challenge is consumed when it is answered (`challenge_consumed`), expires on the program's own five-minute deadline (`challenge_expired`), and an id the operation is not waiting on is `unknown_challenge`. There is **no session binding**: a challenge is answered by whoever is an administrator on this runtime, so a second tab, a reload and a reconnect all answer the prompt in front of them. The secret goes from the parameter into the frame encoder and onto the program's stdin, from the gateway connection's own process; it is never stored in any process state, and the broker never sees it |
 | `fleet.deployment.cancel` `{operation}` | Stops at a safe boundary and reports residue. It does not claim to undo anything: the program finishes or reconciles the durable step it is inside and reaps its SSH children, and a credential already delivered to another machine stays delivered. `outcome: unknown` on a ceiling breach |
@@ -1095,82 +1095,76 @@ ouro fork SESSION [--node NAME] [--at TURN] [--model SPEC]
                       branch a recorded session into a new one. The child id
                       is minted here so a lost reply can only adopt the same
                       child. --at / --model make it an experiment, not a copy
-ouro fleet create     give this machine a cluster identity: node name, private
-                      cookie, TLS materials, and a private EPMD port
-ouro fleet create --from DIR [--machine NAME] [--host HOST]
-                      make this machine the second (or third) of an existing
-                      cluster, from a privately copied `<data dir>/fleet/`: its
-                      leaf is signed by the CA in the copy and it inherits that
-                      fleet id, cookie and roster. Nothing is sent anywhere and
-                      no CA key is written here
-ouro fleet create --regenerate
-                      rewrite only this machine's generated ssl_dist.conf and
-                      vm.args from the profile it already has. The repair for a
-                      profile written by an older Ouroboros, where leave+create
-                      would mint a new fleet id, CA and cookie instead
-ouro fleet members add NAME --host HOST [--node NODE]
-ouro fleet members remove NAME
-                      edit this machine's roster, under the same lock and
-                      validation as `tag`. Not replicated: run it on each
-                      machine. A live runtime picks it up within a second
-ouro fleet sessions forget --machine NAME --accept-state-loss
-                      irreversibly retire this gateway/data-dir's offline
-                      session-owner evidence for a machine that is gone
-ouro fleet sessions restore NAME
-                      put a machine this roster declares gone back into it. The
-                      retired evidence does not come back; the member does
+ouro fleet setup --machine NAME [--address IPV4] [--no-service] [--yes]
+         [--json] [--frames] [--dry-run] [--operation ID]
+                      give this machine its cluster identity — node name, private
+                      cookie, TLS materials, one distribution port — from its own
+                      private-network address, and arrange for it to start. On a
+                      machine that already has a fleet it is an inspection and
+                      changes nothing
+ouro fleet add [USER@]ADDRESS --machine NAME [--port N]
+         [--key PATH | --agent FINGERPRINT | --ask-password]
+         [--install-path P] [--data-dir P] [--no-service] [--yes]
+         [--json] [--frames] [--dry-run] [--operation ID]
+                      bring another machine into this fleet over SSH with this
+                      fleet's bundle. Contacts only this destination; the account
+                      is never inferred from the network device's owner. Host
+                      verification, authentication and the plan review are
+                      explicit steps, and each is a refusal with a stable reason
+                      when there is no terminal to ask
+ouro fleet leave [--machine NAME --user USER [--port N]
+         [--remote-executable PATH] [--key PATH | --agent FP | --ask-password]
+         [--yes] [--json] [--frames] [--dry-run] [--operation ID]]
+                      with no flags, remove this stopped machine's own cluster
+                      credentials, including a directory whose profile.json never
+                      landed. With --machine, take a reachable member out
+                      cooperatively: stop its runtime through its own idle gate,
+                      remove its startup service and its fleet directory, then
+                      forget it here. --user is required with --machine
+ouro fleet forget NAME
+                      the local answer to a machine that cannot be reached: ask
+                      the runtime to retire its session-owner evidence, then take
+                      it off this machine's list. Refused while it is connected.
+                      No undo, and no replication: run it on each machine
 ouro fleet tag add|remove TAG [--machine NAME]
 ouro fleet tag list [--machine NAME]
                       edit local or connected target tags; visible next probe
-ouro fleet protocol [--json]
-                      the fleet protocol revision this build speaks, without
-                      starting a runtime and without discovering or creating a
-                      data directory. --json adds the Ouroboros version, the OTP
-                      and Elixir releases recorded by release packaging, the
-                      platform, whether a release is embedded, and whether the
-                      embedded release's own revision agrees; unknown versions
-                      are null rather than guessed
 ouro fleet status [--json]
-                      expected/connected/offline machines, OS/arch, tags and TLS
-                      posture, and the machines this roster declares gone.
-                      --json adds the build contract and this machine's network
-                      inventory, and exits non-zero on incomplete setup
+                      this machine's fleet id, name, address, node, runtime state,
+                      members and ports, plus the live roster when a runtime
+                      answers. --json exits non-zero on incomplete setup
 ouro fleet devices [--json]
-                      the roster beside the devices the installed Tailscale
-                      client can see. One `tailscale status --json`, bounded and
-                      deadlined; contacts no device and inspects no installation,
-                      so a discovered peer is never labelled uninstalled. A
-                      roster row is matched by the advertised host alone, never
-                      by a name a peer reports about itself. $OUROBOROS_TAILSCALE
-                      names a client, and must be absolute
+                      this machine's members beside the devices the installed
+                      Tailscale client can see. One `tailscale status --json`,
+                      bounded and deadlined; contacts no device and inspects no
+                      installation, so a discovered peer is never labelled
+                      uninstalled. A member row is matched by the advertised host
+                      alone, never by a name a peer reports about itself.
+                      $OUROBOROS_TAILSCALE names a client, and must be absolute
 ouro fleet doctor [--json] [--peer NAME|ADDRESS]
-                      actionable profile/network/runtime checks, including any
-                      fleet-directory entry `leave` would refuse to remove, plus
-                      the network-client layer. --peer probes the route to one
-                      visible device with a single overlay ping and reports only
-                      the path it observed
-ouro fleet service install [--adopt] [--json]
+                      actionable profile/security/port/runtime checks, plus the
+                      network-client layer. --peer probes the route to one visible
+                      device with a single overlay ping and reports only the path
+                      it observed
+ouro fleet service install [--json]
 ouro fleet service status [--json]
 ouro fleet service disable [--json]
 ouro fleet service remove [--json]
                       the one startup service Ouroboros manages for this data
                       directory: a macOS LaunchAgent or a systemd user unit that
                       runs the foreground `ouro service-run`, never the detaching
-                      `ouro daemon`. Every generated unit carries an ownership
-                      marker naming this data directory and a hash of its own
-                      body; anything else at that path is reported with its digest
-                      and left alone, and --adopt is the operator saying it may be
-                      replaced. `install` refuses without a cluster identity,
-                      because a unit installed first would only crash-loop.
-                      `status` reports installed/loaded/running/last exit with
-                      `unknown` wherever the manager did not say, and states the
-                      platform's real limit: a LaunchAgent starts at login and
-                      never before it, and a systemd user unit needs lingering to
-                      survive logout. `disable` is the first half of stopping a
-                      supervised runtime; `remove` disables and then deletes the
-                      one file this code wrote. See docs/FLEET.md
-ouro fleet leave      remove this stopped machine's cluster credentials safely,
-                      including a directory whose profile.json never landed
+                      `ouro daemon`, at one deterministic path per data directory.
+                      `install` refuses without a cluster identity, because a unit
+                      installed first would only crash-loop, and overwrites what it
+                      wrote at that path before; a file there this code did not
+                      write is reported with its digest and left alone. `status`
+                      reports installed/loaded/running/last exit with `unknown`
+                      wherever the manager did not say, and states the platform's
+                      real limit: a LaunchAgent starts at login and never before
+                      it, and a systemd user unit needs lingering to survive
+                      logout. `disable` is the first half of stopping a supervised
+                      runtime; `remove` disables and then deletes the one file this
+                      code wrote. See docs/FLEET.md
 ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
                       WebAssembly containment readiness on a node: helper presence
                       and phase, the world and bounds, the hook-component budget,
@@ -2615,303 +2609,112 @@ command whose whole job is to answer "is anything waiting on me" must not answer
 creating something to wait on. Its counts can differ from the rail's by the approvals the
 rail is holding on an open stream, which `ouro agents` does not have.
 
-### Devices, and deploying to one (slice 6)
+### Devices: the inventory, and the command to run (slice 6)
 
 `ctrl+x D` (`leader.devices`), `/devices`, the palette's **Devices** row and a `d` in
-Settings' **F3 Runtime** section all open one view: the machines this runtime can see,
-and putting Ouroboros onto one of them
+Settings' **F3 Runtime** section all open one view: the machines this runtime can see
 ([devices.rs](../tui/src/ui/app/devices.rs)). It is the terminal half of
-`docs/design-qa/fleet-ux-review-2026-09-18.md` §5; the web page at `/devices` draws the
-same rows, the same drawer steps and the same words, and the row both surfaces are named
-from is `runtime.devices` in `priv/ui/commands.json`.
+`docs/proposals/fleet-kiss.md` §10, and the web page at `/devices` draws the same rows,
+the same status line and the same words.
 
-**Nothing in the view does any work.** Discovery, SSH, artifact verification and roster
-writes run on the *deployment host* — the machine hosting the runtime this client is
-attached to, which for a connected TUI is no more this laptop than it is a browser's. The
-view issues nine methods (`fleet.devices`, `fleet.deployment.prepare|status|start|
-authenticate|confirm_host|cancel|resume`, and `fleet.status` as the non-administrator
-fallback) and draws what comes back. Whose machine that is used to be a boxed three-line
-panel at the top of every screen; it is now **one quiet line**, `Actions run on ‹host› as
-‹account›.`, under the title of the list and again as the caption inside every form and
-every operation screen. The fact it exists for is the same one — a credential typed into
-the wrong host's prompt — and it is on every screen of the flow.
+**It runs nothing.** The view issues two reads — `fleet.devices`, and `fleet.status` as
+the non-administrator fallback — and draws what comes back. There is no form, no
+challenge, no plan, no progress and no takeover, because there is no operation to start:
+the one thing to do about a row is printed *as the command that does it*, to be run on the
+deployment host. A terminal client that cannot ask for a password cannot ask for it under
+the wrong machine's name, and an inventory that starts nothing cannot start the wrong
+thing. The forms, challenges, progress strip, review screen and takeover prompt that used
+to live here are deleted; the web page is where a deployment is driven.
 
-**The list.** One line per device: name, OS, address, presence, Ouroboros, and the one
-thing you can do about it.
+**The list.** One line per device: name, OS, address, presence, Ouroboros, and the command
+for it.
 
 ```
 Devices
 Fleet of studio · 2 of 3 machines connected
 Actions run on studio as ada.
 
-> This Mac      macos   100.64.12.21    ● online                 in the fleet     Open
-  raspberrypi   linux   100.83.203.10   ● online                 not set up       Add to fleet
-  nostromo      linux   100.108.85.110  ○ offline, seen 3 days ago  offline        —
+> This Mac      macos   100.64.12.21    ● online              in the fleet     ouro fleet leave
+  raspberrypi   linux   100.83.203.10   ● online              not set up       ouro fleet add USER@100.83.203.10 --machine raspberrypi
+  nostromo      linux   100.108.85.110  ○ offline, seen 3 days ago  offline     —
+
+Not listed?  ouro fleet add USER@ADDRESS --machine NAME
 ```
 
-The self row is first and is labelled from the host's own OS — **This Mac** when
-`host.os` is `darwin`, **This machine** otherwise — then roster members, then the peers
-discovery found. No Fleet/Available split, no legend, no six lines per device. Above the
-list is one status line: `This Mac is not in a fleet yet` on a standalone machine, or
-`Fleet of ‹name› · N of M machines connected`. On a standalone machine that status line
-**is** the blocker sentence; it is not said a second time in a paragraph underneath.
+The self row is first and is labelled from the host's own OS — **This Mac** when `host.os`
+is `darwin`, **This machine** otherwise — then members, then the peers discovery found.
+Above the list is one status line: `This Mac is not in a fleet yet` on a standalone
+machine, or `Fleet of ‹name› · N of M machines connected`. On a standalone machine that
+status line **is** the blocker sentence and is not repeated underneath. Under it,
+`Actions run on ‹host› as ‹account›.`: discovery, SSH and roster writes happen on the
+machine hosting this runtime, which for a connected TUI is no more this laptop than it is
+a browser's.
 
-The Ouroboros column is one of `in the fleet`, `in the fleet · not connected`,
-`not set up`, `can't run Ouroboros`, `offline`, `setting up…`, `waiting for you`,
-`setup failed`, `set up just now` — the last four from the operation on that row rather
-than from the device's state. An operation's **kind** is half of what those four say: a
-removal reads `removing…`, `removal failed` and `removed just now`, so a finished
-removal next to an **Add to fleet** button says the machine was taken out rather than
-congratulating the operator on a setup that never happened — which is what a live
-*Remove from fleet* against a Raspberry Pi was told.
-`DeviceState::label()` is still where the *CLI's* wording
-lives and `a_state_code_maps_to_the_words_the_cli_prints` still pins this view against
-the serializer; the shorter vocabulary a row reads is
-`DeviceRow::ouroboros_word`, pinned the same way by
-`every_state_lands_on_one_of_the_columns_nine_phrases`, so a variant added to
-`fleet_network` fails a test rather than reaching an operator through a fallback that
-prints its code. The action column is one button or nothing: **Set up this
-Mac**, **Add to fleet**, **Open**, **Continue**, **Retry**, or an em dash. A row that
-cannot be acted on carries no button, and a runtime whose `capabilities` refuse the
-action carries none either: an inert action is the acceptance-10 failure said twice on
-one screen. **Open** leaves the view for the Dashboard's machines panel, which is where
-that machine's sessions are.
+The Ouroboros column is one of nine short phrases — `in the fleet`, `in the fleet · not
+connected`, `not set up`, `can't run Ouroboros`, `offline`, `setting up…`, `waiting for
+you`, `setup failed`, `set up just now` — the last four from an operation on that row
+rather than from the device's state, and read-only: an operation this runtime is running
+shows, and nothing here continues, retries or cancels it. `DeviceState::label()` is where
+the *CLI's* wording lives and `DeviceRow::ouroboros_word` is the shorter vocabulary this
+view reads, each pinned by a test, so a variant added to `fleet_network` fails the build
+rather than reaching an operator as its own code.
 
-Presence on a row is a dot, a word and a *relative* time (`○ offline, seen 3 days ago`);
-the exact observation time is one line down. Every column is bounded and padded by
-`column()`, so a hostile name cannot push the column beside it along — the boundary is a
-fact about the row rather than an alignment the longest value happens to respect.
+**The command column** is `Recipe`: `ouro fleet setup --machine ‹name›` for a machine with
+no fleet, `ouro fleet add USER@‹address› --machine ‹name›` for a device that is not a
+member, `ouro fleet leave --machine ‹name› --user USER` for one that is, a bare
+`ouro fleet leave` on this machine, or an em dash when there is nothing to do. `USER`,
+`ADDRESS` and `NAME` stay literal capitals wherever this runtime cannot name the value: a
+device is not an account, and a plausible-looking account name in a command somebody is
+about to run is exactly the invention a deployment must not make for them. The row cuts a
+long command at the column; the details pane is the one place it is never cut. A line
+under the list carries the manual form for a device the network client never listed.
 
-**The details panel** is three or four lines under the list, for the row under the
-cursor: the address (with the path and the roster name when there are any), the presence
-with its exact timestamp, the runtime's own facts when this runtime holds any
-(`runtime connected · compatible build · probed ‹time›`), the latest operation for that
-device from the operations list, and — when the row has no button — the reason. A
-blocker that belongs to the *host* is true of every row at once, so it is one line above
-the list instead. `x Remove ‹machine› from the fleet` is offered here, on a member's own
-details, and not on the row.
+**The details pane** (`Enter`) is the row's address with its path and member name, its
+presence with the exact timestamp, this runtime's own facts about it when there are any
+(`runtime connected · compatible build · probed ‹time›`), its latest operation and that
+operation's last error, the whole command, and — when there is no command — why.
 
-**Two sources, kept apart.** `fleet.devices` merges this machine's roster with what the
+**Two sources, kept apart.** `fleet.devices` merges this machine's members with what the
 network client can see, and neither is the runtime's own answer to "is that machine here,
-now". Member rows carry `connected`, `compatible`, `runtime_running` and `last_probe`
-from the cluster, and `state` becomes `fleet_member_connected`. The presence column stays
-the network's answer (`online`, `last_seen`); the details panel's `runtime` line carries
-the cluster's. A row where the two disagree is a real and useful thing to show, and
-`null` throughout means "not known", so a device that has never been in a fleet carries
-no runtime line at all rather than reading as disconnected. A state string this build has
-no words for is named in a sentence and gets no button; the column is never blank.
+now". Member rows carry `connected`, `compatible`, `runtime_running` and `last_probe` from
+the cluster; the presence column stays the network's answer. A row where the two disagree
+is a real and useful thing to show, and `null` throughout means "not known", so a device
+that has never been in a fleet carries no runtime line rather than reading as
+disconnected.
 
-**Search and filter appear only past eight rows.** A working home network of four devices
-split into two sections with a search box and three filter buttons was the presentation
-failure; below the threshold `/` and `f` are not drawn and do nothing. Past it, `/`
-searches by name or address and `f` cycles all → fleet → available. `r` refetches at any
-length. The hint line lists the keys that work: `↑↓ select · Enter act · a add by address
-· x remove (members) · r refresh · Esc close`, with `/ search · f filter` added when the
-list is long enough to have them.
+**Search and filter appear only past eight rows.** Below the threshold `/` and `f` are not
+drawn and do nothing — a working home network of four devices does not need to be searched.
+Past it, `/` searches by name or address and `f` cycles all → fleet → available. `r`
+refetches at any length, and the inventory is re-read every time the view opens: a cached
+list of machines is a list of machines that were. `↑↓`/`jk` move, `PageUp`/`PageDown`
+scroll without moving the selection, `Esc` closes the details pane before it closes the
+view, and `q` closes the view.
 
-**Discovery failure is one inline notice** quoting the client's own words:
-*Tailscale did not answer from this runtime: "The Tailscale GUI failed to start". Devices
-already in the fleet are still listed.* Never a claim about build age — that was a guess,
-and a wrong one. The `detail` the runtime carries is what is quoted.
+**Discovery failure is one inline notice** quoting the client's own words: *Tailscale did
+not answer from this runtime: "The Tailscale GUI failed to start". Devices already in the
+fleet are still listed.* Never a claim about build age. Each of the six discovery outcomes
+has its own sentence, and a host blocker — this runtime cannot deploy at all — is one line
+above the list rather than repeated on every row.
 
-**Add to fleet** (`kind: "add"`) asks for the name in the fleet, the address and the SSH
-user, with *port, SSH key, install path, data directory, agent fingerprint, start at
-login* behind an **Advanced** disclosure that is a row of the form — Enter or space opens
-it, and nothing re-renders it shut behind somebody's typing. The name is pre-filled from
-the row's `suggested_machine` and **never** from `name`: a display name is not a machine
-name, and seeding the field from one is what put "Monocursive's MacBook Pro" and
-`this device` into both surfaces' forms. `suggested_machine: null` leaves the field
-empty, and submitting it empty is refused on that field.
+**Every device-supplied string is scrubbed.** A device's name, its address, a fleet's
+name, a gateway's refusal message and an operation's recorded error all reach a line
+through `scrub`, which drops what a terminal would obey (control characters, the C1 block,
+bidi overrides), drops what a person cannot see (zero-width spaces, joiners, soft
+hyphens), collapses whitespace, and cuts the result to the column it is drawn in — by
+*display* width, not character count, so a name of CJK ideographs cannot push the cell
+beside it along. `tests/fixtures/tailscale/hostile-names.json` is a peer list whose names
+are ANSI escapes and a forged four-line device row, and the answer to it is that a name
+cannot reach past its own cell. A device that adopts a member's name is listed as itself,
+with the note in its own details, and is never merged into the member it is imitating.
 
-**There is no authentication picker.** The default SSH identity is used; when the target
-asks for a password the worker raises the `password` challenge and the operation screen
-asks for it. A specific key file or agent fingerprint is two named Advanced fields, and
-naming both is refused rather than guessed between.
+**Read scope and non-administrator.** `fleet.devices` is a read-scope method the identity
+rule reserves for administrators, so a `-32003` on it can only be the identity rule — a
+different sentence from `hello.methods` not listing the method at all. Both fall back to
+`fleet.status`'s membership subset with a sentence saying which happened.
 
-**Add a device by address** (`a`) is the same form with nothing pre-filled and the
-address editable. The name is required here too: without a name field at all the worker
-took the address as the machine name and refused it, so that path could never succeed.
-Fixed addresses on discovered-device and local-setup forms remain visible as read-only
-context, without adding a keyboard stop.
-
-**Set up this Mac** (`kind: "setup"`) is the first local fleet: a name, the address
-discovery gave, a *start at login* checkbox, and the sentence *Ouroboros restarts once
-during setup; this view reconnects by itself.* No account and no host key, because a
-machine does not reach itself over SSH. It answers to a shorter blocker list than an
-admission — every reason except `no_ca_key`, because a machine with no fleet has no
-certificate authority and is exactly the machine first setup exists for. `dev_runtime`
-goes the other way: it blocks **only** setup (*This is a development runtime; the
-packaged `ouro` is what sets a machine up.*), because a Mix dev runtime can drive a
-deployment onto another machine perfectly well and cannot be the thing installed here.
-
-**Remove from fleet** (`x` on a member) prepares `kind: "leave"` with `target.machine` —
-the roster name, never the address — the SSH user and the port. It says what it does and
-what it does not: *Stops Ouroboros on ‹machine›, retires its credentials and takes it out
-of every roster. Its sessions and data stay on that machine.* `x` on this machine or on a
-device that is not a member opens nothing and says so on the hint line. A removal that
-**never reached the machine** — a failure with no step recorded against it, and no
-refusal code of the engine's own — ends with the roster fallback, spelled the way the CLI
-takes it: *‹machine› did not answer, so nothing on it was changed. To take it out of this
-fleet's roster anyway, run `ouro fleet sessions forget --machine ‹machine›
---accept-state-loss` on this machine, and on every other machine in the fleet.* That
-sentence appears nowhere else: on the form, during the operation, or after a failure the
-machine itself answered, it would be telling an operator a machine is gone while the
-thing that would prove it is still running.
-The command uses the full validated roster machine name, never the shortened list label.
-
-**Then the broker is the authority** for every screen after `prepare`:
-`fleet.deployment.status` is polled about once a second, its `state` names the stage, and
-its open challenge names the question. `host_trust` is headed *First time connecting to
-‹address›* and shows the algorithm, the SHA256 fingerprint and the address, port and
-account it belongs to, with an explicit `t` and `n` and the line saying to verify the
-fingerprint independently; `Enter` is not an answer. `password` is headed *Password for
-‹user›@‹target›* and `passphrase` names the key instead, both labelled from their own
-metadata read where the *broker* leaves it. Seam S4 describes those fields as fields of
-the challenge, the worker sends them one level down under `metadata`, and
-`Fleet.Deployment.Client.challenge_metadata/1` lifts them back up — so
-`challenge["plan_digest"]` is the read that runs, with the worker's own nested spelling
-kept as a fallback so a broker that stopped lifting would not empty every prompt in
-silence. A drift test pins both by calling the real builders rather than by agreeing with
-a fake.
-
-**The review is five plain lines**, headed from the plan's own kind — *Ready to deploy*
-with `a  Deploy` for an `add`, *Ready to set up* with `a  Set up` for a `setup`, *Ready
-to remove* with `a  Remove` for a `leave`, and the footer hint carrying the same word as
-the key above it. A removal's five lines are its own (*Stop Ouroboros on ‹machine› and
-disable its start at login · Retire ‹machine›'s credentials · Update N rosters · Its
-sessions and data stay on that machine*, and the trust sentence); the startup line is not
-among them, because how a machine starts at login is not a fact about taking it out of
-the fleet. An `add`'s five lines are: what is installed and where
-with its checksum, what the machine joins as, how it starts, how many rosters change, and
-one sentence about trust. The digest is under them in mono. It is not a field table of
-every decoded value — that was the specification, rendered. Every line is built here,
-from a decoded field, rather than by splitting a rendered block on newlines, so a
-`target.machine` carrying its own newlines and padding cannot forge an aligned row into
-its own review. `PlanView` holds both digests to 64 lowercase hex and refuses a
-`release.sha256` that is not one, because `Plan::render` byte-slices that field and a
-multibyte one panicked the whole client. And `a` approves the digest **this client
-computed** over the plan it drew, refusing when the challenge claims a different one.
-
-**Progress is a stage strip** — `✓ Inspect · ✓ Install · ● Join fleet · ○ Start at
-login · ○ Connect · ○ Ready` — built from the worker's own steps rather than from a state
-name, with the current step's detail under it and the worker's step list below that. A
-`leave` draws its own five: `Inspect · Stop · Disable startup · Leave · Update rosters`,
-collecting the engine's `inspect`, `stop_runtime`, `disable_service`,
-`verify_disconnected`, `leave` and `member_preflight`/`roster` steps in that order.
-`fleet.deployment.status` carries **no `kind`**, so the kind travels with the operation
-the view opened and is handed to the strip; reading the snapshot alone is how a removal
-drew the add flow's six stages and filed its roster removal under *Join fleet*. A stage
-no step ever named, on an operation that finished, is `– Ready (not checked)` rather than
-a tick: a successful add whose steps stop at `connect` reported no readiness at all, and
-ticking it was this screen inventing a check nobody made. In screen-reader mode each mark
-is the word it stands for (`Inspect done · Install now · Ready not checked`), because a
-glyph is not something a screen reader announces usefully.
-
-**Finishing** names the machine (*‹machine› is in your fleet*), draws the worker's own
-`summary` and `next`, the stage strip when there are steps to draw, and offers **Open**
-and **b Done**. It no longer names a model to configure or a task to run: those are per
-machine and explicit, and naming them here was naming actions this screen does not have.
-A finished removal says *‹machine› is out of your fleet*, the same two sentences from the
-worker, and **b back** — there is nothing to open, because the machine it names is not in
-the fleet any more. A failure shows the cause in the worker's words, the stage strip,
-what was left behind, the steps that did run, and `R` **Retry** — a resume by operation
-id, so the worker inspects again and puts the plan up for review again and a stale
-failure cannot apply anything nobody re-read. A removal's failure headings are its own
-(*This removal did not finish*), because a screen that says "setup" about a removal is
-the same defect as a row that does.
-
-**A worker that is gone says so.** When the broker finds an unfinished journal with no
-worker and no `done` frame it carries `worker_exit: {code, last_lines}` from the worker's
-private log, and the screen draws *The setup worker stopped: ‹lines›* and offers `R`.
-Before that, a worker that died before attaching left the operation reading "inspecting"
-for ever while the reason — a Unix socket path over 104 bytes — sat in a log nobody on
-this screen could see. A stopped worker is a finished operation whatever its last written
-state says.
-
-**The restart.** A local setup stops the runtime this client is attached to, by design.
-The worker is detached and the journal is on the deployment host, so the operation
-outlives the connection — but the snapshot in hand does not. The moment the connection
-goes, the operation is marked stale and the screen draws *Ouroboros is restarting…
-reconnecting* with the operation id and what it is waiting for; it never redraws the last
-snapshot as though it were current, and it does not spin, because the failed read backs
-off by the snapshot cadence. When the client reconnects — the same `Msg::Reconnected` the
-transport's `StreamHook::after_reconnect` sends after a fresh handshake — `Devices`
-reloads **this operation by its id** through `fleet.deployment.status`, which is a read,
-and carries on from whatever it answers, including a challenge that is waiting. Until
-that answer lands the screen says *Ouroboros is back… reading this setup again* rather
-than pretending. Before this, the view kept polling a runtime that was gone and drew
-"waiting for you to review the plan" over an empty body for ever.
-A non-transport refusal ends the reconnect wait, discards cached completion and challenge
-state, and shows the current error. `b` returns to the inventory; a stale password or
-approval prompt cannot become actionable again.
-
-**Leaving never cancels.** `Esc` closes the view and stops nothing; the operation keeps
-running on the deployment host, and the row it is about reads `setting up…` /
-`waiting for you` / `setup failed` and offers **Continue** or **Retry**. *That* row and
-no other: operations are matched to devices through `operations[].target`, which is why
-the field exists — before it, every row offered to continue whatever single operation was
-open, so pressing it on one machine attached the view to a deployment against another and
-the password prompt that followed appeared under the wrong machine's name. The heading
-takes its machine from the operation's own target, never from the row that was pressed.
-
-Continuing is a mutation like any other and passes the same three gates as an admission —
-the runtime's `capabilities`, the method being served, and the listener's scope — which
-the continue path used to skip entirely. An operation whose worker is gone is resumed; a
-resume of *another identity's* operation is refused `operation_not_yours`, which this
-view turns into an explicit **Take over this setup?** naming the owner. `takeover: true`
-is sent from that answer and from nowhere else, and `Enter` is not that answer: there is
-no default, because a resume attaches under the resuming identity and every later
-challenge binds to them. Taking over a setup is taking over its credential prompts.
-
-**Where the secret is, and is not.** One field holds a typed secret: a `Zeroizing` buffer
-whose `Debug` prints a character count and no characters, which renders as one bullet per
-character, and which is cleared on submit, on cancel, on the challenge being replaced and
-on closing the view — including Ctrl+C, which goes through the same overlay teardown as
-Esc rather than dropping the overlay with the buffer still full. A paste into that field
-is wrapped in `Zeroizing` and not trimmed, so a password with leading or trailing spaces
-is the password. It is never on a `Tag` — tags are cloned, hashed and `Debug`-printed —
-never in a notice and never in a log line. What leaves the view is one
-`fleet.deployment.authenticate` call, the one method whose parameters the gateway keeps
-out of its audit digest. `tests/devices_flow.rs` types a unique password and then looks
-for it in the frame, in the buffer's length (not the redacted `Debug`) and in every
-queued request.
-
-**Every device-supplied string is scrubbed.** A hostname, an address, a platform, a
-worker's step and prompt labels, a plan's fields, a gateway's refusal `message`: all of
-them go through `scrub`, which drops the default-ignorable code points (so
-`bui<U+200B>ld-linux` is not a second device that reads as the first) and then
-`fleet_network::human`, the same bounding the CLI's row renderer applies.
-`tests/fixtures/tailscale/hostile-names.json` is the capture that tries to forge a row
-with one. A device that adopts a roster machine's name is listed as itself, with the note
-in its own details, and is never merged into the member it is imitating.
-
-**Read scope and non-administrator.** `fleet.devices` is a read-scope method that the
-identity rule reserves for administrators, so a `-32003` on it can only be the identity
-rule — and that is a different sentence from `hello.methods` not listing the method at
-all. Both fall back to `fleet.status`'s membership subset with a sentence saying which
-happened. A read-scope listener sees the list and is told it cannot start a deployment.
-
-**Nothing is refused in silence.** Every refused key writes its sentence to the hint line,
-which is the one row always on the page. That includes the server's own `deploy_blocked`
-(`-32003` with `data.blockers`), which is the authority — a blocker can appear between
-the list being read and the key being pressed — and whose codes are
-`capabilities.reasons`' codes, rendered by the one `blocker_sentence` both paths share so
-the same fact is never described two ways. A row with *no button* is not a refusal: Enter
-does nothing, because the reason is already under the list where the reader is.
-
-**Screen-reader mode** numbers the rows and the menu answers and *answers to those
-numbers* — host trust, the takeover question, the review and the connect form each route
-`access::row_for_digit`, except on the fields where a digit is the value somebody is
-typing (the port, the address and the machine name). It drops the box drawing, spells the
-progress marks as words, and rings the bell when the deployment stops for a person — once
-per question, through the existing `notify::Signal::NeedsInput` path, which resolves
-`auto` to the bell in this mode whether or not the terminal has focus.
-
-**The list follows its cursor except while paging.** `PageUp`/`PageDown` scroll without
-moving the selection, so the details under a long inventory remain reachable. Cursor
-navigation restores selection-following. After paging, the first `Enter` or `x` returns
-to the selected row without acting; a second press can act on the now-visible selection.
-A bracketed paste reaches the masked field and the connect form's text fields.
+**Screen-reader mode** numbers the rows and answers to those numbers, drops the box
+drawing and speaks each mark as the word it stands for. There is no prompt here to ring a
+bell for.
 
 ### Names on screen, never wire words (T2.8)
 
@@ -3829,10 +3632,10 @@ rediscovered:
   `[theme]` has the picker, which can preview where a cycler row could not; `[location]` is
   the `f5` dialog, which browses the runtime's filesystem. A settings page that simply never
   mentions `[keys]` is how an operator concludes their chords cannot be rebound at all.
-- **There is no Machines overlay.** The cluster is not a product this client sets up:
-  `ouro fleet create` gives one machine its identity, `ouro fleet status` and
-  `ouro fleet doctor` read it, and two machines are joined by hand with the environment
-  in `docs/FLEET.md`. The client keeps the readout — the Dashboard's cluster line, the
+- **There is no Machines overlay.** The Devices view is an inventory, not a stepper:
+  `ouro fleet setup` gives one machine its identity, `ouro fleet add` brings a second in,
+  and `ouro fleet status` / `ouro fleet doctor` read what is there — see `docs/FLEET.md`.
+  The client keeps the readout — the Dashboard's cluster line, the
   Settings facts, and the `n` dialog's machine picker — which is
   [`ui/app/cluster.rs`](../tui/src/ui/app/cluster.rs) over `runtime.status` plus the local
   profile. `docs/proposals/core.md` §3 records the decision.
