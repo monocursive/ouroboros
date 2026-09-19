@@ -19,7 +19,7 @@ defmodule Ouroboros.Cluster.TagsTest do
     System.delete_env("OUROBOROS_NODE")
 
     profile = %{
-      "schema" => 1,
+      "schema" => 2,
       "fleet_id" => "00112233445566778899aabb",
       "machine" => "studio",
       "host" => "localhost",

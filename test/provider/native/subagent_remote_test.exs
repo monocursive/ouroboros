@@ -110,7 +110,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     fleet_id = "00112233445566778899aabb"
 
     profile = %{
-      "schema" => 1,
+      "schema" => 2,
       "fleet_id" => fleet_id,
       "machine" => machine,
       "host" => host,
