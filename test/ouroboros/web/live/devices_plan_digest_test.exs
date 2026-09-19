@@ -105,6 +105,31 @@ defmodule Ouroboros.Web.Live.DevicesPlanDigestTest do
       refute Devices.plan_digest(reversed) == @expected
     end
 
+    # Forty keys, because Elixir changes map representation at thirty-two: at or below it a
+    # map iterates in key order and an implementation that forgot to sort agrees with this
+    # one by accident; above it the order is arbitrary. Every object in a real plan is small,
+    # which is exactly why a missing sort survives a suite built only out of real plans.
+    @wide %{"target" => Map.new(1..40, fn index -> {"k#{index}", index} end), "kind" => "add"}
+    @wide_expected "fdcaa9e4cdd70a8cef94df701e73ce21a26b2b2621585e0a8ddf216074daae29"
+
+    test "sorts an object too wide for map iteration to sort it by accident" do
+      keys = Map.keys(@wide["target"])
+
+      refute keys == Enum.sort(keys),
+             "this map still iterates in key order, so it no longer tests what it is for"
+
+      assert Devices.plan_digest(@wide) == @wide_expected
+    end
+
+    test "a wide object written two ways still has one digest" do
+      reversed = %{
+        "kind" => "add",
+        "target" => Map.new(40..1//-1, fn index -> {"k#{index}", index} end)
+      }
+
+      assert Devices.plan_digest(reversed) == @wide_expected
+    end
+
     test "a plan this build cannot canonicalise has no digest, and is not approvable" do
       assert Devices.plan_digest(%{"at" => ~D[2026-09-17]}) == nil
       assert Devices.plan_digest(nil) == nil

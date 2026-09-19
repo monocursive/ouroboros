@@ -503,7 +503,10 @@ WantedBy=default.target
 "#,
                     description = systemd_literal(&data_dir),
                     executable = systemd_quoted(&executable),
-                    working_directory = systemd_quoted(&data_dir),
+                    // A path directive, not a command line: systemd 257 refuses a quoted
+                    // WorkingDirectory= as "path is not absolute" (the quotes are part of
+                    // the value), so it is written literally with only `%` doubled.
+                    working_directory = systemd_literal(&data_dir),
                     out_log = systemd_literal(&out_log),
                     err_log = systemd_literal(&err_log),
                 );
@@ -1303,11 +1306,13 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
     prepare_log(&plan.err_log())?;
     if ownership == Ownership::Ours && fs::read_to_string(&unit_path)? == text {
         inspect_manager(plan, programs, &mut report)?;
-        if report.loaded == Some(true) {
+        // A loaded unit can be stopped. Preserve a running (or indeterminate)
+        // service, but let installation start a known-stopped unit with no owner.
+        if report.loaded == Some(true) && (report.running != Some(false) || owner.is_some()) {
             report.installed = true;
             report
                 .notes
-                .push("the matching service is already loaded; it was left running".into());
+                .push("the matching service is already loaded; it was left unchanged".into());
             return Ok(report);
         }
     }
@@ -1342,6 +1347,23 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         if ownership == Ownership::Absent {
             let _ = fs::remove_file(&unit_path);
             report.step(format!("removed {}", unit_path.display()));
+            // `systemctl --user enable --now` links the unit into
+            // `default.target.wants` before it tries to start it, so a start that the
+            // manager refused leaves a symlink to a file this branch just removed.
+            if plan.platform == Platform::Linux {
+                let wants = plan
+                    .config_home
+                    .join("systemd")
+                    .join("user")
+                    .join("default.target.wants")
+                    .join(plan.manager_name());
+                if fs::symlink_metadata(&wants)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                    && fs::remove_file(&wants).is_ok()
+                {
+                    report.step(format!("removed {}", wants.display()));
+                }
+            }
             return Err(error.context(format!(
                 "the unit this call wrote was removed again, so nothing starts at the next login; {} is as it was",
                 unit_path.display()
@@ -1353,8 +1375,44 @@ pub fn install(plan: &Plan, programs: &Programs, adopt: bool) -> Result<Report> 
         )));
     }
 
+    enable_lingering(plan, programs, &mut report);
     inspect_manager(plan, programs, &mut report)?;
     Ok(report)
+}
+
+/// Ask logind to keep this account's user manager running from boot to shutdown.
+///
+/// A user unit without lingering starts at login and stops at logout, and a machine
+/// that was just added to a fleet over SSH is exactly the machine nobody logs in to.
+/// `loginctl enable-linger` for one's own account needs no administrator on a stock
+/// polkit policy, so it is attempted once, after the unit is loaded; what it answered
+/// is reported either way, and a refusal keeps the honest "starts at login" sentence
+/// with the administrator's step in it.
+fn enable_lingering(plan: &Plan, programs: &Programs, report: &mut Report) {
+    if plan.platform != Platform::Linux || report.linger != Some(false) {
+        return;
+    }
+    let args = ["enable-linger", plan.user.as_str()];
+    report.record(&programs.loginctl, &args);
+    match run(&programs.loginctl, &args, programs.deadline) {
+        Ok(outcome) if outcome.status == Some(0) => {
+            report.linger = Some(true);
+            report.persistence = linger_sentence(&plan.user, Some(true));
+            report.steps.push(format!(
+                "enabled lingering for {}: the unit starts at boot and survives logout",
+                plan.user
+            ));
+        }
+        Ok(outcome) => report.notes.push(format!(
+            "`loginctl enable-linger {}` was refused ({}), so this unit starts at login only",
+            plan.user,
+            first_line(&outcome.stderr, &outcome.stdout)
+        )),
+        Err(error) => report.notes.push(format!(
+            "`loginctl enable-linger {}` could not be run ({error:#}), so this unit starts at login only",
+            plan.user
+        )),
+    }
 }
 
 /// Hand the freshly written unit to the service manager.
@@ -1925,14 +1983,41 @@ fn not_loaded(outcome: &Outcome) -> bool {
 /// not a trusted string: it can carry ANSI escapes that rewrite the line above it, and
 /// on a bad day it can carry a megabyte. Control characters (C0, DEL and the C1 range)
 /// are dropped and the result is capped.
+/// The line of a manager's output worth repeating.
+///
+/// A line that reads as a failure wins over the first line: `systemctl --user enable
+/// --now` prints `Created symlink …` before `Failed to start …: Unit … has a bad unit
+/// file setting.`, and quoting the symlink line described a refusal as a success.
 fn first_line(stderr: &str, stdout: &str) -> String {
-    let line = stderr
+    let lines: Vec<&str> = stderr
         .lines()
         .chain(stdout.lines())
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = lines
+        .iter()
+        .copied()
+        .find(|line| reads_as_failure(line))
+        .or_else(|| lines.first().copied())
         .unwrap_or("the manager said nothing");
     sanitize_manager_text(line)
+}
+
+fn reads_as_failure(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    [
+        "fail",
+        "error",
+        "refus",
+        "denied",
+        "invalid",
+        "bad unit",
+        "not found",
+        "no such",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
 }
 
 /// The longest run of a manager's own words this code will repeat.
@@ -2451,7 +2536,7 @@ mod tests {
         assert!(text.contains("StartLimitBurst=5"), "{text}");
         assert!(text.contains("WantedBy=default.target"), "{text}");
         assert!(
-            text.contains("WorkingDirectory=\"/home/tester/.ouroboros\""),
+            text.contains("WorkingDirectory=/home/tester/.ouroboros\n"),
             "{text}"
         );
     }
@@ -2505,8 +2590,10 @@ mod tests {
             exec, "ExecStart=\"/opt/my tools/100%%/ouro\" service-run",
             "the program is one quoted word and the specifier is doubled"
         );
+        // A path directive takes the rest of its line: quoting it makes systemd read
+        // the quotes as part of the path and refuse the unit ("path is not absolute").
         assert!(
-            text.contains("WorkingDirectory=\"/srv/my data/%%h/a\\\"quoted\\\"/state\""),
+            text.contains("WorkingDirectory=/srv/my data/%%h/a\"quoted\"/state\n"),
             "{text}"
         );
         assert!(
@@ -2537,6 +2624,19 @@ mod tests {
                 "an unescaped specifier survives: {line}"
             );
         }
+    }
+
+    #[test]
+    fn the_manager_line_repeated_is_the_one_that_reads_as_a_failure() {
+        assert_eq!(
+            first_line(
+                "Created symlink '/x/default.target.wants/a.service' -> '/x/a.service'.\nFailed to start a.service: Unit a.service has a bad unit file setting.\n",
+                ""
+            ),
+            "Failed to start a.service: Unit a.service has a bad unit file setting."
+        );
+        assert_eq!(first_line("", "only a note\n"), "only a note");
+        assert_eq!(first_line("", ""), "the manager said nothing");
     }
 
     #[test]

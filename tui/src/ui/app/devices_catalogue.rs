@@ -45,6 +45,7 @@ pub const BLOCKER_CODES: &[&str] = &[
     "ouro_path_unknown",
     "no_data_dir",
     "cleartext_web_bind",
+    "dev_runtime",
 ];
 
 /// `fleet.deployment.status`'s `state` values, including the client-only `attaching`.
@@ -152,6 +153,13 @@ pub fn blocker_sentence(reason: &str) -> String {
         "cleartext_web_bind" => "This runtime publishes its web endpoint on a non-loopback \
                                  address with no TLS, so credential entry is refused on \
                                  this deployment host."
+            .into(),
+        // Only ever a reason a machine cannot set *itself* up: a Mix dev runtime drives a
+        // deployment onto another machine perfectly well, and what it cannot do is be the
+        // thing installed here. A live run let it try, wrote a LaunchAgent that exits 1,
+        // and said nothing.
+        "dev_runtime" => "This is a development runtime; the packaged ouro is what sets a \
+                          machine up."
             .into(),
         other => format!(
             "This runtime reports the blocker {}.",

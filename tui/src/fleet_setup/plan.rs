@@ -140,6 +140,15 @@ pub struct Plan {
     pub schema: u8,
     pub operation: String,
     pub kind: OperationKind,
+    /// One sentence saying what approving this does, in the order it happens.
+    ///
+    /// The surfaces render the document's fields rather than [`Self::render`]'s text, so
+    /// the sentence a person actually decides on has to *be* a field. Defaulted so a
+    /// journal written by an older build still parses; every plan this build makes has
+    /// one, and it is inside the digest like every other fact. Preserve the old shape
+    /// when absent so its recorded approval can still be checked before migration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
     pub deployment_host: DeploymentHost,
     pub target: PlanTarget,
     #[serde(default)]
@@ -161,6 +170,30 @@ pub struct Plan {
 impl Plan {
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    /// Recompute [`Self::summary`] from the plan's own facts.
+    ///
+    /// The sentence is a *rendering* of the rest of the document, so it is derived and
+    /// never remembered. A resumed `add` restores the release its approval named after
+    /// the plan has been built — the binary is on the target by then, so planning it
+    /// fresh finds nothing to install — and a sentence computed before that restore
+    /// would say the operation installs nothing, change the digest, and turn every
+    /// resume into `plan_changed`. Whoever edits a plan calls this afterwards.
+    pub fn refresh_summary(&mut self) {
+        self.summary = match self.kind {
+            OperationKind::Add => add_summary(
+                &self.target.machine,
+                &self.target.address,
+                self.release.is_some(),
+            ),
+            OperationKind::Setup => setup_summary(&self.target.machine, &self.target.address),
+            // `members` is the machine that is leaving plus every roster this operation
+            // edits, so the count of edited rosters is one less than the list.
+            OperationKind::Leave => {
+                leave_summary(&self.target.machine, self.members.len().saturating_sub(1))
+            }
+        };
     }
 
     /// Seam S6's digest: sha256 over the canonical JSON of this document.
@@ -185,6 +218,9 @@ impl Plan {
             "Deploying from {} · local user {}{authority}\n",
             self.deployment_host.hostname, self.deployment_host.user,
         ));
+        if !self.summary.is_empty() {
+            text.push_str(&format!("{}\n", self.summary));
+        }
         text.push_str(&format!("\n  operation    {}\n", self.operation));
         text.push_str(&format!("  action       {}\n", self.kind.as_str()));
         text.push_str(&format!("  machine      {}\n", self.target.machine));
@@ -231,7 +267,7 @@ impl Plan {
             "  startup      {}\n",
             match self.service {
                 ServicePlan::Managed =>
-                    "propose a user service (starts at login; not a pre-login daemon)",
+                    "propose a user service (starts at login; on Linux also at boot, when lingering can be enabled)",
                 ServicePlan::Manual => "manual start, explicitly chosen",
             }
         ));
@@ -266,6 +302,37 @@ impl Plan {
     }
 }
 
+/// What a `leave` does, in one line, in the order it happens.
+///
+/// `rosters` is how many machines' rosters this operation edits — every remaining member
+/// including this one, and not the machine that is leaving. The second half is the part
+/// people ask about first, and it is the part that is easy to get wrong in a hurry: a
+/// removal takes the machine out of the fleet and leaves everything on it alone.
+pub fn leave_summary(machine: &str, rosters: usize) -> String {
+    format!(
+        "Stop Ouroboros on {machine}, retire its credentials, remove it from {rosters} \
+         roster{plural}; its sessions and data stay on that machine.",
+        plural = if rosters == 1 { "" } else { "s" }
+    )
+}
+
+/// The same one-liner for an admission.
+pub fn add_summary(machine: &str, address: &str, installing: bool) -> String {
+    format!(
+        "{install} {machine} ({address}) into this fleet and update every member's roster.",
+        install = if installing {
+            "Install Ouroboros on and join"
+        } else {
+            "Join"
+        }
+    )
+}
+
+/// And for a first setup.
+pub fn setup_summary(machine: &str, address: &str) -> String {
+    format!("Create a fleet on this machine as {machine} ({address}).")
+}
+
 /// The sentence the proposal requires an acceptance to explain, in one place so every
 /// surface says the same thing.
 pub fn admission_grant() -> String {
@@ -293,6 +360,7 @@ mod tests {
             schema: super::super::SCHEMA,
             operation: "op-0123456789ab".into(),
             kind: OperationKind::Add,
+            summary: add_summary("buildbox", "100.64.0.2", false),
             deployment_host: DeploymentHost {
                 hostname: "studio".into(),
                 user: "me".into(),
@@ -354,6 +422,18 @@ mod tests {
             digest,
             "different startup behaviour is a different plan"
         );
+    }
+
+    #[test]
+    fn a_plan_without_a_summary_preserves_its_approved_digest() {
+        let mut legacy = plan().to_value();
+        legacy.as_object_mut().unwrap().remove("summary");
+        let digest = sha256_hex(canonical_json(&legacy).as_bytes());
+        let mut decoded: Plan = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(decoded.to_value(), legacy);
+        assert_eq!(decoded.digest(), digest);
+        decoded.refresh_summary();
+        assert_ne!(decoded.digest(), digest);
     }
 
     /// Everything the proposal requires a review to show is on the page, and nothing a
@@ -419,6 +499,79 @@ mod tests {
         assert!(rendered.contains("install      ouro 0.1.8 (x86_64-unknown-linux-gnu)"));
         assert!(rendered.contains("a loopback test origin, not the official release"));
         assert!(rendered.contains("restart      this machine's runtime must be idle"));
+    }
+
+    /// A `leave` plan says what it does in one line, in a field.
+    ///
+    /// The surfaces render the document, not [`Plan::render`]'s text, so a sentence that
+    /// lived only in the rendering was a sentence the web and the TUI could not show. It
+    /// is a field, it is in the digest, and it states the two things a person removing a
+    /// machine wants confirmed: what stops, and what stays.
+    #[test]
+    fn a_leave_plan_states_what_it_does_and_what_it_leaves_alone() {
+        let mut plan = plan();
+        plan.kind = OperationKind::Leave;
+        plan.summary = leave_summary("buildbox", 2);
+        plan.grants = vec![removal_note("buildbox")];
+
+        assert_eq!(
+            plan.summary,
+            "Stop Ouroboros on buildbox, retire its credentials, remove it from 2 rosters; \
+             its sessions and data stay on that machine."
+        );
+        assert_eq!(
+            leave_summary("buildbox", 1),
+            "Stop Ouroboros on buildbox, retire its credentials, remove it from 1 roster; \
+             its sessions and data stay on that machine.",
+            "one roster is not `1 rosters`"
+        );
+
+        // In the document, and therefore in the digest.
+        assert_eq!(
+            plan.to_value()["summary"],
+            Value::String(plan.summary.clone())
+        );
+        let digest = plan.digest();
+        let mut reworded = plan.clone();
+        reworded.summary = "Remove buildbox.".to_string();
+        assert_ne!(
+            reworded.digest(),
+            digest,
+            "the sentence an operator approved is one of the facts the approval binds"
+        );
+        let reencoded: Plan =
+            serde_json::from_value(plan.to_value()).expect("a round-trippable plan");
+        assert_eq!(
+            reencoded.digest(),
+            digest,
+            "and the digest is still canonical"
+        );
+
+        // And it is on the page a terminal prints, above the facts it summarises.
+        let rendered = plan.render();
+        let summary_at = rendered
+            .find("Stop Ouroboros on buildbox")
+            .expect("the summary is rendered");
+        let operation_at = rendered.find("  operation").expect("the fact list");
+        assert!(summary_at < operation_at, "{rendered}");
+        assert!(rendered.contains("its sessions and data stay on that machine"));
+    }
+
+    /// A journal written before the summary existed still parses, and still digests.
+    #[test]
+    fn a_plan_from_an_older_build_has_no_summary_rather_than_no_plan() {
+        let mut document = plan().to_value();
+        document
+            .as_object_mut()
+            .expect("a plan is an object")
+            .remove("summary");
+        let older: Plan = serde_json::from_value(document).expect("an older plan still parses");
+        assert_eq!(older.summary, "");
+        assert_eq!(older.digest().len(), 64);
+        assert!(
+            !older.render().starts_with('\n'),
+            "and it renders without a blank line where the sentence would be"
+        );
     }
 
     /// Removal states the decision it is deliberately not making.

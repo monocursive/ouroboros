@@ -392,9 +392,9 @@ impl Journal {
         self.flush()
     }
 
-    /// Drop a review that never reached a mutating step, so a retry re-plans.
+    /// Require a new approval, retaining facts needed to verify an installed binary
+    /// or prepared identity. Only the engine may decide whether issuance permits this.
     pub fn forget_review(&mut self) -> Result<()> {
-        self.record.plan = None;
         self.record.plan_digest = None;
         self.record.roster = None;
         self.flush()
@@ -402,7 +402,7 @@ impl Journal {
 
     /// Write the "about to happen" half of a step.
     pub fn begin_step(&mut self, machine: &str, step: &str) -> Result<()> {
-        self.push(machine, step, "started", None, None)
+        self.finish_step(machine, step, "started", None, None)
     }
 
     /// Write the outcome half.
@@ -467,7 +467,14 @@ impl Journal {
 
     /// The sanitized reason the operation stopped. Never a `Debug` rendering.
     pub fn fail(&mut self, state: OperationState, detail: impl Into<String>) -> Result<()> {
-        self.record.last_error = Some(bounded(&detail.into()));
+        let detail = bounded(&detail.into());
+        for step in &mut self.record.steps {
+            if step.outcome == "started" {
+                step.outcome = "failed".into();
+                step.detail = Some(detail.clone());
+            }
+        }
+        self.record.last_error = Some(detail);
         self.record.state = state;
         self.flush()
     }

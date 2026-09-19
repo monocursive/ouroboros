@@ -54,9 +54,12 @@ defmodule Ouroboros.Test.BrowserFleet do
   @refresh_ms 10_000
   @keep 24
 
-  # The frozen inventory. One row per branch of the proposal's observed-state table that a
-  # browser can see: this machine, a member that is not visible, a peer nothing has
-  # inspected, a peer wearing a member's name, and a platform with no release.
+  # The frozen inventory. One row per state a browser can see: this machine, a member that
+  # is not visible, a peer nothing has inspected, and a platform with no release.
+  #
+  # Every row carries `suggested_machine` (fleet UX review 2026-09-18 section 5.5): the
+  # valid name a setup form pre-fills with. `name` is a display name and is never what a
+  # form submits, which is what finding 3 was.
   @inventory %{
     "fleet_protocol_revision" => 5,
     "discovery" => %{
@@ -71,6 +74,7 @@ defmodule Ouroboros.Test.BrowserFleet do
       %{
         "name" => "fixture-studio",
         "machine" => "fixture-studio",
+        "suggested_machine" => "fixture-studio",
         "os" => "macos",
         "address" => "100.100.0.1",
         "online" => true,
@@ -83,6 +87,7 @@ defmodule Ouroboros.Test.BrowserFleet do
       %{
         "name" => "fixture-buildbox",
         "machine" => "fixture-buildbox",
+        "suggested_machine" => "fixture-buildbox",
         "os" => nil,
         "address" => "100.100.0.2",
         "online" => nil,
@@ -95,6 +100,7 @@ defmodule Ouroboros.Test.BrowserFleet do
       %{
         "name" => "fixture-toaster",
         "machine" => nil,
+        "suggested_machine" => "fixture-toaster",
         "os" => "plan9",
         "address" => "100.100.0.9",
         "online" => false,
@@ -171,6 +177,7 @@ defmodule Ouroboros.Test.BrowserFleet do
       %{
         "name" => "fixture-peer-#{String.pad_leading("#{index}", 2, "0")}",
         "machine" => nil,
+        "suggested_machine" => "fixture-peer-#{String.pad_leading("#{index}", 2, "0")}",
         "os" => "linux",
         "address" => "100.100.7.#{index}",
         "online" => true,
@@ -303,7 +310,13 @@ defmodule Ouroboros.Test.BrowserFleet do
       serving ->
         state = %{state | serving: serving, subject: frame["subject"]} |> warm()
         FleetOuroFake.put_spawn_line!(state.bin, FleetWorkerFake.spawn_line(state.next))
-        journal(state, "deploying")
+
+        # The durable state is the one the operation is *about to be in*: this worker is
+        # raising a host-key question and then waiting for an answer. A journal left saying
+        # "deploying" is what made a closed drawer's row read "setting up…" with Continue
+        # over an operation that was waiting for the operator — §5.1 gives the three
+        # `awaiting_*` states the words "waiting for you".
+        journal(state, "awaiting_host_trust")
 
         asked = request(state)
 
@@ -323,6 +336,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-host"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_auth"})
+    journal(state, "awaiting_auth")
 
     asked = request(state)
 
@@ -341,6 +355,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-password"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "awaiting_review"})
+    journal(state, "awaiting_review")
 
     FleetWorkerFake.challenge(state.serving, "fixture-review", "review", %{
       "metadata" => %{"plan" => plan(request(state)), "plan_digest" => digest(request(state))}
@@ -351,6 +366,7 @@ defmodule Ouroboros.Test.BrowserFleet do
 
   def handle_info({:fake_worker, %{"op" => "respond", "challenge" => "fixture-review"}}, state) do
     FleetWorkerFake.emit(state.serving, %{"event" => "state", "state" => "deploying"})
+    journal(state, "deploying")
     Process.send_after(self(), {:step, 0}, 90)
     {:noreply, state}
   end
@@ -480,7 +496,19 @@ defmodule Ouroboros.Test.BrowserFleet do
     end
   end
 
-  defp machine_of(request), do: request["machine"] || request["address"] || "the target"
+  # `setup` names the machine at the top level; `add` and `leave` name it inside `target`,
+  # which is where `fleet.deployment.prepare` puts it. Reading only the top level made every
+  # `add` plan say "the target", which is the fixture reproducing finding 2 rather than
+  # catching it.
+  defp machine_of(request) do
+    target = request["target"] || %{}
+
+    present(request["machine"]) || present(target["machine"]) || present(request["address"]) ||
+      present(target["address"]) || "the target"
+  end
+
+  defp present(value) when is_binary(value) and value != "", do: value
+  defp present(_absent), do: nil
 
   # A real worker sends the sha256 of the plan it built (`Plan::digest/0`), and the page
   # refuses to approve anything else — so a fixture that made a digest up would be a fixture

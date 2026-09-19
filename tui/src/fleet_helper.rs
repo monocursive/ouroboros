@@ -386,6 +386,10 @@ impl Helper {
             })),
             "inspect" => self.inspect(&data_dir),
             "prepare" => self.prepare(&data_dir, object),
+            "discard_preparation" => required_str(object, "operation").and_then(|operation| {
+                fleet::discard_preparation(&data_dir, &operation)?;
+                Ok(json!({"discarded": true}))
+            }),
             "install" => self.install(&data_dir, object),
             "roster" => self.roster(&data_dir, object),
             "receipt" => self.receipt(&data_dir, object),

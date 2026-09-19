@@ -151,11 +151,43 @@ pub fn fetch_verified(
     expected: &str,
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>> {
+    fetch_verified_with_progress(origin, version, asset, expected, cancelled, &mut |_| {})
+}
+
+/// Report bytes received in this attempt without weakening the checksum or size cap.
+pub fn fetch_verified_with_progress(
+    origin: &Origin,
+    version: &str,
+    asset: &str,
+    expected: &str,
+    cancelled: &AtomicBool,
+    progress: &mut dyn FnMut(usize),
+) -> Result<Vec<u8>> {
+    struct ProgressSink<'a> {
+        bytes: Vec<u8>,
+        report: &'a mut dyn FnMut(usize),
+    }
+    impl std::io::Write for ProgressSink<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            (self.report)(self.bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
     let curl = origin.curl();
     let url = origin.url(version, asset);
     for attempt in 0..3 {
-        let mut bytes = Vec::new();
-        match curl.get(&url, false, &mut bytes, BINARY_CAP, cancelled) {
+        progress(0);
+        let mut sink = ProgressSink {
+            bytes: Vec::new(),
+            report: progress,
+        };
+        let result = curl.get(&url, false, &mut sink, BINARY_CAP, cancelled);
+        let bytes = sink.bytes;
+        match result {
             Ok(()) => {
                 let mut digest = Digest::new(&SHA256);
                 digest.update(&bytes);

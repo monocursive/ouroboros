@@ -1,6 +1,6 @@
 defmodule Ouroboros.Web.Publication do
   @moduledoc """
-  Writes `web.json` once the endpoint is bound, and removes it when it stops.
+  Writes `web.json` once the endpoint is bound, and leaves it there when it stops.
 
   This is `Ouroboros.Gateway.Listener`'s publication half, split into its own child
   because the endpoint is Phoenix's to supervise and the bound port is only knowable
@@ -29,11 +29,20 @@ defmodule Ouroboros.Web.Publication do
   A failure to publish stops this process, and therefore the boot. An endpoint nobody can
   find is not a degraded operator surface, it is an absent one.
 
-  Removal is best effort and conditional on the inode still being the one this process
-  wrote: a second daemon that republished over it owns the file now, and deleting another
-  daemon's publication on the way out would be worse than leaving a stale one. A killed
-  node removes nothing at all, which is why the file carries the OS pid and, when present,
-  the kernel birth identity — a stale publication is detectable rather than misleading.
+  Nothing is removed on the way out, and that is the decision rather than an omission. The
+  file names a pid and a birth that are about to be gone, which every reader already treats
+  as "no endpoint" — `ouro web` starts or adopts a runtime exactly as it would with no file
+  at all — and it is the one place the *next* boot can read the port it should take again.
+  Removing it made the sticky port survive a crash and not a clean stop, which is backwards:
+  the clean stop is the one a local fleet setup performs on purpose, with a browser tab
+  waiting on the old port.
+
+  So a stale publication is the ordinary resting state, and it is detectable rather than
+  misleading: the OS pid and, when present, the kernel birth identity say which process
+  wrote it, and a reader that finds neither alive knows what it is looking at. The inode
+  check that used to guard removal now guards the *write* — between the exclusive temporary
+  inode and the rename that publishes it — because that is where a file being swapped
+  underneath this process would actually matter.
   """
 
   use GenServer
@@ -111,9 +120,9 @@ defmodule Ouroboros.Web.Publication do
 
     case endpoint.bound_address() do
       {:ok, {address, port}} ->
-        {path, stat} = publish!(config, port)
+        path = publish!(config, port)
         announce(config, address, port, path)
-        {:ok, %{config: config, path: path, stat: stat, port: port}}
+        {:ok, %{config: config, path: path, port: port}}
 
       :error ->
         {:stop, {:web_endpoint_not_bound, endpoint}}
@@ -123,11 +132,14 @@ defmodule Ouroboros.Web.Publication do
   @impl true
   def handle_call(:path, _from, state), do: {:reply, state.path, state}
 
+  # The publication is left where it is. It names a pid and a birth that are about to be
+  # gone, which every reader already treats as "no endpoint" (`ouro web` starts or adopts
+  # a runtime exactly as it would with no file), and it is the one place the next boot
+  # can read the port it should take again: removing it on the way out made the sticky
+  # port survive a crash and not a clean stop — which is the restart a local fleet setup
+  # does on purpose, with a browser tab waiting on the old port.
   @impl true
-  def terminate(_reason, state) do
-    _ = remove_if_owner(state.path, state.stat)
-    :ok
-  end
+  def terminate(_reason, _state), do: :ok
 
   defp announce(config, address, port, path) do
     Logger.info(
@@ -157,48 +169,41 @@ defmodule Ouroboros.Web.Publication do
 
     contents = JSON.encode_to_iodata!(published)
 
-    stat =
-      try do
-        # The exclusive empty inode makes a preplanted symlink a refusal. Its mode is
-        # private before any discovery bytes are written, and the descriptor is synced
-        # before the rename that publishes them.
-        File.write!(tmp, "", [:exclusive, :sync])
-        File.chmod!(tmp, 0o600)
-        before = File.lstat!(tmp, time: :posix)
+    # The inode is checked at three points and kept at none: this process publishes the file
+    # and never touches it again, so what matters is that nothing was swapped underneath the
+    # write, not what the file looked like afterwards.
+    try do
+      # The exclusive empty inode makes a preplanted symlink a refusal. Its mode is
+      # private before any discovery bytes are written, and the descriptor is synced
+      # before the rename that publishes them.
+      File.write!(tmp, "", [:exclusive, :sync])
+      File.chmod!(tmp, 0o600)
+      before = File.lstat!(tmp, time: :posix)
 
-        File.open!(tmp, [:write, :binary], fn io ->
-          IO.binwrite(io, contents)
-          :ok = :file.sync(io)
-        end)
+      File.open!(tmp, [:write, :binary], fn io ->
+        IO.binwrite(io, contents)
+        :ok = :file.sync(io)
+      end)
 
-        after_write = File.lstat!(tmp, time: :posix)
+      after_write = File.lstat!(tmp, time: :posix)
 
-        unless same_file?(before, after_write) do
-          raise "web publication temporary inode changed while it was written"
-        end
-
-        File.rename!(tmp, path)
-        published = File.lstat!(path, time: :posix)
-
-        unless same_file?(after_write, published) do
-          raise "web publication inode changed while it was published"
-        end
-
-        published
-      rescue
-        error ->
-          _ = File.rm(tmp)
-          reraise error, __STACKTRACE__
+      unless same_file?(before, after_write) do
+        raise "web publication temporary inode changed while it was written"
       end
 
-    {path, stat}
-  end
+      File.rename!(tmp, path)
+      published = File.lstat!(path, time: :posix)
 
-  defp remove_if_owner(path, expected) do
-    case File.lstat(path, time: :posix) do
-      {:ok, current} -> if same_file?(current, expected), do: File.rm(path), else: :ok
-      {:error, _reason} -> :ok
+      unless same_file?(after_write, published) do
+        raise "web publication inode changed while it was published"
+      end
+    rescue
+      error ->
+        _ = File.rm(tmp)
+        reraise error, __STACKTRACE__
     end
+
+    path
   end
 
   defp same_file?(left, right) do

@@ -219,8 +219,10 @@ pub fn missing_publication_refusal(path: &Path, budget: Duration) -> String {
 }
 
 /// The same situation, for a `web.json` that is present and belongs to a process that is
-/// gone. `Ouroboros.Web.Publication` removes the file on an orderly stop and a killed node
-/// removes nothing, which is why the pid is worth naming.
+/// gone. `Ouroboros.Web.Publication` leaves its file behind on every stop, orderly or not —
+/// the next boot reads the port out of it — so a publication naming a dead pid is the
+/// ordinary resting state rather than a sign of a crash, and the pid is what tells a reader
+/// which it is looking at.
 pub fn stale_publication_refusal(path: &Path, pid: i32) -> String {
     format!(
         "{} was left behind by pid {pid}, which is gone, and the runtime serving this data \

@@ -1,4 +1,4 @@
-# ouroboros-managed v1 data-dir=/home/tester/.ouroboros content-sha256=fc8e1876ecc61d32608695dc4dfb4f460a2ca13636a6b94bc0ceb867c443015b
+# ouroboros-managed v1 data-dir=/home/tester/.ouroboros content-sha256=4b9daf55135b2a40558d2f6fff22d63f815c2d94c08c807fdd8fa9506115a3e4
 [Unit]
 Description=Ouroboros runtime for /home/tester/.ouroboros
 # No network ordering: `ouro service-run` waits for this machine's own private
@@ -10,7 +10,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart="/usr/local/bin/ouro" service-run
-WorkingDirectory="/home/tester/.ouroboros"
+WorkingDirectory=/home/tester/.ouroboros
 Environment=HOME="/home/tester"
 Environment=OUROBOROS_DATA_DIR="/home/tester/.ouroboros"
 Environment=PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"

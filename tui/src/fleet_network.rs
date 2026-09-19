@@ -90,6 +90,13 @@ pub const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 pub const CLIENT_ENV: &str = "OUROBOROS_TAILSCALE";
 
 /// Where the client is looked for before `$PATH`, in order.
+///
+/// Before, because these are absolute paths the operator did not choose per shell: a
+/// `tailscale` earlier on `$PATH` would otherwise become the discovery oracle, naming the
+/// address a local setup binds and the addresses "Add to fleet" connects to. The macOS
+/// app bundle's CLI is first here and, from a process with no GUI login session, prints
+/// `The Tailscale GUI failed to start` and exits 0 — so a candidate that answers with no
+/// status document, or fails outright, is skipped for the next one (see [`inventory`]).
 const KNOWN_LOCATIONS: [&str; 4] = [
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
     "/usr/bin/tailscale",
@@ -116,21 +123,45 @@ pub struct Client {
 
 /// The installed client, or `None` when there is none to run.
 pub fn locate_client() -> Option<Client> {
-    locate_client_with(
+    locate_clients().into_iter().next()
+}
+
+/// Every installed client this lookup knows about, in the order they are tried.
+pub fn locate_clients() -> Vec<Client> {
+    locate_clients_with(
         std::env::var_os(CLIENT_ENV).as_deref(),
         std::env::var_os("PATH").as_deref(),
         &KNOWN_LOCATIONS,
     )
 }
 
-/// The lookup, with its three inputs named so a test can drive it without touching the
-/// process environment — and without the real client on this machine answering for a
-/// case that is supposed to have no client at all.
+/// The first candidate of [`locate_clients_with`].
+///
+/// Only the tests ask this question — production wants the whole ordered list, because
+/// a candidate that runs and answers with no status document is skipped for the next —
+/// so it is compiled only for them rather than left as dead weight.
+#[cfg(test)]
 fn locate_client_with(
     override_path: Option<&OsStr>,
     search_path: Option<&OsStr>,
     fallbacks: &[&str],
 ) -> Option<Client> {
+    locate_clients_with(override_path, search_path, fallbacks)
+        .into_iter()
+        .next()
+}
+
+/// The lookup, with its three inputs named so a test can drive it without touching the
+/// process environment — and without the real client on this machine answering for a
+/// case that is supposed to have no client at all.
+///
+/// An override names exactly one program. Otherwise the known locations come first, in
+/// their order, then every executable `tailscale` on `$PATH` in `$PATH` order, each once.
+fn locate_clients_with(
+    override_path: Option<&OsStr>,
+    search_path: Option<&OsStr>,
+    fallbacks: &[&str],
+) -> Vec<Client> {
     if let Some(named) = override_path.filter(|value| !value.is_empty()) {
         let path = PathBuf::from(named);
         // Absolute, for the reason `ouro wasm` requires it of its helper: a relative name
@@ -141,36 +172,34 @@ fn locate_client_with(
         // A rejected override is not a silent fall through to another program either: an
         // operator who named a client meant that one, and running a different one under
         // their instruction is worse than running none.
-        return (path.is_absolute() && executable(&path)).then_some(Client {
-            program: path,
-            source: ClientSource::Environment,
-        });
+        return (path.is_absolute() && executable(&path))
+            .then_some(Client {
+                program: path,
+                source: ClientSource::Environment,
+            })
+            .into_iter()
+            .collect();
     }
 
-    fallbacks
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| executable(path))
-        .map(|program| Client {
-            program,
-            source: ClientSource::KnownLocation,
-        })
-        .or_else(|| {
-            let search_path = search_path?;
-            for directory in std::env::split_paths(search_path) {
-                if directory.as_os_str().is_empty() {
-                    continue;
-                }
-                let candidate = directory.join("tailscale");
-                if executable(&candidate) {
-                    return Some(Client {
-                        program: candidate,
-                        source: ClientSource::Path,
-                    });
-                }
+    let mut found: Vec<Client> = Vec::new();
+    let mut push = |program: PathBuf, source: ClientSource| {
+        if executable(&program) && !found.iter().any(|client| client.program == program) {
+            found.push(Client { program, source });
+        }
+    };
+
+    for fallback in fallbacks {
+        push(PathBuf::from(fallback), ClientSource::KnownLocation);
+    }
+    if let Some(search_path) = search_path {
+        for directory in std::env::split_paths(search_path) {
+            if directory.as_os_str().is_empty() {
+                continue;
             }
-            None
-        })
+            push(directory.join("tailscale"), ClientSource::Path);
+        }
+    }
+    found
 }
 
 fn executable(path: &Path) -> bool {
@@ -543,15 +572,38 @@ impl Inventory {
 
 /// Reads this machine's network inventory. Contacts no peer.
 pub async fn inventory() -> Inventory {
-    match locate_client() {
-        None => Inventory::failed(
+    inventory_from(&locate_clients()).await
+}
+
+/// Candidates are tried in [`locate_clients`] order. One that ran and answered no status
+/// document — the macOS app bundle's CLI from a session with no GUI, which prints a
+/// sentence and exits 0 — or that failed outright is skipped while another candidate
+/// remains; a refusal on permission grounds, a timeout and a flood of output stop here,
+/// because trying another program would not answer them. The last answer stands when
+/// none did better.
+async fn inventory_from(candidates: &[Client]) -> Inventory {
+    if candidates.is_empty() {
+        return Inventory::failed(
             DiscoveryCode::ClientMissing,
             None,
             "install Tailscale and sign this machine in to the network the fleet uses, \
              or set OUROBOROS_TAILSCALE to an absolute path to the client",
-        ),
-        Some(client) => inventory_with(&client).await,
+        );
     }
+
+    let last = candidates.len() - 1;
+    for (index, client) in candidates.iter().enumerate() {
+        let inventory = inventory_with(client).await;
+        let try_next = matches!(
+            inventory.reason,
+            Some(UnavailableReason::ParseFailure) | Some(UnavailableReason::CommandFailed)
+        );
+        if try_next && index < last {
+            continue;
+        }
+        return inventory;
+    }
+    unreachable!("a non-empty candidate list answers on its last element")
 }
 
 async fn inventory_with(client: &Client) -> Inventory {
@@ -642,11 +694,16 @@ fn classify(stdout: &[u8], stderr: &[u8], status: Option<i32>) -> Inventory {
                 )
             };
         }
+        // What it printed instead is the diagnosis — `The Tailscale GUI failed to start`
+        // names a client that needs a login session, and a page of HTML names a proxy —
+        // so the first line goes into the detail, bounded and with any URL redacted.
         return Inventory::failed(
             DiscoveryCode::Unavailable,
             Some(UnavailableReason::ParseFailure),
-            "the Tailscale client's status was not readable as JSON; this build of \
-             Ouroboros may be older than the client",
+            &format!(
+                "the Tailscale client answered with no status document: {}",
+                first_line(&String::from_utf8_lossy(stdout))
+            ),
         );
     };
 
@@ -1374,6 +1431,11 @@ pub struct DeviceRow {
     pub node_key: Option<String>,
     /// Tailscale `ID`, same visibility as [`Self::node_key`].
     pub stable_id: Option<String>,
+    /// A valid machine name to offer when this device is set up or added: the roster name
+    /// for a member, otherwise [`machine_slug`] of the display name, or `None` when nothing
+    /// valid can be made of it. A surface pre-fills a form with this and never with `name`,
+    /// which is a display string the device chose and which the validator refuses.
+    pub suggested_machine: Option<String>,
 }
 
 /// Merges this machine's roster with the visible peers.
@@ -1394,7 +1456,8 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
         name: local_machine
             .map(str::to_string)
             .or_else(|| self_device.and_then(Device::display_name))
-            .unwrap_or_else(|| "this device".into()),
+            .or_else(short_hostname)
+            .unwrap_or_else(|| "this machine".into()),
         machine: local_machine.map(str::to_string),
         os: self_device
             .and_then(|device| device.os.clone())
@@ -1420,6 +1483,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
         } else {
             DeviceState::ThisDeviceWithoutProfile.action()
         },
+        suggested_machine: None,
         name_conflict: None,
         node_key: self_device.and_then(|device| device.node_key.clone()),
         stable_id: self_device.and_then(|device| device.stable_id.clone()),
@@ -1451,6 +1515,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
                 path: peer.path,
                 state: DeviceState::FleetMember,
                 action: DeviceState::FleetMember.action(),
+                suggested_machine: None,
                 name_conflict: None,
                 node_key: peer.node_key.clone(),
                 stable_id: peer.stable_id.clone(),
@@ -1466,6 +1531,7 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
                 path: PathObservation::Unknown,
                 state: DeviceState::FleetMemberNotVisible,
                 action: DeviceState::FleetMemberNotVisible.action(),
+                suggested_machine: None,
                 name_conflict: None,
                 node_key: None,
                 stable_id: None,
@@ -1500,13 +1566,82 @@ pub fn device_rows(summary: &Summary, inventory: &Inventory) -> Vec<DeviceRow> {
             path: peer.path,
             state,
             action: state.action(),
+            suggested_machine: None,
             name_conflict: roster_name_collision(profile, peer),
             node_key: peer.node_key.clone(),
             stable_id: peer.stable_id.clone(),
         });
     }
 
+    // A member's suggestion is its roster name. A peer's is the slug of its display
+    // name — unless that slug is already a member's name or another peer's slug, in
+    // which case nothing is suggested: two devices called "build.linux" and "Build
+    // Linux" both slug to `build-linux`, and a form pre-filled with a name admission
+    // will refuse, or bind to the wrong machine, is worse than an empty field.
+    let taken: Vec<String> = rows.iter().filter_map(|row| row.machine.clone()).collect();
+    let slugs: Vec<Option<String>> = rows
+        .iter()
+        .map(|row| {
+            if row.machine.is_some() {
+                None
+            } else {
+                machine_slug(&row.name)
+            }
+        })
+        .collect();
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.suggested_machine = row.machine.clone().or_else(|| {
+            let slug = slugs[index].clone()?;
+            let claimed = taken.iter().any(|name| fleet::same_name(name, &slug));
+            let shared = slugs.iter().enumerate().any(|(other, candidate)| {
+                other != index && candidate.as_deref().is_some_and(|c| c == slug)
+            });
+            (!claimed && !shared).then_some(slug)
+        });
+    }
+
     rows
+}
+
+/// This host's name up to its first dot, for the self row when the network client gave
+/// no name for it.
+fn short_hostname() -> Option<String> {
+    let hostname = fleet::local_hostname().ok()?;
+    let short = hostname.split('.').next().unwrap_or(&hostname).trim();
+    (!short.is_empty()).then(|| short.to_string())
+}
+
+/// A machine name a person would accept, made from a name a device chose.
+///
+/// The validator (`fleet::validate_machine`) takes 1–40 ASCII letters, digits and
+/// hyphens, starting and ending with a letter or digit. So: lower-cased, apostrophes
+/// dropped (`Monocursive’s MacBook Pro` reads better as `monocursives-macbook-pro` than
+/// with a hyphen where the apostrophe was), every other run of non-alphanumerics folded
+/// to one hyphen, hyphens trimmed from both ends, cut at 40. `None` when nothing is left.
+pub fn machine_slug(name: &str) -> Option<String> {
+    let mut slug = String::new();
+    let mut separator_due = false;
+    for character in name.chars() {
+        if character == '\'' || character == '\u{2019}' {
+            continue;
+        }
+        if !character.is_ascii_alphanumeric() {
+            separator_due = !slug.is_empty();
+            continue;
+        }
+        let needed = if separator_due { 2 } else { 1 };
+        if slug.len() + needed > 40 {
+            break;
+        }
+        if separator_due {
+            slug.push('-');
+            separator_due = false;
+        }
+        slug.push(character.to_ascii_lowercase());
+    }
+    // No trimming is needed: a separator is only ever written directly before the
+    // alphanumeric that follows it, so the slug neither starts nor ends with one.
+    (!slug.is_empty()).then_some(slug)
 }
 
 /// The roster machine name a visible device is calling itself by, when it is not that
@@ -1921,7 +2056,7 @@ mod tests {
     }
 
     #[test]
-    fn a_known_location_is_preferred_to_path() {
+    fn a_known_location_is_preferred_to_path_and_every_candidate_is_kept_in_order() {
         let dir = tempdir();
         let on_path = plant(dir.path(), "tailscale", 0o755);
         let known = plant(dir.path(), "known-client", 0o755);
@@ -1933,7 +2068,135 @@ mod tests {
         .expect("the known location wins");
         assert_eq!(found.program, known);
         assert_eq!(found.source, ClientSource::KnownLocation);
-        assert_ne!(found.program, on_path);
+
+        let all = locate_clients_with(
+            None,
+            Some(dir.path().as_os_str()),
+            &[
+                "/nonexistent/tailscale",
+                known.to_str().expect("utf-8 path"),
+            ],
+        );
+        assert_eq!(
+            all.iter()
+                .map(|client| client.program.clone())
+                .collect::<Vec<_>>(),
+            vec![known.clone(), on_path.clone()],
+            "known locations first, then PATH, each program once, absent ones skipped"
+        );
+        assert_eq!(all[1].source, ClientSource::Path);
+
+        let only_path = locate_clients_with(None, Some(dir.path().as_os_str()), &[]);
+        assert_eq!(only_path.len(), 1);
+        assert_eq!(only_path[0].source, ClientSource::Path);
+    }
+
+    /// A candidate that answers with no document or fails is skipped for the next one;
+    /// a permission refusal is the answer and stops the search.
+    #[test]
+    fn discovery_moves_past_a_client_that_cannot_answer_and_stops_at_a_refusal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("a script");
+            std::fs::set_permissions(&path, PermissionsExt::from_mode(0o755)).expect("executable");
+            Client {
+                program: path,
+                source: ClientSource::KnownLocation,
+            }
+        };
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tailscale/running-with-peers.json");
+        let gui = script(
+            "gui",
+            "echo 'The Tailscale GUI failed to start: The operation could not be completed.'",
+        );
+        let broken = script("broken", "echo 'no tailscaled' >&2; exit 1");
+        let good = script("good", &format!("cat '{}'", fixture_path.display()));
+        let denied = script(
+            "denied",
+            "echo 'Access denied: cannot read status' >&2; exit 1",
+        );
+
+        let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+
+        let answered =
+            runtime.block_on(inventory_from(&[gui.clone(), broken.clone(), good.clone()]));
+        assert_eq!(answered.code, DiscoveryCode::Ok, "{:?}", answered.detail);
+        assert_eq!(answered.client.program.as_deref(), good.program.to_str());
+
+        let last_word = runtime.block_on(inventory_from(&[gui.clone(), broken.clone()]));
+        assert_eq!(last_word.reason, Some(UnavailableReason::CommandFailed));
+
+        let refused = runtime.block_on(inventory_from(&[denied, good.clone()]));
+        assert_eq!(
+            refused.code,
+            DiscoveryCode::PermissionDenied,
+            "a refusal is an answer, not a reason to run another program"
+        );
+
+        let none = runtime.block_on(inventory_from(&[]));
+        assert_eq!(none.code, DiscoveryCode::ClientMissing);
+    }
+
+    #[test]
+    fn a_machine_slug_is_what_the_validator_accepts() {
+        assert_eq!(
+            machine_slug("Monocursive’s MacBook Pro").as_deref(),
+            Some("monocursives-macbook-pro")
+        );
+        assert_eq!(machine_slug("raspberrypi").as_deref(), Some("raspberrypi"));
+        assert_eq!(
+            machine_slug("  build_linux (2) ").as_deref(),
+            Some("build-linux-2")
+        );
+        assert_eq!(machine_slug("---").as_deref(), None);
+        assert_eq!(machine_slug("").as_deref(), None);
+        assert_eq!(machine_slug("日本語").as_deref(), None);
+        let long = machine_slug(&"a".repeat(50)).expect("a slug");
+        assert_eq!(long.len(), 40);
+        let cut_on_separator = machine_slug(&format!("{}-b", "a".repeat(39))).expect("a slug");
+        assert_eq!(
+            cut_on_separator,
+            "a".repeat(39),
+            "a name is never cut to a trailing hyphen"
+        );
+        for slug in [
+            machine_slug("Monocursive’s MacBook Pro").unwrap(),
+            long.clone(),
+            cut_on_separator.clone(),
+        ] {
+            fleet::validate_machine(&slug).expect("every slug validates");
+        }
+    }
+
+    /// A member is suggested its roster name; a peer its slug, unless that slug is
+    /// already spoken for by a member or by another peer.
+    #[test]
+    fn a_suggested_name_is_the_roster_name_for_a_member_and_never_a_collision() {
+        let inventory = classify(&fixture("running-with-peers.json"), b"", Some(0));
+        let summary = summary_at("100.64.12.21", &[("Build-Linux", "100.64.12.44")]);
+        let rows = device_rows(&summary, &inventory);
+        let member = rows
+            .iter()
+            .find(|row| row.machine.as_deref() == Some("Build-Linux"))
+            .expect("the member row");
+        assert_eq!(
+            member.suggested_machine.as_deref(),
+            Some("Build-Linux"),
+            "the roster name, as spelled"
+        );
+        for row in rows.iter().filter(|row| row.machine.is_none()) {
+            assert_ne!(
+                row.suggested_machine
+                    .as_deref()
+                    .map(str::to_ascii_lowercase),
+                Some("build-linux".into()),
+                "a peer is never suggested a member's name: {}",
+                row.name
+            );
+        }
     }
 
     #[test]
@@ -2147,10 +2410,30 @@ mod tests {
     }
 
     #[test]
-    fn garbage_on_stdout_is_a_named_parse_failure() {
+    fn garbage_on_stdout_is_a_named_parse_failure_that_quotes_the_client() {
         let inventory = classify(b"<html>not json</html>", b"", Some(0));
         assert_eq!(inventory.code, DiscoveryCode::Unavailable);
         assert_eq!(inventory.reason, Some(UnavailableReason::ParseFailure));
+        let detail = inventory.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("not json"), "{detail}");
+        assert!(
+            !detail.contains("older"),
+            "no claim about build age: {detail}"
+        );
+
+        // The macOS app bundle's CLI, from a process with no GUI session.
+        let gui = classify(
+            "The Tailscale GUI failed to start: The operation couldn\u{2019}t be completed.\n"
+                .as_bytes(),
+            b"",
+            Some(0),
+        );
+        assert_eq!(gui.reason, Some(UnavailableReason::ParseFailure));
+        assert!(gui
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("The Tailscale GUI failed to start"));
     }
 
     #[test]
@@ -2985,6 +3268,50 @@ mod tests {
             "known members survive blind discovery"
         );
         assert!(blind.contains("stopped"));
+    }
+
+    /// `suggested_machine` is for a form, and a form only.
+    ///
+    /// It exists so a setup form can be pre-filled with a name the validator will take,
+    /// instead of "Monocursive’s MacBook Pro" or "this device". It is not what a device
+    /// is *called*: printing it in a terminal would show a person a name nothing on the
+    /// network answers to, beside the name it does.
+    #[test]
+    fn the_suggested_form_name_is_in_the_json_and_never_in_the_terminal() {
+        let summary = summary_with(&[("attic", "100.64.12.77")]);
+        let value = devices_json(&summary, &running());
+        let suggestions: Vec<(String, String)> = value["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row["name"].as_str()?.to_string(),
+                    row["suggested_machine"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        assert!(
+            !suggestions.is_empty(),
+            "a form has something to pre-fill with: {value}"
+        );
+        for (_, suggestion) in &suggestions {
+            fleet::validate_machine(suggestion)
+                .unwrap_or_else(|error| panic!("`{suggestion}` is not a usable name: {error}"));
+        }
+
+        let text = render_devices(&summary, &running());
+        for (name, suggestion) in &suggestions {
+            if name == suggestion {
+                // The device is already called something valid; there is nothing the
+                // human list could be showing that the JSON invented.
+                continue;
+            }
+            assert!(
+                !text.contains(suggestion.as_str()),
+                "`{suggestion}` is a form's pre-fill, not what `{name}` is called:\n{text}"
+            );
+        }
     }
 
     /// The `--json` `state` is a contract for scripts; a terminal column is prose. The

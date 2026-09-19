@@ -4093,13 +4093,16 @@ body .ouro-gate {
   body .ouro-cell-actions {
     opacity: 1;
   }
-  /* Devices, slice 6: three columns of facts do not fit a phone. Stacked, the action
-     goes under the row it belongs to rather than beside a name it has squeezed. */
+  /* Devices: seven columns do not fit a phone. Stacked, the action goes under the row it
+     belongs to rather than beside a name it has squeezed, and each cell keeps the
+     visually-hidden label the markup already gives it. */
   body .ouro-devices-row {
     grid-template-columns: minmax(0, 1fr);
   }
+  body .ouro-devices-row .ouro-devices-label,
   body .ouro-devices-row .ouro-devices-name,
-  body .ouro-devices-row .ouro-devices-facts,
+  body .ouro-devices-row .ouro-devices-os,
+  body .ouro-devices-row .ouro-devices-address,
   body .ouro-devices-row .ouro-devices-presence,
   body .ouro-devices-row .ouro-devices-state,
   body .ouro-devices-row .ouro-devices-action {
@@ -5060,35 +5063,59 @@ body .ouro-composer-box .ouro-image-attach { width: 44px; height: 44px; }
 body .ouro-composer-bar .ouro-palette-trigger { min-height: 44px; padding: .25rem .5rem; font-size: .75rem; }
 body .ouro-composer-settings > summary { padding: .4rem .6rem; }
 
-
 /* ==========================================================================
-   Devices — fleet onboarding, slice 6
+   Devices — one list, one action per row
    ==========================================================================
 
    `/devices` reuses the panel, field and dialog components the rest of the surface
    already has; what is new here is the inventory row, the discovery notice and the
-   deployment drawer's step list. Nothing in this section restyles a class another
-   section defines, and no state is carried by colour alone: every dot, rule and tone
-   below sits beside words that say the same thing.
+   setup drawer's progress strip.
+
+   Rewritten against §5 of docs/design-qa/fleet-ux-review-2026-09-18.md. What went with
+   the old vocabulary went from here too: the boxed "deploying from" panel, the legend
+   table, the two section headers and the per-row blocker paragraph. What arrived is a
+   seven-column row — label, name, platform, address, presence, Ouroboros, action — and
+   a six-mark strip for a setup in flight.
+
+   Nothing in this section restyles a class another section defines, and no state is
+   carried by colour alone: every dot, mark and tone below sits beside words that say the
+   same thing.
    ========================================================================== */
 
+/* The one quiet line under the title. It used to be a bordered box, on the page and
+   again inside every drawer. */
 .ouro-devices-host {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.9rem 1rem;
-  margin: 0 0 var(--gutter);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
+  margin: 0.35rem 0 0;
   color: var(--secondary);
   font-size: 0.85rem;
   line-height: 1.5;
 }
 
-.ouro-devices-host strong {
+.ouro-devices-caption {
+  margin: 0 0 0.75rem;
+  color: var(--tertiary);
+  font-size: 0.8rem;
+}
+
+/* The status line is the panel's heading: "This Mac is not in a fleet yet", or the fleet
+   and its count. For a standalone machine it is also the blocker sentence, which is why
+   nothing repeats it underneath. */
+.ouro-devices-status {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
   color: var(--ink);
-  font-size: 0.95rem;
+}
+
+.ouro-devices-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ouro-devices-primary {
+  border-color: var(--border-strong);
 }
 
 .ouro-devices-controls {
@@ -5096,7 +5123,7 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   flex-wrap: wrap;
   align-items: flex-end;
   gap: 0.5rem 1rem;
-  padding: 0 0 0.9rem;
+  padding: 0.9rem 0;
   border-bottom: 1px solid var(--hairline-1);
 }
 
@@ -5115,69 +5142,80 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   color: var(--ink);
 }
 
-.ouro-devices-section {
-  padding: 1rem 0 0;
-}
-
-.ouro-devices-section-title {
-  font-size: 0.85rem;
-  font-variant-caps: small-caps;
-  letter-spacing: 0.06em;
-  color: var(--secondary);
-  margin: 0 0 0.6rem;
-}
-
 .ouro-devices-list {
   list-style: none;
-  margin: 0;
+  margin: 0.9rem 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.35rem;
 }
 
+/* Seven columns, every child placed explicitly: the label cell is empty on every row but
+   this machine's, and auto-placement would shift the rest of that row left. */
 .ouro-devices-row {
   display: grid;
-  grid-template-columns: minmax(8rem, 1.2fr) minmax(0, 1.4fr) auto;
+  grid-template-columns:
+    minmax(0, 6rem) minmax(0, 1.1fr) minmax(0, 0.6fr)
+    minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: baseline;
   gap: 0.25rem 1rem;
-  padding: 0.7rem 0.85rem;
+  padding: 0.6rem 0.85rem;
   border: 1px solid var(--hairline-2);
   border-radius: var(--radius);
   background: var(--card);
+  font-size: 0.85rem;
+}
+
+.ouro-devices-label {
+  grid-column: 1;
+  color: var(--secondary);
+  font-size: 0.75rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.05em;
 }
 
 .ouro-devices-name {
-  grid-column: 1;
+  grid-column: 2;
   color: var(--ink);
   font-size: 0.95rem;
+  overflow-wrap: anywhere;
 }
 
-.ouro-devices-facts {
-  grid-column: 2;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  color: var(--tertiary);
-  font-size: 0.75rem;
-}
-
-.ouro-devices-action {
+.ouro-devices-os {
   grid-column: 3;
-  grid-row: 1 / span 2;
-  align-self: center;
-  justify-self: end;
-}
-
-.ouro-devices-presence,
-.ouro-devices-state {
-  grid-column: 1 / span 2;
-  color: var(--secondary);
+  color: var(--tertiary);
   font-size: 0.8rem;
 }
 
+.ouro-devices-address {
+  grid-column: 4;
+  color: var(--tertiary);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.ouro-devices-presence {
+  grid-column: 5;
+  color: var(--secondary);
+}
+
+/* A mark beside a word, never instead of one. */
+.ouro-devices-dot {
+  margin-right: 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
 .ouro-devices-state {
+  grid-column: 6;
   color: var(--ink);
+}
+
+.ouro-devices-action {
+  grid-column: 7;
+  justify-self: end;
+  align-self: center;
 }
 
 .ouro-devices-note,
@@ -5192,9 +5230,9 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   line-height: 1.5;
 }
 
-/* An action a blocker stands in front of. It keeps its name — a control that vanished
-   tells an operator nothing — and reads as unavailable rather than pressable. Not colour
-   alone: it is also `disabled`, `aria-disabled`, and carries the reason as its title. */
+/* A control a blocker stands in front of keeps its name — a control that vanished tells
+   an operator nothing — and reads as unavailable rather than pressable. Not colour alone:
+   it is also `disabled`, `aria-disabled`, and carries the reason as its title. */
 .ouro-devices-unavailable {
   background: transparent;
   border: 1px dashed var(--border);
@@ -5210,58 +5248,33 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
 .ouro-devices-empty {
   color: var(--tertiary);
   font-size: 0.85rem;
-  margin: 0;
+  margin: 0.9rem 0 0;
 }
 
+/* One inline notice, in the network client's own words. */
 .ouro-devices-discovery {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  margin: 1rem 0 0;
-  padding: 0.75rem 0.85rem;
+  margin: 0.9rem 0 0;
+  padding: 0.65rem 0.8rem;
   border: 1px solid var(--border);
   border-left: 2px solid var(--warn-amber);
   border-radius: var(--radius);
   background: var(--inset);
+  color: var(--secondary);
   font-size: 0.85rem;
   line-height: 1.5;
-}
-
-.ouro-devices-discovery strong {
-  color: var(--ink);
 }
 
 .ouro-devices-detail {
   color: var(--tertiary);
   font-family: var(--font-mono);
   font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 .ouro-devices-manual {
   margin: 1rem 0 0;
   color: var(--secondary);
   font-size: 0.85rem;
-}
-
-.ouro-devices-legend {
-  margin: 1.25rem 0 0;
-  font-size: 0.8rem;
-  color: var(--secondary);
-}
-
-.ouro-devices-legend table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 0.6rem;
-}
-
-.ouro-devices-legend th,
-.ouro-devices-legend td {
-  text-align: left;
-  vertical-align: top;
-  padding: 0.4rem 0.6rem 0.4rem 0;
-  border-bottom: 1px solid var(--hairline-1);
-  line-height: 1.5;
 }
 
 .ouro-devices-members {
@@ -5274,15 +5287,11 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   font-size: 0.85rem;
 }
 
+/* ---------------------------------------------------------------- the drawer */
+
 .ouro-devices-drawer {
   max-width: 44rem;
   width: min(44rem, 94vw);
-}
-
-.ouro-devices-target {
-  margin: 0 0 0.75rem;
-  color: var(--secondary);
-  font-size: 0.85rem;
 }
 
 .ouro-devices-step {
@@ -5296,21 +5305,89 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   font-size: 0.95rem;
 }
 
-.ouro-devices-plan {
-  margin: 0 0 0.75rem;
+/* The five plain lines a plan is approved on. The whole document is under the disclosure
+   below them. */
+.ouro-devices-plan-lines {
+  list-style: none;
+  margin: 0 0 0.9rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  color: var(--ink);
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
-.ouro-devices-plan h4 {
-  margin: 0 0 0.35rem;
-  font-size: 0.8rem;
-  font-variant-caps: small-caps;
-  letter-spacing: 0.06em;
+.ouro-devices-plan-lines li {
+  padding-left: 0.9rem;
+  border-left: 2px solid var(--hairline-2);
+}
+
+.ouro-devices-plan {
+  margin: 0.6rem 0 0;
+}
+
+/* A checkbox and its label on one line, rather than a label row above a lone box. */
+.ouro-devices-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ✓ Inspect · ✓ Install · ● Join fleet · ○ Start at login · ○ Connect · ○ Ready.
+   A row of six on a wide drawer, a column on a narrow one; each stage keeps the worker's
+   own step details under it, because a failed step's reason is the thing an operator came
+   here to read. */
+.ouro-devices-strip {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  font-size: 0.85rem;
+}
+
+.ouro-devices-strip > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  color: var(--tertiary);
+}
+
+.ouro-devices-strip > li[data-outcome="ok"],
+.ouro-devices-strip > li[data-outcome="skipped"] {
   color: var(--secondary);
+}
+
+.ouro-devices-strip > li[data-outcome="started"] {
+  color: var(--ink);
+}
+
+.ouro-devices-strip > li[data-outcome="failed"] {
+  color: var(--danger);
+}
+
+.ouro-devices-mark {
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+/* The details a stage carries sit under it, on their own line, at full width. */
+.ouro-devices-strip .ouro-devices-detail {
+  flex: 1 0 100%;
+}
+
+.ouro-devices-strip .ouro-devices-step-outcome {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
 }
 
 .ouro-devices-steps {
   list-style: none;
-  margin: 0;
+  margin: 0.6rem 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -5328,8 +5405,11 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
 }
 
 .ouro-devices-step-name {
-  flex: 1 1 12rem;
   color: var(--ink);
+}
+
+.ouro-devices-steps .ouro-devices-step-name {
+  flex: 1 1 12rem;
 }
 
 .ouro-devices-step-outcome {
@@ -5363,6 +5443,12 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   color: var(--secondary);
 }
 
+.ouro-devices-advanced > summary {
+  cursor: pointer;
+}
+
+/* A takeover, a rebind, and a worker that stopped: three things that need an answer
+   before the drawer can go on. */
 .ouro-devices-takeover {
   margin: 1rem 0 0;
   padding: 0.85rem 0.9rem;
@@ -5378,6 +5464,10 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   font-size: 0.95rem;
 }
 
+.ouro-devices-takeover p {
+  margin: 0 0 0.6rem;
+}
+
 .ouro-devices-drawer-foot {
   display: flex;
   flex-wrap: wrap;
@@ -5386,4 +5476,36 @@ body .ouro-composer-settings > summary { padding: .4rem .6rem; }
   margin: 1.25rem 0 0;
   padding: 0.9rem 0 0;
   border-top: 1px solid var(--hairline-1);
+}
+
+/* ---------------------------------------------------------------- narrow */
+
+/* Below this the seven columns stop being columns: the row stacks, and each cell keeps
+   its own label from the markup's visually-hidden text. */
+@media (max-width: 900px) {
+  .ouro-devices-row {
+    grid-template-columns: 1fr auto;
+    gap: 0.2rem 0.75rem;
+  }
+
+  .ouro-devices-label {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .ouro-devices-name {
+    grid-column: 1;
+  }
+
+  .ouro-devices-os,
+  .ouro-devices-address,
+  .ouro-devices-presence,
+  .ouro-devices-state {
+    grid-column: 1;
+  }
+
+  .ouro-devices-action {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
 }

@@ -11,8 +11,22 @@ use std::{
 const LIMIT: u64 = 8 * 1024 * 1024;
 pub struct DraftFile {
     path: PathBuf,
-    _lock: File,
+    lock: File,
     previous: Vec<u8>,
+}
+/// Releases the slot the moment the owner lets go of it.
+///
+/// A flock belongs to the open file description, and every child this process forks
+/// inherits a reference to it until its exec closes the CLOEXEC descriptor. Closing our
+/// own descriptor therefore leaves the slot locked for as long as any child is still
+/// between fork and exec, and a client reopening in that window would fall through to
+/// an empty slot instead of recovering. An explicit unlock releases the description
+/// itself, so the drop is what frees the slot rather than the last close.
+impl Drop for DraftFile {
+    fn drop(&mut self) {
+        // SAFETY: flock operates on this live descriptor and holds no Rust references.
+        unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 impl DraftFile {
     /// Only an authenticated runtime can identify the recovery store. Older runtimes
@@ -80,7 +94,7 @@ impl DraftFile {
             return Ok((
                 Self {
                     path,
-                    _lock: lock,
+                    lock,
                     previous: bytes,
                 },
                 value,
@@ -124,6 +138,7 @@ mod tests {
     fn runtime_namespace_recovers_a_snapshot_and_refuses_unscoped_or_ephemeral_limits() {
         let root =
             std::env::temp_dir().join(format!("ouro-drafts-namespace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         let limits = serde_json::json!({"client_draft_persistence":"private", "client_recovery_namespace":"a".repeat(64)});
         let namespace = DraftFile::namespace(&limits).unwrap();
         let (mut before, _) = DraftFile::open(&root, namespace).unwrap();

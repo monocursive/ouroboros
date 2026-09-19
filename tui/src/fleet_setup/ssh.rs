@@ -76,7 +76,11 @@ pub enum ResolvedIdentity {
 impl ResolvedIdentity {
     pub fn describe(&self) -> String {
         match self {
-            Self::Default => "the deployment host's default SSH identities".to_string(),
+            Self::Default => {
+                "the deployment host's default SSH identities, or the target account's \
+                 password if none is accepted"
+                    .to_string()
+            }
             Self::Agent {
                 label, fingerprint, ..
             } => format!("agent identity {label} ({fingerprint})"),
@@ -335,8 +339,15 @@ impl Runner {
             // to run keyboard-interactive composes the prompt text the askpass bridge
             // then has to classify — which is how a hostile destination gets a locally
             // rendered "passphrase for your key" question in front of an operator.
+            //
+            // `password` is on that list and keyboard-interactive still is not: keys are
+            // offered first, and a target that accepts none of them and asks for a
+            // password gets the same `password` challenge `--ask-password` raises. That
+            // is what lets a surface have no authentication picker at all — the ordinary
+            // case is "try what this host already has, and ask me if that is not enough"
+            // — while the prompt text a far end may compose is still not automatable.
             ResolvedIdentity::Default => {
-                options.push("PreferredAuthentications=publickey".to_string());
+                options.push("PreferredAuthentications=publickey,password".to_string());
                 options.push(self.identity_agent());
             }
         }
@@ -443,6 +454,16 @@ impl Runner {
         stdin: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Completed> {
+        self.run_with_progress(remote, stdin, timeout, None)
+    }
+
+    pub fn run_with_progress(
+        &self,
+        remote: &str,
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+        progress: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<Completed> {
         let argv = self.argv(remote);
         let command = self.command_from_argv(&argv);
         run_bounded_for(
@@ -452,6 +473,7 @@ impl Runner {
             self.bridge.as_ref(),
             self.cancelled.as_ref(),
             self.challenge_window,
+            progress,
         )
     }
 
@@ -496,6 +518,7 @@ impl Runner {
             self.connect_timeout,
             None,
             self.cancelled.as_ref(),
+            None,
             None,
         )?;
         if !completed.success() {
@@ -571,13 +594,18 @@ impl Runner {
     /// `NumberOfPasswordPrompts=1` so each child asks once, and this loop re-prompts
     /// through the bridge up to [`super::MAX_PASSWORD_ATTEMPTS`].
     pub fn check_access(&self) -> Result<()> {
+        // A password is typed, so a typo is worth another try. The default identity gets
+        // the same budget because it may end up typing one too — it offers this host's
+        // keys first and falls back — but it only *spends* the budget on an attempt that
+        // actually asked for a password; see `password_was_typed`.
         let attempts = match self.identity {
-            ResolvedIdentity::Password => super::MAX_PASSWORD_ATTEMPTS,
+            ResolvedIdentity::Password | ResolvedIdentity::Default => super::MAX_PASSWORD_ATTEMPTS,
             _ => 1,
         };
         let timeout = self.connect_timeout.saturating_mul(3);
         let mut last_stderr = String::new();
         for attempt in 1..=attempts {
+            let prompts_before = self.password_prompts();
             match self.run_with_timeout("exec true", None, timeout) {
                 Ok(completed) if completed.success() => return Ok(()),
                 Ok(completed) => {
@@ -585,8 +613,8 @@ impl Runner {
                     let stderr = completed.stderr_text();
                     if let Some(reason) = classify_ssh_failure(&full) {
                         if reason == "ssh_auth_failed"
-                            && matches!(self.identity, ResolvedIdentity::Password)
                             && attempt < attempts
+                            && self.password_was_typed(prompts_before)
                         {
                             last_stderr = stderr;
                             continue;
@@ -624,6 +652,30 @@ impl Runner {
                 self.destination.label()
             ),
         )
+    }
+
+    /// How many password prompts this connection's bridge has classified so far.
+    fn password_prompts(&self) -> u32 {
+        self.bridge
+            .as_ref()
+            .map(|bridge| bridge.password_prompts())
+            .unwrap_or(0)
+    }
+
+    /// Whether the attempt that just failed spent a password, and is therefore worth
+    /// repeating with a different one.
+    ///
+    /// `Password` always is: that identity offers no key at all, so a refusal is a wrong
+    /// password by construction — including the refusal where the bridge had nothing to
+    /// answer with. `Default` offers this host's keys first, and a refusal that never
+    /// reached the bridge is a key problem: asking for it three times would show an
+    /// operator two password prompts that cannot help.
+    fn password_was_typed(&self, prompts_before: u32) -> bool {
+        match self.identity {
+            ResolvedIdentity::Password => true,
+            ResolvedIdentity::Default => self.password_prompts() > prompts_before,
+            _ => false,
+        }
     }
 }
 
@@ -982,7 +1034,7 @@ const STDERR_CAP: usize = 256 * 1024;
 /// passes or this function is unwound, so an `ssh` that hangs on a dead network does not
 /// outlive the step that started it.
 pub fn run_bounded(command: Command, stdin: Option<&[u8]>, timeout: Duration) -> Result<Completed> {
-    run_bounded_for(command, stdin, timeout, None, None, None)
+    run_bounded_for(command, stdin, timeout, None, None, None, None)
 }
 
 /// The same, with the askpass window opened for exactly this child and closed when it
@@ -995,6 +1047,7 @@ fn run_bounded_for(
     bridge: Option<&Arc<Bridge>>,
     cancelled: Option<&Arc<dyn Fn() -> bool + Send + Sync>>,
     challenge_window: Option<Duration>,
+    mut progress: Option<&mut dyn FnMut(usize)>,
 ) -> Result<Completed> {
     use std::io::Write as _;
 
@@ -1017,7 +1070,9 @@ fn run_bounded_for(
     let _armed = bridge.map(|bridge| bridge.arm(child.id() as i32));
     let mut guard = ChildGuard::new(child);
 
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     if let Some(bytes) = stdin {
+        let sent = Arc::clone(&sent);
         let mut input = guard
             .child
             .stdin
@@ -1030,7 +1085,12 @@ fn run_bounded_for(
         let writer = std::thread::Builder::new()
             .name("ouro-ssh-stdin".to_string())
             .spawn(move || {
-                let _ = input.write_all(&bytes);
+                for chunk in bytes.chunks(64 * 1024) {
+                    if input.write_all(chunk).is_err() {
+                        break;
+                    }
+                    sent.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = input.flush();
                 drop(input);
             })
@@ -1056,6 +1116,9 @@ fn run_bounded_for(
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = loop {
+        if let Some(report) = progress.as_mut() {
+            report(sent.load(std::sync::atomic::Ordering::Relaxed));
+        }
         if cancelled.is_some_and(|flag| flag()) {
             if let Some(bridge) = bridge {
                 bridge.abort_active("cancelled");
@@ -1392,9 +1455,19 @@ mod tests {
                 .unwrap_or_else(|| panic!("no method list for {described}"));
             assert!(
                 preferred == "PreferredAuthentications=publickey"
-                    || preferred == "PreferredAuthentications=password",
+                    || preferred == "PreferredAuthentications=password"
+                    || preferred == "PreferredAuthentications=publickey,password",
                 "only the two methods this product supports: {preferred}"
             );
+            let methods = preferred
+                .trim_start_matches("PreferredAuthentications=")
+                .split(',');
+            for method in methods {
+                assert!(
+                    matches!(method, "publickey" | "password"),
+                    "`{method}` is not one of the two methods this product supports: {preferred}"
+                );
+            }
         }
     }
 

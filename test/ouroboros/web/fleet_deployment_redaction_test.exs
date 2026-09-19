@@ -347,7 +347,10 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
                    Call.call(
                      :operate,
                      "fleet.deployment.prepare",
-                     %{"target" => %{"address" => "100.64.12.44"}, "ssh_user" => "deploy"},
+                     %{
+                       "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
+                       "ssh_user" => "deploy"
+                     },
                      session: "web-session-1"
                    )
 
@@ -408,7 +411,10 @@ defmodule Ouroboros.Web.FleetDeploymentRedactionTest do
   end
 
   defp request do
-    %{"target" => %{"address" => "100.64.12.44"}, "ssh_user" => "deploy"}
+    %{
+      "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
+      "ssh_user" => "deploy"
+    }
   end
 
   defp arrange_devices(context) do

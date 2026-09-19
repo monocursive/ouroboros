@@ -504,6 +504,90 @@ applies to chrome too. `aria-current="page"` marks exactly one element per page 
 section link, not the wordmark as well — and a spoke is marked at its section, because that
 is where the reader is.
 
+### Devices (`/devices`)
+
+[`Ouroboros.Web.Live.DevicesLive`](../lib/ouroboros/web/live/devices_live.ex) is the page
+that puts Ouroboros on a second machine, and
+[`Ouroboros.Web.Live.Devices`](../lib/ouroboros/web/live/devices.ex) is the one table both it
+and the TUI take their words from. The two files are split on purpose, and the split is the
+same one `Presentation` exists for: `fleet.devices` and `fleet.deployment.status` answer in
+stable snake_case codes, none of which was addressed to a person.
+
+The page was rewritten on 2026-09-18 against §5 of
+[the fleet UX review](design-qa/fleet-ux-review-2026-09-18.md), which drove every surface
+against a real second machine and found the previous one unusable for its one job. What it
+replaced is worth naming, because each item is a way a correct implementation can still be
+the wrong interface: row text taken verbatim from the implementation proposal
+("Discovered peer; Ouroboros installation unknown"), a legend table explaining the page's own
+vocabulary, a boxed paragraph about where SSH runs drawn above the list *and* again inside
+every drawer, raw ISO timestamps with microseconds on every row, a search box and three
+filters over four devices, and a Fleet/Available split that put a working home network in two
+sections.
+
+The principle it was rebuilt on: **a row is a device, a device has one state and one thing
+you can do about it.**
+
+- **One list.** This machine first, labelled *This Mac* or *This machine* from `host.os`;
+  roster members next, then visible peers. The ordering is `Devices.group/1` and
+  `Enum.sort_by/2`'s stability, so the runtime's own order — the network client's — survives
+  inside each of the three.
+- **One action per row, or none.** `Set up this Mac`, `Add to fleet`, `Open`, `Continue`,
+  `Retry`, `Details`. A device nothing can be done about draws no control at all, and the
+  reason is the words next to it: a disabled button carrying a paragraph was what the review
+  found unreadable. An operation this machine is holding is the fresher fact and outranks
+  discovery's `state` — except a cancelled one, which left the device exactly as discovery
+  found it.
+  A failed or interrupted removal stays retryable even when discovery still reports the
+  member connected; its details reopen that operation rather than preparing another removal.
+- **Presence is a dot, a word and a relative time.** `● online`, `○ offline, seen 3 days
+  ago`. `Devices.relative_time/2` takes `now` as an argument so a test states the moment it
+  is asking about. The exact instant is in the details panel, where somebody asked for it.
+  A client that reported nothing reads "presence not reported", which is not "offline".
+  Details are selected by inventory row identity, not by deployment address, so separate
+  IPv6-only peers without a usable IPv4 address still open their own panels.
+- **Search and the filter appear only past eight rows**, and from the *unfiltered* count, so
+  the box does not vanish from under the cursor of the person typing into it.
+- **Discovery failure is one notice in the client's own words** — *Tailscale did not answer
+  from this runtime: "…". Devices already in the fleet are still listed.* Never a claim about
+  this build's age: the client printed something and exited 0, which is not evidence about a
+  version.
+- **The blocker sentence for a standalone machine is the status line itself** ("This Mac is
+  not in a fleet yet"), with the primary button beside it, rather than a second paragraph
+  repeating it under the list.
+- **Where the work happens is one quiet line** under the title, and the caption inside each
+  drawer. A browser three hops away cannot lend its SSH agent to the runtime; that fact still
+  has to be said, once.
+
+The drawers are `add`, `setup`, `leave` and the read-only details panel, and they share one
+step machine: form, host key, password, review, progress, finish. The form pre-fills the name
+from the row's `suggested_machine` and **never** from `name` — a display name is not a machine
+name, and the page used to submit one. The address is read-only when it came from the list and
+editable only on *Add a device by address*, where the name is required rather than inferred
+from the address. There is no authentication picker: the default identity is used, a target
+that asks for a password raises the challenge the drawer already answers, and a specific key
+file or agent fingerprint lives under Advanced — a disclosure whose `open` is bound to the
+`advanced?` assign, because an unbound `<details>` collapses on every `phx-change` and this one
+sits under the fields that fire them.
+
+Review shows five plain lines and the digest, with the whole plan behind a disclosure: the
+digest covers the document, not the five lines. Removal (`kind: "leave"`) is reached from the
+member's details panel rather than from its row, and names a **roster machine** rather than an
+address — aiming a removal at whatever answers at an address is not something this page will
+do.
+
+The roster-forgetting fallback is offered only after a failed, unreachable removal whose
+snapshot explicitly records no steps. A timeout after inspection or a stop attempt is not
+evidence that nothing changed, so it never recommends `--accept-state-loss`. The failed
+operation and its recorded steps remain available through **Retry**.
+
+Everything in [`FLEET.md`](FLEET.md)'s "Trust" section is unchanged and is the reason several
+of these choices look roundabout: no secret on a command line or in a journal, one masked
+field per challenge, **no `phx-change` on it**, the plan digest computed by the client and
+checked against the plan on screen, host keys always an explicit question, the detached
+worker, the per-tab challenge binding, and take-over as an explicit answer rather than a
+button that simply works. `data-state`, `data-operation-state` and `data-discovery` stay on
+the markup so a test can name a row by its code without depending on a word.
+
 ### Names and refusals (D7's sixth ground rule)
 
 [`Ouroboros.Web.Presentation`](../lib/ouroboros/web/presentation.ex) is the one place an
