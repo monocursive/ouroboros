@@ -392,9 +392,10 @@ async fn drive(paths: &Paths, mut request: OperationRequest, common: &CommonArgs
             if !frames {
                 report(&outcome, json)?;
             }
-            if outcome.state == OperationState::Completed
-                || outcome.state == OperationState::AwaitingReview
-            {
+            // §6's five states, read for an exit status: `completed` is the only one
+            // that succeeded. A dry run is one of them — it resolved a plan and said so
+            // — which is what the old `awaiting_review` was standing in for here.
+            if outcome.state == OperationState::Completed {
                 Ok(())
             } else {
                 // The proposal: incomplete setup exits non-zero even when some steps
@@ -433,8 +434,12 @@ fn report(outcome: &Outcome, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&outcome.to_value())?);
         return Ok(());
     }
+    // A dry run's plan is printed here because it was never printed at a review: that is
+    // the whole of what a dry run produces. A real operation's plan was already rendered
+    // when somebody approved it, and printing it again under the summary would be the
+    // same document twice.
     if let Some(plan) = &outcome.plan {
-        if outcome.state == OperationState::AwaitingReview {
+        if outcome.dry_run {
             print!("{}", plan.render());
         }
     }

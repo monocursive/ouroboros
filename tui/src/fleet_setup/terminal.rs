@@ -172,7 +172,10 @@ impl Conversation for TerminalConversation {
         }
         let mut out = std::io::stderr();
         let _ = match event {
-            Event::State(state) => writeln!(out, "· {}", state.as_str().replace('_', " ")),
+            // The phase's own word, not the state it is written down as: "· deploying"
+            // is what an operator wants on stderr, and "· running" five times over is
+            // not. Nothing parses this line.
+            Event::State(phase) => writeln!(out, "· {}", phase.as_str().replace('_', " ")),
             Event::Step {
                 machine,
                 step,
@@ -515,9 +518,36 @@ mod tests {
     #[test]
     fn json_mode_prints_no_progress() {
         let quiet = TerminalConversation::new(false, true);
-        quiet.notify(Event::State(super::super::OperationState::Deploying));
+        quiet.notify(Event::State(super::super::Phase::Deploying));
         quiet.notify(Event::Log("nothing should appear on stdout".into()));
         // Nothing to assert beyond "this does not panic and writes no stdout"; the
         // stdout contract is asserted end to end by the CLI tests.
+    }
+
+    /// The terminal keeps the engine's finer words, and they stay off every wire.
+    ///
+    /// §6 gives an operation five states and the engine sequences through more than
+    /// five phases; a person watching `ouro fleet add` is told which one it is in. That
+    /// is exactly why the phase is a separate type: this line is prose on stderr, and
+    /// `Phase::state` is the only thing a journal or a frame is written from.
+    #[test]
+    fn progress_names_the_phase_and_never_a_journal_state() {
+        use super::super::Phase;
+
+        for (phase, word, state) in [
+            (Phase::Inspecting, "inspecting", "running"),
+            (Phase::AwaitingHostTrust, "awaiting host trust", "waiting"),
+            (Phase::AwaitingAuth, "awaiting auth", "waiting"),
+            (Phase::AwaitingReview, "awaiting review", "waiting"),
+            (Phase::Deploying, "deploying", "running"),
+            (Phase::RestartingHost, "restarting host", "running"),
+            (Phase::CheckingReadiness, "checking readiness", "running"),
+            (Phase::Completed, "completed", "completed"),
+            (Phase::Failed, "failed", "failed"),
+            (Phase::Cancelled, "cancelled", "cancelled"),
+        ] {
+            assert_eq!(phase.as_str().replace('_', " "), word, "{phase:?}");
+            assert_eq!(phase.state().as_str(), state, "{phase:?}");
+        }
     }
 }

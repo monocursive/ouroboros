@@ -149,6 +149,7 @@ fn a_frames_setup_asks_one_review_and_reports_a_terminal_done() {
     // Then exactly one challenge: the review.
     let mut challenge = None;
     let mut operation = None;
+    let mut states = vec![first["state"].as_str().unwrap_or_default().to_string()];
     while let Some(frame) = frames.next() {
         match frame["event"].as_str() {
             Some("challenge") => {
@@ -174,7 +175,7 @@ fn a_frames_setup_asks_one_review_and_reports_a_terminal_done() {
                 challenge = frame["challenge"].as_str().map(str::to_string);
                 break;
             }
-            Some("state") => {}
+            Some("state") => states.push(frame["state"].as_str().unwrap_or_default().to_string()),
             Some("log") => {}
             other => panic!("unexpected frame before the review: {other:?} in {frame}"),
         }
@@ -198,7 +199,7 @@ fn a_frames_setup_asks_one_review_and_reports_a_terminal_done() {
                 frame["step"].as_str().unwrap_or_default().to_string(),
                 frame["state"].as_str().unwrap_or_default().to_string(),
             )),
-            Some("state") => {}
+            Some("state") => states.push(frame["state"].as_str().unwrap_or_default().to_string()),
             Some("log") => {}
             Some("done") => {
                 done = Some(frame);
@@ -210,6 +211,23 @@ fn a_frames_setup_asks_one_review_and_reports_a_terminal_done() {
     let done = done.expect("a done frame");
     assert_eq!(done["state"], "completed", "{done}");
     assert_eq!(done["operation"], operation.as_str());
+
+    // §6 and §8 are one vocabulary: every `state` frame of a whole operation, and the
+    // `done` that ends it, is one of five words. The engine sequences through more
+    // phases than that — inspecting, deploying, restarting this host — and none of them
+    // is allowed out here, because the readers on the other end of this pipe have words
+    // for five states and for nothing else.
+    states.push(done["state"].as_str().unwrap_or_default().to_string());
+    for state in &states {
+        assert!(
+            ["running", "waiting", "completed", "failed", "cancelled"].contains(&state.as_str()),
+            "a frame carried `{state}`, which is not one of §8's five: {states:?}"
+        );
+    }
+    assert!(
+        states.iter().any(|state| state == "waiting"),
+        "the review is a question, and a question is `waiting`: {states:?}"
+    );
     assert!(done["summary"]
         .as_str()
         .is_some_and(|text| !text.is_empty()));
@@ -243,7 +261,14 @@ fn a_frames_setup_asks_one_review_and_reports_a_terminal_done() {
     )
     .expect("a decodable journal");
     assert_eq!(journal["schema"], 2);
+    // The journal's own word, read off disk. It is the same vocabulary as the wire's:
+    // §6's `state` is one of five, so a reader of this file needs no second table.
     assert_eq!(journal["state"], "completed");
+    assert!(
+        ["running", "waiting", "completed", "failed", "cancelled"]
+            .contains(&journal["state"].as_str().unwrap_or_default()),
+        "{journal}"
+    );
     assert!(journal["plan"].is_array(), "§6: the plan is the lines read");
     assert!(journal.get("plan_digest").is_none());
     assert!(journal.get("owner").is_none());

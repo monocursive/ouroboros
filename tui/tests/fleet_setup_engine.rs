@@ -1554,7 +1554,40 @@ fn a_start_that_the_manager_refuses_keeps_the_credentials_and_says_so() {
             "connect:skipped",
         ],
     );
-    assert_eq!(record.state, OperationState::Interrupted, "{recorded:?}");
+    // §6's five: the journal says `failed`, and *which* failure is `last_error.reason`.
+    // The word `interrupted` never reached a reader that had words for it — the runtime's
+    // journal module, the web page and the terminal all have five — so the specific fact
+    // lives in the reason and in the steps, which is where a resume and an operator both
+    // look anyway.
+    assert_eq!(record.state, OperationState::Failed, "{recorded:?}");
+    let failure = record
+        .last_error
+        .as_ref()
+        .expect("a failed start records why");
+    assert_eq!(failure.reason, "start_failed", "{failure:?}");
+    assert!(
+        !failure.detail.is_empty(),
+        "the reason carries a sentence: {failure:?}"
+    );
+
+    // Read back off disk, as every consumer of a journal reads it: the five words are
+    // what is *written*, not something a Rust enum translates on the way out.
+    let document: Value = serde_json::from_str(
+        &fs::read_to_string(ouro::fleet_setup::journal_path(&lab.issuer, operation))
+            .expect("a journal on disk"),
+    )
+    .expect("a decodable journal");
+    assert_eq!(document["state"], json!("failed"), "{document:#}");
+    assert_eq!(document["last_error"]["reason"], json!("start_failed"));
+
+    // And it is still a resumable document: `--operation ID` reopens it, and the step
+    // that already landed is recorded `ok`, so a resume does not send the bundle again.
+    // (What a resume then does is pinned by
+    // `an_interrupted_add_resumes_without_installing_the_binary_again`.)
+    assert!(
+        record.completed("vps", "join"),
+        "a resume would repeat the join: {recorded:?}"
+    );
     // The credentials are on the target, and the target is on this machine's list.
     let installed = fleet::load(&lab.target)
         .expect("a readable target")

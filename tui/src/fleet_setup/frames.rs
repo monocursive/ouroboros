@@ -160,9 +160,9 @@ impl Conversation for FramesConversation {
 
     fn notify(&self, event: Event) {
         match event {
-            Event::State(state) => self.sink.emit(json!({
+            Event::State(phase) => self.sink.emit(json!({
                 "event": "state",
-                "state": wire_state(state),
+                "state": phase.state().as_str(),
             })),
             Event::Step {
                 machine,
@@ -190,16 +190,10 @@ impl Conversation for FramesConversation {
     }
 }
 
-/// §8's five states, which are not the engine's eleven. Everything that is neither
-/// terminal nor a question is `running`.
+/// §8's five states — which are now §6's five states too, so this is the identity map
+/// rather than a translation. It stays as the one place the wire's words are produced.
 fn wire_state(state: OperationState) -> &'static str {
-    match state {
-        OperationState::Completed => "completed",
-        OperationState::Failed | OperationState::Interrupted => "failed",
-        OperationState::Cancelled => "cancelled",
-        state if state.waiting() => "waiting",
-        _ => "running",
-    }
+    state.as_str()
 }
 
 /// Run one operation, speaking §8's frames on `input` and `output`.
@@ -248,8 +242,8 @@ pub fn run(
             // challenge to travel on. It goes out as `log` lines — the same lines §6
             // names and the same ones a review would have carried — and the operation
             // is `completed`, because inspecting and printing is the whole of what it
-            // undertook to do. The engine's own state for a dry run is
-            // `awaiting_review`, which is not one of §8's five terminal words.
+            // undertook to do. The engine says `completed` for one too, now that its
+            // states are §8's five; this only still has to print the plan.
             if dry_run {
                 if let Some(plan) = &outcome.plan {
                     for line in plan.lines() {
@@ -262,11 +256,7 @@ pub fn run(
             }
             sink.emit(json!({
                 "event": "done",
-                "state": if dry_run {
-                    "completed"
-                } else {
-                    wire_state(outcome.state)
-                },
+                "state": wire_state(outcome.state),
                 "operation": outcome.operation,
                 "summary": super::sanitize_remote_text(&outcome.summary, super::MAX_FRAME_TEXT),
                 "next": super::sanitize_remote_text(&outcome.next, super::MAX_FRAME_TEXT),
@@ -444,27 +434,100 @@ fn read_line_bounded(input: &mut impl BufRead, out: &mut String) -> std::io::Res
 
 #[cfg(test)]
 mod tests {
-    use super::super::MAX_FRAME_BYTES;
+    use super::super::{Phase, MAX_FRAME_BYTES};
     use super::*;
 
     /// §8's five wire states, and nothing else on the wire.
+    ///
+    /// Two halves, because there are two ways a word could get out. Every state is one
+    /// of the five and goes out as itself — that is §6 and §8 being the same vocabulary
+    /// now — and every one of the engine's finer phases is mapped onto one of them
+    /// before it is emitted, so a phase can never travel under its own name.
     #[test]
-    fn every_engine_state_maps_to_one_of_the_five_wire_states() {
-        for (state, expected) in [
-            (OperationState::Inspecting, "running"),
-            (OperationState::Deploying, "running"),
-            (OperationState::RestartingHost, "running"),
-            (OperationState::CheckingReadiness, "running"),
-            (OperationState::AwaitingHostTrust, "waiting"),
-            (OperationState::AwaitingAuth, "waiting"),
-            (OperationState::AwaitingReview, "waiting"),
-            (OperationState::Completed, "completed"),
-            (OperationState::Failed, "failed"),
-            (OperationState::Interrupted, "failed"),
-            (OperationState::Cancelled, "cancelled"),
+    fn every_engine_phase_maps_to_one_of_the_five_wire_states() {
+        const FIVE: [&str; 5] = ["running", "waiting", "completed", "failed", "cancelled"];
+
+        for state in [
+            OperationState::Running,
+            OperationState::Waiting,
+            OperationState::Completed,
+            OperationState::Failed,
+            OperationState::Cancelled,
         ] {
-            assert_eq!(wire_state(state), expected, "{state:?}");
+            assert_eq!(wire_state(state), state.as_str(), "{state:?}");
+            assert!(FIVE.contains(&wire_state(state)), "{state:?}");
         }
+
+        for (phase, expected) in [
+            (Phase::Inspecting, "running"),
+            (Phase::Deploying, "running"),
+            (Phase::RestartingHost, "running"),
+            (Phase::CheckingReadiness, "running"),
+            (Phase::AwaitingHostTrust, "waiting"),
+            (Phase::AwaitingAuth, "waiting"),
+            (Phase::AwaitingReview, "waiting"),
+            (Phase::Completed, "completed"),
+            (Phase::Failed, "failed"),
+            (Phase::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(wire_state(phase.state()), expected, "{phase:?}");
+        }
+    }
+
+    /// A `state` frame carries the mapped word, never the phase's own.
+    ///
+    /// The bug this pins is the one KR3 fixes at the source: the phase `deploying`
+    /// reaching a reader that has words for five states and not for eleven.
+    #[test]
+    fn a_state_frame_never_carries_a_phase_name() {
+        let emitted = Arc::new(Mutex::new(Vec::new()));
+
+        struct Collector(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Collector {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let conversation = FramesConversation {
+            sink: Arc::new(Sink::new(Box::new(Collector(Arc::clone(&emitted))))),
+            registry: Arc::new(Registry::new()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        for phase in [
+            Phase::Inspecting,
+            Phase::AwaitingReview,
+            Phase::Deploying,
+            Phase::RestartingHost,
+            Phase::CheckingReadiness,
+            Phase::Failed,
+        ] {
+            conversation.notify(Event::State(phase));
+        }
+
+        let written = emitted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let text = String::from_utf8(written).expect("frames are UTF-8");
+        let states: Vec<String> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("one JSON object per line"))
+            .map(|frame| frame["state"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(
+            states,
+            vec!["running", "waiting", "running", "running", "running", "failed"]
+        );
     }
 
     /// A line over the cap is refused rather than buffered.

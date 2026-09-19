@@ -148,11 +148,62 @@ pub fn refusing(reason: &'static str, error: anyhow::Error) -> anyhow::Error {
 
 // ------------------------------------------------------------------ states
 
-/// The operation states the proposal names, in the order an operation passes through
-/// them. Serialized into the journal and reported to an attached client.
+/// An operation's state: the five words §6 and §8 name, and no others.
+///
+/// This is the whole vocabulary that is ever written down or put on a wire — the
+/// journal's `state`, `--json`'s `state`, and `--frames`'s `state` and `done` frames —
+/// because every reader of a journal this process did not write is a different program:
+/// the runtime's `Ouroboros.Fleet.Deployment.Journal`, the web page's
+/// `Devices.operation_state/1`, this client's own `devices_catalogue`. A word only the
+/// engine knew reached all three of them as *a state this build does not recognise*.
+///
+/// The engine's finer sequencing lives in [`Phase`], which is never serialized.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationState {
+    #[default]
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl OperationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether the operation has stopped.
+    ///
+    /// Stopped is not the same as finished with: `failed` is terminal *and* resumable
+    /// with `--operation ID`, and what a resume repeats is decided by the steps, never
+    /// by this. Only `completed` and `cancelled` are swept (§6), which is the rule the
+    /// runtime's journal reader keeps on its own side.
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    /// Whether this state means the operation is waiting for a person.
+    pub fn waiting(self) -> bool {
+        matches!(self, Self::Waiting)
+    }
+}
+
+/// Where the engine is in an operation, for its own sequencing and for the words a
+/// terminal prints while it works.
+///
+/// Deliberately **not** `Serialize`/`Deserialize`: §6 and §8 give an operation five
+/// states, and this is the finer grain underneath them. [`Phase::state`] is the only way
+/// out of it, so a phase this type grows cannot reach a journal or a frame by accident.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Phase {
     #[default]
     Inspecting,
     AwaitingHostTrust,
@@ -162,12 +213,28 @@ pub enum OperationState {
     RestartingHost,
     CheckingReadiness,
     Completed,
-    Interrupted,
     Failed,
     Cancelled,
 }
 
-impl OperationState {
+impl Phase {
+    /// The one of the five words this phase is written down and sent as.
+    pub fn state(self) -> OperationState {
+        match self {
+            Self::Inspecting | Self::Deploying | Self::RestartingHost | Self::CheckingReadiness => {
+                OperationState::Running
+            }
+            Self::AwaitingHostTrust | Self::AwaitingAuth | Self::AwaitingReview => {
+                OperationState::Waiting
+            }
+            Self::Completed => OperationState::Completed,
+            Self::Failed => OperationState::Failed,
+            Self::Cancelled => OperationState::Cancelled,
+        }
+    }
+
+    /// The phase as a word, for progress on a terminal's stderr. Never parsed by
+    /// anything, and never the value of a `state` field.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inspecting => "inspecting",
@@ -178,26 +245,9 @@ impl OperationState {
             Self::RestartingHost => "restarting_host",
             Self::CheckingReadiness => "checking_readiness",
             Self::Completed => "completed",
-            Self::Interrupted => "interrupted",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
-    }
-
-    /// Whether the operation has stopped for good. A terminal state is never resumed.
-    pub fn terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
-        )
-    }
-
-    /// Whether this state means the operation is waiting for a person.
-    pub fn waiting(self) -> bool {
-        matches!(
-            self,
-            Self::AwaitingHostTrust | Self::AwaitingAuth | Self::AwaitingReview
-        )
     }
 }
 
@@ -477,7 +527,9 @@ pub struct ChallengeRequest {
 /// Progress, for whoever is watching. Never carries a secret.
 #[derive(Clone, Debug)]
 pub enum Event {
-    State(OperationState),
+    /// The engine's phase. Whoever is listening decides what to do with it: a terminal
+    /// prints the phase's own word, and `--frames` puts [`Phase::state`] on the wire.
+    State(Phase),
     Step {
         machine: String,
         step: String,
@@ -861,13 +913,14 @@ mod tests {
         assert!(long.ends_with('…'));
     }
 
-    /// A journal record shaped like one an interrupted `add` leaves behind.
+    /// A journal record shaped like one a failed `add` leaves behind. `failed` is one of
+    /// §6's five and is the resumable one: `--operation ID` picks this document up.
     fn resumable(service: Option<bool>, identity: Option<IdentityChoice>) -> journal::Record {
         journal::Record {
             schema: SCHEMA,
             operation: "op-0123456789ab".into(),
             kind: OperationKind::Add,
-            state: OperationState::Interrupted,
+            state: OperationState::Failed,
             created_at: "2026-09-19T00:00:00Z".into(),
             updated_at: "2026-09-19T00:00:00Z".into(),
             target: Some(journal::TargetIdentity {

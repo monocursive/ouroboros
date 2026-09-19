@@ -48,7 +48,7 @@ use super::ssh::{self, Destination, ResolvedIdentity, Runner};
 use super::trust::{self, Trust};
 use super::{
     refuse, sanitize_remote_text, ChallengeRequest, Conversation, Event, OperationKind,
-    OperationRequest, OperationState,
+    OperationRequest, OperationState, Phase,
 };
 
 /// How long the engine waits for a new member to appear connected.
@@ -103,7 +103,16 @@ fn trusted_hosts() -> &'static Mutex<TrustedHostCache> {
 #[derive(Clone, Debug)]
 pub struct Outcome {
     pub operation: String,
+    /// One of §6's five words. `--json` prints it and the CLI's exit status is read off
+    /// it: anything but `completed` is an incomplete operation.
     pub state: OperationState,
+    /// Whether this was a `--dry-run`, which resolved a plan and changed nothing.
+    ///
+    /// A dry run's state is `completed`, because inspecting and printing is the whole of
+    /// what it undertook to do — the same answer `--frames` has always given. This is
+    /// what a display branches on instead: the plan it resolved was never reviewed, so
+    /// it is printed here rather than at a review prompt that never happened.
+    pub dry_run: bool,
     pub plan: Option<Plan>,
     /// One line for a person.
     pub summary: String,
@@ -219,13 +228,13 @@ impl Engine {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 let reason = super::reason_of(&error).unwrap_or("failed");
-                let state = if reason == "cancelled" {
-                    OperationState::Cancelled
+                let phase = if reason == "cancelled" {
+                    Phase::Cancelled
                 } else {
-                    OperationState::Failed
+                    Phase::Failed
                 };
-                journal.fail(state, reason, format!("{error:#}"))?;
-                self.notify_state(state);
+                journal.fail(phase.state(), reason, format!("{error:#}"))?;
+                self.notify_phase(phase);
                 Err(error)
             }
         }
@@ -269,6 +278,7 @@ impl Engine {
         Outcome {
             operation: self.request.operation.clone(),
             state: OperationState::Completed,
+            dry_run: false,
             plan: None,
             summary: format!(
                 "operation {} already completed on this machine",
@@ -283,8 +293,19 @@ impl Engine {
 
     // ---------------------------------------------------------------- shared plumbing
 
-    fn notify_state(&self, state: OperationState) {
-        self.conversation.notify(Event::State(state));
+    /// Tell whoever is listening where this operation is. The phase is the engine's own
+    /// grain; what reaches a wire is [`Phase::state`], one of §6's five words.
+    fn notify_phase(&self, phase: Phase) {
+        self.conversation.notify(Event::State(phase));
+    }
+
+    /// Enter a phase: say so, and write the state it maps to into the journal.
+    ///
+    /// The two used to be written out at every transition, which is how the journal came
+    /// to hold a vocabulary of its own that nothing downstream could read.
+    fn enter(&self, journal: &JournalHandle, phase: Phase) -> Result<()> {
+        self.notify_phase(phase);
+        journal.set_state(phase.state())
     }
 
     fn note(&self, text: impl Into<String>) {
@@ -584,7 +605,7 @@ impl Engine {
             cancelled,
             challenge_window: None,
         };
-        self.notify_state(OperationState::AwaitingAuth);
+        self.notify_phase(Phase::AwaitingAuth);
         runner.check_access()?;
         Ok(Connection {
             runner: Arc::new(runner),
@@ -662,7 +683,7 @@ impl Engine {
             ),
             Trust::Unknown { keys } => {
                 let key = keys.first().expect("a scan with no keys is refused earlier");
-                self.notify_state(OperationState::AwaitingHostTrust);
+                self.notify_phase(Phase::AwaitingHostTrust);
                 let answer = self.conversation.ask(ChallengeRequest {
                     kind: ChallengeKind::HostTrust,
                     metadata: host_trust_metadata(
@@ -714,7 +735,7 @@ impl Engine {
         if journal.record().reviewed() {
             return Ok(());
         }
-        self.notify_state(OperationState::AwaitingReview);
+        self.notify_phase(Phase::AwaitingReview);
         if self.request.assume_yes {
             // `--yes` accepts a *resolved* plan. It has already failed to bypass host
             // trust (that challenge is raised before this point and is answered by the
@@ -754,7 +775,14 @@ impl Engine {
         self.forget_dry_run_scratch();
         Ok(Outcome {
             operation: self.request.operation.clone(),
-            state: OperationState::AwaitingReview,
+            // §6's five have no word for "resolved a plan and stopped there", and the
+            // engine's old `awaiting_review` was never one of them: `--frames` already
+            // reported a dry run `completed`, and `--json` said a word nothing
+            // downstream knew. A dry run *completed* what it undertook — it inspected
+            // and printed — and `dry_run` is what tells a display the plan was never
+            // reviewed.
+            state: OperationState::Completed,
+            dry_run: true,
             summary: format!(
                 "dry run: nothing was changed on this machine or on {}",
                 plan.target.machine
@@ -774,7 +802,7 @@ impl Engine {
     /// Returns the plan and the facts the deploy steps need, so that a dry run and a
     /// real run agree by construction rather than by two code paths staying in step.
     fn plan_add(&self) -> Result<(Plan, Prepared)> {
-        self.notify_state(OperationState::Inspecting);
+        self.notify_phase(Phase::Inspecting);
         let machine = normalize_machine(&self.request.machine)?;
         let profile = self.local_profile()?.ok_or_else(|| super::SetupError {
             reason: "no_fleet",
@@ -1066,8 +1094,7 @@ impl Engine {
         }
 
         // The operation's own lock is already held, from `run_locked`.
-        self.notify_state(OperationState::Deploying);
-        journal.set_state(OperationState::Deploying)?;
+        self.enter(journal, Phase::Deploying)?;
         let mut unknown = Vec::new();
 
         // ---- install a missing ouro
@@ -1177,7 +1204,7 @@ impl Engine {
 
         // ---- the review, then the bundle
         self.review(journal, &plan)?;
-        journal.set_state(OperationState::Deploying)?;
+        journal.set_state(Phase::Deploying.state())?;
 
         if already_joined {
             if !journal.record().completed(&machine, "join") {
@@ -1258,8 +1285,7 @@ impl Engine {
             self.step_event(&machine, "remember", "ok", None);
         }
 
-        self.notify_state(OperationState::CheckingReadiness);
-        journal.set_state(OperationState::CheckingReadiness)?;
+        self.enter(journal, Phase::CheckingReadiness)?;
         let connected = if startup == Startup::Started {
             self.await_connection(journal, &machine, &mut session)?
         } else {
@@ -1274,19 +1300,50 @@ impl Engine {
         // runtime the operator chose to start themselves has not failed to connect; it
         // has not been started. A `start` this operation intended and that failed is
         // incomplete, even though the credentials it already delivered stay put.
-        let state = match startup {
-            _ if connected => OperationState::Completed,
-            Startup::Manual | Startup::Unsupported => OperationState::Completed,
-            Startup::Started | Startup::NotStarted => OperationState::Interrupted,
+        //
+        // Incomplete is `failed` — §6 has five states and none of them is `interrupted`
+        // — and the *reason* is what distinguishes the two ways to arrive here. Both
+        // journals stay put and both resume with `--operation ID`: the steps say what
+        // has already happened, and `join:ok` is not repeated.
+        let unfinished = match startup {
+            _ if connected => None,
+            Startup::Manual | Startup::Unsupported => None,
+            Startup::NotStarted => Some((
+                "start_failed",
+                format!(
+                    "{machine} joined and its startup service would not start it. Its fleet credentials are in place; the `start` step records what the service manager said"
+                ),
+            )),
+            Startup::Started => Some((
+                "not_connected",
+                format!(
+                    "{machine} joined and was started, and it did not report a connected fleet within {} seconds",
+                    CONNECT_DEADLINE.as_secs()
+                ),
+            )),
         };
-        journal.set_state(state)?;
-        self.notify_state(state);
+        let state = match &unfinished {
+            None => {
+                self.enter(journal, Phase::Completed)?;
+                OperationState::Completed
+            }
+            Some((reason, detail)) => {
+                // Written with `fail` rather than `set_state`, because what a resumed or
+                // inspected journal needs is not the word `failed` — it is which of the
+                // two things went wrong, in `last_error.reason`, beside steps that
+                // already say `join:ok` and `start:failed`.
+                journal.fail(Phase::Failed.state(), reason, detail.clone())?;
+                self.notify_phase(Phase::Failed);
+                OperationState::Failed
+            }
+        };
         let _ =
             std::fs::remove_dir_all(super::scratch_dir(&self.data_dir, &self.request.operation));
 
         Ok(Outcome {
             operation: self.request.operation.clone(),
             state,
+            dry_run: false,
             summary: if connected {
                 format!("{machine} joined the fleet and is connected")
             } else {
@@ -1526,7 +1583,7 @@ impl Engine {
     }
 
     fn plan_setup(&self) -> Result<Plan> {
-        self.notify_state(OperationState::Inspecting);
+        self.notify_phase(Phase::Inspecting);
         let machine = normalize_machine(&self.request.machine)?;
         let address = self
             .request
@@ -1602,6 +1659,7 @@ impl Engine {
             return Ok(Outcome {
                 operation: self.request.operation.clone(),
                 state: OperationState::Completed,
+                dry_run: false,
                 plan: None,
                 summary: format!(
                     "this machine is already {} in fleet {}; nothing was changed",
@@ -1645,15 +1703,13 @@ impl Engine {
         self.review(journal, &plan)?;
 
         // The operation's own lock is already held, from `run_locked`.
-        self.notify_state(OperationState::Deploying);
-        journal.set_state(OperationState::Deploying)?;
+        self.enter(journal, Phase::Deploying)?;
 
         // The authorized local transition. The runtime that is running now is the one
         // serving whoever asked for this, so it is stopped only if it is idle.
         if !journal.record().completed(&machine, "stop_runtime") {
             journal.begin_step(&machine, "stop_runtime")?;
-            self.notify_state(OperationState::RestartingHost);
-            journal.set_state(OperationState::RestartingHost)?;
+            self.enter(journal, Phase::RestartingHost)?;
             let stopped = gateway::stop_require_idle(&self.data_dir, &self.token_file)?;
             let outcome = match stopped {
                 gateway::StopOutcome::NotRunning => "skipped",
@@ -1679,7 +1735,7 @@ impl Engine {
             self.step_event(&machine, "stop_runtime", outcome, None);
         }
 
-        journal.set_state(OperationState::Deploying)?;
+        journal.set_state(Phase::Deploying.state())?;
         if !journal.record().completed(&machine, "create") {
             journal.begin_step(&machine, "create")?;
             let profile = fleet::create(
@@ -1807,11 +1863,11 @@ impl Engine {
             journal.skip_step(&machine, "ready", "the runtime was not started from here")?;
         }
 
-        journal.set_state(OperationState::Completed)?;
-        self.notify_state(OperationState::Completed);
+        self.enter(journal, Phase::Completed)?;
         Ok(Outcome {
             operation: self.request.operation.clone(),
             state: OperationState::Completed,
+            dry_run: false,
             summary: format!("this machine is now {machine} at {}", plan.target.address),
             next: if started {
                 "Verify it with `ouro fleet doctor`, then add another machine with `ouro fleet add <user>@<address> --machine <name>`".to_string()
@@ -1828,7 +1884,7 @@ impl Engine {
     // ---------------------------------------------------------------- leave
 
     fn plan_leave(&self, journal: Option<&JournalHandle>) -> Result<(Plan, fleet::Profile)> {
-        self.notify_state(OperationState::Inspecting);
+        self.notify_phase(Phase::Inspecting);
         let machine = normalize_machine(&self.request.machine)?;
         let profile = self.local_profile()?.ok_or_else(|| super::SetupError {
             reason: "no_fleet",
@@ -1953,8 +2009,7 @@ impl Engine {
         self.review(journal, &plan)?;
 
         // The operation's own lock is already held, from `run_locked`.
-        self.notify_state(OperationState::Deploying);
-        journal.set_state(OperationState::Deploying)?;
+        self.enter(journal, Phase::Deploying)?;
 
         let mut residue = None;
         if !journal.record().completed(&machine, "remove") {
@@ -2002,13 +2057,13 @@ impl Engine {
             self.step_event(&machine, "forget", "ok", None);
         }
 
-        journal.set_state(OperationState::Completed)?;
-        self.notify_state(OperationState::Completed);
+        self.enter(journal, Phase::Completed)?;
         let _ =
             std::fs::remove_dir_all(super::scratch_dir(&self.data_dir, &self.request.operation));
         Ok(Outcome {
             operation: self.request.operation.clone(),
             state: OperationState::Completed,
+            dry_run: false,
             summary: format!("{machine} left the fleet; its work and session history stay on it"),
             next: removal_note(&machine),
             plan: Some(plan),

@@ -204,7 +204,7 @@ impl Journal {
                     schema: SCHEMA,
                     operation: operation.to_string(),
                     kind,
-                    state: OperationState::Inspecting,
+                    state: OperationState::Running,
                     created_at: now.clone(),
                     updated_at: now,
                     target: None,
@@ -263,8 +263,9 @@ impl Journal {
     }
 
     /// Drop durable files for `completed`/`cancelled` operations that are both older
-    /// than `older_than` and outside the newest `keep_newest`. Failed, interrupted and
-    /// in-flight work is left alone, as is anything whose `worker.lock` is currently held.
+    /// than `older_than` and outside the newest `keep_newest`. Failed and in-flight work
+    /// is left alone — a failed operation is resumable with `--operation ID` — as is
+    /// anything whose `worker.lock` is currently held.
     pub fn prune_terminal(
         data_dir: &Path,
         keep_newest: usize,
@@ -320,7 +321,14 @@ impl Journal {
         self.record.state
     }
 
-    /// Move to a state and persist it. Called before the work of that state begins.
+    /// Move to one of §6's five states and persist it. Called before the work of that
+    /// state begins.
+    ///
+    /// The engine's finer phases ([`super::Phase`]) arrive here already mapped, so a
+    /// journal only ever holds a word every reader of it knows. In practice that is
+    /// `running` until the operation stops: `waiting` is a live word, emitted while a
+    /// challenge is outstanding by the front end that issued it, and a journal left
+    /// behind by a process that is gone is not waiting for anybody.
     pub fn set_state(&mut self, state: OperationState) -> Result<()> {
         self.record.state = state;
         self.flush()
@@ -664,9 +672,7 @@ mod tests {
         {
             let mut journal =
                 Journal::open(&data, "op-0000000000b2", OperationKind::Setup).expect("a journal");
-            journal
-                .set_state(OperationState::Deploying)
-                .expect("a state");
+            journal.set_state(OperationState::Running).expect("a state");
             journal.note_residue("a staged file").expect("residue");
         }
         let path = journal_path(&data, "op-0000000000b2");
@@ -679,7 +685,7 @@ mod tests {
 
         let reopened =
             Journal::open(&data, "op-0000000000b2", OperationKind::Setup).expect("a journal");
-        assert_eq!(reopened.state(), OperationState::Deploying);
+        assert_eq!(reopened.state(), OperationState::Running);
         assert_eq!(reopened.record().residue, vec!["a staged file".to_string()]);
 
         let wrong_kind = match Journal::open(&data, "op-0000000000b2", OperationKind::Add) {
@@ -739,9 +745,9 @@ mod tests {
     }
 
     /// Completed and cancelled journals outside the newest-N window and older than the
-    /// cutoff are removed; failed and interrupted work is not.
+    /// cutoff are removed; failed work is not, because a failed operation is resumable.
     #[test]
-    fn prune_keeps_the_newest_completed_and_never_touches_failed_or_interrupted() {
+    fn prune_keeps_the_newest_completed_and_never_touches_a_failure() {
         let data = scratch("prune");
         for index in 0..55u32 {
             let id = format!("op-00000000{index:04x}");
@@ -765,11 +771,19 @@ mod tests {
         failed
             .fail(OperationState::Failed, "failed", "still resumable")
             .expect("failed");
-        let mut interrupted =
-            Journal::open(&data, "op-00000000intr", OperationKind::Add).expect("interrupted");
-        interrupted
-            .fail(OperationState::Interrupted, "failed", "still resumable")
-            .expect("interrupted");
+        // The operation §6 used to call `interrupted`: a join that landed and a start
+        // that would not. It is `failed` with its own reason now, and it is exactly the
+        // journal an operator comes back to with `--operation ID`, so the sweep must
+        // leave it where it is.
+        let mut unstarted =
+            Journal::open(&data, "op-00000000strt", OperationKind::Add).expect("a failed start");
+        unstarted
+            .fail(
+                OperationState::Failed,
+                "start_failed",
+                "the credentials are in place and the runtime would not start",
+            )
+            .expect("a failed start");
 
         let removed =
             Journal::prune_terminal(&data, 50, std::time::Duration::from_secs(30 * 86400))
@@ -778,9 +792,51 @@ mod tests {
         let remaining = Journal::list(&data).expect("a listing");
         assert_eq!(remaining.len(), 52, "{remaining:?}");
         assert!(remaining.iter().any(|id| id == "op-00000000fail"));
-        assert!(remaining.iter().any(|id| id == "op-00000000intr"));
+        assert!(remaining.iter().any(|id| id == "op-00000000strt"));
         assert!(journal_path(&data, "op-00000000fail").exists());
-        assert!(journal_path(&data, "op-00000000intr").exists());
+        assert!(journal_path(&data, "op-00000000strt").exists());
+        // And the specific reason is what the surviving document carries.
+        let kept = Journal::read(&data, "op-00000000strt")
+            .expect("a readable journal")
+            .expect("a kept journal");
+        assert_eq!(kept.state, OperationState::Failed);
+        assert_eq!(
+            kept.last_error.expect("a recorded reason").reason,
+            "start_failed"
+        );
+    }
+
+    /// §6: the journal's `state` is one of five words. This is the file, not the enum:
+    /// what a broker, a web page and a terminal read is the text on disk.
+    #[test]
+    fn the_journal_writes_one_of_the_five_words_and_nothing_else() {
+        let data = scratch("vocabulary");
+        let mut journal =
+            Journal::open(&data, "op-0000000000f6", OperationKind::Add).expect("a journal");
+        // A journal starts `running`, before anything sets a state at all.
+        let text = std::fs::read_to_string(journal_path(&data, "op-0000000000f6")).expect("a file");
+        let document: serde_json::Value = serde_json::from_str(&text).expect("a decodable journal");
+        assert_eq!(document["state"], serde_json::json!("running"));
+
+        for (state, word) in [
+            (OperationState::Running, "running"),
+            (OperationState::Waiting, "waiting"),
+            (OperationState::Completed, "completed"),
+            (OperationState::Failed, "failed"),
+            (OperationState::Cancelled, "cancelled"),
+        ] {
+            journal.set_state(state).expect("a state");
+            let text =
+                std::fs::read_to_string(journal_path(&data, "op-0000000000f6")).expect("a file");
+            let document: serde_json::Value =
+                serde_json::from_str(&text).expect("a decodable journal");
+            assert_eq!(document["state"], serde_json::json!(word));
+            // And it reads back as the same state, which is what a resume depends on.
+            let reread = Journal::read(&data, "op-0000000000f6")
+                .expect("a readable journal")
+                .expect("a present journal");
+            assert_eq!(reread.state, state);
+        }
     }
 
     /// A live worker keeps its journal even when the operation is already completed.
