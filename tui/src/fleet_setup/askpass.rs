@@ -1034,12 +1034,12 @@ mod tests {
         let armed = next.arm(200);
         assert!(conversation
             .0
-            .issue(ChallengeKind::Password, json!({}), None, old_issuer)
+            .issue(ChallengeKind::Password, json!({}), old_issuer)
             .is_err());
         assert!(
             conversation
                 .0
-                .issue(ChallengeKind::Password, json!({}), None, armed.issuer)
+                .issue(ChallengeKind::Password, json!({}), armed.issuer)
                 .is_ok(),
             "a new host must be able to ask for its own password"
         );

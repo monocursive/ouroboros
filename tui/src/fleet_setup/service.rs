@@ -202,9 +202,39 @@ impl ServiceActions for LocalServiceActions {
         session: &mut helper::Session,
         action: ServiceAction,
     ) -> Result<ServiceOutcome> {
-        match session.ask("service", json!({ "action": action.as_str() })) {
+        // §7's helper table: `service` takes `install: bool`, and `start` is its own op.
+        // Disable and remove are gone — the helper's `leave` does both on its own side.
+        let (op, params) = match action {
+            ServiceAction::Install => ("service", json!({ "install": true })),
+            ServiceAction::Status => ("service", json!({ "install": false })),
+            ServiceAction::Start => ("start", json!({})),
+            ServiceAction::Disable | ServiceAction::Remove => {
+                return refuse(
+                    "unsupported_op",
+                    format!(
+                        "`{}` is not a remote service action any more; the helper's `leave` disables and removes the unit itself",
+                        action.as_str()
+                    ),
+                )
+            }
+        };
+        match session.ask(op, params) {
             Ok(fields) => {
                 let Some(report) = fields.get("report") else {
+                    // `start` answers with a pid rather than a report; that is enough to
+                    // say the machine has a supervisor and was told to start.
+                    if action == ServiceAction::Start {
+                        return Ok(ServiceOutcome {
+                            action,
+                            supported: true,
+                            detail: match fields.get("via").and_then(Value::as_str) {
+                                Some("daemon") => {
+                                    "started directly, with no managed service".into()
+                                }
+                                _ => "started through its user service".into(),
+                            },
+                        });
+                    }
                     return refuse(
                         "helper_protocol",
                         "the target's service reply carried no report",

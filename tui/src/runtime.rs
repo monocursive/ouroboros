@@ -1953,39 +1953,6 @@ impl Launcher {
             Self::Release { .. } => RELEASE_READY_DEADLINE,
         }
     }
-
-    /// The EPMD shipped by this exact extracted release. Fleet startup uses this rather
-    /// than PATH so ownership and later port-scoped cleanup stay inside the packaged
-    /// runtime boundary.
-    pub fn packaged_epmd_program(&self) -> Result<Option<PathBuf>> {
-        let Self::Release { root } = self else {
-            return Ok(None);
-        };
-        let mut candidates = Vec::new();
-        for entry in fs::read_dir(root)
-            .with_context(|| format!("reading extracted release {}", root.display()))?
-        {
-            let entry = entry?;
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with("erts-") && entry.file_type()?.is_dir() {
-                let candidate = entry.path().join("bin").join("epmd");
-                if candidate.is_file() {
-                    candidates.push(candidate);
-                }
-            }
-        }
-        match candidates.len() {
-            1 => Ok(candidates.pop()),
-            0 => bail!(
-                "extracted release {} has no packaged erts-*/bin/epmd",
-                root.display()
-            ),
-            count => bail!(
-                "extracted release {} has {count} packaged EPMD candidates; refusing an ambiguous lifecycle helper",
-                root.display()
-            ),
-        }
-    }
 }
 
 /// Walks up from `start` looking for this project's checkout.
@@ -2150,20 +2117,6 @@ pub struct Daemon {
     child: Option<Child>,
     identity: ProcessIdentity,
     logs: LogRing,
-    epmd: EpmdLifecycle,
-    data_dir: PathBuf,
-}
-
-/// The EPMD this start selected, in the phase it is currently owned.
-///
-/// During startup validation the exact watch handle stays here, so a boot that fails
-/// can reap the daemon it just launched instead of orphaning it behind a durable
-/// ownership marker. Only a validated start hands the handle to the detached monitor;
-/// after that, health arrives on the oneshot channel as before.
-enum EpmdLifecycle {
-    Absent,
-    Boot(crate::fleet::EpmdRuntimeWatch),
-    Supervised(tokio::sync::oneshot::Receiver<String>),
 }
 
 impl Daemon {
@@ -2185,56 +2138,19 @@ impl Daemon {
         if let Ok(Some(status)) = child.try_wait() {
             return Some(status);
         }
-        if let Some(reason) = self.poll_epmd_failure_nonblocking() {
-            eprintln!(
-                "ouro fleet: {reason}; stopping the still-owned runtime so recovery can restart distribution"
-            );
-            let _ = send_signal(self.pid(), libc::SIGTERM);
-        }
         self.child.as_mut()?.try_wait().ok().flatten()
     }
 
     /// Waits while retaining ownership, so cancellation leaves the drop guard armed.
     /// Used by `ouro service-run`: the service manager supervises this foreground client,
     /// and this client in turn must remain attached to the BEAM child it started.
-    ///
-    /// Supervision is armed by a validated `start`, not here. Arming inside wait would
-    /// make a premature wait unreapable: the Boot child would move to the monitor, and
-    /// Drop/cleanup could no longer stop the packaged EPMD this start launched.
     pub async fn wait(&mut self) -> Result<ExitStatus> {
-        let pid = self.identity.pid;
         let child = self
             .child
             .as_mut()
             .ok_or_else(|| anyhow!("cannot wait for a detached runtime"))?;
-        let status = if let EpmdLifecycle::Supervised(epmd_failure) = &mut self.epmd {
-            tokio::select! {
-                status = child.wait() => status.context("waiting for the runtime")?,
-                failure = epmd_failure => {
-                    match failure {
-                        Ok(reason) => {
-                            eprintln!(
-                                "ouro fleet: {reason}; stopping the still-owned runtime so recovery can restart distribution"
-                            );
-                            // try_wait returning None keeps this exact child unreaped, so
-                            // its PID cannot be reused between the check and the signal.
-                            if child.try_wait()?.is_none() {
-                                send_signal(pid, libc::SIGTERM)?;
-                            }
-                            child.wait().await.context("waiting for the runtime after EPMD loss")?
-                        }
-                        Err(_) => child.wait().await.context("waiting for the runtime")?,
-                    }
-                }
-            }
-        } else {
-            child.wait().await.context("waiting for the runtime")?
-        };
+        let status = child.wait().await.context("waiting for the runtime")?;
         self.child = None;
-        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
-            watch.disarm();
-        }
-        self.epmd = EpmdLifecycle::Absent;
         Ok(status)
     }
 
@@ -2247,13 +2163,6 @@ impl Daemon {
         let started = Instant::now();
 
         loop {
-            if let Some(reason) = self.poll_epmd_failure().await {
-                eprintln!(
-                    "ouro fleet: {reason}; stopping the still-owned runtime because distribution cannot recover in place"
-                );
-                self.terminate(Duration::from_secs(5)).await?;
-                bail!("fleet discovery failed during startup: {reason}");
-            }
             if let Some(status) = self.exited() {
                 bail!(
                     "the runtime exited before it published a gateway ({status}){}",
@@ -2314,47 +2223,6 @@ impl Daemon {
     /// `ouro daemon` and the UI's deliberate detach choice exit this way.
     pub fn detach(&mut self) {
         self.child = None;
-        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
-            // Detach means the runtime — and therefore its EPMD — deliberately outlives
-            // this process; the ownership marker stays behind as the durable claim.
-            watch.disarm();
-        }
-        self.epmd = EpmdLifecycle::Absent;
-    }
-
-    /// Hands the boot-phase EPMD watch to the detached monitor. Called exactly when
-    /// startup validation has passed; before that, the watch stays reapable in place.
-    pub fn arm_epmd_supervision(&mut self) {
-        if matches!(self.epmd, EpmdLifecycle::Boot(_)) {
-            let EpmdLifecycle::Boot(watch) =
-                std::mem::replace(&mut self.epmd, EpmdLifecycle::Absent)
-            else {
-                unreachable!("the Boot variant was just matched");
-            };
-            self.epmd = EpmdLifecycle::Supervised(watch.supervise());
-        }
-    }
-
-    /// After a failed startup validation: stop the packaged EPMD this exact start
-    /// launched and remove its ownership marker and lock, so a retry begins from a
-    /// machine that looks the way it did before the attempt. A reused incumbent daemon
-    /// is never touched — `Ok(false)` reports that nothing needed reaping.
-    pub async fn reap_spawned_epmd(&mut self) -> Result<bool> {
-        match std::mem::replace(&mut self.epmd, EpmdLifecycle::Absent) {
-            EpmdLifecycle::Boot(watch) => {
-                let data_dir = self.data_dir.clone();
-                tokio::task::spawn_blocking(move || watch.reap_spawned(&data_dir))
-                    .await
-                    .unwrap_or_else(|error| Err(anyhow!("EPMD cleanup was cancelled: {error}")))
-            }
-            EpmdLifecycle::Absent => Ok(false),
-            EpmdLifecycle::Supervised(receiver) => {
-                // Supervision only starts after validation passed, so there is nothing
-                // to undo; put the health channel back.
-                self.epmd = EpmdLifecycle::Supervised(receiver);
-                Ok(false)
-            }
-        }
     }
 
     pub fn log_tail(&self, count: usize) -> String {
@@ -2373,44 +2241,6 @@ impl Daemon {
 
         rendered
     }
-
-    async fn poll_epmd_failure(&mut self) -> Option<String> {
-        match &mut self.epmd {
-            EpmdLifecycle::Absent => None,
-            EpmdLifecycle::Boot(watch) => watch.health().await,
-            EpmdLifecycle::Supervised(receiver) => match receiver.try_recv() {
-                Ok(reason) => {
-                    self.epmd = EpmdLifecycle::Absent;
-                    Some(reason)
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.epmd = EpmdLifecycle::Absent;
-                    None
-                }
-            },
-        }
-    }
-
-    fn poll_epmd_failure_nonblocking(&mut self) -> Option<String> {
-        match &mut self.epmd {
-            EpmdLifecycle::Absent => None,
-            // NAMES probes are blocking TCP; the UI tick and other sync callers only
-            // observe a child that already exited. wait_ready runs the full health step.
-            EpmdLifecycle::Boot(watch) => watch.child_lost(),
-            EpmdLifecycle::Supervised(receiver) => match receiver.try_recv() {
-                Ok(reason) => {
-                    self.epmd = EpmdLifecycle::Absent;
-                    Some(reason)
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.epmd = EpmdLifecycle::Absent;
-                    None
-                }
-            },
-        }
-    }
 }
 
 impl Drop for Daemon {
@@ -2420,9 +2250,6 @@ impl Drop for Daemon {
             // error path has already used terminate(); this is the cancellation/panic
             // backstop that makes an accidental early return fail safe instead of detach.
             let _ = child.start_kill();
-        }
-        if let EpmdLifecycle::Boot(watch) = &mut self.epmd {
-            watch.abort_spawned(&self.data_dir);
         }
     }
 }
@@ -2441,11 +2268,6 @@ pub fn spawn(
             "--dev cannot start a fleet profile: Mix starts its VM before release vm.args and the private-cookie boot hook can apply. Build/run the packaged `ouro` for secure fleet distribution, or use a separate OUROBOROS_DATA_DIR for standalone development"
         );
     }
-
-    let epmd_watch = match launcher.packaged_epmd_program()? {
-        Some(epmd_program) => crate::fleet::ensure_owned_epmd_for_runtime(data_dir, &epmd_program)?,
-        None => None,
-    };
 
     let mut command = Command::new(launcher.program());
     command.args(launcher.args());
@@ -2521,21 +2343,10 @@ pub fn spawn(
         }
     }
 
-    // The watch stays in the boot phase until startup validation passes: the readiness
-    // loop checks its health in place, and a failed validation reaps the exact EPMD
-    // child it names instead of orphaning it. `arm_epmd_supervision` hands it to the
-    // detached monitor, which never signals an unowned EPMD or a bare PID.
-    let epmd = match epmd_watch {
-        Some(watch) => EpmdLifecycle::Boot(watch),
-        None => EpmdLifecycle::Absent,
-    };
-
     Ok(Daemon {
         child: Some(child),
         identity: ProcessIdentity { pid, birth },
         logs,
-        epmd,
-        data_dir: data_dir.to_path_buf(),
     })
 }
 

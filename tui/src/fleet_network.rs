@@ -1789,7 +1789,6 @@ fn render_row(row: &DeviceRow) -> String {
 /// `ouro fleet devices --json`.
 pub fn devices_json(summary: &Summary, inventory: &Inventory) -> Value {
     json!({
-        "fleet_protocol_revision": fleet_protocol::FLEET_PROTOCOL_REVISION,
         "discovery": discovery_json(inventory),
         "devices": device_rows(summary, inventory),
     })
@@ -2895,7 +2894,7 @@ mod tests {
     fn summary_at(host: &str, members: &[(&str, &str)]) -> Summary {
         let profile = fleet::Profile {
             tags: json!({"tags": []}),
-            schema: 1,
+            schema: 2,
             fleet_id: "f".into(),
             name: "studio's fleet".into(),
             machine: "studio".into(),
@@ -2906,19 +2905,17 @@ mod tests {
                 machine: "studio".into(),
                 host: host.to_string(),
                 node: format!("ouro-studio@{host}"),
+                dist_port: 13_700,
             })
             .chain(members.iter().map(|(machine, host)| fleet::Member {
                 machine: (*machine).to_string(),
                 host: (*host).to_string(),
                 node: format!("ouro-{machine}@{host}"),
+                dist_port: 13_700,
             }))
             .collect(),
-            tombstones: Vec::new(),
-            roster_revision: 1,
+            dist_port: 13_700,
             gateway_port: 1,
-            epmd_port: 2,
-            dist_port_min: 3,
-            dist_port_max: 4,
         };
         Summary {
             profile: Some(profile),
@@ -3135,8 +3132,12 @@ mod tests {
         let summary = summary_with(&[]);
         let value = status_json(&summary, &running(), None);
         assert_eq!(
-            value["build"]["fleet_protocol_revision"],
-            fleet_protocol::FLEET_PROTOCOL_REVISION
+            value["build"]["ouroboros_version"],
+            fleet_protocol::build_metadata().ouroboros_version
+        );
+        assert!(
+            value["build"].get("fleet_protocol_revision").is_none(),
+            "§12 deleted the revision from every document"
         );
         assert_eq!(value["ready"], true);
         assert_eq!(value["profile"]["machine"], "studio");

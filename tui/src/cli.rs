@@ -1522,35 +1522,16 @@ pub enum FleetCommand {
         #[command(subcommand)]
         command: FleetTagCommand,
     },
-    /// Print the machine-management protocol revision, without starting a runtime.
-    Protocol {
-        /// Print this binary's whole build contract instead of the bare revision:
-        /// protocol revision, Ouroboros version, OTP and Elixir releases, and platform.
-        /// Still starts no runtime; unknown facts are null rather than guessed.
-        #[arg(long)]
-        json: bool,
-    },
+
     /// Give this machine its cluster identity: node name, private cookie, TLS materials
-    /// and a private EPMD port.
+    /// and one distribution port.
+    ///
+    /// Hidden: it is the primitive `ouro fleet setup` uses, kept for the lab.
+    #[command(hide = true)]
     Create {
         /// A friendly label shown in Settings. Defaults to "MACHINE's fleet".
         #[arg(long, value_name = "FLEET")]
         name: Option<String>,
-
-        /// Join the cluster of a privately copied `<data dir>/fleet/` directory instead of
-        /// starting a new one: this machine's certificate is signed by the CA in the copy
-        /// and it inherits that cluster's id, cookie and roster. Nothing is sent anywhere.
-        #[arg(long, value_name = "DIR", conflicts_with = "name")]
-        from: Option<PathBuf>,
-
-        /// Rewrite only this machine's generated `ssl_dist.conf` and `vm.args` from the
-        /// profile it already has, keeping its identity, CA, cookie, roster and
-        /// tombstones. This is the repair for a profile written by an older Ouroboros.
-        #[arg(
-            long,
-            conflicts_with_all = ["name", "from", "machine", "host", "gateway_port", "dist_port"]
-        )]
-        regenerate: bool,
 
         /// A short label people will recognize, such as studio-mini.
         #[arg(long, value_name = "NAME")]
@@ -1566,8 +1547,8 @@ pub enum FleetCommand {
         #[arg(long, value_name = "PORT")]
         gateway_port: Option<u16>,
 
-        /// Pin this machine's TLS distribution listener to one port. Normally a small
-        /// firewall-friendly range is used.
+        /// Pin this machine's TLS distribution listener. One fleet is normally one
+        /// number; this override is what lets several nodes share one host.
         #[arg(long, value_name = "PORT")]
         dist_port: Option<u16>,
     },
@@ -1601,24 +1582,22 @@ pub enum FleetCommand {
         json: bool,
     },
 
-    /// Edit this machine's view of which other machines are in the cluster.
-    Members {
-        #[command(subcommand)]
-        command: FleetMembersCommand,
-    },
-
-    /// Manage durable knowledge about sessions owned by machines that left the cluster.
-    Sessions {
-        #[command(subcommand)]
-        command: SessionsCommand,
+    /// Take a machine out of this machine's roster, and ask the runtime to retire its
+    /// session-owner evidence.
+    ///
+    /// The local answer to a machine that cannot be reached. The runtime refuses while
+    /// that machine is connected, and then nothing changes. There is no undo: the
+    /// command name is the operator's statement.
+    Forget {
+        /// The machine to stop dialing and stop expecting.
+        machine: String,
     },
 
     /// Install, inspect, disable or remove the one startup service Ouroboros manages.
     ///
     /// Only ever this data directory's own unit: a macOS LaunchAgent or a systemd user
-    /// unit that runs the foreground `ouro service-run`. Every unit written here carries
-    /// an ownership marker naming this data directory, and anything else found in the
-    /// service manager's directory is reported and left exactly as it is.
+    /// unit that runs the foreground `ouro service-run`, at one deterministic path per
+    /// data directory.
     Service {
         #[command(subcommand)]
         command: FleetServiceCommand,
@@ -1643,10 +1622,10 @@ pub enum FleetCommand {
         common: FleetSetupArgs,
     },
 
-    /// Add another machine to this fleet over SSH, from this machine's CA.
+    /// Add another machine to this fleet over SSH, with this fleet's bundle.
     ///
-    /// Contacts only the destination given here and the machines already in this
-    /// machine's roster. Host verification and authentication are explicit steps.
+    /// Contacts only the destination given here. Host verification and authentication
+    /// are explicit steps.
     Add {
         /// The target as `user@address`, where address is its private-network IPv4 or
         /// the name its network client reports. The account is never inferred from the
@@ -1686,25 +1665,14 @@ pub enum FleetCommand {
 
         /// The target's data directory, when it is not that account's default.
         #[arg(long, value_name = "PATH")]
-        remote_data_dir: Option<String>,
-
-        /// After the machine is connected, start one planning session on it through this
-        /// machine's runtime and report what it said. A real model call happens only
-        /// when this is given, and a planning session reads and reasons but edits
-        /// nothing.
-        #[arg(long, requires = "test_workspace")]
-        run_test_task: bool,
-
-        /// Absolute workspace on the target for the bounded model check.
-        #[arg(long, value_name = "PATH", requires = "run_test_task")]
-        test_workspace: Option<String>,
+        data_dir: Option<String>,
 
         #[command(flatten)]
         common: FleetSetupArgs,
     },
 
     /// Remove cluster credentials: this machine's own, or — with `--machine` — a
-    /// reachable member's, cooperatively and from every remaining roster.
+    /// reachable member's, cooperatively.
     Leave {
         /// The member to take out of the fleet from here. Omitted, this machine's own
         /// credentials are removed after its runtime is stopped, as before.
@@ -1717,8 +1685,8 @@ pub enum FleetCommand {
         #[arg(long, value_name = "USER", requires = "machine")]
         user: Option<String>,
 
-        /// Where `ouro` lives on that member, when it is not where this machine's
-        /// record of its admission says. Normally unnecessary.
+        /// Where `ouro` lives on that member, when it is not the default. Normally
+        /// unnecessary.
         #[arg(long, value_name = "PATH", requires = "machine")]
         remote_executable: Option<String>,
 
@@ -1742,17 +1710,6 @@ pub enum FleetCommand {
         common: LeaveSetupArgs,
     },
 
-    /// Run one deployment operation as a process that outlives whatever started it.
-    ///
-    /// Never run by hand. The operation's parameters live in a private file beside its
-    /// journal, which is why nothing here names a target, an account or a port: a
-    /// command line is readable by every process on the host.
-    #[command(hide = true)]
-    Worker {
-        #[command(subcommand)]
-        command: FleetWorkerCommand,
-    },
-
     /// Answer one OpenSSH password or passphrase prompt over this operation's private
     /// socket.
     ///
@@ -1767,10 +1724,11 @@ pub enum FleetCommand {
 
     /// Answer the fleet setup protocol on this process's own stdin and stdout.
     ///
-    /// Never run by hand: an issuer starts it over SSH as a fixed command and speaks
-    /// one JSON object per line to it. It opens no listener, starts no subprocess, and
-    /// takes no flags — everything variable, including which machine is being admitted
-    /// and which paths are touched, arrives inside a frame and is validated as data.
+    /// Never run by hand: an operator's `ouro` starts it over SSH as a fixed command and
+    /// speaks one JSON object per line to it. It opens no listener, starts no
+    /// subprocess, and takes no flags — everything variable, including which machine is
+    /// being joined and which paths are touched, arrives inside a frame and is validated
+    /// as data.
     #[command(hide = true)]
     Helper,
 }
@@ -1793,8 +1751,14 @@ pub struct FleetSetupArgs {
 
     /// Machine-readable result on stdout, with stable reason codes. Incomplete setup
     /// still exits non-zero.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "frames")]
     pub json: bool,
+
+    /// Speak NDJSON frames on this process's own stdin and stdout instead of talking to
+    /// a terminal. This is what the runtime's broker runs as a port program; it is
+    /// documented rather than hidden so an operator can drive the same protocol.
+    #[arg(long, conflicts_with_all = ["json", "yes", "dry_run"])]
+    pub frames: bool,
 
     /// Explicitly labelled manual startup instead of a managed user service.
     #[arg(long)]
@@ -1826,34 +1790,18 @@ pub struct LeaveSetupArgs {
     pub yes: bool,
 
     /// Machine-readable result on stdout, with stable reason codes.
-    #[arg(long, requires = "machine")]
+    #[arg(long, requires = "machine", conflicts_with = "frames")]
     pub json: bool,
+
+    /// Speak NDJSON frames on this process's own stdin and stdout. See
+    /// [`FleetSetupArgs::frames`].
+    #[arg(long, requires = "machine", conflicts_with_all = ["json", "yes", "dry_run"])]
+    pub frames: bool,
 
     /// Resume (or name) one operation instead of starting a new one. An operation id is
     /// 8 to 64 characters of lowercase letters, digits and single hyphens.
     #[arg(long, value_name = "ID", requires = "machine")]
     pub operation: Option<String>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum FleetWorkerCommand {
-    /// Fork the detached worker and print the socket it listens on.
-    Start {
-        #[arg(long, value_name = "ID")]
-        operation: String,
-
-        #[arg(long, value_name = "DIR")]
-        data_dir: PathBuf,
-    },
-
-    /// Serve one operation in the foreground. The detached form execs this.
-    Run {
-        #[arg(long, value_name = "ID")]
-        operation: String,
-
-        #[arg(long, value_name = "DIR")]
-        data_dir: PathBuf,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1863,14 +1811,9 @@ pub enum FleetServiceCommand {
     /// Refuses without a cluster identity, because `service-run` refuses to start
     /// without one and a unit installed first would only crash-loop. `--no-service` is
     /// not here: it belongs to `ouro fleet setup`, which decides whether to call this
-    /// at all.
+    /// at all. Whatever is at this data directory's own deterministic unit path is
+    /// overwritten; no other unit is read or touched.
     Install {
-        /// Replace a unit at this data directory's own unit path that this code did
-        /// not write, or that somebody has edited since it did. Both are described,
-        /// with the digest of what is there, before this flag will replace them.
-        #[arg(long)]
-        adopt: bool,
-
         /// Machine-readable form, with stable codes and null for unavailable facts.
         #[arg(long)]
         json: bool,
@@ -1905,58 +1848,6 @@ pub enum FleetServiceCommand {
         /// Machine-readable form, with stable codes and null for unavailable facts.
         #[arg(long)]
         json: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum FleetMembersCommand {
-    /// Add a machine to this machine's roster, so it dials it and expects it. The roster
-    /// is not replicated: run this on every machine that should know about the new one.
-    Add {
-        /// The new machine's short name, as it was given to `ouro fleet create`.
-        machine: String,
-
-        /// The address that machine advertises — the `--host` it was created with.
-        #[arg(long, value_name = "HOST")]
-        host: String,
-
-        /// Optional cross-check on the pair above: a node name is always
-        /// `ouro-<machine>@<host>`, and a mismatch is refused.
-        #[arg(long, value_name = "NODE")]
-        node: Option<String>,
-    },
-
-    /// Take a machine out of this machine's roster, after `ouro fleet leave` was run on
-    /// it. This records no tombstone; `ouro fleet sessions forget` does that.
-    Remove {
-        /// The machine to stop dialing and stop expecting.
-        machine: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SessionsCommand {
-    /// Declare a machine gone for good and irreversibly forget this machine's saved
-    /// routing evidence for it. Takes it out of this machine's roster and records it as
-    /// a tombstone, which is what the runtime requires before it will retire the
-    /// evidence. Run this separately on every remaining cluster machine.
-    Forget {
-        /// The machine whose offline session-owner evidence will be lost.
-        #[arg(long, value_name = "NAME")]
-        machine: String,
-
-        /// Confirm that sessions known only through this local evidence may become
-        /// undiscoverable while their former owner is offline.
-        #[arg(long, required = true)]
-        accept_state_loss: bool,
-    },
-
-    /// Undo `forget`: put a machine declared gone back into this machine's roster. The
-    /// durable evidence the runtime already retired does not come back — this restores
-    /// the roster entry, so the machine is dialed and expected again.
-    Restore {
-        /// The machine this roster records as gone for good.
-        machine: String,
     },
 }
 

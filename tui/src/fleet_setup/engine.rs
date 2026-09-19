@@ -6,23 +6,22 @@
 //! an operation interrupted at any durable boundary continues from that boundary rather
 //! than reissuing credentials or installing twice.
 //!
-//! The order in `add` is the proposal's, and the order matters:
+//! The order in `add` is `docs/proposals/fleet-kiss.md` §6, and the order matters:
 //!
 //! 1. inspect the *effective* SSH config, before connecting;
 //! 2. verify the host key, before authenticating;
-//! 3. authenticate and inspect the target;
+//! 3. authenticate and run the fixed preflight;
 //! 4. install a missing `ouro`, from the exact own-version release;
-//! 5. read every current member's fleet identity and roster — and stop here if one is
-//!    unreachable or has an unresolved operation, because credentials must not leave the
-//!    issuer while the roster cannot be completed;
-//! 6. prepare the target's key, issue its certificate, install its profile;
-//! 7. update every member's roster;
-//! 8. hand startup to the service seam;
-//! 9. observe connectivity, then report readiness separately from connectivity.
+//! 5. `hello`, and refuse a version that is not ours;
+//! 6. `inspect` — is a fleet already there, is a runtime running;
+//! 7. review;
+//! 8. `install` with this fleet's bundle, then `service`, then `start`;
+//! 9. watch the target's own `status` until it reports the fleet connected;
+//! 10. append the new member to *this* machine's list, and nowhere else (§1).
 
 use std::collections::HashMap;
 use std::os::unix::fs::DirBuilderExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -38,8 +37,7 @@ use super::challenge::{host_trust_metadata, Answer, ChallengeKind};
 use super::gateway::{self, Gateway};
 use super::helper;
 use super::journal::{
-    Handle as JournalHandle, IntendedPaths, Journal, RosterMember, RosterSnapshot, SelectedRelease,
-    StepRecord, TargetIdentity,
+    Handle as JournalHandle, IntendedPaths, Journal, SelectedRelease, StepRecord, TargetIdentity,
 };
 use super::plan::{
     admission_grant, removal_note, DeploymentHost, Plan, PlanMember, PlanRelease, PlanTarget,
@@ -57,9 +55,6 @@ use super::{
 pub const CONNECT_DEADLINE: Duration = Duration::from_secs(60);
 /// How long it waits for a removed member to disappear.
 pub const DISCONNECT_DEADLINE: Duration = Duration::from_secs(60);
-/// A roster edit that lost a lock race is retried this many times before it is reported.
-const ROSTER_RETRIES: u32 = 3;
-
 /// Dry-run scratch directories, keyed by process and operation so every step of one
 /// `--dry-run` shares a unique 0700 directory without parking it under the data dir.
 fn dry_run_scratch() -> &'static Mutex<HashMap<String, PathBuf>> {
@@ -128,7 +123,6 @@ impl Outcome {
             "summary": self.summary,
             "next": self.next,
             "plan": self.plan.as_ref().map(Plan::to_value),
-            "plan_digest": self.plan.as_ref().map(Plan::digest),
             "steps": self.steps,
             "residue": self.residue,
             "unknown": self.unknown,
@@ -155,10 +149,6 @@ pub struct Engine {
     pub origin: release::Origin,
     /// This binary's version, which is the release a missing-binary install selects.
     pub version: String,
-    /// The authenticated subject this operation belongs to, when it is known before the
-    /// operation starts. The CLI knows it — the local account. The worker does not: its
-    /// owner is the first client that attaches, so it passes `None` and records it then.
-    pub owner: Option<String>,
 }
 
 impl Engine {
@@ -181,8 +171,7 @@ impl Engine {
         self.run_locked(&journal)
     }
 
-    /// The same, against a journal somebody else is also writing — the worker's socket
-    /// thread records the operation's owner there while the engine records its steps.
+    /// The same, against a journal a caller already opened.
     pub fn run_with(&self, journal: &JournalHandle) -> Result<Outcome> {
         self.validate_request()?;
         if self.request.dry_run {
@@ -193,29 +182,11 @@ impl Engine {
     }
 
     fn validate_request(&self) -> Result<()> {
-        super::validate_operation_id(&self.request.operation)?;
-        if self.request.run_test_task
-            && !self
-                .request
-                .test_workspace
-                .as_deref()
-                .is_some_and(|path| Path::new(path).is_absolute())
-        {
-            return refuse(
-                "invalid_request",
-                "--run-test-task requires --test-workspace with an absolute directory on the target",
-            );
-        }
-        Ok(())
+        super::validate_operation_id(&self.request.operation)
     }
 
     fn run_locked(&self, journal: &JournalHandle) -> Result<Outcome> {
-        self.request.write(&self.data_dir)?;
-        if let Some(owner) = &self.owner {
-            journal.claim(owner)?;
-        }
         if journal.state() == OperationState::Completed {
-            self.consume_request_if_terminal(OperationState::Completed);
             return Ok(self.completed_outcome(journal));
         }
         journal.clear_error()?;
@@ -225,10 +196,7 @@ impl Engine {
             OperationKind::Leave => self.run_leave(journal),
         };
         match result {
-            Ok(outcome) => {
-                self.consume_request_if_terminal(outcome.state);
-                Ok(outcome)
-            }
+            Ok(outcome) => Ok(outcome),
             Err(error) => {
                 let reason = super::reason_of(&error).unwrap_or("failed");
                 let state = if reason == "cancelled" {
@@ -236,38 +204,11 @@ impl Engine {
                 } else {
                     OperationState::Failed
                 };
-                // A waiter that never mutated must not keep a review bound to a roster
-                // the holder is about to change; the retry re-plans against current
-                // members.
-                if matches!(
-                    reason,
-                    "operation_in_progress" | "roster_changed" | "roster_conflict"
-                ) && self.can_review_again(journal)?
-                {
-                    journal.forget_review()?;
-                }
-                journal.fail(state, format!("{error:#}"))?;
-                self.consume_request_if_terminal(state);
+                journal.fail(state, reason, format!("{error:#}"))?;
                 self.notify_state(state);
                 Err(error)
             }
         }
-    }
-
-    /// A roster can be reviewed again only before any credentials or roster changes.
-    /// The issuer receipt also covers a crash after issuance but before journal flush.
-    fn can_review_again(&self, journal: &JournalHandle) -> Result<bool> {
-        let record = journal.record();
-        if record.completed(&self.request.machine, "issue")
-            || record.attempted(&self.request.machine, "install")
-            || record.steps.iter().any(|step| step.step == "roster")
-        {
-            return Ok(false);
-        }
-        Ok(
-            !fleet::read_receipt(&self.data_dir, &self.request.operation)?
-                .is_some_and(|receipt| receipt.has_step("issue")),
-        )
     }
 
     fn transfer_progress<'a>(
@@ -294,19 +235,13 @@ impl Engine {
             };
             self.step_event(
                 machine,
-                "install_binary",
-                "started",
+                "install",
+                "attempted",
                 Some(format!(
                     "{phase}: {amount} · {}s elapsed",
                     began.elapsed().as_secs()
                 )),
             );
-        }
-    }
-
-    fn consume_request_if_terminal(&self, state: OperationState) {
-        if matches!(state, OperationState::Completed | OperationState::Cancelled) {
-            let _ = super::OperationRequest::consume(&self.data_dir, &self.request.operation);
         }
     }
 
@@ -450,48 +385,9 @@ impl Engine {
         })
     }
 
-    fn member_access(&self, machine: &str) -> (super::MemberAccess, super::IdentityChoice) {
-        let latest = Journal::list(&self.data_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|operation| Journal::read(&self.data_dir, &operation).ok().flatten())
-            .filter(|record| {
-                record.kind == OperationKind::Add
-                    && record.state == OperationState::Completed
-                    && record
-                        .target
-                        .as_ref()
-                        .is_some_and(|target| target.machine == machine)
-            })
-            .max_by(|a, b| {
-                a.created_at
-                    .cmp(&b.created_at)
-                    .then(a.updated_at.cmp(&b.updated_at))
-            });
-        let mut access = super::MemberAccess::default();
-        let mut identity = self.request.identity.clone();
-        if let Some(record) = latest {
-            if let Some(target) = record.target {
-                access.ssh_user = target.ssh_user;
-                access.ssh_port = target.port;
-                access.install_path = record.paths.install_path;
-                access.data_dir = record.paths.data_dir;
-                if let Some(recorded) = target.identity {
-                    identity = recorded;
-                }
-            }
-        }
-        if let Some(overrides) = self.request.members.get(machine) {
-            access.ssh_user = overrides.ssh_user.clone().or(access.ssh_user);
-            access.ssh_port = overrides.ssh_port.or(access.ssh_port);
-            access.install_path = overrides.install_path.clone().or(access.install_path);
-            access.data_dir = overrides.data_dir.clone().or(access.data_dir);
-        }
-        (access, identity)
-    }
-
-    fn lock_issuer(&self, journal: &JournalHandle) -> Result<super::lock::Lock> {
-        super::lock::Lock::acquire_issuer(
+    /// §8: the only lock left is this operation's own, so two processes cannot run it.
+    fn lock_operation(&self, journal: &JournalHandle) -> Result<super::lock::Lock> {
+        super::lock::Lock::acquire_operation(
             &self.data_dir,
             &self.request.operation,
             journal.state().as_str(),
@@ -604,22 +500,6 @@ impl Engine {
     }
 
     /// The same, for one existing member, honouring its own access overrides.
-    fn member_destination(&self, host: &str, access: &super::MemberAccess) -> Result<Destination> {
-        let mut destination = self.destination(
-            host,
-            access
-                .ssh_user
-                .as_deref()
-                .or(self.request.ssh_user.as_deref()),
-        )?;
-        if let Some(port) = access.ssh_port {
-            destination.port = port;
-        }
-        Ok(destination)
-    }
-
-    /// Everything between "we have an address" and "we have an authenticated channel":
-    /// the effective-config check, host trust, and the first authentication.
     fn connect(&self, destination: Destination) -> Result<Connection> {
         self.connect_with_identity(destination, &self.request.identity)
     }
@@ -805,8 +685,15 @@ impl Engine {
         }
     }
 
-    /// Ask the operator to approve a plan, and bind the approval to its digest.
-    fn review(&self, plan: &Plan) -> Result<()> {
+    /// Ask the operator to approve a plan.
+    ///
+    /// §6 deleted the plan digest. What binds a resumed operation to what was approved is
+    /// the journal: the plan lines are written there when the review is accepted, and an
+    /// operation that already has them is not asked again.
+    fn review(&self, journal: &JournalHandle, plan: &Plan) -> Result<()> {
+        if journal.record().reviewed() {
+            return Ok(());
+        }
         self.notify_state(OperationState::AwaitingReview);
         if self.request.assume_yes {
             // `--yes` accepts a *resolved* plan. It has already failed to bypass host
@@ -814,139 +701,20 @@ impl Engine {
             // conversation, which refuses it non-interactively) and it cannot make a
             // busy runtime idle.
             self.note("--yes: accepting the resolved plan without a review prompt");
-            return Ok(());
+            return journal.set_plan(plan.lines());
         }
-        let digest = plan.digest();
         let answer = self.conversation.ask(ChallengeRequest {
             kind: ChallengeKind::Review,
-            metadata: json!({ "plan": plan.to_value(), "plan_digest": digest }),
+            metadata: json!({ "plan": plan.to_value(), "lines": plan.lines() }),
         })?;
         match answer {
-            Answer::Approval { plan_digest } if super::constant_time_eq(&plan_digest, &digest) => {
-                Ok(())
-            }
-            Answer::Approval { .. } => refuse(
-                "plan_changed",
-                "the approval names a different plan than the one this operation resolved; review the current plan again",
-            ),
+            Answer::Approval => journal.set_plan(plan.lines()),
             _ => refuse("review_declined", "the plan was not approved"),
         }
     }
 
-    /// The plan digest a resumed operation has to still match (seam S6).
-    fn bind_plan(&self, journal: &JournalHandle, plan: &Plan) -> Result<()> {
-        let digest = plan.digest();
-        let before = journal.record();
-        if let Some(recorded) = before.plan_digest {
-            if !super::constant_time_eq(&recorded, &digest) {
-                // Older plans had no derived summary. Migrate only when both the
-                // recorded document and every freshly resolved fact still hash to
-                // the original approval with that one field omitted. A changed
-                // destination, service, release, or any other fact still refuses.
-                if let Some(approved) = before.plan.filter(|plan| plan.summary.is_empty()) {
-                    let mut legacy = plan.clone();
-                    legacy.summary.clear();
-                    if super::constant_time_eq(&recorded, &approved.digest())
-                        && super::constant_time_eq(&recorded, &legacy.digest())
-                    {
-                        return journal.set_plan(plan);
-                    }
-                }
-                return refuse(
-                    "plan_changed",
-                    "the facts behind this operation changed since it was approved — the target, the roster or the selected release is not what was reviewed. Review the new plan rather than continuing the old one",
-                );
-            }
-            return Ok(());
-        }
-        self.review(plan)?;
-        journal.set_plan(plan)
-    }
-
     fn local_profile(&self) -> Result<Option<fleet::Profile>> {
         fleet::load(&self.data_dir)
-    }
-
-    fn roster_snapshot(&self, profile: &fleet::Profile) -> RosterSnapshot {
-        RosterSnapshot {
-            fleet_id: Some(profile.fleet_id.clone()),
-            roster_revision: profile.roster_revision,
-            members: profile
-                .members
-                .iter()
-                .map(|member| RosterMember {
-                    machine: member.machine.clone(),
-                    host: member.host.clone(),
-                })
-                .collect(),
-        }
-    }
-
-    /// The source roster must still be the one the plan was computed against.
-    ///
-    /// The proposal: "A changed source roster or conflicting operation requires
-    /// reconciliation, never overwriting later edits."
-    fn ensure_roster_unchanged(
-        &self,
-        journal: &JournalHandle,
-        profile: &fleet::Profile,
-    ) -> Result<()> {
-        let Some(recorded) = &journal.record().roster else {
-            return Ok(());
-        };
-        let current = self.roster_snapshot(profile);
-        if recorded.fleet_id != current.fleet_id {
-            return refuse(
-                "fleet_changed",
-                "this machine's fleet identity changed since the operation started; nothing was applied",
-            );
-        }
-        if recorded.roster_revision != current.roster_revision
-            || recorded.members != current.members
-        {
-            let record = journal.record();
-            let mut expected = recorded.members.clone();
-            match self.request.kind {
-                OperationKind::Add => {
-                    if let Some(target) = &record.target {
-                        if let Some(host) = &target.address {
-                            expected.push(RosterMember {
-                                machine: target.machine.clone(),
-                                host: host.clone(),
-                            });
-                        }
-                    }
-                }
-                OperationKind::Leave => expected.retain(|member| {
-                    !fleet::same_name(&member.machine, self.request.machine.trim())
-                }),
-                OperationKind::Setup => {}
-            }
-            expected.sort_by(|a, b| a.machine.cmp(&b.machine));
-            let mut actual = current.members.clone();
-            actual.sort_by(|a, b| a.machine.cmp(&b.machine));
-            if record.attempted(&profile.machine, "roster")
-                && current.roster_revision == recorded.roster_revision.saturating_add(1)
-                && actual == expected
-            {
-                journal.finish_step(
-                    &profile.machine,
-                    "roster",
-                    "ok",
-                    Some(format!("reconciled revision {}", current.roster_revision)),
-                    None,
-                )?;
-                return Ok(());
-            }
-            return refuse(
-                "roster_changed",
-                format!(
-                    "this machine's roster moved from revision {} to {} since the plan was reviewed. Retry this operation to review the updated plan if no credentials were issued; any prepared identity remains bound to this operation",
-                    recorded.roster_revision, current.roster_revision
-                ),
-            );
-        }
-        Ok(())
     }
 
     // ---------------------------------------------------------------- dry run
@@ -1047,12 +815,6 @@ impl Engine {
             })
         };
 
-        let members: Vec<PlanMember> = profile
-            .members
-            .iter()
-            .map(|member| self.plan_member(&profile, member, &format!("add {machine}")))
-            .collect();
-
         let plan = Plan {
             schema: super::SCHEMA,
             operation: self.request.operation.clone(),
@@ -1074,13 +836,13 @@ impl Engine {
                 )),
             },
             release: release_plan.clone(),
-            test_workspace: self.request.test_workspace.clone(),
             service: if self.request.service {
                 ServicePlan::Managed
             } else {
                 ServicePlan::Manual
             },
-            members,
+            fleet: Some(profile.name.clone()),
+            members: Vec::new(),
             restart: None,
             grants: vec![admission_grant()],
             build: Some(
@@ -1165,7 +927,27 @@ impl Engine {
         self.request
             .remote_data_dir
             .clone()
-            .or_else(|| self.member_access(machine).0.data_dir)
+            .or_else(|| self.recorded_data_dir(machine))
+    }
+
+    /// The `OUROBOROS_DATA_DIR` this machine's own journals record for `machine`.
+    fn recorded_data_dir(&self, machine: &str) -> Option<String> {
+        let mut found = None;
+        for operation in Journal::list(&self.data_dir).ok()? {
+            let Ok(Some(record)) = Journal::read(&self.data_dir, &operation) else {
+                continue;
+            };
+            if record.kind != OperationKind::Add
+                || record.state != OperationState::Completed
+                || record.target.as_ref().map(|target| target.machine.as_str()) != Some(machine)
+            {
+                continue;
+            }
+            if let Some(path) = record.paths.data_dir.clone() {
+                found = Some(path);
+            }
+        }
+        found
     }
 
     /// Where this machine's own journals say `ouro` was installed on `machine`.
@@ -1205,35 +987,13 @@ impl Engine {
     }
 
     fn run_add(&self, journal: &JournalHandle) -> Result<Outcome> {
-        let (mut plan, mut prepared) = self.plan_add()?;
-        if let Err(error) = self.ensure_roster_unchanged(journal, &prepared.profile) {
-            if super::reason_of(&error) == Some("roster_changed")
-                && self.can_review_again(journal)?
-            {
-                journal.forget_review()?;
-                self.note("The roster changed before credentials were issued. Review the updated plan; this operation will reuse its prepared identity.");
-            } else {
-                return Err(error);
-            }
-        }
+        let (mut plan, prepared) = self.plan_add()?;
         let before = journal.record();
-        if let Some(roster) = &before.roster {
-            // The new member is contacted as the target, never as an old member on retry.
-            prepared.profile.members.retain(|member| {
-                roster
-                    .members
-                    .iter()
-                    .any(|old| old.machine == member.machine)
-            });
-            plan.members.retain(|member| {
-                roster
-                    .members
-                    .iter()
-                    .any(|old| old.machine == member.machine)
-            });
-        }
-        if before.attempted(&prepared.machine, "install_binary") && plan.release.is_none() {
-            if let Some(release) = before.plan.as_ref().and_then(|plan| plan.release.as_ref()) {
+        // A resumed `add` whose binary this operation already installed plans no install
+        // — the binary is there — so the release it was approved with is restored from
+        // the journal and re-verified by checksum rather than silently forgotten.
+        if before.attempted(&prepared.machine, "install") && plan.release.is_none() {
+            if let Some(release) = &before.release {
                 let command = format!("if command -v sha256sum >/dev/null 2>&1; then sha256sum < {}; else shasum -a 256 < {}; fi", ssh::shell_quote(&prepared.executable), ssh::shell_quote(&prepared.executable));
                 let checked = prepared.connection.runner.run(&command, None)?;
                 if !checked.success()
@@ -1247,19 +1007,15 @@ impl Engine {
                         "the installed binary no longer matches this operation's approved release",
                     );
                 }
-                plan.release = Some(release.clone());
                 journal.finish_step(
                     &prepared.machine,
-                    "install_binary",
+                    "install",
                     "ok",
                     Some("verified the previously installed release checksum".into()),
                     None,
                 )?;
             }
         }
-        // The two edits above — dropping members the approved roster did not have, and
-        // restoring the release this operation already installed — are edits to the
-        // plan, and the sentence is derived from it.
         plan.refresh_summary();
 
         let machine = prepared.machine.clone();
@@ -1281,33 +1037,25 @@ impl Engine {
             install_path: Some(prepared.executable.clone()),
             data_dir: self.request.remote_data_dir.clone(),
         })?;
-        if journal.record().roster.is_none() {
-            journal.set_roster(self.roster_snapshot(&prepared.profile))?;
-        }
         if let Some(release) = &prepared.release {
             journal.set_release(SelectedRelease {
                 version: release.version.clone(),
-                target: release.target.clone(),
                 asset: release.asset.clone(),
                 sha256: release.sha256.clone(),
             })?;
         }
-        // The roster first. Its members are part of the plan, so a moved roster also
-        // changes the digest — and `plan_changed` is the vaguer answer to a question
-        // this machine can answer precisely: the roster moved, re-run so the change is
-        // reconciled rather than overwritten.
-        self.bind_plan(journal, &plan)?;
 
+        let _lock = self.lock_operation(journal)?;
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
         let mut unknown = Vec::new();
 
         // ---- install a missing ouro
         if let Some(release) = &prepared.release {
-            if !journal.record().completed(&machine, "install_binary") {
+            if !journal.record().completed(&machine, "install") {
                 self.check_cancelled()?;
-                journal.begin_step(&machine, "install_binary")?;
-                self.step_event(&machine, "install_binary", "started", None);
+                journal.begin_step(&machine, "install")?;
+                self.step_event(&machine, "install", "attempted", None);
                 let cancelled = AtomicBool::new(false);
                 let mut download = self.transfer_progress(&machine, "Downloading", None);
                 let bytes = release::fetch_verified_with_progress(
@@ -1342,26 +1090,16 @@ impl Engine {
                 )?;
                 journal.finish_step(
                     &machine,
-                    "install_binary",
+                    "install",
                     "ok",
                     Some(format!("ouro {} at {}", release.version, installed.path)),
                     Some(format!("sha256:{}", installed.sha256)),
                 )?;
-                self.step_event(&machine, "install_binary", "ok", Some(installed.path));
+                self.step_event(&machine, "install", "ok", Some(installed.path));
             }
-        } else if !journal.record().completed(&machine, "install_binary") {
-            journal.skip_step(&machine, "install_binary", "the target already has ouro")?;
+        } else if !journal.record().completed(&machine, "install") {
+            journal.skip_step(&machine, "install", "the target already has ouro")?;
         }
-
-        // Member preflight before the target helper: the helper exits after a minute
-        // idle, and authenticating to every current member can take longer than that.
-        let mut member_sessions =
-            self.preflight_members(journal, &prepared.profile, Some(&prepared))?;
-        let _issuer_lock = self.lock_issuer(journal)?;
-        let current = self
-            .local_profile()?
-            .context("the local fleet disappeared during setup")?;
-        self.ensure_roster_unchanged(journal, &current)?;
 
         // ---- inspect the target through its own helper
         let mut session = helper::Session::open(
@@ -1369,9 +1107,10 @@ impl Engine {
             &prepared.executable,
             self.request.remote_data_dir.as_deref(),
         )?;
+        let hello = session.ask("hello", json!({}))?;
+        self.verify_build_contract(&hello, &machine)?;
         let inspection = session.ask("inspect", json!({}))?;
-        self.verify_build_contract(&inspection, &machine)?;
-        let mut target_admitted = false;
+        let mut already_joined = false;
         if let Some(existing) = inspection.get("fleet").and_then(Value::as_object) {
             let existing_fleet = existing
                 .get("fleet_id")
@@ -1380,14 +1119,13 @@ impl Engine {
             if existing_fleet == prepared.profile.fleet_id {
                 if existing.get("machine").and_then(Value::as_str) != Some(machine.as_str())
                     || existing.get("host").and_then(Value::as_str) != Some(target_host.as_str())
-                    || existing.get("node").and_then(Value::as_str) != plan.target.node.as_deref()
                 {
-                    return refuse("identity_mismatch", "the installed target identity does not match the reviewed machine, host and node");
+                    return refuse("identity_mismatch", "the installed target identity does not match the reviewed machine and host");
                 }
-                target_admitted = true;
+                already_joined = true;
             } else {
                 return refuse(
-                    "fleet_exists",
+                    "fleet_present",
                     format!(
                         "{machine} already belongs to another fleet ({}). Run `ouro fleet leave` there first; this workflow never replaces an existing installation's identity",
                         sanitize_remote_text(existing_fleet, 40)
@@ -1395,8 +1133,8 @@ impl Engine {
                 );
             }
         }
-        if !target_admitted && inspection.get("runtime_running") != Some(&Value::Bool(false)) {
-            return refuse("runtime_running", format!("{machine}'s runtime must be stopped before admission. Run `ouro stop --require-idle` for its data directory, then retry; no credentials were issued"));
+        if !already_joined && inspection.get("runtime_running") != Some(&Value::Bool(false)) {
+            return refuse("runtime_running", format!("{machine}'s runtime must be stopped before it joins. Run `ouro stop --require-idle` for its data directory, then retry; no credentials were sent"));
         }
         journal.finish_step(
             &machine,
@@ -1404,11 +1142,11 @@ impl Engine {
             "ok",
             Some(format!(
                 "{} {}",
-                inspection
+                hello
                     .get("os")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown os"),
-                inspection
+                hello
                     .get("arch")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown arch")
@@ -1417,172 +1155,51 @@ impl Engine {
         )?;
         self.step_event(&machine, "inspect", "ok", None);
 
-        // ---- prepare, issue, install
-        // Membership is the operator's *name*, and nothing else. Matching on the host as
-        // well would call a machine a member because another member happens to share an
-        // address, which is exactly what happens when two data directories are set up on
-        // one host; `issue_member_certificate` refuses a genuine node collision on its
-        // own.
-        let already_member = prepared
-            .profile
-            .members
-            .iter()
-            .any(|member| member.machine == machine);
-        let mut admission = None;
-        if target_admitted {
-            for step in ["prepare", "issue", "install"] {
-                if !journal.record().completed(&machine, step) {
-                    journal.skip_step(
-                        &machine,
-                        step,
-                        "the target already holds this fleet's credentials",
-                    )?;
-                }
+        // ---- the review, then the bundle
+        self.review(journal, &plan)?;
+        journal.set_state(OperationState::Deploying)?;
+
+        if already_joined {
+            if !journal.record().completed(&machine, "join") {
+                journal.skip_step(
+                    &machine,
+                    "join",
+                    "the target already holds this fleet's credentials",
+                )?;
             }
-        } else if already_member {
-            return refuse(
-                "identity_mismatch",
-                format!(
-                    "this machine's roster already names {machine}, but {machine} holds no fleet identity. One of the two is stale: `ouro fleet members remove {machine}` here, or `ouro fleet status` there, before admitting it again"
-                ),
-            );
-        } else if journal.record().completed(&machine, "issue") {
-            // The certificate left this machine and the target does not have it — whether
-            // delivery never finished or the target lost it afterwards. The materials
-            // cannot be reissued: replaying an admission is exactly what the issuer
-            // refuses, and they were never written down, because they carry the fleet
-            // cookie. Say so precisely instead of failing on a replay refusal, or worse,
-            // writing a roster entry for a machine that holds no identity.
-            return refuse(
-                "credentials_unrecoverable",
-                format!(
-                    "operation {} issued credentials for {machine} and they did not reach it. They cannot be reissued under this operation. Check {machine}: if it has a fleet directory, finish the operation there; otherwise run `ouro fleet members remove {machine}` here and admit it again as a new operation",
-                    self.request.operation
-                ),
-            );
-        } else if !journal.record().completed(&machine, "install") {
+        } else if !journal.record().completed(&machine, "join") {
             self.check_cancelled()?;
-            journal.begin_step(&machine, "prepare")?;
-            let request_fields = session.ask(
-                "prepare",
-                json!({
-                    "operation": self.request.operation,
-                    "machine": machine,
-                    "host": target_host,
-                }),
-            )?;
-            let prepared_request: fleet::AdmissionRequest =
-                serde_json::from_value(Value::Object(request_fields.clone())).map_err(|error| {
-                    super::SetupError {
-                        reason: "helper_protocol",
-                        detail: format!(
-                            "the target's prepare reply is not an admission request: {error}"
-                        ),
-                    }
-                })?;
-            if prepared_request.operation != self.request.operation
-                || prepared_request.machine != machine
-                || prepared_request.host != target_host
-                || Some(prepared_request.node.as_str()) != plan.target.node.as_deref()
-            {
-                return refuse("identity_mismatch", "the target's admission request does not match the reviewed operation, machine, host and node; no credentials were issued");
-            }
-            journal.finish_step(
-                &machine,
-                "prepare",
-                "ok",
-                Some(prepared_request.node.clone()),
-                Some(prepared_request.key_fingerprint.clone()),
-            )?;
-            self.step_event(&machine, "prepare", "ok", None);
-
-            // The last safe place to stop. From here to the end of `install` the
-            // operation finishes what it started: a certificate that has been issued and
-            // not delivered cannot be reissued, so cancelling in that window would cost
-            // the target its identity rather than save it.
-            if self.conversation.cancelled() {
-                let cleanup = session.discard_preparation(&self.request.operation);
-                let detail = match cleanup {
-                    Ok(_) => {
-                        journal.finish_step(&machine, "prepare", "skipped", Some("cancelled before issuance; removed this operation's prepared identity".into()), None)?;
-                        "the operation stopped before any credentials were issued; its prepared identity was removed".to_string()
-                    }
-                    Err(error) => {
-                        let detail = format!("{machine} still holds the prepared identity for operation {}: {error:#}. Run `ouro fleet doctor` there; `ouro fleet leave` retires an uninstalled preparation", self.request.operation);
-                        journal.note_residue(&detail)?;
-                        detail
-                    }
-                };
-                return refuse("cancelled", detail);
-            }
-            admission = Some(prepared_request);
-        }
-
-        if let Some(admission) = admission {
-            journal.begin_step(&machine, "issue")?;
-            let materials = fleet::issue_member_certificate_checked(
-                &self.data_dir,
-                &admission,
-                Some(&prepared.profile),
-            )?;
-            journal.finish_step(
-                &machine,
-                "issue",
-                "ok",
-                Some(format!("issued for {}", admission.node)),
-                Some(admission.key_fingerprint.clone()),
-            )?;
-            self.step_event(&machine, "issue", "ok", None);
-
-            journal.begin_step(&machine, "install")?;
+            journal.begin_step(&machine, "join")?;
+            // The bundle is read here and nowhere else, and it lives only as long as
+            // this frame: §2's `Bundle` zeroizes its cookie and CA key on drop.
+            let bundle = fleet::bundle(&self.data_dir)?;
             let mut install = json!({
-                "operation": self.request.operation,
-                "materials": serde_json::to_value(&materials)?,
+                "bundle": serde_json::to_value(&bundle)?,
+                "machine": machine,
+                "host": target_host,
             });
             let ports = self.request.ports();
             if ports != fleet::Ports::DEFAULT {
-                install["ports"] = json!({
-                    "gateway": ports.gateway,
-                    "dist": ports.dist,
-                    "epmd": ports.epmd,
-                });
+                install["ports"] = json!({ "gateway": ports.gateway, "dist": ports.dist });
             }
-            let installed = session.ask("install", install)?;
-            let warnings: Vec<String> = installed
-                .get("warnings")
-                .and_then(Value::as_array)
-                .map(|warnings| {
-                    warnings
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(|text| sanitize_remote_text(text, 200))
-                        .collect()
-                })
-                .unwrap_or_default();
-            for warning in &warnings {
-                journal.note_residue(format!("{machine}: {warning}"))?;
-            }
-            let warning = warnings.first().cloned();
+            drop(bundle);
+            let joined = session.ask("install", install)?;
             journal.finish_step(
                 &machine,
-                "install",
+                "join",
                 "ok",
-                Some(match &warning {
-                    Some(warning) => format!("admitted, with a warning: {warning}"),
-                    None => "admitted".to_string(),
-                }),
+                Some(format!(
+                    "joined as {}",
+                    joined
+                        .get("node")
+                        .and_then(Value::as_str)
+                        .map(|node| sanitize_remote_text(node, 80))
+                        .unwrap_or_else(|| machine.clone())
+                )),
                 None,
             )?;
-            self.step_event(&machine, "install", "ok", warning);
+            self.step_event(&machine, "join", "ok", None);
         }
-
-        let change = fleet::RosterChange::Add {
-            machine: machine.clone(),
-            host: target_host.clone(),
-            node: None,
-        };
-        self.apply_roster_everywhere(journal, &prepared.profile, &mut member_sessions, change)?;
-        drop(_issuer_lock);
 
         // ---- startup
         let startup = self.arrange_startup(journal, &machine, &mut session)?;
@@ -1596,40 +1213,43 @@ impl Engine {
             Startup::Started => {}
         }
 
-        // ---- connectivity, then readiness
+        // ---- the local roster edit, then connectivity
+        //
+        // §1: the roster is not replicated. The operator's own list gains the machine,
+        // and nothing is written anywhere else.
+        if !journal.record().completed(&machine, "remember") {
+            journal.begin_step(&machine, "remember")?;
+            let dist_port = self
+                .request
+                .ports()
+                .dist
+                .unwrap_or(prepared.profile.dist_port);
+            let added = fleet::add_member(&self.data_dir, &machine, &target_host, dist_port, None)?;
+            journal.finish_step(
+                &machine,
+                "remember",
+                "ok",
+                Some(format!("{} is on this machine's list", added.node)),
+                None,
+            )?;
+            self.step_event(&machine, "remember", "ok", None);
+        }
+
         self.notify_state(OperationState::CheckingReadiness);
         journal.set_state(OperationState::CheckingReadiness)?;
         let connected = if startup == Startup::Started {
-            self.await_connection(journal, &machine)?
+            self.await_connection(journal, &machine, &mut session)?
         } else {
             journal.skip_step(&machine, "connect", "the runtime was not started from here")?;
             false
         };
-        let doctor = self.remote_doctor(
-            journal,
-            &machine,
-            &prepared.connection.runner,
-            &prepared.executable,
-        )?;
-        if doctor.is_none() {
-            unknown.push(format!("{machine}'s own diagnostics could not be read"));
-        }
         self.record_readiness(journal, &machine, &mut unknown)?;
-        if self.request.run_test_task {
-            self.run_test_task(journal, &machine)?;
-        } else {
-            journal.skip_step(&machine, "test_task", "not requested")?;
-        }
 
         session.close();
-        for session in member_sessions.drain(..) {
-            session.session.close();
-        }
 
-        // Admission is complete when every step this operation *intended* to take
-        // succeeded. A runtime the operator chose to start themselves has not failed to
-        // connect; it has not been started. Only a startup this operation performed can
-        // leave the operation unfinished.
+        // The operation is complete when every step it *intended* to take succeeded. A
+        // runtime the operator chose to start themselves has not failed to connect; it
+        // has not been started.
         let state = if connected || startup != Startup::Started {
             OperationState::Completed
         } else {
@@ -1646,16 +1266,16 @@ impl Engine {
             summary: if connected {
                 format!("{machine} joined the fleet and is connected")
             } else {
-                format!("{machine} was admitted; its connection is not observed yet")
+                format!("{machine} joined; its connection is not observed yet")
             },
             next: if connected {
                 format!("Connected; configure a model on {machine}")
             } else if startup == Startup::Started {
                 format!(
-                    "Admitted. Check {machine} with `ouro fleet doctor --peer {target_host}` once its runtime is up"
+                    "Joined. Check {machine} with `ouro fleet doctor --peer {target_host}` once its runtime is up"
                 )
             } else {
-                format!("Admitted. Start the runtime on {machine} with `ouro daemon` there, then `ouro fleet doctor`")
+                format!("Joined. Start the runtime on {machine} with `ouro daemon` there, then `ouro fleet doctor`")
             },
             plan: Some(plan),
             steps: journal.record().steps,
@@ -1671,321 +1291,36 @@ impl Engine {
     /// workflow silently replaces.
     fn verify_build_contract(
         &self,
-        inspection: &serde_json::Map<String, Value>,
+        hello: &serde_json::Map<String, Value>,
         machine: &str,
     ) -> Result<()> {
         let local = crate::fleet_protocol::build_metadata();
-        let Some(remote) = inspection.get("build").filter(|build| !build.is_null()) else {
+        let Some(remote) = hello
+            .get("version")
+            .and_then(Value::as_str)
+            .map(|text| sanitize_remote_text(text, 64))
+        else {
             return refuse(
                 "incompatible_installation",
                 format!(
-                    "{machine} did not report a build contract, so its compatibility with this fleet cannot be established. Upgrade it to a current official release and run this again"
+                    "{machine} did not report its Ouroboros version, so its compatibility with this fleet cannot be established. Upgrade it to a current official release and run this again"
                 ),
             );
         };
-        let field = |name: &str| -> Option<String> {
-            remote
-                .get(name)
-                .and_then(Value::as_str)
-                .map(|text| sanitize_remote_text(text, 64))
-        };
-        let revision = remote
-            .get("fleet_protocol_revision")
-            .and_then(Value::as_u64);
-        let mismatches = [
-            (
-                "fleet protocol revision",
-                revision.map(|value| value.to_string()),
-                Some(local.fleet_protocol_revision.to_string()),
-            ),
-            (
-                "Ouroboros version",
-                field("ouroboros_version"),
-                Some(local.ouroboros_version.clone()),
-            ),
-            (
-                "OTP release",
-                field("otp_release"),
-                local.otp_release.clone(),
-            ),
-        ];
-        let differing: Vec<String> = mismatches
-            .iter()
-            .filter(|(_, remote, local)| remote != local)
-            .map(|(label, remote, local)| {
-                format!(
-                    "{label} {} here and {} there",
-                    local.clone().unwrap_or_else(|| "unknown".into()),
-                    remote.clone().unwrap_or_else(|| "unknown".into())
-                )
-            })
-            .collect();
-        if differing.is_empty() {
+        if remote == local.ouroboros_version {
             return Ok(());
         }
+        // §6: "a different version is `version_mismatch`, naming both, with the upgrade
+        // recipe; nothing is replaced".
         refuse(
-            "incompatible_installation",
+            "version_mismatch",
             format!(
-                "{machine}'s Ouroboros is not compatible with this fleet: {}. This workflow never replaces an existing installation — install the matching official release there yourself (`ouro update` on that machine, or download the same release), then run this command again",
-                differing.join("; ")
+                "{machine} runs Ouroboros {remote} and this machine runs {}. A fleet is one version (§12), and this workflow never replaces an existing installation: run `ouro update` on {machine}, or install the matching official release there, then run this command again",
+                local.ouroboros_version
             ),
         )
     }
 
-    /// Read every current member's fleet identity and roster revision, and refuse to go
-    /// further if one cannot be reached or has an unresolved operation.
-    fn preflight_members(
-        &self,
-        journal: &JournalHandle,
-        profile: &fleet::Profile,
-        target: Option<&Prepared>,
-    ) -> Result<Vec<MemberSession>> {
-        let mut sessions = Vec::new();
-        for member in &profile.members {
-            if member.machine == profile.machine {
-                continue;
-            }
-            self.check_cancelled()?;
-            journal.begin_step(&member.machine, "member_preflight")?;
-            let (access, identity) = self.member_access(&member.machine);
-            let existing_target = target.filter(|target| target.machine == member.machine);
-            let connection = if let Some(target) = existing_target {
-                target.connection.clone()
-            } else {
-                let destination = self.member_destination(&member.host, &access)?;
-                self.connect_with_identity(destination, &identity).map_err(|error| {
-                super::SetupError {
-                    reason: "member_unreachable",
-                    detail: format!(
-                        "{} could not be reached, and a new member's credentials must not be issued while an existing member cannot be told about it: {error:#}",
-                        member.machine
-                    ),
-                }
-            })?
-            };
-            let preflight = super::bootstrap::preflight(&connection.runner)?;
-            let executable = match existing_target {
-                Some(target) => target.executable.clone(),
-                None => match access.install_path.as_deref() {
-                    Some(path) if path.starts_with('/') => path.to_string(),
-                    Some(path) => {
-                        super::bootstrap::validate_install_path(path)?;
-                        preflight.install_path(path)
-                    }
-                    // Each member's own admission record, not the target's path.
-                    None => self.remote_executable_for(&member.machine, &preflight)?,
-                },
-            };
-            let member_data_dir = if existing_target.is_some() {
-                self.request.remote_data_dir.as_deref()
-            } else {
-                access.data_dir.as_deref()
-            };
-            let mut session = helper::Session::open(
-                &connection.runner,
-                &executable,
-                member_data_dir,
-            )
-            .map_err(|error| super::SetupError {
-                reason: "member_unreachable",
-                detail: format!("{}'s setup helper did not start: {error:#}", member.machine),
-            })?;
-            let inspection = session.ask("inspect", json!({}))?;
-            let pending = inspection
-                .get("pending_operations")
-                .and_then(Value::as_array)
-                .map(|items| items.len())
-                .unwrap_or(0);
-            if pending > 0 {
-                return refuse(
-                    "member_operation_unresolved",
-                    format!(
-                        "{} has an unresolved admission operation. Finish or clear it there before admitting another machine; a half-finished admission plus a new one is how a roster diverges",
-                        member.machine
-                    ),
-                );
-            }
-            let Some(fleet) = inspection.get("fleet").and_then(Value::as_object) else {
-                return refuse(
-                    "member_unreachable",
-                    format!(
-                        "{} is no longer configured as a fleet member",
-                        member.machine
-                    ),
-                );
-            };
-            if fleet.get("fleet_id").and_then(Value::as_str) != Some(profile.fleet_id.as_str()) {
-                return refuse(
-                    "member_unreachable",
-                    format!(
-                        "{} belongs to a different fleet than this one",
-                        member.machine
-                    ),
-                );
-            }
-            let revision = fleet
-                .get("roster_revision")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| super::SetupError {
-                    reason: "helper_protocol",
-                    detail: format!("{} reported no roster revision", member.machine),
-                })?;
-            journal.finish_step(
-                &member.machine,
-                "member_preflight",
-                "ok",
-                Some(format!("roster revision {revision}")),
-                None,
-            )?;
-            self.step_event(&member.machine, "member_preflight", "ok", None);
-            sessions.push(MemberSession {
-                machine: member.machine.clone(),
-                revision,
-                session,
-                _connection: connection,
-            });
-        }
-        Ok(sessions)
-    }
-
-    fn apply_local_roster(
-        &self,
-        journal: &JournalHandle,
-        profile: &fleet::Profile,
-        change: &fleet::RosterChange,
-    ) -> Result<()> {
-        let step = "roster";
-        if journal.record().completed(&profile.machine, step) {
-            return Ok(());
-        }
-        self.check_cancelled()?;
-        journal.begin_step(&profile.machine, step)?;
-        // A receipt belongs to one machine identity, and on the issuer this
-        // operation's receipt already belongs to the machine being admitted. The
-        // issuer's own roster edit is therefore recorded under a derived id; the
-        // journal is what ties the two halves of the operation together. The
-        // revision is whatever is on disk now: issuance no longer holds the
-        // lifecycle lock, so a concurrent local edit is a `roster_conflict`
-        // rather than a silent rebase onto a stale review snapshot.
-        let current = fleet::load(&self.data_dir)?.ok_or_else(|| super::SetupError {
-            reason: "no_fleet",
-            detail: "this machine's fleet profile disappeared before its roster could be updated"
-                .into(),
-        })?;
-        let outcome = fleet::apply_roster_change(
-            &self.data_dir,
-            &self.local_roster_operation(),
-            current.roster_revision,
-            change,
-        )?;
-        journal.finish_step(
-            &profile.machine,
-            step,
-            "ok",
-            Some(format!("revision {}", outcome.roster_revision)),
-            None,
-        )?;
-        self.step_event(&profile.machine, step, "ok", None);
-        Ok(())
-    }
-
-    /// Apply one roster change on the local member and on every remote member.
-    fn apply_roster_everywhere(
-        &self,
-        journal: &JournalHandle,
-        profile: &fleet::Profile,
-        members: &mut [MemberSession],
-        change: fleet::RosterChange,
-    ) -> Result<()> {
-        self.apply_local_roster(journal, profile, &change)?;
-        let step = "roster";
-
-        for member in members.iter_mut() {
-            if journal.record().completed(&member.machine, step) {
-                continue;
-            }
-            self.check_cancelled()?;
-            journal.begin_step(&member.machine, step)?;
-            let revision = member.revision;
-            let mut attempt = 0;
-            loop {
-                attempt += 1;
-                let result = member.session.ask(
-                    "roster",
-                    json!({
-                        "operation": self.request.operation,
-                        "expected_revision": revision,
-                        "change": serde_json::to_value(&change)?,
-                    }),
-                );
-                match result {
-                    Ok(fields) => {
-                        let now = fields
-                            .get("roster_revision")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(revision);
-                        journal.finish_step(
-                            &member.machine,
-                            step,
-                            "ok",
-                            Some(format!("revision {now}")),
-                            None,
-                        )?;
-                        self.step_event(&member.machine, step, "ok", None);
-                        member.revision = now;
-                        break;
-                    }
-                    // A lock held by a concurrent roster edit on that machine is a
-                    // retry; a stale revision requires reconciliation, never a blind rebase.
-                    Err(error)
-                        if attempt <= ROSTER_RETRIES
-                            && super::reason_of(&error) == Some("lock_unavailable") =>
-                    {
-                        std::thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// One row of the plan's member table, naming how this operation will reach it.
-    fn plan_member(
-        &self,
-        profile: &fleet::Profile,
-        member: &fleet::Member,
-        change: &str,
-    ) -> PlanMember {
-        let local = member.machine == profile.machine;
-        let (access, _) = self.member_access(&member.machine);
-        PlanMember {
-            machine: member.machine.clone(),
-            host: member.host.clone(),
-            reached_by: if local { "local".into() } else { "ssh".into() },
-            change: change.to_string(),
-            ssh: (!local).then(|| {
-                format!(
-                    "{}@{} port {}",
-                    access
-                        .ssh_user
-                        .or_else(|| self.request.ssh_user.clone())
-                        .unwrap_or_else(|| "<account not given>".into()),
-                    member.host,
-                    access.ssh_port.or(self.request.ssh_port).unwrap_or(22)
-                )
-            }),
-        }
-    }
-
-    /// The operation id the issuer's own roster edit is receipted under. See
-    /// [`Self::apply_roster_everywhere`].
-    fn local_roster_operation(&self) -> String {
-        format!("{}-roster", self.request.operation)
-    }
-
-    /// Install (or explicitly skip) the target's startup service, through seam S9.
     fn arrange_startup(
         &self,
         journal: &JournalHandle,
@@ -2031,32 +1366,44 @@ impl Engine {
         Ok(Startup::Started)
     }
 
-    /// Poll the local gateway's `fleet.status` until the member appears connected.
-    fn await_connection(&self, journal: &JournalHandle, machine: &str) -> Result<bool> {
+    /// Poll the *target's* own `status` until it reports the fleet connected (§6).
+    ///
+    /// Asking the machine that just joined is the honest question: the operator's runtime
+    /// may not even be running, and distribution is transitive, so what matters is that
+    /// the new member dialled somebody.
+    fn await_connection(
+        &self,
+        journal: &JournalHandle,
+        machine: &str,
+        session: &mut helper::Session,
+    ) -> Result<bool> {
         journal.begin_step(machine, "connect")?;
         let deadline = Instant::now() + CONNECT_DEADLINE;
         loop {
-            match self.gateway.call("fleet.status", json!({})) {
-                Ok(Some(status)) if member_connected(&status, machine) => {
-                    journal.finish_step(
-                        machine,
-                        "connect",
-                        "ok",
-                        Some("the local runtime sees it connected".into()),
-                        None,
-                    )?;
-                    self.step_event(machine, "connect", "ok", None);
-                    return Ok(true);
+            match session.ask("status", json!({})) {
+                Ok(status) => {
+                    let connected = status
+                        .get("connected_to")
+                        .and_then(Value::as_array)
+                        .is_some_and(|nodes| !nodes.is_empty());
+                    if connected {
+                        journal.finish_step(
+                            machine,
+                            "connect",
+                            "ok",
+                            Some(format!("{machine} reports the fleet connected")),
+                            None,
+                        )?;
+                        self.step_event(machine, "connect", "ok", None);
+                        return Ok(true);
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     journal.finish_step(
                         machine,
                         "connect",
                         "skipped",
-                        Some(format!(
-                            "this machine's runtime could not be asked: {error:#}"
-                        )),
+                        Some(format!("{machine} could not be asked: {error:#}")),
                         None,
                     )?;
                     return Ok(false);
@@ -2068,7 +1415,7 @@ impl Engine {
                     "connect",
                     "failed",
                     Some(format!(
-                        "this machine's runtime did not see {machine} connect within {} seconds",
+                        "{machine} did not report a connected fleet within {} seconds",
                         CONNECT_DEADLINE.as_secs()
                     )),
                     None,
@@ -2078,54 +1425,6 @@ impl Engine {
             }
             std::thread::sleep(Duration::from_secs(2));
         }
-    }
-
-    /// The target's own diagnostics, which say things the issuer cannot observe.
-    fn remote_doctor(
-        &self,
-        journal: &JournalHandle,
-        machine: &str,
-        runner: &Runner,
-        executable: &str,
-    ) -> Result<Option<Value>> {
-        let command = match self.request.remote_data_dir.as_deref() {
-            Some(data_dir) => format!(
-                "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} fleet doctor --json",
-                ssh::shell_quote(data_dir),
-                ssh::shell_quote(executable)
-            ),
-            None => format!("exec {} fleet doctor --json", ssh::shell_quote(executable)),
-        };
-        let completed = runner.run(&command, None)?;
-        let parsed: Option<Value> = serde_json::from_slice(&completed.stdout).ok();
-        match &parsed {
-            Some(_) => {
-                journal.finish_step(
-                    machine,
-                    "diagnostics",
-                    if completed.success() { "ok" } else { "failed" },
-                    Some(if completed.success() {
-                        "the target's own doctor reports no setup problems".into()
-                    } else {
-                        "the target's own doctor found setup problems".to_string()
-                    }),
-                    None,
-                )?;
-            }
-            None => {
-                journal.finish_step(
-                    machine,
-                    "diagnostics",
-                    "skipped",
-                    Some(format!(
-                        "the target's diagnostics could not be read: {}",
-                        completed.stderr_text()
-                    )),
-                    None,
-                )?;
-            }
-        }
-        Ok(parsed)
     }
 
     /// Readiness is reported separately from connectivity, and unknown where it is
@@ -2157,107 +1456,6 @@ impl Engine {
         ));
         Ok(())
     }
-
-    /// One explicit model turn, with stable ids so a retry observes the same work.
-    fn run_test_task(&self, journal: &JournalHandle, machine: &str) -> Result<()> {
-        if journal.record().completed(machine, "test_task") {
-            return Ok(());
-        }
-        journal.begin_step(machine, "test_task")?;
-        let id = format!("fleet-check-{}", self.request.operation);
-        let turn_id = format!("{}-turn", id);
-        let result = (|| -> Result<()> {
-            let started = self
-                .gateway
-                .call(
-                    "interactive.start",
-                    json!({
-                        "id": id, "machine": machine, "plan": true,
-                        "workspace": self.request.test_workspace, "max_turns": 1,
-                    }),
-                )?
-                .ok_or_else(|| {
-                    super::refusing(
-                        "test_task_failed",
-                        anyhow::anyhow!("the local runtime is not running"),
-                    )
-                })?;
-            if started.get("id").and_then(Value::as_str) != Some(id.as_str())
-                || started.get("ready") == Some(&Value::Bool(false))
-            {
-                return refuse(
-                    "test_task_failed",
-                    "the target session was not ready for its model check",
-                );
-            }
-            let node = started
-                .get("node")
-                .and_then(Value::as_str)
-                .unwrap_or(machine);
-            self.gateway.call("interactive.send_message", json!({
-                "id": id, "node": node, "turn_id": turn_id,
-                "input": "Reply with exactly OK. Do not use tools, read files, or change anything. This is a fleet model connectivity check.",
-            }))?.ok_or_else(|| super::refusing("test_task_failed", anyhow::anyhow!("the runtime disappeared before the model check")))?;
-            let deadline = Instant::now() + Duration::from_secs(60);
-            loop {
-                if self.conversation.cancelled() || Instant::now() >= deadline {
-                    let _ = self.gateway.call(
-                        "interactive.interrupt",
-                        json!({ "id": id, "node": node, "turn_id": turn_id }),
-                    );
-                    return refuse("test_task_failed", format!("the bounded model check did not complete; inspect session {id} on {machine}"));
-                }
-                let status = self
-                    .gateway
-                    .call("interactive.info", json!({ "id": id, "node": node }))?
-                    .ok_or_else(|| {
-                        super::refusing(
-                            "test_task_failed",
-                            anyhow::anyhow!(
-                                "the runtime disappeared while observing the model check"
-                            ),
-                        )
-                    })?;
-                match status
-                    .get("turns")
-                    .and_then(|turns| turns.get(&turn_id))
-                    .and_then(|turn| turn.get("status"))
-                    .and_then(Value::as_str)
-                {
-                    Some("completed") => return Ok(()),
-                    Some("failed" | "interrupted" | "ambiguous") => {
-                        return refuse(
-                            "test_task_failed",
-                            format!("the model check failed; inspect session {id} on {machine}"),
-                        )
-                    }
-                    _ => std::thread::sleep(Duration::from_millis(250)),
-                }
-            }
-        })();
-        match &result {
-            Ok(()) => {
-                journal.finish_step(
-                    machine,
-                    "test_task",
-                    "ok",
-                    Some(format!("model turn completed in session {id} on {machine}")),
-                    None,
-                )?;
-                self.step_event(machine, "test_task", "ok", Some(id));
-            }
-            Err(error) => journal.finish_step(
-                machine,
-                "test_task",
-                "failed",
-                Some(error.to_string()),
-                None,
-            )?,
-        }
-        result
-    }
-
-    // ---------------------------------------------------------------- setup
 
     fn plan_setup(&self) -> Result<Plan> {
         self.notify_state(OperationState::Inspecting);
@@ -2300,12 +1498,12 @@ impl Engine {
                 node: Some(format!("ouro-{machine}@{parsed}")),
             },
             release: None,
-            test_workspace: self.request.test_workspace.clone(),
             service: if self.request.service {
                 ServicePlan::Managed
             } else {
                 ServicePlan::Manual
             },
+            fleet: None,
             members: vec![PlanMember {
                 machine: machine.clone(),
                 host: parsed.to_string(),
@@ -2342,7 +1540,7 @@ impl Engine {
                     profile.machine, profile.name
                 ),
                 next: format!(
-                    "Run `ouro fleet status` to see it, `ouro fleet add` to admit another machine, or `ouro fleet create --regenerate` to repair generated policy files. Its address is {}",
+                    "Run `ouro fleet status` to see it, or `ouro fleet add` to bring another machine in. Its address is {}",
                     profile.host
                 ),
                 steps: journal.record().steps,
@@ -2351,27 +1549,15 @@ impl Engine {
             });
         }
 
-        let mut plan = self.plan_setup()?;
-        if let Some(approved) = journal.record().plan {
+        let plan = self.plan_setup()?;
+        if journal.record().reviewed() {
             if let Some(profile) = &existing {
-                if let Some(roster) = journal.record().roster {
-                    if roster.fleet_id.as_deref() != Some(profile.fleet_id.as_str()) {
-                        return refuse(
-                            "fleet_changed",
-                            "the local fleet identity changed after this setup created it",
-                        );
-                    }
-                }
-                if profile.machine != machine
-                    || profile.host != approved.target.address
-                    || Some(profile.node.as_str()) != approved.target.node.as_deref()
-                {
+                if profile.machine != machine || profile.host != plan.target.address {
                     return refuse(
                         "identity_mismatch",
                         "the local fleet differs from the identity this setup created",
                     );
                 }
-                plan.deployment_host.issuer = approved.deployment_host.issuer;
                 journal.finish_step(
                     &machine,
                     "create",
@@ -2379,9 +1565,6 @@ impl Engine {
                     Some("verified this operation's local fleet identity".into()),
                     None,
                 )?;
-            }
-            if journal.record().attempted(&machine, "stop_runtime") {
-                plan.restart = approved.restart;
             }
         }
         journal.set_target(TargetIdentity {
@@ -2391,19 +1574,11 @@ impl Engine {
             identity: Some(self.request.identity.clone()),
             ..TargetIdentity::default()
         })?;
-        self.bind_plan(journal, &plan)?;
-        journal.finish_step(
-            &machine,
-            "inspect",
-            "ok",
-            Some("checked the local fleet, address and startup plan".into()),
-            None,
-        )?;
-        self.step_event(&machine, "inspect", "ok", None);
+        self.review(journal, &plan)?;
 
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
-        let _issuer_lock = self.lock_issuer(journal)?;
+        let _lock = self.lock_operation(journal)?;
 
         // The authorized local transition. The runtime that is running now is the one
         // serving whoever asked for this, so it is stopped only if it is idle.
@@ -2453,7 +1628,6 @@ impl Engine {
                 Some(format!("{} at {}", profile.node, profile.host)),
                 None,
             )?;
-            journal.set_roster(self.roster_snapshot(&profile))?;
             self.step_event(&machine, "create", "ok", None);
         }
 
@@ -2494,6 +1668,76 @@ impl Engine {
             )?;
             false
         };
+
+        // §6's `setup` ends at `start` and `ready`: the service manager is what starts
+        // the runtime, and the readiness probe is the gateway publishing a port.
+        if started && !journal.record().completed(&machine, "start") {
+            journal.begin_step(&machine, "start")?;
+            let outcome = match self.services.local(ServiceAction::Start) {
+                Ok(started) if started.supported => {
+                    journal.finish_step(
+                        &machine,
+                        "start",
+                        "ok",
+                        Some(started.detail.clone()),
+                        None,
+                    )?;
+                    true
+                }
+                Ok(started) => {
+                    journal.finish_step(
+                        &machine,
+                        "start",
+                        "skipped",
+                        Some(started.detail.clone()),
+                        None,
+                    )?;
+                    false
+                }
+                Err(error) => {
+                    journal.finish_step(
+                        &machine,
+                        "start",
+                        "failed",
+                        Some(format!("{error:#}")),
+                        None,
+                    )?;
+                    false
+                }
+            };
+            if outcome {
+                journal.begin_step(&machine, "ready")?;
+                let deadline = Instant::now() + CONNECT_DEADLINE;
+                let mut ready = false;
+                while Instant::now() < deadline {
+                    if self.gateway.running() {
+                        ready = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                journal.finish_step(
+                    &machine,
+                    "ready",
+                    if ready { "ok" } else { "failed" },
+                    Some(if ready {
+                        "this machine's runtime published its gateway".to_string()
+                    } else {
+                        format!(
+                            "this machine's runtime did not publish a gateway within {} seconds",
+                            CONNECT_DEADLINE.as_secs()
+                        )
+                    }),
+                    None,
+                )?;
+                if !ready {
+                    unknown.push("whether this machine's runtime finished starting".into());
+                }
+            }
+        } else if !journal.record().completed(&machine, "start") {
+            journal.skip_step(&machine, "start", "manual startup was chosen")?;
+            journal.skip_step(&machine, "ready", "the runtime was not started from here")?;
+        }
 
         journal.set_state(OperationState::Completed)?;
         self.notify_state(OperationState::Completed);
@@ -2551,14 +1795,10 @@ impl Engine {
             .find(|member| crate::fleet::same_name(&member.machine, &machine))
             .cloned()
             .or_else(|| {
+                // A resumed `leave` whose local removal already happened still has to be
+                // able to describe the machine it removed.
                 let record = journal?.record();
-                let target = record.target.as_ref()?;
-                if !record.attempted(&profile.machine, "roster")
-                    || !record.completed(&target.machine, "leave")
-                {
-                    return None;
-                }
-                let target = record.target?;
+                let target = record.target.clone()?;
                 if !fleet::same_name(&target.machine, &machine) {
                     return None;
                 }
@@ -2566,6 +1806,7 @@ impl Engine {
                     machine: target.machine,
                     host: target.address?,
                     node: target.node?,
+                    dist_port: profile.dist_port,
                 })
             })
         else {
@@ -2578,29 +1819,20 @@ impl Engine {
         // The roster's spelling is the identity recorded in steps, access records and
         // runtime status. Keep it after matching the operator's case-insensitive input.
         let machine = member.machine.clone();
-        let mut members: Vec<PlanMember> = profile
-            .members
-            .iter()
-            .filter(|entry| entry.machine != machine)
-            .map(|entry| self.plan_member(&profile, entry, &format!("remove {machine}")))
-            .collect();
-        // The member being removed is contacted too, and is not in that list: the
-        // review has to name every machine this operation will authenticate to.
-        members.insert(
-            0,
-            PlanMember {
-                machine: machine.clone(),
-                host: member.host.clone(),
-                reached_by: "ssh".into(),
-                change: "stop, retire credentials, leave".into(),
-                ssh: Some(format!(
-                    "{}@{} port {}",
-                    self.request.ssh_user.clone().unwrap_or_default(),
-                    member.host,
-                    self.request.ssh_port.unwrap_or(22)
-                )),
-            },
-        );
+        // The one machine this operation contacts. §1 withdrew the replicated roster, so
+        // there is nobody else to tell.
+        let members = vec![PlanMember {
+            machine: machine.clone(),
+            host: member.host.clone(),
+            reached_by: "ssh".into(),
+            change: "stop, retire credentials, leave".into(),
+            ssh: Some(format!(
+                "{}@{} port {}",
+                self.request.ssh_user.clone().unwrap_or_default(),
+                member.host,
+                self.request.ssh_port.unwrap_or(22)
+            )),
+        }];
 
         let plan = Plan {
             schema: super::SCHEMA,
@@ -2621,7 +1853,7 @@ impl Engine {
             },
             release: None,
             service: ServicePlan::Manual,
-            test_workspace: None,
+            fleet: Some(profile.name.clone()),
             members,
             restart: Some(format!(
                 "{machine}'s runtime is stopped through its own idle-gated shutdown before its credentials are removed"
@@ -2635,7 +1867,7 @@ impl Engine {
     }
 
     fn run_leave(&self, journal: &JournalHandle) -> Result<Outcome> {
-        let (plan, profile) = self.plan_leave(Some(journal))?;
+        let (plan, _profile) = self.plan_leave(Some(journal))?;
         let machine = plan.target.machine.clone();
         let (peer_id, stable_id) =
             self.bind_peer_identity(journal, &machine, &plan.target.address)?;
@@ -2650,18 +1882,14 @@ impl Engine {
             stable_id,
             ..TargetIdentity::default()
         }))?;
-        if journal.record().roster.is_none() {
-            journal.set_roster(self.roster_snapshot(&profile))?;
-        }
-        self.ensure_roster_unchanged(journal, &profile)?;
-        self.bind_plan(journal, &plan)?;
+        self.review(journal, &plan)?;
 
+        let _lock = self.lock_operation(journal)?;
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
 
-        let disconnected;
-        let _issuer_lock;
-        if !journal.record().completed(&machine, "leave") {
+        let mut residue = None;
+        if !journal.record().completed(&machine, "remove") {
             let destination =
                 self.destination(&plan.target.address, self.request.ssh_user.as_deref())?;
             let connection = self.connect(destination)?;
@@ -2672,62 +1900,44 @@ impl Engine {
                 &executable,
                 self.remote_data_dir_for(&machine).as_deref(),
             )?;
-
-            let inspection = session.ask("inspect", json!({}))?;
-            let running = inspection
-                .get("runtime_running")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let sessions_note = self.session_ownership(&machine);
-            journal.finish_step(
-                &machine,
-                "inspect",
-                "ok",
-                Some(format!(
-                    "runtime {}; {sessions_note}",
-                    if running { "running" } else { "stopped" }
-                )),
-                None,
-            )?;
-            self.step_event(&machine, "inspect", "ok", Some(sessions_note.clone()));
-
-            _issuer_lock = self.lock_issuer(journal)?;
-            disconnected =
-                self.stop_and_retire(journal, &machine, &connection, &mut session, &executable)?;
+            let result = self.stop_and_retire(journal, &machine, &mut session);
             session.close();
+            match result {
+                Ok(()) => {}
+                Err(error) => {
+                    // §6's `leave` is `stop`, `remove`, `forget`. A machine that cannot
+                    // be stopped keeps its credentials and stays on this roster: a
+                    // removal that only edited the local list would leave a machine in
+                    // the fleet that this operator believes is out of it.
+                    return Err(error);
+                }
+            }
         } else {
-            // Credentials are already retired: finishing propagation must not
-            // depend on reaching the retired machine again.
-            _issuer_lock = self.lock_issuer(journal)?;
-            disconnected = self.await_disconnection(journal, &machine)?;
+            residue = Some(format!(
+                "{machine}'s credentials were already removed by this operation"
+            ));
+        }
+        if let Some(note) = residue {
+            self.note(note);
         }
 
-        let mut members = self.preflight_members_for_removal(journal, &profile, &machine)?;
-        self.apply_roster_everywhere(
-            journal,
-            &profile,
-            &mut members,
-            fleet::RosterChange::Remove {
-                // Roster requests require a canonical name and resolve its stored spelling.
-                machine: machine.to_ascii_lowercase(),
-            },
-        )?;
-        drop(_issuer_lock);
-
-        for member in members.drain(..) {
-            member.session.close();
+        // ---- the local half: forget it here, and nowhere else (§1)
+        if !journal.record().completed(&machine, "forget") {
+            journal.begin_step(&machine, "forget")?;
+            let detail = match fleet::remove_member(&self.data_dir, &machine) {
+                Ok(removed) => format!("{} is off this machine's list", removed.node),
+                // Idempotent on a resume: a machine that is already off the list is the
+                // state this step exists to reach.
+                Err(error) => format!("nothing to remove here: {error:#}"),
+            };
+            journal.finish_step(&machine, "forget", "ok", Some(detail), None)?;
+            self.step_event(&machine, "forget", "ok", None);
         }
 
         journal.set_state(OperationState::Completed)?;
         self.notify_state(OperationState::Completed);
         let _ =
             std::fs::remove_dir_all(super::scratch_dir(&self.data_dir, &self.request.operation));
-        let mut unknown = Vec::new();
-        if !disconnected {
-            unknown.push(format!(
-                "whether {machine} is fully disconnected from this runtime's view"
-            ));
-        }
         Ok(Outcome {
             operation: self.request.operation.clone(),
             state: OperationState::Completed,
@@ -2736,195 +1946,60 @@ impl Engine {
             plan: Some(plan),
             steps: journal.record().steps,
             residue: journal.record().residue,
-            unknown,
+            unknown: Vec::new(),
         })
     }
 
-    /// Gate first (`ouro stop --require-idle`), then disable the supervisor. Resume
-    /// tolerates a journal that disabled first: a completed `disable_service` is
-    /// skipped, and a completed `stop_runtime` is not repeated.
+    /// §6's `stop` and `remove`, in one helper round trip each.
+    ///
+    /// The helper's `leave` op is idle-gated on the far side: it asks that machine's own
+    /// runtime to stop only if it is idle, takes its startup service away, and deletes
+    /// its fleet directory. Nothing here signals a PID and nothing here deletes a file
+    /// on the target directly.
     fn stop_and_retire(
         &self,
         journal: &JournalHandle,
         machine: &str,
-        connection: &Connection,
         session: &mut helper::Session,
-        executable: &str,
-    ) -> Result<bool> {
-        if !journal.record().completed(machine, "stop_runtime") {
-            journal.begin_step(machine, "stop_runtime")?;
-            let command = match self.remote_data_dir_for(machine).as_deref() {
-                Some(data_dir) => format!(
-                    "exec /usr/bin/env OUROBOROS_DATA_DIR={} {} stop --require-idle",
-                    ssh::shell_quote(data_dir),
-                    ssh::shell_quote(executable)
-                ),
-                None => format!("exec {} stop --require-idle", ssh::shell_quote(executable)),
-            };
-            let completed = connection.runner.run(&command, None)?;
-            if !completed.success() {
-                let stderr = sanitize_remote_text(&completed.stderr_text(), 400);
-                let (reason, detail): (&'static str, String) = match completed.code {
-                    Some(10) => (
-                        "runtime_busy",
-                        format!("{machine} is working, so it was not stopped and nothing was removed. Let the work finish and run this again"),
-                    ),
-                    Some(11) => (
-                        "activity_unknown",
-                        format!("{machine} could not say whether it is idle, and unknown activity does not authorize a removal. Stop it yourself when you know it is safe, then run this again"),
-                    ),
-                    _ => (
-                        "shutdown_incomplete",
-                        format!("{machine}'s runtime did not stop: {stderr}"),
-                    ),
-                };
-                return refuse(reason, detail);
-            }
+    ) -> Result<()> {
+        if !journal.record().completed(machine, "stop") {
+            journal.begin_step(machine, "stop")?;
+            let inspection = session.ask("inspect", json!({}))?;
+            let running = inspection
+                .get("runtime_running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             journal.finish_step(
                 machine,
-                "stop_runtime",
+                "stop",
                 "ok",
-                Some("stopped through its own idle-gated shutdown".into()),
+                Some(if running {
+                    format!("{machine}'s runtime is running and will be stopped through its own idle gate")
+                } else {
+                    format!("{machine}'s runtime is already stopped")
+                }),
                 None,
             )?;
-            self.step_event(machine, "stop_runtime", "ok", None);
+            self.step_event(machine, "stop", "ok", None);
         }
 
-        if !journal.record().completed(machine, "disable_service") {
-            journal.begin_step(machine, "disable_service")?;
-            let disabled = self.services.remote(session, ServiceAction::Disable)?;
-            journal.finish_step(
-                machine,
-                "disable_service",
-                if disabled.supported { "ok" } else { "skipped" },
-                Some(disabled.detail.clone()),
-                None,
-            )?;
-            self.step_event(machine, "disable_service", "ok", Some(disabled.detail));
-        }
-
-        let disconnected = self.await_disconnection(journal, machine)?;
-
-        if !journal.record().completed(machine, "leave") {
-            journal.begin_step(machine, "leave")?;
-            let left = session.ask(
-                "leave",
-                json!({ "operation": self.request.operation, "machine": machine }),
-            )?;
-            journal.finish_step(
-                machine,
-                "leave",
-                "ok",
-                Some(
-                    left.get("removed")
-                        .and_then(Value::as_array)
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .unwrap_or_else(|| "credentials removed".into()),
-                ),
-                None,
-            )?;
-            self.step_event(machine, "leave", "ok", None);
-        }
-        Ok(disconnected)
-    }
-
-    /// The remaining members, for a removal. Unreachable members are named rather than
-    /// skipped: a roster that still dials a machine that has left is exactly the residue
-    /// the proposal requires to be reported.
-    fn preflight_members_for_removal(
-        &self,
-        journal: &JournalHandle,
-        profile: &fleet::Profile,
-        leaving: &str,
-    ) -> Result<Vec<MemberSession>> {
-        let remaining = fleet::Profile {
-            members: profile
-                .members
-                .iter()
-                .filter(|member| member.machine != leaving)
-                .cloned()
-                .collect(),
-            ..profile.clone()
-        };
-        self.preflight_members(journal, &remaining, None)
-    }
-
-    fn await_disconnection(&self, journal: &JournalHandle, machine: &str) -> Result<bool> {
-        journal.begin_step(machine, "verify_disconnected")?;
-        let deadline = Instant::now() + DISCONNECT_DEADLINE;
-        loop {
-            match self.gateway.call("fleet.status", json!({})) {
-                Ok(Some(status)) if !member_connected(&status, machine) => {
-                    journal.finish_step(
-                        machine,
-                        "verify_disconnected",
-                        "ok",
-                        Some("this machine's runtime no longer sees it connected".into()),
-                        None,
-                    )?;
-                    return Ok(true);
-                }
-                Ok(None) => {
-                    journal.finish_step(
-                        machine,
-                        "verify_disconnected",
-                        "skipped",
-                        Some("this machine's runtime is not running, so there is nothing connected to it".into()),
-                        None,
-                    )?;
-                    return Ok(true);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    journal.finish_step(
-                        machine,
-                        "verify_disconnected",
-                        "skipped",
-                        Some(format!(
-                            "this machine's runtime could not be asked: {error:#}"
-                        )),
-                        None,
-                    )?;
-                    return Ok(false);
-                }
-            }
-            if Instant::now() >= deadline {
-                journal.finish_step(
-                    machine,
-                    "verify_disconnected",
-                    "failed",
-                    Some(format!(
-                        "{machine} still appears connected after {} seconds",
-                        DISCONNECT_DEADLINE.as_secs()
-                    )),
-                    None,
-                )?;
-                return Ok(false);
-            }
-            std::thread::sleep(Duration::from_secs(2));
-        }
-    }
-
-    /// What this machine can say about sessions the leaving member owns.
-    fn session_ownership(&self, machine: &str) -> String {
-        match self.gateway.call("fleet.status", json!({})) {
-            Ok(Some(status)) => match member_sessions(&status, machine) {
-                Some(count) => format!("it owns {count} session(s) this runtime knows about"),
-                None => "this runtime does not report its session count".to_string(),
-            },
-            Ok(None) => {
-                "this machine's runtime is not running, so its session count is unknown".to_string()
-            }
-            Err(_) => {
-                "this machine's runtime did not answer, so its session count is unknown".to_string()
-            }
-        }
+        journal.begin_step(machine, "remove")?;
+        let left = session.ask("leave", json!({}))?;
+        let removed = left
+            .get("removed")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|text| sanitize_remote_text(text, 80))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "credentials removed".into());
+        journal.finish_step(machine, "remove", "ok", Some(removed), None)?;
+        self.step_event(machine, "remove", "ok", None);
+        Ok(())
     }
 }
 
@@ -2949,14 +2024,6 @@ struct Connection {
 }
 
 /// One current member, its roster revision, and an open helper session to it.
-struct MemberSession {
-    machine: String,
-    revision: u64,
-    session: helper::Session,
-    _connection: Connection,
-}
-
-/// What `plan_add` established, carried into the deploy steps.
 struct Prepared {
     machine: String,
     profile: fleet::Profile,
@@ -3012,46 +2079,6 @@ pub fn normalize_machine(machine: &str) -> Result<String> {
     let lowered = trimmed.to_ascii_lowercase();
     fleet::validate_machine(&lowered).map_err(|error| super::refusing("invalid_request", error))?;
     Ok(lowered)
-}
-
-/// Whether `fleet.status` reports this machine as connected.
-///
-/// Matched by the roster *name*, which is the identity the operator gave it; a peer's
-/// self-reported hostname is display information and is never treated as a member
-/// identity anywhere in this engine.
-fn member_connected(status: &Value, machine: &str) -> bool {
-    machine_entry(status, machine).is_some_and(|entry| {
-        entry
-            .get("connected")
-            .and_then(Value::as_bool)
-            .or_else(|| {
-                entry
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .map(|state| state == "connected" || state == "up")
-            })
-            .unwrap_or(false)
-    })
-}
-
-fn member_sessions(status: &Value, machine: &str) -> Option<u64> {
-    machine_entry(status, machine)?
-        .get("sessions")
-        .and_then(Value::as_u64)
-}
-
-fn machine_entry<'a>(status: &'a Value, machine: &str) -> Option<&'a Value> {
-    for key in ["machines", "members", "nodes"] {
-        if let Some(entries) = status.get(key).and_then(Value::as_array) {
-            if let Some(entry) = entries.iter().find(|entry| {
-                entry.get("machine").and_then(Value::as_str) == Some(machine)
-                    || entry.get("name").and_then(Value::as_str) == Some(machine)
-            }) {
-                return Some(entry);
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

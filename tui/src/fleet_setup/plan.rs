@@ -1,20 +1,21 @@
-//! The concrete plan an operator approves, and the digest that approval is bound to.
+//! The concrete plan an operator approves.
 //!
-//! Seam S6. The proposal requires one concrete plan before any mutation — "target
-//! identity/user, resolved private address, version, paths, service behavior, affected
-//! roster members, and any required idle-runtime restart" — plus the statement that
-//! joining grants broad authority between the fleet's machines. Approval carries
-//! `sha256(canonical(plan))`, so an approval cannot be replayed against a plan whose
-//! facts have since changed: that is `plan_changed`, and it means a fresh review.
+//! One concrete plan before any mutation — target identity and account, resolved private
+//! address, version, paths, service behaviour, and any required idle-runtime restart —
+//! plus the statement that joining grants broad authority between the fleet's machines.
+//!
+//! §6 deleted the plan digest. It existed so an approval could not be replayed against a
+//! plan whose facts had since changed, and the facts it guarded were mostly the roster
+//! ceremony that §1 withdrew. What is left is [`Plan::lines`]: the sentences a person
+//! read, written into the journal exactly as they were shown.
 //!
 //! Everything here is non-secret by construction. There is no field for a cookie, a key
-//! or a password, and the whole document is written into the journal and shown to
-//! whoever is watching.
+//! or a password, and the whole document is shown to whoever is watching.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{canonical_json, sha256_hex, OperationKind};
+use super::OperationKind;
 
 /// The machine the work runs on. The proposal insists this is stated on every surface,
 /// because for the web UI it is the runtime's host and *not* the browser's laptop.
@@ -154,8 +155,9 @@ pub struct Plan {
     #[serde(default)]
     pub release: Option<PlanRelease>,
     pub service: ServicePlan,
+    /// The fleet this operation joins the target to, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub test_workspace: Option<String>,
+    pub fleet: Option<String>,
     pub members: Vec<PlanMember>,
     /// The idle restart this operation needs, when it needs one.
     #[serde(default)]
@@ -188,17 +190,57 @@ impl Plan {
                 self.release.is_some(),
             ),
             OperationKind::Setup => setup_summary(&self.target.machine, &self.target.address),
-            // `members` is the machine that is leaving plus every roster this operation
-            // edits, so the count of edited rosters is one less than the list.
-            OperationKind::Leave => {
-                leave_summary(&self.target.machine, self.members.len().saturating_sub(1))
-            }
+            OperationKind::Leave => leave_summary(&self.target.machine),
         };
     }
 
-    /// Seam S6's digest: sha256 over the canonical JSON of this document.
-    pub fn digest(&self) -> String {
-        sha256_hex(canonical_json(&self.to_value()).as_bytes())
+    /// The plan lines §6 names, in order: what an operator is agreeing to, one clause
+    /// each. These are what the journal records and what a `review` challenge carries.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        match self.kind {
+            OperationKind::Add => {
+                match &self.release {
+                    Some(release) => lines.push(format!(
+                        "Install ouro {} ({}) to {}",
+                        release.version, release.target, self.target.install_path
+                    )),
+                    None => lines.push(format!(
+                        "Use the ouro already at {}",
+                        self.target.install_path
+                    )),
+                }
+                lines.push(format!(
+                    "Join {} as {}",
+                    self.fleet_name(),
+                    self.target.machine
+                ));
+                lines.push(match self.service {
+                    ServicePlan::Managed => "Start at login as a user service".to_string(),
+                    ServicePlan::Manual => "Manual start, explicitly chosen".to_string(),
+                });
+                lines.push(format!("Remember {} on this machine", self.target.machine));
+            }
+            OperationKind::Setup => {
+                lines.push(format!(
+                    "Create a fleet on this machine as {} ({})",
+                    self.target.machine, self.target.address
+                ));
+                lines.push(match self.service {
+                    ServicePlan::Managed => "Start at login as a user service".to_string(),
+                    ServicePlan::Manual => "Manual start, explicitly chosen".to_string(),
+                });
+            }
+            OperationKind::Leave => lines.push(removal_note(&self.target.machine)),
+        }
+        lines
+    }
+
+    /// The fleet this plan joins a machine to, when the plan names one.
+    fn fleet_name(&self) -> String {
+        self.fleet
+            .clone()
+            .unwrap_or_else(|| "this fleet".to_string())
     }
 
     /// The lines an operator reads before answering. Deliberately plain: the same text
@@ -225,9 +267,6 @@ impl Plan {
         text.push_str(&format!("  action       {}\n", self.kind.as_str()));
         text.push_str(&format!("  machine      {}\n", self.target.machine));
         text.push_str(&format!("  address      {}\n", self.target.address));
-        if let Some(workspace) = &self.test_workspace {
-            text.push_str(&format!("  model check  one turn in {workspace}\n"));
-        }
         if !self.target.ssh_user.is_empty() {
             text.push_str(&format!(
                 "  ssh          {}@{} port {}\n",
@@ -297,29 +336,19 @@ impl Plan {
                 text.push_str(&format!("  ! {grant}\n"));
             }
         }
-        text.push_str(&format!("\n  plan digest  {}\n", self.digest()));
         text
     }
 }
 
-/// What a `leave` does, in one line, in the order it happens.
-///
-/// `rosters` is how many machines' rosters this operation edits — every remaining member
-/// including this one, and not the machine that is leaving. The second half is the part
-/// people ask about first, and it is the part that is easy to get wrong in a hurry: a
-/// removal takes the machine out of the fleet and leaves everything on it alone.
-pub fn leave_summary(machine: &str, rosters: usize) -> String {
-    format!(
-        "Stop Ouroboros on {machine}, retire its credentials, remove it from {rosters} \
-         roster{plural}; its sessions and data stay on that machine.",
-        plural = if rosters == 1 { "" } else { "s" }
-    )
+/// What a `leave` does, in one line, in the order it happens (§6).
+pub fn leave_summary(machine: &str) -> String {
+    removal_note(machine)
 }
 
-/// The same one-liner for an admission.
+/// The same one-liner for a join.
 pub fn add_summary(machine: &str, address: &str, installing: bool) -> String {
     format!(
-        "{install} {machine} ({address}) into this fleet and update every member's roster.",
+        "{install} {machine} ({address}) into this fleet and remember it here.",
         install = if installing {
             "Install Ouroboros on and join"
         } else {
@@ -342,12 +371,11 @@ pub fn admission_grant() -> String {
         .to_string()
 }
 
-/// The sentence a removal has to end with, since the tombstone decision stays separate.
+/// §6's review sentence for `leave --machine`, word for word.
 pub fn removal_note(machine: &str) -> String {
     format!(
-        "No tombstone is recorded. Session-owner evidence for {machine} is retained, so its \
-         sessions stay discoverable; `ouro fleet sessions forget --machine {machine} \
-         --accept-state-loss` is the separate, irreversible decision that retires it."
+        "Stop Ouroboros on {machine}, remove its fleet credentials and its startup service, \
+         forget it here. Its sessions and data stay on that machine."
     )
 }
 
@@ -381,65 +409,18 @@ mod tests {
             },
             release: None,
             service: ServicePlan::Managed,
-            test_workspace: None,
-            members: vec![PlanMember {
-                machine: "studio".into(),
-                host: "100.64.0.1".into(),
-                reached_by: "local".into(),
-                change: "add buildbox".into(),
-                ssh: None,
-            }],
+            fleet: Some("studio's fleet".into()),
+            members: Vec::new(),
             restart: None,
             grants: vec![admission_grant()],
             build: None,
         }
     }
 
-    /// The digest is a property of the plan's values: reordering fields does not change
-    /// it, and changing one fact does.
+    /// Everything the review has to show is on the page, and nothing a secret would
+    /// look like is. §6 deleted the digest line.
     #[test]
-    fn the_digest_follows_the_facts_and_not_the_encoding() {
-        let plan = plan();
-        let digest = plan.digest();
-        assert_eq!(digest.len(), 64);
-
-        let reencoded: Plan =
-            serde_json::from_value(plan.to_value()).expect("a round-trippable plan");
-        assert_eq!(reencoded.digest(), digest, "a round trip is the same plan");
-
-        let mut moved = plan.clone();
-        moved.target.address = "100.64.0.3".into();
-        assert_ne!(
-            moved.digest(),
-            digest,
-            "a different address is a different plan"
-        );
-
-        let mut service = plan.clone();
-        service.service = ServicePlan::Manual;
-        assert_ne!(
-            service.digest(),
-            digest,
-            "different startup behaviour is a different plan"
-        );
-    }
-
-    #[test]
-    fn a_plan_without_a_summary_preserves_its_approved_digest() {
-        let mut legacy = plan().to_value();
-        legacy.as_object_mut().unwrap().remove("summary");
-        let digest = sha256_hex(canonical_json(&legacy).as_bytes());
-        let mut decoded: Plan = serde_json::from_value(legacy.clone()).unwrap();
-        assert_eq!(decoded.to_value(), legacy);
-        assert_eq!(decoded.digest(), digest);
-        decoded.refresh_summary();
-        assert_ne!(decoded.digest(), digest);
-    }
-
-    /// Everything the proposal requires a review to show is on the page, and nothing a
-    /// secret would look like is.
-    #[test]
-    fn the_review_shows_every_fact_the_proposal_requires() {
+    fn the_review_shows_every_fact_the_contract_requires() {
         let rendered = plan().render();
         for required in [
             "Deploying from studio · local user me",
@@ -449,36 +430,61 @@ mod tests {
             "host key     SHA256:zzz",
             "executable   /home/me/.local/bin/ouro",
             "startup      propose a user service",
-            "members      studio (100.64.0.1, add buildbox, via local)",
             "broad authority",
-            "plan digest",
         ] {
             assert!(
                 rendered.contains(required),
                 "missing `{required}`:\n{rendered}"
             );
         }
+        assert!(!rendered.contains("plan digest"), "§6 deleted the digest");
         assert!(!rendered.to_lowercase().contains("cookie"));
         assert!(!rendered.to_lowercase().contains("password"));
     }
 
-    /// A member this operation will connect to is shown with the account it will
-    /// authenticate as. The review is where an operator learns which machines are about
-    /// to be contacted, and "via ssh" without an account is not that.
+    /// §6's `add` review is four clauses, in order.
     #[test]
-    fn a_member_reached_over_ssh_shows_the_account_it_is_reached_as() {
+    fn an_add_plan_reads_as_the_four_clauses_the_contract_names() {
         let mut plan = plan();
-        plan.members.push(PlanMember {
-            machine: "vps".into(),
-            host: "100.64.0.3".into(),
-            reached_by: "ssh".into(),
-            change: "add buildbox".into(),
-            ssh: Some("me@100.64.0.3 port 22".into()),
+        plan.release = Some(PlanRelease {
+            version: "0.1.10".into(),
+            target: "x86_64-unknown-linux-gnu".into(),
+            asset: "ouro-0.1.10-x86_64-unknown-linux-gnu".into(),
+            sha256: "f".repeat(64),
+            official_origin: true,
         });
+        assert_eq!(
+            plan.lines(),
+            vec![
+                "Install ouro 0.1.10 (x86_64-unknown-linux-gnu) to /home/me/.local/bin/ouro"
+                    .to_string(),
+                "Join studio's fleet as buildbox".to_string(),
+                "Start at login as a user service".to_string(),
+                "Remember buildbox on this machine".to_string(),
+            ]
+        );
+    }
+
+    /// And §6's `leave` review is one sentence, word for word.
+    #[test]
+    fn a_leave_plan_states_what_it_does_and_what_it_leaves_alone() {
+        let mut plan = plan();
+        plan.kind = OperationKind::Leave;
+        plan.summary = leave_summary("buildbox");
+        plan.grants = vec![removal_note("buildbox")];
+        assert_eq!(
+            plan.lines(),
+            vec![
+                "Stop Ouroboros on buildbox, remove its fleet credentials and its startup \
+                 service, forget it here. Its sessions and data stay on that machine."
+                    .to_string()
+            ]
+        );
         let rendered = plan.render();
+        assert!(rendered.contains("its sessions and data stay on that machine"));
         assert!(
-            rendered.contains("ssh me@100.64.0.3 port 22"),
-            "every machine this operation authenticates to is named:\n{rendered}"
+            !rendered.to_lowercase().contains("tombstone"),
+            "tombstones are gone"
         );
     }
 
@@ -499,86 +505,5 @@ mod tests {
         assert!(rendered.contains("install      ouro 0.1.8 (x86_64-unknown-linux-gnu)"));
         assert!(rendered.contains("a loopback test origin, not the official release"));
         assert!(rendered.contains("restart      this machine's runtime must be idle"));
-    }
-
-    /// A `leave` plan says what it does in one line, in a field.
-    ///
-    /// The surfaces render the document, not [`Plan::render`]'s text, so a sentence that
-    /// lived only in the rendering was a sentence the web and the TUI could not show. It
-    /// is a field, it is in the digest, and it states the two things a person removing a
-    /// machine wants confirmed: what stops, and what stays.
-    #[test]
-    fn a_leave_plan_states_what_it_does_and_what_it_leaves_alone() {
-        let mut plan = plan();
-        plan.kind = OperationKind::Leave;
-        plan.summary = leave_summary("buildbox", 2);
-        plan.grants = vec![removal_note("buildbox")];
-
-        assert_eq!(
-            plan.summary,
-            "Stop Ouroboros on buildbox, retire its credentials, remove it from 2 rosters; \
-             its sessions and data stay on that machine."
-        );
-        assert_eq!(
-            leave_summary("buildbox", 1),
-            "Stop Ouroboros on buildbox, retire its credentials, remove it from 1 roster; \
-             its sessions and data stay on that machine.",
-            "one roster is not `1 rosters`"
-        );
-
-        // In the document, and therefore in the digest.
-        assert_eq!(
-            plan.to_value()["summary"],
-            Value::String(plan.summary.clone())
-        );
-        let digest = plan.digest();
-        let mut reworded = plan.clone();
-        reworded.summary = "Remove buildbox.".to_string();
-        assert_ne!(
-            reworded.digest(),
-            digest,
-            "the sentence an operator approved is one of the facts the approval binds"
-        );
-        let reencoded: Plan =
-            serde_json::from_value(plan.to_value()).expect("a round-trippable plan");
-        assert_eq!(
-            reencoded.digest(),
-            digest,
-            "and the digest is still canonical"
-        );
-
-        // And it is on the page a terminal prints, above the facts it summarises.
-        let rendered = plan.render();
-        let summary_at = rendered
-            .find("Stop Ouroboros on buildbox")
-            .expect("the summary is rendered");
-        let operation_at = rendered.find("  operation").expect("the fact list");
-        assert!(summary_at < operation_at, "{rendered}");
-        assert!(rendered.contains("its sessions and data stay on that machine"));
-    }
-
-    /// A journal written before the summary existed still parses, and still digests.
-    #[test]
-    fn a_plan_from_an_older_build_has_no_summary_rather_than_no_plan() {
-        let mut document = plan().to_value();
-        document
-            .as_object_mut()
-            .expect("a plan is an object")
-            .remove("summary");
-        let older: Plan = serde_json::from_value(document).expect("an older plan still parses");
-        assert_eq!(older.summary, "");
-        assert_eq!(older.digest().len(), 64);
-        assert!(
-            !older.render().starts_with('\n'),
-            "and it renders without a blank line where the sentence would be"
-        );
-    }
-
-    /// Removal states the decision it is deliberately not making.
-    #[test]
-    fn removal_names_the_separate_forget_decision() {
-        let note = removal_note("buildbox");
-        assert!(note.contains("No tombstone is recorded"));
-        assert!(note.contains("sessions forget --machine buildbox --accept-state-loss"));
     }
 }

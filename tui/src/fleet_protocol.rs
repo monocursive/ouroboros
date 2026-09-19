@@ -1,18 +1,9 @@
-//! One fleet protocol revision, and the build metadata that answers for it.
+//! What this binary can say about its own build without starting a BEAM.
 //!
-//! ## Why a constant and a drift test rather than a lookup
-//!
-//! [`Ouroboros.Cluster.runtime_compatible?/2`] compares the revision *exactly*: two
-//! machines are compatible when their `{fleet_protocol_revision, ouroboros_version,
-//! otp_release}` tuples are equal. The revision therefore has to be the same integer in
-//! the runtime and in the client that reports on it, and the client cannot ask a runtime
-//! for it — `ouro fleet protocol` is specified to answer without starting a BEAM, which
-//! is the whole reason it is the command an onboarding preflight calls.
-//!
-//! So the number is written twice, and [`revision_matches_the_runtime`] parses
-//! `lib/ouroboros/cluster.ex` and fails the build when the two copies disagree. Before
-//! this module there were three numbers for one revision: the runtime's 5, a hardcoded 2
-//! in `ouro fleet protocol`, and a 3 in `docs/FLEET.md`.
+//! `docs/proposals/fleet-kiss.md` §12 replaced the hand-maintained
+//! `@fleet_protocol_revision` with the pair `{ouroboros_version, otp_release}`, compared
+//! exactly. So there is no number written twice here and no drift test: what is left is
+//! the build metadata the version comparison reads.
 //!
 //! ## Why OTP and Elixir come out of the release rather than out of this binary
 //!
@@ -26,10 +17,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The manual distributed-runtime compatibility fence, mirrored from
-/// `@fleet_protocol_revision` in `lib/ouroboros/cluster.ex`.
-pub const FLEET_PROTOCOL_REVISION: u32 = 5;
-
 /// The release-tree file `mix release` writes, relative to `releases/<vsn>/`.
 pub const BUILD_METADATA_FILE: &str = "ouroboros-build.json";
 
@@ -40,7 +27,6 @@ pub const BUILD_METADATA_FILE: &str = "ouroboros-build.json";
 /// inventing a version an operator might compare against a peer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BuildMetadata {
-    pub fleet_protocol_revision: u32,
     pub ouroboros_version: String,
     pub otp_release: Option<String>,
     pub elixir_version: Option<String>,
@@ -49,17 +35,9 @@ pub struct BuildMetadata {
     /// Whether this binary carries a packaged runtime at all. `false` is a development
     /// build; the two version fields above are `null` in that case.
     pub embedded_release: bool,
-    /// The revision the embedded release itself recorded, which is a different fact from
-    /// the one this client was compiled with.
-    pub release_fleet_protocol_revision: Option<u32>,
-    /// The Ouroboros version the embedded release recorded, likewise.
+    /// The Ouroboros version the embedded release recorded, which is a different fact
+    /// from the one this client was compiled with.
     pub release_ouroboros_version: Option<String>,
-    /// Whether the two revisions agree. `null` when there is no release, or when a
-    /// release predates the packaging step and recorded no revision — which is not the
-    /// same answer as `false`, and an operator comparing two machines needs to see the
-    /// difference. A `false` here is a client and a runtime that will not form a fleet
-    /// with each other, discovered without starting either.
-    pub revision_matches_embedded_release: Option<bool>,
 }
 
 /// The subset of `releases/<vsn>/ouroboros-build.json` this client reads.
@@ -68,8 +46,6 @@ pub struct BuildMetadata {
 /// add keys without making an older client refuse the file it already understands.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 pub struct ReleaseBuild {
-    #[serde(default)]
-    pub fleet_protocol_revision: Option<u32>,
     #[serde(default)]
     pub ouroboros_version: Option<String>,
     #[serde(default)]
@@ -87,11 +63,7 @@ pub fn build_metadata() -> BuildMetadata {
 /// that recorded nothing, a release that disagrees with this client — is a case a test
 /// can drive rather than a case that needs a particular binary to exist.
 fn metadata_from(release: Option<ReleaseBuild>) -> BuildMetadata {
-    let recorded = release
-        .as_ref()
-        .and_then(|build| build.fleet_protocol_revision);
     BuildMetadata {
-        fleet_protocol_revision: FLEET_PROTOCOL_REVISION,
         ouroboros_version: env!("CARGO_PKG_VERSION").to_string(),
         otp_release: release.as_ref().and_then(|build| build.otp_release.clone()),
         elixir_version: release
@@ -100,12 +72,9 @@ fn metadata_from(release: Option<ReleaseBuild>) -> BuildMetadata {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         embedded_release: release.is_some(),
-        release_fleet_protocol_revision: recorded,
         release_ouroboros_version: release
             .as_ref()
             .and_then(|build| build.ouroboros_version.clone()),
-        revision_matches_embedded_release: recorded
-            .map(|recorded| recorded == FLEET_PROTOCOL_REVISION),
     }
 }
 
@@ -201,113 +170,61 @@ fn is_build_metadata_path(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
-    /// The one place the Rust client and the Elixir runtime have to agree, held to it by
-    /// a test rather than by a comment. `runtime_compatible?/2` compares the integer
-    /// exactly, so a silent drift here is a fleet that refuses to form with no local
-    /// evidence of why.
+    /// The three states the packaging fact can be in, each one a different answer.
     #[test]
-    fn revision_matches_the_runtime() {
-        const CLUSTER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/ouroboros/cluster.ex");
-        let source = std::fs::read_to_string(CLUSTER).unwrap_or_else(|error| {
-            panic!(
-                "this test compares the client's revision against the runtime's, so it \
-                 requires the source tree: {CLUSTER} could not be read ({})",
-                error.kind()
-            )
-        });
-
-        let literal = source
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("@fleet_protocol_revision "))
-            .expect("cluster.ex declares @fleet_protocol_revision")
-            .trim()
-            .parse::<u32>()
-            .expect("@fleet_protocol_revision is an integer literal");
-
-        assert_eq!(
-            literal, FLEET_PROTOCOL_REVISION,
-            "cluster.ex advertises fleet protocol {literal} and this client reports \
-             {FLEET_PROTOCOL_REVISION}; bump tui/src/fleet_protocol.rs and docs/FLEET.md"
-        );
-    }
-
-    /// The four states the packaging fact can be in, each one a different answer.
-    #[test]
-    fn a_disagreeing_release_is_a_fact_in_the_document_and_an_absent_one_is_not_a_guess() {
+    fn an_absent_release_is_not_a_guess_and_a_present_one_names_its_own_version() {
         let none = metadata_from(None);
         assert!(!none.embedded_release);
         assert_eq!(none.otp_release, None);
         assert_eq!(none.elixir_version, None);
-        assert_eq!(none.release_fleet_protocol_revision, None);
-        assert_eq!(
-            none.revision_matches_embedded_release, None,
-            "no release to compare against is unknown, never a mismatch"
-        );
+        assert_eq!(none.release_ouroboros_version, None);
 
-        let agreeing = metadata_from(Some(ReleaseBuild {
-            fleet_protocol_revision: Some(FLEET_PROTOCOL_REVISION),
-            ouroboros_version: Some("0.1.8".into()),
+        let packaged = metadata_from(Some(ReleaseBuild {
+            ouroboros_version: Some("0.1.10".into()),
             otp_release: Some("29".into()),
             elixir_version: Some("1.20.2".into()),
         }));
-        assert!(agreeing.embedded_release);
-        assert_eq!(agreeing.otp_release.as_deref(), Some("29"));
-        assert_eq!(agreeing.revision_matches_embedded_release, Some(true));
-
-        // A client and a runtime that would refuse to form a fleet, said out loud
-        // without starting either of them.
-        let disagreeing = metadata_from(Some(ReleaseBuild {
-            fleet_protocol_revision: Some(FLEET_PROTOCOL_REVISION + 1),
-            ouroboros_version: Some("0.9.9".into()),
-            ..ReleaseBuild::default()
-        }));
-        assert_eq!(disagreeing.fleet_protocol_revision, FLEET_PROTOCOL_REVISION);
+        assert!(packaged.embedded_release);
+        assert_eq!(packaged.otp_release.as_deref(), Some("29"));
         assert_eq!(
-            disagreeing.release_fleet_protocol_revision,
-            Some(FLEET_PROTOCOL_REVISION + 1)
+            packaged.release_ouroboros_version.as_deref(),
+            Some("0.1.10")
         );
-        assert_eq!(
-            disagreeing.release_ouroboros_version.as_deref(),
-            Some("0.9.9")
-        );
-        assert_eq!(disagreeing.revision_matches_embedded_release, Some(false));
 
         // A release packaged before the metadata step: it exists, and says nothing.
         let silent = metadata_from(Some(ReleaseBuild::default()));
         assert!(silent.embedded_release);
-        assert_eq!(silent.revision_matches_embedded_release, None);
+        assert_eq!(silent.release_ouroboros_version, None);
     }
 
     /// The JSON form is a contract for scripts: the field names and the `null`s are the
-    /// part an operator's `jq` depends on.
+    /// part an operator's `jq` depends on. §12 deleted `fleet_protocol_revision` from it.
     #[test]
     fn json_names_every_field_and_prints_unknown_versions_as_null() {
         let metadata = BuildMetadata {
-            fleet_protocol_revision: 5,
-            ouroboros_version: "0.1.8".into(),
+            ouroboros_version: "0.1.10".into(),
             otp_release: None,
             elixir_version: None,
             os: "macos".into(),
             arch: "aarch64".into(),
             embedded_release: false,
-            release_fleet_protocol_revision: None,
             release_ouroboros_version: None,
-            revision_matches_embedded_release: None,
         };
         let value = serde_json::to_value(&metadata).expect("build metadata serializes");
-        assert_eq!(value["fleet_protocol_revision"], 5);
-        assert_eq!(value["ouroboros_version"], "0.1.8");
+        assert_eq!(value["ouroboros_version"], "0.1.10");
         assert!(value["otp_release"].is_null());
         assert!(value["elixir_version"].is_null());
         assert_eq!(value["os"], "macos");
         assert_eq!(value["arch"], "aarch64");
         assert_eq!(value["embedded_release"], false);
-        assert!(value["release_fleet_protocol_revision"].is_null());
         assert!(value["release_ouroboros_version"].is_null());
-        assert!(value["revision_matches_embedded_release"].is_null());
+        assert!(
+            value.get("fleet_protocol_revision").is_none(),
+            "the revision is deleted, not nulled"
+        );
         assert_eq!(
             value.as_object().expect("an object").len(),
-            10,
+            7,
             "a new field is a change to a documented machine-readable shape"
         );
     }
@@ -339,7 +256,7 @@ mod tests {
             bytes
         }
 
-        const METADATA: &str = r#"{"schema":1,"fleet_protocol_revision":5,
+        const METADATA: &str = r#"{"schema":2,
             "ouroboros_version":"0.1.8","otp_release":"28","elixir_version":"1.18.4"}"#;
 
         #[test]
@@ -350,7 +267,6 @@ mod tests {
                 ("releases/0.1.8/ouroboros-build.json", METADATA),
             ]);
             let build = read_release_build(&bytes).expect("the metadata file is found");
-            assert_eq!(build.fleet_protocol_revision, Some(5));
             assert_eq!(build.ouroboros_version.as_deref(), Some("0.1.8"));
             assert_eq!(build.otp_release.as_deref(), Some("28"));
             assert_eq!(build.elixir_version.as_deref(), Some("1.18.4"));
@@ -393,7 +309,7 @@ mod tests {
             let build = read_release_build(&bytes).expect("the metadata file is found");
             assert_eq!(build.otp_release.as_deref(), Some("29"));
             assert_eq!(build.elixir_version, None);
-            assert_eq!(build.fleet_protocol_revision, None);
+            assert_eq!(build.ouroboros_version, None);
         }
 
         /// A link cannot answer for the release, and a first entry that does not parse

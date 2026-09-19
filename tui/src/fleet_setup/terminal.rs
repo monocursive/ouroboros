@@ -131,7 +131,6 @@ impl Conversation for TerminalConversation {
                 Ok(Answer::Secret(self.read_secret(&prompt, issuer)?))
             }
             ChallengeKind::Review => {
-                let digest = text(&request.metadata, "plan_digest");
                 if let Some(plan) = request.metadata.get("plan") {
                     if let Ok(plan) = serde_json::from_value::<Plan>(plan.clone()) {
                         let mut out = std::io::stderr();
@@ -139,9 +138,7 @@ impl Conversation for TerminalConversation {
                     }
                 }
                 if self.assume_yes {
-                    return Ok(Answer::Approval {
-                        plan_digest: digest,
-                    });
+                    return Ok(Answer::Approval);
                 }
                 if !interactive() {
                     return refuse(
@@ -150,9 +147,7 @@ impl Conversation for TerminalConversation {
                     );
                 }
                 if confirm("Apply this plan?")? {
-                    Ok(Answer::Approval {
-                        plan_digest: digest,
-                    })
+                    Ok(Answer::Approval)
                 } else {
                     refuse("review_declined", "the plan was not approved")
                 }
@@ -422,7 +417,7 @@ mod tests {
         let review = conversation
             .ask(ChallengeRequest {
                 kind: ChallengeKind::Review,
-                metadata: json!({"plan_digest": "abc"}),
+                metadata: json!({}),
             })
             .expect_err("no terminal to review a plan on");
         assert_eq!(super::super::reason_of(&review), Some("review_declined"));
@@ -436,11 +431,11 @@ mod tests {
         match conversation
             .ask(ChallengeRequest {
                 kind: ChallengeKind::Review,
-                metadata: json!({"plan_digest": "d1"}),
+                metadata: json!({}),
             })
             .expect("--yes approves the resolved plan")
         {
-            Answer::Approval { plan_digest } => assert_eq!(plan_digest, "d1"),
+            Answer::Approval => {}
             other => panic!("expected an approval, got {other:?}"),
         }
 

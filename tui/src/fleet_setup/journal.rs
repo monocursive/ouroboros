@@ -1,17 +1,16 @@
 //! The operation journal: the durable authority for what has already happened.
 //!
-//! Seam S5. `<data dir>/deploy/<id>.json`, mode 0600, rewritten atomically
+//! `<data dir>/deploy/<id>.json`, mode 0600, schema 2 (§6), rewritten atomically
 //! *before* and *after* every externally visible step. Before, so a process that dies
 //! mid-step leaves behind the statement "this was attempted"; after, so a resume knows
-//! not to repeat it. The proposal is explicit that admission is not a distributed
-//! transaction: once credentials have been delivered, no deletion can prove they were
-//! not copied, so the journal's job is to say exactly what was done rather than to
-//! promise a rollback.
+//! not to repeat it. Joining is not a distributed transaction: once a bundle has been
+//! delivered, no deletion can prove it was not copied, so the journal's job is to say
+//! exactly what was done rather than to promise a rollback.
 //!
-//! Nothing here is a secret. The roster snapshot carries names, hosts and a revision —
-//! never the cookie. The release carries a version and a sha256 — never bytes. The last
-//! error is the sanitized `detail` of a refusal, not a `Debug` dump of an error chain
-//! that might have quoted a prompt.
+//! Nothing here is a secret. The release carries a version and a sha256 — never bytes.
+//! The plan is the lines an operator read. The last error is a stable reason plus the
+//! sanitized `detail` of a refusal, not a `Debug` dump of an error chain that might have
+//! quoted a prompt.
 
 use std::path::{Path, PathBuf};
 
@@ -58,29 +57,19 @@ pub struct TargetIdentity {
     pub host_fingerprint: Option<String>,
 }
 
-/// The source fleet as it was when the plan was made. A later roster that disagrees is
-/// a reconciliation refusal, not an overwrite.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RosterSnapshot {
-    #[serde(default)]
-    pub fleet_id: Option<String>,
-    pub roster_revision: u64,
-    pub members: Vec<RosterMember>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RosterMember {
-    pub machine: String,
-    pub host: String,
-}
-
 /// The exact artifact a missing-binary install selected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SelectedRelease {
     pub version: String,
-    pub target: String,
     pub asset: String,
     pub sha256: String,
+}
+
+/// Why the operation stopped, for something that branches on it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LastError {
+    pub reason: String,
+    pub detail: String,
 }
 
 /// Where the operation intends to put things on the target.
@@ -92,12 +81,18 @@ pub struct IntendedPaths {
     pub data_dir: Option<String>,
 }
 
-/// One externally visible step, on one machine.
+/// One externally visible step.
+///
+/// §6's shape is `{"step","state","at","detail"}`. `machine` is additive and stays
+/// because every surface that renders a step says which machine it was about, and an
+/// operation now touches exactly one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StepRecord {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub machine: String,
     pub step: String,
-    /// `started`, `ok`, `skipped` or `failed`.
+    /// `attempted`, `ok`, `skipped` or `failed`.
+    #[serde(rename = "state")]
     pub outcome: String,
     pub at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,22 +114,13 @@ pub struct Record {
     #[serde(default)]
     pub target: Option<TargetIdentity>,
     #[serde(default)]
-    pub roster: Option<RosterSnapshot>,
-    #[serde(default)]
     pub release: Option<SelectedRelease>,
     #[serde(default)]
     pub paths: IntendedPaths,
+    /// The plan lines an operator reviewed, in order. §6 replaced the plan document and
+    /// its digest with the text a person actually read.
     #[serde(default)]
-    pub plan_digest: Option<String>,
-    #[serde(default)]
-    pub plan: Option<super::plan::Plan>,
-    /// The authenticated subject this operation belongs to: the first client that
-    /// attached to the worker, or the local account for an operation run from the CLI.
-    ///
-    /// Durable because the worker outlives the session that started it, and a resumed
-    /// operation must not hand a second subject the first one's password challenge.
-    #[serde(default)]
-    pub owner: Option<String>,
+    pub plan: Vec<String>,
     #[serde(default)]
     pub steps: Vec<StepRecord>,
     /// What an interrupted or cancelled operation left behind that it could not clean
@@ -142,7 +128,7 @@ pub struct Record {
     #[serde(default)]
     pub residue: Vec<String>,
     #[serde(default)]
-    pub last_error: Option<String>,
+    pub last_error: Option<LastError>,
 }
 
 impl Record {
@@ -153,11 +139,16 @@ impl Record {
             .any(|entry| entry.machine == machine && entry.step == step && entry.outcome == "ok")
     }
 
-    /// Whether a step was started and never finished — the boundary a crash lands on.
+    /// Whether a step was attempted and never finished — the boundary a crash lands on.
     pub fn attempted(&self, machine: &str, step: &str) -> bool {
         self.steps
             .iter()
             .any(|entry| entry.machine == machine && entry.step == step)
+    }
+
+    /// Whether this operation has already been reviewed and approved.
+    pub fn reviewed(&self) -> bool {
+        !self.plan.is_empty()
     }
 
     pub fn last_step(&self) -> Option<&StepRecord> {
@@ -207,12 +198,9 @@ impl Journal {
                     created_at: now.clone(),
                     updated_at: now,
                     target: None,
-                    roster: None,
                     release: None,
                     paths: IntendedPaths::default(),
-                    plan_digest: None,
-                    plan: None,
-                    owner: None,
+                    plan: Vec::new(),
                     steps: Vec::new(),
                     residue: Vec::new(),
                     last_error: None,
@@ -255,9 +243,6 @@ impl Journal {
             let Some(operation) = name.strip_suffix(".json") else {
                 continue;
             };
-            if operation.ends_with(".request") {
-                continue;
-            }
             if super::validate_operation_id(operation).is_ok() {
                 operations.push(operation.to_string());
             }
@@ -280,7 +265,7 @@ impl Journal {
         };
         let mut candidates = Vec::new();
         for operation in Self::list(data_dir)? {
-            if super::lock::Lock::held(data_dir, &format!("{operation}.worker.lock")) {
+            if super::lock::Lock::held(data_dir, &format!("{operation}.lock")) {
                 continue;
             }
             let Some(record) = Self::read(data_dir, &operation)? else {
@@ -335,11 +320,6 @@ impl Journal {
         self.flush()
     }
 
-    pub fn set_roster(&mut self, roster: RosterSnapshot) -> Result<()> {
-        self.record.roster = Some(roster);
-        self.flush()
-    }
-
     pub fn set_release(&mut self, release: SelectedRelease) -> Result<()> {
         self.record.release = Some(release);
         self.flush()
@@ -350,59 +330,15 @@ impl Journal {
         self.flush()
     }
 
-    pub fn owner(&self) -> Option<&str> {
-        self.record.owner.as_deref()
-    }
-
-    /// Claim an unowned operation. Refuses to reassign one that already has an owner —
-    /// that is [`Self::note_takeover`]'s job, and it is deliberately explicit.
-    pub fn claim(&mut self, owner: &str) -> Result<()> {
-        if self.record.owner.is_some() {
-            return Ok(());
-        }
-        self.record.owner = Some(owner.to_string());
-        self.flush()
-    }
-
-    /// Record one subject taking an operation over from another, naming both.
-    pub fn note_takeover(&mut self, from: Option<&str>, to: &str) -> Result<StepRecord> {
-        self.record.owner = Some(to.to_string());
-        self.push(
-            "operation",
-            "takeover",
-            "ok",
-            Some(format!(
-                "{} took this operation over from {}",
-                to,
-                from.unwrap_or("nobody")
-            )),
-            None,
-        )?;
-        Ok(self
-            .record
-            .steps
-            .last()
-            .cloned()
-            .expect("the step just pushed"))
-    }
-
-    pub fn set_plan(&mut self, plan: &super::plan::Plan) -> Result<()> {
-        self.record.plan_digest = Some(plan.digest());
-        self.record.plan = Some(plan.clone());
-        self.flush()
-    }
-
-    /// Require a new approval, retaining facts needed to verify an installed binary
-    /// or prepared identity. Only the engine may decide whether issuance permits this.
-    pub fn forget_review(&mut self) -> Result<()> {
-        self.record.plan_digest = None;
-        self.record.roster = None;
+    /// Record the plan lines an operator approved.
+    pub fn set_plan(&mut self, lines: Vec<String>) -> Result<()> {
+        self.record.plan = lines;
         self.flush()
     }
 
     /// Write the "about to happen" half of a step.
     pub fn begin_step(&mut self, machine: &str, step: &str) -> Result<()> {
-        self.finish_step(machine, step, "started", None, None)
+        self.finish_step(machine, step, "attempted", None, None)
     }
 
     /// Write the outcome half.
@@ -466,15 +402,23 @@ impl Journal {
     }
 
     /// The sanitized reason the operation stopped. Never a `Debug` rendering.
-    pub fn fail(&mut self, state: OperationState, detail: impl Into<String>) -> Result<()> {
+    pub fn fail(
+        &mut self,
+        state: OperationState,
+        reason: &str,
+        detail: impl Into<String>,
+    ) -> Result<()> {
         let detail = bounded(&detail.into());
         for step in &mut self.record.steps {
-            if step.outcome == "started" {
+            if step.outcome == "attempted" {
                 step.outcome = "failed".into();
                 step.detail = Some(detail.clone());
             }
         }
-        self.record.last_error = Some(detail);
+        self.record.last_error = Some(LastError {
+            reason: reason.to_string(),
+            detail,
+        });
         self.record.state = state;
         self.flush()
     }
@@ -533,28 +477,12 @@ impl Handle {
         self.with(|journal| journal.state())
     }
 
-    pub fn owner(&self) -> Option<String> {
-        self.with(|journal| journal.owner().map(str::to_string))
-    }
-
-    pub fn claim(&self, owner: &str) -> Result<()> {
-        self.with(|journal| journal.claim(owner))
-    }
-
-    pub fn note_takeover(&self, from: Option<&str>, to: &str) -> Result<StepRecord> {
-        self.with(|journal| journal.note_takeover(from, to))
-    }
-
     pub fn set_state(&self, state: OperationState) -> Result<()> {
         self.with(|journal| journal.set_state(state))
     }
 
     pub fn set_target(&self, target: TargetIdentity) -> Result<()> {
         self.with(|journal| journal.set_target(target))
-    }
-
-    pub fn set_roster(&self, roster: RosterSnapshot) -> Result<()> {
-        self.with(|journal| journal.set_roster(roster))
     }
 
     pub fn set_release(&self, release: SelectedRelease) -> Result<()> {
@@ -565,12 +493,8 @@ impl Handle {
         self.with(|journal| journal.set_paths(paths))
     }
 
-    pub fn set_plan(&self, plan: &super::plan::Plan) -> Result<()> {
-        self.with(|journal| journal.set_plan(plan))
-    }
-
-    pub fn forget_review(&self) -> Result<()> {
-        self.with(|journal| journal.forget_review())
+    pub fn set_plan(&self, lines: Vec<String>) -> Result<()> {
+        self.with(|journal| journal.set_plan(lines))
     }
 
     pub fn begin_step(&self, machine: &str, step: &str) -> Result<()> {
@@ -598,9 +522,14 @@ impl Handle {
         self.with(|journal| journal.note_residue(note))
     }
 
-    pub fn fail(&self, state: OperationState, detail: impl Into<String>) -> Result<()> {
+    pub fn fail(
+        &self,
+        state: OperationState,
+        reason: &'static str,
+        detail: impl Into<String>,
+    ) -> Result<()> {
         let detail = detail.into();
-        self.with(|journal| journal.fail(state, detail))
+        self.with(|journal| journal.fail(state, reason, detail))
     }
 
     pub fn clear_error(&self) -> Result<()> {
@@ -612,7 +541,7 @@ fn remove_operation_files(data_dir: &Path, operation: &str) -> Result<()> {
     for path in [
         super::journal_path(data_dir, operation),
         super::log_path(data_dir, operation),
-        super::request_path(data_dir, operation),
+        super::deploy_dir(data_dir).join(format!("{operation}.lock")),
     ] {
         match std::fs::remove_file(&path) {
             Ok(()) => {}

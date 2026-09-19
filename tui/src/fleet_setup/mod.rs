@@ -3,10 +3,10 @@
 //! `ouro fleet setup`, `ouro fleet add` and `ouro fleet leave --machine` are three
 //! shapes of the same thing — a bounded sequence of externally visible steps against a
 //! machine an operator selected, each written down before and after it happens, each
-//! able to stop and ask a question that only a person can answer. The CLI and the
-//! detached worker the UI's broker starts run *this* code; what differs between them is
-//! only where a question goes (a terminal, or an attached client over a private socket)
-//! and where progress is reported.
+//! able to stop and ask a question that only a person can answer. The terminal front end
+//! and the `--frames` front end the runtime's broker runs as a port program are the same
+//! code; what differs between them is only where a question goes and how progress is
+//! reported.
 //!
 //! The module boundary is deliberate:
 //!
@@ -18,18 +18,17 @@
 //!   operator to the `ssh` process that asked for it.
 //! - [`journal`] is the durable authority for what has already happened (seam S5). It
 //!   never contains a secret.
-//! - [`plan`] turns an inspected target into the concrete plan an operator approves, and
-//!   into the digest that approval is bound to (seam S6).
-//! - [`engine`] sequences the steps; [`worker`] serves them over the IPC of seams
-//!   S2/S3; [`terminal`] answers them from a tty.
+//! - [`plan`] turns an inspected target into the concrete plan an operator approves.
+//! - [`engine`] sequences the steps; [`frames`] answers them as NDJSON on this
+//!   process's own stdio (§8), and [`terminal`] answers them from a tty.
 //!
 //! ## What may never appear here
 //!
 //! The proposal's "Secret handling and authorization" section is the single list, and
 //! this module defers to it: no password, passphrase, cookie or private key may reach a
-//! command line, an environment variable, the journal, a receipt, a log line or an error
-//! string. The one frame that may carry a secret is the IPC `respond`, and neither side
-//! logs it. [`crate::fleet_setup::askpass`] is the only place a secret is held at all,
+//! command line, an environment variable, the journal, a log line or an error string.
+//! The one frame that may carry a secret is a `respond` on stdin, and neither side logs
+//! it. [`crate::fleet_setup::askpass`] is the only place a secret is held at all,
 //! in a `Zeroizing<String>` that lives for one authentication attempt.
 
 pub mod askpass;
@@ -37,6 +36,7 @@ pub mod bootstrap;
 pub mod challenge;
 pub mod cli;
 pub mod engine;
+pub mod frames;
 pub mod gateway;
 pub mod helper;
 pub mod journal;
@@ -46,7 +46,6 @@ pub mod service;
 pub mod ssh;
 pub mod terminal;
 pub mod trust;
-pub mod worker;
 
 use std::fmt::Write as _;
 use std::fs::DirBuilder;
@@ -78,23 +77,20 @@ pub const KNOWN_HOSTS_FILE: &str = "known_hosts";
 /// Seam S3: one frame per line, never more than this many bytes.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// Seam S2: a worker with no attached broker and no in-flight step does not linger.
-pub const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-
 /// A challenge nobody answers expires rather than holding the issuer's locks.
 pub const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// Seam S4, and the proposal's "at most three, respecting stricter server limits".
 pub const MAX_PASSWORD_ATTEMPTS: u32 = 3;
 
-/// The journal/request schema this build writes and reads.
-pub const SCHEMA: u8 = 1;
+/// The journal schema this build writes and reads (§6).
+pub const SCHEMA: u8 = 2;
 
 // ------------------------------------------------------------------ refusals
 
 /// A refusal with a stable machine-readable reason, mirroring
-/// [`crate::fleet::AdmissionError`] so one orchestrator can branch on `reason` across
-/// both halves of admission.
+/// [`crate::fleet::Refusal`] so one orchestrator can branch on `reason` wherever it
+/// came from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupError {
     pub reason: &'static str,
@@ -109,13 +105,13 @@ impl std::fmt::Display for SetupError {
 
 impl std::error::Error for SetupError {}
 
-/// The stable reason behind an error, when one was declared. Falls back to the
-/// admission half's reason so a helper refusal keeps its code on the way out.
+/// The stable reason behind an error, when one was declared. Falls back to the fleet
+/// library's reason so a helper refusal keeps its code on the way out.
 pub fn reason_of(error: &anyhow::Error) -> Option<&'static str> {
     if let Some(declared) = error.downcast_ref::<SetupError>() {
         return Some(declared.reason);
     }
-    crate::fleet::admission_error(error).map(|declared| declared.reason)
+    crate::fleet::refusal(error).map(|declared| declared.reason)
 }
 
 pub fn refuse<T>(reason: &'static str, detail: impl Into<String>) -> Result<T> {
@@ -232,10 +228,10 @@ pub enum IdentityChoice {
 
 /// What an operation was asked to do.
 ///
-/// Written to `<data dir>/deploy/<id>.request.json` (0600) *before* the worker is
-/// spawned, which is why `ouro fleet worker start` takes only an operation id and a data
-/// directory: a target, a user and a port on a command line would be published to every
-/// process on the host by `ps`, and the seam keeps argv free of operation data.
+/// §6: **the request for an operation is argv.** Nothing on it is a secret — an address,
+/// an account, a port, a path, a key path or an agent fingerprint — and a password never
+/// is, because it arrives through [`askpass`] in answer to a challenge. The private
+/// `deploy/<id>.request.json` the detached worker needed is gone with the worker.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationRequest {
@@ -275,44 +271,16 @@ pub struct OperationRequest {
     /// changed host key, and never a busy runtime.
     #[serde(default)]
     pub assume_yes: bool,
-    /// Run a bounded model call on the new member, only when asked.
-    #[serde(default)]
-    pub run_test_task: bool,
-    /// Explicit absolute workspace on the target for the opt-in model check.
-    #[serde(default)]
-    pub test_workspace: Option<String>,
     /// Test-only port policy for the target's profile. `None` is the production policy.
     #[serde(default)]
     pub ports: Option<PortPolicy>,
-    /// How to reach each *existing* member, keyed by its roster name.
-    ///
-    /// Empty in the ordinary case, where every member is reached with the same account
-    /// and the default paths. It is here because the proposal is explicit that each
-    /// current member may need its own authentication and that remote executable and
-    /// data-directory paths are explicit validated data, not inferences.
-    #[serde(default)]
-    pub members: std::collections::BTreeMap<String, MemberAccess>,
-}
-
-/// How one existing member is reached, when it is not reached the default way.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemberAccess {
-    #[serde(default)]
-    pub ssh_user: Option<String>,
-    #[serde(default)]
-    pub ssh_port: Option<u16>,
-    #[serde(default)]
-    pub install_path: Option<String>,
-    #[serde(default)]
-    pub data_dir: Option<String>,
 }
 
 fn yes() -> bool {
     true
 }
 
-/// The three ports [`crate::fleet::Ports`] carries, in a form that survives JSON.
+/// The two ports [`crate::fleet::Ports`] carries, in a form that survives JSON.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortPolicy {
@@ -320,8 +288,6 @@ pub struct PortPolicy {
     pub gateway: Option<u16>,
     #[serde(default)]
     pub dist: Option<u16>,
-    #[serde(default)]
-    pub epmd: Option<u16>,
 }
 
 impl From<PortPolicy> for crate::fleet::Ports {
@@ -329,7 +295,6 @@ impl From<PortPolicy> for crate::fleet::Ports {
         Self {
             gateway: policy.gateway,
             dist: policy.dist,
-            epmd: policy.epmd,
         }
     }
 }
@@ -356,10 +321,7 @@ impl OperationRequest {
             service: true,
             dry_run: false,
             assume_yes: false,
-            run_test_task: false,
-            test_workspace: None,
             ports: None,
-            members: std::collections::BTreeMap::new(),
         }
     }
 
@@ -369,126 +331,64 @@ impl OperationRequest {
             .unwrap_or(crate::fleet::Ports::DEFAULT)
     }
 
-    /// The largest request this worker will read. The document is a handful of short
-    /// fields; the cap is what stops a file that is not one from being read as one.
-    pub const MAX_BYTES: u64 = 64 * 1024;
-
-    /// Read the request a worker was spawned for, from its private file.
+    /// Fill in what argv left out from an existing journal's target, for `--operation ID`.
     ///
-    /// The broker writes `<data dir>/deploy/<id>.request.json` before it starts
-    /// the worker, because seam S2 gives `worker start` an operation id and a data
-    /// directory and nothing else: a target host, an account and a port on a command
-    /// line would be readable by every process on the machine through `ps`.
-    ///
-    /// Everything about the file is therefore checked before it is believed — a regular
-    /// file, this account's, mode 0600, opened without following a link, bounded, and
-    /// parsed with unknown keys refused.
-    pub fn read(data_dir: &Path, operation: &str) -> Result<Self> {
-        use std::io::Read as _;
-        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    /// §6's resume is "a step recorded `ok` is not repeated", and the journal already
+    /// holds that. What it also holds is who the target was, so an operator resuming an
+    /// operation does not have to retype the address and the account. Argv that
+    /// *contradicts* the journal is `plan_changed`: a resumed operation is the same
+    /// operation, or it is a new one.
+    pub fn hydrate(
+        &mut self,
+        target: &journal::TargetIdentity,
+        paths: &journal::IntendedPaths,
+    ) -> Result<()> {
+        fn agree<T: PartialEq + std::fmt::Debug>(
+            field: &'static str,
+            mine: &mut Option<T>,
+            recorded: Option<T>,
+        ) -> Result<()> {
+            match (mine.as_ref(), recorded) {
+                (Some(mine), Some(recorded)) if *mine != recorded => refuse(
+                    "plan_changed",
+                    format!("this operation was recorded against a different {field}; start a new operation to deploy different intent"),
+                ),
+                (None, recorded) => {
+                    *mine = recorded;
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
 
-        validate_operation_id(operation)?;
-        let path = request_path(data_dir, operation);
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| SetupError {
-            reason: "request_unreadable",
-            detail: format!(
-                "this operation has no request at {}: {error}. The deployment request is written there before the worker starts",
-                path.display()
-            ),
-        })?;
-        let uid = unsafe { libc::geteuid() };
-        if !metadata.file_type().is_file()
-            || metadata.uid() != uid
-            || metadata.permissions().mode() & 0o777 != 0o600
+        if !target.machine.is_empty() && !self.machine.is_empty() && target.machine != self.machine
         {
             return refuse(
-                "request_unreadable",
+                "plan_changed",
                 format!(
-                    "{} must be a private regular file owned by uid {uid} at mode 0600",
-                    path.display()
+                    "operation {} is recorded against machine {}, not {}",
+                    self.operation, target.machine, self.machine
                 ),
             );
         }
-        if metadata.len() > Self::MAX_BYTES {
-            return refuse(
-                "request_unreadable",
-                format!(
-                    "{} is larger than {} bytes and is not a deployment request",
-                    path.display(),
-                    Self::MAX_BYTES
-                ),
-            );
+        if self.machine.is_empty() {
+            self.machine = target.machine.clone();
         }
-        let mut text = String::new();
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .and_then(|mut file| file.read_to_string(&mut text))
-            .map_err(|error| SetupError {
-                reason: "request_unreadable",
-                detail: format!("{} could not be read: {error}", path.display()),
-            })?;
-        let request: Self = serde_json::from_str(&text).map_err(|error| SetupError {
-            reason: "request_unreadable",
-            detail: format!("{} is not a deployment request: {error}", path.display()),
-        })?;
-        if request.schema != SCHEMA {
-            return refuse(
-                "request_unreadable",
-                format!(
-                    "operation request schema {} is not the one this ouro reads ({SCHEMA})",
-                    request.schema
-                ),
-            );
+        agree("address", &mut self.address, target.address.clone())?;
+        agree("account", &mut self.ssh_user, target.ssh_user.clone())?;
+        agree("port", &mut self.ssh_port, target.port)?;
+        if self.install_path.is_none() {
+            self.install_path = paths.install_path.clone();
         }
-        if request.operation != operation {
-            return refuse(
-                "request_unreadable",
-                format!(
-                    "{} describes operation {}, not {operation}",
-                    path.display(),
-                    request.operation
-                ),
-            );
+        if self.remote_data_dir.is_none() {
+            self.remote_data_dir = paths.data_dir.clone();
         }
-        Ok(request)
-    }
-
-    /// Remove the request once the operation can no longer be resumed from it.
-    ///
-    /// Kept while the operation is running, failed or interrupted — resume still needs
-    /// the identity reference. Folded into the journal's target identity and deleted at
-    /// `completed` and `cancelled`.
-    pub fn consume(data_dir: &Path, operation: &str) -> Result<()> {
-        let path = request_path(data_dir, operation);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
-        }
-    }
-
-    /// Write the request before anything is spawned. Private, atomic, idempotent for an
-    /// identical request: a duplicate `prepare` must adopt the operation, not fork it.
-    pub fn write(&self, data_dir: &Path) -> Result<()> {
-        validate_operation_id(&self.operation)?;
-        ensure_deploy_dir(data_dir)?;
-        let path = request_path(data_dir, &self.operation);
-        if path.try_exists()? {
-            let previous = Self::read(data_dir, &self.operation)?;
-            let mut before = serde_json::to_value(previous)?;
-            let mut after = serde_json::to_value(self)?;
-            // How approval is collected may change on a retry; its target and intent may not.
-            before.as_object_mut().unwrap().remove("assume_yes");
-            after.as_object_mut().unwrap().remove("assume_yes");
-            if before != after {
-                return refuse("plan_changed", "this operation already has a different request; use a new operation to review different intent");
+        if matches!(self.identity, IdentityChoice::Default) {
+            if let Some(identity) = target.identity.clone() {
+                self.identity = identity;
             }
-            return Ok(());
         }
-        let bytes = serde_json::to_vec_pretty(self).context("encoding the operation request")?;
-        write_private_atomic(&path, &bytes)
+        Ok(())
     }
 }
 
@@ -560,20 +460,8 @@ pub fn journal_path(data_dir: &Path, operation: &str) -> PathBuf {
     deploy_dir(data_dir).join(format!("{operation}.json"))
 }
 
-pub fn request_path(data_dir: &Path, operation: &str) -> PathBuf {
-    deploy_dir(data_dir).join(format!("{operation}.request.json"))
-}
-
 pub fn log_path(data_dir: &Path, operation: &str) -> PathBuf {
     deploy_dir(data_dir).join(format!("{operation}.log"))
-}
-
-pub fn socket_path(data_dir: &Path, operation: &str) -> PathBuf {
-    deploy_dir(data_dir).join(format!("{operation}.sock"))
-}
-
-pub fn capability_path(data_dir: &Path, operation: &str) -> PathBuf {
-    deploy_dir(data_dir).join(format!("{operation}.cap"))
 }
 
 /// The operation's own private scratch: the askpass socket, a selected agent identity's
@@ -689,8 +577,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     text
 }
 
-/// Constant-time equality for the capability file and the plan digest. Neither is a
-/// password, and both are compared against attacker-supplied input.
+/// Constant-time equality for a value compared against attacker-supplied input.
 pub fn constant_time_eq(left: &str, right: &str) -> bool {
     let (left, right) = (left.as_bytes(), right.as_bytes());
     if left.len() != right.len() {

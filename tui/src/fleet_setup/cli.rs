@@ -7,8 +7,8 @@
 //! whenever setup is incomplete.
 //!
 //! The engine itself is blocking, so it runs on a blocking thread. That is not an
-//! implementation detail to tidy away: it is what lets the same code run inside the
-//! detached worker, which has no async runtime at all.
+//! implementation detail to tidy away: it is what lets the same code answer §8's
+//! `--frames` front end, which has no async runtime at all.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -34,6 +34,8 @@ pub struct CommonArgs {
     pub dry_run: bool,
     pub yes: bool,
     pub json: bool,
+    /// §8: speak NDJSON on this process's own stdio instead of talking to a terminal.
+    pub frames: bool,
     pub no_service: bool,
     /// Resume (or name) a specific operation instead of minting one.
     pub operation: Option<String>,
@@ -59,8 +61,6 @@ pub struct AddArgs {
     pub ask_password: bool,
     pub install_path: Option<String>,
     pub remote_data_dir: Option<String>,
-    pub run_test_task: bool,
-    pub test_workspace: Option<String>,
     pub common: CommonArgs,
 }
 
@@ -82,7 +82,7 @@ pub struct LeaveArgs {
 fn engine_for(
     paths: &Paths,
     request: OperationRequest,
-    conversation: Arc<TerminalConversation>,
+    conversation: Arc<dyn super::Conversation>,
 ) -> Result<Engine> {
     let executable = std::env::current_exe().context("resolving this executable")?;
     Ok(Engine {
@@ -98,19 +98,9 @@ fn engine_for(
         user_known_hosts: default_known_hosts(),
         origin: release::Origin::resolve()?,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        // A CLI operation belongs to whoever is typing, and that is this account. The
-        // worker's owner is instead the first client that attaches to it.
-        owner: Some(local_account()),
         conversation,
         request,
     })
-}
-
-/// The account this process runs as, which is the subject a CLI operation belongs to.
-fn local_account() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| format!("uid {}", unsafe { libc::geteuid() }))
 }
 
 /// The operator's own `known_hosts`, honoured but never written.
@@ -251,8 +241,6 @@ pub async fn add(paths: &Paths, args: AddArgs) -> Result<()> {
     request.service = !args.common.no_service;
     request.dry_run = args.common.dry_run;
     request.assume_yes = args.common.yes;
-    request.run_test_task = args.run_test_task;
-    request.test_workspace = args.test_workspace.clone();
     request.ports = test_ports();
     request.peer_id = peer_id;
     request.stable_id = stable_id;
@@ -318,12 +306,7 @@ fn test_ports() -> Option<PortPolicy> {
     let read = |name: &str| -> Option<u16> { std::env::var(name).ok()?.parse().ok() };
     let gateway = read("OUROBOROS_TEST_GATEWAY_PORT");
     let dist = read("OUROBOROS_TEST_DIST_PORT");
-    let epmd = read("OUROBOROS_TEST_EPMD_PORT");
-    (gateway.is_some() || dist.is_some() || epmd.is_some()).then_some(PortPolicy {
-        gateway,
-        dist,
-        epmd,
-    })
+    (gateway.is_some() || dist.is_some()).then_some(PortPolicy { gateway, dist })
 }
 
 fn operation_id(common: &CommonArgs) -> Result<String> {
@@ -337,23 +320,56 @@ fn operation_id(common: &CommonArgs) -> Result<String> {
 }
 
 /// Run the engine off the async runtime, then report.
-async fn drive(paths: &Paths, request: OperationRequest, common: &CommonArgs) -> Result<()> {
+async fn drive(paths: &Paths, mut request: OperationRequest, common: &CommonArgs) -> Result<()> {
     paths.ensure_private_data_dir()?;
-    // The engine writes the request so a crash can resume it. Completed and cancelled
-    // operations fold the identity choice into the journal and delete the file; failed
-    // and interrupted ones keep it for resume.
-    let conversation = Arc::new(TerminalConversation::new(common.yes, common.json));
+    // §6: the request is argv. What argv leaves out on a `--operation ID` resume comes
+    // from the journal that operation already wrote, and argv that contradicts it is
+    // `plan_changed` rather than a second operation wearing the first one's id.
+    if common.operation.is_some() {
+        if let Some(record) = Journal::read(&paths.data_dir, &request.operation)? {
+            if record.kind != request.kind {
+                return refuse(
+                    "plan_changed",
+                    format!(
+                        "operation {} is a `{}` on this machine, not a `{}`",
+                        request.operation,
+                        record.kind.as_str(),
+                        request.kind.as_str()
+                    ),
+                );
+            }
+            if let Some(target) = &record.target {
+                request.hydrate(target, &record.paths)?;
+            }
+        }
+    }
+    let conversation: Arc<dyn super::Conversation> = if common.frames {
+        // Built inside `frames::run`, which owns the sink; this placeholder is replaced
+        // before the engine runs.
+        Arc::new(TerminalConversation::new(true, true))
+    } else {
+        Arc::new(TerminalConversation::new(common.yes, common.json))
+    };
     let engine = engine_for(paths, request, conversation)?;
     let json = common.json;
+    let frames = common.frames;
     let data_dir = paths.data_dir.clone();
-    let result = tokio::task::spawn_blocking(move || engine.run())
-        .await
-        .context("the deployment engine stopped unexpectedly")?;
+    let result = tokio::task::spawn_blocking(move || {
+        if frames {
+            super::frames::serve(engine)
+        } else {
+            engine.run()
+        }
+    })
+    .await
+    .context("the deployment engine stopped unexpectedly")?;
     let _ = Journal::prune_terminal(&data_dir, 50, Duration::from_secs(30 * 86400));
 
     match result {
         Ok(outcome) => {
-            report(&outcome, json)?;
+            if !frames {
+                report(&outcome, json)?;
+            }
             if outcome.state == OperationState::Completed
                 || outcome.state == OperationState::AwaitingReview
             {
@@ -368,7 +384,7 @@ async fn drive(paths: &Paths, request: OperationRequest, common: &CommonArgs) ->
             }
         }
         Err(error) => {
-            if json {
+            if json && !frames {
                 let reason = super::reason_of(&error).unwrap_or("failed");
                 println!(
                     "{}",
@@ -406,34 +422,6 @@ fn report(outcome: &Outcome, json: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------- hidden surfaces
-
-/// `ouro fleet worker start|run`.
-pub fn worker_start(paths: &Paths, operation: &str) -> Result<()> {
-    let started = super::worker::start(&paths.data_dir, operation)?;
-    println!("{}", started.to_value());
-    Ok(())
-}
-
-pub fn worker_run(paths: &Paths, operation: &str) -> Result<()> {
-    let executable = std::env::current_exe().context("resolving this executable")?;
-    super::worker::run(
-        super::worker::WorkerConfig {
-            data_dir: paths.data_dir.clone(),
-            token_file: paths.token_file(),
-            gateway: Arc::new(LocalGateway::new(&paths.data_dir, &paths.token_file())),
-            services: Arc::new(LocalServiceActions::new(&paths.data_dir)),
-            programs: super::ssh::Programs {
-                askpass: executable,
-                ..super::ssh::Programs::default()
-            },
-            trust_tools: super::trust::Tools::default(),
-            user_known_hosts: default_known_hosts(),
-            origin: release::Origin::resolve()?,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-        operation,
-    )
-}
 
 /// `ouro fleet askpass`: what OpenSSH executes when it needs a secret.
 pub fn askpass(prompt: Option<String>) -> Result<()> {

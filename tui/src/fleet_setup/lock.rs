@@ -1,4 +1,11 @@
-//! Process-scoped locks for an entire deployment and for worker publication.
+//! One advisory lock per operation, so two processes cannot run the same one.
+//!
+//! §8 deleted the issuer-wide operation lock: several deployments from one machine are
+//! not a conflict, and the thing that must not happen twice at once is *one* operation's
+//! journal being written by two processes. The lock is therefore a flock on
+//! `<data dir>/deploy/<id>.lock`, beside the journal rather than on it, because the
+//! journal is rewritten by rename and a renamed file is a different inode.
+//!
 //! Keep the inode on disk: unlinking an advisory lock lets another caller lock a
 //! different inode while the first caller still owns the old one.
 
@@ -31,18 +38,19 @@ impl std::fmt::Debug for Lock {
 }
 
 impl Lock {
+    #[cfg(test)]
     pub fn acquire(data_dir: &Path, name: &str) -> Result<Self> {
         Self::lock_file(data_dir, name, None)
     }
 
-    /// The issuer-wide mutation lock. Inspection, host trust, authentication and review
-    /// run without it; the engine takes it at the first mutating step.
-    pub fn acquire_issuer(
+    /// This operation's own lock, held for as long as the engine is running it.
+    pub fn acquire_operation(
         data_dir: &Path,
         operation: &str,
         state: &str,
         machine: Option<&str>,
     ) -> Result<Self> {
+        super::validate_operation_id(operation)?;
         let holder = Holder {
             operation: operation.to_string(),
             state: state.to_string(),
@@ -52,7 +60,7 @@ impl Lock {
                 .filter(|name| !name.is_empty())
                 .map(str::to_string),
         };
-        Self::lock_file(data_dir, "operation.lock", Some(&holder))
+        Self::lock_file(data_dir, &format!("{operation}.lock"), Some(&holder))
     }
 
     /// Whether an advisory lock of this name is currently held. Does not create the file.
@@ -140,16 +148,16 @@ fn refuse_in_progress<T>(file: &mut File) -> Result<T> {
     let detail = match read_holder(file) {
         Some(holder) => match holder.machine {
             Some(machine) if !machine.is_empty() => format!(
-                "operation {} ({} for {machine}) holds the issuer; finish, resume or cancel it first",
+                "operation {} ({} for {machine}) is already running in another process; wait for it, or cancel it first",
                 holder.operation, holder.state
             ),
             _ => format!(
-                "operation {} ({}) holds the issuer; finish, resume or cancel it first",
+                "operation {} ({}) is already running in another process; wait for it, or cancel it first",
                 holder.operation, holder.state
             ),
         },
         None => {
-            "another deployment is using this data directory; finish it or resume it before starting another"
+            "this operation is already running in another process; wait for it, or cancel it first"
                 .to_string()
         }
     };
@@ -199,20 +207,24 @@ mod tests {
         assert_eq!(super::super::reason_of(&error), Some("lock_unusable"));
     }
 
+    /// §8: one operation cannot run twice, and two different operations are not a
+    /// conflict at all — the issuer-wide lock is gone.
     #[test]
-    fn a_waiter_is_told_which_operation_holds_the_issuer() {
+    fn one_operation_locks_only_itself() {
         let data = scratch("holder");
-        let _held = Lock::acquire_issuer(&data, "op-00000000abcd", "deploying", Some("vps"))
+        let _held = Lock::acquire_operation(&data, "op-00000000abcd", "deploying", Some("vps"))
             .expect("the first lock");
-        let error = Lock::acquire_issuer(&data, "op-00000000ef01", "inspecting", Some("buildbox"))
-            .expect_err("the second lock");
+        Lock::acquire_operation(&data, "op-00000000ef01", "inspecting", Some("buildbox"))
+            .expect("a different operation is not blocked");
+        let error = Lock::acquire_operation(&data, "op-00000000abcd", "deploying", Some("vps"))
+            .expect_err("the same operation twice");
         assert_eq!(
             super::super::reason_of(&error),
             Some("operation_in_progress")
         );
         let detail = format!("{error:#}");
         assert!(
-            detail.contains("operation op-00000000abcd (deploying for vps) holds the issuer"),
+            detail.contains("operation op-00000000abcd (deploying for vps) is already running"),
             "{detail}"
         );
     }
