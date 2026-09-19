@@ -1289,11 +1289,42 @@ fn an_interrupted_add_resumes_without_installing_the_binary_again() {
         .expect("a readable target")
         .is_none());
 
-    // ---- rerun with the same operation id
-    let resumed = lab.ouro(&lab.issuer, lab.target_ports, &borrowed, &[origin]);
+    // The journal already holds *how* this operation was started, written at its start:
+    // which identity authenticated, and the startup choice. That is what lets a resume
+    // — or a broker rebuilding a resume's argv — restate neither and get the same run.
+    let interrupted_record = lab.journal(operation);
+    assert_eq!(
+        interrupted_record.service,
+        Some(false),
+        "`--no-service` is recorded as the startup choice"
+    );
+    assert_eq!(
+        interrupted_record
+            .target
+            .as_ref()
+            .and_then(|target| target.identity.clone()),
+        Some(ouro::fleet_setup::IdentityChoice::Key {
+            path: lab.rig.client_key.clone()
+        }),
+        "the identity this operation authenticated with is recorded"
+    );
+
+    // ---- rerun with the same operation id, and with neither of them on argv
+    let mut resume: Vec<String> = args
+        .iter()
+        .filter(|arg| *arg != "--no-service")
+        .cloned()
+        .collect();
+    let key = resume
+        .iter()
+        .position(|arg| arg == "--key")
+        .expect("a --key flag");
+    resume.drain(key..key + 2);
+    let resume_argv: Vec<&str> = resume.iter().map(String::as_str).collect();
+    let resumed = lab.ouro(&lab.issuer, lab.target_ports, &resume_argv, &[origin]);
     assert!(
         resumed.success(),
-        "the resumed operation failed:\n{}\n{}",
+        "a resume that restates neither the identity nor the startup choice failed:\n{}\n{}",
         resumed.stdout,
         resumed.stderr
     );
@@ -1332,14 +1363,96 @@ fn an_interrupted_add_resumes_without_installing_the_binary_again() {
             .expect("a time"),
         "the binary was not written a second time"
     );
-    // And the rest completed.
+    // And the rest completed — with the startup choice the journal held, not the one
+    // an argv that said nothing would otherwise have meant.
     in_order(&steps(&record), &["install:ok", "inspect:ok", "join:ok"]);
+    assert_eq!(record.service, Some(false));
+    assert!(
+        step_detail(&record, "service").contains("--no-service"),
+        "the resume kept the startup choice it was started with: {:?}",
+        steps(&record)
+    );
     assert_eq!(
         fleet::load(&lab.target)
             .expect("a readable target")
             .expect("an installed target")
             .machine,
         "vps"
+    );
+
+    // ---- a resume that *states* a different identity is refused, not switched
+    let other_key = lab.work.join("another_key");
+    let generated = Command::new("/usr/bin/ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&other_key)
+        .stdin(Stdio::null())
+        .status()
+        .expect("ssh-keygen");
+    assert!(generated.success());
+    let mut switched: Vec<String> = resume.clone();
+    switched.extend(["--key".into(), other_key.display().to_string()]);
+    let switched_argv: Vec<&str> = switched.iter().map(String::as_str).collect();
+    let refused = lab.ouro(&lab.issuer, lab.target_ports, &switched_argv, &[origin]);
+    assert!(!refused.success(), "{}", refused.stdout);
+    assert_eq!(
+        refused.json()["reason"],
+        json!("resume_mismatch"),
+        "a resume that authenticated differently is a different act: {}",
+        refused.stdout
+    );
+}
+
+/// The other half of the same rule: a resume that states `--no-service` against an
+/// operation started with a managed service is refused rather than silently switched.
+///
+/// The journal for this one is written by an `add` that fails at its first connection —
+/// the startup choice is recorded at operation start, before any plan is resolved, so it
+/// is there to disagree with even on an operation that got nowhere.
+#[test]
+fn a_resume_that_states_a_different_startup_choice_is_refused() {
+    let lab = Lab::new("kr2svc", "studio");
+    let operation = "op-0000000000c2";
+    let closed = fleet::ephemeral_ports().gateway.expect("a closed port");
+
+    let mut args = lab.add_args("vps", operation);
+    let port = args
+        .iter()
+        .position(|arg| arg == "--port")
+        .expect("a --port flag");
+    args[port + 1] = closed.to_string();
+    args.extend(["--yes".into(), "--json".into()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let failed = lab.ouro(&lab.issuer, lab.target_ports, &borrowed, &[]);
+    assert!(!failed.success(), "{}", failed.stdout);
+    let record = lab.journal(operation);
+    assert_eq!(
+        record.service,
+        Some(true),
+        "the startup choice is recorded at operation start, before any plan: {record:?}"
+    );
+    assert!(
+        record.target.is_none() || record.steps.is_empty(),
+        "this operation got nowhere, which is the point: {:?}",
+        steps(&record)
+    );
+
+    // Resuming it with `--no-service` states a choice the first run did not make.
+    let mut switched = args.clone();
+    switched.push("--no-service".into());
+    let switched_argv: Vec<&str> = switched.iter().map(String::as_str).collect();
+    let refused = lab.ouro(&lab.issuer, lab.target_ports, &switched_argv, &[]);
+    assert!(!refused.success(), "{}", refused.stdout);
+    assert_eq!(
+        refused.json()["reason"],
+        json!("resume_mismatch"),
+        "{}",
+        refused.stdout
+    );
+    assert_eq!(
+        lab.journal(operation).service,
+        Some(true),
+        "a refused resume did not rewrite the choice"
     );
 }
 

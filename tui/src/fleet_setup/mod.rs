@@ -280,6 +280,19 @@ fn yes() -> bool {
     true
 }
 
+/// How an identity choice is named in a refusal. Never the secret, and never a path
+/// this process did not already have on its own argv.
+fn describe_identity(identity: &IdentityChoice) -> String {
+    match identity {
+        IdentityChoice::Default => "this host's default SSH identities".to_string(),
+        IdentityChoice::Agent { fingerprint } => {
+            format!("agent identity {}", sanitize_remote_text(fingerprint, 80))
+        }
+        IdentityChoice::Key { path } => format!("key {}", path.display()),
+        IdentityChoice::Password => "the target account's password".to_string(),
+    }
+}
+
 /// The two ports [`crate::fleet::Ports`] carries, in a form that survives JSON.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -331,18 +344,24 @@ impl OperationRequest {
             .unwrap_or(crate::fleet::Ports::DEFAULT)
     }
 
-    /// Fill in what argv left out from an existing journal's target, for `--operation ID`.
+    /// Fill in what argv left out from an existing journal, for `--operation ID`.
     ///
     /// §6's resume is "a step recorded `ok` is not repeated", and the journal already
-    /// holds that. What it also holds is who the target was, so an operator resuming an
-    /// operation does not have to retype the address and the account. Argv that
-    /// *contradicts* the journal is `plan_changed`: a resumed operation is the same
-    /// operation, or it is a new one.
-    pub fn hydrate(
-        &mut self,
-        target: &journal::TargetIdentity,
-        paths: &journal::IntendedPaths,
-    ) -> Result<()> {
+    /// holds that. What it also holds is who the target was, which identity was used and
+    /// whether a managed service was asked for — so an operator resuming an operation
+    /// does not have to retype any of it, and the broker can rebuild a resume's argv
+    /// from the document rather than guessing. Argv that *contradicts* the journal is a
+    /// refusal: a resumed operation is the same operation, or it is a new one.
+    ///
+    /// Two reasons, because they are two different mistakes. `plan_changed` is a
+    /// different deployment wearing this id — another address, account or port.
+    /// `resume_mismatch` is this deployment, resumed with a different *how*: another
+    /// key, another agent identity, a password where a key was used, or a startup
+    /// choice the first run did not make. Neither is silently applied.
+    pub fn hydrate(&mut self, record: &journal::Record) -> Result<()> {
+        let default_target = journal::TargetIdentity::default();
+        let target = record.target.as_ref().unwrap_or(&default_target);
+        let paths = &record.paths;
         fn agree<T: PartialEq + std::fmt::Debug>(
             field: &'static str,
             mine: &mut Option<T>,
@@ -383,10 +402,43 @@ impl OperationRequest {
         if self.remote_data_dir.is_none() {
             self.remote_data_dir = paths.data_dir.clone();
         }
-        if matches!(self.identity, IdentityChoice::Default) {
-            if let Some(identity) = target.identity.clone() {
-                self.identity = identity;
+        // `IdentityChoice::Default` is what argv that named no `--key`, `--agent` or
+        // `--ask-password` produces, so it is exactly the "argv left this out" case: the
+        // journal's choice applies. Anything else was typed, and a typed choice that
+        // disagrees with the recorded one is refused rather than quietly switched — a
+        // resume that authenticated differently from the run it is resuming is a
+        // different act, whatever it goes on to do.
+        match (&self.identity, target.identity.clone()) {
+            (IdentityChoice::Default, Some(recorded)) => self.identity = recorded,
+            (mine, Some(recorded)) if *mine != recorded => {
+                return refuse(
+                    "resume_mismatch",
+                    format!(
+                        "operation {} was started with {}, and this resume names {}. Resume it the way it was started, or start a new operation",
+                        self.operation,
+                        describe_identity(&recorded),
+                        describe_identity(mine),
+                    ),
+                )
             }
+            _ => {}
+        }
+
+        // The same rule for the startup choice. `--no-service` is the only way to state
+        // one, so `service == true` is "argv said nothing" and the journal applies;
+        // `service == false` was typed, and a journal that says otherwise is refused.
+        match record.service {
+            Some(recorded) if self.service && !recorded => self.service = recorded,
+            Some(recorded) if self.service != recorded => {
+                return refuse(
+                    "resume_mismatch",
+                    format!(
+                        "operation {} was started with a managed startup service, and this resume names `--no-service`. Resume it the way it was started, or start a new operation",
+                        self.operation
+                    ),
+                )
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -794,23 +846,43 @@ mod tests {
         assert!(long.ends_with('…'));
     }
 
+    /// A journal record shaped like one an interrupted `add` leaves behind.
+    fn resumable(service: Option<bool>, identity: Option<IdentityChoice>) -> journal::Record {
+        journal::Record {
+            schema: SCHEMA,
+            operation: "op-0123456789ab".into(),
+            kind: OperationKind::Add,
+            state: OperationState::Interrupted,
+            created_at: "2026-09-19T00:00:00Z".into(),
+            updated_at: "2026-09-19T00:00:00Z".into(),
+            target: Some(journal::TargetIdentity {
+                machine: "buildbox".into(),
+                address: Some("100.64.0.2".into()),
+                ssh_user: Some("me".into()),
+                port: Some(2222),
+                identity,
+                ..journal::TargetIdentity::default()
+            }),
+            service,
+            release: None,
+            paths: journal::IntendedPaths {
+                install_path: Some("/home/me/.local/bin/ouro".into()),
+                data_dir: None,
+            },
+            plan: Vec::new(),
+            steps: Vec::new(),
+            residue: Vec::new(),
+            last_error: None,
+        }
+    }
+
     /// §6: a resumed operation is the same operation, or it is a new one.
     #[test]
     fn hydrating_a_request_fills_gaps_and_refuses_contradictions() {
-        let target = journal::TargetIdentity {
-            machine: "buildbox".into(),
-            address: Some("100.64.0.2".into()),
-            ssh_user: Some("me".into()),
-            port: Some(2222),
-            ..journal::TargetIdentity::default()
-        };
-        let paths = journal::IntendedPaths {
-            install_path: Some("/home/me/.local/bin/ouro".into()),
-            data_dir: None,
-        };
+        let record = resumable(None, None);
 
         let mut request = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
-        request.hydrate(&target, &paths).expect("a clean resume");
+        request.hydrate(&record).expect("a clean resume");
         assert_eq!(request.address.as_deref(), Some("100.64.0.2"));
         assert_eq!(request.ssh_user.as_deref(), Some("me"));
         assert_eq!(request.ssh_port, Some(2222));
@@ -821,14 +893,62 @@ mod tests {
 
         let mut moved = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
         moved.address = Some("100.64.0.9".into());
-        let error = moved.hydrate(&target, &paths).expect_err("a moved target");
+        let error = moved.hydrate(&record).expect_err("a moved target");
         assert_eq!(reason_of(&error), Some("plan_changed"));
 
         let mut renamed = OperationRequest::new("op-0123456789ab", OperationKind::Add, "vps");
-        let error = renamed
-            .hydrate(&target, &paths)
-            .expect_err("another machine");
+        let error = renamed.hydrate(&record).expect_err("another machine");
         assert_eq!(reason_of(&error), Some("plan_changed"));
+    }
+
+    /// The *how* of a resume: the identity it authenticated with, and the startup
+    /// choice it was started with. Omitted on argv, the journal's applies; stated and
+    /// different, it is `resume_mismatch` rather than a silent switch.
+    #[test]
+    fn a_resume_keeps_the_identity_and_startup_choice_it_was_started_with() {
+        let key = IdentityChoice::Key {
+            path: PathBuf::from("/home/me/.ssh/rig"),
+        };
+        let record = resumable(Some(false), Some(key.clone()));
+
+        // Argv that names neither takes both from the journal.
+        let mut quiet = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        assert!(quiet.service, "argv that omits --no-service means `true`");
+        quiet.hydrate(&record).expect("a clean resume");
+        assert_eq!(quiet.identity, key);
+        assert!(!quiet.service, "the journal's choice applies");
+
+        // Argv that names the same things agrees.
+        let mut same = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        same.identity = key.clone();
+        same.service = false;
+        same.hydrate(&record).expect("an agreeing resume");
+        assert_eq!(same.identity, key);
+
+        // A different identity is refused, and the refusal names neither secret nor
+        // anything this process did not already have on its own argv.
+        let mut switched = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        switched.identity = IdentityChoice::Password;
+        let error = switched.hydrate(&record).expect_err("a switched identity");
+        assert_eq!(reason_of(&error), Some("resume_mismatch"));
+        assert!(format!("{error:#}").contains("password"), "{error:#}");
+
+        // And a startup choice the first run did not make.
+        let managed = resumable(Some(true), Some(key.clone()));
+        let mut manual = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        manual.service = false;
+        let error = manual.hydrate(&managed).expect_err("a switched startup");
+        assert_eq!(reason_of(&error), Some("resume_mismatch"));
+
+        // A journal from a build that predates the field decides nothing.
+        let older = resumable(None, Some(key.clone()));
+        let mut manual = OperationRequest::new("op-0123456789ab", OperationKind::Add, "buildbox");
+        manual.service = false;
+        manual.hydrate(&older).expect("an older journal");
+        assert!(
+            !manual.service,
+            "argv still decides when the journal did not"
+        );
     }
 
     /// §6 deleted the plan digest, but the canonical encoder is still how two sides

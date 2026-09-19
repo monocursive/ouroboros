@@ -189,6 +189,26 @@ impl Engine {
         if journal.state() == OperationState::Completed {
             return Ok(self.completed_outcome(journal));
         }
+        // This operation's own lock, before anything writes to its journal and before
+        // any question is asked or any connection made.
+        //
+        // It used to be taken at the first mutating step, so that "inspection and
+        // challenges do not block other deployments on this host" — which was the right
+        // rule for the issuer-wide lock §8 deleted, and the wrong one for a per-operation
+        // lock. Two *different* operations have two different lock files and never meet.
+        // The only thing this one excludes is a second process running the same
+        // operation id, and that has to be excluded from the first journal write, not
+        // from the first mutation: a second process that got as far as resolving a plan
+        // would have cleared the first one's error, connected over SSH, and asked
+        // somebody a question, all against an operation it was never going to be allowed
+        // to run.
+        let _lock = self.lock_operation(journal)?;
+        // The startup choice, at operation start, so a resume — and the broker
+        // rebuilding a resume's argv — reads it rather than inferring it from a step
+        // that may not have happened. `leave` has no such flag and records none.
+        if matches!(self.request.kind, OperationKind::Add | OperationKind::Setup) {
+            journal.set_service(self.request.service)?;
+        }
         journal.clear_error()?;
         let result = match self.request.kind {
             OperationKind::Add => self.run_add(journal),
@@ -1045,7 +1065,7 @@ impl Engine {
             })?;
         }
 
-        let _lock = self.lock_operation(journal)?;
+        // The operation's own lock is already held, from `run_locked`.
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
         let mut unknown = Vec::new();
@@ -1624,9 +1644,9 @@ impl Engine {
         })?;
         self.review(journal, &plan)?;
 
+        // The operation's own lock is already held, from `run_locked`.
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
-        let _lock = self.lock_operation(journal)?;
 
         // The authorized local transition. The runtime that is running now is the one
         // serving whoever asked for this, so it is stopped only if it is idle.
@@ -1932,7 +1952,7 @@ impl Engine {
         }))?;
         self.review(journal, &plan)?;
 
-        let _lock = self.lock_operation(journal)?;
+        // The operation's own lock is already held, from `run_locked`.
         self.notify_state(OperationState::Deploying);
         journal.set_state(OperationState::Deploying)?;
 

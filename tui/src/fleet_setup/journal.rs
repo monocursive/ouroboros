@@ -113,6 +113,16 @@ pub struct Record {
     pub updated_at: String,
     #[serde(default)]
     pub target: Option<TargetIdentity>,
+    /// The `--no-service` choice, written at operation start beside the target's
+    /// identity: `true` is a managed user service, `false` is manual startup.
+    ///
+    /// It lives here rather than being inferred from a `service` step, because a
+    /// resume has to know what was chosen *before* it reaches that step — and because
+    /// the broker rebuilds a resume's argv from this document and must not have to
+    /// guess. `None` on a `leave`, which has no such flag, and on a journal written by
+    /// a build that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<bool>,
     #[serde(default)]
     pub release: Option<SelectedRelease>,
     #[serde(default)]
@@ -198,6 +208,7 @@ impl Journal {
                     created_at: now.clone(),
                     updated_at: now,
                     target: None,
+                    service: None,
                     release: None,
                     paths: IntendedPaths::default(),
                     plan: Vec::new(),
@@ -317,6 +328,17 @@ impl Journal {
 
     pub fn set_target(&mut self, target: TargetIdentity) -> Result<()> {
         self.record.target = Some(target);
+        self.flush()
+    }
+
+    /// Record the startup choice this operation was started with. Idempotent: a resume
+    /// that agrees writes the same value, and one that disagrees was refused before it
+    /// reached here.
+    pub fn set_service(&mut self, service: bool) -> Result<()> {
+        if self.record.service == Some(service) {
+            return Ok(());
+        }
+        self.record.service = Some(service);
         self.flush()
     }
 
@@ -483,6 +505,10 @@ impl Handle {
 
     pub fn set_target(&self, target: TargetIdentity) -> Result<()> {
         self.with(|journal| journal.set_target(target))
+    }
+
+    pub fn set_service(&self, service: bool) -> Result<()> {
+        self.with(|journal| journal.set_service(service))
     }
 
     pub fn set_release(&self, release: SelectedRelease) -> Result<()> {

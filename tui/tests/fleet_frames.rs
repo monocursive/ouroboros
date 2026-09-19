@@ -715,6 +715,115 @@ fn a_dry_run_over_frames_prints_the_plan_asks_nothing_and_writes_nothing() {
     }
 }
 
+/// A second process on one operation id is refused promptly, and writes nothing.
+///
+/// §8's lock is per operation, not per host: two different deployments from one machine
+/// are not a conflict, and the one thing that must never happen is two processes writing
+/// one journal. The first process here is parked on its review challenge — which is
+/// where a real operation spends most of its life — and the second must not clear its
+/// error, connect to anything, or ask anybody a question on the way to finding out it
+/// cannot run. It says so in frames and exits non-zero.
+#[test]
+fn a_second_process_on_one_operation_is_refused_with_operation_in_progress() {
+    let root = scratch("inprogress");
+    let data = root.join("data");
+    private_dir(&data);
+    let operation = "op-0000000000aa";
+
+    // The first process, parked on its review: it holds the lock for as long as it runs.
+    let first_log = root.join("first.log");
+    let mut first = Frames::start(
+        &data,
+        &first_log,
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    let mut challenge = None;
+    while let Some(frame) = first.next() {
+        if frame["event"] == "challenge" {
+            challenge = frame["challenge"].as_str().map(str::to_string);
+            break;
+        }
+    }
+    let challenge = challenge.expect("the first process reached its review");
+    let journal = data.join("deploy").join(format!("{operation}.json"));
+    let held = std::fs::read(&journal).expect("the first process journalled");
+
+    // The second, on the same id, while the first still holds the lock.
+    let second_log = root.join("second.log");
+    let started = std::time::Instant::now();
+    let mut second = Frames::start(
+        &data,
+        &second_log,
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    second.close_stdin();
+    let mut seen: Vec<Value> = Vec::new();
+    while let Some(frame) = second.next() {
+        seen.push(frame);
+    }
+    let (code, stderr) = second.finish();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        seen.first().map(|frame| frame["event"].clone()),
+        Some(Value::from("state")),
+        "{seen:?}"
+    );
+    assert_eq!(seen[0]["state"], "running", "{seen:?}");
+    let done = seen.last().expect("a done frame");
+    assert_eq!(done["event"], "done", "{seen:?}");
+    assert_eq!(done["state"], "failed", "{done}");
+    assert_eq!(done["operation"], operation, "{done}");
+    assert_eq!(
+        done["reason"], "operation_in_progress",
+        "the reason a broker branches on: {done}"
+    );
+    assert!(
+        !seen.iter().any(|frame| frame["event"] == "challenge"),
+        "the second process asked somebody a question: {seen:?}"
+    );
+    assert_ne!(code, 0, "a refused second process exits non-zero\n{stderr}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "the refusal has to be prompt, not a review's five minutes: {elapsed:?}"
+    );
+    assert_eq!(
+        std::fs::read(&journal).expect("the journal"),
+        held,
+        "the second process wrote to a journal it does not own"
+    );
+
+    // The first process is still the one that owns the operation, and finishes it.
+    first.send(serde_json::json!({
+        "op": "respond",
+        "challenge": challenge,
+        "accept": true,
+    }));
+    let (first_code, first_stderr) = first.finish();
+    assert_eq!(first_code, 0, "{first_stderr}");
+    assert!(data.join("fleet").exists(), "the first process ran");
+}
+
 fn listing(directory: &Path) -> std::collections::BTreeSet<String> {
     std::fs::read_dir(directory)
         .into_iter()

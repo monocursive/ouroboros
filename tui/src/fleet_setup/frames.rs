@@ -249,6 +249,28 @@ pub fn run(
     result
 }
 
+/// §8 frames for a refusal that never reached the engine.
+///
+/// Some things argv is wrong about are found before an engine exists to report them: an
+/// operation id that is not one, a resume that contradicts the journal it names. A
+/// `--frames` front end still has to answer in frames — the broker reads `done` and
+/// nothing else, and a process that exits non-zero having said nothing is a process it
+/// cannot explain. Deliberately no `setsid`: nothing is being detached, and this is
+/// about to exit.
+pub fn refuse_on_stdio(operation: &str, error: &anyhow::Error) {
+    let sink = Sink::new(Box::new(std::io::stdout()));
+    sink.emit(json!({"event": "state", "state": "running"}));
+    let reason = super::reason_of(error).unwrap_or("failed");
+    sink.emit(json!({
+        "event": "done",
+        "state": if reason == "cancelled" { "cancelled" } else { "failed" },
+        "operation": operation,
+        "reason": reason,
+        "summary": super::sanitize_remote_text(&format!("{error:#}"), 400),
+    }));
+    sink.close();
+}
+
 /// `ouro fleet <op> --frames`: the same thing, on this process's own stdio.
 pub fn serve(engine: Engine) -> Result<Outcome> {
     detach();

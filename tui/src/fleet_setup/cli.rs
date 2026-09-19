@@ -319,29 +319,51 @@ fn operation_id(common: &CommonArgs) -> Result<String> {
     }
 }
 
+/// §6: the request is argv. What argv leaves out on a `--operation ID` resume comes from
+/// the journal that operation already wrote, and argv that contradicts it is a refusal
+/// rather than a second operation wearing the first one's id.
+fn prepare_resume(
+    paths: &Paths,
+    request: &mut OperationRequest,
+    common: &CommonArgs,
+) -> Result<()> {
+    if common.operation.is_none() {
+        return Ok(());
+    }
+    let Some(record) = Journal::read(&paths.data_dir, &request.operation)? else {
+        return Ok(());
+    };
+    if record.kind != request.kind {
+        return refuse(
+            "plan_changed",
+            format!(
+                "operation {} is a `{}` on this machine, not a `{}`",
+                request.operation,
+                record.kind.as_str(),
+                request.kind.as_str()
+            ),
+        );
+    }
+    // Unconditionally, not only when a target was recorded: an operation that failed
+    // before it resolved one still recorded its startup choice, and a resume that
+    // contradicts that is the same mistake.
+    request.hydrate(&record)
+}
+
 /// Run the engine off the async runtime, then report.
 async fn drive(paths: &Paths, mut request: OperationRequest, common: &CommonArgs) -> Result<()> {
     paths.ensure_private_data_dir()?;
-    // §6: the request is argv. What argv leaves out on a `--operation ID` resume comes
-    // from the journal that operation already wrote, and argv that contradicts it is
-    // `plan_changed` rather than a second operation wearing the first one's id.
-    if common.operation.is_some() {
-        if let Some(record) = Journal::read(&paths.data_dir, &request.operation)? {
-            if record.kind != request.kind {
-                return refuse(
-                    "plan_changed",
-                    format!(
-                        "operation {} is a `{}` on this machine, not a `{}`",
-                        request.operation,
-                        record.kind.as_str(),
-                        request.kind.as_str()
-                    ),
-                );
-            }
-            if let Some(target) = &record.target {
-                request.hydrate(target, &record.paths)?;
-            }
+    // A refusal found here is found before an engine exists to report it, and it still
+    // has to reach the surface the operator or the broker is reading: a `--json` run
+    // whose stdout is empty, or a `--frames` run that exits non-zero having said
+    // nothing, is a refusal nobody downstream can act on.
+    if let Err(error) = prepare_resume(paths, &mut request, common) {
+        if common.frames {
+            super::frames::refuse_on_stdio(&request.operation, &error);
+        } else if common.json {
+            report_refusal(&error)?;
         }
+        return Err(error);
     }
     let conversation: Arc<dyn super::Conversation> = if common.frames {
         // Built inside `frames::run`, which owns the sink; this placeholder is replaced
@@ -385,19 +407,25 @@ async fn drive(paths: &Paths, mut request: OperationRequest, common: &CommonArgs
         }
         Err(error) => {
             if json && !frames {
-                let reason = super::reason_of(&error).unwrap_or("failed");
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "state": "failed",
-                        "reason": reason,
-                        "detail": format!("{error:#}"),
-                    }))?
-                );
+                report_refusal(&error)?;
             }
             Err(error)
         }
     }
+}
+
+/// `--json`'s refusal document: the stable reason an orchestrator branches on, and the
+/// sentence a person reads. One shape, wherever the refusal came from.
+fn report_refusal(error: &anyhow::Error) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "state": "failed",
+            "reason": super::reason_of(error).unwrap_or("failed"),
+            "detail": format!("{error:#}"),
+        }))?
+    );
+    Ok(())
 }
 
 fn report(outcome: &Outcome, json: bool) -> Result<()> {
