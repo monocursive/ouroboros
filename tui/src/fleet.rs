@@ -2610,7 +2610,30 @@ fn write_profile(data_dir: &Path, profile: &Profile) -> Result<()> {
     write_private_atomic(&profile_path(data_dir), &bytes)
 }
 
+/// The two generated files, rendered with the data directory's *canonical* path.
+///
+/// Canonical, because the same directory is named two ways on this machine's own
+/// services: an operator types `/tmp/x` or `~/x`, and the service unit carries the
+/// resolved `/private/tmp/x` — and a policy file that spelled the directory one way was
+/// refused as "not the generated policy" by a runtime started under the other. On macOS
+/// `/tmp` is a symlink, so the first local setup from a web page, whose LaunchAgent
+/// names the resolved directory, never started at all.
 fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String, String)> {
+    generated_runtime_files_spelled(&canonical_data_dir(data_dir), profile)
+}
+
+/// The data directory with every symlink resolved, or as given when it cannot be.
+fn canonical_data_dir(data_dir: &Path) -> PathBuf {
+    std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
+}
+
+/// The generated files with the data directory spelled exactly as given.
+///
+/// What every Ouroboros before this one wrote, and therefore what an installed profile
+/// may still hold. The strict check does not render this spelling back: it resolves the
+/// paths the file on disk names instead ([`respelled`]), which accepts any spelling of
+/// the one directory and nothing else.
+fn generated_runtime_files_spelled(data_dir: &Path, profile: &Profile) -> Result<(String, String)> {
     if !data_dir.is_absolute() {
         bail!(
             "fleet data directory must be absolute, got {}",
@@ -2637,6 +2660,54 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
         profile.dist_port_min, profile.dist_port_max
     );
     Ok((tls, vm_args))
+}
+
+/// `text` with every quoted path that resolves to a file directly inside
+/// `canonical_root` rewritten in its resolved spelling.
+///
+/// A policy file that names the fleet directory through a symlink — `/tmp/…` where the
+/// service unit says `/private/tmp/…`, or the spelling an older build wrote — then
+/// compares equal to the generated one, and a path that resolves anywhere else, or a
+/// value that is not a path at all, is left exactly as it is and fails the comparison.
+/// The files a generated policy may name inside the fleet directory.
+const GENERATED_FILES: [&str; 4] = [CA_CERT_FILE, NODE_CERT_FILE, NODE_KEY_FILE, TLS_OPTFILE];
+
+fn respelled(text: &str, canonical_root: &Path) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('"') {
+        out.push_str(&rest[..=open]);
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('"') else {
+            break;
+        };
+        let quoted = &rest[..close];
+        // The *directory* the file names is what gets resolved, never the file: a
+        // symlink somewhere else that points into the fleet directory would resolve
+        // into it and read as the generated policy while the file on disk — the one
+        // the BEAM hands to `ssl` — still named the outside path, which whoever owns
+        // that symlink can point anywhere later. So the spelling has to be a spelling
+        // of the fleet directory itself, followed by one of the generated file names.
+        let literal = Path::new(quoted);
+        let respelled = match (literal.parent(), literal.file_name()) {
+            (Some(parent), Some(name)) if GENERATED_FILES.iter().any(|file| name == *file) => {
+                parent
+                    .canonicalize()
+                    .ok()
+                    .filter(|directory| directory == canonical_root)
+                    .map(|directory| directory.join(name))
+            }
+            _other => None,
+        };
+        match respelled.and_then(|path| erl_string(&path).ok()) {
+            Some(spelling) => out.push_str(&spelling),
+            None => out.push_str(quoted),
+        }
+        out.push('"');
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The mutual-TLS policy the Ouroboros before this reduction generated.
@@ -2878,11 +2949,21 @@ fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
     let actual_tls = read_private(&root.join(TLS_OPTFILE), "TLS option file")?;
     let actual_vm_args = read_private(&root.join(VM_ARGS_FILE), "VM arguments")?;
     let (expected_tls, expected_vm_args) = generated_runtime_files(data_dir, &profile)?;
-    if actual_tls != expected_tls {
+    // A profile written by an earlier build, or under another spelling of a symlinked
+    // directory, names the same files another way. The paths the file on disk names are
+    // resolved before the comparison, so one policy compares equal however the
+    // directory was spelled, and a policy that names anything else does not.
+    let canonical_root = fleet_dir(&canonical_data_dir(data_dir));
+    let actual_tls_matches = respelled(&actual_tls, &canonical_root) == expected_tls;
+    let actual_vm_args_matches =
+        respelled(&actual_vm_args, &canonical_root).as_bytes() == expected_vm_args.as_bytes();
+    if !actual_tls_matches {
         // A file that is exactly the policy the previous build generated is not a
         // weakened policy, and "restore from a trusted backup" is a loop for it: the
         // trusted backup is that same file.
-        if actual_tls == previous_generated_tls(data_dir)? {
+        if respelled(&actual_tls, &canonical_root)
+            == respelled(&previous_generated_tls(data_dir)?, &canonical_root)
+        {
             bail!(
                 "{} is the strict generated mutual-TLS policy of an older Ouroboros: it routes verification through `Ouroboros.Cluster.Revocations`, a module this build does not have. Rewrite it from this profile with `ouro fleet create --regenerate` on this stopped machine, which keeps this fleet id, CA, cookie and roster",
                 root.join(TLS_OPTFILE).display()
@@ -2893,7 +2974,7 @@ fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
             root.join(TLS_OPTFILE).display()
         );
     }
-    if actual_vm_args.as_bytes() != expected_vm_args.as_bytes() {
+    if !actual_vm_args_matches {
         bail!(
             "{} does not match the generated TLS/port policy for this profile; startup is refused. Rewrite it from this profile with `ouro fleet create --regenerate`, or restore this file from a trusted backup",
             root.join(VM_ARGS_FILE).display()
@@ -3108,7 +3189,7 @@ pub fn validate_machine(machine: &str) -> Result<()> {
     Ok(())
 }
 
-fn local_hostname() -> Result<String> {
+pub fn local_hostname() -> Result<String> {
     let mut buffer = [0 as libc::c_char; 256];
     // SAFETY: `buffer` is writable for the exact length supplied. A final zero is forced
     // in case a platform truncates without terminating.
@@ -5394,6 +5475,69 @@ pub fn prepare_admission(
     result
 }
 
+/// Retire only this operation's prepared key, before any materials were installed.
+/// The issuer calls this only while holding its admission lock and before issuance.
+pub fn discard_preparation(data_dir: &Path, operation: &str) -> Result<()> {
+    validate_operation_id(operation)?;
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet discard preparation")?;
+    if fleet_dir(data_dir).try_exists()? {
+        return refuse(
+            "fleet_exists",
+            "an installed fleet identity cannot be discarded as a preparation",
+        );
+    }
+    let dir = admission_dir(data_dir, operation);
+    if !dir.try_exists()? {
+        return Ok(());
+    }
+    ensure_private_dir(&dir)?;
+    let request: AdmissionRequest = serde_json::from_str(&read_private(
+        &dir.join(ADMISSION_REQUEST_FILE),
+        "admission request",
+    )?)?;
+    validate_admission_request(&request)?;
+    if request.operation != operation {
+        return refuse(
+            "identity_mismatch",
+            "the prepared identity belongs to another operation",
+        );
+    }
+    // Validate every entry before deleting any: installed materials, symlinks,
+    // hardlinks and unexpected files all refuse, leaving inspection possible.
+    let mut files = Vec::new();
+    let mut receipts = None;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        match name.to_str() {
+            Some(NODE_KEY_FILE | ADMISSION_REQUEST_FILE) => {
+                ensure_private_file(&entry.path(), "prepared identity")?;
+                if fs::symlink_metadata(entry.path())?.nlink() != 1 {
+                    bail!("a prepared identity file has multiple links; it was not removed");
+                }
+                files.push(entry.path());
+            }
+            Some(RECEIPTS_DIR) => {
+                receipts = Some((entry.path(), validate_receipts_directory(&entry.path())?));
+            }
+            _ => {
+                return refuse(
+                    "install_in_progress",
+                    "the preparation contains additional data; it was not removed",
+                )
+            }
+        }
+    }
+    for path in files {
+        fs::remove_file(path)?;
+    }
+    if let Some((home, files)) = receipts {
+        remove_validated_receipts_directory(&home, files)?;
+    }
+    fs::remove_dir(&dir)?;
+    sync_parent(&dir)
+}
+
 /// Check everything about a request that does not need this machine's fleet.
 fn validate_admission_request(request: &AdmissionRequest) -> Result<()> {
     if request.schema != ADMISSION_SCHEMA {
@@ -7153,6 +7297,93 @@ mod tests {
         fs::remove_dir_all(carried).ok();
     }
 
+    /// The same directory spelled two ways — through a symlink and resolved — is one
+    /// directory, and the generated policy has to validate under both: the service unit
+    /// names the resolved path, the operator typed the other one, and on macOS `/tmp`
+    /// itself is a symlink. A profile an older build wrote under the typed spelling is
+    /// still accepted, so an upgrade refuses nothing that was fine before it.
+    #[test]
+    fn a_symlinked_data_dir_validates_under_either_spelling() {
+        let root = scratch("symlinked-data-dir");
+        let real = root.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let typed = link.join("data");
+        let resolved = real.join("data");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&resolved)
+            .unwrap();
+
+        create(&typed, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+
+        // Written with the resolved spelling, whichever one was typed.
+        let tls = fs::read_to_string(fleet_dir(&typed).join(TLS_OPTFILE)).unwrap();
+        let canonical = fs::canonicalize(&resolved).unwrap();
+        assert!(
+            tls.contains(&canonical.display().to_string()),
+            "the policy names the resolved directory: {tls}"
+        );
+        validate_materials(&typed, false).unwrap();
+        validate_materials(&resolved, false).unwrap();
+
+        // An older profile spelled the directory as typed; still one policy.
+        let profile = load(&typed).unwrap().unwrap();
+        let (older_tls, older_vm_args) = generated_runtime_files_spelled(&typed, &profile).unwrap();
+        assert_ne!(
+            older_tls, tls,
+            "the two spellings differ, or this test proves nothing"
+        );
+        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), older_tls.as_bytes()).unwrap();
+        write_private_atomic(
+            &fleet_dir(&typed).join(VM_ARGS_FILE),
+            older_vm_args.as_bytes(),
+        )
+        .unwrap();
+        validate_materials(&typed, false).unwrap();
+        validate_materials(&resolved, false).unwrap();
+
+        // A policy that is neither spelling is still refused.
+        write_private_atomic(
+            &fleet_dir(&typed).join(TLS_OPTFILE),
+            older_tls.replace("verify_peer", "verify_none").as_bytes(),
+        )
+        .unwrap();
+        let refused = validate_materials(&resolved, false).unwrap_err();
+        assert!(format!("{refused:#}").contains("strict generated mutual-TLS policy"));
+
+        // And so is a policy naming the CA through a symlink *outside* the fleet
+        // directory that happens to point into it today: the file on disk names the
+        // outside path, and whoever owns that symlink can point it anywhere tomorrow.
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let alias = elsewhere.join(CA_CERT_FILE);
+        std::os::unix::fs::symlink(fleet_dir(&resolved).join(CA_CERT_FILE), &alias).unwrap();
+        let canonical_ca = fleet_dir(&canonical).join(CA_CERT_FILE);
+        let via_alias = tls.replace(
+            &canonical_ca.display().to_string(),
+            &alias.display().to_string(),
+        );
+        assert_ne!(
+            via_alias, tls,
+            "the policy has to name the alias, or this proves nothing"
+        );
+        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), via_alias.as_bytes()).unwrap();
+        let refused = validate_materials(&resolved, false).unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("strict generated mutual-TLS policy"),
+            "a path outside the fleet directory is never respelled into it: {refused:#}"
+        );
+
+        // A generated name under another directory, and another name under the fleet
+        // directory, are left exactly as written and refused.
+        let other_name = tls.replace(CA_CERT_FILE, "ca-cert.pem.bak");
+        write_private_atomic(&fleet_dir(&typed).join(TLS_OPTFILE), other_name.as_bytes()).unwrap();
+        assert!(validate_materials(&resolved, false).is_err());
+    }
+
     /// F1: `revoke-<64 hex>.json` is durable state on any machine whose lab ever revoked
     /// one, and `leave` is the only command that removes a fleet directory. Recognizing
     /// the shape is what keeps such a machine retirable; naming everything else is what
@@ -7279,7 +7510,9 @@ mod tests {
     fn the_generated_policy_is_the_one_the_handshake_test_drives_ssl_with() {
         let data = scratch("generated-policy-template");
         create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let root = fleet_dir(&data);
+        // Generated under the resolved spelling of the directory (`/private/var/…` on
+        // macOS, where the temp dir is reached through a symlink).
+        let root = fleet_dir(&fs::canonicalize(&data).unwrap());
         let generated = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
         let template = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -9813,6 +10046,24 @@ mod tests {
         assert!(!printed.contains(&materials.cookie));
         assert!(printed.contains("<redacted>"));
         assert!(printed.contains(&materials.operation));
+    }
+
+    #[test]
+    fn preparation_cleanup_is_scoped_and_refuses_materials() {
+        let target = scratch("discard-prep");
+        let op = "op-discard-prep";
+        prepare_admission(&target, op, "vps", "127.0.0.1").unwrap();
+        discard_preparation(&target, "op-other-prep").unwrap();
+        assert!(admission_dir(&target, op).exists());
+        let cookie = admission_dir(&target, op).join(COOKIE_FILE);
+        write_private_new(&cookie, b"not-yet-installed", "test materials").unwrap();
+        assert!(discard_preparation(&target, op).is_err());
+        assert!(admission_dir(&target, op).join(NODE_KEY_FILE).exists());
+        fs::remove_file(cookie).unwrap();
+        discard_preparation(&target, op).unwrap();
+        assert!(!admission_dir(&target, op).exists());
+        discard_preparation(&target, op).unwrap();
+        let _ = fs::remove_dir_all(target);
     }
 
     /// `ouro fleet leave` retires a machine that was admitted, receipts and all. The

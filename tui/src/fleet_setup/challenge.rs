@@ -487,7 +487,22 @@ pub fn host_trust_metadata(
         "algorithm": algorithm,
         "sha256_fingerprint": sha256_fingerprint,
         "user": user,
+        "verification_command": host_key_verification_command(algorithm),
     })
+}
+
+/// Key filenames come from an allowlist, never interpolated remote metadata.
+pub fn host_key_verification_command(algorithm: &str) -> Option<&'static str> {
+    match algorithm {
+        "ssh-rsa" | "rsa-sha2-256" | "rsa-sha2-512" => {
+            Some("ssh-keygen -lf /etc/ssh/ssh_host_rsa_key.pub -E sha256")
+        }
+        "ssh-ed25519" => Some("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256"),
+        "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521" => {
+            Some("ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub -E sha256")
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

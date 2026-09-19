@@ -210,7 +210,11 @@ case "$1" in
     case "$2" in
       gui/*/*)
         if [ -f "$state/loaded" ]; then
-          printf '%s = {{\n\tstate = running\n\tpid = 4321\n\tlast exit code = 0\n}}\n' "$2"
+          if [ -f "$state/stopped" ]; then
+            printf '%s = {{\n\tstate = not running\n\tlast exit code = 0\n}}\n' "$2"
+          else
+            printf '%s = {{\n\tstate = running\n\tpid = 4321\n\tlast exit code = 0\n}}\n' "$2"
+          fi
           exit 0
         fi
         echo "Could not find service" >&2
@@ -245,6 +249,7 @@ case "$1" in
       exit 5
     fi
     touch "$state/loaded"
+    rm -f "$state/stopped"
     exit 0 ;;
   kickstart)
     case "$2" in
@@ -279,7 +284,11 @@ case "$1" in
         exit 0 ;;
       *.service)
         if [ -f "$state/enabled" ]; then
-          printf 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4321\nExecMainStatus=0\nUnitFileState=enabled\n'
+          if [ -f "$state/stopped" ]; then
+            printf 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nExecMainStatus=0\nUnitFileState=enabled\n'
+          else
+            printf 'LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4321\nExecMainStatus=0\nUnitFileState=enabled\n'
+          fi
         else
           printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nUnitFileState=\n'
         fi
@@ -290,7 +299,7 @@ case "$1" in
   enable)
     if [ "$2" != "--now" ]; then echo "unexpected enable: $*" >&2; exit 64; fi
     if [ -f "$state/masked" ]; then echo "Unit file is masked." >&2; exit 1; fi
-    touch "$state/enabled"; exit 0 ;;
+    touch "$state/enabled"; rm -f "$state/stopped"; exit 0 ;;
   disable)
     if [ "$2" != "--now" ]; then echo "unexpected disable: $*" >&2; exit 64; fi
     if [ -f "$state/disable_fails" ]; then echo "Failed to disable: unit is masked" >&2; exit 1; fi
@@ -307,6 +316,14 @@ fn loginctl_script(log: &Path, state: &Path) -> String {
     format!(
         r#"#!/bin/sh
 {preamble}
+if [ "$1" = "enable-linger" ]; then
+  if [ -f "$state/linger_refused" ]; then
+    echo "Could not enable linger: Interactive authentication required." >&2
+    exit 1
+  fi
+  : > "$state/linger"
+  exit 0
+fi
 if [ "$1" != "show-user" ] || [ "$3" != "--property=Linger" ]; then
   echo "unexpected loginctl call: $*" >&2
   exit 64
@@ -438,6 +455,30 @@ fn installing_a_launchagent_writes_one_private_file_and_bootstraps_exactly_once(
 }
 
 #[test]
+fn installing_a_matching_stopped_service_starts_it_on_both_platforms() {
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let root = scratch("stopped-service");
+        let data_dir = data_dir_with_profile(&root, "studio", "127.0.0.1");
+        let fakes = Fakes::install(&root);
+        let plan = plan_for(platform, &root, &data_dir);
+        fleet_service::install(&plan, &fakes.programs, false).expect("initial install");
+        fakes.set("stopped", true);
+        fakes.forget_calls();
+
+        let report = fleet_service::install(&plan, &fakes.programs, false)
+            .expect("install should start an unchanged stopped service");
+
+        assert_eq!(report.running, Some(true));
+        assert!(!fakes.state.join("stopped").exists());
+        assert!(fakes.calls().iter().any(|call| {
+            call.starts_with("launchctl bootstrap")
+                || call.starts_with("systemctl --user enable --now")
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
 fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     let root = scratch("linux-install");
     let data_dir = data_dir_with_profile(&root, "buildbox", "127.0.0.1");
@@ -471,23 +512,54 @@ fn installing_a_systemd_user_unit_reloads_then_enables_and_reports_lingering() {
     );
     assert_eq!(mode(&plan.unit_path()), 0o600);
 
-    // Without lingering the same install succeeds and says what it does not promise.
+    // Without lingering the install enables it, because a machine added over SSH is
+    // the machine nobody logs in to, and reports the boot-time start it now has.
     let second = scratch("linux-install-no-linger");
     let second_data = data_dir_with_profile(&second, "buildbox", "127.0.0.1");
     let second_fakes = Fakes::install(&second);
     let second_plan = plan_for(Platform::Linux, &second, &second_data);
     let report = fleet_service::install(&second_plan, &second_fakes.programs, false)
-        .expect("an install without lingering");
-    assert_eq!(report.linger, Some(false));
+        .expect("an install that enables lingering");
+    assert_eq!(report.linger, Some(true));
     assert!(
-        report.persistence.contains("enable-linger"),
+        report.persistence.contains("survives logout"),
         "{}",
         report.persistence
     );
     assert!(
-        report.persistence.contains("does not start at boot"),
+        report
+            .steps
+            .iter()
+            .any(|step| step.contains("enabled lingering for tester")),
+        "{:?}",
+        report.steps
+    );
+    assert!(second_fakes
+        .calls()
+        .contains(&"loginctl enable-linger tester".to_string()));
+
+    // A refused enable-linger keeps the honest login-scoped sentence and names the step.
+    let third = scratch("linux-install-linger-refused");
+    let third_data = data_dir_with_profile(&third, "buildbox", "127.0.0.1");
+    let third_fakes = Fakes::install(&third);
+    third_fakes.set("linger_refused", true);
+    let third_plan = plan_for(Platform::Linux, &third, &third_data);
+    let report = fleet_service::install(&third_plan, &third_fakes.programs, false)
+        .expect("an install whose lingering was refused");
+    assert_eq!(report.linger, Some(false));
+    assert!(
+        report.persistence.contains("enable-linger")
+            && report.persistence.contains("does not start at boot"),
         "{}",
         report.persistence
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("Interactive authentication required")),
+        "{:?}",
+        report.notes
     );
 }
 

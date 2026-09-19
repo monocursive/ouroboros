@@ -44,6 +44,36 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   # value is dropped before it can reach a log line or a browser.
   @forbidden ~w(secret password passphrase cookie token credential private_key key_pem)
 
+  # The same vocabulary, matched against free text rather than against object keys: a line of
+  # a worker's stdio log has no keys, so this is where a credential would be if one were
+  # printed. Discard the whole matching line: shell quoting, JSON strings and truncated
+  # diagnostics do not have a common value boundary that is safe to guess at.
+  @secret_names Enum.join(@forbidden, "|")
+
+  # Assignments and quoted object keys, including JSON embedded in a diagnostic.
+  @secret_assignment ~r/[A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*["']?\s*[:=]/i
+
+  @secret_option ~r/--?[A-Za-z0-9_.\-]*(?:#{@secret_names})[A-Za-z0-9_.\-]*\s+/i
+
+  # Attached and detached values for sshpass's otherwise unrecognizable flag.
+  @sshpass_option ~r/\bsshpass\b.*?\s-p/i
+
+  @piped_secret ~r/\b(?:echo|printf)\s+.*?\|\s*sudo\b.*?-S\b/i
+
+  # Escape sequences, stripped as sequences rather than character by character: dropping the
+  # `\e` alone out of `\e[1;31m` leaves `[1;31m` on the line, which is noise where the whole
+  # thing was meant to be nothing.
+  @ansi_csi ~r/\e\[[0-9;:<=>?]*[ -\/]*[@-~]/
+  @ansi_osc ~r/\e\][^\a\e]*(?:\a|\e\\)?/
+  # Every other escape form: optional intermediate bytes then one final byte, which covers
+  # `ESC c`, `ESC 7`, `ESC ( B` and a lone `ESC` at the end of a truncated line.
+  @ansi_other ~r/\e[ -\/]*[0-~]?/
+
+  # Then what is left: C0 except tab, DEL, and C1 — which includes the eight-bit CSI at
+  # U+009B, so a line that skipped the escape prefix still loses the byte a terminal would
+  # have acted on. What follows it stays, as the ordinary text it then is.
+  @control_characters ~r/[\x{0000}-\x{0008}\x{000A}-\x{001F}\x{007F}-\x{009F}]/u
+
   @doc """
   The directory the worker keeps its sockets, capability files and journals in.
 
@@ -73,6 +103,18 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @spec request_path(Path.t(), String.t()) :: Path.t()
   def request_path(data_dir, operation) when is_binary(operation),
     do: Path.join(deploy_dir(data_dir), operation <> ".request.json")
+
+  @doc """
+  The worker's own stdio log, which `ouro fleet worker start` redirects its child onto.
+
+  Neither side's record of the operation: the journal is what the worker *says*, and this is
+  what it and its children *printed*. It is the only thing a worker that died before it
+  could journal anything leaves behind, which is why `fleet.deployment.status` reads its
+  tail — through `scrub_line/2`, because nothing wrote it under a contract.
+  """
+  @spec log_path(Path.t(), String.t()) :: Path.t()
+  def log_path(data_dir, operation) when is_binary(operation),
+    do: Path.join(deploy_dir(data_dir), operation <> ".log")
 
   @doc """
   Reads one operation's journal, sanitized.
@@ -175,7 +217,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     end)
   end
 
-  # `.request.json` also ends in `.json`; an operation id is hex, so those names never
+  # `.request.json` also ends in `.json`; operation ids cannot contain dots, so those names never
   # survive `validate_operation/1`. Matching the suffix the worker actually writes is still
   # cheaper than opening them.
   defp journal_name?(name),
@@ -335,14 +377,13 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @doc """
   An operation id this runtime will touch a path with.
 
-  The id names a file and a socket, so it is held to hex rather than to "no slashes": a
-  validated alphabet is the only form of path safety that does not depend on remembering
-  every way a string can escape a directory.
+  Match the worker and CLI: 8 to 64 lowercase letters, digits and single hyphens,
+  with no leading or trailing hyphen. The bounded alphabet excludes path traversal.
   """
   @spec validate_operation(String.t()) :: :ok | {:error, :invalid_operation}
   def validate_operation(operation) when is_binary(operation) do
-    if operation != "" and byte_size(operation) <= 64 and
-         String.match?(operation, ~r/\A[0-9a-f]+\z/),
+    if byte_size(operation) in 8..64 and
+         String.match?(operation, ~r/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/),
        do: :ok,
        else: {:error, :invalid_operation}
   end
@@ -372,6 +413,63 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   """
   @spec scrub_value(term()) :: term()
   def scrub_value(value), do: scrub(value, 0)
+
+  @doc """
+  One line of a worker's private stdio log, made safe to hand to a client.
+
+  That log is not a journal. Nothing writes it under a contract: it is whatever the worker
+  and the programs it forked printed on their way out, which on a bad day is an `ssh`
+  diagnostic, a shell trace, or bytes that are not text at all. So it gets the journal's own
+  forbidden vocabulary — matched against the four shapes a secret takes in free text, since
+  a line has no keys — then the journal's bounding, then the caller's own cap.
+
+  Before any of that, every control character goes. `String.printable?/1` counts `\e` as
+  printable, so the previous version of this let `"worker died \e[1;31mSPOOFED\e[0m"` through
+  unchanged: an operator reading the tail in a terminal saw a sentence the worker did not
+  write, in a colour it chose. Escape sequences are removed whole, then C0 (bar tab), DEL and
+  C1 individually, so nothing is left to reassemble.
+
+  Bytes that are not text at all are folded to `.` rather than dropped: a line a worker
+  printed in a foreign encoding is still evidence of where it stopped, and it must not be
+  able to break the encoder that carries it to a browser.
+  """
+  @spec scrub_line(binary(), pos_integer()) :: String.t()
+  def scrub_line(line, max) when is_binary(line) and is_integer(max) and max > 0 do
+    line
+    |> textual()
+    |> strip_controls()
+    |> String.trim()
+    |> redact()
+    |> scrub_value()
+    |> String.slice(0, max)
+  end
+
+  defp textual(line) do
+    if String.valid?(line) do
+      line
+    else
+      for <<byte <- line>>, into: "", do: <<if(byte in 32..126, do: byte, else: ?.)>>
+    end
+  end
+
+  defp strip_controls(line) do
+    line
+    |> then(&Regex.replace(@ansi_csi, &1, ""))
+    |> then(&Regex.replace(@ansi_osc, &1, ""))
+    |> then(&Regex.replace(@ansi_other, &1, ""))
+    |> then(&Regex.replace(@control_characters, &1, ""))
+  end
+
+  defp redact(line) do
+    if Enum.any?(
+         [@secret_assignment, @secret_option, @sshpass_option, @piped_secret],
+         &Regex.match?(&1, line)
+       ) do
+      "[redacted credential-bearing diagnostic]"
+    else
+      line
+    end
+  end
 
   defp scrub(value, depth) when depth >= @max_depth and (is_map(value) or is_list(value)),
     do: "[truncated: nested deeper than #{@max_depth}]"

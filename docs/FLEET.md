@@ -5,11 +5,13 @@ native subagents placed across it. This document is the whole of it — what a n
 what it reads from its environment, how nodes find each other, and what an operator
 types to bring a second machine up.
 
-There is no enrollment product. Nothing here copies a binary to another machine, opens
-an SSH connection, mints an invitation, or installs a service. An operator builds `ouro`
-on each machine (`make ouro`), copies the binary the way they copy any other binary, and
-then either copies one cluster-identity directory between the machines or sets the
-environment below by hand. `docs/proposals/core.md` §3 records that decision.
+Use **Devices** in the web or terminal client, or `ouro fleet setup` followed by
+`ouro fleet add`, for guided onboarding over OpenSSH. The deployment host installs a
+missing binary from a checksummed release, reviews the target and roster changes,
+issues a certificate for the target's own key, and configures a startup service.
+Tailscale or Headscale must already be installed and connected on both machines.
+See [Guided setup](#two-machines-over-ssh) for the ordinary path. The manual identity-copy and
+environment recipes below are advanced alternatives and transfer broader authority.
 
 ## Roles
 
@@ -197,15 +199,25 @@ command line is readable by every process on the host:
 
 | Flag | What it selects |
 |---|---|
-| *(none)* | the deployment host's own default SSH identities |
+| *(none)* | the deployment host's own default SSH identities, and then — if the target accepts none of them and offers password authentication — the target account's password, through the same masked prompt `--ask-password` uses |
 | `--key <PATH>` | one private key file on the deployment host, checked for ownership and mode. An encrypted key is asked for its passphrase in a masked prompt |
 | `--agent <FINGERPRINT>` | one identity held by this machine's SSH agent, pinned so the agent offers nothing else. No agent is forwarded and no key is exported |
 | `--ask-password` | the target account's password, typed into a masked prompt and used for that operation only |
 
+That fallback is why no surface needs an authentication picker: the ordinary answer is
+"this machine, this account", and the connection asks for a password only when it turns
+out to need one. It is the same `password` challenge, numbered the same way (*attempt 1
+of 3*), and a prompt for an encrypted key's passphrase is still the separate `passphrase`
+challenge that names the key. The method list stays `publickey,password` and nothing
+else: keyboard-interactive would let the far end compose the prompt text, and prompt text
+composed by a far end is never put in front of a person here.
+
 For an explicitly selected key or agent identity, the connection uses the normalized
 options with `-F /dev/null`, so additional `IdentityFile` entries cannot offer another
-key. Preflight still inspects the deployment host's SSH configuration and refuses
-unsupported destination rewriting or proxy routing.
+key. The default identity is the one case that reads the deployment host's own
+`~/.ssh/config`, because using this host's configured identities is what it means.
+Preflight still inspects that configuration and refuses unsupported destination rewriting
+or proxy routing.
 
 An unknown host key is always a separate explicit question showing its algorithm and
 SHA256 fingerprint; `--yes` accepts a reviewed plan but never a host key, never a
@@ -224,20 +236,35 @@ is refused rather than made.
 `--json` prints the operation's result with stable reason codes; incomplete setup exits
 non-zero even when some steps succeeded.
 
-One SSH ControlMaster socket is reused for the operation, so a password is typed once
-and retried up to three times, with a five-minute window to answer. Host-trust and
-review challenges use the same five-minute window.
+One SSH ControlMaster socket is reused for the operation, so a password is typed once and
+retried up to three times, with a five-minute window to answer. A connection refused for a
+reason that never asked for a password — a key the target will not take — is not retried
+three times: there is nothing for anyone to retype. Host-trust and review challenges use
+the same five-minute window.
 
-On this branch the Devices views (the web page at `/devices`, the terminal client's
-`ctrl+x D`) and the `fleet.devices` / `fleet.deployment.*` gateway methods drive this
-same engine through a detached worker; none of it is in a tagged release yet. "What has
-been exercised" below says which parts have run against real programs and which rest
+The Devices views (the web page at `/devices`, the terminal client's `ctrl+x D`) and
+the `fleet.devices` / `fleet.deployment.*` gateway methods drive this same engine
+through a detached worker. These commands and views are available in v0.1.9; fixes
+in an unreleased working tree reach clean targets only when matching Linux/macOS
+artifacts are built and distributed. "What has been exercised" below says which parts have run against real programs and which rest
 on tests alone.
 
-## Two machines, by hand
+If another admission changes the roster while a binary is transferring, Retry the
+same operation and review the updated plan. The prepared identity stays bound to
+that operation; credentials that were already issued are never silently reissued.
+Cancellation before issuance removes only that operation's uninstalled preparation.
+An older target that cannot perform that cleanup reports the residue and the
+`ouro fleet doctor` / `ouro fleet leave` recovery commands.
 
-Nothing below contacts a machine. An operator copies one directory, types four commands,
-and the two runtimes find each other.
+The download and upload stages report bytes and elapsed time. Upload progress counts
+bytes sent into SSH; the step completes only after the target verifies the checksum.
+
+## Two machines, by hand (advanced)
+
+The guided flow above keeps the CA key on the deployment host. This alternative
+copies it to the target and is intended for administrators managing identities by
+hand. The fleet commands below do not contact peers; the operator transfers the
+identity and updates each roster explicitly.
 
 `ouro fleet create` gives the first machine a cluster identity in `<data dir>/fleet/`: a
 fleet id, a node name, a private 64-hex cookie at mode 0600, a self-signed CA, a node
@@ -292,7 +319,9 @@ deadline and a bounded read. It contacts no device, opens no SSH connection, and
 nothing. A discovered peer's Ouroboros state is `discovered_installation_unknown`: nothing
 here has inspected one, so nothing here calls one uninstalled.
 
-The client is found on `$PATH`, then at the usual macOS and Linux locations. Set
+The client is looked for at the usual macOS and Linux locations, then on `$PATH`; a
+client that runs but answers with no status document, or fails outright, is skipped for
+the next candidate, while a permission refusal is the answer and stops the search. Set
 `OUROBOROS_TAILSCALE` to name a different one. It must be **absolute** — a relative name
 would let the directory you happen to be standing in decide which program runs as your
 network client — and an override that is not an absolute path to an executable file is a
@@ -326,6 +355,12 @@ let any device on the network claim a member's row by renaming itself, and show 
 platform and presence under your member's address. A device that does adopt a member's
 name is listed under **Available on this network** as the separate device it is, with
 `name_conflicts_with_roster` in `--json` and a note in the human list.
+
+Every `--json` device row also carries `suggested_machine`: a valid machine name for that
+device — its roster name if it has one, otherwise one derived from its display name, or
+`null` when nothing valid can be derived — so a surface can pre-fill a setup form without
+offering a name the validator will refuse. It is for forms only; the human `ouro fleet
+devices` never prints it, and nothing is named by it until a person submits it.
 
 Human output reads as prose; the snake_case `state` codes are the `--json` contract and
 appear only there.
@@ -426,7 +461,7 @@ with `ouro stop --require-idle` before retrying installation.
 
 | Platform | What the service does, and what it does not |
 |---|---|
-| Linux with a reachable `systemctl --user` | A user unit with `Restart=on-failure`, `RestartSec=5` and a `StartLimitIntervalSec=300`/`StartLimitBurst=5` ceiling, wanted by `default.target`. Surviving logout and starting at boot requires lingering: `status` reports `loginctl show-user <you> --property=Linger` and, when it is off, says outright that this is a login-scoped service and names `loginctl enable-linger` as the administrator's step. When `loginctl` cannot be asked, lingering is reported as unknown rather than assumed. |
+| Linux with a reachable `systemctl --user` | A user unit with `Restart=on-failure`, `RestartSec=5` and a `StartLimitIntervalSec=300`/`StartLimitBurst=5` ceiling, wanted by `default.target`. Surviving logout and starting at boot requires lingering, so `install` runs `loginctl enable-linger <you>` once the unit is loaded — on a stock polkit policy an account may enable its own — and reports the boot-time start it then has. When that is refused, `status` reports `loginctl show-user <you> --property=Linger`, says outright that this is a login-scoped service, and names `loginctl enable-linger` as the administrator's step. When `loginctl` cannot be asked, lingering is reported as unknown rather than assumed. |
 | macOS with a logged-in user session | A LaunchAgent in `~/Library/LaunchAgents` with `RunAtLoad`, `KeepAlive` restricted to unsuccessful exits, and a 30 second `ThrottleInterval`. `ProcessType` is `Adaptive`, not `Background`: a Background job is held to a throttled I/O band, which is right for a backup agent and wrong for a runtime that answers an operator. It starts at login and stops with the login session; there is **no pre-login execution**, so the machine is not reachable between a reboot and the next login. |
 | Anything else | `install` refuses with the prerequisite named — log in to the desktop session, or provide a reachable systemd user manager — and installs nothing. Start the runtime with `ouro daemon` and supervise it yourself; nothing here claims persistent startup it cannot deliver. |
 
@@ -609,12 +644,12 @@ Fleet views are *observations*: bounded per-node answers merged at read time, wi
 unreachable nodes named. Nothing here is membership consensus, quorum, or a partition
 policy.
 
-## Deploying onto another machine — not yet shipped in a release
+## Deployment worker and gateway
 
-**This section describes work in progress.** The Elixir broker below is in the tree; the
-Rust deployment worker it talks to is being built alongside it and is not in a released
-`ouro`. On a runtime whose `ouro` does not serve `fleet worker start`, every verb here
-answers a stable reason code — it does not appear to work.
+The web and terminal Devices views use the deployment worker through these gateway
+methods. The worker ships with `ouro`; its executable must match the runtime. A
+runtime paired with an older executable that lacks `fleet worker start` reports a
+stable refusal rather than starting an incomplete operation.
 
 A deployment is long, interruptible, and carries an SSH credential, so the work does not
 happen inside the runtime that was asked for it. `Ouroboros.Fleet.Deployment` is a broker,
@@ -623,8 +658,17 @@ not an executor:
 1. **It states the request in a private file.** Which machine, which SSH account, which
    port, which identity *reference*, which paths — or, for the first *local* fleet, none of
    those: `kind: "setup"` configures this machine without SSH to itself, so it carries only
-   what this device should be called and the private address its runtime will bind. Written
-   to
+   what this device should be called and the private address its runtime will bind. A third
+   kind, `kind: "leave"`, removes a machine that is already in this machine's roster: it
+   carries the member's name and host, the account to reach it with, the port and the
+   identity reference, and optionally `install_path` when `ouro` is somewhere unusual on
+   that machine. The *address* is read out of this machine's own `fleet/profile.json`
+   rather than taken from the caller, so that the machine named is the machine contacted,
+   and a member name that is not in the roster is refused with the roster listed.
+   Everything else about how the member was deployed — including its
+   `OUROBOROS_DATA_DIR` — is read back out of the journal of the operation that admitted
+   it, so a surface never has to remember it. Unknown keys are refused, so a request
+   carries these and nothing else. Written to
    `<data dir>/deploy/<operation>.request.json`, 0600 in a 0700 directory, atomically
    (an exclusive temporary inode chmodded before the first byte, then renamed) and as
    canonical JSON bounded at 64 KiB. Deliberately **not** on the command line: `ps` is
@@ -656,11 +700,17 @@ not an executor:
    that writes past that cap loses its connection and nothing else.
 4. **It reconnects by instance, not by path.** A socket that exists is not evidence that the
    worker which printed it is the process listening on it.
-5. **It reads the journal when no worker is alive.** `<data dir>/deploy/<id>.json` is
+5. **It reads the journal when no worker is alive**, and the worker's own log when the
+   journal has nothing to say. `<data dir>/deploy/<id>.json` is
    the operation's durable authority, written by the worker before and after every
    externally visible step. The broker opens it read-only and sanitizes what it returns; it
    never writes one, because a broker that repaired a journal would be inventing steps the
-   target machine never saw.
+   target machine never saw. A worker that dies *before* it can journal anything leaves an
+   operation sitting at `inspecting` with no error on it, so a journal answer for an
+   unfinished operation also carries `worker_exit.last_lines`: the last three non-empty
+   lines of `<id>.log`, read from the tail, sanitized the way a journal is and cut to three
+   hundred characters each. Nothing wrote that file under a contract, which is exactly why
+   it is read defensively.
 
 What that buys: closing the page does not cancel a deployment, and neither does stopping
 the runtime — which is what lets the *first local fleet setup* restart the very runtime
@@ -680,6 +730,28 @@ browser's *cookie* id is not that session — one cookie per browser, read by ev
 LiveView mints its own with `Ouroboros.Web.Call.view_session/0` and passes it as `session:`
 on deployment calls.
 
+The session half of that binding lasts exactly as long as the session. A surface passes its
+id to `Ouroboros.Fleet.Deployment.subscribe/2` as well as on its calls, the broker monitors
+the subscriber, and when the last process speaking for a session goes down every challenge
+still open on it is **unbound**, with an audit line naming the operation and the challenge.
+The identity half never lapses — another administrator still needs an explicit takeover — and
+a consumed challenge stays consumed. This is what the binding was always for: a *second* tab
+open at the same time must not answer the first one's prompt. A tab that has been closed is
+not a second tab, and leaving its prompt bound stranded the operation behind a page that no
+longer existed, with `resume` refusing `already_attached` because the detached worker was
+still perfectly alive. An explicit `unsubscribe` releases nothing: a page that unsubscribed
+is a closed drawer, not a closed tab.
+
+Two things are released, not one, because a deployment asks more than once — a review then a
+password, a host key then a password, an attempt then a second attempt. The challenges that
+are *open* are unbound, and so is the **connection's own binding**, which is what every
+challenge issued afterwards would otherwise be stamped with: the connection names the tab
+that opened the socket, and that tab may have been closed an hour ago. Releasing only the
+open ones let the surviving tab press Remove and then refused it the password a second
+later. The first answer after a release says which tab took over and the connection binds to
+it again, so the window in which any of that operator's tabs may answer is the gap between
+the tab closing and the next answer, and not the rest of the operation.
+
 **Ownership.** The journal records the identity that started an operation. `status` and
 `cancel` refuse a different one; `resume` refuses it too, and additionally refuses a journal
 whose owner this build cannot establish, because a resume attaches under the *resuming*
@@ -693,8 +765,13 @@ field would break recovery without protecting anything.
 deployment verbs enforce the same answer: `prepare`, `start`, `authenticate` and `resume`
 refuse `deploy_blocked` carrying the blockers. A disabled button is a rendering, not a
 boundary. `cancel` is never blocked — an operator must be able to stop a deployment on a
-host that may no longer start one — and a `setup` is exempt from `no_ca_key` alone, because
-the first local fleet is what creates that key.
+host that may no longer start one. Two blockers are exempted by kind rather than applied
+flatly: `no_ca_key` does not stop a `setup`, because the first local fleet is what creates
+that key, and it does not stop a `leave`, because removing a member issues nothing.
+`dev_runtime` runs the other way and stops a `setup` and nothing else — a runtime started
+from a checkout cannot boot under a fleet profile, so setting *this* machine up from one
+builds a fleet it can never start, while an `add` or a `leave` from the same runtime acts
+on another machine's installation and is unaffected.
 
 **Authorization.** Every verb here needs an administrator once identities are configured —
 the network inventory as much as the mutations, because a tailnet inventory is every machine

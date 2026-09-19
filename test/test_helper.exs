@@ -36,4 +36,11 @@ Enum.reduce_while(1..40, :error, fn attempt, _acc ->
   end
 end)
 
+# This suite is a Mix runtime, so `Ouroboros.Fleet.Deployment`'s `dev_runtime` blocker would
+# otherwise be true for every case — and that blocker refuses a local `setup`, which is a
+# path several suites have to be able to drive end to end. Declared packaged here so the
+# default is the interesting one; the case that asks what a *dev* runtime answers deletes
+# this key for its own duration and gets the runtime's own answer back.
+Application.put_env(:ouroboros, :dev_runtime, false)
+
 ExUnit.start(exclude: [:live_native])

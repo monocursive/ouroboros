@@ -472,7 +472,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       error =
         call(client, "fleet.deployment.prepare", %{
-          "target" => %{"address" => "100.64.12.44"}
+          "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"}
         })["error"]
 
       assert error["code"] == -32_602
@@ -497,21 +497,55 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       assert error["message"] =~ "fleet.devices"
     end
 
-    test "an add names the machine from the peer id when no machine is given", context do
+    test "an add refuses a target that names no machine, and says where a name comes from",
+         context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      # The build this replaces fell back to the peer id, and then to the address. Neither
+      # is a machine name, the worker refused both, and that is why "Deploy to an address"
+      # was a form that could not succeed (review finding 2).
+      for target <- [
+            %{"address" => "100.64.12.44"},
+            %{"address" => "100.64.12.44", "peer_id" => "nkBuildLinux"},
+            %{"address" => "100.64.12.44", "machine" => ""}
+          ] do
+        error =
+          call(client, "fleet.deployment.prepare", %{"target" => target, "ssh_user" => "deploy"})[
+            "error"
+          ]
+
+        assert error["code"] == -32_602
+        assert error["message"] =~ "a machine name is required"
+        assert error["message"] =~ "suggest one from fleet.devices `suggested_machine`"
+      end
+
+      refute_receive {:fake_worker, _frame}, 300
+    end
+
+    test "an add takes the machine the caller named, and the peer id is not one", context do
       arrange_worker(context)
       client = connected(scope: :operate)
 
       assert call(client, "fleet.deployment.prepare", %{
-               "target" => %{"address" => "100.64.12.44", "peer_id" => "nkBuildLinux"},
+               "target" => %{
+                 "address" => "100.64.12.44",
+                 "machine" => "build-linux",
+                 "peer_id" => "nkBuildLinux"
+               },
                "ssh_user" => "deploy"
              })["result"]
 
       assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
       request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
 
-      assert request["machine"] == "nkBuildLinux"
+      assert request["machine"] == "build-linux"
       assert request["address"] == "100.64.12.44"
       assert request["ssh_port"] == 22
+
+      # The peer id is the network client's key for a device, not something the worker is
+      # told to connect to, so it never reaches the request at all.
+      refute Map.has_key?(request, "peer_id")
     end
 
     test "an identity is translated into the shape the worker names it by", context do
@@ -528,7 +562,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
           ] do
         result =
           call(client, "fleet.deployment.prepare", %{
-            "target" => %{"address" => "100.64.12.44"},
+            "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
             "ssh_user" => "deploy",
             "identity" => given
           })["result"]
@@ -561,7 +595,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       for kind <- ["agent", "key"] do
         error =
           call(client, "fleet.deployment.prepare", %{
-            "target" => %{"address" => "100.64.12.44"},
+            "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
             "ssh_user" => "deploy",
             "identity" => %{"kind" => kind}
           })["error"]
@@ -575,11 +609,205 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       arrange_worker(context)
       client = connected(scope: :operate)
 
-      error = call(client, "fleet.deployment.prepare", %{"kind" => "leave"})["error"]
+      error = call(client, "fleet.deployment.prepare", %{"kind" => "forget"})["error"]
       assert error["code"] == -32_602
-      assert error["message"] =~ "params.kind must be setup or add"
+      assert error["message"] =~ "params.kind must be setup, add or leave"
 
       refute_receive {:fake_worker, _frame}, 300
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Removing a member, which the engine has always been able to do and this could not ask for
+
+  describe "prepare kind leave" do
+    test "writes the request `ouro fleet leave` would write, with the roster's address",
+         context do
+      write_profile(context.root, [
+        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"},
+        %{"machine" => "old-pi", "host" => "100.64.12.10", "node" => "ouro@old-pi"}
+      ])
+
+      %{worker: worker} = arrange_worker(context)
+      client = connected(scope: :operate)
+
+      prepared =
+        call(client, "fleet.deployment.prepare", %{
+          "kind" => "leave",
+          "target" => %{"machine" => "old-pi"},
+          "ssh_user" => "pi",
+          "port" => 2222,
+          "identity" => %{"kind" => "key", "ref" => "/home/a/.ssh/id_ed25519"},
+          "remote_executable" => "bin/ouro"
+        })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      assert FleetWorkerFake.refusals(worker) == 0
+
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      # Field for field, what `leave_machine` in `tui/src/fleet_setup/cli.rs` fills in: the
+      # kind, the roster name the operator typed, the address read out of this machine's own
+      # profile rather than taken from the caller, the account, the port, and the identity
+      # by reference.
+      assert request == %{
+               "schema" => 1,
+               "operation" => prepared["operation_id"],
+               "kind" => "leave",
+               "machine" => "old-pi",
+               "address" => "100.64.12.10",
+               "ssh_user" => "pi",
+               "ssh_port" => 2222,
+               "identity" => %{"kind" => "key", "path" => "/home/a/.ssh/id_ed25519"},
+               "install_path" => "bin/ouro"
+             }
+    end
+
+    test "defaults the port and the identity exactly as an add does", context do
+      write_profile(context.root, [
+        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"}
+      ])
+
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "kind" => "leave",
+               "target" => %{"machine" => "build-linux"},
+               "ssh_user" => "deploy"
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      assert request["ssh_port"] == 22
+      assert request["identity"] == %{"kind" => "default"}
+
+      # Nothing is installed by a leave, so the two fields that say where to install and
+      # whether to run a service are not on the request at all.
+      refute Map.has_key?(request, "service")
+      refute Map.has_key?(request, "remote_data_dir")
+    end
+
+    test "matches a roster name the way the rest of the fleet matches one", context do
+      write_profile(context.root, [
+        %{"machine" => "BuildBox", "host" => "100.64.12.44", "node" => "ouro@buildbox"}
+      ])
+
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "kind" => "leave",
+               "target" => %{"machine" => "buildbox"},
+               "ssh_user" => "deploy"
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+
+      # The operator's spelling is what the operation is called, and the roster's entry is
+      # what says where to go.
+      assert request["machine"] == "buildbox"
+      assert request["address"] == "100.64.12.44"
+    end
+
+    test "refuses a machine that is not in the roster, and names the roster", context do
+      write_profile(context.root, [
+        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"},
+        %{"machine" => "old-pi", "host" => "100.64.12.10", "node" => "ouro@old-pi"}
+      ])
+
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "kind" => "leave",
+          "target" => %{"machine" => "nowhere"},
+          "ssh_user" => "deploy"
+        })["error"]
+
+      assert error["code"] == -32_602
+      assert error["message"] =~ "is not in this machine's roster"
+      assert error["message"] =~ "build-linux, old-pi"
+
+      refute_receive {:fake_worker, _frame}, 300
+    end
+
+    test "refuses a leave with no machine, and one from a machine with no roster", context do
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      # No roster at all: there is nothing to name, and the message says that rather than
+      # listing an empty set.
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "kind" => "leave",
+          "target" => %{"machine" => "build-linux"},
+          "ssh_user" => "deploy"
+        })["error"]
+
+      assert error["code"] == -32_602
+      assert error["message"] =~ "this machine has no roster"
+
+      write_profile(context.root, [
+        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"}
+      ])
+
+      for params <- [
+            %{"kind" => "leave", "ssh_user" => "deploy"},
+            %{"kind" => "leave", "target" => %{}, "ssh_user" => "deploy"}
+          ] do
+        error = call(client, "fleet.deployment.prepare", params)["error"]
+        assert error["code"] == -32_602
+        assert error["message"] =~ "required for a leave"
+        assert error["message"] =~ "name one of build-linux"
+      end
+
+      # And the account is required for a leave exactly as it is for an add: this machine
+      # has to log in to the member it is removing.
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "kind" => "leave",
+          "target" => %{"machine" => "build-linux"}
+        })["error"]
+
+      assert error["message"] =~ "params.ssh_user"
+
+      refute_receive {:fake_worker, _frame}, 300
+    end
+
+    test "is exempt from no_ca_key, because removing a member issues nothing", context do
+      File.rm!(Path.join([context.root, "fleet", "ca-key.pem"]))
+
+      write_profile(context.root, [
+        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"}
+      ])
+
+      arrange_worker(context)
+      client = connected(scope: :operate)
+
+      assert call(client, "fleet.deployment.prepare", %{
+               "kind" => "leave",
+               "target" => %{"machine" => "build-linux"},
+               "ssh_user" => "deploy"
+             })["result"]
+
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      # Every other blocker still applies to it.
+      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
+
+      error =
+        call(client, "fleet.deployment.prepare", %{
+          "kind" => "leave",
+          "target" => %{"machine" => "build-linux"},
+          "ssh_user" => "deploy"
+        })["error"]
+
+      assert error["data"]["reason"] == "deploy_blocked"
+      assert "cleartext_web_bind" in error["data"]["blockers"]
     end
   end
 
@@ -832,7 +1060,10 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   # Helpers
 
   defp prepare_params do
-    %{"target" => %{"address" => "100.64.12.44"}, "ssh_user" => "deploy"}
+    %{
+      "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
+      "ssh_user" => "deploy"
+    }
   end
 
   defp arrange_devices(context, document) do
@@ -980,6 +1211,31 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       :ok -> :ok
       :missing -> flunk("the broker never recorded challenge #{challenge}")
     end
+  end
+
+  # This machine's roster, which is where a `leave` reads the member's address from. The
+  # shape is `fleet::Profile`'s, cut to what this side reads.
+  defp write_profile(root, members) do
+    dir = Path.join(root, "fleet")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "profile.json")
+
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "schema" => 1,
+        "fleet_id" => "f0000000000000000000000000000000",
+        "name" => "home",
+        "machine" => "studio",
+        "host" => "100.64.0.1",
+        "node" => "ouro@studio",
+        "role" => "issuer",
+        "members" => members
+      })
+    )
+
+    File.chmod!(path, 0o600)
+    path
   end
 
   defp write_journal(root, operation, document) do

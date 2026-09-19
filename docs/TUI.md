@@ -2621,131 +2621,249 @@ rail is holding on an open stream, which `ouro agents` does not have.
 
 `ctrl+x D` (`leader.devices`), `/devices`, the palette's **Devices** row and a `d` in
 Settings' **F3 Runtime** section all open one view: the machines this runtime can see,
-and the deployment of Ouroboros onto one of them
-([devices.rs](../tui/src/ui/app/devices.rs)). It is the terminal half of the proposal's
-"Devices UI and deployment experience"; the web page at `/devices` draws the same
-inventory, the same fields, the same confirmations, the same challenge kinds and the same
-progress states, and the row both surfaces are named from is `runtime.devices` in
-`priv/ui/commands.json`.
+and putting Ouroboros onto one of them
+([devices.rs](../tui/src/ui/app/devices.rs)). It is the terminal half of
+`docs/design-qa/fleet-ux-review-2026-09-18.md` §5; the web page at `/devices` draws the
+same rows, the same drawer steps and the same words, and the row both surfaces are named
+from is `runtime.devices` in `priv/ui/commands.json`.
 
 **Nothing in the view does any work.** Discovery, SSH, artifact verification and roster
 writes run on the *deployment host* — the machine hosting the runtime this client is
 attached to, which for a connected TUI is no more this laptop than it is a browser's. The
-view issues eight methods (`fleet.devices`, `fleet.deployment.prepare|status|start|
+view issues nine methods (`fleet.devices`, `fleet.deployment.prepare|status|start|
 authenticate|confirm_host|cancel|resume`, and `fleet.status` as the non-administrator
-fallback) and draws what comes back. The permanent header `Deploying from <host> · local
-user <account>` is on every screen of the flow, because a credential typed into the wrong
-host's prompt is the failure the header exists to prevent.
+fallback) and draws what comes back. Whose machine that is used to be a boxed three-line
+panel at the top of every screen; it is now **one quiet line**, `Actions run on ‹host› as
+‹account›.`, under the title of the list and again as the caption inside every form and
+every operation screen. The fact it exists for is the same one — a credential typed into
+the wrong host's prompt — and it is on every screen of the flow.
+
+**The list.** One line per device: name, OS, address, presence, Ouroboros, and the one
+thing you can do about it.
+
+```
+Devices
+Fleet of studio · 2 of 3 machines connected
+Actions run on studio as ada.
+
+> This Mac      macos   100.64.12.21    ● online                 in the fleet     Open
+  raspberrypi   linux   100.83.203.10   ● online                 not set up       Add to fleet
+  nostromo      linux   100.108.85.110  ○ offline, seen 3 days ago  offline        —
+```
+
+The self row is first and is labelled from the host's own OS — **This Mac** when
+`host.os` is `darwin`, **This machine** otherwise — then roster members, then the peers
+discovery found. No Fleet/Available split, no legend, no six lines per device. Above the
+list is one status line: `This Mac is not in a fleet yet` on a standalone machine, or
+`Fleet of ‹name› · N of M machines connected`. On a standalone machine that status line
+**is** the blocker sentence; it is not said a second time in a paragraph underneath.
+
+The Ouroboros column is one of `in the fleet`, `in the fleet · not connected`,
+`not set up`, `can't run Ouroboros`, `offline`, `setting up…`, `waiting for you`,
+`setup failed`, `set up just now` — the last four from the operation on that row rather
+than from the device's state. An operation's **kind** is half of what those four say: a
+removal reads `removing…`, `removal failed` and `removed just now`, so a finished
+removal next to an **Add to fleet** button says the machine was taken out rather than
+congratulating the operator on a setup that never happened — which is what a live
+*Remove from fleet* against a Raspberry Pi was told.
+`DeviceState::label()` is still where the *CLI's* wording
+lives and `a_state_code_maps_to_the_words_the_cli_prints` still pins this view against
+the serializer; the shorter vocabulary a row reads is
+`DeviceRow::ouroboros_word`, pinned the same way by
+`every_state_lands_on_one_of_the_columns_nine_phrases`, so a variant added to
+`fleet_network` fails a test rather than reaching an operator through a fallback that
+prints its code. The action column is one button or nothing: **Set up this
+Mac**, **Add to fleet**, **Open**, **Continue**, **Retry**, or an em dash. A row that
+cannot be acted on carries no button, and a runtime whose `capabilities` refuse the
+action carries none either: an inert action is the acceptance-10 failure said twice on
+one screen. **Open** leaves the view for the Dashboard's machines panel, which is where
+that machine's sessions are.
+
+Presence on a row is a dot, a word and a *relative* time (`○ offline, seen 3 days ago`);
+the exact observation time is one line down. Every column is bounded and padded by
+`column()`, so a hostile name cannot push the column beside it along — the boundary is a
+fact about the row rather than an alignment the longest value happens to respect.
+
+**The details panel** is three or four lines under the list, for the row under the
+cursor: the address (with the path and the roster name when there are any), the presence
+with its exact timestamp, the runtime's own facts when this runtime holds any
+(`runtime connected · compatible build · probed ‹time›`), the latest operation for that
+device from the operations list, and — when the row has no button — the reason. A
+blocker that belongs to the *host* is true of every row at once, so it is one line above
+the list instead. `x Remove ‹machine› from the fleet` is offered here, on a member's own
+details, and not on the row.
 
 **Two sources, kept apart.** `fleet.devices` merges this machine's roster with what the
 network client can see, and neither is the runtime's own answer to "is that machine here,
-now" — so a member whose runtime this one is connected to read "in the fleet, not visible
-on this network" whenever the client could not see it. Member rows now carry `connected`,
-`compatible`, `runtime_running` and `last_probe` from the cluster, and their `state`
-becomes `fleet_member_connected`, which the row draws as **connected now · View device**.
-The `network` line stays the network's answer (`online`, `last_seen`); a separate
-`runtime` line carries the cluster's ("runtime connected · compatible build · probed
-‹time›"). A row where the two disagree is a real and useful thing to show — a machine
-reachable over BEAM but invisible to the network client is a different problem from one
-that is neither — and `null` throughout means "not known", so a device that has never
-been in a fleet carries no runtime line at all rather than reading as disconnected. A
-state string this build has no words for is named in a sentence; the column is never
-blank.
+now". Member rows carry `connected`, `compatible`, `runtime_running` and `last_probe`
+from the cluster, and `state` becomes `fleet_member_connected`. The presence column stays
+the network's answer (`online`, `last_seen`); the details panel's `runtime` line carries
+the cluster's. A row where the two disagree is a real and useful thing to show, and
+`null` throughout means "not known", so a device that has never been in a fleet carries
+no runtime line at all rather than reading as disconnected. A state string this build has
+no words for is named in a sentence and gets no button; the column is never blank.
 
-**View device and Diagnose.** Enter on a known member opens a read-only panel of what
-`fleet.devices` already carries: connected, compatible, runtime_running, last_probe,
-roster name versus network name, address and path, and the most recent operation for
-that device from the operations list. **Diagnose** is the same panel for a disconnected
-member, with its blockers named and an explicit Refresh (`r`). Esc returns to the list.
-Nothing in the panel starts SSH or a new gateway method; hostile strings go through the
-same `ignorable()` + width caps as the list.
+**Search and filter appear only past eight rows.** A working home network of four devices
+split into two sections with a search box and three filter buttons was the presentation
+failure; below the threshold `/` and `f` are not drawn and do nothing. Past it, `/`
+searches by name or address and `f` cycles all → fleet → available. `r` refetches at any
+length. The hint line lists the keys that work: `↑↓ select · Enter act · a add by address
+· x remove (members) · r refresh · Esc close`, with `/ search · f filter` added when the
+list is long enough to have them.
 
-**The inventory** is two sections — *Fleet devices* and *Available on this network* —
-merged by `ouro fleet devices --json` on the deployment host and rendered here with the
-state in words rather than codes: `DeviceState::label()` is the one place those words
-live, and `a_state_code_maps_to_the_words_the_cli_prints` pins this view against it.
-`r` refetches, `/` searches by name or address, `f` cycles the fleet/available filter.
-Each way discovery can fail has its own empty state, in `Inventory::headline`'s wording.
-A device that adopts a roster machine's name is listed as itself with a note and is never
-merged into the member it is imitating. Every string a *device* supplies goes through
-`fleet_network::human`, the same bounding the CLI's row renderer applies, so a hostname
-carrying escapes, bidi overrides or a forged four-line row cannot draw one
-(`tests/fixtures/tailscale/hostile-names.json` is the capture that tries). `scrub` adds
-what bounding alone leaves behind: the default-ignorable code points, so
-`bui<U+200B>ld-linux` is not a second device that reads as the first. The name column
-ends at a fixed width with a visible separator before the action, so a name cannot run
-into the column beside it and wear this build's words. The same scrubbing covers the
-strings that arrive as `String` rather than as JSON — a gateway's refusal `message` among
-them.
+**Discovery failure is one inline notice** quoting the client's own words:
+*Tailscale did not answer from this runtime: "The Tailscale GUI failed to start". Devices
+already in the fleet are still listed.* Never a claim about build age — that was a guess,
+and a wrong one. The `detail` the runtime carries is what is quoted.
 
-**The deploy flow** is the proposal's five steps. Select and connect asks for the SSH
-username — required, and never inferred from the network client's owner — with port,
-identity and paths as advanced fields. The roster identity is pre-filled only when the
-peer's hostname is already a valid machine name and does not collide with a roster
-member; otherwise the field starts blank and the hostname is drawn as a hint next to
-it. **Set up this device** is the same flow with none
-of them: `fleet.deployment.prepare {kind: "setup"}` takes a machine name and this host's
-own overlay address, because the spec is explicit that a machine configures itself
-without SSH to itself. It answers to a shorter blocker list than Deploy — every reason
-except `no_ca_key`, because a machine with no fleet has no certificate authority and is
-exactly the machine first setup exists for. Gating it on that made the action impossible
-on the only kind of machine that needs it, and a machine with no profile reads
-"This machine is not set up yet — use Set up this device" rather than being sent to open
-Devices on a machine that does hold the key. Its plan is reviewed exactly like any other, and the runtime
-restart it needs arrives here as an interruption that reconnects and reloads by operation
-id rather than as an operation that vanished.
+**Add to fleet** (`kind: "add"`) asks for the name in the fleet, the address and the SSH
+user, with *port, SSH key, install path, data directory, agent fingerprint, start at
+login* behind an **Advanced** disclosure that is a row of the form — Enter or space opens
+it, and nothing re-renders it shut behind somebody's typing. The name is pre-filled from
+the row's `suggested_machine` and **never** from `name`: a display name is not a machine
+name, and seeding the field from one is what put "Monocursive's MacBook Pro" and
+`this device` into both surfaces' forms. `suggested_machine: null` leaves the field
+empty, and submitting it empty is refused on that field.
 
-Then the broker is the authority for every screen after it: `fleet.deployment.status` is
-polled about once a second, its `state` names the stage, and its open challenge names the
-question. `host_trust` shows the algorithm, the SHA256 fingerprint and the address, port
-and account it belongs to, with an explicit `t` and `n` and the line saying to verify the
-fingerprint independently; `Enter` is not an answer. `password` and `passphrase` are
-separate prompts labelled from their own metadata, read where the *broker* leaves it.
-Seam S4 describes those fields as fields of the challenge, the worker sends them one
-level down under `metadata`, and `Fleet.Deployment.Client.challenge_metadata/1` lifts
-them back up — so `challenge["plan_digest"]` is the read that runs, with the worker's own
-nested spelling kept as a fallback so a broker that stopped lifting would not empty every
-prompt in silence. A drift test pins both by calling the real builders rather than by
-agreeing with a fake.
+**There is no authentication picker.** The default SSH identity is used; when the target
+asks for a password the worker raises the `password` challenge and the operation screen
+asks for it. A specific key file or agent fingerprint is two named Advanced fields, and
+naming both is refused rather than guessed between.
 
-**The plan is decoded here, not handed to the local renderer.** `PlanView` reads the
-document into fields that are already scrubbed and bounded and holds both digests to 64
-lowercase hex; a plan whose `release.sha256` is not one is refused rather than drawn,
-because `Plan::render` byte-slices that field and a multibyte one panicked the whole
-client. Every row of the review is built from a decoded field rather than by splitting a
-rendered block on newlines, so a `target.machine` carrying its own newlines and padding
-cannot forge an aligned `grants  none` row into its own review. And `a` approves the
-digest **this client computed** over the plan it drew, refusing when the challenge claims
-a different one: taking the claim on trust meant a plan could be swapped under a review
-with nothing on screen to notice.
+**Add a device by address** (`a`) is the same form with nothing pre-filled and the
+address editable. The name is required here too: without a name field at all the worker
+took the address as the machine name and refused it, so that path could never succeed.
+Fixed addresses on discovered-device and local-setup forms remain visible as read-only
+context, without adding a keyboard stop.
+
+**Set up this Mac** (`kind: "setup"`) is the first local fleet: a name, the address
+discovery gave, a *start at login* checkbox, and the sentence *Ouroboros restarts once
+during setup; this view reconnects by itself.* No account and no host key, because a
+machine does not reach itself over SSH. It answers to a shorter blocker list than an
+admission — every reason except `no_ca_key`, because a machine with no fleet has no
+certificate authority and is exactly the machine first setup exists for. `dev_runtime`
+goes the other way: it blocks **only** setup (*This is a development runtime; the
+packaged `ouro` is what sets a machine up.*), because a Mix dev runtime can drive a
+deployment onto another machine perfectly well and cannot be the thing installed here.
+
+**Remove from fleet** (`x` on a member) prepares `kind: "leave"` with `target.machine` —
+the roster name, never the address — the SSH user and the port. It says what it does and
+what it does not: *Stops Ouroboros on ‹machine›, retires its credentials and takes it out
+of every roster. Its sessions and data stay on that machine.* `x` on this machine or on a
+device that is not a member opens nothing and says so on the hint line. A removal that
+**never reached the machine** — a failure with no step recorded against it, and no
+refusal code of the engine's own — ends with the roster fallback, spelled the way the CLI
+takes it: *‹machine› did not answer, so nothing on it was changed. To take it out of this
+fleet's roster anyway, run `ouro fleet sessions forget --machine ‹machine›
+--accept-state-loss` on this machine, and on every other machine in the fleet.* That
+sentence appears nowhere else: on the form, during the operation, or after a failure the
+machine itself answered, it would be telling an operator a machine is gone while the
+thing that would prove it is still running.
+The command uses the full validated roster machine name, never the shortened list label.
+
+**Then the broker is the authority** for every screen after `prepare`:
+`fleet.deployment.status` is polled about once a second, its `state` names the stage, and
+its open challenge names the question. `host_trust` is headed *First time connecting to
+‹address›* and shows the algorithm, the SHA256 fingerprint and the address, port and
+account it belongs to, with an explicit `t` and `n` and the line saying to verify the
+fingerprint independently; `Enter` is not an answer. `password` is headed *Password for
+‹user›@‹target›* and `passphrase` names the key instead, both labelled from their own
+metadata read where the *broker* leaves it. Seam S4 describes those fields as fields of
+the challenge, the worker sends them one level down under `metadata`, and
+`Fleet.Deployment.Client.challenge_metadata/1` lifts them back up — so
+`challenge["plan_digest"]` is the read that runs, with the worker's own nested spelling
+kept as a fallback so a broker that stopped lifting would not empty every prompt in
+silence. A drift test pins both by calling the real builders rather than by agreeing with
+a fake.
+
+**The review is five plain lines**, headed from the plan's own kind — *Ready to deploy*
+with `a  Deploy` for an `add`, *Ready to set up* with `a  Set up` for a `setup`, *Ready
+to remove* with `a  Remove` for a `leave`, and the footer hint carrying the same word as
+the key above it. A removal's five lines are its own (*Stop Ouroboros on ‹machine› and
+disable its start at login · Retire ‹machine›'s credentials · Update N rosters · Its
+sessions and data stay on that machine*, and the trust sentence); the startup line is not
+among them, because how a machine starts at login is not a fact about taking it out of
+the fleet. An `add`'s five lines are: what is installed and where
+with its checksum, what the machine joins as, how it starts, how many rosters change, and
+one sentence about trust. The digest is under them in mono. It is not a field table of
+every decoded value — that was the specification, rendered. Every line is built here,
+from a decoded field, rather than by splitting a rendered block on newlines, so a
+`target.machine` carrying its own newlines and padding cannot forge an aligned row into
+its own review. `PlanView` holds both digests to 64 lowercase hex and refuses a
+`release.sha256` that is not one, because `Plan::render` byte-slices that field and a
+multibyte one panicked the whole client. And `a` approves the digest **this client
+computed** over the plan it drew, refusing when the challenge claims a different one.
+
+**Progress is a stage strip** — `✓ Inspect · ✓ Install · ● Join fleet · ○ Start at
+login · ○ Connect · ○ Ready` — built from the worker's own steps rather than from a state
+name, with the current step's detail under it and the worker's step list below that. A
+`leave` draws its own five: `Inspect · Stop · Disable startup · Leave · Update rosters`,
+collecting the engine's `inspect`, `stop_runtime`, `disable_service`,
+`verify_disconnected`, `leave` and `member_preflight`/`roster` steps in that order.
+`fleet.deployment.status` carries **no `kind`**, so the kind travels with the operation
+the view opened and is handed to the strip; reading the snapshot alone is how a removal
+drew the add flow's six stages and filed its roster removal under *Join fleet*. A stage
+no step ever named, on an operation that finished, is `– Ready (not checked)` rather than
+a tick: a successful add whose steps stop at `connect` reported no readiness at all, and
+ticking it was this screen inventing a check nobody made. In screen-reader mode each mark
+is the word it stands for (`Inspect done · Install now · Ready not checked`), because a
+glyph is not something a screen reader announces usefully.
+
+**Finishing** names the machine (*‹machine› is in your fleet*), draws the worker's own
+`summary` and `next`, the stage strip when there are steps to draw, and offers **Open**
+and **b Done**. It no longer names a model to configure or a task to run: those are per
+machine and explicit, and naming them here was naming actions this screen does not have.
+A finished removal says *‹machine› is out of your fleet*, the same two sentences from the
+worker, and **b back** — there is nothing to open, because the machine it names is not in
+the fleet any more. A failure shows the cause in the worker's words, the stage strip,
+what was left behind, the steps that did run, and `R` **Retry** — a resume by operation
+id, so the worker inspects again and puts the plan up for review again and a stale
+failure cannot apply anything nobody re-read. A removal's failure headings are its own
+(*This removal did not finish*), because a screen that says "setup" about a removal is
+the same defect as a row that does.
+
+**A worker that is gone says so.** When the broker finds an unfinished journal with no
+worker and no `done` frame it carries `worker_exit: {code, last_lines}` from the worker's
+private log, and the screen draws *The setup worker stopped: ‹lines›* and offers `R`.
+Before that, a worker that died before attaching left the operation reading "inspecting"
+for ever while the reason — a Unix socket path over 104 bytes — sat in a log nobody on
+this screen could see. A stopped worker is a finished operation whatever its last written
+state says.
+
+**The restart.** A local setup stops the runtime this client is attached to, by design.
+The worker is detached and the journal is on the deployment host, so the operation
+outlives the connection — but the snapshot in hand does not. The moment the connection
+goes, the operation is marked stale and the screen draws *Ouroboros is restarting…
+reconnecting* with the operation id and what it is waiting for; it never redraws the last
+snapshot as though it were current, and it does not spin, because the failed read backs
+off by the snapshot cadence. When the client reconnects — the same `Msg::Reconnected` the
+transport's `StreamHook::after_reconnect` sends after a fresh handshake — `Devices`
+reloads **this operation by its id** through `fleet.deployment.status`, which is a read,
+and carries on from whatever it answers, including a challenge that is waiting. Until
+that answer lands the screen says *Ouroboros is back… reading this setup again* rather
+than pretending. Before this, the view kept polling a runtime that was gone and drew
+"waiting for you to review the plan" over an empty body for ever.
+A non-transport refusal ends the reconnect wait, discards cached completion and challenge
+state, and shows the current error. `b` returns to the inventory; a stale password or
+approval prompt cannot become actionable again.
 
 **Leaving never cancels.** `Esc` closes the view and stops nothing; the operation keeps
-running on the deployment host, and the row it is about says a setup is open, names its
-owner, and offers **Continue setup**. *That* row and no other: operations are matched to
-devices through `operations[].target`, which is why the field exists — before it, every
-row offered to continue whatever single operation was open, so pressing it on one machine
-attached the view to a deployment against another and the password prompt that followed
-appeared under the wrong machine's name. The header takes its machine from the
-operation's own target, never from the row that was pressed. An operation whose journal
-names no target is listed above the list and attached to no row.
+running on the deployment host, and the row it is about reads `setting up…` /
+`waiting for you` / `setup failed` and offers **Continue** or **Retry**. *That* row and
+no other: operations are matched to devices through `operations[].target`, which is why
+the field exists — before it, every row offered to continue whatever single operation was
+open, so pressing it on one machine attached the view to a deployment against another and
+the password prompt that followed appeared under the wrong machine's name. The heading
+takes its machine from the operation's own target, never from the row that was pressed.
 
-What the row offers is the operation's own state rather than a single "in progress":
-**Continue setup** while it is running or waiting, **Setup failed · Retry** for a
-failure, and **Setup cancelled · Deploy again** for a cancellation. Retry is a resume by
-operation id, which is what makes it safe to offer after a failure — the worker inspects
-again and puts the plan up for review again, so a stale failure cannot apply anything
-nobody has read. Deploy again is a *fresh* operation, because the broker's own terminal
-set is `completed` and `cancelled` and a resume of either answers `operation_finished`.
-
-Continuing is a mutation like any other and passes the same three gates as Deploy — the
-runtime's `capabilities.deploy`, the method being served, and the listener's scope —
-which the continue path used to skip entirely. An operation whose worker is gone is
-resumed; a resume of *another identity's* operation is refused `operation_not_yours`,
-which this view turns into an explicit **Take over this setup?** naming the owner.
-`takeover: true` is sent from that answer and from nowhere else, and `Enter` is not that
-answer: there is no default, because a resume attaches under the resuming identity and
-every later challenge binds to them. Taking over a setup is taking over its credential
-prompts.
+Continuing is a mutation like any other and passes the same three gates as an admission —
+the runtime's `capabilities`, the method being served, and the listener's scope — which
+the continue path used to skip entirely. An operation whose worker is gone is resumed; a
+resume of *another identity's* operation is refused `operation_not_yours`, which this
+view turns into an explicit **Take over this setup?** naming the owner. `takeover: true`
+is sent from that answer and from nowhere else, and `Enter` is not that answer: there is
+no default, because a resume attaches under the resuming identity and every later
+challenge binds to them. Taking over a setup is taking over its credential prompts.
 
 **Where the secret is, and is not.** One field holds a typed secret: a `Zeroizing` buffer
 whose `Debug` prints a character count and no characters, which renders as one bullet per
@@ -2757,40 +2875,45 @@ is the password. It is never on a `Tag` — tags are cloned, hashed and `Debug`-
 never in a notice and never in a log line. What leaves the view is one
 `fleet.deployment.authenticate` call, the one method whose parameters the gateway keeps
 out of its audit digest. `tests/devices_flow.rs` types a unique password and then looks
-for it in the frame, in the buffer's length (not the redacted `Debug`) and in every queued
-request.
+for it in the frame, in the buffer's length (not the redacted `Debug`) and in every
+queued request.
+
+**Every device-supplied string is scrubbed.** A hostname, an address, a platform, a
+worker's step and prompt labels, a plan's fields, a gateway's refusal `message`: all of
+them go through `scrub`, which drops the default-ignorable code points (so
+`bui<U+200B>ld-linux` is not a second device that reads as the first) and then
+`fleet_network::human`, the same bounding the CLI's row renderer applies.
+`tests/fixtures/tailscale/hostile-names.json` is the capture that tries to forge a row
+with one. A device that adopts a roster machine's name is listed as itself, with the note
+in its own details, and is never merged into the member it is imitating.
 
 **Read scope and non-administrator.** `fleet.devices` is a read-scope method that the
 identity rule reserves for administrators, so a `-32003` on it can only be the identity
 rule — and that is a different sentence from `hello.methods` not listing the method at
 all. Both fall back to `fleet.status`'s membership subset with a sentence saying which
-happened. A read-scope listener sees the inventory and is told it cannot start a
-deployment. A runtime whose `capabilities.deploy` is false explains the first reason in
-words (`no_ca_key`, `ouro_path_unknown`, `no_data_dir`, `cleartext_web_bind`) rather than
-drawing an action that would fail when pressed — and its rows read **Deploy unavailable
-here** rather than carrying a label the gate will refuse.
+happened. A read-scope listener sees the list and is told it cannot start a deployment.
 
-**Nothing is refused in silence.** Every refused Enter writes its sentence to the hint
-line, which is the one row always on the page: the notice at the foot of the inventory
-is below the fold on a real screen, so a refusal that went only there was a keypress that
-visibly did nothing. That includes the server's own `deploy_blocked` (`-32003` with
-`data.blockers`), which is the authority — a blocker can appear between the inventory
-being read and the action being pressed — and whose codes are `capabilities.reasons`'
-codes, rendered by the one `blocker_sentence` both paths share so the same fact is never
-described two ways.
+**Nothing is refused in silence.** Every refused key writes its sentence to the hint line,
+which is the one row always on the page. That includes the server's own `deploy_blocked`
+(`-32003` with `data.blockers`), which is the authority — a blocker can appear between
+the list being read and the key being pressed — and whose codes are
+`capabilities.reasons`' codes, rendered by the one `blocker_sentence` both paths share so
+the same fact is never described two ways. A row with *no button* is not a refusal: Enter
+does nothing, because the reason is already under the list where the reader is.
 
 **Screen-reader mode** numbers the rows and the menu answers and *answers to those
 numbers* — host trust, the takeover question, the review and the connect form each route
-`access::row_for_digit`, except on the port field, where a digit is the value somebody is
-typing. It drops the box drawing, and rings the bell when the deployment stops for a
-person — once per question, through the existing `notify::Signal::NeedsInput` path, which
-resolves `auto` to the bell in this mode whether or not the terminal has focus.
+`access::row_for_digit`, except on the fields where a digit is the value somebody is
+typing (the port, the address and the machine name). It drops the box drawing, spells the
+progress marks as words, and rings the bell when the deployment stops for a person — once
+per question, through the existing `notify::Signal::NeedsInput` path, which resolves
+`auto` to the bell in this mode whether or not the terminal has focus.
 
-**The list follows its cursor.** `PageUp`/`PageDown` are the operator's own scrolling, but
-a selected row below the fold is a row `Enter` acts on and nobody can see, so the renderer
-keeps the marked line on the page. A bracketed paste reaches the masked field and the
-connect form's text fields. The connect form is flattened to one line; a pasted passphrase
-keeps its spaces, because that is exactly what somebody keeps in a password manager.
+**The list follows its cursor except while paging.** `PageUp`/`PageDown` scroll without
+moving the selection, so the details under a long inventory remain reachable. Cursor
+navigation restores selection-following. After paging, the first `Enter` or `x` returns
+to the selected row without acting; a second press can act on the now-visible selection.
+A bracketed paste reaches the masked field and the connect form's text fields.
 
 ### Names on screen, never wire words (T2.8)
 

@@ -229,7 +229,7 @@ fn a_far_end_cannot_put_a_keyboard_interactive_prompt_in_front_of_an_operator() 
             port: 22,
             user: "op".into(),
         },
-        // `IdentityChoice::Default` names PreferredAuthentications=publickey, so
+        // `IdentityChoice::Default` names publickey and password, so
         // keyboard-interactive is not on the menu.
         identity: ResolvedIdentity::Default,
         known_hosts: vec![work.join("known_hosts")],
@@ -247,8 +247,9 @@ fn a_far_end_cannot_put_a_keyboard_interactive_prompt_in_front_of_an_operator() 
     assert!(
         options
             .iter()
-            .any(|option| option == "PreferredAuthentications=publickey"),
-        "the default identity names its methods: {options:?}"
+            .any(|option| option == "PreferredAuthentications=publickey,password"),
+        "the default identity names its methods — keys first, then the account's own \
+         password, and nothing else: {options:?}"
     );
 
     assert!(

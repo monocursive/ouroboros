@@ -104,6 +104,9 @@ impl Conversation for TerminalConversation {
                     out,
                     "\nThe host {address} port {port} (account {user}) is not yet trusted on this machine.\n  algorithm    {algorithm}\n  fingerprint  {fingerprint}\n\nVerify this fingerprint independently — on the machine itself, not over this connection."
                 )?;
+                if let Some(command) = super::challenge::host_key_verification_command(&algorithm) {
+                    writeln!(out, "From the device's console or an already trusted SSH connection, run:\n  {command}\nCompare its SHA256 fingerprint with the one above.")?;
+                }
                 // `--yes` deliberately does not answer this. Host verification is the
                 // one decision automation cannot make on the operator's behalf.
                 let accepted = confirm("Trust this host and continue?")?;

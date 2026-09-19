@@ -6,6 +6,8 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
   @moduletag :capture_log
 
+  import ExUnit.CaptureLog
+
   alias Ouroboros.Fleet.Deployment
   alias Ouroboros.Fleet.Deployment.Frame
   alias Ouroboros.Fleet.Deployment.Journal
@@ -145,6 +147,21 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert inventory["host"]["hostname"]
       assert inventory["host"]["os"] in ["darwin", "linux", "unix"]
       assert inventory["operations"] == []
+
+      # `prepare` requires a machine name and will not invent one, so the name a surface
+      # offers has to survive this trip verbatim. Every row carries one — the Rust side
+      # slugs the display name whatever the state — and a row nothing can be deployed to
+      # simply has nothing to do with it.
+      assert Enum.map(inventory["devices"], & &1["suggested_machine"]) == [
+               "operator-laptop",
+               "build-linux",
+               "old-pi",
+               "pocket-phone",
+               "ipv6-only-box"
+             ]
+
+      for device <- inventory["devices"],
+          do: assert(Map.has_key?(device, "suggested_machine"))
     end
 
     test "names a key it does not read rather than passing it through", context do
@@ -838,6 +855,27 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   describe "events" do
+    test "a session can stop and restart event delivery without dropping its presence", context do
+      %{worker: worker} = arrange_worker(context)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      :ok = Deployment.subscribe(operation, "events-tab")
+      settle(operation)
+      :ok = Deployment.unsubscribe(operation)
+      settle(operation)
+      :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "awaiting_auth"})
+      refute_receive {:ouroboros_fleet_deployment, ^operation, _event}, 300
+
+      :ok = Deployment.subscribe(operation, "events-tab")
+      settle(operation)
+      :ok = FleetWorkerFake.emit(worker, %{"event" => "state", "state" => "deploying"})
+
+      assert_receive {:ouroboros_fleet_deployment, ^operation,
+                      %{"event" => "state", "state" => "deploying"}},
+                     @receive_timeout
+    end
+
     test "reach a subscriber and stop when it goes away", context do
       %{worker: worker} = arrange_worker(context)
       assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
@@ -882,6 +920,251 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   # ---------------------------------------------------------------------------
+  # A challenge's session binding may not outlive the session
+
+  describe "a session that goes away" do
+    setup context do
+      %{worker: worker} = arrange_worker(context)
+
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), tab("a"))
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      # The shape the web surface has: one process per browser tab, subscribed to the
+      # operation under that tab's id, which is what a credential challenge binds to.
+      tab_a = subscriber(operation, "tab-a")
+
+      :ok = FleetWorkerFake.challenge(worker, "rev", "review", %{"plan" => %{"steps" => []}})
+      await_challenge(operation, "rev", tab("a"))
+
+      Map.merge(context, %{worker: worker, operation: operation, tab_a: tab_a})
+    end
+
+    test "lets the surviving tab answer the prompts that come after the one it took over", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      # The live reproduction, which the first release did not cover. A removal asks twice:
+      # the review, and then the password for the member being removed. Releasing only the
+      # challenge that was open let tab B press Remove and then refused it the password,
+      # because the connection was still stamping every new challenge with tab A.
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond", "challenge" => "rev"}},
+                     @receive_timeout
+
+      # Step two: the worker asks for the password *after* the tab that started this was
+      # already gone.
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(operation, "pw", tab("b"))
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.authenticate(operation, "pw", "typed-in-the-second-tab", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
+      assert frame["response"]["secret"] == "typed-in-the-second-tab"
+      assert FleetWorkerFake.refusals(worker) == 0
+    end
+
+    test "binds to the tab that took over, so a third tab is a second tab again", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      close(tab_a)
+      settle(operation)
+
+      # Tab B answers, and in doing so says it is the tab holding this operation now.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond", "challenge" => "rev"}},
+                     @receive_timeout
+
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(operation, "pw", tab("b"))
+
+      # So the window the release opened is shut again: the next prompt is tab B's, not
+      # every tab this administrator has.
+      assert {:error, :challenge_not_bound} =
+               Deployment.authenticate(operation, "pw", "from-a-third-tab", tab("c"))
+
+      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.authenticate(operation, "pw", "from-the-tab-that-took-over", tab("b"))
+    end
+
+    test "keeps the binding while a second process still speaks for that session", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      # The reconnect a LiveView does: the browser drops the socket, the new one mounts under
+      # the *same* tab id and subscribes, and only then does the old process's `:DOWN` land.
+      # For that moment two subscribers name session A, and releasing on the first of them to
+      # die would hand a live tab's prompt to any other tab this administrator has open.
+      #
+      # Mutating the `Enum.any?` guard in `release_session/2` away passed every other case
+      # here, because every other case has exactly one subscriber per session.
+      tab_a_again = subscriber(operation, "tab-a")
+      unsubscribe(tab_a_again, operation)
+
+      close(tab_a)
+      settle(operation)
+
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      # The tab that is still there answers, which is what says the refusal above was the
+      # binding holding rather than the challenge having gone.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-a", tab("a"))
+
+      # And when the last one goes, it releases as it always did.
+      close(tab_a_again)
+      settle(operation)
+    end
+
+    test "leaves the prompt alone while that tab is still there", %{operation: operation} do
+      # This is the property the binding exists for and the one this change must not undo: a
+      # second tab open at the same time is not the tab that was asked.
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-live", tab("b"))
+
+      # And the tab it was issued to still answers, which is what says the refusal above was
+      # about the session rather than about the challenge.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-a", tab("a"))
+    end
+
+    test "unbinds the prompt when the tab is closed, so the next one can answer it", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-early", tab("b"))
+
+      close(tab_a)
+      settle(operation)
+
+      # Same person, another tab. The operation is not stranded behind a prompt bound to a
+      # browser tab that no longer exists.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond", "challenge" => "rev"}},
+                     @receive_timeout
+
+      assert FleetWorkerFake.refusals(worker) == 0
+    end
+
+    test "unbinds the session and not the identity", %{operation: operation, tab_a: tab_a} do
+      close(tab_a)
+      settle(operation)
+
+      # A second administrator is exactly what the identity half of the binding is for, and
+      # it does not lapse with a tab: `resume` with `takeover` is still the only way in.
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-bruno", %{
+                 subject: "bruno",
+                 session: "tab-b"
+               })
+
+      # And the prompt is still there for the operator it belongs to.
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+    end
+
+    test "releases a password prompt too, and it is still answerable exactly once", %{
+      operation: operation,
+      tab_a: tab_a,
+      worker: worker
+    } do
+      # The kind with a secret on it. Nothing of the credential is in play here — the tab
+      # that was asked never typed one, and the worker is still waiting — so there is no
+      # unconsumed secret to strand and every reason to let the operator answer from the
+      # tab they still have.
+      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
+      await_challenge(operation, "pw", tab("a"))
+
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.authenticate(operation, "pw", "typed-in-the-second-tab", tab("b"))
+
+      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
+      assert frame["response"]["secret"] == "typed-in-the-second-tab"
+
+      # Releasing the session does not release the once-only rule.
+      assert {:error, :challenge_consumed} =
+               Deployment.authenticate(operation, "pw", "a-second-guess", tab("c"))
+    end
+
+    test "says which challenge it unbound, and says it once", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      log =
+        capture_log(fn ->
+          close(tab_a)
+          settle(operation)
+        end)
+
+      assert log =~ "fleet deployment challenge operation=#{operation}"
+      assert log =~ "challenge=rev"
+      assert log =~ "outcome=session_released"
+    end
+
+    test "an unsubscribe retains the binding only until the tab goes away", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      # A page that unsubscribed is a page that is still there and can subscribe again — a
+      # closed drawer, not a closed tab. Only a dead process is evidence that nobody is left
+      # to answer.
+      unsubscribe(tab_a, operation)
+      settle(operation)
+
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-after-close", tab("b"))
+    end
+
+    test "a subscriber that named no session releases nothing", %{
+      operation: operation,
+      tab_a: tab_a
+    } do
+      # The listener's shape: a connection subscribes without a per-tab id. Its going away
+      # says nothing about which session may answer, so nothing is released — including by
+      # the tab that is still open beside it.
+      anonymous = subscriber(operation, nil)
+      close(anonymous)
+      settle(operation)
+
+      assert {:error, :challenge_not_bound} =
+               Deployment.start(operation, "digest", "key-b", tab("b"))
+
+      # And the tab that did name one still releases when *it* goes.
+      close(tab_a)
+      settle(operation)
+
+      assert {:ok, %{"accepted" => true}} =
+               Deployment.start(operation, "digest", "key-b2", tab("b"))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Spawn does not stall the broker; a timeout does not discard the request
 
   describe "an asynchronous spawn" do
@@ -903,6 +1186,22 @@ defmodule Ouroboros.Fleet.DeploymentTest do
 
       assert elapsed < 400, "devices/operations waited #{elapsed} ms behind a 3s spawn"
       assert_receive {:prepared, {:ok, %{"state" => "spawning"}}}, 1_000
+    end
+
+    test "a second resume cannot stall unrelated reads behind the client's slow spawn",
+         context do
+      arrange_worker(context, spawn_sleep: 3)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      resumer = Task.async(fn -> Deployment.resume(operation, bound()) end)
+
+      Process.sleep(100)
+      started = System.monotonic_time(:millisecond)
+      assert {:ok, _inventory} = Deployment.devices()
+      {_summaries, _total} = Deployment.operations(context.root)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert elapsed < 1_000, "devices/operations waited #{elapsed} ms behind another resume"
+      assert {:error, :already_attached} = Task.await(resumer, @receive_timeout)
     end
 
     test "a spawn timeout does not unlink the request the grandchild may still be reading",
@@ -1004,7 +1303,415 @@ defmodule Ouroboros.Fleet.DeploymentTest do
   end
 
   # ---------------------------------------------------------------------------
+  # What a worker that died before it could say anything left behind
+
+  describe "the worker log's line sanitiser" do
+    @escape <<0x1B>>
+    @bell <<0x07>>
+
+    test "strips escape sequences whole, so a worker cannot paint its own sentence" do
+      # `String.printable?/1` counts `\e` as printable, which is how this went through
+      # untouched: an operator reading the tail in a terminal saw a sentence in a colour the
+      # worker chose, next to the sentences this build wrote.
+      assert Journal.scrub_line("worker died #{@escape}[1;31mSPOOFED#{@escape}[0m", 300) ==
+               "worker died SPOOFED"
+
+      # An operating-system command — a window title, and everything up to its terminator.
+      assert Journal.scrub_line("title #{@escape}]0;evil#{@bell}after", 300) == "title after"
+
+      # A two-character escape with no sequence after it, and the eight-bit CSI that skips
+      # the escape prefix altogether: the byte a terminal would act on is gone either way.
+      assert Journal.scrub_line("reset#{@escape}c done", 300) == "reset done"
+      refute Journal.scrub_line("eight bit #{<<0xC2, 0x9B>>}mSPOOFED", 300) =~ <<0xC2, 0x9B>>
+    end
+
+    test "strips C0, DEL and C1 but keeps a tab" do
+      assert Journal.scrub_line("bell#{@bell}and#{<<0x08>>}back", 300) == "bellandback"
+      assert Journal.scrub_line("del#{<<0x7F>>}ete", 300) == "delete"
+      assert Journal.scrub_line("c1#{<<0xC2, 0x85>>}next", 300) == "c1next"
+
+      # A tab is layout, not control, and a log tail that loses its columns is harder to
+      # read rather than safer.
+      assert Journal.scrub_line("keep\ta tab", 300) == "keep\ta tab"
+    end
+
+    test "discards credential-bearing diagnostics regardless of value quoting" do
+      for line <- [
+            "ssh_password=hunter2 was passed",
+            "ssh --password hunter2 host",
+            "sshpass -p hunter2 ssh deploy@host",
+            "sshpass -phunter2 ssh deploy@host",
+            "echo hunter2 | sudo -S systemctl restart ouro",
+            ~s(password="alpha beta"),
+            ~s(password='alpha beta'),
+            ~s(password="alpha beta),
+            ~S(password=alpha\ beta),
+            ~s({"password":"alpha-beta"}),
+            ~s(error: {"ssh_password": "alpha beta", "status": "failed"}),
+            ~S({"token":"alpha \"beta\" gamma"}),
+            ~s({'private_key': 'alpha beta'}),
+            ~s(ssh --password "alpha beta" host),
+            ~s(sshpass -p "alpha beta" ssh host),
+            ~s(sshpass -p'alpha beta' ssh host),
+            ~s(printf '%s' 'alpha beta' | sudo -S command)
+          ] do
+        assert Journal.scrub_line(line, 300) == "[redacted credential-bearing diagnostic]"
+      end
+    end
+
+    test "leaves an ordinary diagnostic alone, which is the whole point of showing it" do
+      for line <- [
+            "connecting to 100.64.12.44 port 22",
+            "bind: path is 112 bytes, the limit is 104",
+            "ssh: debug1: reading configuration data /etc/ssh/ssh_config",
+            "echo done | tee /tmp/x",
+            "password authentication failed"
+          ] do
+        assert Journal.scrub_line(line, 300) == line
+      end
+    end
+  end
+
+  describe "worker_exit" do
+    test "an unfinished journal carries the last three sanitized lines of the worker's log",
+         context do
+      operation = plant_journal(context.root, "inspecting")
+
+      write_worker_log(context.root, operation, [
+        "connecting to 100.64.12.44",
+        "",
+        "ssh: debug1: reading configuration",
+        "   ",
+        "ssh_password=hunter2 was passed to the child",
+        "error: socket path /very/long/path.sock is #{String.duplicate("x", 600)} bytes"
+      ])
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert snapshot["source"] == "journal"
+      assert [first, second, third] = snapshot["worker_exit"]["last_lines"]
+
+      # Blank lines are not evidence, so they are not three of the three.
+      assert first == "ssh: debug1: reading configuration"
+
+      # The log is whatever the worker printed, and a worker that printed a password is a
+      # worker bug that must not become a browser's problem. The whole line is replaced.
+      assert second == "[redacted credential-bearing diagnostic]"
+      refute second =~ "hunter2"
+
+      # And a line nobody bounded is bounded here: 300 characters, not 600.
+      assert String.length(third) == 300
+      assert String.starts_with?(third, "error: socket path")
+    end
+
+    test "JSON and quoted secrets never reach the public worker log tail", context do
+      operation = plant_journal(context.root, "inspecting")
+
+      write_worker_log(context.root, operation, [
+        ~s({"password":"alpha-beta"}),
+        ~s(password="alpha beta"),
+        ~s(sshpass -p "alpha beta" ssh host)
+      ])
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+
+      assert snapshot["worker_exit"]["last_lines"] ==
+               List.duplicate("[redacted credential-bearing diagnostic]", 3)
+    end
+
+    test "a truncated credential line is discarded without hiding complete diagnostics",
+         context do
+      operation = plant_journal(context.root, "inspecting")
+      secret_line = "password=" <> String.duplicate("S", 9_000)
+
+      for {suffix, expected} <- [
+            {"", []},
+            {"\nssh: connection closed\n", ["ssh: connection closed"]}
+          ] do
+        File.write!(Journal.log_path(context.root, operation), secret_line <> suffix)
+        assert {:ok, snapshot} = Deployment.status(operation, bound())
+        assert snapshot["worker_exit"]["last_lines"] == expected
+      end
+    end
+
+    test "a worker log that is not text, and one that is enormous, are both answers",
+         context do
+      operation = plant_journal(context.root, "installing")
+
+      # 64 KiB of padding, so only the tail is ever read, and a final line whose bytes are
+      # not UTF-8 at all.
+      File.write!(Journal.log_path(context.root, operation), [
+        String.duplicate("padding line\n", 5_000),
+        "the last readable line\n",
+        <<0xFF, 0xFE, "binary", 0x00, "\n">>
+      ])
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert [_padding, "the last readable line", last] = snapshot["worker_exit"]["last_lines"]
+
+      assert last == "..binary."
+      assert String.valid?(last)
+    end
+
+    test "a finished operation, and one with no log at all, say so rather than guessing",
+         context do
+      finished = plant_journal(context.root, "completed")
+      write_worker_log(context.root, finished, ["this is not news"])
+
+      assert {:ok, snapshot} = Deployment.status(finished, bound())
+      assert snapshot["worker_exit"] == nil
+
+      cancelled = plant_journal(context.root, "cancelled")
+      assert {:ok, snapshot} = Deployment.status(cancelled, bound())
+      assert snapshot["worker_exit"] == nil
+
+      # An unfinished operation whose worker left no log at all is not an unfinished
+      # operation with no explanation: the list is empty and the field is still there.
+      silent = plant_journal(context.root, "inspecting")
+      assert {:ok, snapshot} = Deployment.status(silent, bound())
+      assert snapshot["worker_exit"] == %{"last_lines" => []}
+    end
+
+    test "a live worker's snapshot carries the field as null", context do
+      arrange_worker(context)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert snapshot["source"] == "worker"
+      assert Map.has_key?(snapshot, "worker_exit")
+      assert snapshot["worker_exit"] == nil
+    end
+
+    test "a worker that goes away before it attaches is read from the journal at once",
+         context do
+      arrange_worker(context)
+      assert {:ok, %{"operation_id" => operation}} = Deployment.prepare(request(), bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      write_journal(context.root, operation, %{
+        "operation" => operation,
+        "owner" => "adele",
+        "kind" => "add",
+        "state" => "inspecting"
+      })
+
+      write_worker_log(context.root, operation, ["bind: path is 112 bytes, the limit is 104"])
+
+      # The client dies and the next read follows it immediately, so the broker's monitor
+      # message may or may not have been handled yet. Both orderings have to answer the
+      # same thing: answering `worker_unavailable` for that window is what left the page
+      # saying nothing while the reason was already on disk (review finding 5).
+      assert {:ok, client} = Deployment.client(operation)
+      Process.exit(client, :kill)
+
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert snapshot["source"] == "journal"
+
+      assert snapshot["worker_exit"]["last_lines"] == [
+               "bind: path is 112 bytes, the limit is 104"
+             ]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The one blocker that is about this runtime rather than about this fleet
+
+  describe "the dev_runtime blocker" do
+    setup context do
+      # `test/test_helper.exs` declares this suite a packaged runtime so that every other
+      # case can drive a local setup. This is the case that asks what the runtime itself
+      # answers, so it puts the key back the way a person's machine has it.
+      declared = Application.get_env(:ouroboros, :dev_runtime)
+      Application.delete_env(:ouroboros, :dev_runtime)
+      on_exit(fn -> Application.put_env(:ouroboros, :dev_runtime, declared) end)
+
+      write_ca_key(context.root)
+      arrange_devices(context, ~s({"devices": []}\n))
+      context
+    end
+
+    test "is a reason on a Mix runtime, which is what this suite is", context do
+      assert Code.ensure_loaded?(Mix)
+
+      reasons = Deployment.host(context.root)["capabilities"]["reasons"]
+      assert "dev_runtime" in reasons
+
+      # Appended rather than inserted: a surface renders this list and a test names it.
+      assert List.last(reasons) == "dev_runtime"
+    end
+
+    test "blocks setup and nothing else" do
+      assert {:error, {:deploy_blocked, blockers}} = Deployment.unblocked("setup")
+      assert "dev_runtime" in blockers
+
+      # `add` and `leave` act on another machine's installation. This runtime's inability to
+      # boot under a fleet profile says nothing about theirs.
+      assert Deployment.unblocked("add") == :ok
+      assert Deployment.unblocked("leave") == :ok
+
+      # And a kind this build cannot name is treated as one of those two rather than as a
+      # setup: `start` and `authenticate` reach here with the journal's kind, which is nil
+      # for an operation whose journal has not been written yet.
+      assert Deployment.unblocked(nil) == :ok
+    end
+
+    test "is exempted by kind, and the exemptions are the ones the contract names" do
+      all = ["no_data_dir", "no_ca_key", "ouro_path_unknown", "cleartext_web_bind", "dev_runtime"]
+
+      assert Deployment.exempt(all, "setup") ==
+               ["no_data_dir", "ouro_path_unknown", "cleartext_web_bind", "dev_runtime"]
+
+      assert Deployment.exempt(all, "leave") ==
+               ["no_data_dir", "ouro_path_unknown", "cleartext_web_bind"]
+
+      assert Deployment.exempt(all, "add") ==
+               ["no_data_dir", "no_ca_key", "ouro_path_unknown", "cleartext_web_bind"]
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The roster a leave names a member out of
+
+  describe "the roster" do
+    test "is this machine's fleet profile, matched the way the fleet matches names", context do
+      write_profile(context.root, [
+        %{"machine" => "BuildBox", "host" => "100.64.12.44", "node" => "ouro@buildbox"},
+        %{"machine" => "old-pi", "host" => "100.64.12.10", "node" => "ouro@old-pi"}
+      ])
+
+      assert Deployment.roster(context.root) == [
+               %{"machine" => "BuildBox", "host" => "100.64.12.44"},
+               %{"machine" => "old-pi", "host" => "100.64.12.10"}
+             ]
+
+      # `tui/src/fleet.rs` matches roster names case-insensitively, and an operator whose
+      # profile carries a mixed-case entry from an older build has to be able to name it.
+      assert {:ok, %{"host" => "100.64.12.44"}} =
+               Deployment.roster_member("buildbox", context.root)
+
+      assert Deployment.roster_member("nowhere", context.root) == :error
+    end
+
+    test "is empty rather than an error for a machine that has no fleet", context do
+      assert Deployment.roster(context.root) == []
+
+      File.write!(Path.join([context.root, "fleet", "profile.json"]), "{ not json")
+      assert Deployment.roster(context.root) == []
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Helpers
+
+  describe "live acceptance regressions" do
+    test "named CLI journals appear after a fresh listing and can be read", context do
+      assert {[], 0} = Deployment.operations(context.root)
+      operation = "pi-manual-20260918"
+
+      write_journal(context.root, operation, %{
+        "operation" => operation,
+        "kind" => "add",
+        "state" => "completed",
+        "created_at" => "2026-09-18T20:00:00Z",
+        "target" => %{"machine" => "raspberrypi"}
+      })
+
+      assert {[%{"operation" => ^operation}], 1} = Deployment.operations(context.root)
+      assert {:ok, %{"state" => "completed"}} = Deployment.status(operation, bound())
+
+      for invalid <- ["short", "-operation", "operation-", "op--test", "op.test00", "UPPERCASE"] do
+        assert {:error, :invalid_operation} = Journal.validate_operation(invalid)
+      end
+    end
+
+    test "step updates replace running events and retain progress after reattachment", context do
+      operation = plant_journal(context.root, "interrupted")
+      %{worker: worker} = arrange_worker(context)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      for outcome <- ["started", "started", "ok"] do
+        FleetWorkerFake.emit(worker, %{
+          "event" => "step",
+          "machine" => "vps",
+          "step" => "install_binary",
+          "outcome" => outcome
+        })
+      end
+
+      settle(operation)
+      assert {:ok, snapshot} = Deployment.status(operation, bound())
+      assert Enum.count(snapshot["steps"], &(&1["step"] == "install_binary")) == 1
+
+      assert Enum.any?(
+               snapshot["steps"],
+               &(&1["step"] == "install_binary" and &1["outcome"] == "ok")
+             )
+
+      assert Enum.any?(snapshot["steps"], &(&1["step"] == "inspect" and &1["outcome"] == "ok"))
+    end
+
+    test "a journal's owner still gates reads while its worker is attaching", context do
+      operation = plant_journal(context.root, "interrupted")
+      outsider = %{subject: "orson", session: "tab-b"}
+      assert {:error, :operation_not_yours} = Deployment.status(operation, outsider)
+
+      cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+      socket_path = Path.join([context.root, "deploy", "late.sock"])
+
+      ouro =
+        FleetOuroFake.write!(context.fake_dir,
+          spawn_line:
+            JSON.encode!(%{"socket" => socket_path, "instance" => "1234567890abcdef"}) <> "\n",
+          cap: cap
+        )
+
+      System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert {:ok, pid} = Deployment.client(operation)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      assert {:ok, %{"owner" => "adele", "attached" => false}} =
+               Deployment.status(operation, bound())
+
+      assert {:error, :operation_not_yours} = Deployment.status(operation, outsider)
+    end
+
+    test "CLI history is readable without silently taking over its mutations", context do
+      operation = plant_journal(context.root, "failed")
+      {:ok, document} = Journal.read(context.root, operation)
+
+      write_journal(
+        context.root,
+        operation,
+        Map.put(document, "owner", System.get_env("USER") || System.get_env("LOGNAME"))
+      )
+
+      assert {:ok, %{"source" => "journal", "state" => "failed"}} =
+               Deployment.status(operation, bound())
+
+      arrange_worker(context)
+      assert {:error, :operation_not_yours} = Deployment.resume(operation, bound())
+    end
+
+    test "Retry retires a finished attached worker immediately", context do
+      operation = plant_journal(context.root, "failed")
+      %{worker: worker} = arrange_worker(context)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+
+      FleetWorkerFake.emit(worker, %{
+        "event" => "done",
+        "ok" => false,
+        "state" => "failed",
+        "detail" => "start refused"
+      })
+
+      settle(operation)
+      assert {:ok, _} = Deployment.resume(operation, bound())
+      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+    end
+  end
 
   defp bound, do: %{subject: "adele", session: "session-one"}
 
@@ -1104,9 +1811,64 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     %{worker: worker, ouro: ouro, ouro_dir: context.fake_dir, cap: cap, instance: instance}
   end
 
-  defp await_challenge(operation, id) do
+  # One browser tab's binding: the same operator, a different per-tab session id.
+  defp tab(id), do: %{subject: "adele", session: "tab-#{id}"}
+
+  # A stand-in for the LiveView that a browser tab runs: one process, subscribed to the
+  # operation under that tab's session, which stays alive until the tab is closed.
+  defp subscriber(operation, session) do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        send(test, {:subscribed, self(), Deployment.subscribe(operation, session)})
+        loop()
+      end)
+
+    assert_receive {:subscribed, ^pid, :ok}, @receive_timeout
+    pid
+  end
+
+  defp loop do
+    receive do
+      {:unsubscribe, operation, from} ->
+        send(from, {:unsubscribed, self(), Deployment.unsubscribe(operation)})
+        loop()
+
+      _other ->
+        loop()
+    end
+  end
+
+  # The tab is closed. Waiting for this process's own `:DOWN` is what makes the next line
+  # deterministic: both monitor messages are generated by the same exit, so by the time this
+  # one has arrived the client's is already in its mailbox, ahead of anything sent after.
+  defp close(pid) do
+    reference = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
+    :ok
+  end
+
+  defp unsubscribe(pid, operation) do
+    send(pid, {:unsubscribe, operation, self()})
+    assert_receive {:unsubscribed, ^pid, :ok}, @receive_timeout
+    :ok
+  end
+
+  # One round trip through the client process, so everything already in its mailbox — the
+  # monitor message `close/1` just produced — has been handled before the next assertion.
+  defp settle(operation) do
+    assert {:ok, pid} = Deployment.client(operation)
+    assert {:ok, _snapshot} = Ouroboros.Fleet.Deployment.Client.snapshot(pid)
+    :ok
+  end
+
+  defp await_challenge(operation, id, binding \\ nil) do
+    binding = binding || bound()
+
     Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      case Deployment.status(operation, bound()) do
+      case Deployment.status(operation, binding) do
         {:ok, %{"challenges" => challenges}} ->
           if Enum.any?(challenges, &(&1["challenge"] == id)) do
             {:halt, :ok}
@@ -1173,6 +1935,39 @@ defmodule Ouroboros.Fleet.DeploymentTest do
     File.chmod!(dir, 0o700)
     path = Journal.path(root, operation)
     File.write!(path, JSON.encode!(document))
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp write_worker_log(root, operation, lines) do
+    dir = Journal.deploy_dir(root)
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+    path = Journal.log_path(root, operation)
+    File.write!(path, Enum.map(lines, &[&1, ?\n]))
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp write_profile(root, members) do
+    dir = Path.join(root, "fleet")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "profile.json")
+
+    File.write!(
+      path,
+      JSON.encode!(%{
+        "schema" => 1,
+        "fleet_id" => "f0000000000000000000000000000000",
+        "name" => "home",
+        "machine" => "studio",
+        "host" => "100.64.0.1",
+        "node" => "ouro@studio",
+        "role" => "issuer",
+        "members" => members
+      })
+    )
+
     File.chmod!(path, 0o600)
     path
   end

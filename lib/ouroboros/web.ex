@@ -22,7 +22,7 @@ defmodule Ouroboros.Web do
       Ouroboros.Web                    (rest_for_one)
       ├─ Task.Supervisor               one task per in-flight runtime call
       ├─ Ouroboros.Web.Endpoint        binds, serves HTTP and the LiveView socket
-      └─ Ouroboros.Web.Publication     writes web.json, removes it on the way out
+      └─ Ouroboros.Web.Publication     writes web.json, and leaves it behind on the way out
 
   `rest_for_one`, in that order. The task supervisor has to exist before a request can be
   served, and the publication has to name a port that is currently bound — so an endpoint

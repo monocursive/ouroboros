@@ -154,6 +154,16 @@ impl Session {
 
     /// Send one request and return the reply's fields, or an error carrying the
     /// helper's own stable reason.
+    pub fn discard_preparation(&mut self, operation: &str) -> Result<Map<String, Value>> {
+        let cancelled = self.cancelled.take();
+        let result = self.ask(
+            "discard_preparation",
+            serde_json::json!({"operation": operation}),
+        );
+        self.cancelled = cancelled;
+        result
+    }
+
     pub fn ask(&mut self, op: &str, fields: Value) -> Result<Map<String, Value>> {
         let reply = self.ask_raw(op, fields)?;
         if reply.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -180,7 +190,7 @@ impl Session {
             detail: format!(
                 "{} refused `{op}`: {} ({reason})",
                 self.label,
-                sanitize_remote_text(detail, 300)
+                sanitize_remote_text(detail, 2_000)
             ),
         }
         .into())

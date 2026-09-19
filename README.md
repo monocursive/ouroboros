@@ -155,20 +155,26 @@ and [direct calls using Grok sign-in](https://github.com/xai-org/grok-build/blob
 ## A second machine
 
 Ouroboros runs as one BEAM cluster: several machines, one trust domain, sessions and
-subagents placed across it. There is no enrollment product. Install the same version of `ouro` on each machine,
-copy one cluster-identity directory between them privately, and tell the first machine
-about the second:
+subagents placed across it. Put the machines on Tailscale or Headscale and enable
+OpenSSH on the target. In **Devices**, choose **Set up this machine**, then **Add to
+fleet** on the target and review the plan. The terminal shortcut is `ctrl+x D`.
+The same guided workflow is available from the CLI:
 
 ```sh
-ouro fleet create --machine studio --host STUDIO_PRIVATE_ADDRESS      # first machine
-ouro fleet create --from /path/to/copied/fleet --machine vps --host …  # second machine
-ouro fleet members add vps --host VPS_PRIVATE_ADDRESS                 # first machine
-ouro fleet status
+ouro fleet setup --machine studio --address STUDIO_PRIVATE_ADDRESS
+ouro fleet add ubuntu@VPS_PRIVATE_ADDRESS --machine vps
+ouro fleet doctor
 ```
 
-[The cluster document](docs/FLEET.md) has the whole recipe, the environment a node
-reads, and the boundary that matters: any node that completes the distribution handshake
-holds full authority over every other one.
+Setup verifies the SSH host key, prompts for a password when needed, installs the
+matching release if the target has no `ouro`, admits it with its own certificate,
+updates the rosters, and configures automatic startup. Review the startup result:
+some Linux accounts require an administrator to enable lingering before they start
+at boot. Configure a model on each machine before running tasks there.
+
+[The fleet guide](docs/FLEET.md#two-machines-over-ssh) covers requirements and recovery.
+Any node that completes the distribution handshake holds full authority over every
+other node in the fleet.
 
 ## Development
 
