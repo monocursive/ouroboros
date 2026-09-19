@@ -381,24 +381,26 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
 
   # `expect` is fixed by the challenge's own kind, so a host-trust acceptance cannot be
   # delivered as the answer to a password prompt and a secret cannot be delivered to a review.
-  defp authorize(%{challenge: nil} = _state, _challenge, _response),
-    do: {:error, :unknown_challenge}
+  defp authorize(%{challenge: nil} = state, id, _response), do: stale(state, id)
 
   defp authorize(state, id, response) do
     open = state.challenge
 
     cond do
-      open["challenge"] != id ->
-        if MapSet.member?(state.answered, id),
-          do: {:error, :challenge_consumed},
-          else: {:error, :unknown_challenge}
-
-      expired?(open) ->
-        {:error, :challenge_expired}
-
-      true ->
-        shaped(open["kind"], id, response)
+      open["challenge"] != id -> stale(state, id)
+      expired?(open) -> {:error, :challenge_expired}
+      true -> shaped(open["kind"], id, response)
     end
+  end
+
+  # An id that was answered is `challenge_consumed` — the honest answer to a double click —
+  # and one that was never issued is `unknown_challenge`. Asked in that order, because a
+  # consumed challenge is also not the open one and answering it "unknown" would tell an
+  # operator their password went nowhere when it had already gone.
+  defp stale(state, id) do
+    if MapSet.member?(state.answered, id),
+      do: {:error, :challenge_consumed},
+      else: {:error, :unknown_challenge}
   end
 
   defp shaped(kind, id, %{"accept" => accept})

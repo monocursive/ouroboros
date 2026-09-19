@@ -43,4 +43,9 @@ end)
 # this key for its own duration and gets the runtime's own answer back.
 Application.put_env(:ouroboros, :dev_runtime, false)
 
-ExUnit.start(exclude: [:live_native])
+# `:real_worker` tests run the packaged `ouro` named by `OUROBOROS_TEST_OURO` as a real port
+# program, which needs a build of the Rust side that speaks the frames front end. Excluded
+# from `mix test` and run at integration once that slice lands:
+#
+#     OUROBOROS_TEST_OURO=/path/to/ouro mix test --include real_worker
+ExUnit.start(exclude: [:live_native, :real_worker])

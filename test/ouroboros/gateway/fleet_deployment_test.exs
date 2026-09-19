@@ -1,6 +1,15 @@
 defmodule Ouroboros.Gateway.FleetDeploymentTest do
-  # `async: false`: moves `config :ouroboros, :data_dir`, `config :ouroboros, :audit` and the
-  # `OUROBOROS_PROCESS_ID_HELPER` environment variable, all node-global.
+  @moduledoc """
+  The `fleet.*` verbs over a real listener, against a real port program.
+
+  What this suite is for is the wire: the method table, the scope and identity gates, the
+  parameters each verb refuses, and the lifecycle a client actually drives —
+  `start` → `respond` → `respond` → `respond` → `status`, with `cancel` and `resume` beside
+  it. The program at the other end is `test/support/fleet_frames_fake.sh`, written to §8.
+  """
+
+  # `async: false`: moves `config :ouroboros, :data_dir`, `config :ouroboros, :audit`, the
+  # web config and the `OUROBOROS_*` environment, all node-global.
   use ExUnit.Case, async: false
 
   @moduletag :capture_log
@@ -10,15 +19,14 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Gateway.Methods.Contract
-  alias Ouroboros.Test.FleetOuroFake
-  alias Ouroboros.Test.FleetWorkerFake
+  alias Ouroboros.Test.FleetFramesFake
 
   @token String.duplicate("g", 40)
   @receive_timeout 5_000
 
-  @deployment_methods ~w(
-    fleet.deployment.prepare fleet.deployment.start fleet.deployment.authenticate
-    fleet.deployment.confirm_host fleet.deployment.cancel fleet.deployment.resume
+  @mutations ~w(
+    fleet.deployment.start fleet.deployment.respond
+    fleet.deployment.cancel fleet.deployment.resume
   )
 
   setup do
@@ -31,15 +39,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     root = Path.join(System.tmp_dir!(), "ogw2b#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
     File.chmod!(root, 0o700)
-    fake_dir = Path.join(root, "bin")
-
-    # An `add` needs this host to be able to issue a member certificate, and `prepare` now
-    # enforces that rather than only reporting it. These suites deploy onto other machines,
-    # so they are issuers.
-    File.mkdir_p!(Path.join(root, "fleet"))
-    ca = Path.join([root, "fleet", "ca-key.pem"])
-    File.write!(ca, "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n")
-    File.chmod!(ca, 0o600)
+    bin = Path.join(root, "bin")
 
     previous = %{
       data_dir: Application.get_env(:ouroboros, :data_dir),
@@ -51,8 +51,12 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     }
 
     Application.put_env(:ouroboros, :data_dir, root)
+    FleetFramesFake.install!(bin, devices: ~s({"devices":[],"discovery":{"code":"ok"}}\n))
 
     on_exit(fn ->
+      reap_workers()
+      Process.sleep(150)
+      FleetFramesFake.uninstall!()
       restore(:data_dir, previous.data_dir)
       restore(:audit, previous.audit)
       restore(:web, previous.web)
@@ -61,46 +65,77 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
         do: System.put_env("OUROBOROS_PROCESS_ID_HELPER", previous.ouro),
         else: System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
 
-      File.rm_rf!(root)
+      _ = File.rm_rf(root)
     end)
 
-    %{root: root, fake_dir: fake_dir}
+    %{root: root, bin: bin}
   end
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
 
+  defp reap_workers do
+    supervisor = Ouroboros.Fleet.Deployment.WorkerSupervisor
+
+    supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.each(fn {_id, pid, _type, _modules} ->
+      if is_pid(pid), do: DynamicSupervisor.terminate_child(supervisor, pid)
+    end)
+  catch
+    :exit, _not_running -> :ok
+  end
+
   # ---------------------------------------------------------------------------
   # The table itself
 
   describe "the method table" do
-    test "serves every verb the proposal's method family names, at the scope it names" do
+    test "serves the §9 family, at the scope §9 names, and nothing it deleted" do
       table = Methods.table()
 
       assert table["fleet.devices"].scope == :read
       assert table["fleet.deployment.status"].scope == :read
 
-      for method <- @deployment_methods do
+      for method <- @mutations do
         assert table[method].scope == :operate, "#{method} must be operate-scoped"
+      end
+
+      for gone <- ~w(fleet.deployment.prepare fleet.deployment.authenticate
+                     fleet.deployment.confirm_host) do
+        refute Map.has_key?(table, gone), "#{gone} is deleted by fleet-kiss §9"
+      end
+
+      # And the three that are unchanged.
+      for kept <- ~w(fleet.status fleet.doctor fleet.tags fleet.forget_session_owner) do
+        assert Map.has_key?(table, kept)
       end
     end
 
     test "every one of them refuses an unknown parameter before dispatch" do
-      for method <- ["fleet.devices", "fleet.deployment.status" | @deployment_methods] do
+      for method <- ["fleet.devices", "fleet.deployment.status" | @mutations] do
         assert {:invalid, message} = Contract.validate(method, %{"unexpected" => true})
         assert message =~ "unsupported fields: unexpected"
       end
     end
 
-    test "a ceiling breach on the two verbs that change another machine is unknown, not failure" do
+    test "a ceiling breach on the verbs that change another machine is unknown, not failure" do
       table = Methods.table()
 
-      assert table["fleet.deployment.start"].outcome == :unknown
-      assert table["fleet.deployment.cancel"].outcome == :unknown
+      for method <- ~w(fleet.deployment.start fleet.deployment.respond
+                       fleet.deployment.cancel) do
+        assert table[method].outcome == :unknown
+      end
 
-      # And not on the ones where the gateway giving up really does mean nothing happened.
       refute Map.get(table["fleet.devices"], :outcome)
       refute Map.get(table["fleet.deployment.status"], :outcome)
+    end
+
+    test "the operation parameter is named `operation`, as §9 writes it" do
+      assert {:invalid, message} = Contract.validate("fleet.deployment.status", %{})
+      assert message =~ "operation"
+
+      assert Contract.validate("fleet.deployment.status", %{"operation" => "00aa11bb22cc33dd"}) ==
+               :ok
     end
   end
 
@@ -116,10 +151,11 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       assert result["devices"] == []
       assert is_boolean(result["host"]["capabilities"]["deploy"])
-      assert result["host"]["issuer"] == true
+      # §9: the inventory loses `issuer`, and with it the whole question of who may admit.
+      refute Map.has_key?(result["host"], "issuer")
 
       # Status of an operation nobody started is a not-found, not a scope refusal.
-      assert call(client, "fleet.deployment.status", %{"operation_id" => "00aa11bb22cc33dd"})[
+      assert call(client, "fleet.deployment.status", %{"operation" => "00aa11bb22cc33dd"})[
                "error"
              ]["code"] == -32_007
     end
@@ -127,7 +163,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     test "a read listener refuses every mutation with -32003", _context do
       client = connected(scope: :read)
 
-      for method <- @deployment_methods do
+      for method <- @mutations do
         error = call(client, method, %{})["error"]
         assert error["code"] == -32_003, "#{method} must be refused at read scope"
         assert error["message"] =~ method
@@ -137,10 +173,9 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     test "an operate listener gets past scope and lands on the parameters", _context do
       client = connected(scope: :operate)
 
-      # No `ouro`, so the deepest these can get is a named refusal — never -32003.
       System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
 
-      error = call(client, "fleet.deployment.prepare", %{})["error"]
+      error = call(client, "fleet.deployment.start", %{})["error"]
       assert error["code"] == -32_602
       assert error["message"] =~ "params.target is required for an add"
     end
@@ -156,15 +191,10 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       client = connected(scope: :operate, token: "operator-token")
 
-      # The membership subset an operator keeps lives in `fleet.status`, and only there.
       assert call(client, "fleet.status")["result"]
       assert call(client, "fleet.doctor")["result"]
 
-      # The identity rules are scope-independent, so the read-scoped members of the family
-      # are refused for the same reason the mutations are: a tailnet inventory is every
-      # machine on an operator's private network, and an operation's steps are a
-      # deployment's business.
-      for method <- ["fleet.devices", "fleet.deployment.status" | @deployment_methods] do
+      for method <- ["fleet.devices", "fleet.deployment.status" | @mutations] do
         assert call(client, method, %{})["error"]["code"] == -32_003,
                "#{method} must need an administrator"
       end
@@ -176,7 +206,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       client = connected(scope: :operate, token: "auditor-token")
 
-      for method <- ["fleet.devices", "fleet.deployment.status" | @deployment_methods] do
+      for method <- ["fleet.devices", "fleet.deployment.status" | @mutations] do
         assert call(client, method, %{})["error"]["code"] == -32_003,
                "#{method} must need an administrator"
       end
@@ -189,14 +219,31 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       client = connected(scope: :operate, token: "administrator-token")
 
       assert call(client, "fleet.devices")["result"]["host"]
+      assert call(client, "fleet.deployment.start", %{})["error"]["code"] == -32_602
 
-      # Past the gate, onto the parameters — which is what "reaches the verb" means. The
-      # read-scoped status reaches its own refusal, not the identity's.
-      assert call(client, "fleet.deployment.prepare", %{})["error"]["code"] == -32_602
-
-      assert call(client, "fleet.deployment.status", %{"operation_id" => "00aa11bb22cc33dd"})[
+      assert call(client, "fleet.deployment.status", %{"operation" => "00aa11bb22cc33dd"})[
                "error"
              ]["code"] == -32_007
+    end
+
+    test "a second administrator answers the first one's prompt, which §10 is explicit about",
+         context do
+      configure_identities(context)
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
+
+      adele = connected(scope: :operate, token: "administrator-token")
+      operation = start_add(adele)
+      await_challenge(adele, operation, "hold-1")
+
+      # A different connection, a different session, the same runtime. Before fleet-kiss this
+      # was `challenge_not_bound` and the way out was a takeover.
+      other = connected(scope: :operate, token: "administrator-token")
+
+      assert call(other, "fleet.deployment.respond", %{
+               "operation" => operation,
+               "challenge" => "hold-1",
+               "accept" => true
+             })["result"]["accepted"] == true
     end
   end
 
@@ -209,7 +256,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       client = connected(scope: :operate)
 
       assert call(client, "fleet.devices")["result"]["host"]
-      assert call(client, "fleet.deployment.prepare", %{})["error"]["code"] == -32_602
+      assert call(client, "fleet.deployment.start", %{})["error"]["code"] == -32_602
     end
   end
 
@@ -217,612 +264,286 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   # The whole lifecycle over a real listener
 
   describe "over a listener" do
-    test "prepare, challenge, authenticate, start and cancel", context do
-      %{worker: worker} = arrange_worker(context)
+    test "start, host trust, password, review, steps and done", context do
+      FleetFramesFake.write_scenario!(context.bin, FleetFramesFake.happy_add())
       client = connected(scope: :operate)
 
-      prepared = call(client, "fleet.deployment.prepare", prepare_params())["result"]
-      operation = prepared["operation_id"]
+      started = call(client, "fleet.deployment.start", start_params())["result"]
+      operation = started["operation"]
       assert String.match?(operation, ~r/\A[0-9a-f]{16}\z/)
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      # §9 answers `{operation}`; `operation_id` was the socket protocol's spelling.
+      refute Map.has_key?(started, "operation_id")
 
-      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
+      await_challenge(client, operation, "trust-1")
+
+      status = call(client, "fleet.deployment.status", %{"operation" => operation})["result"]
       assert status["source"] == "worker"
-      assert status["attached"] == true
+      assert status["running"] == true
+      assert status["kind"] == "add"
+      assert status["challenge"]["kind"] == "host_trust"
+      # One challenge, not a list of them.
+      refute Map.has_key?(status, "challenges")
+      refute Map.has_key?(status, "done")
+      refute Map.has_key?(status, "worker_exit")
 
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password", %{"attempt" => 1})
-      await_challenge(client, operation, "pw")
-
-      answered =
-        call(client, "fleet.deployment.authenticate", %{
-          "operation_id" => operation,
-          "challenge" => "pw",
-          "secret" => "listener-secret-01"
-        })["result"]
-
-      assert answered["accepted"] == true
-      assert_receive {:fake_worker, %{"op" => "respond"} = frame}, @receive_timeout
-      assert frame["response"]["secret"] == "listener-secret-01"
-
-      :ok = FleetWorkerFake.challenge(worker, "rev", "review", %{"plan" => %{"steps" => []}})
-      await_challenge(client, operation, "rev")
-
-      started =
-        call(client, "fleet.deployment.start", %{
-          "operation_id" => operation,
-          "plan_digest" => "abc123",
-          "idempotency_key" => "key-listener"
-        })["result"]
-
-      assert started["accepted"] == true
-
-      cancelled =
-        call(client, "fleet.deployment.cancel", %{"operation_id" => operation})["result"]
-
-      assert cancelled["cancelled"] == true
-
-      assert FleetWorkerFake.refusals(worker) == 0
-    end
-
-    test "a second listener connection is a second session and cannot answer the challenge",
-         context do
-      %{worker: worker} = arrange_worker(context)
-      first = connected(scope: :operate)
-      second = connected(scope: :operate)
-
-      operation =
-        call(first, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
-      await_challenge(first, operation, "pw")
-
-      # Same identity, same scope, same machine — a different connection. Seam S4 binds a
-      # challenge to the session it was issued to, and this is that session's neighbour.
-      error =
-        call(second, "fleet.deployment.authenticate", %{
-          "operation_id" => operation,
-          "challenge" => "pw",
-          "secret" => "second-connection-secret"
-        })["error"]
-
-      assert error["code"] == -32_003
-      assert error["data"]["reason"] == "challenge_not_bound"
-
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
-      assert FleetWorkerFake.refusals(worker) == 0
-
-      # The connection it *was* issued to still answers.
-      assert call(first, "fleet.deployment.authenticate", %{
-               "operation_id" => operation,
-               "challenge" => "pw",
-               "secret" => "first-connection-secret"
+      assert call(client, "fleet.deployment.respond", %{
+               "operation" => operation,
+               "challenge" => "trust-1",
+               "accept" => true
              })["result"]["accepted"] == true
+
+      await_challenge(client, operation, "secret-1")
+
+      assert call(client, "fleet.deployment.respond", %{
+               "operation" => operation,
+               "challenge" => "secret-1",
+               "secret" => "a password nobody stores"
+             })["result"]["accepted"] == true
+
+      await_challenge(client, operation, "review-1")
+
+      review = call(client, "fleet.deployment.status", %{"operation" => operation})["result"]
+      assert review["challenge"]["kind"] == "review"
+      assert is_list(review["challenge"]["metadata"]["plan"])
+      # No digest and no idempotency key: approving is answering the challenge.
+      refute Map.has_key?(review["challenge"], "plan_digest")
+
+      assert call(client, "fleet.deployment.respond", %{
+               "operation" => operation,
+               "challenge" => "review-1",
+               "accept" => true
+             })["result"]["accepted"] == true
+
+      final = await_state(client, operation, "completed")
+
+      assert Enum.map(final["steps"], & &1["step"]) ==
+               ~w(inspect install join service start connect)
     end
 
-    test "a stale challenge answered twice is refused with a stable reason", context do
-      %{worker: worker} = arrange_worker(context)
+    test "cancel stops the operation and the journal says so afterwards", context do
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
       client = connected(scope: :operate)
 
-      operation =
-        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+      operation = start_add(client)
+      await_challenge(client, operation, "hold-1")
 
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
+      assert call(client, "fleet.deployment.cancel", %{"operation" => operation})["result"]
 
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
-      await_challenge(client, operation, "pw")
+      final = await_state(client, operation, "cancelled")
+      assert final["state"] == "cancelled"
+    end
 
-      assert call(client, "fleet.deployment.authenticate", %{
-               "operation_id" => operation,
-               "challenge" => "pw",
-               "secret" => "one"
-             })["result"]
+    test "resume runs the program again for an operation nothing is holding", context do
+      FleetFramesFake.write_scenario!(context.bin, [
+        "state running",
+        "step inspect ok seen",
+        "exit 3"
+      ])
 
-      error =
-        call(client, "fleet.deployment.authenticate", %{
-          "operation_id" => operation,
-          "challenge" => "pw",
-          "secret" => "two"
+      client = connected(scope: :operate)
+
+      operation = start_add(client)
+      await_source(client, operation, "journal")
+
+      status = call(client, "fleet.deployment.status", %{"operation" => operation})["result"]
+      assert status["running"] == false
+      assert status["last_error"]["reason"] == "worker_exited"
+
+      FleetFramesFake.write_scenario!(context.bin, [
+        "step inspect skipped already done",
+        "done completed picked up where it left off"
+      ])
+
+      assert call(client, "fleet.deployment.resume", %{"operation" => operation})["result"][
+               "operation"
+             ] == operation
+
+      assert await_state(client, operation, "completed")
+    end
+
+    test "respond refuses two answers at once, and neither of them alone when it asks",
+         context do
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
+      client = connected(scope: :operate)
+
+      operation = start_add(client)
+      await_challenge(client, operation, "hold-1")
+
+      both =
+        call(client, "fleet.deployment.respond", %{
+          "operation" => operation,
+          "challenge" => "hold-1",
+          "accept" => true,
+          "secret" => "no"
         })["error"]
 
-      assert error["code"] == -32_006
-      assert error["data"]["reason"] == "challenge_consumed"
-    end
+      assert both["code"] == -32_602
+      assert both["message"] =~ "two answers"
 
-    test "an expired challenge carries its own reason code", context do
-      %{worker: worker} = arrange_worker(context)
-      client = connected(scope: :operate)
-
-      operation =
-        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      past = DateTime.utc_now() |> DateTime.add(-30, :second) |> DateTime.to_iso8601()
-      :ok = FleetWorkerFake.challenge(worker, "old", "password", %{"expires_at" => past})
-      await_challenge(client, operation, "old")
-
-      error =
-        call(client, "fleet.deployment.authenticate", %{
-          "operation_id" => operation,
-          "challenge" => "old",
-          "secret" => "too-late"
+      neither =
+        call(client, "fleet.deployment.respond", %{
+          "operation" => operation,
+          "challenge" => "hold-1"
         })["error"]
 
-      assert error["data"]["reason"] == "challenge_expired"
+      assert neither["code"] == -32_602
+
+      # A host-trust challenge is not answered with a secret.
+      mismatch =
+        call(client, "fleet.deployment.respond", %{
+          "operation" => operation,
+          "challenge" => "hold-1",
+          "secret" => "no"
+        })["error"]
+
+      assert mismatch["data"]["reason"] == "challenge_kind_mismatch"
+
+      # And none of those reached the program.
+      refute Enum.any?(FleetFramesFake.responses(context.bin), &String.contains?(&1, "\"no\""))
     end
 
-    test "resume brings back an operation whose worker is gone", context do
-      %{worker: _worker} = arrange_worker(context)
+    test "an operation id that is not one is refused before anything touches a path",
+         _context do
       client = connected(scope: :operate)
 
-      operation =
-        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      # The worker wrote its journal before it died, which is the only reason there is
-      # anything to resume.
-      write_journal(context.root, operation, %{
-        "operation" => operation,
-        # Seam S5's owner. A listener that authenticated with the local token resolves to
-        # `local-owner`, which is what `Audit.Identity.actor/0` answers for this caller.
-        "owner" => "local-owner",
-        "kind" => "add",
-        "state" => "interrupted"
-      })
-
-      assert {:ok, pid} = Ouroboros.Fleet.Deployment.client(operation)
-      reference = Process.monitor(pid)
-      Process.exit(pid, :kill)
-      assert_receive {:DOWN, ^reference, :process, ^pid, _reason}, @receive_timeout
-
-      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
-      assert status["source"] == "journal"
-      assert status["state"] == "interrupted"
-
-      resumed = call(client, "fleet.deployment.resume", %{"operation_id" => operation})["result"]
-      assert resumed["operation_id"] == operation
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
-      assert status["source"] == "worker"
-    end
-
-    test "an unknown `ouro` is a named unavailability rather than a crash", _context do
-      System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
-      client = connected(scope: :operate)
-
-      error = call(client, "fleet.devices")["error"]
-      assert error["code"] == -32_004
-      assert error["data"]["reason"] == "ouro_path_unknown"
-
-      # `prepare` does not get as far as the launcher: not knowing where `ouro` is, is one of
-      # the blockers this host is refused for, and the refusal names the whole set.
-      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
-      assert error["data"]["reason"] == "deploy_blocked"
-      assert "ouro_path_unknown" in error["data"]["blockers"]
-    end
-
-    test "an operation id that is not one is refused before any path is built", _context do
-      client = connected(scope: :operate)
-
-      error =
-        call(client, "fleet.deployment.status", %{"operation_id" => "../../../etc/passwd"})[
-          "error"
-        ]
-
-      assert error["code"] == -32_602
-      assert error["data"]["reason"] == "invalid_operation"
+      for method <- ~w(fleet.deployment.status fleet.deployment.cancel fleet.deployment.resume) do
+        error = call(client, method, %{"operation" => "../../etc/passwd"})["error"]
+        assert error["data"]["reason"] == "invalid_operation", "#{method} accepted a path"
+      end
     end
   end
 
   # ---------------------------------------------------------------------------
-  # The first local fleet, and the request the worker actually reads
+  # The three kinds
 
-  describe "prepare kinds" do
-    test "a setup takes no target and no account, because it is this device", context do
-      %{worker: worker} = arrange_worker(context)
+  describe "start kinds" do
+    test "a setup takes no target and names this host when the caller did not", context do
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
       client = connected(scope: :operate)
 
-      prepared = call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
-      operation = prepared["operation_id"]
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      assert FleetWorkerFake.refusals(worker) == 0
+      operation =
+        call(client, "fleet.deployment.start", %{"kind" => "setup"})["result"]["operation"]
 
-      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
+      await_challenge(client, operation, "hold-1")
 
-      assert request["kind"] == "setup"
-      assert request["operation"] == operation
-      assert request["schema"] == 1
-      assert request["identity"] == %{"kind" => "default"}
-
-      # The spec is explicit that this machine configures itself "without SSH to itself":
-      # there is no account on this request at all.
-      refute Map.has_key?(request, "ssh_user")
-      refute Map.has_key?(request, "ssh_port")
-
-      # And it is called what this device is already called, unless somebody says otherwise.
-      assert request["machine"] == Ouroboros.Fleet.Deployment.host_name()
+      argv = FleetFramesFake.argv(context.bin)
+      assert Enum.take(argv, 2) == ["fleet", "setup"]
+      assert "--machine" in argv
+      refute "--user" in argv
+      refute Enum.any?(argv, &String.contains?(&1, "@"))
+      assert Enum.take(argv, -3) == ["--frames", "--operation", operation]
     end
 
-    test "a setup takes the machine, address and service the operator chose", context do
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      assert call(client, "fleet.deployment.prepare", %{
-               "kind" => "setup",
-               "machine" => "operator-laptop",
-               "address" => "100.64.12.21",
-               "service" => false
-             })["result"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
-
-      assert request["machine"] == "operator-laptop"
-      assert request["address"] == "100.64.12.21"
-      assert request["service"] == false
-    end
-
-    test "an add still requires the account, and a setup never did", context do
-      arrange_worker(context)
+    test "an add without a machine name is refused, and says where a name comes from",
+         _context do
       client = connected(scope: :operate)
 
       error =
-        call(client, "fleet.deployment.prepare", %{
-          "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"}
+        call(client, "fleet.deployment.start", %{
+          "target" => %{"address" => "100.64.12.44"},
+          "ssh_user" => "deploy"
         })["error"]
 
       assert error["code"] == -32_602
-      assert error["message"] =~ "params.ssh_user"
-
-      # The same call as a setup is not missing anything, because a setup has no account.
-      assert call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
+      assert error["message"] =~ "suggested_machine"
     end
 
-    test "an add is refused a target that names no address", context do
-      arrange_worker(context)
+    test "an add without an address is refused rather than sent a peer id as one", _context do
       client = connected(scope: :operate)
 
       error =
-        call(client, "fleet.deployment.prepare", %{
-          "target" => %{"peer_id" => "nkBuildLinux"},
+        call(client, "fleet.deployment.start", %{
+          "target" => %{"peer_id" => "n1234", "machine" => "pi"},
           "ssh_user" => "deploy"
         })["error"]
 
       assert error["code"] == -32_602
       assert error["message"] =~ "params.target.address is required"
-      assert error["message"] =~ "fleet.devices"
     end
 
-    test "an add refuses a target that names no machine, and says where a name comes from",
-         context do
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      # The build this replaces fell back to the peer id, and then to the address. Neither
-      # is a machine name, the worker refused both, and that is why "Deploy to an address"
-      # was a form that could not succeed (review finding 2).
-      for target <- [
-            %{"address" => "100.64.12.44"},
-            %{"address" => "100.64.12.44", "peer_id" => "nkBuildLinux"},
-            %{"address" => "100.64.12.44", "machine" => ""}
-          ] do
-        error =
-          call(client, "fleet.deployment.prepare", %{"target" => target, "ssh_user" => "deploy"})[
-            "error"
-          ]
-
-        assert error["code"] == -32_602
-        assert error["message"] =~ "a machine name is required"
-        assert error["message"] =~ "suggest one from fleet.devices `suggested_machine`"
-      end
-
-      refute_receive {:fake_worker, _frame}, 300
-    end
-
-    test "an add takes the machine the caller named, and the peer id is not one", context do
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      assert call(client, "fleet.deployment.prepare", %{
-               "target" => %{
-                 "address" => "100.64.12.44",
-                 "machine" => "build-linux",
-                 "peer_id" => "nkBuildLinux"
-               },
-               "ssh_user" => "deploy"
-             })["result"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
-
-      assert request["machine"] == "build-linux"
-      assert request["address"] == "100.64.12.44"
-      assert request["ssh_port"] == 22
-
-      # The peer id is the network client's key for a device, not something the worker is
-      # told to connect to, so it never reaches the request at all.
-      refute Map.has_key?(request, "peer_id")
-    end
-
-    test "an identity is translated into the shape the worker names it by", context do
-      %{worker: worker} = arrange_worker(context)
-      client = connected(scope: :operate)
-
-      for {given, expected} <- [
-            {%{"kind" => "agent", "ref" => "SHA256:abc"},
-             %{"kind" => "agent", "fingerprint" => "SHA256:abc"}},
-            {%{"kind" => "key", "ref" => "/home/a/.ssh/id_ed25519"},
-             %{"kind" => "key", "path" => "/home/a/.ssh/id_ed25519"}},
-            {%{"kind" => "password"}, %{"kind" => "password"}},
-            {%{"kind" => "default"}, %{"kind" => "default"}}
-          ] do
-        result =
-          call(client, "fleet.deployment.prepare", %{
-            "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
-            "ssh_user" => "deploy",
-            "identity" => given
-          })["result"]
-
-        assert result
-        assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-        request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
-
-        assert request["identity"] == expected,
-               "#{inspect(given)} became #{inspect(request["identity"])}"
-
-        operation = result["operation_id"]
-        {:ok, pid} = Ouroboros.Fleet.Deployment.client(operation)
-        ref = Process.monitor(pid)
-        Process.exit(pid, :kill)
-        assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @receive_timeout
-
-        Enum.reduce_while(1..50, :attached, fn _attempt, _acc ->
-          if FleetWorkerFake.attached(worker) == nil,
-            do: {:halt, :ok},
-            else: Process.sleep(20) && {:cont, :attached}
-        end)
-      end
-    end
-
-    test "an agent or key identity with no reference is refused", context do
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      for kind <- ["agent", "key"] do
-        error =
-          call(client, "fleet.deployment.prepare", %{
-            "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
-            "ssh_user" => "deploy",
-            "identity" => %{"kind" => kind}
-          })["error"]
-
-        assert error["code"] == -32_602
-        assert error["message"] =~ "identity.kind is #{kind}"
-      end
-    end
-
-    test "an unknown kind is refused before anything is forked", context do
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      error = call(client, "fleet.deployment.prepare", %{"kind" => "forget"})["error"]
-      assert error["code"] == -32_602
-      assert error["message"] =~ "params.kind must be setup, add or leave"
-
-      refute_receive {:fake_worker, _frame}, 300
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Removing a member, which the engine has always been able to do and this could not ask for
-
-  describe "prepare kind leave" do
-    test "writes the request `ouro fleet leave` would write, with the roster's address",
-         context do
+    test "a leave names a member of this machine's profile, and never an address", context do
       write_profile(context.root, [
-        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"},
-        %{"machine" => "old-pi", "host" => "100.64.12.10", "node" => "ouro@old-pi"}
+        %{"machine" => "studio", "host" => "100.64.0.1", "node" => "ouro@100.64.0.1"},
+        %{"machine" => "buildbox", "host" => "100.64.12.44", "node" => "ouro@100.64.12.44"}
       ])
 
-      %{worker: worker} = arrange_worker(context)
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
       client = connected(scope: :operate)
 
-      prepared =
-        call(client, "fleet.deployment.prepare", %{
+      operation =
+        call(client, "fleet.deployment.start", %{
           "kind" => "leave",
-          "target" => %{"machine" => "old-pi"},
-          "ssh_user" => "pi",
-          "port" => 2222,
-          "identity" => %{"kind" => "key", "ref" => "/home/a/.ssh/id_ed25519"},
-          "remote_executable" => "bin/ouro"
-        })["result"]
+          "target" => %{"machine" => "buildbox"},
+          "ssh_user" => "deploy"
+        })["result"]["operation"]
 
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      assert FleetWorkerFake.refusals(worker) == 0
+      await_challenge(client, operation, "hold-1")
 
-      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
-
-      # Field for field, what `leave_machine` in `tui/src/fleet_setup/cli.rs` fills in: the
-      # kind, the roster name the operator typed, the address read out of this machine's own
-      # profile rather than taken from the caller, the account, the port, and the identity
-      # by reference.
-      assert request == %{
-               "schema" => 1,
-               "operation" => prepared["operation_id"],
-               "kind" => "leave",
-               "machine" => "old-pi",
-               "address" => "100.64.12.10",
-               "ssh_user" => "pi",
-               "ssh_port" => 2222,
-               "identity" => %{"kind" => "key", "path" => "/home/a/.ssh/id_ed25519"},
-               "install_path" => "bin/ouro"
-             }
+      assert FleetFramesFake.argv(context.bin) == [
+               "fleet",
+               "leave",
+               "--machine",
+               "buildbox",
+               "--user",
+               "deploy",
+               "--port",
+               "22",
+               "--frames",
+               "--operation",
+               operation
+             ]
     end
 
-    test "defaults the port and the identity exactly as an add does", context do
+    test "a leave of a machine that is not a member is refused with the list printed",
+         context do
       write_profile(context.root, [
-        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"}
+        %{"machine" => "studio", "host" => "100.64.0.1", "node" => "ouro@100.64.0.1"}
       ])
 
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      assert call(client, "fleet.deployment.prepare", %{
-               "kind" => "leave",
-               "target" => %{"machine" => "build-linux"},
-               "ssh_user" => "deploy"
-             })["result"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
-
-      assert request["ssh_port"] == 22
-      assert request["identity"] == %{"kind" => "default"}
-
-      # Nothing is installed by a leave, so the two fields that say where to install and
-      # whether to run a service are not on the request at all.
-      refute Map.has_key?(request, "service")
-      refute Map.has_key?(request, "remote_data_dir")
-    end
-
-    test "matches a roster name the way the rest of the fleet matches one", context do
-      write_profile(context.root, [
-        %{"machine" => "BuildBox", "host" => "100.64.12.44", "node" => "ouro@buildbox"}
-      ])
-
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      assert call(client, "fleet.deployment.prepare", %{
-               "kind" => "leave",
-               "target" => %{"machine" => "buildbox"},
-               "ssh_user" => "deploy"
-             })["result"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      request = JSON.decode!(FleetOuroFake.request_body(context.fake_dir))
-
-      # The operator's spelling is what the operation is called, and the roster's entry is
-      # what says where to go.
-      assert request["machine"] == "buildbox"
-      assert request["address"] == "100.64.12.44"
-    end
-
-    test "refuses a machine that is not in the roster, and names the roster", context do
-      write_profile(context.root, [
-        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"},
-        %{"machine" => "old-pi", "host" => "100.64.12.10", "node" => "ouro@old-pi"}
-      ])
-
-      arrange_worker(context)
       client = connected(scope: :operate)
 
       error =
-        call(client, "fleet.deployment.prepare", %{
+        call(client, "fleet.deployment.start", %{
           "kind" => "leave",
           "target" => %{"machine" => "nowhere"},
           "ssh_user" => "deploy"
         })["error"]
 
       assert error["code"] == -32_602
-      assert error["message"] =~ "is not in this machine's roster"
-      assert error["message"] =~ "build-linux, old-pi"
-
-      refute_receive {:fake_worker, _frame}, 300
+      assert error["message"] =~ "is not in this machine's fleet"
+      assert error["message"] =~ "studio"
     end
 
-    test "refuses a leave with no machine, and one from a machine with no roster", context do
-      arrange_worker(context)
-      client = connected(scope: :operate)
-
-      # No roster at all: there is nothing to name, and the message says that rather than
-      # listing an empty set.
-      error =
-        call(client, "fleet.deployment.prepare", %{
-          "kind" => "leave",
-          "target" => %{"machine" => "build-linux"},
-          "ssh_user" => "deploy"
-        })["error"]
-
-      assert error["code"] == -32_602
-      assert error["message"] =~ "this machine has no roster"
-
+    test "a leave matches a member's name the way the rest of the fleet matches names",
+         context do
       write_profile(context.root, [
-        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"}
+        %{"machine" => "BuildBox", "host" => "100.64.12.44", "node" => "ouro@100.64.12.44"}
       ])
 
-      for params <- [
-            %{"kind" => "leave", "ssh_user" => "deploy"},
-            %{"kind" => "leave", "target" => %{}, "ssh_user" => "deploy"}
-          ] do
-        error = call(client, "fleet.deployment.prepare", params)["error"]
-        assert error["code"] == -32_602
-        assert error["message"] =~ "required for a leave"
-        assert error["message"] =~ "name one of build-linux"
-      end
-
-      # And the account is required for a leave exactly as it is for an add: this machine
-      # has to log in to the member it is removing.
-      error =
-        call(client, "fleet.deployment.prepare", %{
-          "kind" => "leave",
-          "target" => %{"machine" => "build-linux"}
-        })["error"]
-
-      assert error["message"] =~ "params.ssh_user"
-
-      refute_receive {:fake_worker, _frame}, 300
-    end
-
-    test "is exempt from no_ca_key, because removing a member issues nothing", context do
-      File.rm!(Path.join([context.root, "fleet", "ca-key.pem"]))
-
-      write_profile(context.root, [
-        %{"machine" => "build-linux", "host" => "100.64.12.44", "node" => "ouro@build-linux"}
-      ])
-
-      arrange_worker(context)
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
       client = connected(scope: :operate)
 
-      assert call(client, "fleet.deployment.prepare", %{
+      assert call(client, "fleet.deployment.start", %{
                "kind" => "leave",
-               "target" => %{"machine" => "build-linux"},
+               "target" => %{"machine" => "buildbox"},
                "ssh_user" => "deploy"
-             })["result"]
-
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-
-      # Every other blocker still applies to it.
-      Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
-
-      error =
-        call(client, "fleet.deployment.prepare", %{
-          "kind" => "leave",
-          "target" => %{"machine" => "build-linux"},
-          "ssh_user" => "deploy"
-        })["error"]
-
-      assert error["data"]["reason"] == "deploy_blocked"
-      assert "cleartext_web_bind" in error["data"]["blockers"]
+             })["result"]["operation"]
     end
   end
 
   # ---------------------------------------------------------------------------
-  # What a device row needs to know about an open operation
+  # The operations listing
 
   describe "the operations listing" do
-    test "names the device each open operation belongs to", context do
+    test "names the device each open operation belongs to, and whether it is running",
+         context do
       arrange_devices(context, ~s({"devices": []}\n))
 
       write_journal(context.root, "aa11bb22cc33dd44", %{
+        "schema" => 2,
         "operation" => "aa11bb22cc33dd44",
-        "owner" => "adele",
         "kind" => "add",
-        "state" => "awaiting_auth",
+        "state" => "waiting",
         "created_at" => "2026-09-17T10:00:00Z",
         "updated_at" => "2026-09-17T10:05:00Z",
         "target" => %{
@@ -840,12 +561,13 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       assert operation["operation"] == "aa11bb22cc33dd44"
       assert operation["kind"] == "add"
-      assert operation["state"] == "awaiting_auth"
-      assert operation["owner"] == "adele"
-      assert operation["attached"] == false
+      assert operation["state"] == "waiting"
+      assert operation["running"] == false
+      # §9 replaces `owner`/`attached` with `running`, because there is no owner any more.
+      refute Map.has_key?(operation, "owner")
+      refute Map.has_key?(operation, "attached")
 
-      # The four fields that put it on a row, and only those: a summary is not a journal,
-      # and a fingerprint or an architecture is not what a list needs.
+      # The four fields that put it on a row, and only those.
       assert operation["target"] == %{
                "machine" => "build-linux",
                "address" => "100.64.12.44",
@@ -859,9 +581,10 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       arrange_devices(context, ~s({"devices": []}\n))
 
       write_journal(context.root, "1122334455667788", %{
+        "schema" => 2,
         "operation" => "1122334455667788",
         "kind" => "setup",
-        "state" => "inspecting"
+        "state" => "running"
       })
 
       File.write!(Path.join([context.root, "deploy", "99aabbccddeeff00.json"]), "{ not json")
@@ -872,18 +595,14 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       setup = Enum.find(operations, &(&1["operation"] == "1122334455667788"))
       assert setup["kind"] == "setup"
       assert setup["target"] == nil
-      assert setup["owner"] == nil
       assert setup["readable"] == true
 
       broken = Enum.find(operations, &(&1["operation"] == "99aabbccddeeff00"))
       assert broken["readable"] == false
       assert broken["reason"] == "journal_unreadable"
 
-      # Every row carries every key a surface reads, null where it could not be established:
-      # a missing key and a null one are the same thing to a renderer and different things
-      # to a person reading the JSON.
       for row <- operations do
-        for field <- ~w(operation owner kind state created_at updated_at target readable) do
+        for field <- ~w(operation kind state created_at updated_at target readable running) do
           assert Map.has_key?(row, field), "#{field} missing from #{inspect(row)}"
         end
       end
@@ -894,59 +613,60 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   # A disabled button is a rendering; this is the boundary
 
   describe "deploy blockers" do
-    setup context do
-      context
-      |> arrange_worker()
-      |> Map.put(:client, connected(scope: :operate))
-    end
+    test "a cleartext bind blocks every kind, because each of them writes something",
+         context do
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
+      client = connected(scope: :operate)
 
-    test "no CA key blocks an add, and does not block the setup that creates one", %{
-      client: client,
-      root: root
-    } do
-      File.rm!(Path.join([root, "fleet", "ca-key.pem"]))
-
-      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
-      assert error["data"]["reason"] == "deploy_blocked"
-      assert error["data"]["blockers"] == ["no_ca_key"]
-
-      # The first local fleet is what *creates* the key, so refusing it for not having one
-      # would make the operation that fixes the blocker impossible.
-      assert call(client, "fleet.deployment.prepare", %{"kind" => "setup"})["result"]
-    end
-
-    test "a cleartext bind blocks a setup too, because it still writes a fleet", %{
-      client: client
-    } do
       Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
 
-      for params <- [prepare_params(), %{"kind" => "setup"}] do
-        error = call(client, "fleet.deployment.prepare", params)["error"]
+      for params <- [start_params(), %{"kind" => "setup"}] do
+        error = call(client, "fleet.deployment.start", params)["error"]
         assert error["data"]["reason"] == "deploy_blocked"
         assert "cleartext_web_bind" in error["data"]["blockers"]
       end
     end
 
-    test "every blocker this host has is named at once", %{client: client, root: root} do
-      File.rm!(Path.join([root, "fleet", "ca-key.pem"]))
+    test "a dev runtime blocks a setup and nothing else", context do
+      FleetFramesFake.write_scenario!(context.bin, hold_scenario())
+      client = connected(scope: :operate)
+
+      previous = Application.get_env(:ouroboros, :dev_runtime)
+      Application.put_env(:ouroboros, :dev_runtime, true)
+      on_exit(fn -> Application.put_env(:ouroboros, :dev_runtime, previous) end)
+
+      error = call(client, "fleet.deployment.start", %{"kind" => "setup"})["error"]
+      assert error["data"]["blockers"] == ["dev_runtime"]
+
+      assert call(client, "fleet.deployment.start", start_params())["result"]["operation"]
+    end
+
+    test "every blocker this host has is named at once", context do
+      client = connected(scope: :operate)
+
       System.delete_env("OUROBOROS_PROCESS_ID_HELPER")
       Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
 
-      error = call(client, "fleet.deployment.prepare", prepare_params())["error"]
+      error = call(client, "fleet.deployment.start", start_params())["error"]
 
       assert error["code"] == -32_003
-
-      assert Enum.sort(error["data"]["blockers"]) ==
-               ["cleartext_web_bind", "no_ca_key", "ouro_path_unknown"]
+      assert Enum.sort(error["data"]["blockers"]) == ["cleartext_web_bind", "ouro_path_unknown"]
+      # `no_ca_key` went with the per-member PKI: every member holds the bundle.
+      refute "no_ca_key" in error["data"]["blockers"]
+      _ = context
     end
 
     test "an operation already under way cannot be advanced on a host that became blocked",
-         %{client: client, worker: worker} do
-      operation =
-        call(client, "fleet.deployment.prepare", prepare_params())["result"]["operation_id"]
+         context do
+      FleetFramesFake.write_scenario!(context.bin, [
+        "state waiting",
+        "challenge pw password {}",
+        "await pw",
+        "done completed answered"
+      ])
 
-      assert_receive {:fake_worker, %{"op" => "attach"}}, @receive_timeout
-      :ok = FleetWorkerFake.challenge(worker, "pw", "password")
+      client = connected(scope: :operate)
+      operation = start_add(client)
       await_challenge(client, operation, "pw")
 
       # The endpoint is reconfigured under a running deployment. The credential must not be
@@ -954,15 +674,9 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       Application.put_env(:ouroboros, :web, enabled: true, bind: "0.0.0.0", allow_remote: true)
 
       for {method, params} <- [
-            {"fleet.deployment.authenticate",
-             %{"operation_id" => operation, "challenge" => "pw", "secret" => "blocked-secret"}},
-            {"fleet.deployment.start",
-             %{
-               "operation_id" => operation,
-               "plan_digest" => "sha",
-               "idempotency_key" => "blocked"
-             }},
-            {"fleet.deployment.resume", %{"operation_id" => operation}}
+            {"fleet.deployment.respond",
+             %{"operation" => operation, "challenge" => "pw", "secret" => "blocked-secret"}},
+            {"fleet.deployment.resume", %{"operation" => operation}}
           ] do
         error = call(client, method, params)["error"]
 
@@ -970,11 +684,14 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
         assert "cleartext_web_bind" in error["data"]["blockers"]
       end
 
-      refute_receive {:fake_worker, %{"op" => "respond"}}, 300
+      refute Enum.any?(
+               FleetFramesFake.responses(context.bin),
+               &String.contains?(&1, "blocked-secret")
+             )
 
       # Stopping one is always allowed: an operator must be able to end a deployment on a
       # host that may no longer start one.
-      assert call(client, "fleet.deployment.cancel", %{"operation_id" => operation})["result"]
+      assert call(client, "fleet.deployment.cancel", %{"operation" => operation})["result"]
     end
   end
 
@@ -1000,9 +717,6 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
 
       member = Enum.find(rows, &(&1["machine"] == "buildbox"))
 
-      # This suite's runtime has no `buildbox`, so the live answer is "nothing known" rather
-      # than "disconnected" — which is the shape the assertion is about: three fields that
-      # are the cluster's, separate from the network's.
       assert Map.has_key?(member, "connected")
       assert Map.has_key?(member, "compatible")
       assert Map.has_key?(member, "runtime_running")
@@ -1012,8 +726,6 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       assert member["online"] == false
       assert member["path"] == "unknown"
 
-      # And a row that was never in a fleet is not reported as disconnected — it is reported
-      # as nothing, because this runtime knows nothing about it.
       stranger = Enum.find(rows, &(&1["address"] == "100.64.12.77"))
       assert stranger["connected"] == nil
       assert stranger["compatible"] == nil
@@ -1022,10 +734,6 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     end
 
     test "a connected member's row becomes fleet_member_connected", context do
-      # The local machine is in `fleet_status` as `:local` — connected and compatible — so a
-      # discovery row naming it is the case the live merge exists for. Selected by its state
-      # rather than by position: another suite can leave an offline expected machine in that
-      # list, and the first row is then somebody else's.
       local =
         Ouroboros.Cluster.fleet_status().machines
         |> Enum.find(&(&1[:state] == :local))
@@ -1046,12 +754,7 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       assert row["compatible"] == true
       assert row["runtime_running"] == true
       assert is_binary(row["last_probe"])
-
-      # The row an operator reads stops saying "not visible on this network · Diagnose" and
-      # starts saying the thing that is true.
       assert row["state"] == "fleet_member_connected"
-
-      # The network still says what the network said.
       assert row["online"] == false
     end
   end
@@ -1059,45 +762,25 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   # ---------------------------------------------------------------------------
   # Helpers
 
-  defp prepare_params do
+  # A scenario that raises one challenge and then waits, so a case can read a *live*
+  # operation rather than race its ending.
+  defp hold_scenario do
+    ["state waiting", "challenge hold-1 host_trust {}", "await hold-1", "done completed held"]
+  end
+
+  defp start_params do
     %{
       "target" => %{"address" => "100.64.12.44", "machine" => "build-linux"},
       "ssh_user" => "deploy"
     }
   end
 
-  defp arrange_devices(context, document) do
-    ouro = FleetOuroFake.write!(context.fake_dir, devices: document)
-    System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
-    ouro
+  defp start_add(client) do
+    call(client, "fleet.deployment.start", start_params())["result"]["operation"]
   end
 
-  defp arrange_worker(context) do
-    cap = Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
-    instance = Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-    socket_path = Path.join([context.root, "deploy", "w.sock"])
-
-    worker =
-      start_supervised!(
-        {FleetWorkerFake,
-         [
-           socket_path: socket_path,
-           cap: cap,
-           instance: instance,
-           operation_file: FleetOuroFake.operation_file(context.fake_dir),
-           owner: self()
-         ]},
-        id: {FleetWorkerFake, System.unique_integer([:positive])}
-      )
-
-    ouro =
-      FleetOuroFake.write!(context.fake_dir,
-        spawn_line: FleetWorkerFake.spawn_line(worker),
-        cap: cap
-      )
-
-    System.put_env("OUROBOROS_PROCESS_ID_HELPER", ouro)
-    %{worker: worker, ouro: ouro}
+  defp arrange_devices(context, document) do
+    FleetFramesFake.write_devices!(context.bin, document)
   end
 
   defp configure_identities(context) do
@@ -1197,24 +880,50 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
   end
 
   defp await_challenge(client, operation, challenge) do
-    Enum.reduce_while(1..50, :missing, fn _attempt, _acc ->
-      status = call(client, "fleet.deployment.status", %{"operation_id" => operation})["result"]
+    poll("challenge #{challenge}", fn ->
+      status = call(client, "fleet.deployment.status", %{"operation" => operation})["result"]
 
-      if status && Enum.any?(status["challenges"], &(&1["challenge"] == challenge)) do
-        {:halt, :ok}
-      else
-        Process.sleep(20)
-        {:cont, :missing}
+      if status && status["challenge"] && status["challenge"]["challenge"] == challenge,
+        do: status,
+        else: nil
+    end)
+  end
+
+  defp await_state(client, operation, state) do
+    poll("state #{state}", fn ->
+      status = call(client, "fleet.deployment.status", %{"operation" => operation})["result"]
+
+      if status && status["state"] == state, do: status, else: nil
+    end)
+  end
+
+  defp await_source(client, operation, source) do
+    poll("source #{source}", fn ->
+      status = call(client, "fleet.deployment.status", %{"operation" => operation})["result"]
+
+      if status && status["source"] == source, do: status, else: nil
+    end)
+  end
+
+  defp poll(what, fun) do
+    Enum.reduce_while(1..120, nil, fn _attempt, _acc ->
+      case fun.() do
+        nil ->
+          Process.sleep(25)
+          {:cont, nil}
+
+        found ->
+          {:halt, found}
       end
     end)
     |> case do
-      :ok -> :ok
-      :missing -> flunk("the broker never recorded challenge #{challenge}")
+      nil -> flunk("never reached: #{what}")
+      found -> found
     end
   end
 
-  # This machine's roster, which is where a `leave` reads the member's address from. The
-  # shape is `fleet::Profile`'s, cut to what this side reads.
+  # This machine's own profile, which is the closed set a `leave` may name. The shape is
+  # `fleet::Profile`'s, cut to what this side reads.
   defp write_profile(root, members) do
     dir = Path.join(root, "fleet")
     File.mkdir_p!(dir)
@@ -1223,13 +932,14 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
     File.write!(
       path,
       JSON.encode!(%{
-        "schema" => 1,
+        "schema" => 2,
         "fleet_id" => "f0000000000000000000000000000000",
         "name" => "home",
         "machine" => "studio",
         "host" => "100.64.0.1",
-        "node" => "ouro@studio",
-        "role" => "issuer",
+        "node" => "ouro@100.64.0.1",
+        "role" => "core",
+        "dist_port" => 13_700,
         "members" => members
       })
     )
