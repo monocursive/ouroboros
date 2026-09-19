@@ -169,8 +169,8 @@ defmodule Ouroboros.Gateway.Methods.Contract do
                           {"reasoning_effort", :optional, {:enum_of, @reasoning_efforts}, nil}
                         ]
                       ]}, nil}
-  @deployment_operation {"operation_id", :required, :string,
-                         "the id `fleet.deployment.prepare` answered with; sixteen lowercase hex characters, because it also names a Unix socket path and `sun_path` is short"}
+  @deployment_operation {"operation", :required, :string,
+                         "the id `fleet.deployment.start` answered with; sixteen lowercase hex characters, which is also what names this operation's journal and its log under `<data dir>/deploy/`"}
   @turn_id_param {"turn_id", :optional, :string,
                   "caller-supplied; resending the same `{id, input, turn_id}` returns the same turn rather than starting a second"}
   @methods %{
@@ -494,31 +494,32 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: 15_000,
       params:
         {:closed, [],
-         "the Devices inventory, answered by this machine about itself and the network it can see. `fleet_name` is this machine's fleet's own name, or null for a standalone machine. `host` is the deployment host — hostname, local account, os, arch — plus `issuer` (whether the fleet CA *private* key is on this machine, which is what makes it able to admit a member rather than merely describe one) and `capabilities` `{deploy, reasons}`. `deploy` is false with a named reason when this runtime serves no durable data directory (`no_data_dir`), holds no CA key (`no_ca_key`), cannot say where its own `ouro` is (`ouro_path_unknown`), publishes a cleartext non-loopback web endpoint (`cleartext_web_bind`) — the spec decides credential entry on the bind, the one transport fact a server can verify, and a forwarded header never enters it — or is a development runtime rather than a packaged one (`dev_runtime`). The order is stable, because a surface renders it. The last of the five is not a blanket refusal and is the only one that is not: a `--dev` runtime cannot boot under a fleet profile, so a local `setup` from one builds a fleet it can never start, while an `add` or a `leave` from the same runtime acts on somebody else\'s installation and is unaffected — `fleet.deployment.prepare` therefore applies `dev_runtime` to `setup` alone, and `no_ca_key` to neither `setup` nor `leave`. `discovery` and `devices` are `ouro fleet devices --json` verbatim, bounded and read under a ten-second ceiling: a merge of this machine\'s roster with the peers its network client can see, where a visible peer is never labelled uninstalled because nothing has inspected one. Every row carries `suggested_machine`: the roster name for a member, otherwise that device\'s display name folded to a valid machine name, or `null` when nothing valid remains — `fleet.deployment.prepare` requires a machine name and will not invent one, so this is where a surface gets the name it offers. Each **member** row additionally carries what this runtime knows about that machine as a BEAM peer — `connected`, `compatible`, `runtime_running` and `last_probe` — and its `state` becomes `fleet_member_connected` when it is connected. These are the cluster's answers and are kept separate from `online` and `path`, which are the network client's: a member reachable over BEAM but invisible to the network client is a different problem from one that is neither, and reporting only the second is why a machine `fleet doctor` called connected still rendered as \"not visible on this network\". A row that is not a member carries `null` for all four, because this runtime knows nothing about it rather than knowing it is absent. `operations` is the deployment operations this data directory holds journals for — `operation`, `kind`, `state`, `owner`, `created_at`/`updated_at`, whether a worker is `attached`, and the `target` (machine, address, ssh user and port) that puts it on a device row. Newest first by `created_at`, at most 200, with `operations_total` saying how many there are so a surface can say \"and N older\" rather than showing a prefix as if it were the whole. A top-level key `ouro` printed that this build does not read is named in `unknown` rather than passed through. Administrator-only by the identity rule even at read scope: this is every machine on an operator\'s private network. A non-administrator reader sees `fleet.status`\'s membership subset instead"},
+         "the Devices inventory, answered by this machine about itself and the network it can see. `fleet_name` is this machine's fleet's own name, or null for a standalone machine. `host` is the deployment host — hostname, local account, os, arch — plus `capabilities` `{deploy, reasons}`. `deploy` is false with a named reason when this runtime serves no durable data directory (`no_data_dir`), cannot say where its own `ouro` is (`ouro_path_unknown`), publishes a cleartext non-loopback web endpoint (`cleartext_web_bind`) — the spec decides credential entry on the bind, the one transport fact a server can verify, and a forwarded header never enters it — or is a development runtime rather than a packaged one (`dev_runtime`). The order is stable, because a surface renders it. The last of the four is not a blanket refusal and is the only one that is not: a `--dev` runtime cannot boot under a fleet profile, so a local `setup` from one builds a fleet it can never start, while an `add` or a `leave` from the same runtime acts on somebody else\'s installation and is unaffected — `fleet.deployment.start` therefore applies `dev_runtime` to `setup` alone. There is no `issuer` and no `no_ca_key`: one fleet is one shared bundle held by every member, so holding the certificate authority key stopped being what makes a machine able to admit another. `discovery` and `devices` are `ouro fleet devices --json` verbatim, bounded and read under a ten-second ceiling: a merge of this machine\'s members with the peers its network client can see, where a visible peer is never labelled uninstalled because nothing has inspected one. Every row carries `suggested_machine`: the member name for a machine already in this fleet, otherwise that device\'s display name folded to a valid machine name, or `null` when nothing valid remains — `fleet.deployment.start` requires a machine name and will not invent one, so this is where a surface gets the name it offers. Each **member** row additionally carries what this runtime knows about that machine as a BEAM peer — `connected`, `compatible`, `runtime_running` and `last_probe` — and its `state` becomes `fleet_member_connected` when it is connected. These are the cluster\'s answers and are kept separate from `online` and `path`, which are the network client\'s: a member reachable over BEAM but invisible to the network client is a different problem from one that is neither. A row that is not a member carries `null` for all four, because this runtime knows nothing about it rather than knowing it is absent. `operations` is the deployment operations this data directory holds journals for — `operation`, `kind`, `state`, `created_at`/`updated_at`, whether a worker process is `running` here and now, and the `target` (machine, address, ssh user and port) that puts it on a device row. Newest first by `created_at`, at most 200, with `operations_total` saying how many there are so a surface can say \"and N older\" rather than showing a prefix as if it were the whole. A top-level key `ouro` printed that this build does not read is named in `unknown` rather than passed through. Administrator-only by the identity rule even at read scope: this is every machine on an operator\'s private network. A non-administrator reader sees `fleet.status`\'s membership subset instead"},
       handler: :handle_fleet_devices
     },
-    "fleet.deployment.prepare" => %{
+    "fleet.deployment.start" => %{
       scope: :operate,
       timeout: @default_timeout,
+      outcome: :unknown,
       params:
         {:closed,
          [
            {"kind", {:optional, "add"}, {:enum, ["setup", "add", "leave"]},
-            "`add` deploys onto another machine over SSH. `setup` is the first **local** fleet — \"Set up this device\" — which the spec is explicit about: this machine configures itself, without SSH to itself, so it takes no target and no account. `leave` removes a machine that is already in this machine\'s roster: it stops Ouroboros there, retires that member\'s credentials and takes it out of every roster, and it installs nothing"},
+            "`add` deploys onto another machine over SSH. `setup` is the first **local** fleet — \"Set up this device\" — which this machine configures for itself, without SSH to itself, so it takes no account. `leave` removes a machine that is already in this machine\'s profile: it stops Ouroboros there, removes its fleet credentials and its startup service, and forgets it here"},
            {"target", :optional,
             {:object,
              [
                {"address", :required, :string,
-                "the private overlay address. Required for `add`, because the worker talks to addresses: a peer id is a network client\'s *name* for a device, and resolving one is what `fleet.devices` is for. Never given for a `leave`, whose address comes from this machine\'s roster so that the machine named is the machine contacted"},
+                "the private overlay address. Required for `add`, because the program talks to addresses: a peer id is a network client\'s *name* for a device, and resolving one is what `fleet.devices` is for. Never given for a `leave`, whose address the program reads out of this machine\'s own profile so that the machine named is the machine contacted"},
                {"machine", :required, :string,
-                "**required.** For `add`, the roster name the new member will have — neither a peer id nor an address is a machine name, and the worker refuses both, so `fleet.devices` answers `suggested_machine` for every row to give a surface one to offer. For `leave`, a name already in this machine\'s roster; a name that is not in it is refused `-32602` with the roster listed"},
+                "**required.** For `add`, the name the new member will have — neither a peer id nor an address is a machine name, so `fleet.devices` answers `suggested_machine` for every row to give a surface one to offer. For `leave`, a name already in this machine\'s profile; a name that is not in it is refused `-32602` with the list printed"},
                {"peer_id", :optional, :string,
-                "the network client\'s own id. Recorded by the caller for its own bookkeeping; it is not a machine name and is not what the worker is told to connect to"}
+                "the network client\'s own id. Recorded by the caller for its own bookkeeping; it is not a machine name and is not what the program is told to connect to"}
              ]}, "required for `add` and `leave`; unused by `setup`"},
            {"machine", :optional, :string,
             "`setup` only: what this device should be called in its own fleet. This host\'s own name when omitted"},
            {"address", :optional, :string,
-            "`setup` only: this machine\'s private overlay address, the one its runtime will bind. The worker refuses `unresolved_address` rather than guessing when it is absent; `fleet.devices` reports it"},
+            "`setup` only: this machine\'s private overlay address, the one its runtime will bind. The program refuses `unresolved_address` rather than guessing when it is absent; `fleet.devices` reports it"},
            {"ssh_user", :optional, :string,
             "required for `add` and for `leave`: the account on the target. Never inferred from the network client\'s owner, and never used by `setup`"},
            {"port", {:optional, 22}, {:integer, 1, 65_535}, nil},
@@ -529,26 +530,24 @@ defmodule Ouroboros.Gateway.Methods.Contract do
                {"ref", :optional, :string,
                 "required for `agent` (the identity\'s public fingerprint) and for `key` (a path on this host) — a reference, never key material"}
              ]},
-            "`add` and `leave`; omitted means `default`, which is whatever this host\'s own ssh configuration selects"},
+            "`add` and `leave`; omitted means `default`, which is whatever this host\'s own ssh configuration selects. A target that then asks for a password raises the `password` challenge, so `default` reaches a prompt rather than failing"},
            {"install_path", :optional, :string, "`add` only: where `ouro` goes on the target"},
-           {"remote_executable", :optional, :string,
-            "`leave` only: where `ouro` already is on that member, when it is not where this host would look. The CLI spells it `--remote-executable`"},
-           {"data_dir", :optional, :string, "the target\'s durable directory"},
+           {"data_dir", :optional, :string, "`add` only: the target\'s durable directory"},
            {"service", {:optional, true}, :boolean,
             "whether to install an Ouroboros-owned startup service on the target"}
          ],
-         "forks the deployment worker for a new operation and attaches to it, then answers. Inspection, host verification and authentication all happen behind the returned `operation_id` rather than inside this call: the worker is detached, so closing the page and stopping this runtime both leave it running. These parameters reach it in a private 0600 file under the data directory rather than on its command line, because `ps` is readable by every local account and a target hostname is nobody else's business; the worker retains that private, secret-free file for crash recovery and later member access. They are written in the worker's own request shape, which refuses a key it does not know, so what this method accepts and what the worker reads cannot drift apart silently. **Refused `-32003` `deploy_blocked` when this host cannot deploy**, carrying `data.blockers` — the same list `fleet.devices` reports under `capabilities.reasons`. A disabled button is a rendering, not a boundary, so the check is here as well; `.start`, `.authenticate` and `.resume` are held to it too, and `.cancel` never is, because an operator must be able to stop a deployment on a host that may no longer start one. `setup` and `leave` are exempt from `no_ca_key`: the first local fleet is what creates the key, and removing a member issues nothing. `dev_runtime` runs the other way — it blocks `setup` and nothing else, because a development runtime cannot boot under a fleet profile but is perfectly able to act on another machine. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
-      handler: :handle_fleet_deployment_prepare
+         "mints an operation id and runs `ouro fleet <kind> … --frames --operation <id>` as a port program of this runtime, then answers `{operation}` immediately. Inspection, host verification, authentication and the plan review all happen behind that id as challenges rather than inside this call. **The request is the argv**: every parameter here becomes a word on that command line, nothing on it is a secret, and a value that is empty, multi-word or begins with `-` is refused rather than passed — an address of `--data-dir` would otherwise be an option this runtime did not mean to give. `ouro` is the absolute path the launcher exported, never a `PATH` lookup, because this is the process that will be handed a password. **Refused `-32003` `deploy_blocked` when this host cannot deploy**, carrying `data.blockers` — the same list `fleet.devices` reports under `capabilities.reasons`. A disabled button is a rendering, not a boundary, so the check is here as well; `.respond` and `.resume` are held to it too, and `.cancel` never is, because an operator must be able to stop a deployment on a host that may no longer start one. `dev_runtime` blocks `setup` and nothing else. No secret is a parameter here — an identity is named by reference and a password is only ever answered to its own challenge"},
+      handler: :handle_fleet_deployment_start
     },
     "fleet.deployment.status" => %{
       scope: :read,
       timeout: @default_timeout,
       params:
         {:closed, [@deployment_operation],
-         "the sanitized snapshot: `source` is `worker` when one is attached and `journal` when none is, which is the operator\'s whole question after an interruption — a journal says what was durably recorded, only a live worker says what is happening now. Carries states, steps, bounded log lines and the metadata of every open challenge; a challenge\'s metadata is secret-free by construction and this reads it defensively anyway. A read cannot obtain or answer a secret. `worker_exit` is `null` on every answer but one: a `journal` answer whose operation is neither finished nor `done` carries `{last_lines}`, the last three non-empty lines of the worker\'s *own* stdio log — read from the tail, at most three hundred characters each, through the same sanitizer the journal is read with, because nothing wrote that file under a contract. It is there because a worker that dies before it attaches leaves an operation sitting at `inspecting` with no error on it while the reason — a socket path over the platform\'s limit, a release that would not download — is on disk the whole time. `last_lines` is empty when the worker left no log, which is a different fact from leaving no explanation"},
+         "the sanitized snapshot: `source` is `worker` when a process on this runtime is holding the operation\'s port program and `journal` when none is, which is the operator\'s whole question after an interruption — a journal says what was durably recorded, only a live process says what is happening now. Carries `kind`, `state`, `steps`, the one open `challenge` with its secret-free metadata, the last fifty `log` lines, the reviewed `plan` as the lines an operator approves, the `summary` of a `done` frame and `last_error`. `running` is whether a process is holding it. A read cannot obtain or answer a secret. A `journal` answer\'s `log` is the tail of the program\'s own stderr file, read through the same sanitizer the journal is read with, because nothing wrote that file under a contract — it is the only thing a program that died before it could journal anything leaves behind, and without it an operation sat at `running` with no error on it while the reason was on disk the whole time. A `journal` answer for an unfinished operation whose journal records no error of its own carries `last_error` `{reason: \"worker_exited\", detail}` when this runtime saw its program exit"},
       handler: :handle_fleet_deployment_status
     },
-    "fleet.deployment.start" => %{
+    "fleet.deployment.respond" => %{
       scope: :operate,
       timeout: @default_timeout,
       outcome: :unknown,
@@ -556,41 +555,15 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed,
          [
            @deployment_operation,
-           {"plan_digest", :required, :string,
-            "the sha256 of the canonical plan that was reviewed; a plan that changed since is refused `plan_changed` rather than applied"},
-           {"idempotency_key", :required, :string,
-            "caller-owned. The same key against the same operation replays the recorded answer without touching the worker; a different key while that operation is running is `operation_in_progress`"}
+           {"challenge", :required, :string,
+            "the open challenge this answers. An id that is not the one the operation is waiting on is `unknown_challenge`; one that was already answered is `challenge_consumed`"},
+           {"accept", :optional, :boolean,
+            "for `host_trust` and `review`. True trusts the key for this operation, or approves the plan exactly as it was shown; false refuses the attempt"},
+           {"secret", :optional, :string,
+            "for `password` and `passphrase`: single use. It is written to the program\'s stdin and referenced nowhere else"}
          ],
-         "approves the reviewed plan and lets the deployment run. A lost answer is safe to retry under the same key, which is the whole reason the key is required rather than optional"},
-      handler: :handle_fleet_deployment_start
-    },
-    "fleet.deployment.authenticate" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           @deployment_operation,
-           {"challenge", :required, :string, "the `password` or `passphrase` challenge answered"},
-           {"secret", :required, :string,
-            "the password or key passphrase, single use. It is written to the worker\'s socket and referenced nowhere else"}
-         ],
-         "**the one method in this protocol whose parameters never reach the audit digest.** The spec\'s secret-handling section names `Web.Call` and gateway parameter digests among the places a secret may never appear, *even hashed* — a hash of a human\'s password is that password in a form somebody can look up. Both surfaces therefore log `operation_id` and `challenge` and nothing else for this verb, and the challenge\'s kind and the outcome are logged by the broker, which knows them. Answering requires the identity **and the client session** the challenge was issued to (seam S4): a second tab, a second listener connection, or another administrator is `challenge_not_bound`. A challenge is consumed when it is sent, so a second answer is `challenge_consumed` rather than a second guess"},
-      handler: :handle_fleet_deployment_authenticate
-    },
-    "fleet.deployment.confirm_host" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           @deployment_operation,
-           {"challenge", :required, :string, "the `host_trust` challenge answered"},
-           {"accept", :required, :boolean,
-            "true appends the key to this operation\'s private known-hosts store; false fails the attempt"}
-         ],
-         "explicit trust for one unknown SSH host key, bound to its session exactly as `authenticate` is. A key that *changed* is never offered here: that is `host_key_changed` and it blocks"},
-      handler: :handle_fleet_deployment_confirm_host
+         "**the one method in this protocol whose parameters never reach the audit digest.** The spec\'s secret-handling section names `Web.Call` and gateway parameter digests among the places a secret may never appear, *even hashed* — a hash of a human\'s password is that password in a form somebody can look up. Both surfaces therefore log `operation` and `challenge` and nothing else for this verb, and the challenge\'s kind and the outcome are logged by the worker process, which knows them. Exactly one of `accept` and `secret` is given, and which one is fixed by the challenge\'s own kind: a host-trust acceptance delivered to a password prompt is `challenge_kind_mismatch` and is never written. A challenge is consumed when it is answered, so a second answer is `challenge_consumed` rather than a second guess, and one answered past its `expires_at` is `challenge_expired`. There is **no session binding**: a challenge is answered by whoever is an administrator on this runtime, so a second tab, a reload and a reconnect all answer the prompt in front of them"},
+      handler: :handle_fleet_deployment_respond
     },
     "fleet.deployment.cancel" => %{
       scope: :operate,
@@ -598,20 +571,15 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       outcome: :unknown,
       params:
         {:closed, [@deployment_operation],
-         "stops at a safe boundary and reports residue. It does not claim to undo anything: the worker finishes or reconciles the durable step it is inside, reaps its SSH children, and a credential already delivered to another machine stays delivered"},
+         "stops at a safe boundary and reports residue. It does not claim to undo anything: the program finishes or reconciles the durable step it is inside, reaps its SSH children, and a credential already delivered to another machine stays delivered"},
       handler: :handle_fleet_deployment_cancel
     },
     "fleet.deployment.resume" => %{
       scope: :operate,
       timeout: @default_timeout,
       params:
-        {:closed,
-         [
-           @deployment_operation,
-           {"takeover", {:optional, false}, :boolean,
-            "required to resume an operation another identity started, or one whose owner this build cannot establish. A resume attaches under the resuming identity, so every later challenge binds to *them* — that is inheriting somebody else's credential prompt, and it leaves its own audit line naming who took what from whom"}
-         ],
-         "forks a new worker for an operation whose previous one is gone, after reading the journal\'s state. Refused when a worker is still attached (`already_attached`), when the journal records a finished operation (`operation_finished`), and when the journal records no state at all (`operation_state_unknown`) — resuming an operation whose record cannot be read would be starting a second worker against a machine whose state nobody knows — and when the journal's `owner` is not this identity and `takeover` was not set (`operation_not_yours`)"},
+        {:closed, [@deployment_operation],
+         "runs an interrupted operation\'s program again against the journal it left. `--operation ID` is the whole of resume: a step recorded `ok` is not repeated, and an `install` onto a target already in this fleet as this machine is `skipped`. The command line is the one this runtime built, or — on a runtime that restarted and has forgotten — the one the journal\'s `kind`, `target` and `paths` rebuild; nothing on it was ever a secret, which is what makes rebuilding it safe. Refused when a process is still holding the operation (`already_attached`), when the journal records a finished operation (`operation_finished`), and when the journal records no state at all (`operation_state_unknown`) — resuming an operation whose record cannot be read would be starting a second program against a machine whose state nobody knows"},
       handler: :handle_fleet_deployment_resume
     },
     "fleet.doctor" => %{
@@ -627,7 +595,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed,
          [
            {"machine", :required, :string,
-            "must appear in the validated local profile's roster tombstones, and must be offline"},
+            "a machine this runtime is not connected to. There is no tombstone precondition: `ouro fleet forget NAME` is the operator's own statement about a machine that cannot be reached, and it takes the name out of this profile's members"},
            {"accept_state_loss", :required, {:const, true},
             "anything else is refused: this retires durable session-owner evidence"}
          ]},

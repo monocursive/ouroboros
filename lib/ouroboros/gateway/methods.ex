@@ -739,23 +739,10 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
-  def handle_fleet_deployment_prepare(params) do
-    deployment(fn binding ->
-      with {:ok, request} <- deployment_request(params) do
-        Deployment.prepare(request, binding)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_fleet_deployment_status(params) do
-    # Needs the *subject* — an operation belongs to the identity that started it (seam S5) —
-    # but not a client session. A session is what a challenge is answered against, and this
-    # verb answers nothing; failing a read for the second browser tab would be a restriction
-    # with no property behind it.
+  def handle_fleet_deployment_start(params) do
     safe(fn ->
-      with {:ok, operation} <- fetch_string(params, "operation_id") do
-        Deployment.status(operation, deployment_subject()) |> deployment_reply()
+      with {:ok, request} <- deployment_request(params) do
+        Deployment.start(request) |> deployment_reply()
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -763,12 +750,12 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
-  def handle_fleet_deployment_start(params) do
-    deployment(fn binding ->
-      with {:ok, operation} <- fetch_string(params, "operation_id"),
-           {:ok, digest} <- fetch_string(params, "plan_digest"),
-           {:ok, key} <- fetch_string(params, "idempotency_key") do
-        Deployment.start(operation, digest, key, binding)
+  def handle_fleet_deployment_status(params) do
+    safe(fn ->
+      with {:ok, operation} <- fetch_string(params, "operation") do
+        Deployment.status(operation) |> deployment_reply()
+      else
+        {:invalid, message} -> invalid_params(message)
       end
     end)
   end
@@ -777,35 +764,46 @@ defmodule Ouroboros.Gateway.Methods do
   # `params` is not destructured into a local beyond the two fields the audit line is allowed
   # to name, and `secret` is read once, passed straight through, and never bound to anything
   # this function keeps. Nothing on this path inspects, logs or digests the map.
-  def handle_fleet_deployment_authenticate(params) do
-    deployment(fn binding ->
-      with {:ok, operation} <- fetch_string(params, "operation_id"),
+  #
+  # `Deployment.respond/3` runs in *this* process, which is the gateway connection's own:
+  # the broker is asked for the worker's pid and the response goes to that pid directly, so
+  # a secret never enters the mailbox of the named singleton every deployment shares.
+  def handle_fleet_deployment_respond(params) do
+    safe(fn ->
+      with {:ok, operation} <- fetch_string(params, "operation"),
            {:ok, challenge} <- fetch_string(params, "challenge"),
-           {:ok, secret} <- fetch_string(params, "secret") do
-        Deployment.authenticate(operation, challenge, secret, binding)
+           {:ok, response} <- deployment_response(params) do
+        Deployment.respond(operation, challenge, response) |> deployment_reply()
+      else
+        {:invalid, message} -> invalid_params(message)
       end
     end)
   end
 
-  @doc false
-  def handle_fleet_deployment_confirm_host(params) do
-    deployment(fn binding ->
-      with {:ok, operation} <- fetch_string(params, "operation_id"),
-           {:ok, challenge} <- fetch_string(params, "challenge"),
-           accept when is_boolean(accept) <- Map.get(params, "accept") do
-        Deployment.confirm_host(operation, challenge, accept, binding)
-      else
-        {:invalid, message} -> {:invalid, message}
-        _not_a_boolean -> {:invalid, "params.accept must be true or false"}
-      end
-    end)
+  # Exactly one of the two, because a challenge has one kind and answering it two ways at
+  # once is a caller that does not know which question it is answering.
+  defp deployment_response(params) do
+    case {Map.get(params, "accept"), Map.get(params, "secret")} do
+      {accept, nil} when is_boolean(accept) ->
+        {:ok, %{"accept" => accept}}
+
+      {nil, secret} when is_binary(secret) ->
+        {:ok, %{"secret" => secret}}
+
+      {nil, nil} ->
+        {:invalid, "params must carry accept for a host_trust or review, or secret otherwise"}
+
+      _both ->
+        {:invalid,
+         "params.accept and params.secret are two answers; send the one the challenge asks for"}
+    end
   end
 
   @doc false
   def handle_fleet_deployment_cancel(params) do
     safe(fn ->
-      with {:ok, operation} <- fetch_string(params, "operation_id") do
-        Deployment.cancel(operation, deployment_subject()) |> deployment_reply()
+      with {:ok, operation} <- fetch_string(params, "operation") do
+        Deployment.cancel(operation) |> deployment_reply()
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -814,64 +812,20 @@ defmodule Ouroboros.Gateway.Methods do
 
   @doc false
   def handle_fleet_deployment_resume(params) do
-    deployment(fn binding ->
-      with {:ok, operation} <- fetch_string(params, "operation_id"),
-           {:ok, takeover?} <- deployment_takeover(params) do
-        Deployment.resume(operation, binding, takeover?)
-      end
-    end)
-  end
-
-  defp deployment_takeover(params) do
-    case Map.get(params, "takeover") do
-      nil -> {:ok, false}
-      takeover when is_boolean(takeover) -> {:ok, takeover}
-      _other -> {:invalid, "params.takeover must be true or false"}
-    end
-  end
-
-  # Every deployment mutation runs the same three steps: establish who is asking, run the
-  # body, map the answer. The binding is the pair a challenge is bound to at issue (seam S4)
-  # — the audited identity and the client session, which is the listener connection for a
-  # terminal client and the authenticated browser session for a page. A call that arrives
-  # with no session is refused rather than given a shared default: two unattributed callers
-  # sharing one binding would be exactly the cross-session reply the binding exists to stop.
-  defp deployment(body) do
     safe(fn ->
-      case deployment_binding() do
-        {:ok, binding} ->
-          case body.(binding) do
-            {:invalid, message} -> invalid_params(message)
-            result -> deployment_reply(result)
-          end
-
-        {:error, _reason} = refusal ->
-          deployment_reply(refusal)
+      with {:ok, operation} <- fetch_string(params, "operation") do
+        Deployment.resume(operation) |> deployment_reply()
+      else
+        {:invalid, message} -> invalid_params(message)
       end
     end)
   end
 
-  # Who is asking, with no session. The identity rule has already decided this caller may
-  # reach the verb; this is the narrower question of whose operation it is.
-  defp deployment_subject do
-    %{subject: Ouroboros.Audit.Identity.actor(), session: Process.get(:ouroboros_client_session)}
-  end
-
-  defp deployment_binding do
-    case Process.get(:ouroboros_client_session) do
-      session when is_binary(session) and session != "" ->
-        {:ok, %{subject: Ouroboros.Audit.Identity.actor(), session: session}}
-
-      _absent ->
-        {:error, :session_unbound}
-    end
-  end
-
-  # The worker is told what to inspect, in the shape its own `OperationRequest` reads
-  # (`tui/src/fleet_setup/mod.rs`), and nothing it is told is a secret: a machine name, an
-  # address, an account, a port, paths, and an identity named by *reference*. That is exactly
-  # the set the spec permits a deployment to retain. The worker refuses unknown keys, so this
-  # builds its fields rather than a shape of this side's own choosing.
+  # The program is told what to do in the shape its own command line reads, and nothing it
+  # is told is a secret: a machine name, an address, an account, a port, paths, and an
+  # identity named by *reference*. That is exactly the set the spec permits a deployment to
+  # retain. `Ouroboros.Fleet.Deployment.argv/2` checks every one of them again before it
+  # becomes a word on that line.
   defp deployment_request(params) do
     case deployment_kind(params) do
       {:ok, "setup"} -> setup_request(params)
@@ -889,12 +843,12 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # The first local fleet, which the spec is explicit about: "Set up this device" configures
-  # *this* machine, without SSH to itself. So there is no target and no account — only what
-  # this machine should be called and the private address it will bind. Both are optional
-  # here because both have an answer this host can supply: the machine name defaults to this
-  # host's own, and an address the caller does not give is one the worker refuses to guess
-  # at, with `unresolved_address` and the command that shows it.
+  # The first local fleet: "Set up this device" configures *this* machine, without SSH to
+  # itself. So there is no target and no account — only what this machine should be called
+  # and the private address it will bind. Both are optional here because both have an answer
+  # this host can supply: the machine name defaults to this host's own, and an address the
+  # caller does not give is one the program refuses to guess at, with `unresolved_address`
+  # and the command that shows it.
   defp setup_request(params) do
     with {:ok, machine} <- deployment_optional_string(params, "machine"),
          {:ok, address} <- deployment_optional_string(params, "address"),
@@ -904,7 +858,6 @@ defmodule Ouroboros.Gateway.Methods do
          "kind" => "setup",
          "machine" => machine || Deployment.host_name(),
          "address" => address,
-         "identity" => %{"kind" => "default"},
          "service" => service
        })}
     end
@@ -924,42 +877,39 @@ defmodule Ouroboros.Gateway.Methods do
          "machine" => target["machine"],
          "address" => target["address"],
          "ssh_user" => ssh_user,
-         "ssh_port" => port,
+         "port" => port,
          "identity" => identity,
          "install_path" => install_path,
-         "remote_data_dir" => data_dir,
+         "data_dir" => data_dir,
          "service" => service
        })}
     end
   end
 
-  # Removing a member, in the shape `ouro fleet leave --machine NAME` writes (`leave_machine`
-  # in `tui/src/fleet_setup/cli.rs`). Two things are not parameters here and that is the
-  # point of the verb: the *address* comes from this machine's own roster, so the machine
-  # named is the machine contacted, and there is nothing to install, so `service` and a data
-  # directory never appear. `install_path` is the one path a leave takes, under the name the
-  # CLI gives it — `--remote-executable`, an override for where `ouro` lives on that member.
+  # Removing a member, in the shape `ouro fleet leave --machine NAME --user USER` takes. Two
+  # things are not parameters here and that is the point of the verb: the *address* is read
+  # by the program out of this machine's own profile, so the machine named is the machine
+  # contacted, and there is nothing to install, so `service` and a data directory never
+  # appear. The name is still checked against this machine's members, because "not a member"
+  # is a refusal this side can make before a connection rather than after one.
   defp leave_request(params) do
-    with {:ok, member, machine} <- deployment_member(params),
+    with {:ok, _member, machine} <- deployment_member(params),
          {:ok, ssh_user} <- fetch_string(params, "ssh_user"),
          {:ok, port} <- deployment_port(params),
-         {:ok, identity} <- deployment_identity(params),
-         {:ok, install_path} <- deployment_optional_string(params, "remote_executable") do
+         {:ok, identity} <- deployment_identity(params) do
       {:ok,
        prune(%{
          "kind" => "leave",
          "machine" => machine,
-         "address" => member["host"],
          "ssh_user" => ssh_user,
-         "ssh_port" => port,
-         "identity" => identity,
-         "install_path" => install_path
+         "port" => port,
+         "identity" => identity
        })}
     end
   end
 
-  # The roster is the closed set a leave may name, and the refusal prints it: "not in the
-  # roster" without the roster is a message that makes an operator go and read a JSON file.
+  # The members list is the closed set a leave may name, and the refusal prints it: "not in
+  # the fleet" without the list is a message that makes an operator go and read a JSON file.
   defp deployment_member(params) do
     case Map.get(params, "target") do
       %{"machine" => machine} when is_binary(machine) and machine != "" ->
@@ -980,33 +930,30 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp not_a_member(machine) do
-    "params.target.machine #{inspect(machine)} is not in this machine's roster: " <>
+    "params.target.machine #{inspect(machine)} is not in this machine's fleet: " <>
       roster_sentence()
   end
 
   defp roster_sentence do
     case Deployment.roster() |> Enum.map(& &1["machine"]) |> Enum.sort() do
-      [] -> "this machine has no roster, so there is no member to remove"
+      [] -> "this machine has no members, so there is no machine to remove"
       names -> "name one of " <> Enum.join(names, ", ")
     end
   end
 
-  # An absent optional field is left out rather than sent as null: the worker's decoder takes
-  # either, and a file with only the fields somebody actually chose is a file an operator can
-  # read.
+  # An absent optional field is left out rather than sent as null: the argv builder takes
+  # either, and a request with only the fields somebody actually chose is one a test can read.
   defp prune(request), do: :maps.filter(fn _key, value -> not is_nil(value) end, request)
 
-  # `address` is what reaches the worker — its request has no `peer_id` field, because a peer
-  # id is a network client's name for a device and the worker talks to addresses. A caller
-  # that has only a peer id has not resolved the device yet, and `fleet.devices` is where
-  # that resolution comes from, so this refuses rather than sending a name as an address.
+  # `address` is what reaches the program — a peer id is a network client's name for a device
+  # and the program talks to addresses. A caller that has only a peer id has not resolved the
+  # device yet, and `fleet.devices` is where that resolution comes from, so this refuses
+  # rather than sending a name as an address.
   #
-  # `machine` is required rather than defaulted, and that is a change from the build that
-  # fell back to the peer id or the address. Neither is a machine name: a peer id is the
-  # network client's opaque key and an address is an address, and the worker refused both —
-  # which is how "Deploy to an address" came to be a form that could not succeed (review
-  # finding 2). `fleet.devices` answers `suggested_machine` for every row precisely so a
-  # surface has a name to offer, so this refuses and says where the name comes from.
+  # `machine` is required rather than defaulted. Neither a peer id nor an address is a machine
+  # name, and the program refuses both — which is how "Deploy to an address" came to be a form
+  # that could not succeed. `fleet.devices` answers `suggested_machine` for every row
+  # precisely so a surface has a name to offer, so this refuses and says where the name is.
   defp deployment_target(params) do
     case Map.get(params, "target") do
       %{} = target ->
@@ -1046,24 +993,21 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # Translated into the worker's internally tagged enum rather than passed through: `ref`
-  # means a different thing for each kind — an agent identity's public fingerprint, a key
-  # file's path — and naming it as one field on this side while the worker names it as two
-  # would be a shape nobody could validate.
+  # Passed through as `{kind, ref}` rather than translated: `Deployment.argv/2` is the one
+  # place that decides which flag each kind becomes, and naming the flag twice is how the two
+  # come to disagree.
   defp deployment_identity(params) do
     case Map.get(params, "identity") do
-      nil -> {:ok, %{"kind" => "default"}}
-      %{"kind" => "password"} -> {:ok, %{"kind" => "password"}}
-      %{"kind" => "default"} -> {:ok, %{"kind" => "default"}}
-      %{"kind" => "agent"} = identity -> identity_ref(identity, "agent", "fingerprint")
-      %{"kind" => "key"} = identity -> identity_ref(identity, "key", "path")
+      nil -> {:ok, nil}
+      %{"kind" => kind} when kind in ["password", "default"] -> {:ok, %{"kind" => kind}}
+      %{"kind" => kind} = identity when kind in ["agent", "key"] -> identity_ref(identity, kind)
       _other -> {:invalid, "params.identity.kind must be one of default, agent, key, password"}
     end
   end
 
-  defp identity_ref(identity, kind, field) do
+  defp identity_ref(identity, kind) do
     case identity["ref"] do
-      ref when is_binary(ref) and ref != "" -> {:ok, %{"kind" => kind, field => ref}}
+      ref when is_binary(ref) and ref != "" -> {:ok, %{"kind" => kind, "ref" => ref}}
       _absent -> {:invalid, "params.identity.ref is required when identity.kind is #{kind}"}
     end
   end

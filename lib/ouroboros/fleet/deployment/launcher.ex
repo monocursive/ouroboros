@@ -1,9 +1,9 @@
 defmodule Ouroboros.Fleet.Deployment.Launcher do
   @moduledoc """
-  The one place the BEAM decides where `ouro` is, and the only two ways it runs it.
+  The one place the BEAM decides where `ouro` is, and the environment it runs it in.
 
   The launcher that started this runtime exports `OUROBOROS_PROCESS_ID_HELPER` as the
-  absolute path of the `ouro` executable it ran (seam S1; `tui/src/runtime.rs` sets it and
+  absolute path of the `ouro` executable it ran (`tui/src/runtime.rs` sets it and
   `Ouroboros.RuntimeOwner` already reads it for its liveness checks). This module reads
   exactly that and never consults `PATH`: a deployment spawns a process that will be handed
   an SSH credential, and resolving its executable through inherited environment is how a
@@ -14,26 +14,15 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   somebody. A runtime started some other way has no `ouro`, and that is reported as
   `ouro_path_unknown` rather than guessed at.
 
-  Both entry points take an argv list. Nothing here builds a shell string, and no caller
-  may: `System.cmd/3` execs the file directly.
+  Every entry point takes an argv list. Nothing here builds a shell string, and no caller
+  may: the file is exec'd directly.
   """
 
   import Bitwise
 
   alias Ouroboros.DataDir
-  alias Ouroboros.Fleet.Deployment.Journal
 
   @helper_env "OUROBOROS_PROCESS_ID_HELPER"
-
-  # A handful of strings: a host, an account, a port, two paths and an identity reference.
-  # A request past this is a caller this build refuses rather than one it hands to another
-  # process.
-  @max_request_bytes 64 * 1024
-
-  # `fleet_setup::SCHEMA`. The worker refuses a request whose schema it does not know and
-  # refuses unknown keys outright, so this number and that one moving apart is a broken
-  # deployment rather than a quiet one — which is the direction it should fail in.
-  @request_schema 1
 
   # What `ouro` may print into this runtime's heap before it is stopped. A device inventory
   # for a large tailnet is tens of kilobytes; half a megabyte is generous, and past it the
@@ -109,168 +98,6 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
     end
   end
 
-  @doc """
-  Starts a detached worker for one operation and reads the line it prints (seam S2).
-
-  `ouro fleet worker start` forks the worker into its own session and process group, points
-  its stdio at a private log, and exits 0 after printing one JSON line naming the socket it
-  will listen on and the instance identity that distinguishes it from a recycled pid. This
-  returns that line decoded; it does not connect, and it holds nothing of the worker's
-  lifetime — the worker outlives this runtime by design.
-
-  ## The request travels in a private file, not on argv
-
-  Seam S2 fixes the argv at `--operation` and `--data-dir`, and seam S3's client operations
-  are a closed list with no verb that describes a target. The request an operator made —
-  which machine, which SSH account, which port, which identity *reference*, which paths —
-  therefore has to reach the worker some third way, and it goes in
-  `<data dir>/deploy/<operation>.request.json`.
-
-  Not on the command line, and the reason is `ps`. An argv is readable by every local user
-  on both platforms this ships to; a target hostname and an SSH account name are not
-  secrets in the sense the spec's one list means, but they are exactly the reconnaissance
-  that makes the next attempt cheaper, and there is no reason to publish them to a shell
-  account that has no business with this deployment. The file is 0600 in a 0700 directory,
-  written whole before the worker exists, and retained for recovery after a worker crash.
-
-  Written atomically — an exclusive temporary inode chmodded before a byte goes in, then
-  renamed into place — so the worker never opens a half-written request, and never a
-  request whose mode was briefly the umask's idea. Canonical JSON with sorted keys, so the
-  same request twice is the same bytes twice. Bounded at 64 KiB: this is a handful of
-  strings, and a request larger than that is a caller this build should refuse rather than
-  hand to another process.
-
-  When the launch itself fails — a nonzero exit, a crash, a ceiling — this removes the file
-  again, because nothing is coming to read it. When the launch succeeds the file is the
-  worker's, even if this runtime cannot then parse what it printed.
-
-  A resume passes `nil` and writes nothing: the worker retains its request and journal, and
-  re-stating a target would be a second chance to state a different one.
-  """
-  @spec spawn_worker(String.t(), Path.t(), map() | nil, pos_integer()) ::
-          {:ok, %{socket: Path.t(), instance: String.t()}}
-          | {:error, path_error()}
-          | {:error, {:worker_spawn_failed, term()}}
-  def spawn_worker(operation, data_dir, request, timeout)
-      when is_binary(operation) and is_binary(data_dir) and (is_map(request) or is_nil(request)) do
-    args = ["fleet", "worker", "start", "--operation", operation, "--data-dir", data_dir]
-    path = Journal.request_path(data_dir, operation)
-
-    with :ok <- publish_request(path, operation, request) do
-      case run(args, timeout) do
-        {:ok, output} ->
-          decode_spawn(output)
-
-        {:error, {:ouro_path_unknown, _detail} = reason} ->
-          discard_request(path, request)
-          {:error, reason}
-
-        {:error, :ouro_timeout} ->
-          # The parent `ouro fleet worker start` is SIGKILL'd on this ceiling, but the
-          # detached grandchild it forked may already be alive and reading the request.
-          # Unlinking the file from under it is how an operation that exists becomes a
-          # `worker_spawn_failed` the operator cannot resume.
-          {:error, {:worker_spawn_failed, :ouro_timeout}}
-
-        {:error, reason} ->
-          discard_request(path, request)
-          {:error, {:worker_spawn_failed, reason}}
-      end
-    end
-  end
-
-  defp publish_request(_path, _operation, nil), do: :ok
-
-  defp publish_request(path, operation, request) do
-    # `schema` and `operation` are stamped here rather than by the caller: the operation id
-    # is minted by the broker a moment before this runs, and the schema is a fact about the
-    # wire rather than about the request somebody made.
-    document = Map.merge(request, %{"schema" => @request_schema, "operation" => operation})
-    bytes = canonical(document) |> IO.iodata_to_binary()
-
-    cond do
-      byte_size(bytes) > @max_request_bytes ->
-        {:error, {:worker_spawn_failed, :request_too_large}}
-
-      true ->
-        with :ok <- private_deploy_dir(Path.dirname(path)) do
-          write_private_atomic(path, bytes)
-        end
-    end
-  end
-
-  defp discard_request(_path, nil), do: :ok
-  # The removal's own failure is not the caller's problem: the launch already failed, and
-  # a request file this could not unlink is a private file in a private directory that
-  # nothing will read.
-  defp discard_request(path, _request) do
-    _ = File.rm(path)
-    :ok
-  end
-
-  # `chmod` rather than a refusal, uniquely here: 0700 only ever *removes* access, the
-  # directory is this uid's own, and both the broker and the worker create it. Narrowing is
-  # the one direction a privacy repair is safe in without asking an operator first.
-  defp private_deploy_dir(dir) do
-    with :ok <- File.mkdir_p(dir), :ok <- File.chmod(dir, 0o700) do
-      :ok
-    else
-      {:error, reason} -> {:error, {:worker_spawn_failed, {:deploy_dir_unwritable, reason}}}
-    end
-  end
-
-  # Exclusive temporary inode, chmodded before the first byte, then renamed. The rename is
-  # what makes it atomic for the reader; the chmod-before-write is what keeps the umask from
-  # deciding who may read a target hostname for the length of one write.
-  defp write_private_atomic(path, bytes) do
-    tmp = path <> ".tmp-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-
-    with {:ok, io} <- File.open(tmp, [:write, :exclusive, :binary]),
-         :ok <- File.chmod(tmp, 0o600),
-         :ok <- IO.binwrite(io, bytes),
-         :ok <- File.close(io),
-         :ok <- File.rename(tmp, path) do
-      :ok
-    else
-      {:error, reason} ->
-        _ = File.rm(tmp)
-        {:error, {:worker_spawn_failed, {:request_unwritable, reason}}}
-    end
-  end
-
-  # Sorted keys, no whitespace. Two identical requests produce two identical files, which is
-  # what lets a duplicate `prepare` be recognised as one by looking rather than by guessing.
-  defp canonical(value) when is_map(value) do
-    inner =
-      value
-      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
-      |> Enum.map(fn {key, inner} ->
-        [JSON.encode_to_iodata!(to_string(key)), ?:, canonical(inner)]
-      end)
-      |> Enum.intersperse(?,)
-
-    [?{, inner, ?}]
-  end
-
-  defp canonical(value) when is_list(value),
-    do: [?[, value |> Enum.map(&canonical/1) |> Enum.intersperse(?,), ?]]
-
-  defp canonical(value), do: JSON.encode_to_iodata!(value)
-
-  # The worker prints exactly one line. Anything else — an empty stdout, a second line, a
-  # socket path that is not absolute — is a worker this build cannot talk to, and saying so
-  # is better than connecting to whatever the string happened to name.
-  defp decode_spawn(output) do
-    with [line | _rest] <- output |> String.split("\n", trim: true),
-         {:ok, %{"socket" => socket, "instance" => instance}}
-         when is_binary(socket) and is_binary(instance) <- JSON.decode(line),
-         true <- Path.type(socket) == :absolute and instance != "" do
-      {:ok, %{socket: socket, instance: instance}}
-    else
-      _unreadable -> {:error, {:worker_spawn_failed, :unreadable_worker_line}}
-    end
-  end
-
   # The Port is opened here rather than through `System.cmd/3`, for two reasons `System.cmd`
   # cannot give:
   #
@@ -338,11 +165,11 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   # leaves a child that is not reading its stdin and not writing its stdout exactly where it
   # was.
   #
-  # Only the child's own pid, never its process group — the child is not in a session of its
-  # own (it must not be; that is the *worker's* job, done behind `fleet worker start`), so
-  # its process group is this runtime's, and signalling that would take the BEAM down with
-  # it. A grandchild the child spawned therefore survives, which is stated here rather than
-  # implied away.
+  # Only the child's own pid, never its process group — a bounded read's child shares this
+  # runtime's process group, and signalling that would take the BEAM down with it. A
+  # grandchild the child spawned therefore survives, which is stated here rather than
+  # implied away. Nothing on this path is the deployment port program: that one is never
+  # signalled, because outliving this runtime is what it is for (§8).
   defp reap(port, os_pid) do
     _ = if Port.info(port), do: Port.close(port)
 
@@ -364,19 +191,41 @@ defmodule Ouroboros.Fleet.Deployment.Launcher do
   defp excerpt(output) when is_binary(output),
     do: output |> String.trim() |> String.slice(0, 2_000)
 
-  # The worker is handed an SSH credential. An inherited environment is how a secret in
-  # this runtime's env — a CI token, a canary, anything `OUROBOROS_*` did not name —
-  # becomes a secret in the process that holds the password. Keep an allowlist and unset
-  # every other key explicitly: Port `:env` replaces only the names it is given.
-  defp inherited_env do
-    Enum.map(System.get_env(), fn {key, value} ->
-      name = String.to_charlist(key)
+  @doc """
+  The environment a deployment port program is given, and the only one it is given.
 
-      if allowed_env?(key),
-        do: {name, String.to_charlist(value)},
-        else: {name, false}
-    end)
+  The program is handed an SSH credential. An inherited environment is how a secret in this
+  runtime's env — a CI token, a canary, anything `OUROBOROS_*` did not name — becomes a
+  secret in the process that holds the password. Keep an allowlist and unset every other key
+  explicitly: Port `:env` replaces only the names it is given.
+
+  `data_dir` is stamped on top when one is given, because the §8 argv carries no
+  `--data-dir`: the program finds the journal it is to write the way every other `ouro`
+  command does, and this runtime's durable directory is the one it must find rather than
+  whatever the daemon happened to inherit.
+  """
+  @spec child_env(Path.t() | nil) :: [{charlist(), charlist() | false}]
+  def child_env(data_dir \\ nil) do
+    inherited = Enum.map(System.get_env(), fn {key, value} -> env_pair(key, value) end)
+
+    case data_dir do
+      dir when is_binary(dir) and dir != "" ->
+        name = ~c"OUROBOROS_DATA_DIR"
+
+        [{name, String.to_charlist(dir)} | Enum.reject(inherited, &(elem(&1, 0) == name))]
+
+      _absent ->
+        inherited
+    end
   end
+
+  defp env_pair(key, value) do
+    name = String.to_charlist(key)
+
+    if allowed_env?(key), do: {name, String.to_charlist(value)}, else: {name, false}
+  end
+
+  defp inherited_env, do: child_env()
 
   defp allowed_env?(key) when is_binary(key) do
     key in ~w(PATH HOME USER LOGNAME LANG TMPDIR SSH_AUTH_SOCK) or

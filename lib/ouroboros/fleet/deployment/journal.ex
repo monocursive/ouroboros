@@ -1,10 +1,10 @@
 defmodule Ouroboros.Fleet.Deployment.Journal do
   @moduledoc """
-  The worker's durable record, read and never written (seam S5).
+  The port program's durable record, read and never written (§6).
 
   `<data dir>/deploy/<operation>.json` is the operation's authority for what actually
-  happened. The worker writes it atomically before and after every externally visible step;
-  this runtime reads it when no worker is alive, which is the whole of "status of an
+  happened. The program writes it atomically before and after every step; this runtime reads
+  it when no process is alive for the operation, which is the whole of "status of an
   interrupted operation". Nothing in this module opens the file for writing, and there is
   no function here that could: a broker that repaired a journal would be inventing steps
   the machine it deployed to never saw.
@@ -27,16 +27,17 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @max_list 200
   @max_string 2_000
 
-  # S5's field list. A key the worker adds later is dropped here until this build is taught
-  # what it means, which is the direction an operator-facing summary has to fail in.
+  # §6's schema-2 field list, and nothing else. A key the program adds later is dropped here
+  # until this build is taught what it means, which is the direction an operator-facing
+  # summary has to fail in.
   #
-  # `owner` is the identity that started the operation. It is the worker's to record and this
-  # build's to enforce: without it in this allowlist the field was scrubbed out of every
-  # journal read, and a second administrator could resume somebody else's deployment and
-  # inherit its credential prompts (review F11).
+  # Gone with the per-member ceremony: `owner`, `roster` and `plan_digest`. A challenge is
+  # answered by whoever is an administrator on this runtime (§10), so there is no identity to
+  # record on an operation; the roster is a dial hint each machine writes for itself (§1); and
+  # `plan` is the reviewed lines rather than a digest of a document (§6).
   @fields ~w(
-    operation owner kind state created_at updated_at target roster release paths
-    plan_digest steps residue last_error
+    schema operation kind state created_at updated_at target release paths
+    plan steps residue last_error
   )
 
   # Anywhere, at any depth. These are the names the one list in the spec's "Secret handling
@@ -75,14 +76,14 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @control_characters ~r/[\x{0000}-\x{0008}\x{000A}-\x{001F}\x{007F}-\x{009F}]/u
 
   @doc """
-  The directory the worker keeps its sockets, capability files and journals in.
+  The directory the port program keeps its journals and logs in.
 
   `<data dir>/deploy/`, deliberately **not** under `fleet/`. A fleet profile is committed by
   one atomic rename of a staging directory, so nothing may exist inside `fleet/` beforehand —
-  and a `setup` operation's journal has to exist before the fleet it is creating does. The
-  file names inside are unchanged: `<id>.sock`, `<id>.cap`, `<id>.json`, `<id>.request.json`,
-  `<id>.log`, and the worker's own `<id>.d/` scratch. Mode 0700, created by whichever side
-  gets there first.
+  and a `setup` operation's journal has to exist before the fleet it is creating does. Two
+  files per operation now: `<id>.json` and `<id>.log`. The socket, the capability and the
+  request file went with the detached worker (§9). Mode 0700, created by whichever side gets
+  there first.
   """
   @spec deploy_dir(Path.t()) :: Path.t()
   def deploy_dir(data_dir) when is_binary(data_dir), do: Path.join(data_dir, "deploy")
@@ -93,24 +94,11 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     do: Path.join(deploy_dir(data_dir), operation <> ".json")
 
   @doc """
-  Where the broker leaves the request that starts one operation (seam S2).
+  The program's own stderr log (§8).
 
-  A sibling of the journal rather than part of it: the broker writes this one file and the
-  worker consumes and unlinks it, which is the opposite ownership from the journal next to
-  it. `.request.json` rather than `.request` so that the two are obviously the same family
-  when an operator lists the directory.
-  """
-  @spec request_path(Path.t(), String.t()) :: Path.t()
-  def request_path(data_dir, operation) when is_binary(operation),
-    do: Path.join(deploy_dir(data_dir), operation <> ".request.json")
-
-  @doc """
-  The worker's own stdio log, which `ouro fleet worker start` redirects its child onto.
-
-  Neither side's record of the operation: the journal is what the worker *says*, and this is
-  what it and its children *printed*. It is the only thing a worker that died before it
-  could journal anything leaves behind, which is why `fleet.deployment.status` reads its
-  tail — through `scrub_line/2`, because nothing wrote it under a contract.
+  Neither side's record of the operation: the journal is what the program *says*, and this is
+  what it and its children *printed*. Scrubbed by `scrub_line/2` wherever it is read, because
+  nothing wrote it under a contract.
   """
   @spec log_path(Path.t(), String.t()) :: Path.t()
   def log_path(data_dir, operation) when is_binary(operation),
@@ -142,7 +130,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   end
 
   # How long a `completed`/`cancelled` journal is kept, and how many of those terminal
-  # records survive even when they are younger. `failed`/`interrupted` are resumable and
+  # records survive even when they are younger. `failed`/`waiting`/`running` are resumable and
   # are never swept by this policy.
   @retention_seconds 30 * 24 * 60 * 60
   @max_kept_terminal 50
@@ -217,11 +205,10 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     end)
   end
 
-  # `.request.json` also ends in `.json`; operation ids cannot contain dots, so those names never
-  # survive `validate_operation/1`. Matching the suffix the worker actually writes is still
-  # cheaper than opening them.
-  defp journal_name?(name),
-    do: String.ends_with?(name, ".json") and not String.ends_with?(name, ".request.json")
+  # Operation ids cannot contain dots, so a name with a second suffix never survives
+  # `validate_operation/1`. Matching the suffix the program actually writes is still cheaper
+  # than opening the file.
+  defp journal_name?(name), do: String.ends_with?(name, ".json")
 
   defp cached_summary(cache, entry) do
     case Map.fetch(cache, entry.key) do
@@ -239,7 +226,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
 
   defp order(%{"operation" => operation}), do: {"", operation}
 
-  @summary_fields ~w(operation owner kind state created_at updated_at plan_digest)
+  @summary_fields ~w(operation kind state created_at updated_at)
 
   # Enough to put an open operation on the row it belongs to, and no more.
   #
@@ -291,13 +278,9 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   Removes journals this runtime no longer needs to resume from.
 
   `completed` and `cancelled` records older than 30 days go, and of what remains of those
-  two states only the newest 50 are kept. `failed` and `interrupted` are resumable and are
-  not touched. A live client is the authority on an operation that is still attached, so
-  those ids are skipped even when their journal already says they finished.
-
-  A `.request.json` for a non-terminal operation is never deleted: the worker may still
-  be reading it. This function only deletes files of operations whose journal is already
-  in a prunable state.
+  two states only the newest 50 are kept. `failed` and `waiting` are resumable and are not
+  touched. A running worker process is the authority on an operation it holds, so those ids
+  are skipped even when their journal already says they finished.
   """
   @spec prune(Path.t(), keyword()) :: :ok
   def prune(data_dir, opts \\ []) when is_binary(data_dir) do
@@ -360,13 +343,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
     dir = deploy_dir(data_dir)
 
     Enum.each(
-      [
-        Path.join(dir, operation <> ".json"),
-        Path.join(dir, operation <> ".request.json"),
-        Path.join(dir, operation <> ".log"),
-        Path.join(dir, operation <> ".cap"),
-        Path.join(dir, operation <> ".sock")
-      ],
+      [Path.join(dir, operation <> ".json"), Path.join(dir, operation <> ".log")],
       &File.rm/1
     )
 
@@ -377,7 +354,7 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @doc """
   An operation id this runtime will touch a path with.
 
-  Match the worker and CLI: 8 to 64 lowercase letters, digits and single hyphens,
+  Match the program and the CLI: 8 to 64 lowercase letters, digits and single hyphens,
   with no leading or trailing hyphen. The bounded alphabet excludes path traversal.
   """
   @spec validate_operation(String.t()) :: :ok | {:error, :invalid_operation}
@@ -393,9 +370,9 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
   @doc """
   The allowlisted, bounded, credential-free view of one journal document.
 
-  Public because it is what the broker applies to a *live* worker's status reply too: the
-  worker and its journal describe the same operation, and one sanitizer means the two
-  cannot disagree about what a client is allowed to see.
+  Public because it is what the worker process applies to a live operation's snapshot too:
+  the program's frames and its journal describe the same operation, and one sanitizer means
+  the two cannot disagree about what a client is allowed to see.
   """
   @spec sanitize(map()) :: map()
   def sanitize(document) when is_map(document) do

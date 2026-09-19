@@ -278,76 +278,49 @@ defmodule Ouroboros.Gateway.Methods.Safe do
     ouro_timeout: {:upstream_timeout, "`ouro` did not answer inside the deployment ceiling"},
     ouro_failed: {:upstream_error, "`ouro` refused the call"},
     ouro_crashed: {:upstream_error, "`ouro` could not be run"},
+    ouro_output_too_large:
+      {:upstream_error, "`ouro` printed more than this runtime will read from it"},
     devices_unreadable:
       {:upstream_error, "`ouro fleet devices --json` printed something this build cannot read"},
+    devices_busy:
+      {:unavailable, "this runtime is already running as many device inventories as it allows"},
     no_data_dir:
       {:unavailable, "this runtime serves no durable data directory, so it holds no deployments"},
     unknown_operation: {:not_found, "no deployment operation with that id on this runtime"},
-    invalid_operation: {:invalid_params, "params.operation_id is not an operation id"},
+    invalid_operation: {:invalid_params, "params.operation is not an operation id"},
+    invalid_request:
+      {:invalid_params,
+       "that request cannot become a command line; the request *is* the argv, so nothing on it may be empty, multi-word or a flag"},
     journal_unreadable:
       {:upstream_error, "the operation journal on this machine could not be read"},
     no_worker:
       {:unavailable,
-       "no deployment worker is attached for that operation; read its status, then resume it"},
-    worker_unavailable: {:unavailable, "the deployment worker is no longer connected"},
-    worker_unreachable:
-      {:unavailable,
-       "the deployment worker's socket could not be reached; its log is beside its journal in the data directory"},
-    worker_timeout: {:upstream_timeout, "the deployment worker did not answer in time"},
+       "no process on this runtime is holding that operation; read its status, then resume it"},
+    worker_unavailable: {:unavailable, "the deployment program is no longer running here"},
+    worker_timeout: {:upstream_timeout, "the deployment program did not answer in time"},
     worker_answered_nothing:
-      {:upstream_error, "the deployment worker answered a frame this build cannot read"},
+      {:upstream_error, "the deployment program wrote a frame this build cannot read"},
     worker_frame_too_large:
-      {:upstream_error, "the deployment worker wrote a frame over the protocol's 1 MiB cap"},
-    frame_too_large: {:invalid_params, "that response does not fit in one protocol frame"},
-    worker_spawn_failed: {:upstream_error, "the deployment worker could not be started"},
-    attach_failed: {:upstream_error, "this runtime could not attach to the deployment worker"},
-    capability_missing:
-      {:unavailable,
-       "the deployment worker never published its capability file; its log is beside its journal"},
-    capability_unusable:
+      {:upstream_error, "the deployment program wrote a frame over the protocol's 1 MiB cap"},
+    worker_exited:
       {:upstream_error,
-       "the deployment worker's capability file is not a private 0600 file holding a capability"},
-    capability_unreadable:
-      {:upstream_error, "the deployment worker's capability file could not be read"},
-    session_unbound:
-      {:scope_denied,
-       "this call arrived with no client session, and a deployment challenge is answered by the session it was issued to"},
-    challenge_not_bound:
-      {:scope_denied,
-       "that challenge was issued to a different identity or session; ask for a new one"},
+       "the deployment program exited without saying how the operation ended; its journal and its log are in the data directory"},
+    worker_spawn_failed: {:upstream_error, "the deployment program could not be started"},
+    frame_too_large: {:invalid_params, "that response does not fit in one protocol frame"},
+    unknown_challenge:
+      {:upstream_error, "that is not the challenge this operation is waiting on"},
     challenge_expired: {:upstream_error, "that challenge has expired; ask for a new one"},
     challenge_consumed: {:upstream_error, "that challenge has already been answered"},
-    challenge_kind_mismatch:
-      {:upstream_error, "that challenge is not the kind this method answers"},
-    no_review_pending: {:upstream_error, "that operation has no plan waiting for approval"},
-    operation_in_progress:
-      {:upstream_error, "that operation was already started under a different idempotency key"},
-    start_in_flight:
-      {:upstream_error, "that start is still in flight; read the operation's status"},
-    already_attached: {:upstream_error, "that operation already has a worker attached"},
+    challenge_kind_mismatch: {:upstream_error, "that is not the answer this challenge asks for"},
+    already_attached: {:upstream_error, "that operation is already running on this runtime"},
     operation_finished: {:upstream_error, "that operation has finished and cannot be resumed"},
     operation_state_unknown:
       {:upstream_error, "that operation's journal does not record a state to resume from"},
-    worker_refused: {:upstream_error, "the deployment worker refused the request"},
     deploy_blocked:
       {:scope_denied,
        "this host cannot deploy right now; `fleet.devices` reports the same blockers under capabilities.reasons"},
-    worker_attaching:
-      {:unavailable,
-       "that operation's worker is still being attached to; read its status in a moment"},
-    operation_not_yours:
-      {:scope_denied,
-       "that operation belongs to another identity; resume it with takeover if you mean to take it over"},
-    devices_busy:
-      {:unavailable, "this runtime is already running as many device inventories as it allows"},
-    ouro_output_too_large:
-      {:upstream_error, "`ouro` printed more than this runtime will read from it"},
-    socket_not_private:
-      {:upstream_error,
-       "the worker's socket path is not a socket this account owns in a private directory"},
-    socket_unreadable: {:unavailable, "the worker's socket could not be inspected"},
     client_supervisor_unavailable:
-      {:unavailable, "this runtime's deployment connection supervisor is not running"}
+      {:unavailable, "this runtime's deployment worker supervisor is not running"}
   }
 
   @doc "Every stable deployment reason code, for the reference and the tests."
@@ -369,14 +342,6 @@ defmodule Ouroboros.Gateway.Methods.Safe do
       :unknown ->
         upstream_error(reason)
     end
-  end
-
-  # The worker's own refusal keeps the worker's reason string rather than being folded into
-  # one of this side's: `plan_changed`, `host_key_changed` and `unsupported_routing` are
-  # facts about the machine being deployed to, and a broker that renamed them would be
-  # hiding the only part of the answer an operator can act on.
-  defp normalize_deployment({:worker_refused, reason, detail}) when is_binary(reason) do
-    {:worker_refused, %{"worker_reason" => reason, "detail" => bounded(detail)}}
   end
 
   # The blockers travel as a list under their own key rather than as prose: a surface renders
