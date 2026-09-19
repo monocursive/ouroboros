@@ -8,6 +8,8 @@ requirements and upgrade instructions are in the
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-09-19
+
 ### Devices
 
 - The web Devices page is one list instead of two sections. This machine is first,
@@ -64,7 +66,8 @@ requirements and upgrade instructions are in the
   systemd unit quoted `WorkingDirectory=`, which systemd 257 refuses; the unit is now
   written the way systemd reads it, the error shown is the real one rather than the
   "Created symlink" line before it, and `install` enables lingering for the account
-  so the service starts at boot and survives logout without an administrator.
+  so the service starts at boot and survives logout when the account permits it.
+  Accounts that cannot enable lingering report the administrator action required.
 - The default SSH identity falls back to a password prompt when the machine asks for
   one, so `ouro fleet add` without `--ask-password` works against a machine that only
   takes passwords, and the web and terminal forms need no authentication picker.
@@ -78,6 +81,24 @@ requirements and upgrade instructions are in the
   asked for a local setup reconnects after the restart it causes. Every device row from
   `ouro fleet devices --json` carries `suggested_machine`, a valid fleet name derived
   from the display name.
+- Retry offers a fresh plan when another admission changes the roster before
+  credentials are issued. Cancellation removes only that operation's uninstalled
+  preparation; older helpers report any remaining preparation and recovery commands.
+- Rechecking an existing member reuses its authenticated SSH connection. Password
+  prompts for different hosts no longer inherit a previous host's cancelled prompt.
+- Downloads and uploads report bytes and elapsed time. Progress survives worker
+  reattachment, completed steps replace running markers, and CLI operations appear
+  in the web history. A finished worker no longer delays an immediate Retry.
+- Installing a matching but stopped startup service starts it when no runtime owns
+  the data directory. Host-key review includes a concrete independent fingerprint
+  check, and service failures retain their useful error details.
+- Previously approved plans without a summary remain resumable when their deployment
+  facts are unchanged. Reconnected terminal views refuse input to stale prompts.
+
+### Terminal
+
+- Image-draft recovery releases its file lock immediately when its owner closes,
+  even while a forked child still holds the inherited file descriptor.
 
 ## [0.1.9] - 2026-09-18
 
@@ -323,7 +344,8 @@ requirements and upgrade instructions are in the
 
 Earlier `v0.1.0` and `v0.1.1` tags have no published release assets.
 
-[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.9...dev
+[Unreleased]: https://github.com/monocursive/ouroboros/compare/v0.1.10...dev
+[0.1.10]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.10
 [0.1.9]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.9
 [0.1.8]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.8
 [0.1.7]: https://github.com/monocursive/ouroboros/releases/tag/v0.1.7
