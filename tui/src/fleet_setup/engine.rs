@@ -233,11 +233,78 @@ impl Engine {
                 } else {
                     Phase::Failed
                 };
+                // Before the failure is written, because the failure is what makes
+                // residue residue: everything delivered up to here stays where it was
+                // put, and §6 requires an operation that stops to name it rather than
+                // claim a clean undo. Cancellation comes through here too.
+                self.note_residue(journal)?;
                 journal.fail(phase.state(), reason, format!("{error:#}"))?;
                 self.notify_phase(phase);
                 Err(error)
             }
         }
+    }
+
+    /// Name what this operation has already delivered and is not going to take back.
+    ///
+    /// Read off the steps recorded `ok`, never guessed: §6 says residue is "what an
+    /// interrupted or cancelled operation left behind that it could not clean up.
+    /// Named, never guessed at." A `join` that landed is credentials on a machine; a
+    /// `remember` that landed is a member on this roster; a `remove` that landed on a
+    /// `leave` whose `forget` has not is the mirror of it. Every one of these is a
+    /// thing an operator has to know about before they decide what to do next, and
+    /// `residue` was `[]` on every surface — `--json`, `fleet.deployment.status`, the
+    /// cancel path — because nothing in this build ever called `note_residue`.
+    fn note_residue(&self, journal: &JournalHandle) -> Result<()> {
+        let record = journal.record();
+        let Some(machine) = record
+            .target
+            .as_ref()
+            .map(|target| target.machine.clone())
+            .filter(|machine| !machine.is_empty())
+        else {
+            // No target resolved yet, so nothing was sent anywhere. An operation that
+            // stopped before it knew who it was about has left nothing behind.
+            return Ok(());
+        };
+        let install_path = record
+            .paths
+            .install_path
+            .clone()
+            .unwrap_or_else(|| "its install path".to_string());
+
+        if record.completed(&machine, "install") && !record.completed(&machine, "join") {
+            journal.note_residue(format!(
+                "the matching `ouro` release is installed on {machine} at {install_path}, and it holds no fleet credentials"
+            ))?;
+        }
+        if record.completed(&machine, "join") {
+            journal.note_residue(format!(
+                "{machine} holds this fleet's credentials: `ouro fleet leave --machine {machine} --user <account>` is what takes them back"
+            ))?;
+        }
+        if record.completed(&machine, "service") {
+            journal.note_residue(format!(
+                "{machine} has this fleet's startup service installed"
+            ))?;
+        }
+        if record.completed(&machine, "remember") {
+            journal.note_residue(format!("{machine} is on this machine's member list"))?;
+        }
+        if record.completed(&machine, "create") {
+            journal.note_residue(
+                "this machine holds the fleet this operation created; `ouro fleet leave` retires it"
+                    .to_string(),
+            )?;
+        }
+        // The `leave` mirror: the far half is done and the near half is not, so this
+        // roster still names a machine whose credentials are already gone.
+        if record.completed(&machine, "remove") && !record.completed(&machine, "forget") {
+            journal.note_residue(format!(
+                "{machine}'s credentials were removed and it is still on this machine's member list"
+            ))?;
+        }
+        Ok(())
     }
 
     fn transfer_progress<'a>(
@@ -1332,6 +1399,11 @@ impl Engine {
                 // inspected journal needs is not the word `failed` — it is which of the
                 // two things went wrong, in `last_error.reason`, beside steps that
                 // already say `join:ok` and `start:failed`.
+                //
+                // This is the one failure that does not travel through `run_locked`'s
+                // error arm — it is an `Ok` outcome that is not `completed` — so the
+                // residue is named here as well.
+                self.note_residue(journal)?;
                 journal.fail(Phase::Failed.state(), reason, detail.clone())?;
                 self.notify_phase(Phase::Failed);
                 OperationState::Failed
@@ -2041,6 +2113,12 @@ impl Engine {
             ));
         }
         if let Some(note) = residue {
+            // A `log` frame *and* the journal. The frame is seen by whoever is attached
+            // at this instant; the journal is what an operator reads afterwards, and
+            // this is the resumed `leave` whose far half is done — if `forget` then
+            // fails, this roster names a machine whose credentials are already gone,
+            // and that sentence is the only record of it.
+            journal.note_residue(note.clone())?;
             self.note(note);
         }
 
