@@ -511,6 +511,7 @@ defmodule Ouroboros.Cluster.Monitor do
     %{
       local_node: node(),
       fleet_name: Ouroboros.Cluster.fleet_name(),
+      profile: Ouroboros.Cluster.profile_problem(),
       generated_at: now,
       monitoring_since: state.started_at,
       summary: %{
@@ -686,6 +687,12 @@ defmodule Ouroboros.Cluster.Monitor do
     end
   end
 
+  # There is no tombstone to require any more. `ouro fleet forget NAME` removes the
+  # machine from this profile's members and then asks for its evidence; the only thing
+  # that can refuse is the machine being connected, because retiring the evidence of a
+  # node that is still here would make its live sessions unlistable. Everything else —
+  # a name this runtime never heard of, a name two nodes answer to — is a question this
+  # runtime cannot answer rather than a precondition.
   defp forget_session_owner_from_profile(state, machine) do
     case fleet_profile_storage() do
       :ephemeral ->
@@ -695,17 +702,43 @@ defmodule Ouroboros.Cluster.Monitor do
         {:error, {:fleet_profile_unavailable, reason}}
 
       {:ok, fleet_id, profile, opts} ->
-        case Map.fetch(profile.tombstones, machine) do
-          :error ->
-            {:error, {:session_owner_not_tombstoned, machine}}
+        with {:ok, owner} <- resolve_session_owner(state, profile, machine),
+             do: forget_named_session_owner(state, machine, owner, fleet_id, opts)
+    end
+  end
 
-          {:ok, owner} ->
-            forget_tombstoned_session_owner(state, machine, owner, profile, fleet_id, opts)
+  # Which node that name means, from the three places this runtime records it: the
+  # profile's own members, for a `forget` asked before the local removal; the last-known
+  # directory, which keeps an offline machine and its operator-given label after it has
+  # left `members`; and the evidence itself, whose owners are node names a label can be
+  # derived from. A name that resolves to two nodes is refused rather than half retired.
+  defp resolve_session_owner(state, profile, machine) do
+    from_directory =
+      state.machines
+      |> Map.values()
+      |> Enum.filter(&(&1.machine == machine))
+      |> Enum.map(&Atom.to_string(&1.node))
+
+    from_evidence =
+      state
+      |> session_owners()
+      |> Map.fetch!(:interactive)
+      |> Enum.filter(&(Ouroboros.Cluster.default_machine_label(&1) == machine))
+
+    case Map.get(profile.members, machine) do
+      owner when is_binary(owner) ->
+        {:ok, owner}
+
+      nil ->
+        case from_directory |> Enum.concat(from_evidence) |> Enum.uniq() |> Enum.sort() do
+          [owner] -> {:ok, owner}
+          [] -> {:error, {:unknown_session_owner_machine, machine}}
+          owners -> {:error, {:ambiguous_session_owner_machine, machine, owners}}
         end
     end
   end
 
-  defp forget_tombstoned_session_owner(state, machine, owner, profile, fleet_id, opts) do
+  defp forget_named_session_owner(state, machine, owner, fleet_id, opts) do
     if session_owner_connected?(owner) do
       {:error, {:session_owner_connected, machine, owner}}
     else
@@ -715,12 +748,7 @@ defmodule Ouroboros.Cluster.Monitor do
 
       with :ok <- validate_session_owners(updated),
            :ok <- write_session_owner_checkpoint(updated, fleet_id, opts) do
-        result = %{
-          machine: machine,
-          node: owner,
-          roster_revision: profile.roster_revision,
-          removed: updated != current
-        }
+        result = %{machine: machine, node: owner, removed: updated != current}
 
         {:ok, result, Map.put(state, :session_owners, updated)}
       else
@@ -845,6 +873,11 @@ defmodule Ouroboros.Cluster.Monitor do
             # Standalone mode must never resurrect evidence from a fleet that was left.
             :ephemeral
 
+          # Not wrapped: a profile from an older Ouroboros is one named condition with one
+          # sentence of repair, and every surface matches on it directly.
+          {:error, :unsupported_profile_schema} ->
+            {:error, :unsupported_profile_schema}
+
           {:error, reason} ->
             {:error, {:fleet_profile_unreadable, reason}}
         end
@@ -905,38 +938,35 @@ defmodule Ouroboros.Cluster.Monitor do
     end
   end
 
+  # Schema 2 (docs/proposals/fleet-kiss.md §2): the members this machine knew when its
+  # profile was written, as dial hints, and nothing else. There is no replicated roster,
+  # so there is no revision to compare and no tombstone list to honour; `roster_revision`,
+  # `tombstones` and `epmd_port` are ignored wherever a file still carries them, because a
+  # key this build does not read must not be a key it refuses a profile over.
   defp decode_fleet_roster(
          %{
-           "schema" => 1,
+           "schema" => 2,
            "fleet_id" => fleet_id,
            "machine" => local_machine,
            "host" => local_host,
            "node" => local_node,
            "role" => "core",
-           "members" => members,
-           "roster_revision" => revision
+           "members" => members
          } = profile,
          fleet_id
        )
-       when is_binary(local_machine) and is_binary(local_host) and is_binary(local_node) and
-              is_integer(revision) and revision > 0 do
+       when is_binary(local_machine) and is_binary(local_host) and is_binary(local_node) do
     with true <- valid_profile_machine?(local_machine),
          true <- valid_profile_host?(local_host),
-         true <- local_node == "ouro-#{local_machine}@#{local_host}",
+         true <- valid_member_node?(local_node, local_host),
          true <- configured_local_node?(local_node),
-         {:ok, active} <- decode_profile_members(:members, members),
-         true <- MapSet.member?(active.nodes, local_node),
-         {:ok, removed} <-
-           decode_profile_members(:tombstones, Map.get(profile, "tombstones", [])),
-         true <- MapSet.disjoint?(active.nodes, removed.nodes),
-         true <- MapSet.disjoint?(active.machines, removed.machines) do
+         {:ok, active} <- decode_profile_members(members),
+         true <- MapSet.member?(active.nodes, local_node) do
       {:ok,
        %{
          name: profile_name(profile),
          tag_facts: Ouroboros.Cluster.Facts.validate_tags(Map.get(profile, "tags", [])),
-         roster_revision: revision,
-         members: active.by_machine,
-         tombstones: removed.by_machine
+         members: active.by_machine
        }}
     else
       _invalid -> {:error, :invalid_fleet_profile_roster}
@@ -946,6 +976,14 @@ defmodule Ouroboros.Cluster.Monitor do
   defp decode_fleet_roster(%{"fleet_id" => recorded}, fleet_id)
        when is_binary(recorded) and recorded != fleet_id,
        do: {:error, :fleet_profile_identity_mismatch}
+
+  # A schema this build does not speak is its own answer, separate from a malformed file,
+  # because the repair is different: there is no migration from the replicated-roster
+  # profile, only `ouro fleet leave` here and a fresh `setup` or `add`.
+  # `Ouroboros.Cluster.profile_problem/0` turns this into the sentence `fleet.status` and
+  # `fleet.doctor` say.
+  defp decode_fleet_roster(%{"schema" => schema}, _fleet_id) when schema != 2,
+    do: {:error, :unsupported_profile_schema}
 
   defp decode_fleet_roster(_invalid, _fleet_id),
     do: {:error, :invalid_fleet_profile}
@@ -973,7 +1011,7 @@ defmodule Ouroboros.Cluster.Monitor do
     end
   end
 
-  defp decode_profile_members(kind, entries) when is_list(entries) do
+  defp decode_profile_members(entries) when is_list(entries) do
     if length(entries) <= @max_fleet_roster_entries do
       Enum.reduce_while(
         entries,
@@ -982,11 +1020,11 @@ defmodule Ouroboros.Cluster.Monitor do
           %{"machine" => machine, "host" => host, "node" => owner}, {:ok, seen} ->
             cond do
               not valid_profile_machine?(machine) or not valid_profile_host?(host) or
-                owner != "ouro-#{machine}@#{host}" or not valid_node_name?(owner) ->
-                {:halt, {:error, {:invalid_fleet_profile_member, kind}}}
+                  not valid_member_node?(owner, host) ->
+                {:halt, {:error, :invalid_fleet_profile_member}}
 
               MapSet.member?(seen.nodes, owner) or MapSet.member?(seen.machines, machine) ->
-                {:halt, {:error, {:duplicate_fleet_profile_member, kind}}}
+                {:halt, {:error, :duplicate_fleet_profile_member}}
 
               true ->
                 {:cont,
@@ -999,16 +1037,30 @@ defmodule Ouroboros.Cluster.Monitor do
             end
 
           _invalid, _seen ->
-            {:halt, {:error, {:invalid_fleet_profile_member, kind}}}
+            {:halt, {:error, :invalid_fleet_profile_member}}
         end
       )
     else
-      {:error, {:too_many_fleet_profile_members, kind}}
+      {:error, :too_many_fleet_profile_members}
     end
   end
 
-  defp decode_profile_members(kind, _invalid),
-    do: {:error, {:invalid_fleet_profile_members, kind}}
+  defp decode_profile_members(_invalid), do: {:error, :invalid_fleet_profile_members}
+
+  # A member's `node` is what the profile says it is — §2 writes `ouro@<host>` — rather
+  # than a name this decoder rebuilds from the machine name. What must hold is the half
+  # the dialer and the TLS server-name check both rest on: it is a well-formed node name
+  # and its host is this member's host, so nothing in a profile can point a connection at
+  # a host the entry does not name.
+  defp valid_member_node?(owner, host) when is_binary(owner) and is_binary(host) do
+    valid_node_name?(owner) and
+      case String.split(owner, "@", parts: 2) do
+        [name, ^host] -> name != ""
+        _other -> false
+      end
+  end
+
+  defp valid_member_node?(_owner, _host), do: false
 
   defp valid_profile_machine?(machine) when is_binary(machine) do
     byte_size(machine) in 1..40 and
@@ -1114,23 +1166,17 @@ defmodule Ouroboros.Cluster do
   @directory_timeout 2_000
   @default_reconnect_ms 5_000
 
-  # Manual distributed-runtime compatibility fence. Bump this integer whenever a change
-  # makes mixed-revision fleet posture, remote session routing, or distributed ownership
-  # unsafe even if the application version was accidentally left unchanged. Never derive
-  # it from a build path, source hash, or host: operators need one stable, reviewable
-  # protocol revision shared by every artifact in a compatible fleet.
-  @fleet_protocol_revision 5
-  @runtime_contract_keys [:fleet_protocol_revision, :ouroboros_version, :otp_release]
+  # Distributed-runtime compatibility, compared exactly. Two machines form a fleet when
+  # they run the same Ouroboros release on the same OTP release, and that is the whole
+  # fence: a hand-maintained protocol revision beside it was one more integer to bump,
+  # bumped by hand, and it never said anything the application version did not already.
+  @runtime_contract_keys [:ouroboros_version, :otp_release]
 
-  @doc """
-  The manual compatibility fence above, as a value.
-
-  Release packaging records it beside the boot scripts so `ouro fleet protocol` can
-  answer with it without starting a runtime; `tui/src/fleet_protocol.rs` carries the same
-  integer and a test that parses this file rather than trusting the copy.
-  """
-  @spec fleet_protocol_revision() :: pos_integer()
-  def fleet_protocol_revision, do: @fleet_protocol_revision
+  # The one sentence every surface says about a profile written by an older Ouroboros
+  # (docs/proposals/fleet-kiss.md §2). There is no migration, so there is no other advice
+  # to give, and no surface invents its own wording for it.
+  @unsupported_profile_message "this fleet was created by an older Ouroboros; run " <>
+                                 "`ouro fleet leave` here and set the fleet up again."
 
   @type role :: :core | :builder | :signer
   @type strategy :: :none | :epmd
@@ -1283,6 +1329,32 @@ defmodule Ouroboros.Cluster do
     case __MODULE__.Monitor.fleet_profile_storage() do
       {:ok, _fleet_id, profile, _opts} -> Map.get(profile, :name)
       _unnamed -> nil
+    end
+  end
+
+  @doc """
+  What is wrong with this machine's saved fleet profile, or `nil` when nothing is.
+
+  There is exactly one condition worth a sentence of its own rather than a generic
+  "unreadable": a profile written by an Ouroboros from before the schema-2 fleet. It is
+  not corrupt and it is not someone else's, it is this machine's own state in a shape
+  this build deliberately does not migrate, and the repair — leave the fleet here, be set
+  up or added again — is one an operator can act on. `fleet.status` carries it and
+  `fleet.doctor` names it as an error, both with the same words, because an operator who
+  read one and then the other must not be given two different accounts.
+
+  Every other way a profile can fail stays `nil` here and is reported where it already
+  was: a missing file is a standalone machine, and an unreadable one keeps the last
+  membership this node read (`membership_hosts/0`).
+  """
+  @spec profile_problem() :: %{reason: atom(), message: String.t()} | nil
+  def profile_problem do
+    case __MODULE__.Monitor.fleet_profile_storage() do
+      {:error, :unsupported_profile_schema} ->
+        %{reason: :unsupported_profile_schema, message: @unsupported_profile_message}
+
+      _readable_or_absent ->
+        nil
     end
   end
 
@@ -1645,9 +1717,9 @@ defmodule Ouroboros.Cluster do
   @spec runtime_compatible?(map(), map()) :: boolean()
   def runtime_compatible?(left, right) when is_map(left) and is_map(right) do
     # BEAM distribution and agent placement are intentionally cross-architecture. A
-    # packaged arm64 Mac and x86_64 Linux machine are compatible when they speak the same
-    # explicit fleet protocol on the same Ouroboros and OTP releases; architecture remains
-    # useful inventory but must never become a placement fence.
+    # packaged arm64 Mac and x86_64 Linux machine are compatible when they run the same
+    # Ouroboros and OTP releases; architecture remains useful inventory but must never
+    # become a placement fence.
     valid_runtime_contract?(left) and valid_runtime_contract?(right) and
       runtime_contract(left) == runtime_contract(right)
   end
@@ -1690,8 +1762,8 @@ defmodule Ouroboros.Cluster do
   Placement requires a connected `:core` node running a compatible version of this
   runtime, because that is the only role whose tree contains the stores and session
   supervisors a placed worker will reach for. Compatibility is the Ouroboros application
-  contract, explicit fleet protocol revision, and OTP release; CPU architecture is
-  inventory only and is deliberately not a placement fence. `config :ouroboros,
+  version and the OTP release, compared exactly; CPU architecture is inventory only and
+  is deliberately not a placement fence. `config :ouroboros,
   :placement_role_check` (default `true`) disables the check for setups that place onto
   nodes this runtime cannot introspect.
   """
@@ -1879,7 +1951,6 @@ defmodule Ouroboros.Cluster do
       end
 
     %{
-      fleet_protocol_revision: @fleet_protocol_revision,
       ouroboros_version: version,
       otp_release: to_string(:erlang.system_info(:otp_release)),
       elixir_version: System.version(),
@@ -1904,10 +1975,7 @@ defmodule Ouroboros.Cluster do
     do: Map.take(runtime, @runtime_contract_keys)
 
   defp valid_runtime_contract?(runtime) do
-    revision = Map.get(runtime, :fleet_protocol_revision)
-
-    is_integer(revision) and revision > 0 and
-      nonempty_binary?(Map.get(runtime, :ouroboros_version)) and
+    nonempty_binary?(Map.get(runtime, :ouroboros_version)) and
       nonempty_binary?(Map.get(runtime, :otp_release))
   end
 
@@ -1978,6 +2046,7 @@ defmodule Ouroboros.Cluster do
     %{
       local_node: node(),
       fleet_name: fleet_name(),
+      profile: profile_problem(),
       generated_at: now,
       monitoring_since: nil,
       summary: %{
@@ -2048,6 +2117,17 @@ defmodule Ouroboros.Cluster do
           do: "Select a discovery strategy and at least one reachable seed machine",
           else: nil
         )
+      ),
+      # A machine on a profile from an older Ouroboros cannot form a fleet with a machine
+      # on this one, and the sentence it is told is the same one `fleet.status` carries.
+      doctor_check(
+        :fleet_profile,
+        if(fleet.profile, do: :error, else: :ok),
+        if(fleet.profile,
+          do: fleet.profile.message,
+          else: "This machine's fleet profile is the one this build reads"
+        ),
+        nil
       )
     ]
 
@@ -2088,7 +2168,7 @@ defmodule Ouroboros.Cluster do
                 nil
 
               machine.expected? ->
-                "Check that Ouroboros is running there and that EPMD and distribution ports are reachable"
+                "Check that Ouroboros is running there and that this fleet's distribution port is reachable"
 
               true ->
                 "If this machine should remain in the fleet, check it is running and reachable; otherwise its last-known record is informational"
@@ -2109,17 +2189,16 @@ defmodule Ouroboros.Cluster do
                 "#{machine.machine} defines the local runtime version"
 
               :compatible ->
-                "#{machine.machine} runs a compatible fleet protocol/Ouroboros/OTP build"
+                "#{machine.machine} runs a compatible Ouroboros and OTP build"
 
               :unknown ->
                 "#{machine.machine}'s runtime compatibility is not known yet"
 
               :incompatible ->
-                "#{machine.machine} runs a different fleet protocol, Ouroboros, or OTP build"
+                "#{machine.machine} runs a different Ouroboros or OTP build"
             end,
             if(machine.compatibility == :incompatible,
-              do:
-                "Install the same Ouroboros build and fleet protocol revision on every machine before placing agents",
+              do: "Install the same Ouroboros build on every machine before placing agents",
               else: nil
             ),
             machine.node

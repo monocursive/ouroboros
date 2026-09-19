@@ -34,16 +34,7 @@
     end
   end
 
-  port_min = port.("OUROBOROS_DIST_PORT_MIN")
-  port_max = port.("OUROBOROS_DIST_PORT_MAX")
-
-  if is_nil(port_min) != is_nil(port_max) do
-    raise "OUROBOROS_DIST_PORT_MIN and OUROBOROS_DIST_PORT_MAX must be set together"
-  end
-
-  if port_min && port_max && port_min > port_max do
-    raise "OUROBOROS_DIST_PORT_MIN must not exceed OUROBOROS_DIST_PORT_MAX"
-  end
+  dist_port = port.("OUROBOROS_DIST_PORT")
 %>## Flags given to the VM for <%= @release.name %>: https://www.erlang.org/doc/man/erl.html
 ## -mode/-name/-sname/-setcookie are configured via env vars, do not set them here.
 ##
@@ -58,10 +49,18 @@
 ## Distribution runs over cleartext TCP. Anything that completes the handshake has full
 ## :erpc authority on this node, so this is only safe on a trusted network segment.
 ## Build with OUROBOROS_DIST_TLS=1 and OUROBOROS_DIST_TLS_OPTFILE to change that.
-<% end %><%= if port_min do %>
-## Pin the distribution listener to a fixed range so a firewall can describe it.
-## EPMD must be reachable separately. Advanced/manual releases default to 4369 unless
-## ERL_EPMD_PORT says otherwise; `ouro fleet` replaces this file and prints its own
-## fleet-specific EPMD port, so do not assume or open 4369 for a generated fleet.
--kernel inet_dist_listen_min <%= port_min %> inet_dist_listen_max <%= port_max %>
+<% end %><%= if dist_port do %>
+## One distribution port, stated twice and agreeing: the listener binds it, and
+## Ouroboros.Cluster.Epmd answers with it in place of a port mapper. A fleet has one
+## number per machine, so a firewall rule is one line and nothing has to be opened for
+## 4369 — there is no epmd daemon to reach, here or on any peer. Peers are resolved from
+## OUROBOROS_DIST_PORTS (host=port for every member) and this node's own OUROBOROS_DIST_PORT.
+-start_epmd false
+-epmd_module Elixir.Ouroboros.Cluster.Epmd
+-kernel inet_dist_listen_min <%= dist_port %> inet_dist_listen_max <%= dist_port %>
+<% else %>
+## No OUROBOROS_DIST_PORT, so this artifact names no listener and no epmd module: a
+## release built this way is either single-machine or an advanced operator-managed one
+## that brings its own port mapper. `ouro fleet` never boots from this file — it writes a
+## private per-machine vm.args and points RELEASE_VM_ARGS at it.
 <% end %>

@@ -46,40 +46,52 @@ defmodule Ouroboros.ClusterTest do
       assert_raise ArgumentError, ~r/node_role/, fn -> Cluster.boot_role!() end
     end
 
-    test "fleet compatibility has an explicit manual protocol revision" do
+    test "fleet compatibility is the Ouroboros version and the OTP release, and nothing else" do
       runtime = Cluster.local_fleet_posture().runtime
 
-      assert runtime.fleet_protocol_revision == 5
+      # There is no hand-maintained protocol revision any more: the fence an operator has
+      # to reason about is the release they installed.
+      refute Map.has_key?(runtime, :fleet_protocol_revision)
+      assert Cluster.runtime_compatible?(runtime, runtime)
 
+      # Architecture is inventory. Placement across a packaged arm64 Mac and an x86_64
+      # Linux machine is the case this deliberately does not fence.
       assert Cluster.runtime_compatible?(
                runtime,
                %{runtime | system_architecture: "different-test-architecture"}
              )
 
-      refute Cluster.runtime_compatible?(
-               runtime,
-               %{runtime | fleet_protocol_revision: runtime.fleet_protocol_revision + 1}
-             )
+      # Elixir's own version rides along for the same reason: it cannot differ without
+      # the Ouroboros build differing.
+      assert Cluster.runtime_compatible?(runtime, %{runtime | elixir_version: "0.0.1"})
 
-      refute Cluster.runtime_compatible?(runtime, Map.delete(runtime, :fleet_protocol_revision))
+      # A stray revision on a peer from an older build is ignored rather than compared,
+      # so a mixed fleet is decided by the two facts that are still the contract.
+      assert Cluster.runtime_compatible?(runtime, Map.put(runtime, :fleet_protocol_revision, 5))
     end
 
-    test "the pre-reduction fleet contract is incompatible in both directions" do
+    test "a different Ouroboros or OTP build is incompatible in both directions" do
       runtime = Cluster.local_fleet_posture().runtime
-      # dev at 3bc8887 exposes remote session APIs removed by the core reduction, but
-      # has the same application version and OTP release as an upgraded peer.
-      previous = %{runtime | fleet_protocol_revision: 2}
 
-      refute Cluster.runtime_compatible?(runtime, previous)
-      refute Cluster.runtime_compatible?(previous, runtime)
-    end
+      for previous <- [
+            %{runtime | ouroboros_version: "0.0.1-previous"},
+            %{runtime | otp_release: "26"}
+          ] do
+        refute Cluster.runtime_compatible?(runtime, previous)
+        refute Cluster.runtime_compatible?(previous, runtime)
+      end
 
-    test "the pre-J2 session contract is incompatible in both directions" do
-      runtime = Cluster.local_fleet_posture().runtime
-      previous = %{runtime | fleet_protocol_revision: 3}
-
-      refute Cluster.runtime_compatible?(runtime, previous)
-      refute Cluster.runtime_compatible?(previous, runtime)
+      # And a contract that is missing half of itself is not a contract: a peer that
+      # answers without one of the two keys, or with a blank one, is never compatible.
+      for incomplete <- [
+            Map.delete(runtime, :ouroboros_version),
+            Map.delete(runtime, :otp_release),
+            %{runtime | ouroboros_version: ""},
+            %{runtime | otp_release: ""}
+          ] do
+        refute Cluster.runtime_compatible?(runtime, incomplete)
+        refute Cluster.runtime_compatible?(incomplete, runtime)
+      end
     end
   end
 
@@ -234,7 +246,7 @@ defmodule Ouroboros.ClusterTest do
       before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
       assert before.compatibility == :compatible
       assert before.last_up_at
-      assert before.runtime.fleet_protocol_revision == 5
+      assert before.runtime.ouroboros_version == to_string(Application.spec(:ouroboros, :vsn))
       assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
 
       assert %{status: :warning, guidance: roster_guidance} =
@@ -282,18 +294,17 @@ defmodule Ouroboros.ClusterTest do
                      check.id == {:machine_compatibility, peer}
                    end)
 
-          protocol_revision = mixed_arch.runtime.fleet_protocol_revision
+          # The OTP release is half the contract, and a peer on a different one is named
+          # rather than trusted. (The other half, the Ouroboros version, has its own
+          # test below with a real peer running a rewritten application spec.)
+          otp_release = mixed_arch.runtime.otp_release
 
           :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
-            put_in(
-              state,
-              [:machines, peer, :runtime, :fleet_protocol_revision],
-              protocol_revision + 1
-            )
+            put_in(state, [:machines, peer, :runtime, :otp_release], otp_release <> "-skewed")
           end)
 
-          protocol_skew = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
-          assert protocol_skew.compatibility == :incompatible
+          runtime_skew = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
+          assert runtime_skew.compatibility == :incompatible
 
           assert %{status: :error, guidance: guidance} =
                    Enum.find(Cluster.fleet_doctor().checks, fn check ->
@@ -303,11 +314,7 @@ defmodule Ouroboros.ClusterTest do
           assert guidance =~ "same Ouroboros build"
 
           :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
-            put_in(
-              state,
-              [:machines, peer, :runtime, :fleet_protocol_revision],
-              protocol_revision
-            )
+            put_in(state, [:machines, peer, :runtime, :otp_release], otp_release)
           end)
         end
       )
@@ -734,9 +741,18 @@ defmodule Ouroboros.ClusterTest do
 
           doctor = Cluster.fleet_doctor()
 
+          # There is no port mapper to mention any more, and one distribution port to
+          # check: a machine that cannot be reached is told about the port its fleet
+          # actually uses rather than the two 4369 was one of.
           assert Enum.any?(doctor.checks, fn check ->
                    check.id == {:machine_connectivity, absent} and check.status == :error and
-                     check.message =~ "will keep retrying" and check.guidance =~ "EPMD"
+                     check.message =~ "will keep retrying" and
+                     check.guidance =~ "this fleet's distribution port"
+                 end)
+
+          refute Enum.any?(doctor.checks, fn check ->
+                   String.contains?(check.message, "EPMD") or
+                     String.contains?(Map.get(check, :guidance, ""), "EPMD")
                  end)
         end
       )
@@ -1042,7 +1058,7 @@ defmodule Ouroboros.ClusterTest do
 
       expected =
         Cluster.local_fleet_posture().runtime
-        |> Map.take([:fleet_protocol_revision, :ouroboros_version, :otp_release])
+        |> Map.take([:ouroboros_version, :otp_release])
 
       assert {:error,
               {:runtime_incompatible, %{ouroboros_version: ^incompatible_version} = actual,
@@ -1083,8 +1099,10 @@ defmodule Ouroboros.ClusterTest do
                  id: "j2-incompatible-gateway-start"
                )
 
+      # The OTP release matched all along: the Ouroboros version alone decided this, which
+      # is half of the whole contract and the half an operator changes by installing.
       assert actual.otp_release == expected.otp_release
-      assert actual.fleet_protocol_revision == expected.fleet_protocol_revision
+      assert Map.keys(actual) == Map.keys(expected)
 
       assert %{status: :error, node: ^core} =
                Enum.find(
@@ -1358,13 +1376,14 @@ defmodule Ouroboros.ClusterTest do
       refute MapSet.member?(owners, "former-core@127.0.0.1")
     end
 
-    test "a malformed fleet tombstone makes owner evidence unavailable instead of clearing it" do
+    test "a malformed fleet member makes owner evidence unavailable instead of clearing it" do
       fleet_id = "2468ace02468ace02468ace0"
       data_dir = tmp_dir!()
       fleet_dir = Path.join(data_dir, "fleet")
       File.mkdir_p!(fleet_dir)
       owner = :"ouro-lost@127.0.0.2"
-      removed = test_fleet_member("lost", "127.0.0.2")
+      local = test_fleet_member("owner", "127.0.0.1")
+      lost = test_fleet_member("lost", "127.0.0.2")
       previous_data_dir = Application.get_env(:ouroboros, :data_dir)
 
       with_env(%{"OUROBOROS_FLEET_ID" => fleet_id}, fn ->
@@ -1376,7 +1395,7 @@ defmodule Ouroboros.ClusterTest do
             else: Application.delete_env(:ouroboros, :data_dir)
         end)
 
-        write_test_fleet_profile!(fleet_dir, fleet_id)
+        write_test_fleet_profile!(fleet_dir, fleet_id, local: local, members: [local])
         reset_session_owner_evidence!()
 
         assert :ok =
@@ -1384,11 +1403,30 @@ defmodule Ouroboros.ClusterTest do
                    {owner, [%{id: "retained-owner"}]}
                  ])
 
-        malformed = Map.put(removed, "node", "ouro-someone-else@127.0.0.2")
+        # A member whose node names a different host than the entry does. Nothing in a
+        # profile may point a connection at a host its own entry does not name.
+        malformed = Map.put(lost, "node", "ouro-someone-else@127.0.0.9")
 
+        # A tombstone list is not read at all any more, malformed or otherwise: a profile
+        # that still carries one is decoded, and the evidence stays exactly where it was.
         write_test_fleet_profile!(fleet_dir, fleet_id,
+          local: local,
+          members: [local],
           tombstones: [malformed],
           roster_revision: 2
+        )
+
+        restart_cluster_monitor!()
+
+        assert {:ok, unaffected} = Cluster.session_owners(:interactive)
+        assert MapSet.member?(unaffected, Atom.to_string(owner))
+
+        # A malformed *member* is a different matter. The roster is what this node dials
+        # and what its evidence is scoped to, so an unreadable one fails closed rather
+        # than reading as an empty fleet.
+        write_test_fleet_profile!(fleet_dir, fleet_id,
+          local: local,
+          members: [local, malformed]
         )
 
         restart_cluster_monitor!()
@@ -1405,12 +1443,80 @@ defmodule Ouroboros.ClusterTest do
 
         # Repairing the profile recovers the unchanged durable evidence; malformed input
         # never became an implicit state-loss acknowledgement.
-        write_test_fleet_profile!(fleet_dir, fleet_id, roster_revision: 2)
+        write_test_fleet_profile!(fleet_dir, fleet_id, local: local, members: [local])
         restart_cluster_monitor!()
 
         assert {:ok, recovered} = Cluster.session_owners(:interactive)
         assert MapSet.member?(recovered, Atom.to_string(owner))
         assert :ok = Cluster.record_session_snapshot(:interactive, [{owner, []}])
+      end)
+    end
+
+    test "a profile from an older Ouroboros is named by status and doctor, in one sentence" do
+      fleet_id = "0f0f0f0f1e1e1e1e2d2d2d2d"
+      data_dir = tmp_dir!()
+      fleet_dir = Path.join(data_dir, "fleet")
+      File.mkdir_p!(fleet_dir)
+      local = test_fleet_member("owner", "127.0.0.1")
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Cluster.reset_membership_cache()
+
+      with_env(%{"OUROBOROS_FLEET_ID" => fleet_id}, fn ->
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+
+        on_exit(fn ->
+          Cluster.reset_membership_cache()
+
+          if previous_data_dir,
+            do: Application.put_env(:ouroboros, :data_dir, previous_data_dir),
+            else: Application.delete_env(:ouroboros, :data_dir)
+        end)
+
+        # Schema 2 is what this build reads, and it says so by saying nothing.
+        write_test_fleet_profile!(fleet_dir, fleet_id, local: local, members: [local])
+        assert Cluster.profile_problem() == nil
+        assert Cluster.fleet_status().profile == nil
+
+        assert %{status: :ok} =
+                 Enum.find(Cluster.fleet_doctor().checks, &(&1.id == :fleet_profile))
+
+        sentence =
+          "this fleet was created by an older Ouroboros; run `ouro fleet leave` here " <>
+            "and set the fleet up again."
+
+        # Every other schema is one named condition with one sentence of repair. There is
+        # no migration, and a schema-1 profile is the file this actually happens with.
+        for schema <- [1, 0, 3, 99] do
+          write_test_fleet_profile!(fleet_dir, fleet_id,
+            schema: schema,
+            local: local,
+            members: [local]
+          )
+
+          assert Ouroboros.Cluster.Monitor.fleet_profile_storage() ==
+                   {:error, :unsupported_profile_schema}
+
+          assert Cluster.profile_problem() == %{
+                   reason: :unsupported_profile_schema,
+                   message: sentence
+                 }
+
+          assert Cluster.fleet_status().profile.message == sentence
+
+          # Doctor says the same words, because an operator who read one and then the
+          # other must not be given two different accounts of the same file.
+          doctor = Cluster.fleet_doctor()
+
+          assert %{status: :error, message: ^sentence} =
+                   Enum.find(doctor.checks, &(&1.id == :fleet_profile))
+
+          refute doctor.healthy?
+        end
+
+        # A file that is not a profile at all is still the generic unreadable answer:
+        # this sentence is only for a profile this build recognises and will not migrate.
+        File.write!(Path.join(fleet_dir, "profile.json"), "{ not json")
+        assert Cluster.profile_problem() == nil
       end)
     end
 
@@ -1476,7 +1582,7 @@ defmodule Ouroboros.ClusterTest do
     end
 
     @tag timeout: 180_000
-    test "a roster tombstone preserves evidence until an explicit offline state-loss acknowledgement" do
+    test "session-owner evidence is retired for an offline machine and refused for a connected one" do
       fleet_id = "9876543210abcdef98765432"
       data_dir = tmp_dir!()
       fleet_dir = Path.join(data_dir, "fleet")
@@ -1507,21 +1613,22 @@ defmodule Ouroboros.ClusterTest do
             else: Application.delete_env(:ouroboros, :data_dir)
         end)
 
-        write_test_fleet_profile!(fleet_dir, fleet_id)
+        local = test_fleet_member("owner", "127.0.0.1")
+
+        # No tombstone, and nothing to record before asking: the machine is a member of
+        # this profile like any other, and the only precondition left is that it is not
+        # connected.
+        write_test_fleet_profile!(fleet_dir, fleet_id,
+          local: local,
+          members: [local, removed_member]
+        )
+
         reset_session_owner_evidence!()
 
-        assert {:error, -32_007, missing_message} =
-                 Methods.invoke("fleet.forget_session_owner", %{
-                   "machine" => machine,
-                   "accept_state_loss" => true
-                 })
-
-        assert missing_message =~ "no roster tombstone"
-
-        write_test_fleet_profile!(fleet_dir, fleet_id,
-          tombstones: [removed_member],
-          roster_revision: 2
-        )
+        # A name nothing here answers to is a question this runtime cannot answer, which
+        # is not the same as a refusal to act on a machine it knows.
+        assert {:error, {:unknown_session_owner_machine, "no-such-machine"}} =
+                 Cluster.forget_session_owner("no-such-machine")
 
         assert :ok =
                  Cluster.record_session_snapshot(:interactive, [
@@ -1559,8 +1666,8 @@ defmodule Ouroboros.ClusterTest do
         assert_eventually(fn -> target not in Node.list() end, 300)
         restart_cluster_monitor!()
 
-        # Cancellation and signed roster import are not session-state retirement. The
-        # tombstone alone survives a Monitor/BEAM recovery.
+        # A disconnect is not retirement, and never infers one: the evidence survives a
+        # Monitor/BEAM recovery and the session list still fails closed on it.
         assert {:ok, owners} = Cluster.session_owners(:interactive)
         assert MapSet.member?(owners, Atom.to_string(target))
 
@@ -1570,26 +1677,22 @@ defmodule Ouroboros.ClusterTest do
 
         assert owner == Atom.to_string(target)
 
-        assert {:ok,
-                %{
-                  machine: ^machine,
-                  node: forgotten_node,
-                  roster_revision: 2,
-                  removed: true
-                }} =
+        assert {:ok, %{machine: ^machine, node: forgotten_node, removed: true} = result} =
                  Methods.invoke("fleet.forget_session_owner", %{
                    "machine" => machine,
                    "accept_state_loss" => true
                  })
 
         assert forgotten_node == Atom.to_string(target)
+        # No roster to revise, so no revision to report.
+        refute Map.has_key?(result, :roster_revision)
 
         assert {:ok, owners} = Cluster.session_owners(:interactive)
         refute MapSet.member?(owners, Atom.to_string(target))
 
         # Repeating an already-confirmed retirement is safe for automation and still
         # forces a synced checkpoint before success.
-        assert {:ok, %{removed: false, roster_revision: 2}} =
+        assert {:ok, %{removed: false}} =
                  Methods.invoke("fleet.forget_session_owner", %{
                    "machine" => machine,
                    "accept_state_loss" => true
@@ -1599,6 +1702,46 @@ defmodule Ouroboros.ClusterTest do
 
         assert {:ok, interactive} = Methods.invoke("interactive.list", %{})
         assert is_list(interactive)
+
+        # `ouro fleet forget NAME` removes the machine from this profile first and then
+        # asks the runtime, so the machine is gone from `members` by the time the call
+        # arrives. The last-known directory still holds it under the name the operator
+        # gave it, and that is what the retirement resolves through.
+        write_test_fleet_profile!(fleet_dir, fleet_id, local: local, members: [local])
+
+        assert :ok =
+                 Cluster.record_session_snapshot(:interactive, [
+                   {target, [%{id: "forgotten-after-removal"}]}
+                 ])
+
+        :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
+          put_in(state, [:machines, target], %{
+            node: target,
+            machine: machine,
+            role: :core,
+            state: :offline,
+            expected?: false,
+            runtime_running?: nil,
+            first_seen_at: nil,
+            last_seen_at: nil,
+            last_up_at: nil,
+            last_down_at: nil,
+            down_reason: "connection_lost",
+            runtime: %{},
+            wasm: nil,
+            workspace: nil,
+            facts: nil,
+            probe_error: :node_not_connected
+          })
+        end)
+
+        assert {:ok, %{machine: ^machine, removed: true}} =
+                 Methods.invoke("fleet.forget_session_owner", %{
+                   "machine" => machine,
+                   "accept_state_loss" => true
+                 })
+
+        on_exit(fn -> forget_fixture_machines([target]) end)
       end)
     end
 
@@ -1919,17 +2062,13 @@ defmodule Ouroboros.ClusterTest do
             :sys.replace_state(Ouroboros.Cluster.Monitor, &Map.put(&1, :facts_probe, nil))
           end)
 
-          revision =
+          otp_release =
             Cluster.fleet_status().machines
             |> Enum.find(&(&1.node == core))
-            |> get_in([:runtime, :fleet_protocol_revision])
+            |> get_in([:runtime, :otp_release])
 
           :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
-            put_in(
-              state,
-              [:machines, core, :runtime, :fleet_protocol_revision],
-              revision + 1
-            )
+            put_in(state, [:machines, core, :runtime, :otp_release], otp_release <> "-skewed")
           end)
 
           assert Enum.find(Cluster.fleet_status().machines, &(&1.node == core)).compatibility ==
@@ -2014,25 +2153,33 @@ defmodule Ouroboros.ClusterTest do
         render_template("rel/vm.args.eex", %{
           "OUROBOROS_DIST_TLS" => nil,
           "OUROBOROS_DIST_TLS_OPTFILE" => nil,
-          "OUROBOROS_DIST_PORT_MIN" => nil,
-          "OUROBOROS_DIST_PORT_MAX" => nil
+          "OUROBOROS_DIST_PORT" => nil
         })
 
       refute cleartext =~ "-proto_dist"
       refute cleartext =~ "inet_dist_listen_min"
       assert cleartext =~ "cleartext"
 
+      # Told no port, the artifact names no epmd module either: it is single-machine, or
+      # an operator-managed release that brings its own port mapper.
+      refute cleartext =~ "-epmd_module"
+      refute cleartext =~ "-start_epmd"
+
       tls =
         render_template("rel/vm.args.eex", %{
           "OUROBOROS_DIST_TLS" => "1",
           "OUROBOROS_DIST_TLS_OPTFILE" => "/etc/ouroboros/dist_tls.conf",
-          "OUROBOROS_DIST_PORT_MIN" => "9100",
-          "OUROBOROS_DIST_PORT_MAX" => "9105"
+          "OUROBOROS_DIST_PORT" => "9100"
         })
 
       assert tls =~ "-proto_dist inet_tls"
       assert tls =~ "-ssl_dist_optfile /etc/ouroboros/dist_tls.conf"
-      assert tls =~ "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9105"
+
+      # One port, said twice and agreeing: the listener binds it and the epmd module
+      # answers with it. Nothing anywhere mentions a port mapper to reach.
+      assert tls =~ "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100"
+      assert tls =~ "-start_epmd false"
+      assert tls =~ "-epmd_module Elixir.Ouroboros.Cluster.Epmd"
 
       # The remote-command VMs must speak the same protocol to reach the node at all,
       # and must not pin the port the running node already holds.
@@ -2040,8 +2187,7 @@ defmodule Ouroboros.ClusterTest do
         render_template("rel/remote.vm.args.eex", %{
           "OUROBOROS_DIST_TLS" => "1",
           "OUROBOROS_DIST_TLS_OPTFILE" => "/etc/ouroboros/dist_tls.conf",
-          "OUROBOROS_DIST_PORT_MIN" => "9100",
-          "OUROBOROS_DIST_PORT_MAX" => "9105"
+          "OUROBOROS_DIST_PORT" => "9100"
         })
 
       assert remote =~ "-proto_dist inet_tls"
@@ -2056,25 +2202,10 @@ defmodule Ouroboros.ClusterTest do
         })
       end
 
-      assert_raise RuntimeError, ~r/must be set together/, fn ->
-        render_template("rel/vm.args.eex", %{
-          "OUROBOROS_DIST_PORT_MIN" => "9100",
-          "OUROBOROS_DIST_PORT_MAX" => nil
-        })
-      end
-
-      assert_raise RuntimeError, ~r/must not exceed/, fn ->
-        render_template("rel/vm.args.eex", %{
-          "OUROBOROS_DIST_PORT_MIN" => "9200",
-          "OUROBOROS_DIST_PORT_MAX" => "9100"
-        })
-      end
-
-      assert_raise RuntimeError, ~r/TCP port/, fn ->
-        render_template("rel/vm.args.eex", %{
-          "OUROBOROS_DIST_PORT_MIN" => "0",
-          "OUROBOROS_DIST_PORT_MAX" => "9100"
-        })
+      for invalid <- ["0", "65536", "-1", "nine thousand"] do
+        assert_raise RuntimeError, ~r/TCP port/, fn ->
+          render_template("rel/vm.args.eex", %{"OUROBOROS_DIST_PORT" => invalid})
+        end
       end
     end
 
@@ -2331,23 +2462,26 @@ defmodule Ouroboros.ClusterTest do
   defp write_test_fleet_profile!(fleet_dir, fleet_id, opts \\ []) do
     local = Keyword.get(opts, :local, test_fleet_member("owner", "127.0.0.1"))
     members = Keyword.get(opts, :members, [local])
-    tombstones = Keyword.get(opts, :tombstones, [])
 
     profile = %{
-      "schema" => 1,
+      "schema" => Keyword.get(opts, :schema, 2),
       "fleet_id" => fleet_id,
       "name" => "Cluster test fleet",
       "machine" => local["machine"],
       "host" => local["host"],
       "node" => local["node"],
       "role" => "core",
-      "members" => members,
-      "roster_revision" => Keyword.get(opts, :roster_revision, 1),
-      "tombstones" => tombstones,
+      "dist_port" => 13_700,
       "gateway_port" => 41_789,
-      "epmd_port" => 44_369,
-      "dist_port_min" => 45_100,
-      "dist_port_max" => 45_199
+      "members" => members,
+      "tags" => Keyword.get(opts, :tags, []),
+      # Three keys schema 2 does not read, kept in every fixture on purpose: a profile
+      # that still carries them is decoded, and they change nothing. A roster is not
+      # replicated any more, so there is no revision to compare, and a member is removed
+      # by leaving `members` rather than by being listed here.
+      "roster_revision" => Keyword.get(opts, :roster_revision, 1),
+      "tombstones" => Keyword.get(opts, :tombstones, []),
+      "epmd_port" => 44_369
     }
 
     path = Path.join(fleet_dir, "profile.json")

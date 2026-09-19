@@ -123,19 +123,20 @@ defmodule Ouroboros.MixProject do
     ]
   end
 
-  # `ouro fleet protocol --json` has to answer with the fleet protocol revision, the OTP
-  # release and the Elixir version *without starting a BEAM*, because it is the command an
-  # onboarding preflight calls before there is a runtime to ask. `ouro` is a Rust binary:
-  # it cannot derive any of that from the tarball it embeds. So the facts are recorded
-  # here, between `:assemble` and `:tar`, where they are facts — the ERTS that `mix
-  # release` just copied into this tree is the ERTS these versions describe — and the
-  # client reads this one file back out of the tarball. See `tui/src/fleet_protocol.rs`,
-  # and `scripts/release-smoke.py`, which asserts that the shipped client and this file
-  # still agree.
+  # The packaged client has to answer with the Ouroboros version, the OTP release and the
+  # Elixir version *without starting a BEAM*, because it is what an onboarding preflight
+  # asks before there is a runtime. `ouro` is a Rust binary: it cannot derive any of that
+  # from the tarball it embeds. So the facts are recorded here, between `:assemble` and
+  # `:tar`, where they are facts — the ERTS that `mix release` just copied into this tree
+  # is the ERTS these versions describe — and the client reads this one file back out of
+  # the tarball. See `tui/src/fleet_protocol.rs`, and `scripts/release-smoke.py`, which
+  # asserts that the shipped client and this file still agree.
+  #
+  # `fleet_protocol_revision` is gone (fleet-kiss §12): runtime compatibility is
+  # `{ouroboros_version, otp_release}` and nothing else.
   defp write_build_metadata(%Mix.Release{} = release) do
     metadata = %{
       schema: 1,
-      fleet_protocol_revision: Ouroboros.Cluster.fleet_protocol_revision(),
       ouroboros_version: to_string(release.version),
       otp_release: to_string(:erlang.system_info(:otp_release)),
       elixir_version: System.version()
