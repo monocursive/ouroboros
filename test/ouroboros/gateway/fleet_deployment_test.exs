@@ -586,6 +586,9 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       # §9 replaces `owner`/`attached` with `running`, because there is no owner any more.
       refute Map.has_key?(operation, "owner")
       refute Map.has_key?(operation, "attached")
+      # A row of a *waiting* operation has nothing to say about a failure, and says so with
+      # a null rather than by leaving the key out.
+      assert operation["last_error"] == nil
 
       # The four fields that put it on a row, and only those.
       assert operation["target"] == %{
@@ -622,7 +625,8 @@ defmodule Ouroboros.Gateway.FleetDeploymentTest do
       assert broken["reason"] == "journal_unreadable"
 
       for row <- operations do
-        for field <- ~w(operation kind state created_at updated_at target readable running) do
+        for field <- ~w(operation kind state created_at updated_at last_error target
+                        readable running) do
           assert Map.has_key?(row, field), "#{field} missing from #{inspect(row)}"
         end
       end

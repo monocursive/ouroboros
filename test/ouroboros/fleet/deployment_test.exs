@@ -627,12 +627,36 @@ defmodule Ouroboros.Fleet.DeploymentTest do
       assert row["kind"] == "add"
       assert row["running"] == true
       assert row["target"]["machine"] == "fixture-target"
+      assert row["last_error"] == nil
 
       {:ok, _} = Deployment.cancel(live)
       await_no_worker(live)
 
       {rows, _total} = Deployment.operations(context.root)
       assert Enum.find(rows, &(&1["operation"] == live))["running"] == false
+    end
+
+    test "a failed operation's row carries the journal's own last_error", context do
+      FleetFramesFake.write_scenario!(context.bin, [
+        "state running",
+        "step inspect failed the target refused the connection",
+        "error ssh_unavailable the target refused the connection",
+        "done failed fixture-target was not added"
+      ])
+
+      {:ok, operation} = start_add()
+      await_no_worker(operation)
+
+      {rows, _total} = Deployment.operations(context.root)
+      row = Enum.find(rows, &(&1["operation"] == operation))
+
+      assert row["state"] == "failed"
+      # A list that says `failed` and nothing else sends an operator into a drawer to find
+      # out what a line could have told them.
+      assert row["last_error"] == %{
+               "reason" => "ssh_unavailable",
+               "detail" => "the target refused the connection"
+             }
     end
   end
 

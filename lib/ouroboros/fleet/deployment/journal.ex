@@ -226,7 +226,12 @@ defmodule Ouroboros.Fleet.Deployment.Journal do
 
   defp order(%{"operation" => operation}), do: {"", operation}
 
-  @summary_fields ~w(operation kind state created_at updated_at)
+  # `last_error` is on a *summary* because a failed operation's row is where an operator
+  # first reads about it: a list that says `failed` and nothing else sends them into a
+  # drawer to find out what a line could have told them. It is the journal's own field and
+  # keeps the journal's own shape — a bare string from an older record, `{reason, detail}`
+  # from a schema-2 one — and it goes through the same scrubbing as everything else here.
+  @summary_fields ~w(operation kind state created_at updated_at last_error)
 
   # Enough to put an open operation on the row it belongs to, and no more.
   #
