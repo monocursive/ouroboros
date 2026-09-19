@@ -1626,7 +1626,7 @@ async fn service_run(paths: &Paths, dev: bool) -> Result<()> {
     }
     paths.ensure_private_data_dir()?;
     if fleet::load(&paths.data_dir)?.is_none() {
-        bail!("service-run requires a cluster identity; run `ouro fleet create` first");
+        bail!("service-run requires a cluster identity; run `ouro fleet setup` first");
     }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing the service termination handler")?;
@@ -3324,7 +3324,7 @@ enum StartRequirement {
 fn ensure_start_requirement(paths: &Paths, requirement: StartRequirement) -> Result<()> {
     if requirement == StartRequirement::Fleet && fleet::load(&paths.data_dir)?.is_none() {
         bail!(
-            "service-run lost its fleet profile before acquiring runtime ownership. The runtime was not started; stop the supervising unit or run `ouro fleet create` again first"
+            "service-run lost its fleet profile before acquiring runtime ownership. The runtime was not started; stop the supervising unit or run `ouro fleet setup` again first"
         );
     }
     Ok(())

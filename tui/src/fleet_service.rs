@@ -1059,7 +1059,7 @@ pub fn install(plan: &Plan, programs: &Programs) -> Result<Report> {
         return refuse(
             "no_fleet",
             format!(
-                "{} has no cluster identity, and `ouro service-run` refuses to start without one. Run `ouro fleet create` first; a unit installed now would only crash-loop",
+                "{} has no cluster identity, and `ouro service-run` refuses to start without one. Run `ouro fleet setup` first; a unit installed now would only crash-loop",
                 plan.data_dir.display()
             ),
         );
@@ -2077,7 +2077,7 @@ pub fn network_wait_backoff(attempt: u32) -> Duration {
     doubled.min(NETWORK_WAIT_MAX)
 }
 
-/// The real probe: exactly the bind check `ouro fleet create` and a join already make,
+/// The real probe: exactly the bind check `fleet::create` and a join already make,
 /// on an ephemeral port that is dropped immediately.
 pub fn probe_bindable(host: &str) -> Result<std::net::Ipv4Addr> {
     crate::fleet::ensure_local_bind_address(host)
