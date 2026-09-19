@@ -1073,15 +1073,18 @@ defmodule Ouroboros.Cluster do
 
     * `none` (default) — no discovery. Nodes connect because something else connected
       them, exactly as before this module existed.
-    * `epmd` — a list of node names, retried on an interval so boot order does not
-      matter. `OUROBOROS_CLUSTER_HOSTS` (comma-separated) seeds the list at boot; when
-      this node runs from a saved fleet profile, every retry re-resolves membership
-      from that profile (`membership_hosts/0`), so a roster edited while the runtime is
-      up reaches its dialer without a restart.
-    * `gossip` — libcluster's multicast gossip, optionally keyed by
-      `OUROBOROS_CLUSTER_GOSSIP_SECRET`.
-    * `dns` — poll the A records of `OUROBOROS_CLUSTER_DNS_QUERY` and connect
-      `basename@ip`.
+    * `epmd` — the roster dialer, whose name is libcluster's and which has not needed a
+      port mapper since `Ouroboros.Cluster.Epmd` became the fleet's `-epmd_module`. A
+      list of node names, retried on an interval so boot order does not matter.
+      `OUROBOROS_CLUSTER_HOSTS` (comma-separated) seeds the list at boot; when this node
+      runs from a saved fleet profile, every retry re-resolves membership from that
+      profile (`membership_hosts/0`), so a roster edited while the runtime is up reaches
+      its dialer without a restart.
+
+  There were two more — libcluster's multicast gossip and DNS polling. Neither was ever
+  how an Ouroboros fleet forms: a fleet is a list of machines an operator named, each
+  carrying the others in its own profile, and a discovery mechanism that admits whoever
+  answers a broadcast is the opposite of that. They are gone, along with their variables.
 
   A strategy that is named but misconfigured refuses the boot; it does not quietly fall
   back to an unformed cluster.
@@ -1102,7 +1105,7 @@ defmodule Ouroboros.Cluster do
   require Logger
 
   @roles [:core, :builder, :signer]
-  @strategies [:none, :epmd, :gossip, :dns]
+  @strategies [:none, :epmd]
   @session_planes [:interactive]
   @role_key {__MODULE__, :node_role}
   @formation_name __MODULE__.Formation
@@ -1130,7 +1133,7 @@ defmodule Ouroboros.Cluster do
   def fleet_protocol_revision, do: @fleet_protocol_revision
 
   @type role :: :core | :builder | :signer
-  @type strategy :: :none | :epmd | :gossip | :dns
+  @type strategy :: :none | :epmd
   @type posture :: %{node: node(), role: role(), running: boolean()}
 
   @doc false
@@ -1796,66 +1799,6 @@ defmodule Ouroboros.Cluster do
     end
   end
 
-  defp build_topologies(:gossip) do
-    with {:ok, port} <- optional_port("OUROBOROS_CLUSTER_GOSSIP_PORT") do
-      config =
-        []
-        |> put_present(:secret, env("OUROBOROS_CLUSTER_GOSSIP_SECRET"))
-        |> put_present(:port, port)
-
-      {:ok, [ouroboros: [strategy: Cluster.Strategy.Gossip, config: config]]}
-    end
-  end
-
-  defp build_topologies(:dns) do
-    with {:ok, query} <- required_env("OUROBOROS_CLUSTER_DNS_QUERY"),
-         {:ok, basename} <- dns_basename() do
-      {:ok,
-       [
-         ouroboros: [
-           strategy: Cluster.Strategy.DNSPoll,
-           config: [
-             query: query,
-             node_basename: basename,
-             polling_interval: reconnect_interval()
-           ]
-         ]
-       ]}
-    end
-  end
-
-  # DNS polling builds `basename@ip`, so the basename must match what the peers
-  # actually registered. Deriving it from this node's own name is right whenever the
-  # fleet is homogeneous, which is the case this strategy is for.
-  defp dns_basename do
-    case env("OUROBOROS_CLUSTER_DNS_BASENAME") do
-      nil ->
-        case node() |> Atom.to_string() |> String.split("@", parts: 2) do
-          [name, _host] when name != "" -> {:ok, name}
-          _other -> {:error, {:missing_cluster_configuration, "OUROBOROS_CLUSTER_DNS_BASENAME"}}
-        end
-
-      basename ->
-        {:ok, basename}
-    end
-  end
-
-  defp put_present(config, _key, nil), do: config
-  defp put_present(config, key, value), do: Keyword.put(config, key, value)
-
-  defp optional_port(name) do
-    case env(name) do
-      nil ->
-        {:ok, nil}
-
-      value ->
-        case Integer.parse(value) do
-          {port, ""} when port > 0 and port < 65_536 -> {:ok, port}
-          _other -> {:error, {:invalid_cluster_configuration, name}}
-        end
-    end
-  end
-
   defp reconnect_interval do
     case env("OUROBOROS_CLUSTER_RECONNECT_MS") do
       nil ->
@@ -1866,13 +1809,6 @@ defmodule Ouroboros.Cluster do
           {interval, ""} when interval > 0 -> interval
           _other -> @default_reconnect_ms
         end
-    end
-  end
-
-  defp required_env(name) do
-    case env(name) do
-      nil -> {:error, {:missing_cluster_configuration, name}}
-      value -> {:ok, value}
     end
   end
 

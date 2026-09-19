@@ -107,9 +107,8 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
 
   cluster_strategy = env_value.("OUROBOROS_CLUSTER_STRATEGY") || "none"
 
-  unless cluster_strategy in ["none", "epmd", "gossip", "dns"] do
-    raise "OUROBOROS_CLUSTER_STRATEGY must be one of none, epmd, gossip, dns, got: " <>
-            cluster_strategy
+  unless cluster_strategy in ["none", "epmd"] do
+    raise "OUROBOROS_CLUSTER_STRATEGY must be one of none, epmd, got: " <> cluster_strategy
   end
 
   # `-proto_dist` reaches the emulator through vm.args, ELIXIR_ERL_OPTIONS, or the

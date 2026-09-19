@@ -1,12 +1,6 @@
 defmodule Ouroboros.ClusterTest do
   use ExUnit.Case, async: false
 
-  # libcluster's strategies are aliased first, on purpose: `Ouroboros.Cluster` takes the
-  # `Cluster` alias below, after which `Cluster.Strategy.DNSPoll` would name a module
-  # that does not exist. The epmd strategy is Ouroboros' own `Cluster.RosterEpmd`.
-  alias Cluster.Strategy.DNSPoll
-  alias Cluster.Strategy.Gossip
-
   alias Ouroboros.Cluster
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Mesh
@@ -677,13 +671,24 @@ defmodule Ouroboros.ClusterTest do
                  {:error, {:missing_cluster_configuration, "OUROBOROS_CLUSTER_HOSTS"}}
       end)
 
-      with_env(
-        %{"OUROBOROS_CLUSTER_STRATEGY" => "dns", "OUROBOROS_CLUSTER_DNS_QUERY" => nil},
-        fn ->
-          assert Cluster.topologies() ==
-                   {:error, {:missing_cluster_configuration, "OUROBOROS_CLUSTER_DNS_QUERY"}}
-        end
-      )
+      # The two discovery strategies this runtime used to understand are gone, and a
+      # machine still carrying their variables is a machine that names a strategy this
+      # build does not have rather than one that quietly forms a different cluster.
+      for withdrawn <- ["gossip", "dns"] do
+        with_env(
+          %{
+            "OUROBOROS_CLUSTER_STRATEGY" => withdrawn,
+            "OUROBOROS_CLUSTER_DNS_QUERY" => "ouroboros.internal",
+            "OUROBOROS_CLUSTER_DNS_BASENAME" => "core",
+            "OUROBOROS_CLUSTER_GOSSIP_SECRET" => "shared",
+            "OUROBOROS_CLUSTER_GOSSIP_PORT" => "45999"
+          },
+          fn ->
+            assert Cluster.strategy() == {:error, {:unknown_cluster_strategy, withdrawn}}
+            assert Cluster.topologies() == {:error, {:unknown_cluster_strategy, withdrawn}}
+          end
+        )
+      end
     end
 
     test "each strategy builds the topology its variables describe" do
@@ -703,41 +708,10 @@ defmodule Ouroboros.ClusterTest do
         end
       )
 
-      with_env(
-        %{
-          "OUROBOROS_CLUSTER_STRATEGY" => "dns",
-          "OUROBOROS_CLUSTER_DNS_QUERY" => "ouroboros.internal",
-          "OUROBOROS_CLUSTER_DNS_BASENAME" => "core"
-        },
-        fn ->
-          assert {:ok, [ouroboros: topology]} = Cluster.topologies()
-          assert topology[:strategy] == DNSPoll
-          assert topology[:config][:query] == "ouroboros.internal"
-          assert topology[:config][:node_basename] == "core"
-        end
-      )
-
-      with_env(
-        %{
-          "OUROBOROS_CLUSTER_STRATEGY" => "gossip",
-          "OUROBOROS_CLUSTER_GOSSIP_SECRET" => "shared",
-          "OUROBOROS_CLUSTER_GOSSIP_PORT" => "45999"
-        },
-        fn ->
-          assert {:ok, [ouroboros: topology]} = Cluster.topologies()
-          assert topology[:strategy] == Gossip
-          assert topology[:config][:secret] == "shared"
-          assert topology[:config][:port] == 45_999
-        end
-      )
-
-      with_env(
-        %{"OUROBOROS_CLUSTER_STRATEGY" => "gossip", "OUROBOROS_CLUSTER_GOSSIP_PORT" => "no"},
-        fn ->
-          assert Cluster.topologies() ==
-                   {:error, {:invalid_cluster_configuration, "OUROBOROS_CLUSTER_GOSSIP_PORT"}}
-        end
-      )
+      # There is one other strategy and it builds nothing, which is the whole list.
+      with_env(%{"OUROBOROS_CLUSTER_STRATEGY" => "none"}, fn ->
+        assert Cluster.topologies() == {:ok, []}
+      end)
     end
 
     test "static topology exposes an expected offline machine with recovery guidance" do
