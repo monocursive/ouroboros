@@ -1,5 +1,16 @@
 # Fleet UX review — Devices in the web and the TUI
 
+> **Status, 2026-09-19.** The findings and the words in §5 are what shipped, and the web
+> page still follows them. [fleet-kiss.md](../proposals/fleet-kiss.md) supersedes what this
+> review assumes underneath: the per-member trust ceremony, the replicated roster and its
+> tombstones, the detached worker with its owner and takeover, and the protocol revision
+> are all gone, and the deployment methods are now `fleet.deployment.start`, `.status`,
+> `.respond`, `.cancel` and `.resume` — `prepare`, `authenticate` and `confirm_host` no
+> longer exist. §10 there also replaces the TUI half of this review: the terminal Devices
+> view is an inventory that runs no operation and prints the command to run instead, so
+> the forms, challenges, progress screens and takeover prompt described below are not in
+> the terminal any more. Everything else here still holds.
+
 Date: 2026-09-18. Branch `dev` at `915eb6e7` (the day after PR #39 merged). Client
 `ouro 0.1.9` as installed at `~/.local/bin/ouro`, plus a debug build of the same tree.
 

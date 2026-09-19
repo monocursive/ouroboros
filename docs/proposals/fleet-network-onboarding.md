@@ -1,5 +1,19 @@
 # Fleet onboarding over Tailscale
 
+> **Status, 2026-09-19.** [fleet-kiss.md](fleet-kiss.md) supersedes the trust, roster,
+> worker, protocol-revision, tombstone and TUI-flow parts of this document. There is no
+> per-member certificate ceremony and no issuer: one fleet is one shared bundle held by
+> every member (§1 there). There is no replicated roster, no `roster_revision` and no
+> tombstone — a profile's `members` is a list of dial hints each machine writes for
+> itself. There is no detached deployment worker, no socket, no capability file and no
+> takeover: the deployment program is an ordinary port program of the runtime that asked
+> for it. `@fleet_protocol_revision` and `ouro fleet protocol` are deleted; runtime
+> compatibility is `{ouroboros_version, otp_release}`, compared exactly. The TUI runs no
+> operation; it shows an inventory and the command to run. What this document says about
+> Tailscale as the network, OpenSSH as the bootstrap, secret handling, the host-key
+> question, the service lifecycle and the Devices words still holds, and
+> [FLEET.md](../FLEET.md) is what ships.
+
 Status: implemented on the branch `codex/fleet-onboarding` (2026-09-17, from `dev` at
 `826a4c51`, source version `0.1.8`), not yet merged or released. Originally written
 2026-09-14 against `dev` at `af782a4b`; refreshed 2026-09-17. Slices 1–6 below landed,

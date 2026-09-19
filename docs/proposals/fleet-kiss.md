@@ -347,3 +347,55 @@ Gates per slice: the slice's own suites green, `cargo fmt`/`clippy -D warnings` 
 the integration gates from `make test`, the packaged `make ouro` binary running `setup`,
 `add` and `leave --machine` against the real-OpenSSH loopback rig, and finally a live
 second machine.
+
+## 14. Deviations accepted
+
+What the implementation did differently from the text above. Where the two disagree the
+code is right, and [FLEET.md](../FLEET.md) documents the code.
+
+- **Node names keep the spelling `ouro-<machine>@<host>`.** §2's `ouro@<host>` example was
+  wrong: `fleet::member` has always built `ouro-<machine>@<host>`, and `add_member` refuses
+  any other spelling by name.
+- **`OUROBOROS_DIST_PORTS` is keyed by the full node name**, `ouro-studio@100.64.0.1=13700,…`,
+  one entry per member including self. Two lab nodes on one host cannot both be true under
+  a host key. `Cluster.Epmd.port_please/2,3` tries `name@host`, then the bare `host`, then
+  `OUROBOROS_DIST_PORT`. The module's own doc still describes the production form as
+  `host=port`; the launcher never writes that form.
+- **`RELEASE_VM_ARGS` is still set by the launcher.** §3 left it out of the table, but it
+  is how the generated `vm.args` is read at all.
+- **The journal's `target` keeps more than the four keys §6 lists.** Beside `machine`,
+  `address`, `ssh_user` and `port` it carries `node`, `host_fingerprint`, `identity`,
+  `peer_id`, `stable_id`, and `hostname`, `os`, `arch`. Steps carry `machine`, and a step
+  may carry a `fingerprint`.
+- **The step lists differ from §6.** `setup` runs `stop_runtime` before `create`, not
+  after. `add` has a seventh step, `remember` — the local roster append — and its `install`
+  step is the *binary* install, while the bundle install is journaled as `join`.
+- **The startup service keeps today's unit label and path** — `dev.ouroboros.runtime.<digest>`
+  in `~/Library/LaunchAgents`, `ouroboros-<digest>.service` under `~/.config/systemd/user`
+  — so a unit installed by 0.1.9 or 0.1.10 is the same file. §11's other cuts were **not**
+  made: `fleet_service.rs` still writes the ownership marker and still classifies a unit as
+  foreign or modified, `status` still reports a second unit for the same data directory,
+  and `install`/`remove` still refuse a foreign one. What is gone is the `--adopt` flag:
+  every caller passes `adopt: false`, so the refusal text that still names `--adopt` names
+  a flag the CLI no longer has.
+- **`fleet.status` has a `profile` key** — `null`, or `{reason: unsupported_profile_schema,
+  message}` — and `fleet.doctor` a `fleet_profile` check, both carrying the one schema-1
+  sentence.
+- **`fleet.forget_session_owner` takes `machine` only.** No confirmation flag and no
+  tombstone precondition: `ouro fleet forget NAME` is the operator's statement.
+- **`--frames` does not accept `--dry-run`.** `FleetSetupArgs::frames` and
+  `LeaveSetupArgs::frames` conflict with `json`, `yes` *and* `dry_run`, so a dry run is a
+  terminal or `--json` front end only.
+- **`fleet.deployment.status` answers carry `summary`** (from the `done` frame), `log`
+  (live frames, or the scrubbed tail of `deploy/<id>.log` from a journal), `last_error`
+  (the journal's, or `worker_exited` from the broker's memory of program exits) and
+  `running`. A resume rebuilds argv from the journal's `kind`, `target` and `paths`, with
+  the identity and the service falling back to their defaults.
+- **Frames need no `v` field**; a `v` that is present and is not `1` is refused. This is
+  the helper protocol (§7). The `--frames` protocol (§8) carries no `v` at all.
+- **`unknown_challenge` is a deployment reason code**, for an id the operation is not
+  waiting on.
+- **The TUI does not print the web address of this runtime's Devices page.** §10 asks for
+  it; `devices.rs` prints the per-row recipe and a manual `ouro fleet add USER@ADDRESS
+  --machine NAME` line, and nothing about the web.
+- **`fleet_id` is 24 hex characters**, `random_hex(12)`. §2's example says 32.

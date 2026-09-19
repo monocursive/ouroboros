@@ -155,26 +155,27 @@ and [direct calls using Grok sign-in](https://github.com/xai-org/grok-build/blob
 ## A second machine
 
 Ouroboros runs as one BEAM cluster: several machines, one trust domain, sessions and
-subagents placed across it. Put the machines on Tailscale or Headscale and enable
-OpenSSH on the target. In **Devices**, choose **Set up this machine**, then **Add to
-fleet** on the target and review the plan. The terminal shortcut is `ctrl+x D`.
-The same guided workflow is available from the CLI:
+subagents placed across it. Put the machines on Tailscale or Headscale and enable OpenSSH
+on the target, then, on the machine you work from:
 
 ```sh
-ouro fleet setup --machine studio --address STUDIO_PRIVATE_ADDRESS
+ouro fleet setup --machine studio
 ouro fleet add ubuntu@VPS_PRIVATE_ADDRESS --machine vps
 ouro fleet doctor
 ```
 
-Setup verifies the SSH host key, prompts for a password when needed, installs the
-matching release if the target has no `ouro`, admits it with its own certificate,
-updates the rosters, and configures automatic startup. Review the startup result:
-some Linux accounts require an administrator to enable lingering before they start
-at boot. Configure a model on each machine before running tasks there.
+`add` verifies the SSH host key, asks for a password when the target needs one, installs
+the matching release if that machine has no `ouro`, hands it this fleet's bundle, and
+arranges for it to start at login. Some Linux accounts need an administrator to enable
+lingering before a user service starts at boot, so read what the startup step reports.
 
-[The fleet guide](docs/FLEET.md#two-machines-over-ssh) covers requirements and recovery.
-Any node that completes the distribution handshake holds full authority over every
-other node in the fleet.
+In **Devices** on the web (`/devices`) the same flow runs from the page. The terminal's
+Devices view (`ctrl+x D`) shows the same inventory and prints the command to run for each
+machine; it runs nothing itself.
+
+[The fleet guide](docs/FLEET.md) covers the trust model, the commands and recovery. Any
+node that completes the distribution handshake holds full authority over every other node
+in the fleet.
 
 ## Development
 
@@ -221,7 +222,7 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Terminal client](docs/TUI.md)
 - [Web interface](docs/WEB.md)
-- [The cluster](docs/FLEET.md)
+- [The fleet](docs/FLEET.md)
 - [Traceability and audit](docs/AUDIT.md)
 - [Session replay](docs/REPLAY.md)
 - [WebAssembly components](docs/WASM_GUIDE.md)
