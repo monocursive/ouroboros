@@ -641,6 +641,67 @@ fn a_machine_joins_over_real_ssh_and_leaves_again() {
     in_order(&steps(&removal), &["stop:ok", "remove:ok", "forget:ok"]);
 }
 
+/// §5's local counterpart to `leave --machine`: `ouro fleet forget NAME`, which removes
+/// NAME from this profile's members *and* asks the runtime to retire NAME's
+/// session-owner evidence.
+///
+/// Both halves or neither. With no runtime here the second half cannot happen, and it
+/// cannot happen later either — the runtime resolves a machine name through the
+/// profile's members, and the roster edit is exactly what takes it off that list. The
+/// command used to do the edit anyway and print that the evidence had been retired,
+/// which was a false statement about a machine that had just become unnameable.
+#[test]
+fn forget_refuses_while_no_runtime_can_retire_the_evidence() {
+    let lab = Lab::new("kr2frg", "studio");
+    let operation = "op-0000000000e2";
+    let mut args = lab.add_args("vps", operation);
+    args.extend(["--no-service".into(), "--yes".into(), "--json".into()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let added = lab.ouro(&lab.issuer, lab.target_ports, &borrowed, &[]);
+    assert!(added.success(), "{}\n{}", added.stdout, added.stderr);
+    assert!(lab
+        .issuer_profile()
+        .members
+        .iter()
+        .any(|member| member.machine == "vps"));
+
+    // Nothing is running here: `--no-service` started nothing, and this data directory
+    // has never published a gateway.
+    let forgotten = lab.ouro(
+        &lab.issuer,
+        lab.issuer_ports,
+        &["fleet", "forget", "vps"],
+        &[],
+    );
+
+    assert!(
+        !forgotten.success(),
+        "a forget with nothing to retire the evidence must refuse:\n{}\n{}",
+        forgotten.stdout,
+        forgotten.stderr
+    );
+    let said = format!("{}{}", forgotten.stdout, forgotten.stderr);
+    assert!(
+        said.contains("not running on this machine"),
+        "the refusal says Ouroboros is not running here: {said}"
+    );
+    assert!(said.contains("ouro daemon"), "and names the repair: {said}");
+    assert!(
+        !said.contains("has been retired") && !said.contains("Forgotten on this machine"),
+        "a refusal must not claim the work was done: {said}"
+    );
+
+    // The profile is exactly as it was: the member is still there, so a later `forget`
+    // with a runtime up can still name it.
+    let after = lab.issuer_profile();
+    assert!(
+        after.members.iter().any(|member| member.machine == "vps"),
+        "a refused forget edited the roster: {:?}",
+        after.members
+    );
+    assert_eq!(after.members.len(), 2, "{:?}", after.members);
+}
+
 // ============================================================================== --frames
 
 /// One `ouro fleet … --frames` process, spoken to the way the broker's port program is.

@@ -1444,9 +1444,24 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             Ok(())
         }
         FleetCommand::Forget { machine } => {
-            // The runtime is asked first, and a refusal — the usual one being that the
-            // machine is connected after all — leaves the roster exactly as it was.
-            if let Some(publication) = runtime::read_live_publication(&paths.data_dir)? {
+            // `forget` is two changes, and this process owns only one of them: the
+            // runtime retires the machine's session-owner evidence, and the roster edit
+            // takes it off this machine's list. The runtime is asked first, and a
+            // refusal — the usual one being that the machine is connected after all —
+            // leaves the roster exactly as it was.
+            //
+            // With no runtime there is no second half, and it cannot be done later
+            // either: the runtime resolves a machine name through the profile's members,
+            // and the roster edit is what removes it. Editing the profile now would
+            // leave evidence that nothing can ever name again, under a sentence claiming
+            // it had been retired. So a stopped runtime is a refusal, before the profile
+            // is touched.
+            let Some(publication) = runtime::read_live_publication(&paths.data_dir)? else {
+                bail!(
+                    "Ouroboros is not running on this machine, so `{machine}`'s saved session-owner evidence cannot be retired and nothing was changed. Start it with `ouro daemon`, then run `ouro fleet forget {machine}` again."
+                );
+            };
+            {
                 let token = runtime::read_token(&paths.token_file())?;
                 let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
                 let attached =
