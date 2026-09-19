@@ -1011,6 +1011,82 @@ fn kr3_a_refused_replace_install_has_already_destroyed_the_fleet_that_was_there(
     );
 }
 
+/// **Coverage gap, closed here.** Nothing proved the bundle's secrets never come back
+/// out on the helper's *stdout*.
+///
+/// `install_writes_the_bundle_at_the_documented_modes_and_guards_what_is_there` checks
+/// `helper.errors()` — stderr — and the review found no assertion anywhere about the
+/// reply frames. A mutation that adds `"installed_cookie": bundle.cookie` to the
+/// `install` success reply survives `--lib` and all six fleet suites: the fleet's shared
+/// secret goes back up the SSH pipe, into the issuer's `helper::Session`, and past every
+/// test in the tree.
+///
+/// So: every frame this helper writes, for every op that has touched the bundle, against
+/// both secrets and against the PEM banner that would mean a key body is in there.
+#[test]
+fn kr3_no_reply_frame_carries_the_cookie_or_the_ca_key() {
+    let world = World::new("nosecrets");
+    let target = private_dir(&world.root.join("data"));
+    let issuer = Issuer::new(&world.root, "studio");
+    let ports = ephemeral();
+    let cookie = issuer.cookie();
+    let ca_key = fs::read_to_string(issuer.data_dir.join("fleet/ca-key.pem"))
+        .expect("the issuer's CA key");
+    let ca_key_body: String = ca_key
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(cookie.len() == 64 && !ca_key_body.is_empty());
+
+    let mut helper = Helper::start(&world, &target);
+    let mut frames = Vec::new();
+    frames.push(helper.ask(
+        "install",
+        json!({
+            "bundle": issuer.bundle(),
+            "machine": "pi",
+            "host": "127.0.0.1",
+            "ports": { "gateway": ports.gateway, "dist": ports.dist },
+        }),
+    ));
+    // The idempotent replay and the refusal path both read the installed profile back.
+    frames.push(helper.ask(
+        "install",
+        json!({
+            "bundle": issuer.bundle(),
+            "machine": "pi",
+            "host": "127.0.0.1",
+        }),
+    ));
+    frames.push(helper.ask("inspect", json!({})));
+    frames.push(helper.ask("hello", json!({})));
+    frames.push(helper.ask("status", json!({})));
+
+    for frame in &frames {
+        let text = frame.to_string();
+        assert!(
+            !text.contains(&cookie),
+            "a reply frame carries the fleet cookie: {frame}"
+        );
+        assert!(
+            !text.contains(&ca_key_body),
+            "a reply frame carries the fleet CA key: {frame}"
+        );
+        assert!(
+            !text.contains("PRIVATE KEY"),
+            "a reply frame carries a PEM private key banner: {frame}"
+        );
+    }
+
+    let errors = helper.errors();
+    assert!(!errors.contains(&cookie), "stderr carries the fleet cookie");
+    assert!(
+        !errors.contains(&ca_key_body),
+        "stderr carries the fleet CA key"
+    );
+}
+
 /// The same ordering, reached through the other half of `join`'s validation: a machine
 /// name this build refuses to mint. Nothing about the bundle is wrong here at all.
 #[test]
