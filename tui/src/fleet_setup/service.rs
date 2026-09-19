@@ -263,12 +263,16 @@ impl ServiceActions for LocalServiceActions {
 
 /// The service slice's reason codes, matched against a closed list for the same reason
 /// a remote helper's are: a reason decides which branch is taken.
-fn known_service_reason(reason: &str) -> &'static str {
+pub(super) fn known_service_reason(reason: &str) -> &'static str {
     const KNOWN: &[&str] = &[
         "unsupported_platform",
         "unsupported",
         "unusable_executable",
         "unusable_path",
+        // A unit path that is a directory is produced by `fleet_service` and was missing
+        // from this list, so the one refusal that names a file an operator has to move
+        // aside arrived as `service_refused`.
+        "unit_path_is_a_directory",
         "unusable_manager_program",
         "outside_service_root",
         "not_installed",

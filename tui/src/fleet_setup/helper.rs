@@ -404,58 +404,50 @@ fn looks_unsupported(diagnostics: &str) -> bool {
 /// against a closed list. An unrecognized code becomes `helper_refused`, and the
 /// original text stays in the human `detail`.
 fn known_reason(reason: &str) -> &'static str {
-    const KNOWN: &[&str] = &[
+    /// The envelope's own refusals, from `serve` before any op runs, plus the fallback
+    /// a library error with no declared reason arrives under.
+    const PROTOCOL: &[&str] = &[
         "bad_request",
         "unsupported_op",
         "unsupported_version",
         "frame_too_large",
         "invalid_path",
-        "invalid_request",
-        "operation_in_progress",
-        "install_in_progress",
-        "identity_mismatch",
-        "fleet_exists",
-        "no_fleet",
-        "no_ca_key",
-        "machine_known",
-        "machine_already_issued",
-        "operation_replayed",
-        "csr_identity_mismatch",
-        "roster_conflict",
-        "roster_refused",
-        "roster_too_large",
-        // A lock held by a concurrent lifecycle or roster operation is a retry, distinct
-        // from a stale revision (`roster_conflict`) and from an invalid change
-        // (`roster_refused`).
-        "lock_unavailable",
-        // An idempotent `install` replay whose materials are not the ones already
-        // installed. A reconciliation refusal, never an overwrite.
-        "materials_differ",
-        "helper_unsupported",
-        "runtime_running",
-        "runtime_busy",
-        "activity_unknown",
-        "shutdown_unavailable",
-        "shutdown_incomplete",
-        "publication_mismatch",
-        "unsupported_action",
-        "unsupported_platform",
-        "unsupported",
-        "not_installed",
-        "unusable_path",
-        "unusable_manager_program",
-        "outside_service_root",
-        "manager_unavailable",
-        "manager_refused",
-        "staging_missing",
-        "unusable_host",
         "failed",
     ];
-    KNOWN
-        .iter()
-        .find(|known| **known == reason)
-        .copied()
-        .unwrap_or("helper_refused")
+    /// What §7's seven ops refuse with.
+    ///
+    /// This list was the *withdrawn* design's: `no_ca_key`, `machine_already_issued`,
+    /// `csr_identity_mismatch`, `roster_conflict`, `roster_too_large`,
+    /// `materials_differ`, `operation_replayed` — every one of them a code from the
+    /// per-member PKI and the replicated roster §1 deleted, and not one of them
+    /// produced anywhere in this build. Meanwhile the codes §7 *does* name —
+    /// `already_installed`, `bundle_invalid`, `fleet_present`, `fleet_unreadable`,
+    /// `runtime_running` — were absent, so a helper that said "that machine is already
+    /// in this fleet under this name" reached the engine as `helper_refused`: the one
+    /// idempotent, retry-into-me answer in the protocol, flattened into the answer for
+    /// a code nobody understands.
+    const OPS: &[&str] = &[
+        // `install`
+        "already_installed",
+        "bundle_invalid",
+        "fleet_present",
+        "invalid_request",
+        "unusable_host",
+        // `inspect`
+        "fleet_unreadable",
+        // `install`, `service`, `start`, `leave`: this machine is not stopped.
+        "runtime_running",
+    ];
+    if let Some(known) = PROTOCOL.iter().chain(OPS).find(|known| **known == reason) {
+        return known;
+    }
+    // §7's `service` and `start` answer with the service slice's own codes, so that
+    // catalogue is consulted rather than copied into this one. Its own fallback means
+    // "not a service code", which here is just "not a code this client knows".
+    match super::service::known_service_reason(reason) {
+        "service_refused" => "helper_refused",
+        service => service,
+    }
 }
 
 #[cfg(test)]
@@ -498,12 +490,48 @@ mod tests {
 
     /// A remote decides which branch this client takes, so its reason is matched against
     /// a closed list rather than trusted as a code.
+    ///
+    /// The list is §7's, and §7 is the whole of what a helper can say. It used to be the
+    /// withdrawn design's — the per-member PKI's `no_ca_key` and `csr_identity_mismatch`,
+    /// the replicated roster's `roster_conflict` and `machine_already_issued` — none of
+    /// which any build since §1 can produce, while §7's own codes fell through to
+    /// `helper_refused`.
     #[test]
     fn a_remote_reason_is_matched_against_the_codes_this_client_knows() {
-        assert_eq!(known_reason("materials_differ"), "materials_differ");
-        assert_eq!(known_reason("lock_unavailable"), "lock_unavailable");
-        assert_eq!(known_reason("roster_conflict"), "roster_conflict");
-        assert_eq!(known_reason("no_ca_key"), "no_ca_key");
+        // §7's `install`, including the idempotent replay a resume retries into.
+        for reason in [
+            "already_installed",
+            "bundle_invalid",
+            "fleet_present",
+            "fleet_unreadable",
+            "runtime_running",
+            "invalid_request",
+            "unusable_host",
+        ] {
+            assert_eq!(known_reason(reason), reason, "§7 names {reason}");
+        }
+        // The envelope's own refusals.
+        for reason in ["bad_request", "unsupported_op", "frame_too_large", "failed"] {
+            assert_eq!(known_reason(reason), reason);
+        }
+        // `service` and `start` answer with the service slice's codes, through its own
+        // catalogue rather than a second copy of it.
+        for reason in ["not_installed", "manager_refused", "unsupported_platform"] {
+            assert_eq!(known_reason(reason), reason);
+        }
+        // The withdrawn design's codes are not codes any more. A remote that sends one
+        // is a remote this client does not understand, and says so.
+        for gone in [
+            "materials_differ",
+            "lock_unavailable",
+            "roster_conflict",
+            "no_ca_key",
+            "machine_already_issued",
+            "csr_identity_mismatch",
+            "operation_replayed",
+        ] {
+            assert_eq!(known_reason(gone), "helper_refused", "{gone} is withdrawn");
+        }
         assert_eq!(known_reason("something_new"), "helper_refused");
         assert_eq!(known_reason(""), "helper_refused");
     }
