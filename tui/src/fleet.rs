@@ -239,7 +239,7 @@ fn validate_inferred_host(host: &str) -> Result<()> {
     let has_network_signal = host.parse::<std::net::Ipv4Addr>().is_ok() || host.contains('.');
     if local_only || !has_network_signal {
         bail!(
-            "Ouroboros found local hostname `{host}`, but cannot safely assume another machine can reach it. Rerun with explicit `--host HOST`, using a Tailscale MagicDNS name, private DNS name, or private IPv4 address (example: `ouro fleet create --machine studio-mini --host studio-mini.tailnet.ts.net`). Explicit loopback remains available for same-host labs"
+            "Ouroboros found local hostname `{host}`, but cannot safely assume another machine can reach it. Rerun with explicit `--host HOST`, using a Tailscale MagicDNS name, private DNS name, or private IPv4 address (example: `ouro fleet setup --machine studio-mini --host studio-mini.tailnet.ts.net`). Explicit loopback remains available for same-host labs"
         );
     }
     ensure_usable_ipv4_resolution(host).with_context(|| {

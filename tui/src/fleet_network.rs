@@ -1732,7 +1732,7 @@ pub fn render_devices(summary: &Summary, inventory: &Inventory) -> String {
     }
     if !rows.iter().any(|row| row.machine.is_some()) {
         text.push_str(
-            "      There is no fleet on this machine yet; `ouro fleet create` starts one.\n",
+            "      There is no fleet on this machine yet; `ouro fleet setup` starts one.\n",
         );
     }
 
