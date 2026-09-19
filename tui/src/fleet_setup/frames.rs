@@ -30,6 +30,7 @@
 //! Nothing here logs a `respond` frame. It is the one frame that may carry a secret.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -123,10 +124,22 @@ struct FramesConversation {
     sink: Arc<Sink>,
     registry: Arc<Registry>,
     cancelled: Arc<AtomicBool>,
+    /// Set when stdin reached EOF: there is nobody left who can answer a question.
+    finishing: Arc<AtomicBool>,
 }
 
 impl FramesConversation {
     fn ask_issued(&self, issuer: u64, request: ChallengeRequest) -> Result<Answer> {
+        // §8: on stdin EOF the operation *finishes*. It has exactly one peer, and that
+        // peer has gone, so a question raised now is a question with no answerable
+        // destination; waiting out its five minutes would only park the operation on
+        // its own lock. It fails the same way an unanswered one does.
+        if self.finishing.load(Ordering::Relaxed) {
+            return super::refuse(
+                "challenge_expired",
+                "the peer closed this operation's input before this question was asked, and there is nobody left to answer it",
+            );
+        }
         let challenge = self
             .registry
             .issue(request.kind, request.metadata.clone(), issuer)?;
@@ -159,29 +172,51 @@ impl Conversation for FramesConversation {
     }
 
     fn notify(&self, event: Event) {
+        // Twice, on purpose, and never the same thing twice over one channel: the frame
+        // is for the broker, and the line is this operation's own account of itself in
+        // `<data dir>/deploy/<id>.log` (§8). Without the second one a finished
+        // operation's log is an empty file — which is what `fleet.deployment.status`
+        // was serving as "the scrubbed tail" for every operation whose worker had gone.
         match event {
-            Event::State(phase) => self.sink.emit(json!({
-                "event": "state",
-                "state": phase.state().as_str(),
-            })),
+            Event::State(phase) => {
+                self.sink.emit(json!({
+                    "event": "state",
+                    "state": phase.state().as_str(),
+                }));
+                // The phase's own word, as a terminal prints it: a log of `running`
+                // repeated six times says nothing a person can act on.
+                eprintln!("· {}", phase.as_str().replace('_', " "));
+            }
             Event::Step {
                 machine,
                 step,
                 outcome,
                 detail,
-            } => self.sink.emit(json!({
-                "event": "step",
-                "machine": machine,
-                "step": step,
-                "state": outcome,
+            } => {
                 // A step's detail quotes what a target said, so it is bounded and
                 // stripped like any other text this process did not author.
-                "detail": detail.map(|detail| super::sanitize_remote_text(&detail, super::MAX_FRAME_TEXT)),
-            })),
-            Event::Log(line) => self.sink.emit(json!({
-                "event": "log",
-                "line": super::sanitize_remote_text(&line, 400),
-            })),
+                let detail = detail
+                    .map(|detail| super::sanitize_remote_text(&detail, super::MAX_FRAME_TEXT));
+                self.sink.emit(json!({
+                    "event": "step",
+                    "machine": machine,
+                    "step": step,
+                    "state": outcome,
+                    "detail": detail,
+                }));
+                match detail.as_deref().filter(|detail| !detail.is_empty()) {
+                    Some(detail) => eprintln!("  {machine}: {step} {outcome} — {detail}"),
+                    None => eprintln!("  {machine}: {step} {outcome}"),
+                }
+            }
+            Event::Log(line) => {
+                let line = super::sanitize_remote_text(&line, 400);
+                self.sink.emit(json!({
+                    "event": "log",
+                    "line": line,
+                }));
+                eprintln!("  {line}");
+            }
         }
     }
 
@@ -208,19 +243,22 @@ pub fn run(
     let sink = Arc::new(Sink::new(output));
     let registry = Arc::new(Registry::new());
     let cancelled = Arc::new(AtomicBool::new(false));
+    let finishing = Arc::new(AtomicBool::new(false));
     let conversation = Arc::new(FramesConversation {
         sink: Arc::clone(&sink),
         registry: Arc::clone(&registry),
         cancelled: Arc::clone(&cancelled),
+        finishing: Arc::clone(&finishing),
     });
 
     let reader = {
         let sink = Arc::clone(&sink);
         let registry = Arc::clone(&registry);
         let cancelled = Arc::clone(&cancelled);
+        let finishing = Arc::clone(&finishing);
         std::thread::Builder::new()
             .name("fleet-frames-stdin".into())
-            .spawn(move || read_requests(input, &sink, &registry, &cancelled))
+            .spawn(move || read_requests(input, &sink, &registry, &cancelled, &finishing))
             .context("starting the frames input reader")?
     };
 
@@ -269,13 +307,18 @@ pub fn run(
             } else {
                 "failed"
             };
+            let summary = super::sanitize_remote_text(&format!("{error:#}"), 400);
             sink.emit(json!({
                 "event": "done",
                 "state": state,
                 "operation": operation,
                 "reason": reason,
-                "summary": super::sanitize_remote_text(&format!("{error:#}"), 400),
+                "summary": summary,
             }));
+            // And into this operation's log, which is where a person sent by FLEET.md
+            // looks for why it stopped. The process's own exit message is printed by
+            // `main` long after the log has been closed, so it cannot be this.
+            eprintln!("· {state}: {reason} — {summary}");
         }
     }
     sink.close();
@@ -306,12 +349,161 @@ pub fn refuse_on_stdio(operation: &str, error: &anyhow::Error) {
 
 /// `ouro fleet <op> --frames`: the same thing, on this process's own stdio.
 pub fn serve(engine: Engine) -> Result<Outcome> {
+    // Before `detach`, because after it this process has no controlling terminal and a
+    // diagnostic written in between would have nowhere to go.
+    //
+    // A dry run is exempt: it promises to create nothing, and `<data dir>/deploy/` is
+    // the namespace a real operation journals into — a machine that has never deployed
+    // would be left holding it.
+    let mut log = None;
+    if !engine.request.dry_run {
+        match capture_stderr(&engine.data_dir, &engine.request.operation) {
+            Ok(capture) => log = Some(capture),
+            Err(error) => eprintln!("this operation's log could not be opened: {error:#}"),
+        }
+    }
     detach();
-    run(
+    let result = run(
         engine,
         BufReader::new(std::io::stdin()),
         Box::new(std::io::stdout()),
-    )
+    );
+    // Explicit rather than at the end of the scope: the log is closed, and everything
+    // written to it drained, before this returns — because what happens next is `main`
+    // printing an exit message, and a process that exits with a line still inside a pipe
+    // has lost it. What `main` prints goes to the stderr this process was handed, which
+    // is where a person who ran this by hand is looking.
+    drop(log);
+    result
+}
+
+/// §8: *"Stderr goes to `<data dir>/deploy/<id>.log`, 0600, scrubbed by the same funnel
+/// as the journal."*
+///
+/// It went to whatever descriptor this process inherited, which for the broker's port
+/// program is the runtime's own stderr — so `fleet.deployment.status`'s `log`, which
+/// reads exactly this path, was empty for every operation whose worker had finished,
+/// and `log_path` had one caller in the whole build: the pruner that deletes the file.
+///
+/// A pipe rather than the file itself, because "scrubbed" has to hold for text this
+/// process did not write. An `ssh` child inherits descriptor 2 and prints whatever a
+/// remote sent it; a panic prints a path. Both arrive here as lines, go through
+/// [`sanitize_remote_text`](super::sanitize_remote_text) — the same funnel, at the same
+/// 400 characters the journal's `detail` uses — and are appended one at a time, so a
+/// process that is killed loses at most the line it was mid-way through.
+fn capture_stderr(data_dir: &std::path::Path, operation: &str) -> Result<OperationLog> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // The id names a file, so it is the validated id or nothing. Every caller has
+    // already validated it; this is the one that would have to be wrong for a
+    // `--operation ../../x` to become a path.
+    super::validate_operation_id(operation)?;
+    super::ensure_deploy_dir(data_dir)?;
+    let path = super::log_path(data_dir, operation);
+    // Appended to, not truncated: a resumed operation's log is the same operation's log.
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    // `mode` applies only on create, and §8 fixes the mode of the file rather than of
+    // the moment it first appeared.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("securing {}", path.display()))?;
+
+    let (reader, writer) = stderr_pipe()?;
+    // Kept, so the inherited stderr can be put back when the operation ends. Without it
+    // the only way to let the drain thread see EOF would be to close descriptor 2 for
+    // good, and `main`'s exit message would go nowhere at all.
+    // SAFETY: `dup` on an open descriptor this process owns; the new one is owned by
+    // the `File` from here on.
+    let original = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if original < 0 {
+        return Err(std::io::Error::last_os_error()).context("keeping this process's stderr");
+    }
+    // SAFETY: `original` is a fresh descriptor, owned by exactly this `File`.
+    let original = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(original) };
+    // SAFETY: both are open descriptors this process owns, and `dup2` onto descriptor 2
+    // closes whatever was there and duplicates the write end in its place.
+    if unsafe { libc::dup2(writer.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("redirecting stderr to the log");
+    }
+    // Descriptor 2 is the write end now; this handle is not needed, and holding it would
+    // mean the reader never sees EOF.
+    drop(writer);
+
+    let drain = std::thread::Builder::new()
+        .name("fleet-frames-stderr".into())
+        .spawn(move || {
+            for line in BufReader::new(reader).lines() {
+                let Ok(line) = line else { return };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let scrubbed = super::sanitize_remote_text(&line, 400);
+                if writeln!(file, "{scrubbed}")
+                    .and_then(|()| file.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .context("starting the operation log writer")?;
+    Ok(OperationLog {
+        original: Some(original),
+        drain: Some(drain),
+    })
+}
+
+/// The operation's log, for as long as the operation lasts.
+///
+/// Dropping it puts the inherited stderr back on descriptor 2 — which drops the pipe's
+/// last write end — and then waits for the drain thread to finish writing what is still
+/// in the pipe. Both halves matter: a process that exits with a line still in flight
+/// has lost it, and that line is usually the one saying why it stopped.
+struct OperationLog {
+    original: Option<std::fs::File>,
+    drain: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for OperationLog {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd as _;
+
+        if let Some(original) = self.original.take() {
+            // SAFETY: `original` is this process's own kept stderr, open for the whole
+            // of this call; `dup2` closes the pipe end that is on descriptor 2 now.
+            unsafe {
+                libc::dup2(original.as_raw_fd(), libc::STDERR_FILENO);
+            }
+        }
+        if let Some(drain) = self.drain.take() {
+            let _ = drain.join();
+        }
+    }
+}
+
+/// One pipe, as two owned files. `libc` rather than `std::io::pipe`, which this repo's
+/// Rust floor predates.
+fn stderr_pipe() -> Result<(std::fs::File, std::fs::File)> {
+    use std::os::fd::FromRawFd as _;
+
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `pipe` fills the two integers it is given and nothing else.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("creating the operation log pipe");
+    }
+    // SAFETY: both descriptors are fresh, and each is owned by exactly one `File` from
+    // here on.
+    unsafe {
+        Ok((
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        ))
+    }
 }
 
 /// §8: `setsid`, `SIGHUP` and `SIGPIPE` ignored.
@@ -336,13 +528,27 @@ fn read_requests(
     sink: &Arc<Sink>,
     registry: &Arc<Registry>,
     cancelled: &Arc<AtomicBool>,
+    finishing: &Arc<AtomicBool>,
 ) {
     loop {
         let mut line = Zeroizing::new(String::new());
         match read_line_bounded(&mut input, &mut line) {
             Ok(0) => {
-                // §8: stdin EOF finishes the operation. Nothing is cancelled and nothing
-                // is withdrawn — an unanswered challenge still expires on its own clock.
+                // §8: stdin EOF *finishes the operation*. Nothing is cancelled — the
+                // steps already taken stand, the journal keeps being written, and a
+                // review that was accepted before the pipe closed carries the operation
+                // through to its end.
+                //
+                // What does end here is waiting for anybody. This process has one peer
+                // and no reattach, so a question still outstanding is a question that
+                // can no longer be answered: it used to sit out the whole five-minute
+                // lifetime with the operation's flock held, so the journal read
+                // `running` and every `--operation ID` resume was refused
+                // `operation_in_progress` until the expiry. It expires now instead, and
+                // the operation fails `challenge_expired` — the same end, at the moment
+                // it became certain. An answer that arrived before the EOF is kept.
+                finishing.store(true, Ordering::Relaxed);
+                registry.expire_unanswered();
                 return;
             }
             Ok(_) => {}
@@ -502,6 +708,7 @@ mod tests {
             sink: Arc::new(Sink::new(Box::new(Collector(Arc::clone(&emitted))))),
             registry: Arc::new(Registry::new()),
             cancelled: Arc::new(AtomicBool::new(false)),
+            finishing: Arc::new(AtomicBool::new(false)),
         };
         for phase in [
             Phase::Inspecting,
