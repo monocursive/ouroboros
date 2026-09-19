@@ -940,6 +940,120 @@ fn an_idle_connection_times_out_and_the_helper_exits() {
     drop(writer);
 }
 
+// =========================================================== adversarial review, KR3
+
+/// **Finding.** `install` with `replace: true` deletes the fleet that is there *before*
+/// it validates anything about the bundle, the machine name or the host.
+///
+/// `Helper::install` (tui/src/fleet_helper.rs:552) runs `fleet::leave(data_dir)` as soon
+/// as it has parsed the request's *shape*, and only then calls `fleet::join`, which is
+/// where `validate_bundle`, `validate_joined_machine`, `canonical_host` and
+/// `validate_ports` live. So a request that is refused — for a cookie that is not 64
+/// lowercase hex, a `dist_port` of 0, or a machine name this build will not mint — has
+/// already destroyed the cookie, the shared CA key and this machine's node key by the
+/// time the refusal is written.
+///
+/// `a_malformed_install_request_installs_nothing` proves a refused install writes
+/// nothing on a *fresh* target. This proves that on an *occupied* one, a refused install
+/// unwrites what was there and leaves the machine standalone.
+#[test]
+fn kr3_a_refused_replace_install_has_already_destroyed_the_fleet_that_was_there() {
+    let world = World::new("replace-order");
+    let target = private_dir(&world.root.join("data"));
+    let issuer = Issuer::new(&world.root, "studio");
+    let other = Issuer::new(&world.root, "other");
+    let ports = ephemeral();
+
+    let mut helper = Helper::start(&world, &target);
+    let installed = helper.ask(
+        "install",
+        json!({
+            "bundle": issuer.bundle(),
+            "machine": "pi",
+            "host": "127.0.0.1",
+            "ports": { "gateway": ports.gateway, "dist": ports.dist },
+        }),
+    );
+    assert_eq!(installed["ok"], json!(true), "{installed}");
+    let before = fs::read(target.join("fleet/cookie")).expect("the installed cookie");
+
+    // A bundle that parses as a `Bundle` and fails `validate_bundle`: the cookie is not
+    // 64 lowercase hex, which is the very first thing `join` checks.
+    let mut poisoned = other.bundle();
+    poisoned["cookie"] = json!("not-a-cookie");
+    let replaced = helper.ask(
+        "install",
+        json!({
+            "bundle": poisoned,
+            "machine": "pi",
+            "host": "127.0.0.1",
+            "replace": true,
+        }),
+    );
+    assert_eq!(
+        replaced["ok"],
+        json!(false),
+        "an invalid bundle must be refused: {replaced}"
+    );
+    assert_eq!(replaced["reason"], json!("bundle_invalid"), "{replaced}");
+
+    // The refusal is not the finding. This is:
+    assert!(
+        target.join("fleet").exists(),
+        "a refused `install` destroyed {}: the cookie, the shared CA key and this \
+         machine's node key were deleted by an operation that then installed nothing",
+        target.join("fleet").display()
+    );
+    assert_eq!(
+        fs::read(target.join("fleet/cookie")).expect("the cookie that was there"),
+        before,
+        "a refused `install` replaced the fleet that was there"
+    );
+}
+
+/// The same ordering, reached through the other half of `join`'s validation: a machine
+/// name this build refuses to mint. Nothing about the bundle is wrong here at all.
+#[test]
+fn kr3_a_replace_install_refused_for_its_machine_name_still_destroyed_the_fleet() {
+    let world = World::new("replace-name");
+    let target = private_dir(&world.root.join("data"));
+    let issuer = Issuer::new(&world.root, "studio");
+    let other = Issuer::new(&world.root, "other");
+    let ports = ephemeral();
+
+    let mut helper = Helper::start(&world, &target);
+    assert_eq!(
+        helper.ask(
+            "install",
+            json!({
+                "bundle": issuer.bundle(),
+                "machine": "pi",
+                "host": "127.0.0.1",
+                "ports": { "gateway": ports.gateway, "dist": ports.dist },
+            }),
+        )["ok"],
+        json!(true)
+    );
+
+    // `validate_joined_machine` refuses an upper-case name: "`Pi` and `pi` would be two
+    // identities for one machine". It runs inside `join`, after the replace.
+    let replaced = helper.ask(
+        "install",
+        json!({
+            "bundle": other.bundle(),
+            "machine": "PI",
+            "host": "127.0.0.1",
+            "replace": true,
+        }),
+    );
+    assert_eq!(replaced["ok"], json!(false), "{replaced}");
+    assert_eq!(replaced["reason"], json!("invalid_request"), "{replaced}");
+    assert!(
+        target.join("fleet").exists(),
+        "a request refused for its machine name had already deleted the fleet directory"
+    );
+}
+
 /// A pipe, as two owned halves. `std::io::pipe` is not on this floor's toolchain, so
 /// this is the two-line `libc` version.
 fn os_pipe() -> (fs::File, fs::File) {

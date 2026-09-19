@@ -837,6 +837,185 @@ fn a_second_process_on_one_operation_is_refused_with_operation_in_progress() {
     assert!(data.join("fleet").exists(), "the first process ran");
 }
 
+// ============================================================ adversarial review, KR3
+
+/// **Finding.** stdin EOF while a challenge is still outstanding parks the operation for
+/// the challenge's whole five minutes, holding its flock, and no `--operation ID` resume
+/// can get in until it expires.
+///
+/// §8 says EOF means "finish the operation": *"Once the review is accepted it needs
+/// nothing more from stdin: on stdin EOF it finishes the operation."* The code does not
+/// distinguish EOF-after-review from EOF-before-review — `read_requests` returns on
+/// `Ok(0)` and deliberately withdraws nothing (tui/src/fleet_setup/frames.rs:343) — so an
+/// operation whose review nobody answered goes on waiting for an answer that now has no
+/// way to arrive: its one peer is the pipe that just closed, and §8 has no reattach.
+///
+/// The cost is not only the dead time. The per-operation flock is held for the whole
+/// five minutes, so the broker's `fleet.deployment.resume` for that operation is refused
+/// `operation_in_progress` throughout, and the only repair is to wait.
+///
+/// Bounded rather than run to the expiry: what is asserted is that the process is still
+/// parked, that the lock is still refusing a resume, and that the journal still says
+/// `running`, long after the peer went away.
+#[test]
+fn kr3_stdin_eof_with_an_unanswered_challenge_parks_the_operation_and_locks_it_out() {
+    let root = scratch("eof-review");
+    let data = root.join("data");
+    private_dir(&data);
+    let operation = "op-0000000000bb";
+
+    let first_log = root.join("first.log");
+    let mut first = Frames::start(
+        &data,
+        &first_log,
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    while let Some(frame) = first.next() {
+        if frame["event"] == "challenge" {
+            assert_eq!(frame["kind"], "review", "{frame}");
+            break;
+        }
+    }
+
+    // The peer goes away without answering. §8's own words for this are "it finishes the
+    // operation".
+    first.close_stdin();
+
+    // §8's promise: on stdin EOF it finishes the operation. Fifteen seconds is far
+    // longer than any step of a `--no-service` local setup needs.
+    let parked = std::time::Instant::now();
+    let mut exited = None;
+    while parked.elapsed() < std::time::Duration::from_secs(15) {
+        if let Some(status) = first.child.try_wait().expect("a waitable child") {
+            exited = Some(status);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Evidence gathered before the assertion, because the assertion is the finding and
+    // what it costs is what the rest of this proves: the journal still says the
+    // operation is under way, and the lock still refuses a resume.
+    let journal: Value = serde_json::from_slice(
+        &std::fs::read(data.join("deploy").join(format!("{operation}.json")))
+            .expect("the journal"),
+    )
+    .expect("a journal document");
+    let journalled = journal["state"].as_str().unwrap_or_default().to_string();
+    let resume_log = root.join("resume.log");
+    let mut resume = Frames::start(
+        &data,
+        &resume_log,
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    resume.close_stdin();
+    let mut seen: Vec<Value> = Vec::new();
+    while let Some(frame) = resume.next() {
+        seen.push(frame);
+    }
+    let done = seen.last().expect("a done frame").clone();
+    let (_code, _) = resume.finish();
+    let resume_reason = done["reason"].as_str().unwrap_or_default().to_string();
+
+    let _ = first.child.kill();
+    let _ = first.child.wait();
+
+    assert!(
+        exited.is_some(),
+        "§8: on stdin EOF the operation finishes. It did not: {:?} after the peer closed \
+         the pipe it is still parked on a review challenge nothing can answer any more, \
+         its journal says `{journalled}`, and a `--operation` resume is refused \
+         `{resume_reason}` — for the challenge's whole five minutes",
+        parked.elapsed(),
+    );
+}
+
+/// **Finding.** Nothing ever writes `<data dir>/deploy/<id>.log`.
+///
+/// §8: *"Stderr goes to `<data dir>/deploy/<id>.log`, 0600, scrubbed by the same funnel
+/// as the journal."* `docs/FLEET.md` says the same at line 347, and at line 482 tells an
+/// operator that a journal-sourced `fleet.deployment.status` answer's `log` is "the
+/// scrubbed tail of `deploy/<id>.log`". The Elixir broker reads exactly that path
+/// (`Ouroboros.Fleet.Deployment.log_tail/1` on `Journal.log_path/2`).
+///
+/// In this build `fleet_setup::log_path` has one caller — the pruner that deletes the
+/// file — and the frames front end leaves its stderr on the descriptor it inherited. So
+/// a broker-run operation's `log` is always empty once its worker is gone, and an
+/// operator following FLEET.md to find out what a finished deployment printed finds no
+/// file at all.
+#[test]
+fn kr3_a_finished_frames_operation_writes_no_deploy_log() {
+    let root = scratch("deploylog");
+    let data = root.join("data");
+    private_dir(&data);
+    let operation = "op-0000000000cc";
+    let log = root.join("stderr.log");
+
+    let mut frames = Frames::start(
+        &data,
+        &log,
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "lab",
+            "--address",
+            "127.0.0.1",
+            "--no-service",
+            "--operation",
+            operation,
+        ],
+    );
+    let mut challenge = None;
+    while let Some(frame) = frames.next() {
+        if frame["event"] == "challenge" {
+            challenge = frame["challenge"].as_str().map(str::to_string);
+            break;
+        }
+    }
+    frames.send(serde_json::json!({
+        "op": "respond",
+        "challenge": challenge.expect("a review"),
+        "accept": true,
+    }));
+    while frames.next().is_some() {}
+    let (code, stderr) = frames.finish();
+    assert_eq!(code, 0, "{stderr}");
+
+    assert!(data.join("fleet").exists(), "the operation ran");
+
+    let deploy = data.join("deploy");
+    assert!(
+        deploy.join(format!("{operation}.log")).exists(),
+        "§8 and FLEET.md promise `deploy/{operation}.log`, 0600 and scrubbed, and the \
+         Elixir broker reads exactly that path for a journal-sourced `log`. After a \
+         whole successful operation the deploy directory holds {:?}; the {} bytes this \
+         process wrote to stderr went to the descriptor it inherited and nowhere else",
+        listing(&deploy),
+        stderr.len()
+    );
+}
+
 fn listing(directory: &Path) -> std::collections::BTreeSet<String> {
     std::fs::read_dir(directory)
         .into_iter()
