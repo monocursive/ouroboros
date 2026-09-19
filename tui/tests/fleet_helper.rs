@@ -71,6 +71,41 @@ fn create_fleet(data_dir: &Path, name: Option<&str>, machine: &str) -> fleet::Pr
     );
 }
 
+/// A helper `install` on a fresh pair of ports, retried past a lost port race.
+///
+/// The same window `create_fleet` closes, on the other side of the pipe: the helper
+/// binds the target's ports to prove they are free, seconds after this test reserved
+/// them, and a number that went somewhere else in between is not a fact about the code
+/// under test. Returns the reply and the ports that were actually installed, because
+/// the caller asserts on them. Anything that is not a lost port fails immediately.
+fn install_ok(helper: &mut Helper, bundle: Value, machine: &str) -> (Value, fleet::Ports) {
+    let mut last = Value::Null;
+    for attempt in 0..4 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(50 * attempt));
+        }
+        let ports = ephemeral();
+        let reply = helper.ask(
+            "install",
+            json!({
+                "bundle": bundle,
+                "machine": machine,
+                "host": "127.0.0.1",
+                "ports": { "gateway": ports.gateway, "dist": ports.dist },
+            }),
+        );
+        if reply["ok"] == json!(true) {
+            return (reply, ports);
+        }
+        let lost_a_port = reply["detail"].as_str().is_some_and(|detail| {
+            detail.contains("already in use") || detail.contains("unavailable")
+        });
+        assert!(lost_a_port, "an install was refused: {reply}");
+        last = reply;
+    }
+    panic!("an install, after four attempts: {last}");
+}
+
 fn scratch(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "ouro-helper-{label}-{}-{}",
@@ -465,18 +500,9 @@ fn install_writes_the_bundle_at_the_documented_modes_and_guards_what_is_there() 
     let world = World::new("install");
     let target = private_dir(&world.root.join("data"));
     let issuer = Issuer::new(&world.root, "studio");
-    let ports = ephemeral();
 
     let mut helper = Helper::start(&world, &target);
-    let installed = helper.ask(
-        "install",
-        json!({
-            "bundle": issuer.bundle(),
-            "machine": "pi",
-            "host": "127.0.0.1",
-            "ports": { "gateway": ports.gateway, "dist": ports.dist },
-        }),
-    );
+    let (installed, ports) = install_ok(&mut helper, issuer.bundle(), "pi");
 
     assert_eq!(installed["ok"], json!(true), "{installed}");
     assert_eq!(installed["machine"], json!("pi"));
@@ -976,18 +1002,9 @@ fn kr3_a_refused_replace_install_has_already_destroyed_the_fleet_that_was_there(
     let target = private_dir(&world.root.join("data"));
     let issuer = Issuer::new(&world.root, "studio");
     let other = Issuer::new(&world.root, "other");
-    let ports = ephemeral();
 
     let mut helper = Helper::start(&world, &target);
-    let installed = helper.ask(
-        "install",
-        json!({
-            "bundle": issuer.bundle(),
-            "machine": "pi",
-            "host": "127.0.0.1",
-            "ports": { "gateway": ports.gateway, "dist": ports.dist },
-        }),
-    );
+    let (installed, _ports) = install_ok(&mut helper, issuer.bundle(), "pi");
     assert_eq!(installed["ok"], json!(true), "{installed}");
     let before = fs::read(target.join("fleet/cookie")).expect("the installed cookie");
 
@@ -1042,7 +1059,7 @@ fn kr3_no_reply_frame_carries_the_cookie_or_the_ca_key() {
     let world = World::new("nosecrets");
     let target = private_dir(&world.root.join("data"));
     let issuer = Issuer::new(&world.root, "studio");
-    let ports = ephemeral();
+
     let cookie = issuer.cookie();
     let ca_key =
         fs::read_to_string(issuer.data_dir.join("fleet/ca-key.pem")).expect("the issuer's CA key");
@@ -1055,15 +1072,8 @@ fn kr3_no_reply_frame_carries_the_cookie_or_the_ca_key() {
 
     let mut helper = Helper::start(&world, &target);
     let mut frames = Vec::new();
-    frames.push(helper.ask(
-        "install",
-        json!({
-            "bundle": issuer.bundle(),
-            "machine": "pi",
-            "host": "127.0.0.1",
-            "ports": { "gateway": ports.gateway, "dist": ports.dist },
-        }),
-    ));
+    let (installed, _ports) = install_ok(&mut helper, issuer.bundle(), "pi");
+    frames.push(installed);
     // The idempotent replay and the refusal path both read the installed profile back.
     frames.push(helper.ask(
         "install",
@@ -1109,21 +1119,10 @@ fn kr3_a_replace_install_refused_for_its_machine_name_still_destroyed_the_fleet(
     let target = private_dir(&world.root.join("data"));
     let issuer = Issuer::new(&world.root, "studio");
     let other = Issuer::new(&world.root, "other");
-    let ports = ephemeral();
 
     let mut helper = Helper::start(&world, &target);
-    assert_eq!(
-        helper.ask(
-            "install",
-            json!({
-                "bundle": issuer.bundle(),
-                "machine": "pi",
-                "host": "127.0.0.1",
-                "ports": { "gateway": ports.gateway, "dist": ports.dist },
-            }),
-        )["ok"],
-        json!(true)
-    );
+    let (installed, _ports) = install_ok(&mut helper, issuer.bundle(), "pi");
+    assert_eq!(installed["ok"], json!(true), "{installed}");
 
     // `validate_joined_machine` refuses an upper-case name: "`Pi` and `pi` would be two
     // identities for one machine". It runs inside `join`, after the replace.
@@ -1161,21 +1160,10 @@ fn kr3_a_replace_into_a_running_runtime_says_runtime_running_and_keeps_the_fleet
     let target = private_dir(&world.root.join("data"));
     let issuer = Issuer::new(&world.root, "studio");
     let other = Issuer::new(&world.root, "other");
-    let ports = ephemeral();
 
     let mut helper = Helper::start(&world, &target);
-    assert_eq!(
-        helper.ask(
-            "install",
-            json!({
-                "bundle": issuer.bundle(),
-                "machine": "pi",
-                "host": "127.0.0.1",
-                "ports": { "gateway": ports.gateway, "dist": ports.dist },
-            }),
-        )["ok"],
-        json!(true)
-    );
+    let (installed, _ports) = install_ok(&mut helper, issuer.bundle(), "pi");
+    assert_eq!(installed["ok"], json!(true), "{installed}");
     let before = fs::read(target.join("fleet/cookie")).expect("the installed cookie");
 
     // A runtime owns this data directory now.
