@@ -402,7 +402,7 @@ impl Helper {
             "service" => self.service(&data_dir, object),
             "start" => self.start(&data_dir),
             "status" => self.status(&data_dir, object),
-            "leave" => self.leave(&data_dir),
+            "leave" => self.leave(&data_dir, object),
             _ => {
                 return (
                     refusal(
@@ -661,12 +661,16 @@ impl Helper {
         }))
     }
 
-    /// §7 `leave`: the same `fleet::leave` the local command runs, after the runtime has
-    /// been stopped through its idle gate and the managed service taken away.
+    /// §7 `leave`: retire the named machine and fleet, after checking its identity,
+    /// stopping its runtime through the idle gate and taking its managed service away.
     ///
     /// Sessions, workspaces and attachments are not touched. Nothing is written on any
     /// other machine — there is no roster to replicate (§1).
-    fn leave(&self, data_dir: &Path) -> Result<Value> {
+    fn leave(&self, data_dir: &Path, object: &Map<String, Value>) -> Result<Value> {
+        let machine = required_str(object, "machine")?;
+        let fleet_id = required_str(object, "fleet_id")?;
+        // Reject a stale roster before stopping this machine or touching its service.
+        fleet::check_removal_identity(data_dir, &machine, &fleet_id)?;
         let mut removed: Vec<String> = Vec::new();
         let token_file = data_dir.join(crate::runtime::TOKEN_FILE);
         match crate::fleet_setup::gateway::stop_require_idle(data_dir, &token_file) {
@@ -699,7 +703,7 @@ impl Helper {
             }
         }
 
-        let removal = fleet::leave(data_dir)?;
+        let removal = fleet::leave_matching(data_dir, &machine, &fleet_id)?;
         let machine = removal.as_ref().and_then(|removal| removal.machine.clone());
         if let Some(removal) = &removal {
             removed.extend(removal.removed.iter().cloned());

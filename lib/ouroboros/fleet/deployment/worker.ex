@@ -379,14 +379,21 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
   defp put_challenge(state, _unreadable),
     do: fault(state, :worker_answered_nothing, "a challenge this build cannot read")
 
-  defp plan_of(%{"metadata" => %{"plan" => plan}}) when is_list(plan) do
+  defp plan_of(%{"metadata" => %{"lines" => plan}}) when is_list(plan),
+    do: plan_lines(plan)
+
+  # Accept the list-shaped metadata used by earlier frames producers too.
+  defp plan_of(%{"metadata" => %{"plan" => plan}}) when is_list(plan),
+    do: plan_lines(plan)
+
+  defp plan_of(_absent), do: nil
+
+  defp plan_lines(plan) do
     case Journal.scrub_value(plan) do
       lines when is_list(lines) -> Enum.filter(lines, &is_binary/1)
       _unreadable -> nil
     end
   end
-
-  defp plan_of(_absent), do: nil
 
   defp put_done(state, frame) do
     %{

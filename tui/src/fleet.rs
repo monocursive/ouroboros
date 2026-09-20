@@ -383,8 +383,9 @@ fn remove_member_locked(data_dir: &Path, machine: &str) -> Result<Member> {
         .iter()
         .position(|entry| same_name(&entry.machine, machine) || same_name(&entry.node, machine))
     else {
-        bail!(
-            "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
+        return refuse(
+            "machine_unknown",
+            format!("this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"),
         );
     };
     let removed = profile.members.remove(index);
@@ -1201,7 +1202,35 @@ pub struct Removal {
 pub fn leave(data_dir: &Path) -> Result<Option<Removal>> {
     ensure_data_dir(data_dir)?;
     let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet leave")?;
+    leave_locked(data_dir)
+}
 
+/// Remote removal must name the identity it is authorized to retire. Unlike a local
+/// repair, it cannot delete an unreadable or repurposed fleet directory.
+pub(crate) fn check_removal_identity(data_dir: &Path, machine: &str, fleet_id: &str) -> Result<()> {
+    match load(data_dir).map_err(|error| refusing("fleet_unreadable", error))? {
+        Some(profile) if same_name(&profile.machine, machine) && profile.fleet_id == fleet_id => Ok(()),
+        None if !fleet_dir(data_dir).try_exists()? => Ok(()),
+        _ => refuse(
+            "identity_mismatch",
+            "this data directory no longer holds the machine and fleet named by the removal; nothing was removed",
+        ),
+    }
+}
+
+pub(crate) fn leave_matching(
+    data_dir: &Path,
+    machine: &str,
+    fleet_id: &str,
+) -> Result<Option<Removal>> {
+    ensure_data_dir(data_dir)?;
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet helper leave")?;
+    // Recheck after the stop/service calls, under the same lock as the deletion.
+    check_removal_identity(data_dir, machine, fleet_id)?;
+    leave_locked(data_dir)
+}
+
+fn leave_locked(data_dir: &Path) -> Result<Option<Removal>> {
     let dir = fleet_dir(data_dir);
     if !dir
         .try_exists()
@@ -3632,6 +3661,24 @@ mod tests {
         assert!(format!("{folded:#}").contains("repeats"), "{folded:#}");
         // Two genuinely different machines are still a valid list.
         twice("studio", "buildbox").expect("two machines are two members");
+    }
+
+    #[test]
+    fn remote_leave_rechecks_identity_at_the_deletion_boundary() {
+        let (dir, profile) = create_local("leave-recheck", "studio");
+        check_removal_identity(&dir, "studio", &profile.fleet_id).unwrap();
+        leave(&dir).unwrap();
+        let replacement = create(
+            &dir,
+            Some("replacement"),
+            "studio",
+            "127.0.0.1",
+            ephemeral_ports(),
+        )
+        .unwrap();
+        let error = leave_matching(&dir, "studio", &profile.fleet_id).unwrap_err();
+        assert_eq!(refusal(&error).unwrap().reason, "identity_mismatch");
+        assert_eq!(load(&dir).unwrap().unwrap().fleet_id, replacement.fleet_id);
     }
 
     /// §2: `leave` is a stop-gated deletion of `fleet/`, and it works on a directory

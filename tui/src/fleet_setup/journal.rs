@@ -331,6 +331,11 @@ impl Journal {
     /// behind by a process that is gone is not waiting for anybody.
     pub fn set_state(&mut self, state: OperationState) -> Result<()> {
         self.record.state = state;
+        // Completion resolves the partial operation. Notes from an earlier failure
+        // must not keep claiming that a now-forgotten member is still on the roster.
+        if state == OperationState::Completed {
+            self.record.residue.clear();
+        }
         self.flush()
     }
 

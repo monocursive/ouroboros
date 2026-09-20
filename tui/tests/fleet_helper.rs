@@ -706,12 +706,13 @@ fn service_reports_without_installing_and_status_answers_for_a_stopped_runtime()
 fn leave_on_a_stopped_target_removes_the_fleet_directory() {
     let world = World::new("leave");
     let target = private_dir(&world.root.join("data"));
-    create_fleet(&target, Some("the lab"), "pi");
+    let profile = create_fleet(&target, Some("the lab"), "pi");
     let cookie = fs::read_to_string(target.join("fleet/cookie")).expect("a cookie");
     assert!(target.join("fleet").exists());
 
     let mut helper = Helper::start(&world, &target);
-    let left = helper.ask("leave", json!({}));
+    let identity = json!({"machine": "pi", "fleet_id": profile.fleet_id});
+    let left = helper.ask("leave", identity.clone());
 
     assert_eq!(left["ok"], json!(true), "{left}");
     assert_eq!(left["machine"], json!("pi"), "{left}");
@@ -726,7 +727,7 @@ fn leave_on_a_stopped_target_removes_the_fleet_directory() {
     assert!(target.exists());
 
     // Running it again is the idempotent answer rather than a failure.
-    let again = helper.ask("leave", json!({}));
+    let again = helper.ask("leave", identity);
     assert_eq!(again["ok"], json!(true), "{again}");
     assert_eq!(again["already_standalone"], json!(true), "{again}");
 
@@ -736,6 +737,47 @@ fn leave_on_a_stopped_target_removes_the_fleet_directory() {
         !spoken.contains(cookie.trim()),
         "the cookie reached the wire or stderr"
     );
+}
+
+#[test]
+fn leave_requires_the_expected_machine_and_fleet_before_any_service_action() {
+    let world = World::new("leave-identity");
+    let target = private_dir(&world.root.join("data"));
+    let profile = create_fleet(&target, Some("the lab"), "pi");
+    let cookie = fs::read(target.join("fleet/cookie")).unwrap();
+    let mut helper = Helper::start(&world, &target);
+
+    for (identity, reason) in [
+        (json!({}), "failed"),
+        (json!({"machine": "pi"}), "failed"),
+        (
+            json!({"machine": "another", "fleet_id": profile.fleet_id}),
+            "identity_mismatch",
+        ),
+        (
+            json!({"machine": "pi", "fleet_id": "another-fleet"}),
+            "identity_mismatch",
+        ),
+    ] {
+        let refused = helper.ask("leave", identity);
+        assert_eq!(refused["ok"], json!(false), "{refused}");
+        assert_eq!(refused["reason"], json!(reason), "{refused}");
+        assert_eq!(fs::read(target.join("fleet/cookie")).unwrap(), cookie);
+        assert!(
+            world.manager_calls().is_empty(),
+            "a refused removal touched the service"
+        );
+    }
+
+    // An incomplete fleet directory is not an already-standalone machine.
+    fs::remove_file(target.join("fleet/profile.json")).unwrap();
+    let refused = helper.ask(
+        "leave",
+        json!({"machine": "pi", "fleet_id": profile.fleet_id}),
+    );
+    assert_eq!(refused["ok"], json!(false), "{refused}");
+    assert_eq!(fs::read(target.join("fleet/cookie")).unwrap(), cookie);
+    assert!(world.manager_calls().is_empty());
 }
 
 // ========================================================================== the wire rules
@@ -880,7 +922,10 @@ fn stdout_carries_frames_and_nothing_else_and_stderr_carries_no_secret() {
     );
     helper.ask("service", json!({ "install": false }));
     helper.ask("status", json!({}));
-    helper.ask("leave", json!({}));
+    helper.ask(
+        "leave",
+        json!({"machine": "pi", "fleet_id": issuer.profile.fleet_id}),
+    );
     let farewell = helper.ask("bye", json!({}));
     assert_eq!(farewell["ok"], json!(true));
 

@@ -342,7 +342,8 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       when is_binary(operation) and is_binary(challenge) do
     guarded(socket, fn ->
       with :ok <- secret_bind_ok?(socket),
-           :ok <- allowed?(socket, drawer_gate(socket)) do
+           :ok <- allowed?(socket, drawer_gate(socket)),
+           :ok <- reviewable(socket.assigns.drawer, challenge) do
         result =
           operate(socket, @respond, %{
             "operation" => operation,
@@ -2697,13 +2698,12 @@ defmodule Ouroboros.Web.Live.DevicesLive do
   # challenge or from the journal.
   defp review_step(assigns) do
     challenge = challenge(assigns.drawer, ["review"])
-    facts = Devices.metadata(challenge)
     status = assigns.drawer.status || %{}
 
     assigns =
       assigns
       |> assign(:challenge, challenge)
-      |> assign(:lines, Devices.review_lines(facts["plan"] || status["plan"]))
+      |> assign(:lines, review_plan_lines(challenge, status))
       |> assign(:kind, assigns.drawer.kind)
 
     ~H"""
@@ -2715,8 +2715,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       </ul>
 
       <p :if={@lines == []} class="ouro-devices-quiet">
-        This operation sent no plan this page can read. Approving it would be approving
-        something nobody has been shown, so read the steps below before you do.
+        This operation sent no readable plan. Cancel it and start again.
       </p>
 
       <div class="ouro-devices-actions">
@@ -2724,6 +2723,7 @@ defmodule Ouroboros.Web.Live.DevicesLive do
           type="button"
           class="ouro-button"
           phx-click="approve"
+          disabled={@lines == []}
           phx-value-challenge={@challenge["challenge"]}
           aria-describedby="ouro-deploy-review-hint"
         >
@@ -2736,6 +2736,23 @@ defmodule Ouroboros.Web.Live.DevicesLive do
       </p>
     </section>
     """
+  end
+
+  defp review_plan_lines(challenge, status) do
+    facts = Devices.metadata(challenge)
+    Devices.review_lines(facts["lines"] || facts["plan"] || status["plan"])
+  end
+
+  defp reviewable(drawer, id) do
+    case challenge(drawer, ["review"]) do
+      %{"challenge" => ^id} = current ->
+        if review_plan_lines(current, drawer.status || %{}) != [],
+          do: :ok,
+          else: {:refused, "This operation sent no readable plan. Cancel it and start again."}
+
+      _ ->
+        {:refused, "This review is no longer waiting for approval."}
+    end
   end
 
   attr :drawer, :map, required: true

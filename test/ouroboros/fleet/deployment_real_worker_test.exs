@@ -1,6 +1,6 @@
 defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
   @moduledoc """
-  The one test in this slice that talks to the real `ouro`.
+  Tests that talk to the real `ouro`.
 
   Everything else here runs against `test/support/fleet_frames_fake.sh`, which is a fake
   written to §8 — so it proves that this build reads §8 and not that `ouro` writes it. This
@@ -8,10 +8,9 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
   program, exactly as `Ouroboros.Fleet.Deployment.Worker` does, and checks that the first
   frames off its stdout decode as the events §8 names.
 
-  `--dry-run` is what makes it safe to run anywhere: §5 gives `fleet setup` that flag, and a
-  dry run changes nothing — not the data directory, not a journal, not a credential, not a
-  members list, and not a recorded host key. The data directory it is pointed at is a
-  throwaway one regardless.
+  The dry-run changes nothing. The review test declines the real plan before any fleet
+  credentials or service are installed. Both use a throwaway data directory and an
+  explicit loopback address, so neither needs network discovery.
 
   Excluded by default (`:real_worker`), because a checkout has no packaged `ouro` and the
   Rust slice that speaks `--frames` lands separately. Run it at integration:
@@ -26,6 +25,7 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
 
   alias Ouroboros.Fleet.Deployment.Frame
   alias Ouroboros.Fleet.Deployment.Launcher
+  alias Ouroboros.Fleet.Deployment.Worker
 
   # A real `fleet setup --dry-run` resolves a release, reads the network client and writes
   # nothing. Generous, because the first of those may go to the network.
@@ -54,6 +54,8 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
       "setup",
       "--machine",
       "realworker",
+      "--address",
+      "127.0.0.1",
       "--dry-run",
       "--frames",
       "--operation",
@@ -102,6 +104,68 @@ defmodule Ouroboros.Fleet.DeploymentRealWorkerTest do
     for step <- Enum.filter(decoded, &(Frame.event(&1) == "step")) do
       assert is_binary(step["step"])
       assert step["state"] in ~w(ok failed skipped attempted)
+    end
+  end
+
+  test "the real review frame exposes its readable plan through the worker", context do
+    operation = "op-" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+
+    worker =
+      start_supervised!(
+        {Worker,
+         operation: operation,
+         kind: "setup",
+         data_dir: context.root,
+         executable: context.ouro,
+         argv: [
+           "fleet",
+           "setup",
+           "--machine",
+           "realworker",
+           "--address",
+           "127.0.0.1",
+           "--no-service",
+           "--frames",
+           "--operation",
+           operation
+         ]}
+      )
+
+    snapshot = await_review(worker, System.monotonic_time(:millisecond) + @deadline)
+    metadata = snapshot["challenge"]["metadata"]
+    assert is_map(metadata["plan"])
+    assert is_list(metadata["lines"]) and metadata["lines"] != []
+    assert snapshot["plan"] == metadata["lines"]
+    assert Enum.any?(snapshot["plan"], &String.contains?(&1, "realworker"))
+
+    :ok = Worker.subscribe(worker, self())
+
+    assert {:ok, _} =
+             Worker.respond(worker, snapshot["challenge"]["challenge"], %{"accept" => false})
+
+    assert_receive {:ouroboros_fleet_deployment, ^operation,
+                    %{"event" => "done", "state" => "failed", "reason" => "review_declined"}},
+                   5_000
+
+    refute File.exists?(Path.join(context.root, "fleet"))
+  end
+
+  defp await_review(worker, deadline) do
+    assert {:ok, snapshot} = Worker.snapshot(worker)
+
+    cond do
+      is_map(snapshot["challenge"]) ->
+        snapshot
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("no real review: #{inspect(snapshot)}")
+
+      snapshot["state"] in ["failed", "completed", "cancelled"] ->
+        flunk("stopped before review: #{inspect(snapshot)}")
+
+      true ->
+        Process.sleep(20)
+        await_review(worker, deadline)
     end
   end
 

@@ -1779,7 +1779,9 @@ impl Engine {
 
         // The authorized local transition. The runtime that is running now is the one
         // serving whoever asked for this, so it is stopped only if it is idle.
-        if !journal.record().completed(&machine, "stop_runtime") {
+        if !journal.record().completed(&machine, "create")
+            && !journal.record().completed(&machine, "stop_runtime")
+        {
             journal.begin_step(&machine, "stop_runtime")?;
             self.enter(journal, Phase::RestartingHost)?;
             let stopped = gateway::stop_require_idle(&self.data_dir, &self.token_file)?;
@@ -1865,72 +1867,9 @@ impl Engine {
             false
         };
 
-        // §6's `setup` ends at `start` and `ready`: the service manager is what starts
-        // the runtime, and the readiness probe is the gateway publishing a port.
-        if started && !journal.record().completed(&machine, "start") {
-            journal.begin_step(&machine, "start")?;
-            let outcome = match self.services.local(ServiceAction::Start) {
-                Ok(started) if started.supported => {
-                    journal.finish_step(
-                        &machine,
-                        "start",
-                        "ok",
-                        Some(started.detail.clone()),
-                        None,
-                    )?;
-                    true
-                }
-                Ok(started) => {
-                    journal.finish_step(
-                        &machine,
-                        "start",
-                        "skipped",
-                        Some(started.detail.clone()),
-                        None,
-                    )?;
-                    false
-                }
-                Err(error) => {
-                    journal.finish_step(
-                        &machine,
-                        "start",
-                        "failed",
-                        Some(format!("{error:#}")),
-                        None,
-                    )?;
-                    false
-                }
-            };
-            if outcome {
-                journal.begin_step(&machine, "ready")?;
-                let deadline = Instant::now() + CONNECT_DEADLINE;
-                let mut ready = false;
-                while Instant::now() < deadline {
-                    if self.gateway.running() {
-                        ready = true;
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                journal.finish_step(
-                    &machine,
-                    "ready",
-                    if ready { "ok" } else { "failed" },
-                    Some(if ready {
-                        "this machine's runtime published its gateway".to_string()
-                    } else {
-                        format!(
-                            "this machine's runtime did not publish a gateway within {} seconds",
-                            CONNECT_DEADLINE.as_secs()
-                        )
-                    }),
-                    None,
-                )?;
-                if !ready {
-                    unknown.push("whether this machine's runtime finished starting".into());
-                }
-            }
-        } else if !journal.record().completed(&machine, "start") {
+        if started {
+            self.start_setup_runtime(journal, &machine, CONNECT_DEADLINE)?;
+        } else {
             journal.skip_step(&machine, "start", "manual startup was chosen")?;
             journal.skip_step(&machine, "ready", "the runtime was not started from here")?;
         }
@@ -1951,6 +1890,66 @@ impl Engine {
             residue: journal.record().residue,
             unknown,
         })
+    }
+
+    /// Startup and readiness are separate durable steps: a failed readiness probe can
+    /// resume without repeating a successful service start.
+    fn start_setup_runtime(
+        &self,
+        journal: &JournalHandle,
+        machine: &str,
+        readiness_timeout: Duration,
+    ) -> Result<()> {
+        if !journal.record().completed(machine, "start") {
+            journal.begin_step(machine, "start")?;
+            match self.services.local(ServiceAction::Start) {
+                Ok(started) if started.supported => {
+                    journal.finish_step(
+                        machine,
+                        "start",
+                        "ok",
+                        Some(started.detail.clone()),
+                        None,
+                    )?;
+                    self.step_event(machine, "start", "ok", Some(started.detail));
+                }
+                result => {
+                    let detail = match result {
+                        Ok(unsupported) => unsupported.detail,
+                        Err(error) => format!("{error:#}"),
+                    };
+                    journal.finish_step(machine, "start", "failed", Some(detail.clone()), None)?;
+                    self.step_event(machine, "start", "failed", Some(detail.clone()));
+                    return refuse("start_failed", detail);
+                }
+            }
+        }
+        if !journal.record().completed(machine, "ready") {
+            journal.begin_step(machine, "ready")?;
+            let deadline = Instant::now() + readiness_timeout;
+            loop {
+                self.check_cancelled()?;
+                if self.gateway.running() {
+                    let detail = "this machine's runtime published its gateway".to_string();
+                    journal.finish_step(machine, "ready", "ok", Some(detail.clone()), None)?;
+                    self.step_event(machine, "ready", "ok", Some(detail));
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    let detail = format!(
+                        "this machine's runtime did not publish a gateway within {} seconds",
+                        readiness_timeout.as_secs()
+                    );
+                    journal.finish_step(machine, "ready", "failed", Some(detail.clone()), None)?;
+                    self.step_event(machine, "ready", "failed", Some(detail.clone()));
+                    return refuse("readiness_failed", detail);
+                }
+                std::thread::sleep(
+                    Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- leave
@@ -2063,7 +2062,7 @@ impl Engine {
     }
 
     fn run_leave(&self, journal: &JournalHandle) -> Result<Outcome> {
-        let (plan, _profile) = self.plan_leave(Some(journal))?;
+        let (plan, profile) = self.plan_leave(Some(journal))?;
         let machine = plan.target.machine.clone();
         let (peer_id, stable_id) =
             self.bind_peer_identity(journal, &machine, &plan.target.address)?;
@@ -2095,7 +2094,7 @@ impl Engine {
                 &executable,
                 self.remote_data_dir_for(&machine).as_deref(),
             )?;
-            let result = self.stop_and_retire(journal, &machine, &mut session);
+            let result = self.stop_and_retire(journal, &machine, &profile.fleet_id, &mut session);
             session.close();
             match result {
                 Ok(()) => {}
@@ -2129,7 +2128,13 @@ impl Engine {
                 Ok(removed) => format!("{} is off this machine's list", removed.node),
                 // Idempotent on a resume: a machine that is already off the list is the
                 // state this step exists to reach.
-                Err(error) => format!("nothing to remove here: {error:#}"),
+                Err(error)
+                    if fleet::refusal(&error)
+                        .is_some_and(|refusal| refusal.reason == "machine_unknown") =>
+                {
+                    format!("nothing to remove here: {error:#}")
+                }
+                Err(error) => return Err(error),
             };
             journal.finish_step(&machine, "forget", "ok", Some(detail), None)?;
             self.step_event(&machine, "forget", "ok", None);
@@ -2161,11 +2166,20 @@ impl Engine {
         &self,
         journal: &JournalHandle,
         machine: &str,
+        fleet_id: &str,
         session: &mut helper::Session,
     ) -> Result<()> {
+        let hello = session.ask("hello", json!({}))?;
+        self.verify_build_contract(&hello, machine)?;
+        let inspection = session.ask("inspect", json!({}))?;
+        match inspection.get("fleet") {
+            Some(Value::Null) => {},
+            Some(fleet) if fleet.get("fleet_id").and_then(Value::as_str) == Some(fleet_id)
+                && fleet.get("machine").and_then(Value::as_str).is_some_and(|name| crate::fleet::same_name(name, machine)) => {},
+            _ => return refuse("identity_mismatch", "the target no longer holds the machine and fleet named by this removal; nothing was stopped or removed"),
+        }
         if !journal.record().completed(machine, "stop") {
             journal.begin_step(machine, "stop")?;
-            let inspection = session.ask("inspect", json!({}))?;
             let running = inspection
                 .get("runtime_running")
                 .and_then(Value::as_bool)
@@ -2185,7 +2199,7 @@ impl Engine {
         }
 
         journal.begin_step(machine, "remove")?;
-        let left = session.ask("leave", json!({}))?;
+        let left = session.ask("leave", json!({"machine": machine, "fleet_id": fleet_id}))?;
         let removed = left
             .get("removed")
             .and_then(Value::as_array)
@@ -2299,7 +2313,148 @@ pub fn normalize_machine(machine: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::gateway::ScriptedGateway;
+    use super::super::service::CountingServiceActions;
+    use super::super::terminal::TerminalConversation;
     use super::*;
+
+    fn setup_engine(data_dir: PathBuf) -> Engine {
+        let mut request = OperationRequest::new("op-123456789abc", OperationKind::Setup, "studio");
+        request.address = Some("127.0.0.1".into());
+        request.assume_yes = true;
+        let ports = fleet::ephemeral_ports();
+        request.ports = Some(super::super::PortPolicy {
+            gateway: ports.gateway,
+            dist: ports.dist,
+        });
+        Engine {
+            token_file: data_dir.join("gateway.token"),
+            data_dir,
+            request,
+            conversation: Arc::new(TerminalConversation::new(true, true)),
+            gateway: Arc::new(ScriptedGateway::new(false, vec![])),
+            services: Arc::new(CountingServiceActions::new(
+                true,
+                vec![ServiceAction::Install, ServiceAction::Start],
+            )),
+            programs: ssh::Programs::default(),
+            trust_tools: trust::Tools::default(),
+            user_known_hosts: None,
+            origin: release::Origin::official(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        }
+    }
+
+    #[test]
+    fn failed_local_start_is_failed_and_resumes_without_recreating_or_reinstalling() {
+        let dir = exclusive_temp_dir("setup-retry-").unwrap();
+        let mut engine = setup_engine(dir.clone());
+        engine.services = Arc::new(CountingServiceActions::new(
+            true,
+            vec![ServiceAction::Install],
+        ));
+        let error = engine
+            .run()
+            .expect_err("a refused start cannot complete setup");
+        assert_eq!(super::super::reason_of(&error), Some("start_failed"));
+        let failed = Journal::read(&dir, &engine.request.operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, OperationState::Failed);
+        assert!(failed.completed("studio", "create"));
+        assert!(failed.completed("studio", "service"));
+        assert!(failed
+            .steps
+            .iter()
+            .any(|step| step.step == "start" && step.outcome == "failed"));
+        assert!(failed
+            .residue
+            .iter()
+            .any(|line| line.contains("holds the fleet")));
+        let cookie = std::fs::read(dir.join("fleet/cookie")).unwrap();
+        let stop_before = failed
+            .steps
+            .iter()
+            .find(|step| step.step == "stop_runtime")
+            .unwrap();
+
+        let services = Arc::new(CountingServiceActions::new(
+            true,
+            vec![ServiceAction::Start],
+        ));
+        engine.services = services.clone();
+        engine.gateway = Arc::new(ScriptedGateway::new(true, vec![]));
+        let resumed = engine.run().expect("a repaired start resumes setup");
+        assert!(resumed.complete());
+        assert!(resumed.residue.is_empty());
+        assert_eq!(services.local_calls(), vec![ServiceAction::Start]);
+        assert_eq!(std::fs::read(dir.join("fleet/cookie")).unwrap(), cookie);
+        let stop_after = resumed
+            .steps
+            .iter()
+            .find(|step| step.step == "stop_runtime")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(stop_before).unwrap(),
+            serde_json::to_value(stop_after).unwrap()
+        );
+        assert!(resumed
+            .steps
+            .iter()
+            .any(|step| step.step == "ready" && step.outcome == "ok"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_readiness_can_be_retried_without_starting_twice() {
+        let dir = exclusive_temp_dir("ready-retry-").unwrap();
+        let mut engine = setup_engine(dir.clone());
+        let services = Arc::new(CountingServiceActions::new(
+            true,
+            vec![ServiceAction::Start],
+        ));
+        engine.services = services.clone();
+        let journal = JournalHandle::new(
+            Journal::open(&dir, &engine.request.operation, OperationKind::Setup).unwrap(),
+        );
+        let error = engine
+            .start_setup_runtime(&journal, "studio", Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(super::super::reason_of(&error), Some("readiness_failed"));
+        assert!(journal.record().completed("studio", "start"));
+        assert!(journal
+            .record()
+            .steps
+            .iter()
+            .any(|step| step.step == "ready" && step.outcome == "failed"));
+
+        engine.gateway = Arc::new(ScriptedGateway::new(true, vec![]));
+        engine
+            .start_setup_runtime(&journal, "studio", Duration::ZERO)
+            .unwrap();
+        assert_eq!(services.local_calls(), vec![ServiceAction::Start]);
+        assert!(journal.record().completed("studio", "ready"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unsupported_start_after_installation_is_a_failure() {
+        let dir = exclusive_temp_dir("start-unavailable-").unwrap();
+        let mut engine = setup_engine(dir.clone());
+        engine.services = Arc::new(CountingServiceActions::new(
+            false,
+            vec![ServiceAction::Start],
+        ));
+        let journal = JournalHandle::new(
+            Journal::open(&dir, &engine.request.operation, OperationKind::Setup).unwrap(),
+        );
+        let error = engine
+            .start_setup_runtime(&journal, "studio", Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(super::super::reason_of(&error), Some("start_failed"));
+        assert!(!journal.record().attempted("studio", "ready"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A machine name is lower-cased before it becomes an identity, so `Buildbox` and
     /// `buildbox` cannot become two members.

@@ -235,7 +235,7 @@ timeout, `{"v":1,"id","op",…}` in and `{"v":1,"id","ok":true,…}` or
 | `service` | `install: bool` | as today's `service` op, on the simplified manager |
 | `start` | | starts the daemon from this `ouro`; `pid` |
 | `status` | `peer?` | `runtime_running`, `connected_to: [node]`, `version` |
-| `leave` | | idle-gated stop, service disable and remove, `fleet/` deleted; `removed: [what]` |
+| `leave` | `machine`, `fleet_id` | verify the expected identity before stopping and again under the deletion lock; idle-gated stop, service disable and remove, `fleet/` deleted; `removed: [what]` |
 | `bye` | | exit 0 |
 
 Deleted: `prepare`, `discard_preparation`, `roster`, `receipt`, `disable`, `remove`.

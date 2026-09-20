@@ -607,6 +607,55 @@ defmodule Ouroboros.Web.Live.DevicesLiveTest do
   # Leave and setup
   # ------------------------------------------------------------------------------------
 
+  test "review shows the real helper's lines alongside its structured plan", context do
+    lines = ["Join the fleet as vps-1", "Remember vps-1 on this machine"]
+    metadata = JSON.encode!(%{"plan" => %{"kind" => "add"}, "lines" => lines})
+
+    ouro!(context,
+      scenario: [
+        "state waiting",
+        "challenge review-1 review #{metadata}",
+        "await review-1",
+        "done completed vps-1 joined this fleet"
+      ]
+    )
+
+    {:ok, view, _html} = live(web!(context), "/devices")
+    add!(view)
+    html = await(view, "Remember vps-1 on this machine")
+    assert html =~ "Join the fleet as vps-1"
+    refute has_element?(view, ~s{button[phx-click="approve"][disabled]})
+    view |> element(~s{button[phx-click="approve"]}) |> render_click()
+    assert await(view, "vps-1 is in your fleet")
+
+    assert Enum.any?(
+             FleetFramesFake.responses(context.bin),
+             &(JSON.decode!(&1)["accept"] == true)
+           )
+  end
+
+  test "review with no readable plan cannot be approved, including a direct event", context do
+    ouro!(context,
+      scenario: [
+        "state waiting",
+        "challenge review-1 review {\"plan\":{\"kind\":\"add\"}}",
+        "await review-1",
+        "done completed should never run"
+      ]
+    )
+
+    {:ok, view, _html} = live(web!(context), "/devices")
+    add!(view)
+    await(view, "This operation sent no readable plan")
+    assert has_element?(view, ~s{button[phx-click="approve"][disabled]})
+    html = render_click(view, "approve", %{"challenge" => "review-1"})
+    assert html =~ "This operation sent no readable plan"
+    assert FleetFramesFake.responses(context.bin) == []
+
+    assert :sys.get_state(view.pid).socket.assigns.drawer.status["challenge"]["challenge"] ==
+             "review-1"
+  end
+
   describe "removing a member" do
     test "is reached from the details panel and reads as a removal", context do
       members!(context.root, [

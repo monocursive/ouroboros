@@ -427,6 +427,7 @@ fn known_reason(reason: &str) -> &'static str {
     /// idempotent, retry-into-me answer in the protocol, flattened into the answer for
     /// a code nobody understands.
     const OPS: &[&str] = &[
+        "identity_mismatch",
         // `install`
         "already_installed",
         "bundle_invalid",

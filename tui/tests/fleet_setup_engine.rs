@@ -1749,6 +1749,51 @@ fn a_start_that_the_manager_refuses_keeps_the_credentials_and_says_so() {
         "the service step installed a unit: {:?}",
         listing(&agents)
     );
+
+    // The local setup path must have the same nonzero exit and resumable journal
+    // when this manager accepts installation but refuses the start.
+    let local = lab.work.join("local-setup");
+    let attempted = lab.ouro(
+        &local,
+        ephemeral(),
+        &[
+            "fleet",
+            "setup",
+            "--machine",
+            "local",
+            "--address",
+            "127.0.0.1",
+            "--yes",
+            "--json",
+            "--operation",
+            "op-0000000000d2",
+        ],
+        &[
+            ("OUROBOROS_LAUNCHCTL", launchctl.to_str().unwrap()),
+            ("OUROBOROS_SYSTEMCTL", systemctl.to_str().unwrap()),
+            ("OUROBOROS_LOGINCTL", loginctl.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        !attempted.success(),
+        "{} {}",
+        attempted.stdout,
+        attempted.stderr
+    );
+    assert_eq!(attempted.json()["reason"], json!("start_failed"));
+    let failed = Journal::read(&local, "op-0000000000d2").unwrap().unwrap();
+    assert_eq!(failed.state, OperationState::Failed);
+    assert!(failed.completed("local", "create"));
+    assert!(failed.completed("local", "service"));
+    assert!(failed
+        .steps
+        .iter()
+        .any(|step| step.step == "start" && step.outcome == "failed"));
+    assert!(failed
+        .residue
+        .iter()
+        .any(|line| line.contains("holds the fleet")));
+    assert!(local.join("fleet/cookie").is_file());
     let _ = fs::remove_dir_all(&fakes);
 }
 
@@ -2050,4 +2095,129 @@ fn listing(directory: &Path) -> BTreeSet<String> {
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect()
+}
+
+#[test]
+fn leave_refuses_a_target_repurposed_for_another_fleet() {
+    let lab = Lab::new("leaveforeign", "studio");
+    let mut args = lab.add_args("vps", "op-1111111111a2");
+    args.extend(["--no-service".into(), "--yes".into(), "--json".into()]);
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    let added = lab.ouro(&lab.issuer, lab.target_ports, &borrowed, &[]);
+    assert!(added.success(), "{} {}", added.stdout, added.stderr);
+
+    fleet::leave(&lab.target).unwrap();
+    let foreign = fleet::create(
+        &lab.target,
+        Some("other-fleet"),
+        "unrelated",
+        "127.0.0.1",
+        lab.target_ports,
+    )
+    .unwrap();
+    let cookie = fs::read(lab.target.join("fleet/cookie")).unwrap();
+    let left = lab.ouro(
+        &lab.issuer,
+        lab.target_ports,
+        &[
+            "fleet",
+            "leave",
+            "--machine",
+            "vps",
+            "--user",
+            &account(),
+            "--port",
+            &lab.rig.port.to_string(),
+            "--key",
+            &lab.rig.client_key.display().to_string(),
+            "--yes",
+            "--json",
+            "--operation",
+            "op-1111111111a3",
+        ],
+        &[],
+    );
+    assert!(!left.success(), "{} {}", left.stdout, left.stderr);
+    assert_eq!(left.json()["reason"], json!("identity_mismatch"));
+    assert_eq!(
+        fleet::load(&lab.target).unwrap().unwrap().fleet_id,
+        foreign.fleet_id
+    );
+    assert_eq!(fs::read(lab.target.join("fleet/cookie")).unwrap(), cookie);
+    assert!(lab
+        .issuer_profile()
+        .members
+        .iter()
+        .any(|member| member.machine == "vps"));
+    assert!(!lab.journal("op-1111111111a3").attempted("vps", "remove"));
+}
+
+#[test]
+fn a_failed_local_forget_is_reported_and_resumes_without_contacting_the_removed_target() {
+    for already_forgotten in [false, true] {
+        let lab = Lab::new("leavewrite", "studio");
+        let mut args = lab.add_args("vps", "op-1111111111b2");
+        args.extend(["--no-service".into(), "--yes".into(), "--json".into()]);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let added = lab.ouro(&lab.issuer, lab.target_ports, &borrowed, &[]);
+        assert!(added.success(), "{} {}", added.stdout, added.stderr);
+
+        let user = account();
+        let port = lab.rig.port.to_string();
+        let key = lab.rig.client_key.display().to_string();
+        let leave = [
+            "fleet",
+            "leave",
+            "--machine",
+            "vps",
+            "--user",
+            &user,
+            "--port",
+            &port,
+            "--key",
+            &key,
+            "--yes",
+            "--json",
+            "--operation",
+            "op-1111111111b3",
+        ];
+        let profile_dir = lab.issuer.join("fleet");
+        fs::set_permissions(&profile_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let left = lab.ouro(&lab.issuer, lab.target_ports, &leave, &[]);
+        fs::set_permissions(&profile_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!left.success(), "{} {}", left.stdout, left.stderr);
+        let failed = lab.journal("op-1111111111b3");
+        assert_eq!(failed.state, OperationState::Failed);
+        assert!(failed.completed("vps", "remove"));
+        assert!(failed
+            .steps
+            .iter()
+            .any(|step| step.step == "forget" && step.outcome == "failed"));
+        assert!(failed
+            .residue
+            .iter()
+            .any(|line| line.contains("still on this machine's member list")));
+        assert!(lab
+            .issuer_profile()
+            .members
+            .iter()
+            .any(|member| member.machine == "vps"));
+        assert!(!lab.target.join("fleet").exists());
+
+        // Recovery only retries the local write, including when another process has
+        // already forgotten the member. Any repeated remote work would now fail.
+        write_script(&lab.wrapper, "#!/bin/sh\nexit 77\n");
+        if already_forgotten {
+            fleet::remove_member(&lab.issuer, "vps").unwrap();
+        }
+        let resumed = lab.ouro(&lab.issuer, lab.target_ports, &leave, &[]);
+        assert!(resumed.success(), "{} {}", resumed.stdout, resumed.stderr);
+        assert_eq!(resumed.json()["residue"], json!([]));
+        assert!(lab.journal("op-1111111111b3").completed("vps", "forget"));
+        assert!(!lab
+            .issuer_profile()
+            .members
+            .iter()
+            .any(|member| member.machine == "vps"));
+    }
 }
