@@ -85,7 +85,7 @@ defmodule Ouroboros.Session.Request do
          {:ok, retention} <-
            Ouroboros.Session.RetentionOptions.normalize(Map.get(attrs, :retention, %{})),
          attrs = Map.put(attrs, :retention, retention),
-         {:ok, request} <- parse(Map.put_new(attrs, :cwd, File.cwd!())),
+         {:ok, request} <- parse(Map.put_new_lazy(attrs, :cwd, &File.cwd!/0)),
          true <- File.dir?(request.cwd) do
       {:ok, request}
     else

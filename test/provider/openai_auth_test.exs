@@ -145,6 +145,55 @@ defmodule Ouroboros.Provider.OpenAIAuthTest do
     assert {:error, _reason} = ReqLLM.OAuth.resolve(:openai_codex, oauth_file: path)
   end
 
+  test "a rejected credential stays unusable across auth restarts without exposing tokens", %{
+    path: path
+  } do
+    payload = %{"openai-codex" => %{"access" => "access-canary", "refresh" => "refresh-canary"}}
+    File.write!(path, JSON.encode!(payload))
+    original = File.read!(path)
+    fingerprint = OpenAIAuth.credential_fingerprint(path)
+
+    assert :ok = OpenAIAuth.reject_credential(path, fingerprint)
+    assert OpenAIAuth.credential_status(path) == :invalid
+    assert File.read!(path) == original
+    marker = File.read!(path <> ".rejected")
+    assert byte_size(marker) == 64
+    refute marker =~ "canary"
+    assert Bitwise.band(File.stat!(path <> ".rejected").mode, 0o777) == 0o600
+
+    server = start_supervised!({OpenAIAuth, name: nil, credential_path: path})
+    assert {:ok, account} = OpenAIAuth.read(server)
+    assert account["requiresOpenaiAuth"]
+    assert account["credentialState"] == "invalid"
+    assert account["account"] == nil
+    refute JSON.encode!(account) =~ "canary"
+  end
+
+  test "new sign-in supersedes rejection and a late failure cannot invalidate it", %{path: path} do
+    File.write!(path, JSON.encode!(%{"openai-codex" => %{"refresh" => "old-refresh-canary"}}))
+    old = OpenAIAuth.credential_fingerprint(path)
+    assert :ok = OpenAIAuth.reject_credential(path, old)
+
+    server =
+      start_supervised!(
+        {OpenAIAuth,
+         name: nil,
+         credential_path: path,
+         issuer: "https://issuer.test",
+         http: FakeHTTP,
+         browser_port: 0}
+      )
+
+    assert {:ok, %{"loginId" => id, "authUrl" => url}} = OpenAIAuth.login(:browser, server)
+    query = URI.parse(url).query |> URI.decode_query()
+    assert {:ok, %{}} = OpenAIAuth.complete(id, "browser-code", query["state"], server)
+    assert :ok = OpenAIAuth.reject_credential(path, old)
+    assert OpenAIAuth.credential_status(path) == :present
+    assert {:ok, account} = OpenAIAuth.read(server)
+    refute account["requiresOpenaiAuth"]
+    assert account["account"]["email"] == "operator@example.com"
+  end
+
   defp eventually(fun, attempts \\ 100) do
     cond do
       fun.() -> true

@@ -294,7 +294,7 @@ defmodule Ouroboros.Interactive.State do
   # *start options*, which is why it answers a bare map rather than a struct: the session
   # struct is built by `new/2` from it.
   defp base(opts) do
-    workspace_option = Keyword.get(opts, :workspace, File.cwd!())
+    workspace_option = Keyword.get_lazy(opts, :workspace, &File.cwd!/0)
     provider = Keyword.get(opts, :provider, :native)
     sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
     workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))

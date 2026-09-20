@@ -228,6 +228,48 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLMTest do
     refute_canaries(formatted)
   end
 
+  test "request-build wrappers preserve a rejected OAuth refresh without leaking provider text" do
+    for transport <- ["streaming", "websocket"] do
+      error =
+        Elixir.ReqLLM.Error.API.Request.exception(
+          reason:
+            "Failed to build OpenAI Codex #{transport} request: Invalid parameter: " <>
+              "OpenAI OAuth refresh failed with status 401: " <> @response_canary,
+          headers: [{"authorization", @authorization_canary}],
+          request_body: @request_canary
+        )
+
+      wrapped = {:http_streaming_failed, {:provider_build_failed, error}}
+      formatted = ReqLLM.format_error(wrapped)
+
+      assert formatted ==
+               "category=credentials status=401 provider_code=openai_oauth_refresh_rejected " <>
+                 "retryable=false diagnostic=ChatGPT sign-in could not be refreshed; " <>
+                 "sign in to OpenAI again in Settings, then retry"
+
+      refute_canaries(formatted)
+    end
+  end
+
+  test "request-build wrappers retain structured errors without guessing from arbitrary text" do
+    structured = Elixir.ReqLLM.Error.API.Request.exception(status: 429, retryable: true)
+
+    assert ReqLLM.format_error({:http_streaming_failed, {:provider_build_failed, structured}}) =~
+             "category=api status=429 retryable=true"
+
+    for reason <- [
+          "unrelated: OpenAI OAuth refresh failed with status 401",
+          "Failed to build OpenAI Codex streaming request: Invalid parameter: " <>
+            "OpenAI OAuth refresh failed with status 500: private",
+          "Failed to build OpenAI Codex streaming request: Invalid parameter: " <>
+            "OpenAI OAuth refresh failed with status 4010: private"
+        ] do
+      error = Elixir.ReqLLM.Error.API.Request.exception(reason: reason)
+      assert ReqLLM.format_error(error) =~ "category=unknown"
+      refute ReqLLM.format_error(error) =~ reason
+    end
+  end
+
   test "lazy streaming wrappers preserve structured API and transport causes" do
     for {cause, expected} <- [
           {Elixir.ReqLLM.Error.API.Request.exception(

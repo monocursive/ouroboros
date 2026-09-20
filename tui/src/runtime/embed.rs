@@ -1,4 +1,4 @@
-//! The embedded release: verify, extract once, and keep the cache small.
+//! The embedded release: verify, extract once, and retain runnable releases.
 //!
 //! ## The digest is checked before anything is unpacked
 //!
@@ -26,14 +26,16 @@
 //! check, not detection of later payload tampering. The releases directory itself is
 //! kept private to its owner, matching every other directory this crate creates.
 //!
-//! ## A start is a use, and collection counts uses
+//! ## Cached releases can still belong to running runtimes
 //!
 //! The cache is keyed by the digest, so recognising an already-extracted release costs a
 //! directory lookup rather than a pass over the whole embedded payload — on a warm start,
 //! the difference between faulting in every embedded byte and faulting in none of them.
-//! Reuse restamps the directory, so [`gc`] keeps the two most recently
-//! *started* releases rather than the two most recently unpacked ones: a daemon running
-//! out of a release nobody has replaced twice is not something a later start collects.
+//! Reuse restamps the directory, but recency does not establish whether a release is
+//! still in use. A detached daemon can outlive any number of newer starts, including
+//! starts with other data directories sharing this cache. Automatic collection retains
+//! completed releases until runtime lifetime tracking can prove they are unused; only
+//! abandoned temporary extractions are removed.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -56,9 +58,10 @@ static TEMPORARY: AtomicU32 = AtomicU32::new(0);
 const COMPLETION_MARKER: &str = ".ouroboros-release-complete";
 const EXTRACTION_LOCK: &str = ".extract.lock";
 
-/// How many extracted releases survive a collection. Two, so that the release a running
-/// daemon was started from outlives the one that replaced it.
-pub const KEEP: usize = 2;
+/// Automatic collection must not evict a release that a live runtime may still use.
+/// A finite recency limit cannot prove that; keep completed releases until collection
+/// can track every runtime's lifetime, including detached and alternate-data-dir starts.
+pub const KEEP: usize = usize::MAX;
 
 /// A release baked into this binary at build time.
 #[derive(Debug, Clone, Copy)]
@@ -838,9 +841,8 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Collection keeps what was started most recently, not what was unpacked most
-    /// recently: a release two upgrades old that a daemon is still running out of would
-    /// otherwise be deleted underneath it.
+    /// Explicit bounded collection orders releases by their most recent start.
+    /// Automatic collection does not use a finite limit: recency is not liveness.
     #[test]
     fn reuse_restamps_a_release_so_collection_spares_it() {
         let dir = scratch("restamp");
@@ -859,7 +861,7 @@ mod tests {
         // Starting out of it again is the use that has to count.
         assert_eq!(extract(&bytes, &digest, "1.0.0", &dir).unwrap(), old);
 
-        gc(&dir, KEEP).expect("a collection");
+        gc(&dir, 2).expect("a collection");
 
         assert!(old.is_dir(), "the release just started must survive");
         assert!(!dir.join("2.0.0+aaaaaaaa").exists());
@@ -1036,7 +1038,7 @@ mod tests {
         let dead = dir.join(".tmp-2147483646-0");
         fs::create_dir_all(&dead).unwrap();
 
-        let removed = gc(&dir, KEEP).expect("a collection");
+        let removed = gc(&dir, 2).expect("a collection");
 
         assert!(removed.iter().any(|path| path.ends_with("0.1.0+aaaaaaaa")));
         assert!(removed

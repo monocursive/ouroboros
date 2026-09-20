@@ -113,10 +113,52 @@ defmodule Ouroboros.Provider.OpenAIAuth do
   end
 
   @doc "Non-secret source observation. Unavailable/invalid is not evidence of absence."
-  def credential_status do
-    credential_path() |> read_credentials() |> credential_state()
+  def credential_status(path \\ credential_path()) do
+    credential_state(read_credentials(path), path)
   rescue
     _ -> :unavailable
+  end
+
+  @doc false
+  def credential_fingerprint(path) do
+    case read_credentials(path) do
+      {:ok, credential} -> fingerprint(credential)
+      _ -> nil
+    end
+  end
+
+  @doc false
+  def reject_credential(path, fingerprint) when is_binary(fingerprint) do
+    # Record only a digest, never rewrite or remove credentials from a failed request.
+    # A delayed failure must not invalidate a sign-in completed in the meantime.
+    if credential_fingerprint(path) == fingerprint,
+      do: atomic_write(path <> ".rejected", fingerprint),
+      else: :ok
+  end
+
+  def reject_credential(_path, _fingerprint), do: :ok
+
+  defp fingerprint(credential) do
+    [credential["access"], credential["refresh"]]
+    |> JSON.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp credential_state(observation, path) do
+    case observation do
+      {:ok, credential} ->
+        expected = fingerprint(credential)
+
+        # Bound reads even if an external process damages the rejection marker.
+        case File.open(path <> ".rejected", [:read, :binary], &IO.binread(&1, 65)) do
+          {:ok, ^expected} -> :invalid
+          _ -> credential_state(observation)
+        end
+
+      _ ->
+        credential_state(observation)
+    end
   end
 
   defp credential_state({:ok, credential}) do
@@ -453,10 +495,11 @@ defmodule Ouroboros.Provider.OpenAIAuth do
 
   defp account_projection(state) do
     observation = read_credentials(state.credential_path)
+    credential_state = credential_state(observation, state.credential_path)
 
     credential =
-      case observation do
-        {:ok, value} -> value
+      case {credential_state, observation} do
+        {:present, {:ok, value}} -> value
         _absent -> nil
       end
 
@@ -477,7 +520,7 @@ defmodule Ouroboros.Provider.OpenAIAuth do
 
     %{
       "account" => account,
-      "credentialState" => Atom.to_string(credential_state(observation)),
+      "credentialState" => Atom.to_string(credential_state),
       "requiresOpenaiAuth" => is_nil(credential),
       "login" => state.login
     }

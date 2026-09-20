@@ -20,7 +20,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   """
 
   @behaviour Ouroboros.Provider.Native.Model
-  alias Ouroboros.Provider.{AnthropicKey, GrokSubscription, XAIKey}
+  alias Ouroboros.Provider.{AnthropicKey, GrokSubscription, OpenAIAuth, XAIKey}
   alias Ouroboros.Provider.Native.Model.{Admission, ToolSchema}
   alias ReqLLM.Provider.ChunkAccumulator
 
@@ -86,9 +86,19 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
                  generation_opts,
                  conversation_id(request)
                ) do
+          credential = codex_credential(model, generation_opts)
+
           case ReqLLM.stream_text(model, context, generation_opts) do
-            {:ok, response} -> {:ok, normalize(response, request.tools)}
-            {:error, reason} -> {:error, reason}
+            {:ok, response} ->
+              {:ok, normalize(response, request.tools)}
+
+            {:error, reason} ->
+              if credential && codex_refresh_rejected?(unwrap_error(reason)) do
+                {path, fingerprint} = credential
+                _ = OpenAIAuth.reject_credential(path, fingerprint)
+              end
+
+              {:error, reason}
           end
         end
       end)
@@ -97,6 +107,13 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     error in Ouroboros.Audit.Unavailable -> reraise error, __STACKTRACE__
     error -> {:error, {:model_client_error, Exception.message(error)}}
   end
+
+  defp codex_credential("openai_codex:" <> _, options) do
+    path = Keyword.fetch!(options, :oauth_file)
+    {path, OpenAIAuth.credential_fingerprint(path)}
+  end
+
+  defp codex_credential(_model, _options), do: nil
 
   @doc false
   @impl true
@@ -114,27 +131,23 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   defp unwrap_error(%ReqLLM.Error.API.Stream{cause: cause}) when not is_nil(cause),
     do: unwrap_error(cause)
 
+  defp unwrap_error({wrapper, reason})
+       when wrapper in [:http_streaming_failed, :provider_build_failed],
+       do: unwrap_error(reason)
+
   defp unwrap_error(reason), do: reason
 
   defp error_summary(%ReqLLM.Error.API.Request{} = error) do
-    case ReqLLM.Streaming.Failure.classify(error) do
-      {:api, status, provider_code, retryable} ->
-        fields(
-          :api,
-          status,
-          provider_code,
-          retryable,
-          api_diagnostic(error, status, provider_code)
-        )
-
-      {:transport, transport_reason, retryable} ->
-        fields(:transport, nil, nil, retryable, transport_diagnostic(transport_reason))
-
-      :cancelled ->
-        fields(:cancelled, nil, nil, false, "model request cancelled")
-
-      :unknown ->
-        fields(:unknown, nil, error.provider_code, false, "API request failed")
+    if codex_refresh_rejected?(error) do
+      fields(
+        :credentials,
+        401,
+        "openai_oauth_refresh_rejected",
+        false,
+        "ChatGPT sign-in could not be refreshed; sign in to OpenAI again in Settings, then retry"
+      )
+    else
+      request_error_summary(error)
     end
   end
 
@@ -162,6 +175,43 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
       :unknown ->
         fields(:unknown, nil, nil, false, "model request failed")
+    end
+  end
+
+  # ReqLLM wraps token refresh failures in a request-build exception, without a
+  # structured status. Recognize only its fixed prefix; never publish provider text.
+  defp codex_refresh_rejected?(%ReqLLM.Error.API.Request{reason: reason})
+       when is_binary(reason) do
+    Enum.any?(["streaming", "websocket"], fn transport ->
+      prefix =
+        "Failed to build OpenAI Codex #{transport} request: Invalid parameter: " <>
+          "OpenAI OAuth refresh failed with status 401"
+
+      reason == prefix or String.starts_with?(reason, prefix <> ":")
+    end)
+  end
+
+  defp codex_refresh_rejected?(_reason), do: false
+
+  defp request_error_summary(error) do
+    case ReqLLM.Streaming.Failure.classify(error) do
+      {:api, status, provider_code, retryable} ->
+        fields(
+          :api,
+          status,
+          provider_code,
+          retryable,
+          api_diagnostic(error, status, provider_code)
+        )
+
+      {:transport, transport_reason, retryable} ->
+        fields(:transport, nil, nil, retryable, transport_diagnostic(transport_reason))
+
+      :cancelled ->
+        fields(:cancelled, nil, nil, false, "model request cancelled")
+
+      :unknown ->
+        fields(:unknown, nil, error.provider_code, false, "API request failed")
     end
   end
 
@@ -208,7 +258,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     if code in ~w(upstream_timeout server_is_overloaded overloaded rate_limit_exceeded
                   insufficient_quota invalid_api_key invalid_request_error model_not_found
                   context_length_exceeded content_policy_violation content_filter
-                  policy_violation safety_violation request_blocked) do
+                  policy_violation safety_violation request_blocked openai_oauth_refresh_rejected) do
       "provider_code=#{code}"
     else
       "provider_code=redacted"

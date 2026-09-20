@@ -515,6 +515,18 @@ defmodule Ouroboros.Web.Live.CellsTest do
       end
     end
 
+    test "a rejected ChatGPT refresh requests sign-in rather than claiming no credential exists" do
+      detail =
+        "model call failed: category=credentials status=401 " <>
+          "provider_code=openai_oauth_refresh_rejected retryable=false diagnostic=SECRET"
+
+      html = paint(%Cell.Status{label: "Agent error", detail: detail, tone: :error})
+      assert html =~ "ChatGPT sign-in could not be refreshed"
+      assert html =~ "Sign in to OpenAI again in Settings"
+      refute html =~ "No model credential"
+      refute html =~ "SECRET"
+    end
+
     test "transport, cancellation and unknown stream errors keep safe distinctions" do
       for {detail, copy} <- [
             {"stream_failed category=transport retryable=true diagnostic=transport failed: timeout",

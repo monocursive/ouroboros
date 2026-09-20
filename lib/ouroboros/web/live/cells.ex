@@ -485,12 +485,15 @@ defmodule Ouroboros.Web.Live.Cells do
              code in ~w(upstream_timeout server_is_overloaded overloaded rate_limit_exceeded
                       insufficient_quota invalid_api_key invalid_request_error model_not_found
                       context_length_exceeded content_policy_violation content_filter
-                      policy_violation safety_violation request_blocked redacted),
+                      policy_violation safety_violation request_blocked openai_oauth_refresh_rejected redacted),
            do: code,
            else: "redacted"
 
       message =
         cond do
+          code == "openai_oauth_refresh_rejected" ->
+            "Your ChatGPT sign-in could not be refreshed. Sign in to OpenAI again in Settings, then retry."
+
           category == "credentials" ->
             "No model credential was reported. Check the provider connection in Settings."
 

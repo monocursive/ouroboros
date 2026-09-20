@@ -1685,7 +1685,8 @@ environment, and nothing in this file reaches the spawn env.
 - Extract to `$XDG_CACHE_HOME/ouroboros/releases/<version>+<sha8>/`:
   verify sha256 of the embedded bytes, unpack to `.tmp-<pid>`, rename
   atomically, `chmod +x` bin. Concurrent first-runs are safe (rename loser
-  just deletes its tmp). GC keeps the newest 2 versions.
+  just deletes its tmp). Automatic cleanup removes abandoned temporary extractions;
+  completed releases remain cached because a running daemon may still use them.
 - Spawn `bin/ouroboros start`; stdout/stderr piped. stderr → bounded ring
   buffer (Logs tab). Child exit → prominent status change + last stderr page.
 - Serialize the complete read/recheck/spawn window with a fully written 0600
@@ -3562,6 +3563,10 @@ rediscovered:
   (`:busy` switches to the durable follow-up queue). Pending reconciliation IDs are kept
   per session across composer closure and session switches. Recent sessions and account
   state load behind this first frame.
+  If OpenAI rejects a refresh token, the failed turn asks for a new sign-in and
+  `account.read` reports the credential as invalid. A private `oauth.json.rejected`
+  file stores only the rejected credential's digest, so that state survives a restart;
+  a fresh sign-in supersedes it without deleting the credential file or other providers.
 - **Every frame is one synchronized update.** `terminal.draw` is wrapped in DEC mode 2026
   (`ESC [ ? 2026 h` … `ESC [ ? 2026 l`), written through the backend's own writer so the
   bracket cannot race the frame's bytes. Ratatui hides and shows the cursor at the end of
@@ -3863,9 +3868,10 @@ release 0.1.0):
 The warm path does not hash the payload: the cache is keyed by the digest the
 build recorded, so recognising an extracted release is a directory lookup rather
 than a pass over eighteen megabytes of the binary. Reuse restamps the directory,
-so the GC's "newest two" means most recently *started*, not most recently
-unpacked — otherwise the release a daemon is running out of ages out from under
-it after two upgrades.
+but a timestamp cannot establish whether a daemon still uses it. Automatic cleanup
+therefore retains completed releases and removes only abandoned temporary
+extractions. The cache may grow across builds; completed releases must only be
+removed when no runtime is using them.
 
 - **No publishing lane.** `ouro` must be built on the exact OS/arch it runs on,
   because ERTS is not cross-compiled; that constraint is the same one the forge
@@ -3916,10 +3922,11 @@ it after two upgrades.
    → tarball → `cargo build --features embed` → the binary run on a scratch
    `XDG_DATA_HOME`/`XDG_CACHE_HOME`, extracting, spawning `bin/ouroboros start`,
    publishing `gateway.json`, answering `hello` and `runtime.status`, surviving
-   `ouro attach`, and stopping through `runtime.shutdown`. Collection was proven
-   the same way: three releases through one cache, the third start collecting the
-   first. The SSH-tunnel half of the gate is still untested — no server has been
-   attached to over a real tunnel.
+   `ouro attach`, and stopping through `runtime.shutdown`. Automatic collection now
+   removes only abandoned temporary extractions. Completed releases are retained:
+   a daemon can still be running from the first release after several newer starts,
+   so a recency limit cannot safely evict it. The SSH-tunnel half of the gate is
+   still untested — no server has been attached to over a real tunnel.
 
 Rough sizing: S1 ≈ 1.5–2k LOC (heavy on tests), S2 ≈ 1k, S3 ≈ 2–3k Rust,
 S4 ≈ 1.5–2k mixed (includes greenfield CI across four targets). Each slice is
