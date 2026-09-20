@@ -250,42 +250,39 @@ test("the whole setup: host key, a masked password, review, progress, finish", a
   await expect(page.locator("[data-ouro-secret]")).toHaveCount(0);
   expect(await page.content()).not.toContain(password);
 
-  await page.locator('button[phx-click="approve"]').click();
-
   // 5. Progress. A polite live region carries each step change.
   const live = page.locator("#ouro-deploy-live");
   await expect(live).toHaveAttribute("aria-live", "polite");
 
   // Every sentence the region took, not whichever one it happened to hold when this polled:
-  // the steps go past in under a second, and "it said something at the end" is not the
-  // claim. A screen reader hears each of these.
-  const announced = await page.evaluate(
-    () =>
-      new Promise(resolve => {
-        const region = document.getElementById("ouro-deploy-live");
-        const seen = [];
-        // The sentence is the region's first text node; a visually-hidden counter beside it
-        // is what makes two identical sentences two announcements rather than one silent
-        // no-op, and it is not part of what is said.
-        const said = () => {
-          const first = region.querySelector("span") || region.firstChild;
-          return ((first && first.textContent) || "").trim();
-        };
-        const observer = new MutationObserver(() => {
-          const text = said();
-          if (text && seen[seen.length - 1] !== text) seen.push(text);
-          if (/^Done\.$/.test(text)) {
-            observer.disconnect();
-            resolve(seen);
-          }
-        });
-        observer.observe(region, { childList: true, characterData: true, subtree: true });
-        setTimeout(() => {
+  // observe before approving because the fixture can finish before click() returns.
+  await page.evaluate(() => {
+    window.ouroDeployAnnouncements = new Promise(resolve => {
+      const region = document.getElementById("ouro-deploy-live");
+      const seen = [];
+      // Each announcement gets a new span id, so repeated sentences still change the DOM.
+      const said = () => {
+        const first = region.querySelector("span") || region.firstChild;
+        return ((first && first.textContent) || "").trim();
+      };
+      const observer = new MutationObserver(() => {
+        const text = said();
+        if (text && seen[seen.length - 1] !== text) seen.push(text);
+        if (/^Done\.$/.test(text)) {
           observer.disconnect();
           resolve(seen);
-        }, 20000);
-      })
-  );
+        }
+      });
+      observer.observe(region, { childList: true, characterData: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        resolve(seen);
+      }, 20000);
+    });
+  });
+
+  await page.locator('button[phx-click="approve"]').click();
+  const announced = await page.evaluate(() => window.ouroDeployAnnouncements);
 
   expect(announced).toContain("Install Ouroboros: done.");
   expect(announced).toContain("Connect: done.");

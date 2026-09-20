@@ -599,7 +599,9 @@ defmodule Ouroboros.Fleet.Deployment.Worker do
   report. `:progressed` is the other side of the same question — a program that has sent a
   step, a log line or a challenge is one that is doing the work.
   """
-  @spec probe(pid()) :: {:ok, :pending | :progressed | :done | {:refused, String.t()}}
+  @spec probe(pid()) ::
+          {:ok, :pending | :progressed | :done | {:refused, String.t()}}
+          | {:error, :worker_timeout | :worker_unavailable}
   def probe(pid), do: call(pid, :probe)
 
   defp probe_of(%{done?: true, last_error: %{"reason" => reason}})

@@ -1423,10 +1423,11 @@ impl Watch {
                     model: Some(named), ..
                 }) => model = Some(named),
                 PresentationEvent::Plan(_) => plan_sequence = Some(event.sequence),
-                PresentationEvent::TurnStarted { turn_id, at } => {
-                    if let Some(at) = at {
-                        turn_starts.insert(turn_id.unwrap_or_default(), at);
-                    }
+                PresentationEvent::TurnStarted {
+                    turn_id,
+                    at: Some(at),
+                } => {
+                    turn_starts.insert(turn_id.unwrap_or_default(), at);
                 }
                 PresentationEvent::TurnEnded { turn_id, .. } => {
                     if let Some(turn_id) = turn_id {
