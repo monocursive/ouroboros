@@ -3414,10 +3414,22 @@ mod tests {
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        let mut file = std::fs::File::create(&path).expect("writing a fake client");
-        file.write_all(body.as_bytes())
-            .expect("writing a fake client");
-        drop(file);
+        // A sibling test can fork while the executable is open for writing and keep
+        // that descriptor until exec, making Linux refuse it with ETXTBSY. The writer
+        // owns that descriptor in a separate process and closes it before we continue.
+        let mut writer = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\"", "write-fake-client"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("a fake-client writer");
+        writer
+            .stdin
+            .take()
+            .expect("the writer's stdin")
+            .write_all(body.as_bytes())
+            .expect("the fake client is delivered");
+        assert!(writer.wait().expect("the writer exits").success());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("making the fake client executable");
         path
@@ -3453,7 +3465,7 @@ mod tests {
             .expect_err("more than 4 MiB is a refusal");
         assert!(
             matches!(error, RunError::TooMuchOutput),
-            "half a JSON document parses as missing fields, so it is never accepted"
+            "half a JSON document parses as missing fields, so it is never accepted: {error:?}"
         );
     }
 

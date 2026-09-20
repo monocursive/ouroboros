@@ -1743,11 +1743,15 @@ fn a_start_that_the_manager_refuses_keeps_the_credentials_and_says_so() {
         .iter()
         .any(|member| member.machine == "vps"));
     // The unit really was written, and inside the rig's own contained HOME.
-    let agents = lab.rig.home.join("Library/LaunchAgents");
+    let (units, suffix) = if cfg!(target_os = "linux") {
+        (lab.rig.home.join(".config/systemd/user"), ".service")
+    } else {
+        (lab.rig.home.join("Library/LaunchAgents"), ".plist")
+    };
     assert!(
-        listing(&agents).iter().any(|name| name.ends_with(".plist")),
+        listing(&units).iter().any(|name| name.ends_with(suffix)),
         "the service step installed a unit: {:?}",
-        listing(&agents)
+        listing(&units)
     );
 
     // The local setup path must have the same nonzero exit and resumable journal
@@ -2051,7 +2055,14 @@ fn this_binary_leaves_the_accounts_own_directories_untouched() {
         return;
     }
     let home = dirs::home_dir().expect("a home directory");
-    let watched = [home.join("Library/LaunchAgents"), home.join(".ssh")];
+    let units = if cfg!(target_os = "linux") {
+        dirs::config_dir()
+            .expect("a config directory")
+            .join("systemd/user")
+    } else {
+        home.join("Library/LaunchAgents")
+    };
+    let watched = [units, home.join(".ssh")];
     let before: Vec<BTreeSet<String>> = watched.iter().map(|path| listing(path)).collect();
     let known_hosts = home.join(".ssh/known_hosts");
     let known_before = fs::read(&known_hosts).ok();
