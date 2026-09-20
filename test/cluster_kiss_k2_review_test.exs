@@ -28,14 +28,16 @@ defmodule Ouroboros.ClusterKissK2ReviewTest do
     previous = Map.new(@variables, &{&1, System.get_env(&1)})
     Enum.each(@variables, &System.delete_env/1)
 
-    on_exit(fn ->
-      Enum.each(previous, fn
-        {name, nil} -> System.delete_env(name)
-        {name, value} -> System.put_env(name, value)
-      end)
-    end)
+    on_exit(fn -> restore_environment(previous) end)
 
-    :ok
+    {:ok, cluster_environment: previous}
+  end
+
+  defp restore_environment(previous) do
+    Enum.each(previous, fn
+      {name, nil} -> System.delete_env(name)
+      {name, value} -> System.put_env(name, value)
+    end)
   end
 
   describe "FINDING 1 (fixed): the dial path answers a member's port from the host's own text" do
@@ -325,7 +327,7 @@ defmodule Ouroboros.ClusterKissK2ReviewTest do
   end
 
   describe "FINDING 3 (half fixed): `forget_session_owner` resolves a machine by three sources" do
-    setup do
+    setup %{cluster_environment: cluster_environment} do
       data_dir =
         Path.join(
           System.tmp_dir!(),
@@ -344,6 +346,11 @@ defmodule Ouroboros.ClusterKissK2ReviewTest do
           do: Application.delete_env(:ouroboros, :data_dir),
           else: Application.put_env(:ouroboros, :data_dir, previous)
 
+        # The monitor outlives this test and otherwise retains the fake offline owner,
+        # making later session lists fail closed. Restore both storage and fleet identity
+        # before reloading the original evidence; the outer environment cleanup runs later.
+        restore_environment(cluster_environment)
+        restart_monitor!()
         File.rm_rf(data_dir)
       end)
 
@@ -520,27 +527,9 @@ defmodule Ouroboros.ClusterKissK2ReviewTest do
     end
 
     defp restart_monitor! do
-      previous = Process.whereis(Cluster.Monitor)
-      Process.exit(previous, :kill)
-
-      wait_until(fn ->
-        case Process.whereis(Cluster.Monitor) do
-          monitor when is_pid(monitor) -> monitor != previous
-          _absent -> false
-        end
-      end)
-    end
-
-    defp wait_until(fun, attempts \\ 300)
-    defp wait_until(_fun, 0), do: flunk("condition did not become true")
-
-    defp wait_until(fun, attempts) do
-      if fun.() do
-        :ok
-      else
-        Process.sleep(20)
-        wait_until(fun, attempts - 1)
-      end
+      :ok = Supervisor.terminate_child(Cluster, Cluster.Monitor)
+      {:ok, _monitor} = Supervisor.restart_child(Cluster, Cluster.Monitor)
+      :ok
     end
   end
 end
