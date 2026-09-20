@@ -19,15 +19,14 @@ defmodule Ouroboros.Wasm.EpochTest do
   setup do
     name = String.to_atom("wasm_epoch_reg_#{System.unique_integer([:positive])}")
 
-    {:ok, pid} =
-      Registry.start_link(
-        name: name,
-        storage:
-          {Ouroboros.Storage.ETS,
-           table: String.to_atom("wasm_epoch_rollouts_#{System.unique_integer([:positive])}")}
-      )
+    start_supervised!(
+      {Registry,
+       name: name,
+       storage:
+         {Ouroboros.Storage.ETS,
+          table: String.to_atom("wasm_epoch_rollouts_#{System.unique_integer([:positive])}")}}
+    )
 
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
     %{registry: name}
   end
 

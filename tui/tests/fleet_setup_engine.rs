@@ -36,7 +36,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -944,6 +944,14 @@ impl Frames {
     }
 }
 
+impl Drop for Frames {
+    fn drop(&mut self) {
+        drop(self.input.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// §8's frame order for a whole `add`: `state running` first, every `challenge`
 /// followed by `state waiting`, `done` last, and exit 0 only on `completed`.
 #[test]
@@ -1275,10 +1283,10 @@ fn a_dry_run_add_over_frames_resolves_the_plan_and_deploys_nothing() {
 
 /// §6's resume: a step recorded `ok` is not repeated.
 ///
-/// The operation is killed the moment its journal records `install ok`, and rerun with
-/// the same `--operation`. What has to hold is that the binary is not installed a second
-/// time — the release it was approved with is restored from the journal and re-verified
-/// by checksum — and that the rest of the operation completes.
+/// The operation is killed at the review challenge, after `install ok` and before the
+/// target can join, and rerun with the same `--operation`. The binary must not be installed
+/// a second time — its release is restored from the journal and re-verified by checksum —
+/// and the rest of the operation completes.
 #[test]
 fn an_interrupted_add_resumes_without_installing_the_binary_again() {
     let lab = Lab::new("kr2res", "studio");
@@ -1306,47 +1314,39 @@ fn an_interrupted_add_resumes_without_installing_the_binary_again() {
         .expect("an --install-path flag");
     args[install + 1] = ".local/bin/ouro".into();
     args.extend(["--no-service".into(), "--yes".into(), "--json".into()]);
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     // The loopback origin override, by its real name. Getting this wrong is not a
     // failing test — it is a test that quietly downloads the *official* release and
     // then asserts against it, which is how this one first "failed".
     let origin = (ouro::update::release::BASE_URL_ENV, server.base.as_str());
 
-    // ---- run it once, and kill it as soon as `install` is recorded `ok`
-    let mut child = lab
-        .command(&lab.issuer, lab.target_ports, &borrowed, &[origin])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the built ouro binary");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let mut interrupted = false;
-    while Instant::now() < deadline {
-        if Journal::read(&lab.issuer, operation)
-            .ok()
-            .flatten()
-            .is_some_and(|record| record.completed("vps", "install"))
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            interrupted = true;
-            break;
-        }
-        if child.try_wait().expect("a waitable child").is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
+    // The pending review holds the operation after installation and before joining.
+    // Polling the journal cannot hold that boundary: a busy runner can observe
+    // `install ok` only after the operation has already sent the credentials.
+    let mut first_argv: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| !matches!(*arg, "--yes" | "--json"))
+        .collect();
+    first_argv.push("--frames");
+    let mut frames =
+        Frames::start(lab.command(&lab.issuer, lab.target_ports, &first_argv, &[origin]));
+    let opened = frames.until("challenge");
+    let waiting = frames.next();
+    frames
+        .child
+        .kill()
+        .expect("interrupting the pending review");
+    let (_, code, stderr) = frames.finish();
+    assert_eq!(code, None, "the operation was killed:\n{stderr}");
+    assert_eq!(
+        opened.last().expect("a challenge")["kind"],
+        json!("review"),
+        "the host is trusted, so installation reaches the review: {opened:?}"
+    );
+    assert_eq!(waiting, json!({"event": "state", "state": "waiting"}));
     assert!(
-        interrupted,
-        "the operation never recorded `install ok`: {:?}",
-        Journal::read(&lab.issuer, operation)
-            .ok()
-            .flatten()
-            .map(|record| steps(&record))
+        lab.journal(operation).completed("vps", "install"),
+        "the pending review follows `install ok`"
     );
 
     let installed = lab.rig.home.join(".local/bin/ouro");
