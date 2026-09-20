@@ -382,10 +382,18 @@ mod tests {
 
     #[tokio::test]
     async fn output_beyond_the_cap_is_not_buffered() {
-        let line = run("yes abcdefgh | head -c 100000 | tr -d '\\n'", &Value::Null)
-            .await
-            .expect("the command runs");
+        // The byte cap is independent of the production deadline, which the hang test
+        // covers. A finite shell builtin avoids scheduling an unrelated pipeline.
+        let output = "x".repeat(MAX_BYTES * 2);
+        let command = format!("printf '%s' '{output}'");
+        let line = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            execute(&command, &Value::Null),
+        )
+        .await
+        .expect("the finite producer finishes")
+        .expect("the command runs");
 
-        assert!(line.len() <= MAX_BYTES, "{}", line.len());
+        assert_eq!(line, &output[..MAX_BYTES]);
     }
 }

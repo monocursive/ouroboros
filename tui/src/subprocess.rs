@@ -149,11 +149,17 @@ mod tests {
 
     #[test]
     fn excessive_output_is_bounded() {
+        // Emit a finite amount above 1 MiB. An 8 KiB Linux pipe can need over
+        // 128 polling intervals to deliver it, especially under parallel CI load.
+        let error = output(
+            shell("exec dd if=/dev/zero bs=65536 count=17 2>/dev/null"),
+            Duration::from_secs(10),
+            || false,
+        )
+        .unwrap_err();
         assert!(
-            output(shell("yes output"), Duration::from_secs(2), || false)
-                .unwrap_err()
-                .to_string()
-                .contains("1 MiB")
+            error.to_string().contains("1 MiB"),
+            "expected the output cap, got: {error:#}"
         );
     }
 }
