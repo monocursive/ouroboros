@@ -152,6 +152,10 @@ check() {
   session "$log" fixture-session-delegating :idle 1 :native || bad=1
   session "$log" fixture-session-native :idle 1 :native || bad=1
   session "$log" fixture-session-read-only :idle 0 :native || bad=1
+  expect "$log" '^fleet profile schema 1: rejected as unsupported_profile_schema$' \
+    'the retired fleet profile is refused before fixture-only setup' || bad=1
+  expect "$log" '^historical session-owner checkpoint: unchanged$' \
+    'the historical session-owner checkpoint remains byte-for-byte unchanged' || bad=1
   expect "$log" '^cluster session owners \(interactive\): \{:ok, MapSet\.new\(\["ouro-fixture@fixture\.invalid"\]\)\}' \
     'the interactive session owner, out of the checkpoint that carries the retired :coding atom' || bad=1
   expect "$log" '^rollout registry: .*\{"artifact-fixture-beam", "Elixir\.Ouroboros\.Capability\.FixtureProbe", :live\}' \

@@ -5,9 +5,10 @@
 #     FIXTURE_WORKSPACES_ROOT=/abs/fixture-workspaces \
 #       mix run --no-start scripts/fixture/boot_check.exs
 #
-# It writes nothing to the directory beyond what booting a node writes (the ownership
-# marker and, if audit is on, its own reconciliation), so run it against a copy. Every
-# count it prints is read back out of a store that had to decode its checkpoint to answer.
+# It installs a current fleet profile after asserting the old profile is refused, then
+# writes only what booting a node writes (the ownership marker and audit reconciliation).
+# Run it against a fresh copy. Every count it prints is read back out of a store that
+# had to decode its checkpoint to answer.
 #
 # The reduced tree runs this same script against the same copy. A store that stops the
 # boot fails here loudly; a store that quarantines a record shows up as a smaller count.
@@ -55,6 +56,26 @@ File.mkdir_p!(workspaces_root)
 Application.put_env(:ouroboros, :workspace_allowed_roots, [workspaces_root])
 # Preserve the frozen corpus while checking historical decoding, regardless of today's date.
 Application.put_env(:ouroboros, :terminal_retention_ms, nil)
+
+# Fleet schema 1 was deliberately retired after this corpus was captured. Prove that
+# refusal first, then give this scratch copy a current profile so the historical
+# session-owner checkpoint is still exercised through the real monitor at boot.
+# This is fixture setup, not a product migration; the archive and checkpoint stay frozen.
+profile_path = leaf.("fleet/profile.json")
+%{"schema" => 1} = legacy_profile = profile_path |> File.read!() |> Jason.decode!()
+{:error, :unsupported_profile_schema} = Ouroboros.Cluster.Monitor.fleet_profile_storage()
+IO.puts("fleet profile schema 1: rejected as unsupported_profile_schema")
+
+owner_checkpoints =
+  leaf.("fleet/cluster-directory/checkpoints/*.term")
+  |> Path.wildcard()
+  |> Map.new(fn path -> {path, File.read!(path)} end)
+
+unless map_size(owner_checkpoints) > 0, do: raise("missing historical session-owner checkpoint")
+
+profile = legacy_profile |> Map.put("schema", 2) |> Map.drop(["roster_revision", "tombstones"])
+File.write!(profile_path, Jason.encode!(profile))
+{:ok, _fleet_id, _profile, _opts} = Ouroboros.Cluster.Monitor.fleet_profile_storage()
 
 started_at = System.monotonic_time(:millisecond)
 
@@ -175,6 +196,12 @@ end)
 safe.("cluster session owners (interactive)", fn ->
   Ouroboros.Cluster.session_owners(:interactive)
 end)
+
+for {path, bytes} <- owner_checkpoints do
+  unless File.read!(path) == bytes, do: raise("boot rewrote historical session-owner checkpoint")
+end
+
+IO.puts("historical session-owner checkpoint: unchanged")
 
 safe.("cluster session owners (coding)", fn -> Ouroboros.Cluster.session_owners(:coding) end)
 

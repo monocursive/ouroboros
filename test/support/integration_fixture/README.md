@@ -40,7 +40,7 @@ names are opaque. What each store held when it was written:
 | `policy-promotion/`, `policy/evidence.ndjson` | `Control.PolicyPromotion`, `Control.PolicyEvidence` | `Bash(mix test *)` promoted on `bash`; 1 evidence row | as written |
 | `capabilities/`, `signing-journal/`, `forge-epochs/` | `Rollout.Registry`, `Signing.Journal`, `Upgrade.Epoch` | 2 rollouts (lane B, lane W), 2 refusals, watermark 3 | as written; wire-encoded, so the lane-B module reads back as a string |
 | `coding/`, `teams/`, `orchestration/`, `control/`, `upgrades/`, `release-journal/` | the deleted planes | one record each | never opened |
-| `audit/`, `mirrors/`, `fleet/profile.json` | `Audit.Store`, `Workspace.Mirrors`, the fleet profile | 2 streams over 17 segments; a bare repository with a real bundle; JSON | as written; no atom in any of them |
+| `audit/`, `mirrors/`, `fleet/profile.json` | `Audit.Store`, `Workspace.Mirrors`, the fleet profile | 2 streams over 17 segments; a bare repository with a real bundle; JSON | audit/mirror bytes unchanged; profile replaced only in the scratch copy as described below; no atom in any of them |
 
 The full file-by-file map, the provenance of every shape, and the five defects the fixture
 found in `dev` itself are in the record this directory was cut from
@@ -63,6 +63,13 @@ else it builds a debug one), extracts the tarball under `_build/boot-gate/`, and
 environment — the one the record was taken in, and the one where the helper is required
 exactly as it is on a packaged node. It fails on any `BOOT: FAILED` and on any count that
 differs from the block below. `make test` runs it.
+
+The captured fleet profile uses schema 1, which the later fleet simplification
+intentionally refuses. Before starting the application, the check script asserts that
+refusal, then writes a schema-2 profile into that boot's scratch copy. This is fixture
+setup, not a product migration. The archive remains checksum-pinned, and the original
+session-owner checkpoint must both load the recorded owner and remain byte-for-byte
+unchanged. This keeps the historical checkpoint proof without weakening fleet validation.
 
 **Every boot runs under a node name of the gate's own**, `boot-gate-<mode>-<n>@<host>`,
 never the `nonode@nohost` that wrote the directory. `Session.Recovery` adopts only records
@@ -98,7 +105,9 @@ interactive sessions   4   fixture-session-claude      :idle  events 0  provider
                            fixture-session-delegating  :idle  events 1  provider :native
                            fixture-session-native      :idle  events 1  provider :native  turns 1
                            fixture-session-read-only   :idle  events 0  provider :native
+fleet profile schema 1                rejected as unsupported_profile_schema
 cluster session owners (interactive)   {:ok, MapSet.new(["ouro-fixture@fixture.invalid"])}
+historical session-owner checkpoint   unchanged
 rollout registry       2   artifact-fixture-beam  "Elixir.Ouroboros.Capability.FixtureProbe"  :live
                            artifact-fixture-wasm  "wasm/counter"                               :live
 forge epoch watermark      {:ok, 3}
