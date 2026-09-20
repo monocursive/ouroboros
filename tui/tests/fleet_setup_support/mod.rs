@@ -103,8 +103,8 @@ pub struct Sshd {
     /// without this the missing-binary path would install into their real home
     /// directory. Verified to take effect on OpenSSH 10.3 on this machine.
     ///
-    /// The config also turns `PerSourcePenalties` off. OpenSSH 9.8 and later penalise a
-    /// source address that opens connections and does not authenticate, and
+    /// The config also turns `PerSourcePenalties` off where supported. OpenSSH 9.8 and
+    /// later penalise a source address that opens connections and does not authenticate, and
     /// `ssh-keyscan` never authenticates — it opens one connection per key type and
     /// hangs up. Every client here is 127.0.0.1, so a rig that scans its own server
     /// twice in quick succession gets its second scan dropped and the test reports "did
@@ -171,13 +171,37 @@ impl Sshd {
                  UsePAM no\n\
                  StrictModes no\n\
                  SetEnv HOME={home}\n\
-                 PerSourcePenalties no\n\
                  LogLevel VERBOSE\n",
                 authorized = dir.join("authorized_keys").display(),
                 home = home.display(),
             ),
         )
         .expect("an sshd config");
+
+        // Older OpenSSH has no per-source penalty setting and rejects the keyword.
+        // Ask the actual daemon which options it knows instead of guessing its version.
+        let effective = Command::new("/usr/sbin/sshd")
+            .arg("-T")
+            .arg("-f")
+            .arg(&config)
+            .output()
+            .expect("checking the sshd config");
+        assert!(
+            effective.status.success(),
+            "sshd config for {label} failed: {}",
+            String::from_utf8_lossy(&effective.stderr)
+        );
+        if String::from_utf8_lossy(&effective.stdout)
+            .lines()
+            .any(|line| line.starts_with("persourcepenalties "))
+        {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&config)
+                .expect("the sshd config")
+                .write_all(b"PerSourcePenalties no\n")
+                .expect("disabling per-source penalties for loopback tests");
+        }
 
         let log = fs::File::create(dir.join("sshd.log")).expect("an sshd log");
         let errors = log.try_clone().expect("a cloned log handle");
