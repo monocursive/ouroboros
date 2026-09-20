@@ -8,20 +8,11 @@
 //! and a fact the runtime did not report is `None` and is not drawn — a footer that
 //! guessed a model name would be worse than a footer with no model on it.
 //!
-//! ## The transcript accessors this codes against
-//!
-//! A7 is specified against `Watch::model()`, `Watch::queue_len()` and
-//! `Watch::active_turn_elapsed()`, which arrive with the transcript slice (A2) that also
-//! stops dropping `run_started`, `queue_changed`, and the turn terminators. Until that
-//! branch lands, [`TranscriptFacts::read`] derives the same three from the event window
-//! the `Watch` already holds, in one function, so adopting the real accessors is a body
-//! swap rather than a sweep of the call sites.
-
 use serde_json::{json, Value};
 
-use crate::model::{Capabilities, EventType, Plane, SessionInfo, SessionUsage};
+use crate::model::{Capabilities, Plane, SessionInfo, SessionUsage};
 use crate::ui::notify::Activity;
-use crate::ui::transcript::{Entry, Watch};
+use crate::ui::transcript::Watch;
 
 use super::{App, Connection, Tab};
 
@@ -50,8 +41,7 @@ pub struct SessionFacts {
     pub plan: bool,
     pub capabilities: Capabilities,
     pub usage: Option<SessionUsage>,
-    /// Whether a turn is running. The runtime's own status, not an inference from the
-    /// transcript: `idle` is the one value that means "nothing is happening".
+    /// Whether the open session has a turn in flight, shared with its interrupt action.
     pub working: bool,
     /// How long the running turn has been running, from its `turn_started` timestamp.
     pub elapsed_ms: Option<u64>,
@@ -62,8 +52,7 @@ pub struct SessionFacts {
     pub approvals: usize,
 }
 
-/// The three transcript-derived numbers, behind the one function that will become the
-/// `Watch` accessors.
+/// Cached transcript facts used by the footer and status-line command.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TranscriptFacts {
     pub queued: Option<u64>,
@@ -71,181 +60,14 @@ pub struct TranscriptFacts {
 }
 
 impl TranscriptFacts {
-    /// Walks the retained window newest-first for the last `queue_changed` and for a
-    /// `turn_started` with no terminator after it.
-    ///
-    /// `now_ms` is passed in rather than read here so the arithmetic is testable without
-    /// a clock. It is compared against the *runtime's* timestamp, so a client whose clock
-    /// disagrees with the session's owner reports an elapsed time that is off by the
-    /// skew — the honest alternative, measuring from when this client first saw the turn,
-    /// reports nothing at all for a session opened mid-turn.
     pub fn read(watch: &Watch, now_ms: i64) -> Self {
-        let entries = watch.entries();
-        let mut queued = None;
-        let mut elapsed_ms = None;
-        let mut turn_ended: Option<&str> = None;
-
-        for entry in entries.iter().rev() {
-            let Entry::Event(event) = entry else {
-                continue;
-            };
-
-            match &event.kind {
-                EventType::QueueChanged if queued.is_none() => {
-                    queued = event
-                        .payload
-                        .get("queued_turns")
-                        .and_then(Value::as_u64)
-                        .or_else(|| event.payload.get("queued").and_then(Value::as_u64));
-                }
-                // Newest-first, so a terminator is always met before the start it ends.
-                // Kept per turn id: a queued follow-up can start while an earlier turn's
-                // terminator is still the newest one in the window.
-                EventType::TurnCompleted | EventType::TurnFailed | EventType::TurnInterrupted
-                    if turn_ended.is_none() =>
-                {
-                    turn_ended = Some(event.turn_id.as_deref().unwrap_or(""));
-                }
-                EventType::TurnStarted if elapsed_ms.is_none() => {
-                    let ended = turn_ended.is_some_and(|turn| {
-                        turn.is_empty() || Some(turn) == event.turn_id.as_deref()
-                    });
-
-                    if !ended {
-                        elapsed_ms = epoch_ms(&event.timestamp)
-                            .map(|started| now_ms.saturating_sub(started).max(0) as u64);
-                    }
-                }
-                _other => {}
-            }
-
-            if queued.is_some() && elapsed_ms.is_some() {
-                break;
-            }
+        Self {
+            queued: watch.queue_depth().map(|depth| depth as u64),
+            elapsed_ms: watch
+                .active_turn_elapsed_at(now_ms)
+                .map(|elapsed| elapsed as u64),
         }
-
-        Self { queued, elapsed_ms }
     }
-}
-
-/// The transcript's `run_started.model`, newest first.
-///
-/// Becomes `Watch::model()` with A2; the shape of the payload is the harness's
-/// (`%{"model" => …}` on `run_started` for every CLI mapper that reports one).
-pub fn transcript_model(watch: &Watch) -> Option<String> {
-    watch.entries().iter().rev().find_map(|entry| {
-        let Entry::Event(event) = entry else {
-            return None;
-        };
-
-        if event.kind != EventType::RunStarted {
-            return None;
-        }
-
-        event
-            .payload
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_string)
-    })
-}
-
-/// `2026-01-01T00:00:00.000000Z` → milliseconds since the Unix epoch.
-///
-/// Written out rather than pulled in: this client has no date crate, and the one format
-/// it has to read is the one `Gateway.Wire` emits for a `DateTime` — ISO-8601 with an
-/// optional fraction and an optional offset. Anything else answers `None`, which renders
-/// as no elapsed time rather than as a wrong one.
-pub fn epoch_ms(timestamp: &str) -> Option<i64> {
-    let timestamp = timestamp.trim();
-    let (date, rest) = timestamp.split_once(['T', 't', ' '])?;
-
-    let mut date = date.split('-');
-    let year: i64 = date.next()?.parse().ok()?;
-    let month: i64 = date.next()?.parse().ok()?;
-    let day: i64 = date.next()?.parse().ok()?;
-
-    if date.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-
-    // Where the time ends and the zone begins. `-` cannot be searched for from the left:
-    // it never appears in the time itself, but neither does anything else that would
-    // stop `find` from hitting the fraction's digits first.
-    let (time, offset) = match rest.find(['Z', 'z', '+']) {
-        Some(index) => rest.split_at(index),
-        None => match rest.rfind('-') {
-            Some(index) => rest.split_at(index),
-            None => (rest, ""),
-        },
-    };
-
-    let mut clock = time.split(':');
-    let hour: i64 = clock.next()?.parse().ok()?;
-    let minute: i64 = clock.next()?.parse().ok()?;
-    let seconds = clock.next().unwrap_or("0");
-
-    if clock.next().is_some() || hour > 23 || minute > 59 {
-        return None;
-    }
-
-    let (second, fraction) = match seconds.split_once('.') {
-        Some((second, fraction)) => (second, fraction),
-        None => (seconds, ""),
-    };
-
-    let second: i64 = second.parse().ok()?;
-    if second > 60 {
-        return None;
-    }
-
-    let millis: i64 = format!("{fraction:0<3}")
-        .get(..3)
-        .and_then(|millis| millis.parse().ok())
-        .unwrap_or(0);
-
-    let offset_seconds = offset_seconds(offset)?;
-
-    Some(
-        (days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second
-            - offset_seconds)
-            * 1_000
-            + millis,
-    )
-}
-
-fn offset_seconds(offset: &str) -> Option<i64> {
-    let offset = offset.trim();
-
-    if offset.is_empty() || offset.eq_ignore_ascii_case("z") {
-        return Some(0);
-    }
-
-    let sign = match offset.chars().next()? {
-        '+' => 1,
-        '-' => -1,
-        _unreadable => return None,
-    };
-
-    let mut parts = offset[1..].split(':');
-    let hours: i64 = parts.next()?.parse().ok()?;
-    let minutes: i64 = parts.next().unwrap_or("0").parse().ok()?;
-
-    Some(sign * (hours * 3_600 + minutes * 60))
-}
-
-/// Howard Hinnant's `days_from_civil`, the standard branch-free civil-to-serial-date
-/// conversion. Proleptic Gregorian, valid well beyond any timestamp a session carries.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-
-    era * 146_097 + day_of_era - 719_468
 }
 
 impl App {
@@ -284,11 +106,11 @@ impl App {
             provider: info.and_then(|info| info.provider.clone()),
             workspace: info.and_then(|info| info.workspace.clone()),
             node: info.and_then(|info| info.node.clone()),
-            working: status != "idle" && status != "unknown",
+            working: self.turn_running(),
             status,
             model: info
                 .and_then(|info| info.model.clone())
-                .or_else(|| watch.and_then(transcript_model)),
+                .or_else(|| watch.and_then(Watch::model).map(str::to_string)),
             approval_mode: info.and_then(|info| info.approval_mode.clone()),
             sandbox_mode: info.and_then(|info| info.sandbox_mode.clone()),
             plan: watch
@@ -316,10 +138,7 @@ impl App {
 
     /// The same answer for facts a caller has already gathered.
     ///
-    /// Reading them costs a walk of the retained event window, and the tick and the frame
-    /// each want them three or four times over. Gathered once and passed down rather than
-    /// cached: a cache would answer with the previous tick's numbers, and these are the
-    /// numbers the footer is claiming are current.
+    /// The tick and the frame share one snapshot of the current session facts.
     pub(super) fn activity_of(&self, facts: Option<&SessionFacts>) -> Activity {
         // Unanswered, not pending: an approval whose answer is already in flight — a
         // keypress or the auto-approve robot — is not waiting on the person this title
@@ -430,44 +249,5 @@ impl App {
     pub fn interrupt_offered_for(&self, facts: Option<&SessionFacts>) -> bool {
         self.tab == Tab::Sessions
             && facts.is_some_and(|facts| facts.working && facts.capabilities.interrupt.offered())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn wire_timestamps_become_epoch_milliseconds() {
-        assert_eq!(epoch_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(epoch_ms("1970-01-01T00:00:01.500Z"), Some(1_500));
-        assert_eq!(
-            epoch_ms("2026-01-01T00:00:00.000000Z"),
-            Some(1_767_225_600_000)
-        );
-        // The fraction is truncated to milliseconds, not rounded up into the next second.
-        assert_eq!(
-            epoch_ms("2026-01-01T00:00:00.999999Z"),
-            Some(1_767_225_600_999)
-        );
-        // Offsets, both directions, and a bare local time.
-        assert_eq!(
-            epoch_ms("2026-01-01T01:00:00+01:00"),
-            epoch_ms("2026-01-01T00:00:00Z")
-        );
-        assert_eq!(
-            epoch_ms("2025-12-31T19:00:00-05:00"),
-            epoch_ms("2026-01-01T00:00:00Z")
-        );
-        assert_eq!(epoch_ms("2026-01-01T00:00:00"), Some(1_767_225_600_000));
-    }
-
-    #[test]
-    fn an_unreadable_timestamp_is_no_elapsed_time_rather_than_a_wrong_one() {
-        assert_eq!(epoch_ms(""), None);
-        assert_eq!(epoch_ms("yesterday"), None);
-        assert_eq!(epoch_ms("2026-01-01"), None);
-        assert_eq!(epoch_ms("2026-13-01T00:00:00Z"), None);
-        assert_eq!(epoch_ms("2026-01-01T25:00:00Z"), None);
     }
 }

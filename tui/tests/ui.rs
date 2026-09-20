@@ -5128,6 +5128,25 @@ fn ctrl_c_clears_the_prompt_before_it_interrupts() {
 }
 
 #[test]
+fn ctrl_c_on_runtime_tabs_does_not_interrupt_the_background_session() {
+    for tab in [Tab::Dashboard, Tab::Upgrade, Tab::Logs] {
+        let mut app = with_open_session();
+        app.tab = tab;
+        app.drain();
+
+        app.apply(ctrl('c'));
+
+        assert!(app.quit_armed(), "{tab:?}");
+        assert!(
+            app.drain()
+                .iter()
+                .all(|call| call.method != "interactive.interrupt"),
+            "{tab:?}: Ctrl-C must not interrupt a hidden conversation"
+        );
+    }
+}
+
+#[test]
 fn readline_kills_reach_the_open_composer() {
     let mut app = with_open_session();
     type_text(&mut app, "hello world");

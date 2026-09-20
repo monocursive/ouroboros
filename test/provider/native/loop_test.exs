@@ -996,6 +996,112 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       assert Enum.at(second.messages, -2).role == :tool
     end
 
+    test "steering during a tool-free response is answered before the turn completes", context do
+      test = self()
+
+      response =
+        Stream.map([{:text, "original answer"}], fn chunk ->
+          send(test, :model_waiting)
+          receive do: (:release_model -> chunk)
+        end)
+
+      {loop, agent} = start_loop(context, [response, [{:text, "answer after steering"}]])
+      pid = run(loop)
+      assert_receive :model_waiting, 30_000
+      send(pid, {:native_steer, "include the validation result"})
+      send(pid, :release_model)
+
+      events = collect()
+      assert length(all(events, :turn_completed)) == 1
+      refute find(events, :turn_failed)
+      [_first, second] = NativeModelScript.requests(agent)
+
+      assert List.last(second.messages) == %{
+               role: :user,
+               content: "include the validation result"
+             }
+
+      assert Enum.at(second.messages, -2).content == "original answer"
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert state.steer == []
+      assert List.last(state.messages).content == "answer after steering"
+    end
+
+    test "completion drains steering accepted at the intake boundary and reopens controls",
+         context do
+      test = self()
+      boundary_seen = make_ref()
+
+      {loop, agent} =
+        start_loop(context, [[{:text, "original answer"}], [{:text, "updated answer"}]],
+          control_boundary: fn action ->
+            send(test, {:control_boundary, action})
+
+            # The session accepted this steer after the final model drain but before
+            # replying to the close request. Its reply must fence this delivery.
+            if action == :close and not Process.get(boundary_seen, false) do
+              Process.put(boundary_seen, true)
+              send(self(), {:native_steer, "include the validation result"})
+            end
+
+            :ok
+          end
+        )
+
+      run(loop)
+      events = collect()
+
+      assert_receive {:control_boundary, :close}, 1_000
+      assert_receive {:control_boundary, :open}, 1_000
+      assert_receive {:control_boundary, :close}, 1_000
+      refute_receive {:control_boundary, :open}
+      assert length(all(events, :turn_completed)) == 1
+      refute find(events, :turn_failed)
+      [_first, second] = NativeModelScript.requests(agent)
+
+      assert List.last(second.messages) == %{
+               role: :user,
+               content: "include the validation result"
+             }
+
+      assert Enum.at(second.messages, -2).content == "original answer"
+      assert_receive {:finished, {:ok, state}}, 1_000
+      assert state.steer == []
+      assert List.last(state.messages).content == "updated answer"
+    end
+
+    test "steering on the final round is checkpointed and fails instead of silently completing",
+         context do
+      test = self()
+
+      response =
+        Stream.map([{:text, "original answer"}], fn chunk ->
+          send(test, :model_waiting)
+          receive do: (:release_model -> chunk)
+        end)
+
+      {loop, agent} =
+        start_loop(context, [response],
+          max_iterations: 1,
+          checkpoint: fn snapshot ->
+            send(test, {:checkpointed, snapshot.messages})
+            :ok
+          end
+        )
+
+      pid = run(loop)
+      assert_receive :model_waiting, 30_000
+      send(pid, {:native_steer, "include the validation result"})
+      send(pid, :release_model)
+
+      events = collect()
+      assert find(events, :turn_failed).payload["reason"] == "max_iterations"
+      refute find(events, :turn_completed)
+      assert NativeModelScript.call_count(agent) == 1
+      assert_receive {:checkpointed, messages}, 1_000
+      assert List.last(messages) == %{role: :user, content: "include the validation result"}
+    end
+
     test "an interrupt stops after the current tool and emits turn_interrupted", context do
       script = [
         [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo one"}}}],

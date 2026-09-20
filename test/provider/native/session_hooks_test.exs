@@ -167,6 +167,46 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
 
   @simple [[{:text, "hello"}, {:finish, :stop}]]
 
+  test "settlement refuses controls that the finished loop cannot consume", context do
+    record = Path.join(context.root, "stop.json")
+    release = Path.join(context.root, "release-stop")
+
+    hook =
+      script(context.root, "stop.sh", """
+      cat > "#{record}"
+      while [ ! -f "#{release}" ]; do sleep 0.01; done
+      """)
+
+    user_hooks(context.root, """
+    [[hooks]]
+    event = "Stop"
+    command = "#{hook}"
+    timeout_ms = 10000
+    """)
+
+    %{handle: handle} = open(context, @simple)
+    assert :ok = Session.send(handle, TurnRequest.new!("finish"), "turn-1")
+    assert JSON.decode!(eventually(record))["hook_event_name"] == "Stop"
+
+    try do
+      assert {:error, :no_active_turn} =
+               Session.steer(handle, TurnRequest.new!("too late"), "late-steer")
+
+      assert {:error, :not_active} = Session.interrupt(handle, "turn-1")
+      assert {:ok, _info} = Session.info(handle)
+    after
+      File.write!(release, "continue")
+    end
+
+    assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+    assert {:ok, %{status: :completed}} = Session.await(handle, "turn-1", 5_000)
+    assert {:ok, events} = Session.replay(handle)
+    refute Enum.any?(events, &(&1.request_id == "late-steer"))
+
+    assert :ok = Session.send(handle, TurnRequest.new!("next turn"), "turn-2")
+    assert %{turn_id: "turn-2"} = await_event(:turn_completed)
+  end
+
   # ---------------------------------------------------------------- SessionStart
 
   describe "SessionStart" do

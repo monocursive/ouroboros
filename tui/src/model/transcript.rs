@@ -430,11 +430,15 @@ impl PresentationEvent {
                     detail: optional_detail(&event.payload).unwrap_or_default(),
                 }
             }
-            EventType::QueueChanged => Self::QueueChanged {
-                queued: count(
-                    &event.payload,
-                    &["queued_turns", "queued", "length", "count"],
-                ),
+            EventType::QueueChanged => match count(
+                &event.payload,
+                &["queued_turns", "queued", "length", "count"],
+            ) {
+                Some(queued) => Self::QueueChanged { queued },
+                None => Self::ProviderNote {
+                    kind: "queue_changed".to_string(),
+                    detail: optional_detail(&event.payload).unwrap_or_default(),
+                },
             },
             EventType::TurnQueued => Self::Lifecycle {
                 marker: Lifecycle::TurnQueued,
@@ -705,7 +709,7 @@ fn number(value: &Value, keys: &[&str]) -> Option<u64> {
     })
 }
 
-fn count(value: &Value, keys: &[&str]) -> usize {
+fn count(value: &Value, keys: &[&str]) -> Option<usize> {
     number(value, keys)
         .map(|count| count.min(usize::MAX as u64) as usize)
         .or_else(|| {
@@ -713,7 +717,6 @@ fn count(value: &Value, keys: &[&str]) -> usize {
                 .and_then(Value::as_array)
                 .map(Vec::len)
         })
-        .unwrap_or(0)
 }
 
 /// A lifecycle line's detail, preferring the words a provider chose over its bookkeeping.

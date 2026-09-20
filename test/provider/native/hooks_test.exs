@@ -1016,7 +1016,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
   # ================================================================ [checks]
 
   describe "[checks]" do
-    test "a failing check's tail is retained for the next turn", context do
+    test "a failing check fails the turn and retains its tail for the next turn", context do
       trust(context.workspace)
 
       project_toml(context.workspace, """
@@ -1044,7 +1044,11 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert last.content =~ "Project checks failed"
       assert last.content =~ "typecheck"
       assert last.content =~ "undefined function"
-      assert List.last(events).type == :turn_completed
+      terminal = List.last(events)
+      assert terminal.type == :turn_failed
+      assert terminal.payload["reason"] == "checks_failed"
+      assert terminal.payload["error"] =~ "undefined function"
+      refute Enum.any?(events, &(&1.type == :turn_completed))
 
       requests = agent |> NativeModelScript.requests() |> Enum.reverse()
       assert length(requests) == 2
@@ -1076,6 +1080,33 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
       assert_receive {:finished, {:ok, state}}, 30_000
       refute List.last(state.messages).content =~ "Project checks failed"
+    end
+
+    test "a check that cannot run fails the turn with the infrastructure reason", context do
+      trust(context.workspace)
+      project_toml(context.workspace, "[checks]\ntypecheck = \"true\"\n")
+      previous = Application.get_env(:ouroboros, :native_sandbox)
+      Application.put_env(:ouroboros, :native_sandbox, :none)
+      on_exit(fn -> restore(:native_sandbox, previous) end)
+
+      script = [
+        [
+          {:tool_call,
+           %{id: "c1", name: "write", input: %{"path" => "lib/b.ex", "content" => "x\n"}}}
+        ],
+        [{:text, "done"}, {:finish, :stop}]
+      ]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+
+      terminal = List.last(events)
+      assert terminal.type == :turn_failed
+      assert terminal.payload["reason"] == "checks_failed"
+      assert terminal.payload["error"] =~ "could not run"
+      assert terminal.payload["error"] =~ ":no_backend"
+      refute Enum.any?(events, &(&1.type == :turn_completed))
     end
 
     test "a turn that changed no file runs no check", context do

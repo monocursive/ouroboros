@@ -8,7 +8,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   its own mailbox for control.
 
       {:native_steer, text}                 injected as a user message at the next
-                                            tool boundary of the running turn
+                                            model or tool boundary of the running turn
       :native_interrupt                     stop after the current tool
       {:native_approval, id, response}      the answer to an `approval_requested`
 
@@ -34,11 +34,10 @@ defmodule Ouroboros.Provider.Native.Loop do
   alternative is discovering the ceiling after a tool call that cannot be answered. If
   the model still emits tool calls, the turn fails by name and those unpaired calls are
   stripped from the checkpointed transcript so a resume remains well-formed. During the
-  final ten calls a transient user message at the end of the request exposes the
+  final ten calls a user message at the end of the request exposes the
   remaining budget, becoming urgent for the final three and naming the last round as
-  tool-free. It is appended to the request and never to `messages`: the system prompt is
-  the cached prefix, and a number that changes every call would miss the cache on every
-  call — ten of a default subagent's twelve. `tool_timeout_ms` caps one tool.
+  tool-free. It stays in `messages` so each request preserves the previous cached prefix.
+  `tool_timeout_ms` caps one tool.
   The doom-loop guard stops a turn on the third identical `(name, input)` call — OpenCode's
   rule, and the cheapest defence against a model that has found a loop it likes. Each
   bound fails the turn by name rather than running out quietly.
@@ -221,6 +220,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     lifecycle_owner: :loop,
     # A 1-arity function replacing `drain_control/1`, or `nil` for the mailbox.
     control_feed: nil,
+    # The session closes control intake before settlement, then reopens it only if a
+    # previously accepted steer continues the loop. Its synchronous reply fences every
+    # steer/interrupt it already sent, so the following mailbox drain cannot miss them.
+    control_boundary: nil,
     # The `.agents/rules` held back for lazy loading, and the ones already injected. A
     # rule enters the conversation once per session, however many matching files are
     # read after it.
@@ -3779,6 +3782,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- control
 
+  defp control_boundary(%{control_boundary: nil} = state, _action), do: state
+
+  defp control_boundary(state, action) do
+    :ok = state.control_boundary.(action)
+    state
+  end
+
   # R1's control seam. A live turn drains its own mailbox, which is a race by nature: a
   # steer arrives whenever the operator sent it. Replay hands the same messages back in the
   # order they were recorded at, so the feed replaces the drain rather than wrapping it —
@@ -3814,11 +3824,24 @@ defmodule Ouroboros.Provider.Native.Loop do
   # ---------------------------------------------------------------- terminals
 
   defp complete(state, iterations) do
-    state = run_checks(state)
+    state = state |> control_boundary(:close) |> drain_control()
 
-    case settle(state, "complete") do
-      {:ok, state} ->
-        emit(state, :turn_completed, %{
+    cond do
+      state.interrupted? ->
+        interrupted(state)
+
+      state.steer != [] ->
+        state |> apply_steer() |> control_boundary(:open) |> iterate(iterations + 1)
+
+      true ->
+        checked_complete(state, iterations)
+    end
+  end
+
+  defp checked_complete(state, iterations) do
+    case run_checks(state) do
+      [] ->
+        finish(state, "complete", :turn_completed, %{
           "status" => "completed",
           "iterations" => iterations,
           "input_tokens" => state.usage.input,
@@ -3826,52 +3849,59 @@ defmodule Ouroboros.Provider.Native.Loop do
           "cost_usd" => rounded_cost(state.usage.cost)
         })
 
+      failures ->
+        message =
+          "Project checks failed after this turn's file changes:\n" <>
+            Enum.join(failures, "\n")
+
+        fail(inject(state, [message], "checks"), injected_body([message]), "checks_failed")
+    end
+  end
+
+  defp interrupted(state),
+    do:
+      finish(%{state | interrupted?: true}, "interrupted", :turn_interrupted, %{
+        "reason" => "interrupted"
+      })
+
+  defp fail(state, message, reason),
+    do:
+      finish(state, "failed:" <> to_string(reason), :turn_failed, %{
+        "error" => message,
+        "reason" => reason
+      })
+
+  # One settlement path owns checkpoint-before-terminal ordering for every outcome.
+  # A checkpoint failure preserves an existing failure's reason and otherwise prevents
+  # either completion or interruption from being acknowledged as durable.
+  defp finish(state, status, type, payload) do
+    state = state |> control_boundary(:close) |> drain_control() |> apply_steer()
+
+    case settle(state, status) do
+      {:ok, state} ->
+        emit(state, type, payload)
         {:ok, state}
 
       {:error, state, reason} ->
-        checkpoint_failed(state, reason)
-    end
-  end
+        checkpoint_error = inspect(reason, limit: 6)
 
-  defp interrupted(state) do
-    state = %{state | interrupted?: true}
+        payload =
+          if type == :turn_failed do
+            Map.merge(payload, %{
+              "error" =>
+                payload["error"] <> "; conversation checkpoint failed: " <> checkpoint_error,
+              "checkpoint_error" => checkpoint_error
+            })
+          else
+            %{
+              "error" => "conversation checkpoint failed: " <> checkpoint_error,
+              "reason" => "checkpoint_error"
+            }
+          end
 
-    case settle(state, "interrupted") do
-      {:ok, state} ->
-        emit(state, :turn_interrupted, %{"reason" => "interrupted"})
-        {:ok, state}
-
-      {:error, state, reason} ->
-        checkpoint_failed(state, reason)
-    end
-  end
-
-  defp fail(state, message, reason) do
-    case settle(state, "failed:" <> to_string(reason)) do
-      {:ok, state} ->
-        emit(state, :turn_failed, %{"error" => message, "reason" => reason})
-        {:ok, state}
-
-      {:error, state, checkpoint_reason} ->
-        emit(state, :turn_failed, %{
-          "error" =>
-            message <>
-              "; conversation checkpoint failed: " <> inspect(checkpoint_reason, limit: 6),
-          "reason" => reason,
-          "checkpoint_error" => inspect(checkpoint_reason, limit: 6)
-        })
-
+        emit(state, :turn_failed, payload)
         {:ok, state}
     end
-  end
-
-  defp checkpoint_failed(state, reason) do
-    emit(state, :turn_failed, %{
-      "error" => "conversation checkpoint failed: #{inspect(reason, limit: 6)}",
-      "reason" => "checkpoint_error"
-    })
-
-    {:ok, state}
   end
 
   # Everything that has to be true before the terminal event reaches a subscriber: the
@@ -3899,29 +3929,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  # `[checks]` — a project-declared typecheck or lint — runs once per turn, and only when
-  # the turn actually changed a file. Its failing tail becomes an ordinary user message,
-  # so the *next* model step reads it: R4's universal fallback, the thing OpenCode now
-  # recommends over an LSP integration, and the one bound that matters is that it never
-  # blocks and never extends the turn.
-  defp run_checks(%{turn_paths: []} = state), do: state
-
-  defp run_checks(state) do
-    case Hooks.run_checks(state.hooks) do
-      [] ->
-        state
-
-      failures ->
-        inject(
-          state,
-          [
-            "Project checks failed after this turn's file changes:\n" <>
-              Enum.join(failures, "\n")
-          ],
-          "checks"
-        )
-    end
-  end
+  # Configured checks run once when a file-changing turn finishes. Failure diagnostics
+  # remain in the checkpoint for the next turn, and prevent a false success event.
+  defp run_checks(%{turn_paths: []}), do: []
+  defp run_checks(state), do: Hooks.run_checks(state.hooks)
 
   defp record_turn_files(%{turn_paths: [], turn_commands: []} = state), do: state
 

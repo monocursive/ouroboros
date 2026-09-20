@@ -195,11 +195,49 @@ defmodule Ouroboros.Provider.Native.ReplayParityTest do
     end
   end
 
+  test "successive tool-free steers replay at their own model response boundaries", context do
+    response = fn text, steer ->
+      Stream.map([{:text, text}, {:finish, :stop}], fn chunk ->
+        if chunk == {:finish, :stop}, do: send(self(), {:native_steer, steer})
+        chunk
+      end)
+    end
+
+    live =
+      run(context, [
+        response.("first answer", "include the validation result"),
+        response.("second answer", "also include the changed files"),
+        [{:text, "final answer"}, {:finish, :stop}]
+      ])
+
+    recorded = records(context)
+    assert Enum.count(recorded, &(&1["kind"] == "model_call")) == 3
+    assert Enum.count(recorded, &(&1["kind"] == "injected")) == 2
+    assert {:ok, %{verified: true} = verdict} = verify(context)
+    assert verdict.turns == 1
+    assert Enum.map(live, & &1.type) == Enum.map(verdict.events, & &1.type)
+    assert Enum.map(live, & &1.payload) == Enum.map(verdict.events, & &1.payload)
+  end
+
+  test "a tool-free interruption replays the model output that preceded it", context do
+    response =
+      Stream.map([{:text, "partial answer"}, {:finish, :stop}], fn chunk ->
+        if chunk == {:finish, :stop}, do: send(self(), :native_interrupt)
+        chunk
+      end)
+
+    live = run(context, [response])
+    assert Enum.any?(live, &(&1.type == :output_text_delta))
+    assert Enum.any?(live, &(&1.type == :turn_interrupted))
+    assert {:ok, %{verified: true} = verdict} = verify(context)
+    assert Enum.map(live, & &1.type) == Enum.map(verdict.events, & &1.type)
+    assert Enum.map(live, & &1.payload) == Enum.map(verdict.events, & &1.payload)
+  end
+
   # ------------------------------------------------------------------ helpers
 
   # A tool call, then a final answer. The steer `run/3` sends is drained at the top of the
-  # first iteration and applied after `run_tools/2` returns, which is the only position a
-  # steer can occupy — and the reason a steer cannot be recorded without a tool call.
+  # first iteration and applied after `run_tools/2` returns.
   defp tool_and_steer_script do
     [
       [

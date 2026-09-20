@@ -578,9 +578,8 @@ defmodule Ouroboros.Provider.Native.Replay do
   # ------------------------------------------------------------------ control (D7)
 
   # The mailbox drain, replaced by the order that actually happened. A steer's position is
-  # fixed by its `seq` relative to the `tool_result` records around it — R1 dropped the
-  # `after_call_id` field precisely because the total order already says this — so a steer
-  # is handed over once the loop has reproduced every tool result recorded before it.
+  # fixed by its `seq` relative to the model and tool results around it. Both must be
+  # reproduced before delivery: several tool-free responses can each receive a steer.
   #
   # An interrupt has no record of its own; what the journal says is that the turn settled
   # `interrupted`, and the last record before the settle is where it stopped. So the
@@ -588,14 +587,17 @@ defmodule Ouroboros.Provider.Native.Replay do
   # which is that same place.
   defp control_feed(turn, collector) do
     total = length(turn.tool_results)
+    total_models = length(turn.calls)
     interrupted? = Map.get(turn.settled, "status") == "interrupted"
 
     fn state ->
       observed = observed_tool_results(collector)
+      observed_models = ReplayModel.consumed_calls()
 
       state =
         Enum.reduce(turn.steers, state, fn steer, state ->
-          if delivered?(collector, steer) or not ready?(steer, turn, observed) do
+          if delivered?(collector, steer) or
+               not ready?(steer, turn, observed, observed_models) do
             state
           else
             deliver(collector, steer)
@@ -603,15 +605,22 @@ defmodule Ouroboros.Provider.Native.Replay do
           end
         end)
 
-      if interrupted? and observed >= total and Enum.empty?(pending(turn, collector)),
-        do: %{state | interrupted?: true},
-        else: state
+      if interrupted? and observed >= total and observed_models >= total_models and
+           Enum.empty?(pending(turn, collector)),
+         do: %{state | interrupted?: true},
+         else: state
     end
   end
 
-  defp ready?(steer, turn, observed) do
+  defp ready?(steer, turn, observed, observed_models) do
     before = Enum.count(turn.tool_results, &(Map.get(&1, "seq") < Map.get(steer, "seq")))
-    observed >= before
+
+    models_before =
+      Enum.count(turn.calls, fn {_call, result} ->
+        Map.get(result, "seq") < Map.get(steer, "seq")
+      end)
+
+    observed >= before and observed_models >= models_before
   end
 
   defp pending(turn, collector),

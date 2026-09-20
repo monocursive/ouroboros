@@ -93,15 +93,44 @@ defmodule Ouroboros.Web.Live.ComposerTest do
       assert state.queued == 0
     end
 
-    test "dividers are not events and do not move the state" do
+    test "history dividers do not change a turn, but an ended stream settles it" do
       mixed = [
         %Entry.Floor{sequence: 4},
         %Entry.Event{event: event(5, :turn_started)},
-        %Entry.Gap{from: 6, to: 7},
-        %Entry.Ended{status: "closed"}
+        %Entry.Gap{from: 6, to: 7}
       ]
 
       assert Composer.turn_state(mixed).running?
+
+      for status <- ~w(closed completed failed cancelled lost) do
+        state = Composer.turn_state(mixed ++ [%Entry.Ended{status: status}])
+        refute state.running?
+        assert state.spoke?
+        assert is_nil(state.turn_id)
+        assert state.failed? == status in ["failed", "lost"]
+      end
+    end
+
+    test "session termination settles a turn even when its terminal event is missing" do
+      for type <- [:session_closed, :session_failed, :session_cancelled] do
+        state = Composer.turn_state(entries([event(1, :turn_started), event(2, type)]))
+        refute state.running?
+        assert state.failed? == (type == :session_failed)
+      end
+    end
+
+    test "session failure does not rewrite a completed turn as failed" do
+      completed = entries([event(1, :turn_started), event(2, :turn_completed)])
+
+      for ending <- [
+            %Entry.Event{event: event(3, :session_failed)},
+            %Entry.Ended{status: "failed"},
+            %Entry.Ended{status: "lost"}
+          ] do
+        state = Composer.turn_state(completed ++ [ending])
+        refute state.running?
+        refute state.failed?
+      end
     end
   end
 
@@ -121,6 +150,26 @@ defmodule Ouroboros.Web.Live.ComposerTest do
       assert Composer.verb(silent, nil) == "interactive.send_message"
       assert Composer.verb(silent, :running) == "interactive.follow_up"
       assert Composer.verb(silent, :awaiting_approval) == "interactive.follow_up"
+    end
+
+    test "send and interrupt use the same activity decision for an incomplete ledger" do
+      silent = Composer.turn_state([])
+
+      for status <- [
+            :starting,
+            :running,
+            :awaiting_approval,
+            :idle,
+            :closed,
+            :failed,
+            :cancelled,
+            :lost,
+            :unknown,
+            nil
+          ] do
+        assert Composer.verb(silent, status) == "interactive.follow_up" ==
+                 Composer.working?(silent, status)
+      end
     end
   end
 

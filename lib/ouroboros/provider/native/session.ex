@@ -828,6 +828,9 @@ defmodule Ouroboros.Provider.Native.Session do
       is_nil(state.loop) ->
         {:reply, {:error, :no_active_turn}, state}
 
+      not Map.get(state.loop, :controls_open?, true) ->
+        {:reply, {:error, :no_active_turn}, state}
+
       map_size(state.steering) >= @max_steering_requests ->
         {:reply, {:error, :steering_capacity}, state}
 
@@ -879,6 +882,9 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   def handle_call({:interrupt, _turn_id}, _from, %{loop: nil} = state),
+    do: {:reply, {:error, :not_active}, state}
+
+  def handle_call({:interrupt, _turn_id}, _from, %{loop: %{controls_open?: false}} = state),
     do: {:reply, {:error, :not_active}, state}
 
   def handle_call({:interrupt, requested}, _from, state) do
@@ -1294,6 +1300,21 @@ defmodule Ouroboros.Provider.Native.Session do
     emit(state, %{type: :session_cancelled, payload: %{"reason" => "killed"}})
     {:reply, :ok, %{state | status: :cancelled, finished_at: DateTime.utc_now()}}
   end
+
+  # Closing intake and then draining the loop's mailbox gives settlement one atomic
+  # boundary: earlier accepted controls precede this reply, and later ones are refused.
+  # A steer that resumes inference reopens intake before the next model call.
+  def handle_call(
+        {:control_boundary, turn_id, action},
+        {pid, _},
+        %{loop: %{turn_id: turn_id, pid: pid}} = state
+      )
+      when action in [:open, :close] do
+    {:reply, :ok, %{state | loop: Map.put(state.loop, :controls_open?, action == :open)}}
+  end
+
+  def handle_call({:control_boundary, _turn_id, _action}, _from, state),
+    do: {:reply, {:error, :stale_producer}, state}
 
   # Only the current loop can submit a producer event. Its synchronous call bounds
   # outstanding submissions to one; a full buffer holds that caller without blocking
@@ -2077,6 +2098,9 @@ defmodule Ouroboros.Provider.Native.Session do
         end,
         checkpoint: fn snapshot ->
           GenServer.call(owner, {:checkpoint, turn_id, snapshot}, @checkpoint_timeout)
+        end,
+        control_boundary: fn action ->
+          GenServer.call(owner, {:control_boundary, turn_id, action}, @checkpoint_timeout)
         end,
         model_module: state.model_module,
         model_spec: turn_context.model_spec,

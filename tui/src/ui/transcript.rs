@@ -833,7 +833,7 @@ pub struct Watch {
 #[derive(Debug, Default)]
 struct Derived {
     usage: UsageTotals,
-    queued: usize,
+    queued: Option<usize>,
     model: Option<String>,
     plan: Option<PlanUpdate>,
     /// Sequence of the `plan_updated` `plan` was parsed from, so an unchanged plan is not
@@ -924,6 +924,11 @@ impl Watch {
     /// How many turns the runtime is holding behind the running one, from the newest
     /// `queue_changed`.
     pub fn queue_len(&self) -> usize {
+        self.queue_depth().unwrap_or(0)
+    }
+
+    /// The reported queue depth, distinguishing an unreported queue from an empty one.
+    pub fn queue_depth(&self) -> Option<usize> {
         self.derived.queued
     }
 
@@ -932,17 +937,22 @@ impl Watch {
     /// `None` when no turn is open, when the stream has ended, or when the runtime's
     /// timestamp could not be read — never a zero standing in for "do not know".
     pub fn active_turn_elapsed(&self) -> Option<i64> {
-        if self.ended.is_some() {
-            return None;
-        }
-
-        let started = self.derived.active_turn_started?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?
             .as_millis() as i64;
 
-        (now >= started).then_some(now - started)
+        self.active_turn_elapsed_at(now)
+    }
+
+    /// Elapsed time against a caller's clock, using the same cached active turn.
+    pub fn active_turn_elapsed_at(&self, now_ms: i64) -> Option<i64> {
+        if self.ended.is_some() {
+            return None;
+        }
+
+        let started = self.derived.active_turn_started?;
+        Some(now_ms.saturating_sub(started).max(0))
     }
 
     /// The newest plan the provider published, whatever dialect it arrived in.
@@ -1400,7 +1410,7 @@ impl Watch {
             complete: self.floor == 0,
             ..UsageTotals::default()
         };
-        let mut queued = 0usize;
+        let mut queued = None;
         let mut model: Option<String> = None;
         let mut plan_sequence: Option<u64> = None;
         let mut turn_starts: BTreeMap<String, i64> = BTreeMap::new();
@@ -1408,14 +1418,14 @@ impl Watch {
         for event in self.events.values() {
             match PresentationEvent::from_event(event) {
                 PresentationEvent::Usage(report) => usage.fold(&report),
-                PresentationEvent::QueueChanged { queued: depth } => queued = depth,
+                PresentationEvent::QueueChanged { queued: depth } => queued = Some(depth),
                 PresentationEvent::RunStarted(RunStart {
                     model: Some(named), ..
                 }) => model = Some(named),
                 PresentationEvent::Plan(_) => plan_sequence = Some(event.sequence),
                 PresentationEvent::TurnStarted { turn_id, at } => {
-                    if let (Some(turn_id), Some(at)) = (turn_id, at) {
-                        turn_starts.insert(turn_id, at);
+                    if let Some(at) = at {
+                        turn_starts.insert(turn_id.unwrap_or_default(), at);
                     }
                 }
                 PresentationEvent::TurnEnded { turn_id, .. } => {
@@ -2051,5 +2061,22 @@ mod tests {
         .expect("an event")]);
 
         assert_eq!(watch.active_turn_elapsed(), None);
+    }
+
+    #[test]
+    fn a_legacy_turn_without_an_id_has_one_timer_until_it_ends() {
+        let mut watch = watch();
+        let mut started = typed(1, "turn_started", json!({}));
+        started.turn_id = None;
+        let at = crate::model::transcript::epoch_millis(&started.timestamp).unwrap();
+        watch.absorb(vec![started]);
+
+        assert_eq!(watch.active_turn_elapsed_at(at + 1_500), Some(1_500));
+
+        let mut completed = typed(2, "turn_completed", json!({}));
+        completed.turn_id = None;
+        watch.absorb(vec![completed]);
+
+        assert_eq!(watch.active_turn_elapsed_at(at + 2_000), None);
     }
 }

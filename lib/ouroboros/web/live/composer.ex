@@ -126,8 +126,20 @@ defmodule Ouroboros.Web.Live.Composer do
       entries,
       %{running?: false, spoke?: false, failed?: false, turn_id: nil, queued: 0},
       fn
-        %Entry.Event{event: event}, state -> absorb(state, event)
-        _divider, state -> state
+        %Entry.Event{event: event}, state ->
+          absorb(state, event)
+
+        %Entry.Ended{status: status}, state ->
+          %{
+            state
+            | running?: false,
+              spoke?: true,
+              failed?: state.failed? or (state.running? and status in ["failed", "lost"]),
+              turn_id: nil
+          }
+
+        _divider, state ->
+          state
       end
     )
   end
@@ -152,8 +164,17 @@ defmodule Ouroboros.Web.Live.Composer do
       :queue_changed ->
         %{state | queued: queued_of(event)}
 
-      :session_closed ->
-        %{state | running?: false, spoke?: true, failed?: false, turn_id: nil}
+      :session_failed ->
+        %{
+          state
+          | running?: false,
+            spoke?: true,
+            failed?: state.failed? or state.running?,
+            turn_id: nil
+        }
+
+      type when type in [:session_closed, :session_cancelled] ->
+        %{state | running?: false, spoke?: true, turn_id: nil}
 
       :session_idle ->
         %{state | running?: false, spoke?: true, turn_id: nil}
@@ -188,11 +209,9 @@ defmodule Ouroboros.Web.Live.Composer do
   turn boundary.
   """
   @spec verb(turn(), atom()) :: String.t()
-  def verb(%{spoke?: true, running?: true}, _status), do: "interactive.follow_up"
-  def verb(%{spoke?: true}, _status), do: "interactive.send_message"
-  def verb(_silent, :idle), do: "interactive.send_message"
-  def verb(_silent, nil), do: "interactive.send_message"
-  def verb(_silent, _busy), do: "interactive.follow_up"
+  def verb(turn, status) do
+    if working?(turn, status), do: "interactive.follow_up", else: "interactive.send_message"
+  end
 
   @doc "Whether an interrupt control belongs on screen, by the same two-source rule."
   @spec working?(turn(), atom()) :: boolean()

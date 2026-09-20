@@ -352,6 +352,100 @@ fn a_working_session_carries_an_elapsed_timer_and_offers_esc_interrupt() {
 }
 
 #[test]
+fn terminal_sessions_do_not_claim_work_or_offer_interrupt() {
+    for status in ["closed", "completed", "failed", "cancelled", "lost"] {
+        let mut app = opened(status, options(native_capabilities()), usage(), Vec::new());
+        let row = footer(&render(&mut app, 160, 24));
+
+        assert!(!app.turn_running(), "{status}");
+        assert!(!app.session_facts().unwrap().working, "{status}");
+        assert_eq!(app.activity(), Activity::Idle, "{status}");
+        assert!(!row.contains("Working"), "{status}: {row}");
+        assert!(!row.contains("interrupt"), "{status}: {row}");
+    }
+}
+
+#[test]
+fn completed_turns_do_not_leave_an_elapsed_timer_in_the_statusline() {
+    let mut events = vec![
+        event(1, "turn_started", json!({}), "2026-01-01T00:00:00Z"),
+        event(2, "turn_completed", json!({}), "2026-01-01T00:00:01Z"),
+        event(3, "turn_started", json!({}), "2026-01-01T00:00:02Z"),
+        event(4, "turn_completed", json!({}), "2026-01-01T00:00:03Z"),
+    ];
+    events[2]["turn_id"] = json!("turn-2");
+    events[3]["turn_id"] = json!("turn-2");
+    let app = opened("idle", options(native_capabilities()), usage(), events);
+
+    assert_eq!(app.session_facts().unwrap().elapsed_ms, None);
+    assert_eq!(app.statusline_payload()["elapsed_ms"], Value::Null);
+}
+
+#[test]
+fn an_ended_stream_has_no_elapsed_timer() {
+    let mut app = opened(
+        "running",
+        options(native_capabilities()),
+        usage(),
+        vec![event(1, "turn_started", json!({}), "2026-01-01T00:00:00Z")],
+    );
+    app.sessions
+        .watches
+        .get_mut(&(Plane::Interactive, "session-a7".into()))
+        .unwrap()
+        .end("closed".into());
+
+    assert_eq!(app.session_facts().unwrap().elapsed_ms, None);
+}
+
+#[test]
+fn an_unreported_queue_is_distinct_from_a_reported_empty_queue() {
+    let app = opened("idle", options(native_capabilities()), usage(), Vec::new());
+    assert_eq!(app.session_facts().unwrap().queued, None);
+
+    let app = opened(
+        "idle",
+        options(native_capabilities()),
+        usage(),
+        vec![event(
+            1,
+            "queue_changed",
+            json!({"queued_turns": 0}),
+            "2026-01-01T00:00:00Z",
+        )],
+    );
+    assert_eq!(app.session_facts().unwrap().queued, Some(0));
+}
+
+#[test]
+fn an_unreadable_queue_report_does_not_invent_an_empty_queue() {
+    let unreadable = event(2, "queue_changed", json!({}), "2026-01-01T00:00:01Z");
+    let app = opened(
+        "idle",
+        options(native_capabilities()),
+        usage(),
+        vec![unreadable.clone()],
+    );
+    assert_eq!(app.session_facts().unwrap().queued, None);
+
+    let app = opened(
+        "idle",
+        options(native_capabilities()),
+        usage(),
+        vec![
+            event(
+                1,
+                "queue_changed",
+                json!({"queued_turns": 2}),
+                "2026-01-01T00:00:00Z",
+            ),
+            unreadable,
+        ],
+    );
+    assert_eq!(app.session_facts().unwrap().queued, Some(2));
+}
+
+#[test]
 fn a_managed_session_never_advertises_a_key_it_cannot_honour() {
     let mut app = opened(
         "running",

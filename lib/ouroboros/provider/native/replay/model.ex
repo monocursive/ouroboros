@@ -60,7 +60,7 @@ defmodule Ouroboros.Provider.Native.Replay.Model do
   """
   @spec install([call()], module()) :: :ok
   def install(calls, delegate) when is_list(calls) and is_atom(delegate) do
-    Process.put(@script, %{calls: calls, delegate: delegate})
+    Process.put(@script, %{calls: calls, delegate: delegate, consumed: 0})
     Process.delete(@divergence)
     :ok
   end
@@ -75,6 +75,14 @@ defmodule Ouroboros.Provider.Native.Replay.Model do
   @doc "The divergence this module refused on, or `nil`."
   @spec divergence() :: map() | nil
   def divergence, do: Process.get(@divergence)
+
+  @doc false
+  def consumed_calls do
+    case Process.get(@script) do
+      %{consumed: count} -> count
+      _unarmed -> 0
+    end
+  end
 
   @doc """
   The `at` of the `model_result` record currently being streamed.
@@ -96,7 +104,7 @@ defmodule Ouroboros.Provider.Native.Replay.Model do
   def stream(request, _opts) do
     case Process.get(@script) do
       %{calls: [call | rest], delegate: delegate} = script ->
-        Process.put(@script, %{script | calls: rest})
+        Process.put(@script, %{script | calls: rest, consumed: script.consumed + 1})
         answer(call, request, delegate)
 
       %{calls: [], delegate: _delegate} ->

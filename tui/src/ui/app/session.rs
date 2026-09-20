@@ -2978,7 +2978,7 @@ impl App {
             return;
         }
 
-        if self.turn_running() {
+        if self.tab == Tab::Sessions && self.turn_running() {
             self.interrupt_turn();
             self.disarm_quit();
             return;
