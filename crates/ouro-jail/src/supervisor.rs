@@ -1528,16 +1528,28 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     record.lifetime.tree_empty = tree.tree_empty;
     record.lifetime.verified_at = tree.verified_at.map(rfc3339_utc);
     record.lifetime.verification_scope = Some(tree.verification_scope);
-    record.lifetime.integrity = tree.integrity;
+    // J3-none begin: the last nonsettled phase without a confirmed exec is prepared (§8.1)
+    let prepared_integrity = std::mem::replace(&mut record.lifetime.integrity, tree.integrity);
+    // J3-none end
 
     let settled = tree.tree_empty == Some(true) && record.lifetime.integrity == "verified";
     // §13.2: "If tree death itself is unknown, retain the last nonsettled phase
     // and update its outcome/coverage/error as unknown."
+    // J3-none begin: `enforced` is the phase after a confirmed target exec (§8.1)
     let phase = if settled {
         Phase::Settled
-    } else {
+    } else if record.exec_observed {
         Phase::Enforced
+    } else {
+        // Without a confirmed exec the last nonsettled phase is `prepared`.
+        // Its integrity stays the prepared one unless a loss was detected:
+        // an unknown tree end does not unmake the verified boundary.
+        if record.lifetime.integrity == "pending" {
+            record.lifetime.integrity = prepared_integrity;
+        }
+        Phase::Prepared
     };
+    // J3-none end
     // §14.2: default managed scratch is removed only after verified tree
     // death. Until then the child could still be writing to it, and after an
     // unverified one something may still be holding it, so it is retained and

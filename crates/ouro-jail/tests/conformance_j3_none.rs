@@ -1488,3 +1488,135 @@ fn a13_an_oom_kill_in_the_leaf_ends_the_tree() {
         .unwrap();
     assert_eq!(mem["hit"], true);
 }
+
+// ===========================================================================
+// §8.1: `enforced` is the phase after a confirmed exec
+// ===========================================================================
+
+/// Observation off, the target is this jail's own binary blocked on its
+/// stdin, so its image never differs from the supervisor's and its exec is
+/// never independently confirmed. It moves itself out of the leaf and is
+/// killed by a signal. The run ends unsettled without a confirmed exec, so
+/// every receipt it leaves, mid-run and final, is `prepared`, never
+/// `enforced`, with the loss recorded.
+#[test]
+fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
+    use std::process::{Command, Stdio};
+    if !live() {
+        return;
+    }
+    let validators = validators();
+    let root = common::private_tempdir();
+    for name in ["data", "config", "workspace"] {
+        std::fs::create_dir(root.path().join(name)).unwrap();
+    }
+    for name in ["data", "config"] {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            root.path().join(name),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    let destination = Destination::new("unconfirmed");
+    let receipt_copy = root.path().join("receipt.json");
+    let jail = harness::jail_path();
+    let target: Vec<OsString> = vec![
+        jail.clone().into_os_string(),
+        "__launch".into(),
+        "--release-fd".into(),
+        "0".into(),
+        "--error-fd".into(),
+        "2".into(),
+        "--".into(),
+        "/bin/true".into(),
+    ];
+    let mut supervisor = Command::new(&jail)
+        .args([
+            "run",
+            "--profile",
+            "none",
+            "--observe",
+            "off",
+            "--workspace",
+        ])
+        .arg(root.path().join("workspace"))
+        .arg("--receipt")
+        .arg(&receipt_copy)
+        .arg("--")
+        .args(&target)
+        .env("OURO_DATA_DIR", root.path().join("data"))
+        .env("OURO_CONFIG_DIR", root.path().join("config"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("the jail starts");
+    let current = || -> Value {
+        std::fs::read_to_string(&receipt_copy)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null)
+    };
+    wait_for("a prepared receipt", || current()["phase"] == "prepared");
+    let prepared = current();
+    let (leaf, _) = leaf_of(&prepared);
+    let pid = prepared["lifetime"]["native"]["details"]["launcher_pid"]
+        .as_i64()
+        .unwrap() as i32;
+    let expected: Vec<Vec<u8>> = target
+        .iter()
+        .map(|part| part.as_encoded_bytes().to_vec())
+        .collect();
+    wait_for("the target image", || {
+        std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|raw| {
+            raw.split(|byte| *byte == 0)
+                .filter(|part| !part.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>()
+                == expected
+        })
+    });
+    let target_fd = identity::pidfd_open(pid).expect("the live target");
+    std::fs::write(destination.path.join("cgroup.procs"), pid.to_string())
+        .expect("the target is moved out");
+    wait_for("the loss in the receipt", || {
+        current()["lifetime"]["integrity"] == "lost"
+    });
+    let mid_run = current();
+    validators["jail-receipt"]
+        .validate(&mid_run)
+        .unwrap_or_else(|error| panic!("{error}\n{mid_run:#}"));
+    assert_eq!(mid_run["phase"], "prepared", "{mid_run:#}");
+    assert_eq!(mid_run["exec_observed"], false);
+
+    identity::pidfd_send_signal(target_fd.as_raw_fd(), libc::SIGKILL).unwrap();
+    drop(supervisor.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = supervisor.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the jail did not end");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(status.code(), Some(1));
+    let last = current();
+    validators["jail-receipt"]
+        .validate(&last)
+        .unwrap_or_else(|error| panic!("{error}\n{last:#}"));
+    assert_unprotected(&last);
+    assert_eq!(last["phase"], "prepared", "{last:#}");
+    assert_eq!(last["exec_observed"], false);
+    assert_eq!(last["outcome"]["kind"], "unknown");
+    assert_eq!(last["lifetime"]["integrity"], "lost");
+    assert_eq!(last["lifetime"]["tree_empty"], Value::Null);
+    assert!(
+        last["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["code"] == "tree_unknown")
+    );
+    remove_cgroup(&leaf);
+}
