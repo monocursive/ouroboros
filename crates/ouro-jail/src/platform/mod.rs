@@ -20,7 +20,9 @@ use crate::trace::SharedTrace;
 
 pub mod macos;
 
-#[cfg(target_os = "linux")]
+// `linux` is declared unconditionally: its `bpf` and `seccomp` modules describe
+// a Linux ABI without calling into it, so they build and test on every host;
+// everything that touches Linux is gated inside `platform/linux/mod.rs`.
 pub mod linux;
 
 /// Who this binary is running as, for the receipt's `platform` group.

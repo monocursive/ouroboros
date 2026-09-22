@@ -20,6 +20,9 @@ use ouro_jail::records::{
 use ouro_jail::supervisor::{self, Context, DoctorReport, ExplainReport, GcReport};
 
 fn main() -> ExitCode {
+    if let Some(code) = internal_subcommand() {
+        return code;
+    }
     let cli = Cli::parse();
     let context = match build_context() {
         Ok(context) => context,
@@ -393,4 +396,33 @@ fn scope_name(capability: &Capability) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// internal subcommands
+// ---------------------------------------------------------------------------
+
+/// The hidden subcommands the Linux platform reaches by re-executing this
+/// binary: the inside launcher (`__launch`, jail-v1 §8.1 step 3), the doctor
+/// probes' inside helper (`__probe-inside`, §14.1) and the seccomp table
+/// printer kept as conformance evidence (`__seccomp-table`, §9.2). They take
+/// no policy input and grant nothing the caller lacks; `None` means an
+/// ordinary invocation that clap parses.
+fn internal_subcommand() -> Option<ExitCode> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let first = args.get(1)?;
+    match first.to_str()? {
+        #[cfg(target_os = "linux")]
+        "__launch" => ouro_jail::platform::linux::launch::launch_main(&args[2..]),
+        #[cfg(target_os = "linux")]
+        "__probe-inside" => ouro_jail::platform::linux::probe::probe_inside_main(&args[2..]),
+        "__seccomp-table" => {
+            print!(
+                "{}",
+                ouro_jail::platform::linux::seccomp::tool_baseline_table()
+            );
+            Some(ExitCode::SUCCESS)
+        }
+        _ => None,
+    }
 }
