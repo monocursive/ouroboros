@@ -1657,3 +1657,97 @@ fn c01_a_source_that_changes_under_the_copy_refuses_rather_than_tearing() {
     assert_eq!(error.remediation, Remediation::Retry);
     assert!(error.message.contains("changed while"), "{}", error.message);
 }
+
+// ---------------------------------------------------------------------------
+// Inspection output: `explain` and `doctor --launch` (§12, §14.1)
+// ---------------------------------------------------------------------------
+
+/// A launch profile with one good, one missing and one special source, all
+/// beneath the fixture's own directories, whose paths must never be printed.
+fn inspection_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let good = fixture.credential("good.json", b"fixture-secret-inspect");
+    let fifo = fixture.creds.join("fifo");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture.launch(
+        "inspect",
+        &format!(
+            "name = \"inspect\"\njail = \"agent\"\nstate_var = \"I_HOME\"\n\
+             [credentials.good]\nsource = \"{}\"\ndest = \"good.json\"\nmode = \"copy_rw\"\n\
+             [credentials.missing]\nsource = \"{}\"\ndest = \"missing.json\"\nmode = \"copy_rw\"\n\
+             [credentials.pipe]\nsource = \"{}\"\ndest = \"conf/pipe\"\nmode = \"bind_ro\"\n",
+            good.display(),
+            fixture.creds.join("absent.json").display(),
+            fifo.display()
+        ),
+    );
+    fixture
+}
+
+fn jail_binary(fixture: &Fixture, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_ouro-jail"))
+        .args(args)
+        .current_dir(&fixture.workspace)
+        .env("OURO_CONFIG_DIR", &fixture.config)
+        .env("OURO_DATA_DIR", &fixture.data)
+        .env("HOME", fixture.root.join("home"))
+        .output()
+        .unwrap()
+}
+
+fn assert_no_private_path(fixture: &Fixture, label: &str, text: &str) {
+    for private in [
+        fixture.creds.to_string_lossy().into_owned(),
+        fixture.root.join("home").to_string_lossy().into_owned(),
+        "fixture-secret-inspect".to_owned(),
+    ] {
+        assert!(
+            !text.contains(&private),
+            "{label} prints {private}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn explain_prints_credentials_by_id_mode_and_dest_never_by_source() {
+    let fixture = inspection_fixture();
+    let json = jail_binary(&fixture, &["explain", "--launch", "inspect", "--json"]);
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&json.stdout).into_owned();
+    assert_no_private_path(&fixture, "explain --json", &stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["policy"]["credential_sources"], "omitted");
+    let credentials = value["policy"]["snapshot"]["launch"]["credentials"]
+        .as_array()
+        .unwrap();
+    assert_eq!(credentials.len(), 3);
+    for credential in credentials {
+        let keys: Vec<&str> = credential
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["dest", "id", "mode"], "{credential}");
+    }
+    assert_eq!(credentials[2]["dest"], "conf/pipe");
+
+    let text = jail_binary(&fixture, &["explain", "--launch", "inspect"]);
+    assert!(text.status.success());
+    let stdout = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert_no_private_path(&fixture, "explain", &stdout);
+    assert!(
+        stdout.contains("launch credential good mode=copy_rw dest=good.json source=omitted"),
+        "{stdout}"
+    );
+}
