@@ -1132,6 +1132,14 @@ mediated this way is not a ptrace stop; the mediator emits its evidence. When
 the kernel offers a native, composable restriction of pathname Unix peers,
 prefer it and drop the mediation.
 
+The mediation governs connections the child initiates. A host process that
+itself connects to a socket the child bound in a writable shared root talks to
+the child, and can pass it descriptors; that is the host tool's choice, like
+reading a file the child wrote there. The jail does not protect host tools
+from sockets or files the child plants in roots it may write. A later
+hardening may refuse socket-node creation in shared roots (Landlock
+`MAKE_SOCK` beneath the workspace and operator grants); it is not claimed now.
+
 Set `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase equivalents
 to `http://127.0.0.1:3128`; set `NO_PROXY` and `no_proxy` to the empty string.
 Environment variables offer compatibility; the network namespace and separate
