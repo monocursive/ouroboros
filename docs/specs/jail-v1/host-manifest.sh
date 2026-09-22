@@ -44,4 +44,5 @@ say apparmor_loaded_bwrap_ouro "$(sudo -n aa-status 2>/dev/null | grep -iE 'bwra
 say kconfig_bpf "$(grep -E '^CONFIG_(BPF_SYSCALL|BPF_JIT|DEBUG_INFO_BTF)=' "/boot/config-$(uname -r)" 2>/dev/null | tr '\n' ' ')"
 say btf_vmlinux "$([ -r /sys/kernel/btf/vmlinux ] && echo present || echo absent)"
 say beam_present "$(command -v erl >/dev/null 2>&1 && echo yes || echo no)"
+say rust_toolchain "$(PATH="$HOME/.cargo/bin:$PATH" cargo --version 2>/dev/null || echo 'not installed')"
 say ouro_binaries_on_path "$(for b in ouro ouro-jail ouro-ledger; do command -v "$b"; done 2>/dev/null | tr '\n' ' ')"

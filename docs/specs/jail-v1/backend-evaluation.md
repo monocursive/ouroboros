@@ -189,5 +189,7 @@ has no per-event context switch, which is its case, and it costs provisioning.
 ## 6. Decision
 
 Selected enforcement integration: none. Selected observer: none. Named
-blockers: none recorded, because nothing has been measured. Raw fixture
-locations: none.
+blockers: none recorded. Working assumption (2026-09-22): the dual-backend
+observer of jail-v1 §5.2, ptrace baseline plus eBPF fast path, to be confirmed
+or refuted by the purpose-built tracer's numbers in §4. Raw fixture locations:
+the `evidence/` files cited above.

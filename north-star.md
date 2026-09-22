@@ -1,6 +1,6 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 14.** Written 2026-09-21, revised 2026-09-22. Revision 6 cut the
+Status: **specification, revision 15.** Written 2026-09-21, revised 2026-09-22. Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
 each hole. Revision 8 keeps the findings as named limits and stops there.
@@ -56,6 +56,11 @@ performance, gets its capabilities from the installer's file capabilities,
 never from a required service unit. Distribution-specific remediations, such
 as Ubuntu's user-namespace restriction, are named by `doctor` and applied by
 the operator (§11, jail-v1 §§3.2, 5.2).
+
+Revision 15 (2026-09-22) records the dual-backend observer as the working
+assumption: ptrace everywhere, eBPF where provisioned, same closed set and
+receipt (jail-v1 §5.2). The purpose-built tracer's measured overhead confirms
+or refutes it.
 
 ## 0. Why
 

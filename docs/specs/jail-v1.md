@@ -1,6 +1,6 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 6, 2026-09-22. No implementation
+Status: implementation specification, revision 7, 2026-09-22. No implementation
 or backend conformance is claimed by this document.
 
 Parent: [North star](../../north-star.md), principally §§3–4 and §7. This document
@@ -374,6 +374,16 @@ provisioning under the default Yama scope that Ubuntu, Debian, Fedora and
 Arch ship. The eBPF candidate is measured when ptrace misses the closed set
 or the performance budget. Whichever is selected must install on a wide range
 of distributions without a service manager or a privileged helper.
+
+Working assumption, recorded 2026-09-22 after the first measurements and to
+be confirmed by the purpose-built tracer: two observer backends behind the
+observer interface of §4. ptrace is the baseline that runs on any host with
+nothing installed and is what `doctor` selects when it cannot prove eBPF
+usable; eBPF is the fast path when the installer's file capabilities and
+tracefs access are present. Both emit the same closed set, events and
+receipts, and the receipt's observer backend field names which one ran. The
+tracer's overhead on the fixed file workload decides whether J1 needs eBPF or
+can defer it. This is an assumption to measure, not a selection.
 
 The proof must identify attach points, kernel/configuration dependencies,
 required capabilities, attachment lifetime, descendant tracking, event loss,
