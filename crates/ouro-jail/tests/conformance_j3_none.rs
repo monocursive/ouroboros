@@ -1620,3 +1620,128 @@ fn an_unconfirmed_target_that_escapes_and_is_killed_stays_prepared() {
     );
     remove_cgroup(&leaf);
 }
+
+// ===========================================================================
+// The review's adversary
+// ===========================================================================
+
+/// The review's adversary (adv2.sh): the target ignores SIGTERM, creates two
+/// cgroups of its own under the delegated service, forks a grandchild that
+/// moves into one, moves itself into the other, and both stay alive. The
+/// wall ends the run. The record is honest (lost, no tree result, never
+/// settled, the target's forced end as its outcome) and both escapees die:
+/// the target through its pidfd, the grandchild once the subreaper adopts it.
+#[test]
+fn adversary_target_and_grandchild_both_escape_alive() {
+    if !live() {
+        return;
+    }
+    for observe in ["off", "on"] {
+        // The fixture makes these itself; the guards only remove them.
+        let target_cgroup = ChildMade::new("adv-t");
+        let grand_cgroup = ChildMade::new("adv-g");
+        let (jail, _) = none_case(observe);
+        let pids = jail.root().join("pids");
+        let code = format!(
+            "import os, time, signal, json\n\
+             signal.signal(signal.SIGTERM, signal.SIG_IGN)\n\
+             d1, d2 = {d1:?}, {d2:?}\n\
+             for d in (d1, d2): os.mkdir(d)\n\
+             r, w = os.pipe()\n\
+             pid = os.fork()\n\
+             if pid == 0:\n\
+             \x20   null = os.open('/dev/null', os.O_RDWR)\n\
+             \x20   for fd in (0, 1, 2): os.dup2(null, fd)\n\
+             \x20   open(os.path.join(d2, 'cgroup.procs'), 'w').write('0')\n\
+             \x20   os.write(w, b'g')\n\
+             \x20   time.sleep(120)\n\
+             \x20   os._exit(0)\n\
+             os.read(r, 1)\n\
+             open(os.path.join(d1, 'cgroup.procs'), 'w').write('0')\n\
+             open({pids:?}, 'w').write(json.dumps({{'target': os.getpid(), 'grand': pid}}))\n\
+             time.sleep(120)\n",
+            d1 = target_cgroup.path.to_str().unwrap(),
+            d2 = grand_cgroup.path.to_str().unwrap(),
+            pids = pids.to_str().unwrap(),
+        );
+        let run = jail
+            .args(["--limit", "wall=2s"])
+            .target([PYTHON, "-c", &code])
+            .run()
+            .expect("the jail runs");
+        validate(&run);
+        assert_eq!(run.code(), Some(1), "{observe}: {}", run.stderr_text());
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&pids).unwrap()).unwrap();
+        let receipt = last_receipt(&run);
+        assert_lost(&receipt);
+        assert_eq!(receipt["phase"], "enforced", "{observe}: {receipt:#}");
+        assert_eq!(receipt["exec_observed"], true);
+        assert_eq!(receipt["outcome"]["kind"], "signaled", "{receipt:#}");
+        assert_eq!(receipt["outcome"]["signal"], libc::SIGKILL);
+        assert_eq!(receipt["outcome"]["cause"], "wall_expiry");
+        assert!(run.receipt_phase("settled").is_none());
+        let notes = lifetime_notes(&run);
+        for subject in ["target", "descendant"] {
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note["subject"] == subject && note["reason"] == "membership_escape"),
+                "{observe}: {subject}: {notes:?}"
+            );
+        }
+        // Both escapees are dead, by the jail's hand, and the cgroups they
+        // fled to are empty.
+        for key in ["target", "grand"] {
+            let pid = written[key].as_i64().unwrap();
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists()
+                    || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                        .is_ok_and(|stat| stat.contains(") Z")),
+                "{observe}: the escaped {key} survived its attempt"
+            );
+        }
+        assert!(!populated(&target_cgroup.path), "{observe}");
+        assert!(!populated(&grand_cgroup.path), "{observe}");
+        let (leaf, _) = leaf_of(&receipt);
+        remove_cgroup(&leaf);
+    }
+}
+
+/// A cgroup path under the delegated service that a fixture creates itself;
+/// the guard only empties and removes it afterwards.
+struct ChildMade {
+    path: PathBuf,
+}
+
+impl ChildMade {
+    fn new(tag: &str) -> ChildMade {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        // SAFETY: getuid takes no arguments and cannot fail.
+        let root = cgroup::delegated_root(unsafe { libc::getuid() })
+            .expect("the delegated subtree exists");
+        ChildMade {
+            path: root.join(format!(
+                "ouro-j3none-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )),
+        }
+    }
+}
+
+impl Drop for ChildMade {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            if populated(&self.path) {
+                let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while populated(&self.path) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
+}
