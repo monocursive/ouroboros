@@ -301,6 +301,8 @@ struct Sim {
     tree: TreeEnd,
     target: TargetEnd,
     release_fails: bool,
+    /// Whether a failed release reports a verified teardown.
+    release_teardown_verified: bool,
     /// What the "child" does in vendor state, given its host path.
     activity: Option<Activity>,
     seen: Arc<Mutex<Seen>>,
@@ -451,6 +453,19 @@ impl PreparedExecution for SimPrepared {
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         Ok(Teardown {
             tree: Some(verified_tree()),
+        })
+    }
+    fn release_reporting_teardown(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ouro_jail::platform::ReleaseFailure>> {
+        let verified = self.sim.release_teardown_verified;
+        self.release().map_err(|error| {
+            Box::new(ouro_jail::platform::ReleaseFailure {
+                error,
+                teardown: verified.then(|| Teardown {
+                    tree: Some(verified_tree()),
+                }),
+            })
         })
     }
 }
@@ -1321,6 +1336,22 @@ fn c02_a_release_failure_after_setup_retains_and_an_exec_error_with_verified_tea
         "no teardown was verified"
     );
     assert!(attempt_dir(&report).join("vendor-state").exists());
+
+    // The same failure, from a platform that reports a verified teardown.
+    let report = fixture.run(
+        Sim {
+            release_fails: true,
+            release_teardown_verified: true,
+            ..Sim::default()
+        },
+        &["--launch", "fixture"],
+    );
+    assert_eq!(report.exit_code, 125);
+    let receipt = receipt_json(&report);
+    assert_schema("jail-receipt", &receipt);
+    assert_eq!(receipt["lifetime"]["tree_empty"], true);
+    assert_eq!(receipt["state_cleanup"], "complete");
+    assert!(cleanup::absent(&attempt_dir(&report).join("vendor-state")));
 
     let report = fixture.run(
         Sim {

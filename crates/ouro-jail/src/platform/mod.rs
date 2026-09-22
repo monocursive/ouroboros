@@ -101,9 +101,10 @@ pub struct PreparedPlan {
     /// The absolute resolved workspace.
     pub workspace: PathBuf,
     // J3-launch begin: vendor state and bind_ro handles staged by the
-    // supervisor, bound by descriptor (§9.1, §12). The only change to this
-    // file: a field, so the platform receives the exact objects staging
-    // examined instead of re-resolving paths.
+    // supervisor, bound by descriptor (§9.1, §12). A field, so the platform
+    // receives the exact objects staging examined instead of re-resolving
+    // paths. (The other J3-launch change here is the additive
+    // `release_reporting_teardown` default method.)
     /// The vendor-state directory and `bind_ro` sources, when a launch
     /// profile needs them; `None` otherwise.
     pub launch: Option<crate::credentials::LaunchHandoff>,
@@ -303,7 +304,42 @@ pub trait PreparedExecution {
     /// # Errors
     /// Returns a typed error when teardown could not be completed or verified.
     fn abort(self: Box<Self>) -> Result<Teardown, JailError>;
+
+    // J3-launch begin: a failed release reports its teardown (§13.2 row 4)
+    /// [`PreparedExecution::release`], plus what the teardown after a failed
+    /// release established about the tree.
+    ///
+    /// ADDITIVE, with a default that reports nothing (`None`), which the
+    /// supervisor records as an unverified tree: exactly today's behaviour.
+    /// A platform that tears the boundary down on a failed release and can
+    /// verify that teardown overrides it, so the refused receipt can say
+    /// `tree_empty = true` and vendor state can be removed honestly.
+    ///
+    /// # Errors
+    /// The release refusal and, when one ran, the teardown's observation.
+    fn release_reporting_teardown(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
+        self.release().map_err(|error| {
+            Box::new(ReleaseFailure {
+                error,
+                teardown: None,
+            })
+        })
+    }
+    // J3-launch end
 }
+
+// J3-launch begin: a failed release with its teardown
+/// Why a release failed, and what the teardown it ran established.
+#[derive(Debug)]
+pub struct ReleaseFailure {
+    /// The refusal.
+    pub error: JailError,
+    /// The teardown's observation, when the platform ran and can report one.
+    pub teardown: Option<Teardown>,
+}
+// J3-launch end
 
 /// A released execution (§4).
 pub trait RunningExecution {

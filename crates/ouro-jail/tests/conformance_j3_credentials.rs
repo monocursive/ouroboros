@@ -347,6 +347,109 @@ fn c01_a_bind_ro_source_replaced_after_staging_is_never_bound() {
     assert!(!captured.stdout.contains("IMPOSTOR"));
 }
 
+/// Measured on bubblewrap 0.11.1 (`strace`): `--ro-bind-fd N` does not mount
+/// through the descriptor. It `readlink`s `/proc/self/fd/N` into a path,
+/// mounts that path, then compares `fstat(N)` with the mounted destination
+/// and dies on a mismatch. This forces the race: `strace` delays the bind's
+/// `mount(2)` while the test puts an impostor at the resolved path. The
+/// boundary must refuse to start, so the target never reads the impostor.
+#[test]
+fn c01_bwrap_refuses_a_bind_ro_source_swapped_between_resolution_and_mount() {
+    if !common::live() || !common::reference_host("strace-driven bubblewrap measurement") {
+        return;
+    }
+    let strace = Path::new("/usr/bin/strace");
+    if !strace.is_file() {
+        harness::skip_or_fail("the reference host has no /usr/bin/strace");
+        return;
+    }
+    let staging = Staging::new();
+    let (_auth, config, bind_fd) = stage_two(&staging);
+    let workspace = common::private_tempdir();
+    let marker = workspace.path().join("read");
+
+    // Render the platform's own plan, then run it under strace.
+    let scratch = common::private_tempdir();
+    let mut plan = BwrapPlan::tool(
+        workspace.path(),
+        scratch.path(),
+        Path::new(env!("CARGO_BIN_EXE_ouro-jail")),
+    );
+    plan.bwrap = common::bwrap_path();
+    plan.vendor_state = Some(staging.vendor_path());
+    plan.vendor_state_fd = Some(VENDOR_FD);
+    plan.credential_binds = vec![CredentialBind {
+        fd: Some(BIND_FD),
+        destination: Path::new(VENDOR_STATE_INSIDE_PATH).join("conf/config.toml"),
+    }];
+    plan.inner = vec![
+        OsString::from("/usr/bin/cp"),
+        OsString::from("/run/ouro/state/conf/config.toml"),
+        marker.clone().into_os_string(),
+    ];
+    let rendered = plan.render().unwrap();
+
+    // Which `mount(2)` is the view's bind: count them in an undelayed run.
+    let count_run = |extra: &[&str]| {
+        let trace = scratch.path().join("trace");
+        let mut command = Command::new(strace);
+        command
+            .args(["-f", "-o"])
+            .arg(&trace)
+            .args(["-e", "trace=mount"])
+            .args(extra)
+            .args(&rendered.argv);
+        command.stdin(std::process::Stdio::null());
+        let mut fds = FdMap::new();
+        fds.add(staging.vendor.try_clone_fd().unwrap(), VENDOR_FD)
+            .unwrap();
+        fds.add(bind_fd.try_clone().unwrap(), BIND_FD).unwrap();
+        fds.apply(&mut command);
+        let child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(fds);
+        (child, trace)
+    };
+    let (child, trace) = count_run(&[]);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&marker).unwrap(), b"fixture-config-original");
+    std::fs::remove_file(&marker).unwrap();
+    let text = std::fs::read_to_string(&trace).unwrap();
+    let mounts: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("mount("))
+        .collect();
+    let index = mounts
+        .iter()
+        .position(|line| line.contains("config.toml\", \"/newroot/run/ouro/state/conf"))
+        .expect("the view's bind appears in the trace")
+        + 1;
+
+    let (child, _) = count_run(&[
+        "-e",
+        &format!("inject=mount:delay_enter=3000000:when={index}"),
+    ]);
+    std::thread::sleep(Duration::from_millis(1500));
+    std::fs::rename(&config, staging.creds.join("config.moved")).unwrap();
+    fixture_file(&config, b"fixture-config-IMPOSTOR");
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "the boundary started over a swapped source"
+    );
+    assert!(stderr.contains("Race condition"), "{stderr}");
+    assert!(!marker.exists(), "the target ran");
+}
+
 #[test]
 fn p04_a_fifo_source_is_refused_without_ever_being_opened_for_io() {
     // A writer blocks in open(2) until some reader opens the FIFO. Staging
@@ -637,33 +740,140 @@ fn c02_a_refusal_after_setup_with_a_verified_teardown_cleans_vendor_state() {
 }
 
 #[test]
-fn c02_after_setup_vendor_state_is_removed_exactly_when_the_teardown_was_verified() {
+fn c02_a_withheld_gate_with_observation_on_verifies_the_teardown_and_cleans() {
     if !common::live() {
         return;
     }
-    // Observation on: whether this teardown verifies is the platform's
-    // measurement, not this test's choice. Whatever it says, cleanup must
-    // agree with it: `complete` only with a verified empty tree, and
-    // otherwise `pending`, `tree_unverified` and the directory retained.
+    // Observation on: the observer is attached to the blocked launcher when
+    // the gate closes. The teardown is verified by the init's pidfd, the
+    // reaped backend and watcher, the unpopulated leaf and the observer's own
+    // account; before J3 it was read once from `/proc` and raced the reaping
+    // of the init's zombie, so this ran several times to show it no longer
+    // depends on that timing.
+    for round in 0..5 {
+        let (jail, workspace) = launched("fixture", PLAIN_PROFILE);
+        let run = withheld(jail, &workspace.join("ran"));
+        let attempt = attempt_of(&run);
+        let receipt = jail_json(&attempt);
+        assert_eq!(receipt["phase"], "refused", "round {round}");
+        assert_eq!(receipt["policy"]["observe"], "on");
+        assert_eq!(
+            receipt["lifetime"]["tree_empty"], true,
+            "round {round}: {receipt:#}"
+        );
+        assert_eq!(
+            receipt["lifetime"]["integrity"], "verified",
+            "round {round}"
+        );
+        assert!(
+            receipt["lifetime"]["verified_at"].is_string(),
+            "round {round}"
+        );
+        assert_eq!(
+            receipt["state_cleanup"], "complete",
+            "round {round}: {receipt:#}"
+        );
+        assert!(
+            cleanup::absent(&attempt.join("vendor-state")),
+            "round {round}"
+        );
+        assert_eq!(state_json(&attempt)["state_cleanup"], "complete");
+        // The placeholders for the absent `.git` and `.ouroboros` literals
+        // went with the verified teardown; nothing is left in the workspace.
+        let left: Vec<_> = std::fs::read_dir(&workspace)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "round {round}: {left:?}");
+    }
+}
+
+#[test]
+fn c02_a_release_failure_after_the_backend_died_verifies_the_teardown_and_cleans() {
+    if !common::live() {
+        return;
+    }
+    // Deterministic release failure: kill the backend while the launcher is
+    // blocked, wait until it has exited, then send a valid release. The
+    // platform finds its lifetime resources gone and refuses the release;
+    // the teardown it runs is verified, and the refused receipt says so.
     let (jail, workspace) = launched("fixture", PLAIN_PROFILE);
-    let run = withheld(jail, &workspace.join("ran"));
+    let marker = workspace.join("ran");
+    let mut spawned = jail
+        .gate()
+        .receipt()
+        .target([
+            OsString::from("/usr/bin/touch"),
+            marker.as_os_str().to_owned(),
+        ])
+        .spawn()
+        .unwrap();
+    let prepared = spawned
+        .owner()
+        .await_prepared()
+        .expect("a prepared message");
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
+    assert_eq!(
+        receipt["state_cleanup"], "pending",
+        "vendor state exists now"
+    );
+    let bwrap = receipt["lifetime"]["native"]["details"]["bwrap_pid"]
+        .as_i64()
+        .expect("the backend pid is recorded");
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &bwrap.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    // Wait until both the backend and the outside watcher have exited: the
+    // platform checks the watcher, which exits only after it sees the
+    // backend's death. Releasing earlier races that, and a release that wins
+    // the race is an ordinary (unknown-outcome) run, not this refusal.
+    let watcher = receipt["lifetime"]["native"]["details"]["watcher_pid"]
+        .as_i64()
+        .expect("the watcher pid is recorded");
+    let exited = |pid: i64| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit(')').next().map(|rest| rest.trim().to_owned()))
+            .is_none_or(|rest| rest.starts_with('Z'))
+    };
+    let gone = std::time::Instant::now() + Duration::from_secs(5);
+    while !(exited(bwrap) && exited(watcher)) {
+        assert!(std::time::Instant::now() < gone, "the backend did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    spawned
+        .owner()
+        .release(
+            &harness::gate::Release::Valid,
+            prepared["attempt_id"].as_str().unwrap(),
+            receipt["policy"]["digest"].as_str().unwrap(),
+        )
+        .unwrap();
+    let run = spawned.wait().unwrap();
     let attempt = attempt_of(&run);
     let receipt = jail_json(&attempt);
-    assert_eq!(receipt["phase"], "refused");
-    if receipt["lifetime"]["tree_empty"] == true {
-        assert_eq!(receipt["state_cleanup"], "complete", "{receipt:#}");
-        assert!(cleanup::absent(&attempt.join("vendor-state")));
-    } else {
-        assert_eq!(receipt["lifetime"]["tree_empty"], Value::Null);
-        assert_eq!(receipt["state_cleanup"], "pending", "{receipt:#}");
-        assert_eq!(receipt["cleanup_error"], cleanup::REASON_TREE_UNVERIFIED);
-        assert!(attempt.join("vendor-state").is_dir());
-        assert_eq!(state_json(&attempt)["state_cleanup"], "pending");
-    }
-    println!(
-        "observed: tree_empty={} state_cleanup={}",
-        receipt["lifetime"]["tree_empty"], receipt["state_cleanup"]
+    assert_eq!(
+        run.code(),
+        Some(125),
+        "stderr: {}\ncontrol: {:?}\nreceipt: {receipt:#}",
+        run.stderr_text(),
+        run.control_messages()
     );
+    assert!(!marker.exists(), "the target never ran");
+    assert_eq!(receipt["phase"], "refused");
+    assert_eq!(receipt["exec_observed"], false);
+    assert_eq!(
+        receipt["outcome"]["error"]["code"], "backend_unavailable",
+        "{receipt:#}"
+    );
+    assert_eq!(receipt["lifetime"]["tree_empty"], true, "{receipt:#}");
+    assert_eq!(receipt["lifetime"]["integrity"], "verified");
+    assert_eq!(receipt["state_cleanup"], "complete", "{receipt:#}");
+    assert!(cleanup::absent(&attempt.join("vendor-state")));
 }
 
 #[test]

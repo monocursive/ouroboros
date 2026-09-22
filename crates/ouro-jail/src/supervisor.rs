@@ -1179,9 +1179,17 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     }
 
     // Step 7: execute the exact target argv through the blocked launcher.
-    let mut running = match prepared.release() {
+    // J3-launch begin: a failed release reports its teardown, so the refused
+    // receipt carries the verified tree (§13.2 row 4) and vendor state can be
+    // removed rather than retained.
+    let mut running = match prepared.release_reporting_teardown() {
         Ok(running) => running,
-        Err(error) => {
+        Err(failure) => {
+            let crate::platform::ReleaseFailure { error, teardown } = *failure;
+            if let Some(teardown) = teardown {
+                record_teardown(&mut record, &Ok(teardown));
+            }
+            // J3-launch end
             return Ok(refuse(
                 &attempt_dir,
                 &mut record,

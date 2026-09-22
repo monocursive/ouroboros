@@ -1413,6 +1413,113 @@ impl Boundary {
         }
     }
 
+    // J3-launch begin: a verified teardown for a boundary whose target never
+    // ran (abort, failed release; §13.2 row 4)
+    /// Kills the boundary and reports whether its death was verified.
+    ///
+    /// Verified means exactly what settlement requires, without the target:
+    /// the namespace init's pidfd reports its death (PID-namespace semantics:
+    /// every other member, the blocked launcher included, died first); the
+    /// backend (this supervisor's child) and the outside watcher are dead and
+    /// reaped; the execution cgroup, when one exists, was observed
+    /// unpopulated and its identity was never lost; and the observer, when
+    /// attached, finished without abandoning a tracee or losing a child's
+    /// status. Everything is polled within one tree budget; whatever is still
+    /// unknown at its end leaves the tree `pending` and `tree_empty` null.
+    /// "The trusted launcher died" is not on the list: it is implied by the
+    /// init's death and proves nothing without it.
+    fn verified_teardown(&mut self) -> TreeObservation {
+        let deadline = clock::Deadline::after(TREE_BUDGET);
+        self.kill_boundary();
+        // The observer is stopped first, so after this nothing but this
+        // thread waits for children; its account is kept for the verdict.
+        self.stop_observer(deadline.remaining());
+        let backend_reaped = match self.child.take() {
+            Some(mut child) => {
+                reap_until(&mut child, deadline);
+                match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    // The tracer's `waitpid(-1)` reaped it before it was
+                    // stopped. Nothing else in this process waits, so an
+                    // exited backend whose status is gone was reaped here.
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => self
+                        .bwrap_fd
+                        .as_ref()
+                        .is_some_and(|fd| super::watch::readable(fd.as_raw_fd())),
+                    _ => false,
+                }
+            }
+            None => false,
+        };
+        let init_dead = || {
+            self.init_fd
+                .as_ref()
+                .is_some_and(|fd| super::watch::readable(fd.as_raw_fd()))
+        };
+        loop {
+            let settled = init_dead() && self.watcher.ended() && self.cgroup_empty();
+            if settled || deadline.expired() {
+                break;
+            }
+            sleep_for(WAIT_STEP);
+        }
+        self.watcher.reap();
+        let watcher_reaped = self.watcher.ended();
+        // The observer's own account, with one difference from settlement:
+        // its "unreaped children" are this supervisor's own children (the
+        // backend and the watcher) that were still exiting when it stopped.
+        // Here they were reaped above, by this thread, so that loss has a
+        // route after all. Any other unreaped child, an abandoned tracee or
+        // a panicked observer still refuses the verdict.
+        let verified = abort_verdict(&AbortInputs {
+            backend_reaped,
+            watcher_reaped,
+            init_dead: init_dead(),
+            cgroup_empty: self.cgroup_empty(),
+            abandoned_tracees: self
+                .tracer_summary
+                .as_ref()
+                .map_or(0, |summary| summary.loss.abandoned_tracees),
+            observer_panicked: self
+                .tracer_summary
+                .as_ref()
+                .is_some_and(|summary| summary.thread_panicked),
+            unreaped_children: self
+                .tracer_summary
+                .as_ref()
+                .map(|summary| summary.unreaped_children.clone())
+                .unwrap_or_default(),
+            backend_pid: self.bwrap_pid,
+            watcher_pid: i32::try_from(self.watcher.pid()).unwrap_or(-1),
+        });
+        // Placeholders go only once the tree is known dead, and on this
+        // verdict rather than the settlement-time one, whose observer check
+        // would count the children reaped above as lost.
+        if verified && self.placeholder_outcomes.is_empty() {
+            self.placeholder_outcomes = self
+                .placeholders
+                .iter()
+                .map(Placeholder::remove_if_unchanged)
+                .collect();
+        }
+        if verified {
+            TreeObservation {
+                tree_empty: Some(true),
+                verified_at: Some(SystemTime::now()),
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: "verified".to_owned(),
+            }
+        } else {
+            TreeObservation {
+                tree_empty: None,
+                verified_at: None,
+                verification_scope: "attempt_tree".to_owned(),
+                integrity: if self.cgroup_lost { "lost" } else { "pending" }.to_owned(),
+            }
+        }
+    }
+    // J3-launch end
+
     fn boundary_identity(&self) -> BoundaryIdentity {
         let mut details = Map::new();
         details.insert("watcher_pid".to_owned(), Value::from(self.watcher.pid()));
@@ -2124,6 +2231,17 @@ impl PreparedExecution for LinuxPrepared {
     }
 
     fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+        // J3-launch begin: one implementation, which also reports teardown
+        self.release_reporting_teardown()
+            .map_err(|failure| failure.error)
+        // J3-launch end
+    }
+
+    // J3-launch begin: a failed release runs the verified teardown and says
+    // what it established, instead of tearing down without a verdict.
+    fn release_reporting_teardown(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<crate::platform::ReleaseFailure>> {
         let mut boundary = self.boundary;
         if boundary.watcher.ended()
             || boundary
@@ -2131,25 +2249,36 @@ impl PreparedExecution for LinuxPrepared {
                 .as_ref()
                 .is_some_and(|leaf| leaf.verify().is_err())
         {
-            boundary.teardown();
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                "lifetime resources were lost before release",
-            ));
+            let tree = boundary.verified_teardown();
+            return Err(Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::BackendUnavailable,
+                    "lifetime resources were lost before release",
+                ),
+                teardown: Some(Teardown { tree: Some(tree) }),
+            }));
         }
         let Some(release) = boundary.release.take() else {
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                "the release pipe is already closed",
-            ));
+            let tree = boundary.verified_teardown();
+            return Err(Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::BackendUnavailable,
+                    "the release pipe is already closed",
+                ),
+                teardown: Some(Teardown { tree: Some(tree) }),
+            }));
         };
         if let Err(err) = write_all(release.as_raw_fd(), &[1]) {
-            boundary.teardown();
-            return Err(preparing(
-                ErrorCode::BackendUnavailable,
-                format!("the release byte could not be written: {err}"),
-            ));
+            let tree = boundary.verified_teardown();
+            return Err(Box::new(crate::platform::ReleaseFailure {
+                error: preparing(
+                    ErrorCode::BackendUnavailable,
+                    format!("the release byte could not be written: {err}"),
+                ),
+                teardown: Some(Teardown { tree: Some(tree) }),
+            }));
         }
+        // J3-launch end
         // Closing it makes a second release impossible (X03).
         drop(release);
         let wall = boundary
@@ -2179,29 +2308,13 @@ impl PreparedExecution for LinuxPrepared {
 
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         let mut boundary = self.boundary;
-        boundary.teardown();
-        // The target never ran, but the boundary existed, and whether its
-        // teardown was observed to complete is still a measured fact.
-        let verified = boundary.observer_verified_the_tree()
-            && !init_alive(boundary.init_pid)
-            && boundary.cgroup_empty();
+        // J3-launch begin: the target never ran, but the boundary existed, and
+        // whether its teardown completed is a measured fact, established by
+        // the same facts settlement requires (see `verified_teardown`).
         Ok(Teardown {
-            tree: Some(if verified {
-                TreeObservation {
-                    tree_empty: Some(true),
-                    verified_at: Some(SystemTime::now()),
-                    verification_scope: "attempt_tree".to_owned(),
-                    integrity: "verified".to_owned(),
-                }
-            } else {
-                TreeObservation {
-                    tree_empty: None,
-                    verified_at: None,
-                    verification_scope: "attempt_tree".to_owned(),
-                    integrity: "pending".to_owned(),
-                }
-            }),
+            tree: Some(boundary.verified_teardown()),
         })
+        // J3-launch end
     }
 }
 
@@ -2820,6 +2933,55 @@ pub fn verdict(inputs: &TreeInputs) -> TreeObservation {
     }
 }
 
+// J3-launch begin: the verdict of a teardown whose target never ran
+/// What a teardown after an abort or a failed release established.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbortInputs {
+    /// The backend, this supervisor's child, is dead and reaped.
+    pub backend_reaped: bool,
+    /// The outside watcher is dead and reaped.
+    pub watcher_reaped: bool,
+    /// The namespace init's pidfd reports its death.
+    pub init_dead: bool,
+    /// The execution cgroup, if any, was observed unpopulated with its
+    /// identity intact (true when there is no cgroup).
+    pub cgroup_empty: bool,
+    /// Tracees the observer had to kill on the way out.
+    pub abandoned_tracees: u64,
+    /// The observer's thread panicked.
+    pub observer_panicked: bool,
+    /// This process's children the observer left unreaped when it stopped.
+    pub unreaped_children: Vec<libc::pid_t>,
+    /// The backend's pid.
+    pub backend_pid: libc::pid_t,
+    /// The watcher's pid.
+    pub watcher_pid: libc::pid_t,
+}
+
+/// Whether a teardown whose target never ran verified the tree's death.
+///
+/// The settlement facts without the target: the init's death (which the PID
+/// namespace makes the death of every member), the backend and the watcher
+/// reaped, the leaf empty, and an observer account with nothing abandoned.
+/// The observer's "unreaped children" are forgiven only when they are exactly
+/// the backend and the watcher and this thread reaped them afterwards; any
+/// other child is a process this verdict knows nothing about.
+#[must_use]
+pub fn abort_verdict(inputs: &AbortInputs) -> bool {
+    let children_accounted = inputs.unreaped_children.iter().all(|pid| {
+        (*pid == inputs.backend_pid && inputs.backend_reaped)
+            || (*pid == inputs.watcher_pid && inputs.watcher_reaped)
+    });
+    inputs.backend_reaped
+        && inputs.watcher_reaped
+        && inputs.init_dead
+        && inputs.cgroup_empty
+        && inputs.abandoned_tracees == 0
+        && !inputs.observer_panicked
+        && children_accounted
+}
+// J3-launch end
+
 fn init_alive(init: libc::pid_t) -> bool {
     init > 0 && Path::new(&format!("/proc/{init}")).exists()
 }
@@ -3268,6 +3430,59 @@ mod tests {
         assert!(
             super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
         );
+    }
+    // J3-launch begin: the abort verdict
+    #[test]
+    fn an_abort_is_verified_only_by_every_settlement_fact() {
+        use super::{AbortInputs, abort_verdict};
+        let good = AbortInputs {
+            backend_reaped: true,
+            watcher_reaped: true,
+            init_dead: true,
+            cgroup_empty: true,
+            abandoned_tracees: 0,
+            observer_panicked: false,
+            unreaped_children: vec![10, 11],
+            backend_pid: 10,
+            watcher_pid: 11,
+        };
+        assert!(abort_verdict(&good));
+        assert!(abort_verdict(&AbortInputs {
+            unreaped_children: Vec::new(),
+            ..good.clone()
+        }));
+        for broken in [
+            AbortInputs {
+                backend_reaped: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                watcher_reaped: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                init_dead: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                cgroup_empty: false,
+                ..good.clone()
+            },
+            AbortInputs {
+                abandoned_tracees: 1,
+                ..good.clone()
+            },
+            AbortInputs {
+                observer_panicked: true,
+                ..good.clone()
+            },
+            AbortInputs {
+                unreaped_children: vec![10, 11, 12],
+                ..good.clone()
+            },
+        ] {
+            assert!(!abort_verdict(&broken), "{broken:?}");
+        }
     }
     // J3-launch end
 }
