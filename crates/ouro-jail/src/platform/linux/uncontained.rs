@@ -299,6 +299,18 @@ pub fn prepare(
     sinks: Sinks,
     deadline: clock::Deadline,
 ) -> Result<Box<dyn PreparedExecution>, JailError> {
+    // J3 integration begin: resolution refuses `--launch` with `none`
+    // (launch_profile.rs); a launch hand-off reaching this boundary would be
+    // dropped silently, so refuse it here too.
+    if plan.launch.is_some() {
+        return Err(JailError::new(
+            ErrorCode::PolicyWidening,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            "the uncontained `none` boundary stages no vendor state or credentials".to_owned(),
+        ));
+    }
+    // J3 integration end
     let boundary = Uncontained::create(plan, sinks, deadline)?;
     Ok(Box::new(Prepared { boundary }))
 }

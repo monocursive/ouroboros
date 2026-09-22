@@ -1312,6 +1312,7 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
                 format!("touch {}", marker.display()).into_bytes(),
             ],
             workspace: workspace.clone(),
+            launch: None,
         };
         let deadline = ouro_jail::platform::linux::clock::Deadline::after(Duration::from_secs(10));
         let Err(error) =
