@@ -1,7 +1,9 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 8, 2026-09-22. No implementation
-or backend conformance is claimed by this document. Revision 8 records the
+Status: implementation specification, revision 9, 2026-09-22. No implementation
+or backend conformance is claimed by this document. Revision 9 makes the jail
+work on a stock host: no required host configuration, so `agent` no longer
+requires nested user namespaces (§§3.2, 9.2, S03). Revision 8 recorded the
 clarifications the first adversarial reviews of the J1 implementation forced
 (review-resolutions.md, "J1 review findings"); they correct ambiguities and
 add three native variants to the closed set, and they change no guarantee.
@@ -168,17 +170,16 @@ same facts read-only; its first run is
 and `doctor --json` output supersedes it. Ubuntu 24.04 and later restrict
 unprivileged user namespaces through AppArmor by default. The
 distribution's own `bwrap-userns-restrict` profile is measured sufficient for
-one containment layer on the reference host, which `tool` and `build` need,
-and insufficient for a nested sandbox, which `agent` needs, because it denies
-capabilities inside the user namespace
+the one containment layer every contained profile uses, and insufficient for a
+user namespace nested inside it, because it denies capabilities there
 ([probe](jail-v1/evidence/bwrap-probe-2026-09-22-ouro-ci.txt),
 [nesting probe](jail-v1/evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)).
-For `agent` the operator either installs a scoped profile granting `userns`,
-and capabilities within it, to the required executables, or changes that
-sysctl. The reference host uses the sysctl (decision 2026-09-22, recorded by
-the manifest); a multi-tenant host would need the scoped profile. The
-restriction is specific to Ubuntu 24.04 and later; `doctor` names the
-remediation for the host it runs on. All of
+An unprivileged Landlock domain does work inside that layer
+([Landlock nesting probe](jail-v1/evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt)). The jail requires no host configuration: every profile must work
+on a stock install of a supported distribution, and the reference host stays
+stock so that conformance proves it. Nested user namespaces are therefore a
+measured, optional host capability (§9.2), never a requirement. `doctor` names
+the host-specific change that would enable them, as an optional remediation. All of
 these are host policy: the tools report the state and change none of them. Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, lingering enabled so its `user@` service delegates the
 cgroup controllers, the provisioned tracing capabilities, and nothing else
@@ -945,14 +946,27 @@ The reference conformance toolchain uses glibc. Other runtimes must pass their
 own threading fixture; a runtime that cannot fall back is incompatible, not
 a reason to silently allow `clone3`.
 
-`agent` uses a separate nesting filter permitting the setup actually needed
-by the scripted inner sandbox. It may permit mount/unmount and namespace
-creation within the outer restricted authority. It must not recover excluded
-paths, make locked read-only mounts writable, join a host namespace or obtain
-direct egress. Record the allowed setup operations and probe the real nesting
-sequence, not just one successful `unshare`. If safe nesting fails, refuse
-`agent`; do not disable the outer or inner sandbox. Seccomp restrictions are
-inherited; namespace creation does not remove them.
+`agent` uses a separate filter that permits the unprivileged sandboxing an
+inner vendor sandbox needs: `no_new_privs`, its own seccomp filters and
+Landlock. These work inside the outer layer on every supported host and are
+the nesting `agent` guarantees. Where the host also permits nested user
+namespaces, the filter additionally permits the namespace creation and
+mount/unmount an inner namespace sandbox needs, within the outer restricted
+authority. Nothing it permits may recover excluded paths, make locked
+read-only mounts writable, join a host namespace or obtain direct egress.
+Record the allowed setup operations and the measured nested-namespace
+capability in the receipt, and probe the real nesting sequence, not just one
+successful `unshare` or `landlock_restrict_self`. Where nested user namespaces
+are unavailable, `agent` still runs: an inner sandbox that needs them fails
+visibly to the child, the jail never simulates it, and the receipt never
+claims it ran. The jail never disables the outer sandbox, and never disables
+or rewrites an inner one; running a vendor with its own sandbox off is the
+operator's choice of argv or vendor configuration, and its tool commands then
+share the agent's jail authority. If a nesting mechanism the host does offer
+cannot be permitted safely, `agent` refuses rather than permitting it
+unsafely. Seccomp restrictions are inherited; namespace creation and Landlock
+domains do not remove them. An inner filter cannot obtain its own seccomp
+notification listener while the outer mediation filter (§10) holds one.
 
 The backend may use more restrictive mechanisms when their behavior passes
 the same contract. There is no arbitrary seccomp expression in user config.
@@ -1572,7 +1586,9 @@ Required Linux probes:
   accounting; loading an empty BPF program is insufficient.
 - Proxy/bridge connectivity, allowed and denied destinations, and direct-egress
   rejection for `agent`.
-- Scripted nested sandbox setup and attempted outer-boundary reversal for
+- Scripted nested sandbox setup (Landlock and seccomp; nested user namespaces
+  where the host permits them) and attempted outer-boundary reversal for
+  `agent`. An unavailable nested user namespace is reported, not a failure of
   `agent`.
 - Host AppArmor restrictions when detectable. If effective permission cannot
   be read, the execution probe remains authoritative and the explanation says
@@ -1638,7 +1654,7 @@ its own processes. Never test against the operator's actual credentials.
 | F04 | Scan-limit exhaustion and source-identity swap refuse without a claimed complete boundary. |
 | S01 | Denied syscall and native ABI variants fail; ordinary threads still work with clone3 fallback. |
 | S02 | Child cannot reach host processes, cgroups, namespace fds, host sockets or supervisor state. |
-| S03 | Nested sandbox starts and restricts its child; attempts to undo each outer boundary fail. |
+| S03 | A Landlock and seccomp inner sandbox starts inside `agent` on a stock host and restricts its child; where the host permits nested user namespaces, a namespace inner sandbox does too, and where it does not, the failure is visible and the receipt records the capability as unavailable. Attempts to undo each outer boundary fail. |
 | S04 | Every contained profile rejects all three io_uring interfaces/ABI variants and inherits no ring; attempted async socket/open/connect cannot bypass policy. None retains explicit observation exclusions. |
 | N01 | Direct TCP/UDP/IPv6 egress and environment-proxy bypass fail for contained profiles. |
 | N02 | Allowed/denied proxy requests each yield exactly one matching proxy result; audit facts stay distinct. |
@@ -1688,7 +1704,7 @@ fleet scaffolding is needed to complete these steps.
 | J0: feasibility | Provision the reference host and record its manifest; measure the observer privilege model first (§5.2); then pin and evaluate the enforcement candidates (§5.1) with the fixture harness and lifecycle integration; fill [backend-evaluation.md](jail-v1/backend-evaluation.md). | §5 report has measured evidence and one chosen viable path or a named blocker. No fabricated backend selection. A blocked observer is a valid exit; it does not license `--observe off` as J1's acceptance run. |
 | J1: first execution | Cargo workspace; portable policy/records; Linux tool supervisor, observation, wall and receipts; macOS refusal implementation. | §1.1 runs end to end, with P01–P04, X01–X07, M01–M03, I03 and its relevant F/O/L/R tests. This is the first product implementation slice. P04's "credential special files refuse" sub-clause is scoped to J3, where credential staging exists; J1 refuses every credential-bearing launch profile fail-closed, so the sub-clause has no code path yet. |
 | J2: authority | Complete mounts/protected paths, filter families, native ABI checks, limits, gate faults and doctor probes. | F01–F04, S01–S02, S04, X02–X06, L01–L05 pass on the named Linux lane. |
-| J3: agent execution | Proxy, nested agent profile, data-only launch profiles, credential modes/cleanup and explicit none. | S03, N01–N05, C01–C02 and R05–R06 pass. Profiles remain experimental. |
+| J3: agent execution | Proxy, agent profile with unprivileged nesting, data-only launch profiles, credential modes/cleanup and explicit none, all on a stock host. | S03, N01–N05, C01–C02 and R05–R06 pass. Profiles remain experimental. |
 | J4: evidence/recovery | Complete closed set, loss handling, bounded trace, atomic records and GC. | O01–O06, R01–R06 and C03 pass, including failure injection. |
 | J5: milestone proof | Full independent suite, performance report, platform compilation, docs and schema freeze. | All noncredential gates pass; A01 is either recorded or explicitly skipped; no Linux mechanism leaks into portable requirements. |
 

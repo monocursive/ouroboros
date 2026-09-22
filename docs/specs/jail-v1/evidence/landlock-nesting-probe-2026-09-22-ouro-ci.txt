@@ -1,0 +1,18 @@
+collected_at: 2026-09-22T17:25:11Z as ouro-ci on vps-450b3fe8, kernel 7.0.0-31-generic, bubblewrap 0.11.1
+sysctl kernel.apparmor_restrict_unprivileged_userns: 1
+lsm: lockdown,capability,landlock,yama,apparmor,ima,evm
+=== 1. Landlock ABI and the access bits this kernel accepts (outside any sandbox)
+landlock_abi 8
+landlock_errata 7
+accepted_fs_bits [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+accepted_net_bits [0, 1]
+accepted_scoped_bits [0, 1]
+=== 2. unprivileged Landlock inside ONE bwrap layer (stock host, no operator change)
+landlock_restrict_self 0 errno 0
+write granted dir: ok
+read ungranted file: denied 13
+unshare -Urm inside the domain: exit 1 unshare: unshare failed: Operation not permitted
+bwrap exit 0
+=== 3. a user namespace nested inside that layer, for comparison
+unshare: unshare failed: Operation not permitted
+nested unshare exit 1

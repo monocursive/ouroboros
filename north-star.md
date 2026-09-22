@@ -1,6 +1,7 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 15.** Written 2026-09-21, revised 2026-09-22. Revision 6 cut the
+Status: **specification, revision 16.** Written 2026-09-21, revised 2026-09-22. Revision 16 makes
+the jail require no host configuration (D9, §4.6). Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
 each hole. Revision 8 keeps the findings as named limits and stops there.
@@ -206,7 +207,7 @@ remain outside the product. The single-worker pilot does not wait for fleet.
 | D6 | Packaging | After milestone 3: three executables (`ouro`, `ouro-jail`, `ouro-ledger`), the pinned D8 dependencies, and a separately fetched BEAM runtime for nodes that run the fleet. `doctor` refuses a missing required component. Packaging is not a gate for milestone 1. The BEAM runtime is not embedded in the jail or the ledger. | 2026-09-21 |
 | D7 | Repository | One workspace, laid out as jail-v1 §4 specifies: Rust crates under `crates/` (one per process the north star names; `ouro-records` carved out of the jail only when the ledger becomes its second consumer; a test-only fixture crate; a BPF object crate outside the default members if J0 selects eBPF; `xtask` for repository tasks), the Elixir fleet as a sibling Mix project outside Cargo, contracts and measured evidence under `docs/specs/`, proposals under `docs/proposals/`, packaging under `packaging/` after milestone 3. Directories are created when their milestone starts; their names and split rules are fixed now. A tool moves to its own repository only after a later decision, once its CLI, contracts and tests stand alone. | 2026-09-21; layout 2026-09-22 |
 | D8 | Jail implementation | Before milestone 1 is declared green, evaluate pinned `srt`, Greywall and the existing in-tree sandbox against §4. Prefer reuse behind `ouro-jail`, with the smallest policy, admission and receipt integration that passes. The enforcement backend is not the audit sensor (§4.8). A backend that leaves no supervisor outside the child, or that hides descendant syscalls from a host probe, fails the evaluation. Record boundary and nesting failures, coverage, lifecycle and limit support, startup cost, dependency footprint, licensing and maintenance cost. A runtime dependency such as Node is a measured packaging tradeoff. Implement or port a missing mechanism only when a named failing gate justifies it. Freeze one backend, version and integration, with provenance and a gap-to-gate plan, in `docs/specs/jail-v1/backend-evaluation.md`. Independent §4 fixtures are authoritative. Differential runs against other candidates are supporting evidence, not an oracle and not a permanent shipping dependency. The decision is scheduled, not made: it is taken in J0's report, whose checked-in skeleton at [`backend-evaluation.md`](docs/specs/jail-v1/backend-evaluation.md) records `not_started` for every measurement until the reference host produces them. J0 measures the observer privilege model before the enforcement candidates, because a blocked observer changes which backend is worth integrating. | pending; scheduled as J0 on 2026-09-22 |
-| D9 | First lane | Linux (bubblewrap, seccomp, cgroup v2 where the host delegates one). Initial launch profiles for Codex, Claude Code, and OpenCode. A profile is experimental until its own §7.4 run. `--jail none` is a real run, still observed unless `--observe off`, and its evidence is unprotected. macOS execution, including Claude's Keychain credential, follows a separate platform implementation; shared contracts must accommodate it now. On Ubuntu 24.04+, an operator-installed scoped AppArmor profile may grant `userns` to the required executables, or on a dedicated host the operator may turn the restriction sysctl off; the reference host does the latter (2026-09-22). `doctor` measures the sandbox, the cgroup, and the audit sensor, and never changes host policy. The initial conformance host is an operator-provisioned x86_64 virtual private server that runs its own Linux kernel under hardware virtualization, pinned to the release it runs: Ubuntu 26.04 LTS on the 7.0-series kernel, with the measured manifest recorded in jail-v1 §3.2. A container-based host that cannot create user namespaces, delegate a cgroup v2 subtree or attach the observer is ineligible, whatever the provider calls it. aarch64 is a later, separately conformed lane, not the reference host (jail-v1 §3.2). | 2026-09-21; host added 2026-09-22 |
+| D9 | First lane | Linux (bubblewrap, seccomp, cgroup v2 where the host delegates one). Initial launch profiles for Codex, Claude Code, and OpenCode. A profile is experimental until its own §7.4 run. `--jail none` is a real run, still observed unless `--observe off`, and its evidence is unprotected. macOS execution, including Claude's Keychain credential, follows a separate platform implementation; shared contracts must accommodate it now. The jail requires no host configuration: every profile works on a stock install of a supported distribution, with no sysctl, AppArmor profile, file capability, setuid helper or systemd unit (2026-09-22, superseding that day's sysctl decision for the reference host, which stays stock). On Ubuntu 24.04+ that means one user-namespace layer, the one bubblewrap is allowed; nested user namespaces are an optional host capability that `doctor` measures and never a requirement. Optional accelerators may be offered only as opt-in remediations. `doctor` measures the sandbox, the cgroup, and the audit sensor, and never changes host policy. The initial conformance host is an operator-provisioned x86_64 virtual private server that runs its own Linux kernel under hardware virtualization, pinned to the release it runs: Ubuntu 26.04 LTS on the 7.0-series kernel, with the measured manifest recorded in jail-v1 §3.2. A container-based host that cannot create user namespaces, delegate a cgroup v2 subtree or attach the observer is ineligible, whatever the provider calls it. aarch64 is a later, separately conformed lane, not the reference host (jail-v1 §3.2). | 2026-09-21; host added 2026-09-22 |
 | D10 | Audit sensor | The jail supervisor is the only syscall sensor. It attaches before exec, outside the child, including when containment is `none`. The ledger is the store. The closed set and the `--observe` default are §4.8. Seccomp notification is not that sensor. | 2026-09-21 |
 | D11 | The five limits | `none` is labelled unprotected. Its tree kill is the supervisor's cgroup, and supervisor death is an unknown. Fleet I/O is batch with opt-in bounded capture. Vendor state is deleted after tree death. One real-agent run marks that profile supported. The accepted holes are the Enough table in §1. | 2026-09-21 |
 | D12 | Language and platform boundary | Rust owns the local CLI, jail and ledger; Elixir/OTP owns fleet coordination. Linux and macOS share policy semantics, lifecycle states, events and receipts. Containment, observation, process identity and tree termination have OS-specific implementations and measured capabilities. Linux mechanisms are not required fields in portable records. A missing required guarantee refuses; compilation on macOS is not execution support. | 2026-09-21 |
@@ -326,9 +327,11 @@ Applied for every profile other than `none`.
   outer setup. Architecture-specific syscall variants and indirect interfaces are
   covered by the filter. A rule that cannot inspect an argument safely does not
   claim it did.
-- `agent` uses a separate, versioned nesting profile. It permits the namespace and
-  mount setup an inner sandbox needs, including `mount` and `umount2` where the
-  fixture requires them. Seccomp filters are inherited across fork and exec.
+- `agent` uses a separate, versioned nesting profile. It permits the
+  unprivileged sandboxing an inner sandbox needs (`no_new_privs`, seccomp,
+  Landlock) on every host, and the namespace and mount setup of a namespace
+  sandbox, including `mount` and `umount2`, only where the host permits nested
+  user namespaces. Seccomp filters are inherited across fork and exec.
   Creating a user namespace cannot relax an outer denial. The receipt records the
   filter digest and the allowed setup operations. A namespace-creation probe by
   itself is not evidence of working nesting.
@@ -438,17 +441,31 @@ are the accepted hole in §1.
 ### 4.6 Nesting
 
 Codex, Claude Code, and OpenCode may start their own bubblewrap, Landlock, or
-seccomp. The `agent` profile exists so that inner sandbox can start: the setup syscalls in §4.3 are permitted,
-the helper binaries the fixture needs are visible read-only, `/proc` is mounted,
-and the inner network namespace may be empty because the proxy is a Unix socket
-the inner sandbox can reach. Creating a namespace cannot relax an outer denial.
+seccomp. The `agent` profile exists so that inner sandbox can start where the
+host allows it: the setup syscalls in §4.3 are permitted, the helper binaries
+the fixture needs are visible read-only, `/proc` is mounted, and the inner
+network namespace may be empty because the proxy is a Unix socket the inner
+sandbox can reach. Creating a namespace cannot relax an outer denial.
+
+No host configuration is required (D9). On a stock host an unprivileged inner
+sandbox (Landlock, seccomp) always starts. A user-namespace inner sandbox, such
+as bubblewrap inside the jail, starts only where the host permits nested user
+namespaces; stock Ubuntu 24.04+ permits exactly one layer, which the jail
+uses. There the inner sandbox fails visibly, `doctor` and the receipt say
+nested namespaces are unavailable, and `agent` still runs. The jail never
+disables or rewrites either boundary. An operator may run a vendor with its
+own sandbox off; its tool commands then share the agent's jail authority,
+including its staged credentials and allowed hosts, and the documentation
+says so.
 
 The fixture is a scripted inner sandbox, not a vendor binary. It must start, deny
 a write it should deny, and fail at each of: remount, unmount, joining a
-namespace, reading a protected path, and direct egress. A failed nesting probe
-refuses the `agent` profile (125). It does not disable either boundary. Host
-prerequisites, including any scoped AppArmor profile, are recorded with the
-kernel, helper, and filter versions.
+namespace, reading a protected path, and direct egress. Its Landlock and
+seccomp form runs on every host; its namespace form runs where the host
+permits nested user namespaces and is reported unavailable elsewhere. A
+nesting mechanism the host offers but the jail cannot permit safely refuses
+the `agent` profile (125). Host facts are recorded with the kernel, helper,
+and filter versions.
 
 ### 4.7 Network
 
@@ -605,7 +622,8 @@ not part of the receipt. A *prepared* receipt is not proof of exec. A missing
   unobserved same-UID interference remains an accepted limit, not tree proof.
 - `doctor` runs the probes: create a namespace, bind a mount, load the filter,
   take a cgroup leaf and kill it, start the bridge, run the scripted nested
-  setup, load the audit sensor, and inspect the applicable AppArmor policy.
+  setup (Landlock and seccomp; nested namespaces where permitted), load the
+  audit sensor, and inspect the applicable AppArmor policy.
   It reports each as measured and does not change host policy. A skipped probe
   is reported skipped.
 
@@ -1180,8 +1198,10 @@ radius per store; `docs/experiments/` is never added.
 - **`--jail none` is uncontained.** The ledger label says `unprotected`. The
   supervisor kills the cgroup; if the supervisor dies first, the outcome is
   unknown. Status shows both.
-- **Ubuntu 24.04+.** Restricted user namespaces can block the outer or the
-  nested sandbox. `doctor` measures both. The operator owns any host-policy change.
+- **Ubuntu 24.04+.** Restricted user namespaces allow the jail's one bubblewrap
+  layer and block a user namespace nested inside it. `doctor` measures both.
+  The jail requires neither a sysctl nor an AppArmor profile; a vendor sandbox
+  that needs nested namespaces cannot start inside `agent` on such a host.
 - **Observer provisioning is the critical path.** J1 requires observation on,
   from a non-root supervisor, with no setuid helper and no host-policy change by
   the tools. Ubuntu 24.04 restricts unprivileged user namespaces through

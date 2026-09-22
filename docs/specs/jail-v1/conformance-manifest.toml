@@ -90,7 +90,8 @@ apparmor_userns_restriction = "available"
 # bubblewrap all fail with EPERM. Evidence:
 # evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt measurements 1, 2, 3 and
 # 5 (all exit 1) with the profile text quoted verbatim; backend-evaluation.md
-# §1.1 rows for nested namespaces and nested bubblewrap. This stays
-# unavailable until an operator applies the sysctl or an AppArmor decision;
-# the agent profile (S03) needs it, `tool` does not.
+# §1.1 rows for nested namespaces and nested bubblewrap. The jail requires no
+# host configuration (jail-v1 revision 9), so this host stays stock and this
+# row stays unavailable: `agent` runs without nested user namespaces, and S03
+# proves its Landlock and seccomp nesting instead.
 nested_user_namespace = "unavailable"

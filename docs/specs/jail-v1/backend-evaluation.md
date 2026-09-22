@@ -46,22 +46,23 @@ functionality probe of the mechanism the D9 lane builds on, not a §15 gate.
 | bubblewrap inside bubblewrap, which sandbox-runtime and Greywall both do | fail: the inner bubblewrap cannot create its namespaces |
 | Not measured | pathname-socket isolation (§10) and what the distribution profile denies beyond capabilities |
 
-Consequence for D9 on this host: one containment layer, which is all `tool`
-and `build` need, works under the distribution profile with no operator
-change. The `agent` profile's nesting requirement (§4.6, §9.2) does not. It
-needs the operator-installed scoped AppArmor profile D9 names, giving the
-jail's launcher a profile without the capability denial, or the host-wide
-sysctl change that sandbox-runtime's README recommends; both are host policy
-the specification leaves to the operator. Which one, and its exact text, is
-the next enforcement measurement. Until it passes S03, `agent` refuses on
-this host, as §4.6 requires.
+Consequence for D9 on this host: one containment layer, which every
+contained profile uses, works under the distribution profile with no operator
+change. A user namespace nested inside it does not.
 
-Decision 2026-09-22: on this dedicated single-tenant host the sysctl is the
-chosen mechanism, applied and made persistent by the operator, because it is
-one recorded setting rather than a path-pinned profile that must follow every
-launcher rebuild. The manifest already records its value, so the change is
-visible in every later evidence file. Not yet applied; the nesting probe is
-re-run once it is, and a multi-tenant host would need the scoped profile.
+Decision 2026-09-22 (superseding the same day's sysctl decision): the jail
+requires no host configuration, and this host stays stock so that conformance
+proves it. `agent`'s nesting is therefore the unprivileged kind: an inner
+Landlock domain works inside one bwrap layer (measured 2026-09-22 as
+`ouro-ci`: `landlock_restrict_self` succeeded, a granted write succeeded, an
+ungranted read was denied, `unshare -Urm` in the same layer was EPERM), and
+inner seccomp filters stack on the outer ones
+([evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt](evidence/landlock-nesting-probe-2026-09-22-ouro-ci.txt),
+which also records Landlock ABI 8 accepting filesystem bits 0–15, network
+bits 0–1 and scope bits 0–1 only: no pathname-socket control, which is why
+N05 uses seccomp user-notification mediation). Nested user namespaces are an
+optional capability that `doctor` measures; on this host they stay
+unavailable and `agent` runs without them (jail-v1 §9.2, revision 9).
 The restriction itself is specific to Ubuntu 24.04 and later; Debian 13,
 Fedora and Arch ship usable unprivileged user namespaces by default. The
 portable install story is therefore: `doctor` detects that nested namespaces

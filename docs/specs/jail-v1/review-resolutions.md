@@ -121,3 +121,9 @@ Still deferred with reasons: receipt-fsync on a worker
 thread with the 5-second budget (§13.3 — the synchronous write is bounded by
 the filesystem; the thread split lands with J4's failure-injection work where
 it can be tested); per-pid birth identity on audit events (J4).
+
+## Revision 9 decision (2026-09-22, stock hosts)
+
+| Issue | Resolution | Contract / acceptance |
+|---|---|---|
+| `agent` required nested user namespaces, which stock Ubuntu 24.04+ denies inside bubblewrap, so it needed a host sysctl or AppArmor profile | The operator requires no host configuration. `agent` guarantees unprivileged nesting (Landlock, seccomp, `no_new_privs`), measured working inside one bwrap layer; nested user namespaces are an optional, measured host capability; where unavailable `agent` runs and an inner namespace sandbox fails visibly; the reference host stays stock | jail-v1 §§3.2, 9.2, 14.1; S03, J3 row; north-star D9, §§4.3, 4.6, 11; backend-evaluation §1.1; manifest `nested_user_namespace` |
