@@ -166,7 +166,11 @@ impl OwnedTempDir {
         let pid = unsafe { libc::getpid() };
         let nanos = super::clock::boottime_ns();
         let path = std::env::temp_dir().join(format!("ouro-{tag}-{pid}-{nanos}"));
-        std::fs::create_dir(&path)?;
+        // Explicit mode: `create_dir` applies the umask, and on a host with
+        // umask 002 that leaves a probe's directory group-writable in a
+        // directory everyone shares.
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self { path })
     }
 }

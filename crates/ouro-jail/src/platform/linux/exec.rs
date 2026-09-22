@@ -101,24 +101,59 @@ impl FdMap {
     /// Arrange for this layout to be installed in `command`'s child.
     ///
     /// The closure runs after `fork` and before `exec` and calls nothing but
-    /// `close_range` and `dup2`, both async-signal-safe. Every descriptor
-    /// above stdio is first marked close-on-exec, so nothing the supervisor
-    /// happens to hold — the gate, control and trace channels among them —
-    /// survives into the child (§8.3). The `dup2` calls then clear that flag
-    /// on exactly the descriptors this map names. Every source is at or above
-    /// [`RESERVE_BASE`] and every target below it, so no `dup2` can clobber a
-    /// later source.
+    /// `prctl`, `getppid`, `close_range` and `dup2`, all async-signal-safe.
+    ///
+    /// It starts by tying the child's life to this process with
+    /// `PR_SET_PDEATHSIG` (§8.2), and re-reads the parent pid immediately
+    /// afterwards, because the death that signal must catch can happen in the
+    /// window between `fork` and the `prctl` itself and is not resent. That
+    /// closes the fork-to-exec window.
+    ///
+    /// It does not close all of it, and the measurement says why. On this host
+    /// bubblewrap **clears the inherited parent-death signal**: a child that
+    /// arms `SIGKILL` and execs `/usr/bin/sleep` dies with its parent, and the
+    /// same child execing `bwrap` — with or without `--unshare-user` — does
+    /// not. Bubblewrap arms its own for `--die-with-parent`, which this plan
+    /// always passes and which works once it is armed. What remains is the
+    /// window inside bubblewrap's startup between clearing ours and arming its
+    /// own: a supervisor killed in that instant still leaves an orphan on pid
+    /// 1 holding this run's descriptors. Closing it needs either a change in
+    /// bubblewrap or a descriptor bubblewrap blocks on during setup
+    /// (`--userns-block-fd`, which moves the uid-map write to the supervisor).
+    /// Neither belongs in this closure.
+    ///
+    /// Then every descriptor above stdio is marked close-on-exec, so nothing
+    /// the supervisor happens to hold — the gate, control and trace channels
+    /// among them — survives into the child (§8.3). The `dup2` calls clear
+    /// that flag on exactly the descriptors this map names. Every source is at
+    /// or above [`RESERVE_BASE`] and every target below it, so no `dup2` can
+    /// clobber a later source.
     pub fn apply(&self, command: &mut Command) {
         let moves: Vec<(RawFd, RawFd)> = self
             .moves
             .iter()
             .map(|(fd, target)| (fd.as_raw_fd(), *target))
             .collect();
-        // SAFETY: the closure performs only `close_range` and `dup2` over a
+        // SAFETY: getppid cannot fail and is async-signal-safe; the value is
+        // read before the fork so the child can compare against it.
+        let supervisor = unsafe { libc::getpid() };
+        // SAFETY: the closure performs only async-signal-safe calls over a
         // `Vec` of plain integers built before the fork, and constructs an
         // `io::Error` from an errno, which does not allocate.
         unsafe {
             command.pre_exec(move || {
+                // SAFETY: PR_SET_PDEATHSIG takes scalars and dereferences
+                // nothing.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: getppid takes no arguments and cannot fail.
+                if libc::getppid() != supervisor {
+                    // The supervisor died in the fork window, so the signal
+                    // this child just armed will never arrive. Leave before
+                    // becoming the orphan that holds the run's descriptors.
+                    libc::_exit(EXIT_SUPERVISOR_GONE);
+                }
                 close_range_cloexec()?;
                 for (source, target) in &moves {
                     if libc::dup2(*source, *target) < 0 {
@@ -130,6 +165,13 @@ impl FdMap {
         }
     }
 }
+
+/// Exit status of a child that found its supervisor already gone.
+///
+/// It is never observed through a receipt — the supervisor that would read it
+/// is the one that died — but it keeps the reason out of the range an ordinary
+/// program uses.
+pub const EXIT_SUPERVISOR_GONE: i32 = 123;
 
 /// `CLOSE_RANGE_CLOEXEC` from `linux/close_range.h`.
 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;

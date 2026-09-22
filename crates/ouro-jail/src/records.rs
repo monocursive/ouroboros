@@ -999,6 +999,22 @@ impl Outcome {
         }
     }
 
+    /// A target exec that was proved to have failed (§13.2).
+    ///
+    /// Distinct from `refused`: the attempt got as far as releasing the
+    /// launcher and the kernel answered. `cause` carries the errno name,
+    /// which is the only field of this group that can hold it.
+    #[must_use]
+    pub fn exec_error(errno: &str) -> Self {
+        Outcome {
+            kind: OutcomeKind::ExecError,
+            code: None,
+            signal: None,
+            cause: Some(errno.to_owned()),
+            error: None,
+        }
+    }
+
     /// The outcome before anything is known.
     #[must_use]
     pub fn pending() -> Self {

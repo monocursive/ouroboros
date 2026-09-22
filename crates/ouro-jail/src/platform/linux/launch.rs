@@ -24,9 +24,10 @@
 //! so the syscalls the launcher narrows to and the syscalls the tracer
 //! expects to be stopped on cannot drift apart.
 
-use std::ffi::{CString, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fmt;
 use std::os::fd::RawFd;
+use std::os::unix::ffi::OsStrExt as _;
 
 use super::sys::{PathError, cstring_from_os};
 
@@ -199,6 +200,10 @@ pub fn launch_main(args: &[OsString]) -> ! {
     let mut argv_ptrs: Vec<*const libc::c_char> = argv_c.iter().map(|part| part.as_ptr()).collect();
     argv_ptrs.push(std::ptr::null());
     let program = argv_c[0].clone();
+    // Resolved here, before the narrowing filter is installed, because after
+    // it nothing may allocate. The supervisor is told which path was resolved
+    // so that it can hold the observer's exec snapshot against it.
+    let candidates = exec_candidates(&program, std::env::var_os("PATH").as_deref());
 
     // The target must not inherit the error pipe: EOF with no bytes is how the
     // supervisor learns the exec succeeded.
@@ -252,12 +257,92 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // the release pipe.
     unsafe { libc::close(parsed.release_fd) };
 
-    // SAFETY: `program` and `argv_ptrs` are NUL-terminated C strings and a
-    // NULL-terminated pointer array, both live for the call. execvp only
-    // returns on failure.
-    unsafe { libc::execvp(program.as_ptr(), argv_ptrs.as_ptr()) };
-    let errno = errno();
-    report_and_exit(parsed.error_fd, errno, EXIT_EXEC_FAILED);
+    // `execve`, never `execvp`. On `ENOEXEC` the library call re-executes the
+    // file through `/bin/sh`, so a file that is neither ELF nor a script with
+    // a shebang would run as a shell script nobody asked for, and the receipt
+    // would say the named program executed successfully. §6.1 admits no
+    // implicit shell, and X04 wants `ENOEXEC` to be its own distinct outcome,
+    // so the error reaches the error pipe as itself.
+    let mut last_errno = libc::ENOENT;
+    for candidate in &candidates {
+        // SAFETY: `candidate` and `argv_ptrs` are NUL-terminated C strings and
+        // a NULL-terminated pointer array, all live for the call, and
+        // `environ` is this process's own. execve only returns on failure.
+        unsafe { libc::execve(candidate.as_ptr(), argv_ptrs.as_ptr(), environ()) };
+        last_errno = errno();
+        // The search continues only where a PATH search is defined to: a
+        // component that is not there, or not a directory. Anything else — a
+        // file that exists and cannot be executed, a file that is not an
+        // executable format — is the answer.
+        if !matches!(last_errno, libc::ENOENT | libc::ENOTDIR) {
+            break;
+        }
+    }
+    report_and_exit(parsed.error_fd, last_errno, EXIT_EXEC_FAILED);
+}
+
+/// The same list as [`exec_candidates`], as raw bytes.
+///
+/// # Errors
+///
+/// [`PathError`] when the program name cannot be handed to a syscall.
+pub fn exec_candidate_bytes(
+    program: &OsStr,
+    path: Option<&OsStr>,
+) -> Result<Vec<Vec<u8>>, PathError> {
+    let program = cstring_from_os(program)?;
+    Ok(exec_candidates(&program, path)
+        .into_iter()
+        .map(|candidate| candidate.into_bytes())
+        .collect())
+}
+
+/// This process's environment, for `execve`.
+fn environ() -> *const *const libc::c_char {
+    unsafe extern "C" {
+        static environ: *const *const libc::c_char;
+    }
+    // SAFETY: `environ` is the C runtime's own pointer, valid for the life of
+    // the process and not modified by this program after startup.
+    unsafe { environ }
+}
+
+/// The paths an `execve` should be attempted at, in order.
+///
+/// Public because the supervisor derives the same list from the same inputs:
+/// the pathname the observer reports for the target's exec transition must be
+/// one of these, or the transition is not this launcher's exec of this target
+/// and does not confirm it.
+///
+/// A name containing a slash is used as given, exactly as `execvp` defines it.
+/// Otherwise the `PATH` this process was handed is searched; an empty element
+/// means the current directory, as POSIX says. The search is done here, in
+/// code that can be read, rather than in a library call whose failure mode is
+/// to invent a shell.
+pub fn exec_candidates(program: &CString, path: Option<&OsStr>) -> Vec<CString> {
+    if program.as_bytes().contains(&b'/') {
+        return vec![program.clone()];
+    }
+    let mut out = Vec::new();
+    let raw = path.map_or_else(Vec::new, |value| value.as_bytes().to_vec());
+    for element in raw.split(|byte| *byte == b':') {
+        let mut candidate: Vec<u8> = if element.is_empty() {
+            b".".to_vec()
+        } else {
+            element.to_vec()
+        };
+        if candidate.last() != Some(&b'/') {
+            candidate.push(b'/');
+        }
+        candidate.extend_from_slice(program.as_bytes());
+        if let Ok(candidate) = CString::new(candidate) {
+            out.push(candidate);
+        }
+    }
+    if out.is_empty() {
+        out.push(program.clone());
+    }
+    out
 }
 
 /// Write `errno` as four little-endian bytes to `fd` and exit with `code`.

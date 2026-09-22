@@ -178,6 +178,16 @@ impl Receipts {
             .unwrap_or_else(|| panic!("no {phase} receipt; saw {:?}", self.by_phase.keys()))
     }
 
+    /// The receipt of the latest phase this attempt reached.
+    fn last(&self) -> Option<&Value> {
+        for phase in ["settled", "enforced", "refused", "prepared"] {
+            if let Some(receipt) = self.by_phase.get(phase) {
+                return Some(receipt);
+            }
+        }
+        None
+    }
+
     fn saw(&self, phase: &str) -> bool {
         self.phases_seen.iter().any(|item| item == phase)
     }
@@ -440,8 +450,17 @@ fn s11_wall_expiry_separate_run() {
     let settled = receipts.phase("settled");
     assert_eq!(field(settled, "/outcome/kind"), "signaled");
     assert_eq!(field(settled, "/outcome/cause"), "wall_expiry");
+    // §9.3: the stop is cooperative first. Measured on this host, a SIGTERM
+    // to the outer bubblewrap never reaches the target, so this signal number
+    // is the evidence that the supervisor signalled the target's own host pid:
+    // a stop that skipped that step would end in the forced SIGKILL below
+    // instead.
     let signal = field(settled, "/outcome/signal").as_i64().unwrap_or(0);
-    assert!(signal > 0, "a signalled outcome names its signal");
+    assert_eq!(
+        signal,
+        i64::from(libc::SIGTERM),
+        "the target did not die of the cooperative stop"
+    );
     assert_eq!(run.code(), Some(128 + i32::try_from(signal).unwrap_or(0)));
     assert_eq!(field(settled, "/lifetime/tree_empty"), true);
 
@@ -1164,6 +1183,206 @@ fn x07_case(validators: &BTreeMap<String, Validator>, observe: Option<&str>) {
     assert!(
         !Path::new(&format!("/proc/{init}")).exists(),
         "the namespace init is still alive"
+    );
+}
+
+#[test]
+fn l01_a_target_that_ignores_the_cooperative_stop_dies_of_the_forced_one() {
+    if !live() {
+        return;
+    }
+    let validators = validators();
+    let case = case();
+    // The other half of the stop sequence: this target sets SIGTERM to
+    // SIG_IGN, so the cooperative signal arrives and does nothing, and only
+    // the forced kill of the namespace init ends it. Together with the wall
+    // test — where the same deadline produces SIGTERM — this shows the two
+    // steps happen in that order and that the grace is real.
+    let run = case
+        .jail
+        .args(["--limit", "wall=500ms"])
+        .target([
+            case.fixture.as_os_str(),
+            OsStr::new("ignore-term"),
+            OsStr::new("30000"),
+        ])
+        .run()
+        .expect("the jail runs");
+
+    let receipts = receipts_of(&run, &validators);
+    let settled = receipts.phase("settled");
+    assert_eq!(field(settled, "/outcome/kind"), "signaled");
+    assert_eq!(field(settled, "/outcome/cause"), "wall_expiry");
+    assert_eq!(
+        field(settled, "/outcome/signal"),
+        i64::from(libc::SIGKILL),
+        "a target that ignores SIGTERM must still be stopped"
+    );
+    assert_eq!(field(settled, "/lifetime/tree_empty"), true);
+    assert_eq!(run.code(), Some(128 + libc::SIGKILL));
+}
+
+#[test]
+fn x03_observation_off_does_not_confirm_an_exec_that_never_happened() {
+    if !live() {
+        return;
+    }
+    let validators = validators();
+    let case = case();
+    let marker = case.workspace.join("marker.txt");
+    let mut spawned = case
+        .jail
+        .args(["--observe", "off"])
+        .gate()
+        .target([
+            case.fixture.as_os_str(),
+            OsStr::new("open"),
+            marker.as_os_str(),
+            OsStr::new("--create"),
+            OsStr::new("--write"),
+        ])
+        .spawn()
+        .expect("the jail starts");
+
+    let attempt_id = {
+        let mut owner = spawned.owner();
+        let control = owner.await_prepared().expect("a prepared message");
+        control
+            .get("attempt_id")
+            .and_then(Value::as_str)
+            .expect("an attempt id")
+            .to_owned()
+    };
+
+    // With observation off, exec confirmation rests on the error pipe reaching
+    // EOF with no bytes. A launcher that was killed closes that pipe the same
+    // way a launcher that exec'd does. Killing it here makes the two look
+    // alike on that channel alone, so anything that still says "exec
+    // confirmed" is reading EOF as proof rather than as an absence.
+    let launcher = launcher_pid_of(spawned.pid()).expect("the launcher is running");
+    // SAFETY: the launcher is a descendant of this test's own jail process.
+    unsafe { libc::kill(launcher, libc::SIGKILL) };
+    while Path::new(&format!("/proc/{launcher}")).exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    {
+        let mut owner = spawned.owner();
+        // The release may fail outright now: its reader is gone.
+        let _ = owner.release(&Release::Valid, &attempt_id, "");
+    }
+    let run = spawned.wait().expect("the jail finishes");
+
+    assert!(!marker.exists(), "the target ran after its launcher died");
+    let receipts = receipts_of(&run, &validators);
+    let last = receipts
+        .last()
+        .expect("the attempt persisted at least one receipt");
+    assert_ne!(
+        field(last, "/exec_observed"),
+        true,
+        "a dead launcher was taken for a confirmed exec: {last:#}"
+    );
+    assert_ne!(
+        field(last, "/outcome/kind"),
+        "exited",
+        "an exit was invented for a target that never ran: {last:#}"
+    );
+    assert!(
+        matches!(run.code(), Some(1 | 125)),
+        "unexpected exit {:?}: {}",
+        run.code(),
+        run.stderr_text()
+    );
+}
+
+/// The host pid of the `__launch` process beneath a running `ouro-jail`.
+fn launcher_pid_of(jail: u32) -> Option<libc::pid_t> {
+    fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+        let mut out = Vec::new();
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            return out;
+        };
+        for task in tasks.flatten() {
+            let Ok(raw) = std::fs::read_to_string(task.path().join("children")) else {
+                continue;
+            };
+            out.extend(
+                raw.split_ascii_whitespace()
+                    .filter_map(|token| token.parse::<libc::pid_t>().ok()),
+            );
+        }
+        out
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let jail = libc::pid_t::try_from(jail).ok()?;
+    while std::time::Instant::now() < deadline {
+        let mut frontier = vec![jail];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for pid in frontier {
+                for child in children(pid) {
+                    if std::fs::read(format!("/proc/{child}/cmdline"))
+                        .is_ok_and(|raw| raw.split(|b| *b == 0).any(|part| part == b"__launch"))
+                    {
+                        return Some(child);
+                    }
+                    next.push(child);
+                }
+            }
+            frontier = next;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    None
+}
+
+#[test]
+fn m03_doctor_refuses_when_the_backend_is_not_on_the_operators_path() {
+    if !live() {
+        return;
+    }
+    // §14.1: doctor reports what it measured, and §6.4 gives it 125 when the
+    // selected plan is unavailable. A host whose PATH has no bubblewrap has
+    // not provisioned the backend, and saying so is the whole point of the
+    // command; reaching past PATH to a well-known location would report a
+    // capability the operator did not offer.
+    let empty = harness::fixture_path()
+        .parent()
+        .expect("the fixture has a directory")
+        .join("no-backend-here");
+    std::fs::create_dir_all(&empty).expect("an empty directory");
+    let output = std::process::Command::new(harness::jail_path())
+        .args(["doctor", "--json"])
+        .env("PATH", &empty)
+        .env(
+            "OURO_DATA_DIR",
+            std::env::temp_dir().join("ouro-doctor-nobwrap-data"),
+        )
+        .env(
+            "OURO_CONFIG_DIR",
+            std::env::temp_dir().join("ouro-doctor-nobwrap-cfg"),
+        )
+        .output()
+        .expect("doctor runs");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("one JSON document");
+    let status = report["capabilities"]
+        .as_array()
+        .expect("capabilities")
+        .iter()
+        .find(|capability| capability["name"] == "bwrap_present")
+        .map(|capability| capability["status"].clone())
+        .expect("the backend probe is reported");
+    assert_eq!(
+        status, "unavailable",
+        "an absent backend must be unavailable, never skipped: {report:#}"
+    );
+    assert_eq!(report["ready"], Value::Bool(false));
+    assert_eq!(
+        output.status.code(),
+        Some(125),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

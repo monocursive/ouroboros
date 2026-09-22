@@ -179,6 +179,8 @@ pub struct NsIds {
     pub net: Option<u64>,
     /// `/proc/<pid>/ns/user`.
     pub user: Option<u64>,
+    /// `/proc/<pid>/ns/cgroup`.
+    pub cgroup: Option<u64>,
 }
 
 /// Read the four namespace ids this project cares about.
@@ -192,6 +194,7 @@ pub fn ns_ids(pid: libc::pid_t) -> NsIds {
         mnt: ns_id(pid, "mnt"),
         net: ns_id(pid, "net"),
         user: ns_id(pid, "user"),
+        cgroup: ns_id(pid, "cgroup"),
     }
 }
 

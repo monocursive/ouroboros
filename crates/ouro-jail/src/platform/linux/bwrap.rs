@@ -8,7 +8,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -229,18 +229,52 @@ impl Placeholder {
     ///
     /// jail-v1 §9.1: "remove only unchanged, empty placeholders it created
     /// after tree death. Never remove a pre-existing Git file/directory."
+    ///
+    /// Every step works on one descriptor rather than on the name. The parent
+    /// is opened once without following a symlink; the entry is opened
+    /// through it; identity, emptiness and removal all refer to that open
+    /// object. A name resolved four times is four chances for something else
+    /// to be standing there by the last one, and the last one is a deletion.
     #[must_use]
     pub fn remove_if_unchanged(&self) -> PlaceholderOutcome {
         let path = self.destination.clone();
-        let stat = match lstat(&path) {
-            Ok(stat) => stat,
-            Err(errno) if errno == libc::ENOENT => {
-                return PlaceholderOutcome::AlreadyGone(path);
-            }
-            Err(errno) => return PlaceholderOutcome::KeptError(path, errno),
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return PlaceholderOutcome::KeptError(path, libc::EINVAL);
         };
-        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
-            return PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned());
+        let Ok(parent_fd) = open_directory(parent) else {
+            return PlaceholderOutcome::KeptError(path, last_errno());
+        };
+        let Ok(name_c) = cstring_from_os(name) else {
+            return PlaceholderOutcome::KeptError(path, libc::EINVAL);
+        };
+
+        // The entry itself, as a directory and without following a link.
+        // SAFETY: `parent_fd` is a live directory descriptor and `name_c` is a
+        // NUL-terminated name valid for the call.
+        let entry = unsafe {
+            libc::openat(
+                parent_fd.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if entry < 0 {
+            let errno = last_errno();
+            return match errno {
+                libc::ENOENT => PlaceholderOutcome::AlreadyGone(path),
+                libc::ENOTDIR | libc::ELOOP => {
+                    PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned())
+                }
+                other => PlaceholderOutcome::KeptError(path, other),
+            };
+        }
+        // SAFETY: `entry` was just opened and is owned here.
+        let entry = unsafe { OwnedFd::from_raw_fd(entry) };
+
+        let mut stat = super::sys::empty_stat();
+        // SAFETY: `entry` is live and `stat` is a writable buffer.
+        if unsafe { libc::fstat(entry.as_raw_fd(), &raw mut stat) } != 0 {
+            return PlaceholderOutcome::KeptError(path, last_errno());
         }
         if (stat.st_dev, stat.st_ino) != (self.dev, self.ino) {
             return PlaceholderOutcome::KeptChanged(
@@ -254,23 +288,88 @@ impl Placeholder {
         if stat.st_uid != self.uid {
             return PlaceholderOutcome::KeptChanged(path, "owner changed".to_owned());
         }
-        match std::fs::read_dir(&path) {
-            Ok(mut entries) => {
-                if entries.next().is_some() {
-                    return PlaceholderOutcome::KeptNotEmpty(path);
-                }
-            }
-            Err(e) => {
-                return PlaceholderOutcome::KeptError(path, e.raw_os_error().unwrap_or(libc::EIO));
-            }
+        match directory_is_empty(&entry) {
+            Ok(true) => {}
+            Ok(false) => return PlaceholderOutcome::KeptNotEmpty(path),
+            Err(errno) => return PlaceholderOutcome::KeptError(path, errno),
         }
-        match std::fs::remove_dir(&path) {
-            Ok(()) => {
-                let _ = std::fs::remove_dir(&self.source);
-                PlaceholderOutcome::Removed(path)
-            }
-            Err(e) => PlaceholderOutcome::KeptError(path, e.raw_os_error().unwrap_or(libc::EIO)),
+        drop(entry);
+
+        // SAFETY: `parent_fd` is live and `name_c` is NUL-terminated;
+        // AT_REMOVEDIR removes the directory entry the checks above described.
+        if unsafe { libc::unlinkat(parent_fd.as_raw_fd(), name_c.as_ptr(), libc::AT_REMOVEDIR) }
+            != 0
+        {
+            return PlaceholderOutcome::KeptError(path, last_errno());
         }
+        let _ = std::fs::remove_dir(&self.source);
+        PlaceholderOutcome::Removed(path)
+    }
+}
+
+/// Open a directory without following a symlink at its final component.
+fn open_directory(path: &Path) -> Result<OwnedFd, i32> {
+    let c = cstring_from_os(path.as_os_str()).map_err(|_| libc::EINVAL)?;
+    // SAFETY: `c` is a NUL-terminated path that outlives the call.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(last_errno());
+    }
+    // SAFETY: `fd` was just opened and is owned here.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Whether an open directory has any entry besides `.` and `..`.
+fn directory_is_empty(dir: &OwnedFd) -> Result<bool, i32> {
+    // `fdopendir` takes ownership of what it is given, so it gets a duplicate.
+    // SAFETY: `dir` is a live directory descriptor.
+    let duplicate = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(last_errno());
+    }
+    // SAFETY: `duplicate` is a fresh directory descriptor; closedir releases
+    // it exactly once.
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let errno = last_errno();
+        // SAFETY: fdopendir failed, so the descriptor is still ours to close.
+        unsafe { libc::close(duplicate) };
+        return Err(errno);
+    }
+    let mut empty = true;
+    let mut failure = None;
+    loop {
+        // SAFETY: errno is this thread's own.
+        unsafe { *libc::__errno_location() = 0 };
+        // SAFETY: `stream` is the DIR* just created; the returned pointer is
+        // valid until the next call on the same stream.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            let errno = last_errno();
+            if errno != 0 {
+                failure = Some(errno);
+            }
+            break;
+        }
+        // SAFETY: `entry` is non-null and `d_name` is a NUL-terminated array
+        // inside it.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let bytes = name.to_bytes();
+        if bytes != b"." && bytes != b".." {
+            empty = false;
+            break;
+        }
+    }
+    // SAFETY: `stream` was created above and is closed exactly once here.
+    unsafe { libc::closedir(stream) };
+    match failure {
+        Some(errno) => Err(errno),
+        None => Ok(empty),
     }
 }
 
@@ -528,6 +627,10 @@ impl BwrapPlan {
                 "--unshare-net",
                 "--unshare-ipc",
                 "--unshare-uts",
+                // §9.1: no host namespace handle reaches the child. Without
+                // this the child reads the supervisor's own cgroup path out
+                // of /proc/self/cgroup, which names the operator's session.
+                "--unshare-cgroup",
                 "--die-with-parent",
                 "--new-session",
                 "--clearenv",
@@ -767,6 +870,10 @@ mod tests {
             "--unshare-net",
             "--unshare-ipc",
             "--unshare-uts",
+            // §9.1: no host namespace handle reaches the child. Without this
+            // the child reads the supervisor's own cgroup path out of
+            // /proc/self/cgroup, which names the operator's session.
+            "--unshare-cgroup",
             "--die-with-parent",
             "--new-session",
             "--clearenv",

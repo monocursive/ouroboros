@@ -48,7 +48,16 @@ pub const PROTECTED_SEGMENTS: &[&str] = &[".git", ".ouroboros"];
 /// Environment names a contained profile admits from the operator's
 /// environment (§12). Values are read from the supervisor's environment; the
 /// receipt records only the names.
-pub const CONTAINED_ENVIRONMENT_NAMES: &[&str] = &["PATH", "LANG", "TERM", "TZ"];
+pub const CONTAINED_ENVIRONMENT_NAMES: &[&str] = &["LANG", "TERM", "TZ"];
+
+/// The `PATH` a contained profile gives its child (§6.1).
+///
+/// A fixed value over the runtime roots the profile grants, never the
+/// supervisor's own. The operator's `PATH` names their home, their toolchain
+/// managers and whatever else they have installed; handing it to the child
+/// discloses all of that and points it at directories the jail does not grant,
+/// so every lookup through it would miss anyway.
+pub const CONTAINED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 /// Builds the baseline a built-in profile expands to.
 ///
@@ -186,7 +195,10 @@ fn preferred(requested: &str, value: u64) -> Ceiling {
 /// The contained environment: an empty environment plus the admitted names that
 /// the operator's environment actually defines, plus the generated `TMPDIR`.
 fn contained_environment(lookup: &EnvLookup) -> crate::policy::EnvironmentSnapshot {
-    let mut bindings = Vec::new();
+    let mut bindings = vec![EnvBinding {
+        name: "PATH".to_owned(),
+        value: EnvValue::Native(NativeString::Text(CONTAINED_PATH.to_owned())),
+    }];
     for name in CONTAINED_ENVIRONMENT_NAMES {
         if let Some(value) = lookup(name)
             && let Ok(value) = NativeString::from_bytes(value)

@@ -1034,7 +1034,11 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 break;
             }
             RunEvent::ExecError { errno } => {
-                // §8.1: an unsuccessful target exec is a pre-exec failure.
+                // §8.1: an unsuccessful target exec is a pre-exec failure, and
+                // §13.2 gives it its own outcome kind. It is not `refused`:
+                // the attempt reached release and the kernel answered, which
+                // is a different fact from a refusal before anything ran.
+                record.outcome = Outcome::exec_error(&errno);
                 let error = JailError::new(
                     ErrorCode::ExecFailed,
                     ErrorStage::Released,
@@ -1110,6 +1114,13 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
     } else {
         Phase::Enforced
     };
+    // §14.2: default managed scratch is removed only after verified tree
+    // death. Until then the child could still be writing to it, and after an
+    // unverified one something may still be holding it, so it is retained and
+    // the receipt says the cleanup did not complete.
+    if settled {
+        record.state_cleanup = remove_managed_scratch(&attempt_dir, &plan);
+    }
     let tree_error = (!settled).then(|| {
         let error = JailError::new(
             ErrorCode::TreeUnknown,
@@ -1180,6 +1191,34 @@ fn wall_deadline(plan: &Plan) -> Option<Instant> {
         .wall
         .as_ref()
         .map(|ceiling| Instant::now() + Duration::from_millis(ceiling.value))
+}
+
+/// Removes this attempt's managed scratch and placeholder holders (§14.2).
+///
+/// Only the directories this tool created under the attempt directory: an
+/// operator-supplied `--scratch` and the workspace are never touched. The
+/// receipt records `complete` only when both are gone.
+fn remove_managed_scratch(attempt_dir: &AttemptDir, plan: &Plan) -> crate::records::StateCleanup {
+    use crate::records::StateCleanup;
+    if plan.resolved.snapshot.roots.scratch != ScratchRoot::Managed {
+        return cleanup::not_needed();
+    }
+    let mut complete = true;
+    for path in [
+        attempt_dir.root().join("scratch"),
+        attempt_dir.root().join("placeholders"),
+    ] {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => complete = false,
+        }
+    }
+    if complete {
+        StateCleanup::Complete
+    } else {
+        StateCleanup::Pending
+    }
 }
 
 fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profile: ProfileName) {
@@ -1481,7 +1520,16 @@ fn refuse(
     control: Option<&mut ControlSink>,
     journal: &mut Journal,
 ) -> RunReport {
-    record.outcome = Outcome::refused(error);
+    // A proved exec failure keeps its own kind (§13.2); everything else that
+    // reaches here refused before the target ran.
+    record.outcome = if record.outcome.kind == OutcomeKind::ExecError {
+        Outcome {
+            error: Some(error.to_object()),
+            ..record.outcome.clone()
+        }
+    } else {
+        Outcome::refused(error)
+    };
     record.errors.push(error.to_object());
     record.exec_observed = false;
     journal.lifecycle("refused");

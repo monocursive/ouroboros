@@ -97,6 +97,12 @@ impl LinuxPlatform {
     }
 }
 
+/// The backend, looked up on the operator's `PATH`.
+///
+/// There is no fallback to a well-known location. An operator whose `PATH`
+/// does not contain bubblewrap has not provisioned this host for the backend,
+/// and `doctor` should say the backend is unavailable rather than reach past
+/// what they configured and report a capability they did not offer.
 fn find_bwrap() -> PathBuf {
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
@@ -106,7 +112,7 @@ fn find_bwrap() -> PathBuf {
             }
         }
     }
-    PathBuf::from("/usr/bin/bwrap")
+    PathBuf::from("bwrap")
 }
 
 fn error(
@@ -386,11 +392,23 @@ impl StatusReader {
 /// Everything the boundary owns, from preparation through settlement.
 struct Boundary {
     snapshot: PolicySnapshot,
+    workspace: PathBuf,
     child: Option<Child>,
     bwrap_pid: libc::pid_t,
+    /// A descriptor for bubblewrap, taken while it was known to be itself. A
+    /// pid number can come to mean another process; a pidfd cannot (§9.3).
+    bwrap_fd: Option<OwnedFd>,
     init_pid: libc::pid_t,
+    /// The same, for the namespace init.
+    init_fd: Option<OwnedFd>,
     launcher: identity::ProcessIdentity,
+    /// The launcher's own descriptor, for the cooperative stop.
+    launcher_fd: Option<OwnedFd>,
     launcher_argv: Vec<Vec<u8>>,
+    /// The paths the launcher will try to `execve`, derived from the same
+    /// program name and `PATH` the launcher itself uses. The observer's exec
+    /// snapshot must be one of them.
+    target_images: Vec<Vec<u8>>,
     release: Option<OwnedFd>,
     error: OwnedFd,
     error_bytes: Vec<u8>,
@@ -440,7 +458,14 @@ impl Boundary {
             )
         })?;
 
-        validate_stdio(&plan.attempt_dir)?;
+        // `<data>/attempts/<id>` is the attempt; the state root is two levels
+        // up, and everything under it is supervisor state (§7).
+        let state_root = plan
+            .attempt_dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(plan.attempt_dir.as_path());
+        validate_stdio(state_root)?;
 
         // The scratch directory the child sees as /tmp.
         let scratch = match &snapshot.roots.scratch {
@@ -513,6 +538,23 @@ impl Boundary {
             .iter()
             .map(|part| part.as_bytes().to_vec())
             .collect();
+        let child_path = bplan
+            .env
+            .iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone());
+        let target_images = super::launch::exec_candidate_bytes(
+            target.first().map_or(OsStr::new(""), OsString::as_os_str),
+            child_path.as_deref(),
+        )
+        .map_err(|err| {
+            error(
+                ErrorCode::InvalidConfig,
+                ErrorStage::Preparing,
+                Remediation::Configuration,
+                err.to_string(),
+            )
+        })?;
 
         let rendered = bplan.render().map_err(|err| {
             error(
@@ -565,6 +607,7 @@ impl Boundary {
         drop(fds);
         let bwrap_pid = libc::pid_t::try_from(child.id()).unwrap_or(-1);
 
+        let workspace_path = plan.workspace.clone();
         let mut boundary = Boundary {
             audit: AuditWriter::new(
                 &plan.attempt_id,
@@ -573,15 +616,20 @@ impl Boundary {
                 bwrap::SCRATCH_INSIDE_PATH.as_bytes(),
             ),
             snapshot,
+            workspace: workspace_path,
             child: Some(child),
             bwrap_pid,
+            bwrap_fd: identity::pidfd_open(bwrap_pid).ok(),
             init_pid: -1,
+            init_fd: None,
             launcher: identity::ProcessIdentity {
                 pid: -1,
                 boot_id: String::new(),
                 start_time_ticks: 0,
             },
+            launcher_fd: None,
             launcher_argv,
+            target_images,
             release: Some(release_w),
             error: error_r,
             error_bytes: Vec::new(),
@@ -665,6 +713,10 @@ impl Boundary {
             nap();
         };
         self.init_pid = init_pid;
+        // Taken now, while the kernel has just named this pid as the
+        // namespace init: every later signal goes through the descriptor, so
+        // it cannot reach a process that merely inherited the number.
+        self.init_fd = identity::pidfd_open(init_pid).ok();
 
         // The launcher is the init's child whose argv is the one we asked for.
         let launcher = loop {
@@ -714,7 +766,35 @@ impl Boundary {
         // namespaces the launcher is actually in. Recording the first without
         // checking the second would be taking the backend's word for the
         // boundary, so both are read and they must agree.
+        self.launcher_fd = identity::pidfd_open(launcher).ok();
         self.ns_ids = identity::ns_ids(launcher);
+        // Every namespace the plan asked for has to be one the launcher is
+        // actually in, and a different one from this process's.
+        // SAFETY: getpid takes no arguments and cannot fail.
+        let own = identity::ns_ids(unsafe { libc::getpid() });
+        for (name, inside, outside) in [
+            ("pid", self.ns_ids.pid, own.pid),
+            ("mnt", self.ns_ids.mnt, own.mnt),
+            ("net", self.ns_ids.net, own.net),
+            ("user", self.ns_ids.user, own.user),
+            ("cgroup", self.ns_ids.cgroup, own.cgroup),
+        ] {
+            match (inside, outside) {
+                (Some(inside), Some(outside)) if inside == outside => {
+                    return Err(preparing(
+                        ErrorCode::BackendUnavailable,
+                        format!("the launcher shares this process's {name} namespace"),
+                    ));
+                }
+                (None, _) => {
+                    return Err(preparing(
+                        ErrorCode::BackendUnavailable,
+                        format!("the launcher's {name} namespace could not be read"),
+                    ));
+                }
+                _ => {}
+            }
+        }
         for (key, seen) in [
             ("pid-namespace", self.ns_ids.pid),
             ("mnt-namespace", self.ns_ids.mnt),
@@ -805,6 +885,21 @@ impl Boundary {
                 hit: applied.then_some(false),
             });
         }
+        let mut mounts = mounts;
+        // A protected name the walk refused to follow is authority this plan
+        // did not apply. The mount table is where §13.2 lists what the child's
+        // view is, and `hidden` is the mode the schema has for a path that is
+        // named and not granted, so each one appears there rather than being
+        // left out of the record entirely.
+        for name in skipped_protected_names(scan) {
+            let path = self.workspace_bytes_joined(&name);
+            if let Ok(native) = NativeString::from_bytes(path) {
+                mounts.push(AppliedMount {
+                    path: native,
+                    mode: "hidden".to_owned(),
+                });
+            }
+        }
         Applied {
             filesystem: Some(AppliedFilesystem {
                 mechanism: "bubblewrap-binds".to_owned(),
@@ -826,6 +921,16 @@ impl Boundary {
         }
     }
 
+    /// A workspace-relative name as the absolute bytes the child sees.
+    fn workspace_bytes_joined(&self, relative: &str) -> Vec<u8> {
+        let mut out = self.workspace.as_os_str().as_bytes().to_vec();
+        if out.last() != Some(&b'/') {
+            out.push(b'/');
+        }
+        out.extend_from_slice(relative.as_bytes());
+        out
+    }
+
     fn diagnostic(&self) -> String {
         self.status.text.clone()
     }
@@ -843,19 +948,29 @@ impl Boundary {
 
     /// Kills and reaps everything this boundary owns.
     fn teardown(&mut self) {
-        if self.init_pid > 0 {
-            // SAFETY: signalling a descendant this process created.
-            unsafe { libc::kill(self.init_pid, libc::SIGKILL) };
-        }
-        if self.bwrap_pid > 0 {
-            // SAFETY: as above.
-            unsafe { libc::kill(self.bwrap_pid, libc::SIGKILL) };
-        }
+        self.kill_boundary();
         self.stop_observer(TREE_BUDGET);
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
         self.remove_placeholders();
+    }
+
+    /// Kills the namespace init and the backend through their descriptors.
+    ///
+    /// §9.3: never signal a pid without revalidating its identity. A pidfd
+    /// taken at discovery is that revalidation made permanent — the kernel
+    /// refuses to deliver through it once the process is gone, so no signal of
+    /// this attempt's can land on whatever later holds the number. Killing the
+    /// init makes the kernel kill the namespace; the backend outside it goes
+    /// too.
+    fn kill_boundary(&self) {
+        for fd in [self.init_fd.as_ref(), self.bwrap_fd.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGKILL);
+        }
     }
 
     /// Stops the observer within `budget` and keeps its account.
@@ -936,6 +1051,7 @@ impl Boundary {
             ("mnt_namespace", self.ns_ids.mnt),
             ("net_namespace", self.ns_ids.net),
             ("user_namespace", self.ns_ids.user),
+            ("cgroup_namespace", self.ns_ids.cgroup),
         ] {
             details.insert(key.to_owned(), value.map_or(Value::Null, Value::from));
         }
@@ -1053,53 +1169,88 @@ fn create_private_dir(path: &Path) -> Result<(), JailError> {
 
 /// §8.3: reject socket or directory stdio, and regular-file stdio that
 /// resolves into protected supervisor state.
-fn validate_stdio(attempt_dir: &Path) -> Result<(), JailError> {
+///
+/// `state_root` is the whole runtime state directory, not just this attempt's
+/// own: a redirect into a sibling attempt's receipts is the same disclosure.
+/// A descriptor that cannot be inspected refuses rather than passing, because
+/// "I could not tell what this is" is not a reason to hand it to the child.
+fn validate_stdio(state_root: &Path) -> Result<(), JailError> {
+    let state_root = state_root.canonicalize();
     for fd in [0, 1, 2] {
-        let mut st = super::sys::empty_stat();
-        // SAFETY: `st` is a writable stat buffer; fstat dereferences nothing
-        // else.
-        if unsafe { libc::fstat(fd, &raw mut st) } != 0 {
-            continue;
-        }
-        let kind = st.st_mode & libc::S_IFMT;
         let name = match fd {
             0 => "stdin",
             1 => "stdout",
             _ => "stderr",
         };
-        if kind == libc::S_IFSOCK || kind == libc::S_IFDIR {
-            return Err(error(
+        let refuse = |message: String| {
+            Err(error(
                 ErrorCode::InvalidFd,
                 ErrorStage::Preparing,
                 Remediation::Configuration,
-                format!("{name} is a socket or a directory, which a contained run refuses"),
+                message,
+            ))
+        };
+        let mut st = super::sys::empty_stat();
+        // SAFETY: `st` is a writable stat buffer; fstat dereferences nothing
+        // else.
+        if unsafe { libc::fstat(fd, &raw mut st) } != 0 {
+            let errno = super::sys::last_errno();
+            return refuse(format!(
+                "{name} cannot be inspected ({}), so what the child would inherit is unknown",
+                super::sys::errno_name(errno)
             ));
         }
-        if kind == libc::S_IFREG
-            && let Ok(target) = std::fs::read_link(format!("/proc/self/fd/{fd}"))
-            && target.starts_with(attempt_dir)
-        {
-            return Err(error(
-                ErrorCode::InvalidFd,
-                ErrorStage::Preparing,
-                Remediation::Configuration,
-                format!("{name} resolves into this attempt's own state directory"),
+        let kind = st.st_mode & libc::S_IFMT;
+        if kind == libc::S_IFSOCK || kind == libc::S_IFDIR {
+            return refuse(format!(
+                "{name} is a socket or a directory, which a contained run refuses"
             ));
+        }
+        if kind == libc::S_IFREG {
+            let Ok(target) = std::fs::read_link(format!("/proc/self/fd/{fd}")) else {
+                return refuse(format!(
+                    "{name} is a regular file whose path cannot be read, so it cannot be \
+                     shown to lie outside the state root"
+                ));
+            };
+            let target = target.canonicalize().unwrap_or(target);
+            if let Ok(state_root) = state_root.as_ref()
+                && target.starts_with(state_root)
+            {
+                return refuse(format!("{name} resolves into the runtime state root"));
+            }
         }
     }
     Ok(())
 }
 
-/// The coverage the plan actually obtained.
+/// The coverage the plan actually obtained, derived from the walk.
 ///
-/// Every segment the walk found is bound read-only over itself and every
-/// absent root-level literal gets a placeholder, which is exactly
-/// `existing_and_root` (north-star §4.4). A segment created later, deeper in
-/// the tree, is outside it, and the walk refused rather than returning a
-/// partial answer, so this is not a claim beyond what was measured.
+/// `existing_and_root` means every protected segment that existed at launch is
+/// covered, plus the root-level literals. The walk earns that claim only if it
+/// finished inside its bounds and skipped no protected name: a `.git` that was
+/// a symlink is not followed and not covered, so a scan that met one has not
+/// covered everything that existed and says `none` instead of overstating.
+/// A segment created later, deeper in the tree, is outside the claim either
+/// way (north-star §4.4).
 fn scan_coverage(scan: &jfs::ProtectedScan) -> String {
-    debug_assert!(scan.entries_seen <= jfs::ScanLimits::DEFAULT.max_entries);
-    "existing_and_root".to_owned()
+    let within_bounds = scan.entries_seen <= jfs::ScanLimits::DEFAULT.max_entries
+        && scan.max_depth_seen <= jfs::ScanLimits::DEFAULT.max_depth;
+    if within_bounds && scan.skipped_symlinks.is_empty() {
+        "existing_and_root".to_owned()
+    } else {
+        "none".to_owned()
+    }
+}
+
+/// The protected names the walk would not follow, as workspace-relative
+/// strings for the receipt.
+fn skipped_protected_names(scan: &jfs::ProtectedScan) -> Vec<String> {
+    scan.skipped_symlinks
+        .iter()
+        .filter_map(|path| path.strip_prefix(&scan.root).ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The mount table the launcher actually sees, from `/proc/<pid>/mountinfo`.
@@ -1343,6 +1494,25 @@ impl LinuxRunning {
         }
     }
 
+    /// Whether an observed exec transition is the launcher executing the
+    /// program the operator named.
+    ///
+    /// A transition with no pathname is one whose entry the observer did not
+    /// witness. A transition whose pathname is not one the launcher would have
+    /// tried is some other image: the launcher resolves `PATH` itself and
+    /// finishes with `execve`, so the set is small, known and derived from the
+    /// same inputs on both sides. Neither confirms the target ran.
+    fn image_is_the_target(&self, path: Option<&super::tracer::PathSnapshot>) -> bool {
+        let Some(path) = path else { return false };
+        if !path.complete {
+            return false;
+        }
+        self.boundary
+            .target_images
+            .iter()
+            .any(|candidate| candidate.as_slice() == path.bytes.as_slice())
+    }
+
     /// Drains the tracer channel into audit events and run events.
     ///
     /// `block` is how long to wait for the first event. Every event taken from
@@ -1378,7 +1548,10 @@ impl LinuxRunning {
                 // target exec is witnessed and carries a path; requiring one
                 // here means a transition we cannot attribute never becomes
                 // exec confirmation.
-                if *pid == launcher && !self.exec_confirmed && path.is_some() {
+                if *pid == launcher
+                    && !self.exec_confirmed
+                    && self.image_is_the_target(path.as_ref())
+                {
                     self.exec_confirmed = true;
                     self.pending.push(RunEvent::ExecConfirmed);
                 }
@@ -1509,16 +1682,7 @@ impl LinuxRunning {
             return;
         }
         self.hard_killed = true;
-        // Killing the namespace init makes the kernel kill every process in
-        // the namespace (§9.3); bubblewrap outside it goes too.
-        if self.boundary.init_pid > 0 {
-            // SAFETY: signalling a descendant this process created.
-            unsafe { libc::kill(self.boundary.init_pid, libc::SIGKILL) };
-        }
-        if self.boundary.bwrap_pid > 0 {
-            // SAFETY: as above.
-            unsafe { libc::kill(self.boundary.bwrap_pid, libc::SIGKILL) };
-        }
+        self.boundary.kill_boundary();
     }
 
     /// The outcome once no more facts can arrive.
@@ -1648,10 +1812,8 @@ impl RunningExecution for LinuxRunning {
         // bubblewrap itself and never reaches the target, while a SIGTERM to
         // the target's own host pid runs its handler. So the cooperative stop
         // goes to the target.
-        if self.boundary.launcher.pid > 0 && self.boundary.launcher.is_live() {
-            // SAFETY: signalling a descendant this process created, whose
-            // identity was just revalidated.
-            unsafe { libc::kill(self.boundary.launcher.pid, libc::SIGTERM) };
+        if let Some(fd) = self.boundary.launcher_fd.as_ref() {
+            let _ = identity::pidfd_send_signal(fd.as_raw_fd(), libc::SIGTERM);
         }
     }
 
@@ -1689,22 +1851,27 @@ impl RunningExecution for LinuxRunning {
         self.boundary.stop_observer(deadline.remaining());
         self.boundary.remove_placeholders();
 
-        let verified = natural && self.boundary.observer_verified_the_tree();
-        if verified {
-            TreeObservation {
-                tree_empty: Some(true),
-                verified_at: Some(SystemTime::now()),
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: "verified".to_owned(),
-            }
-        } else {
-            TreeObservation {
-                tree_empty: None,
-                verified_at: None,
-                verification_scope: "attempt_tree".to_owned(),
-                integrity: "pending".to_owned(),
-            }
-        }
+        verdict(&TreeInputs {
+            init_alive: init_alive(self.boundary.init_pid),
+            backend_reaped: self.bwrap_status.is_some(),
+            tracer_finished: self.boundary.tracer.is_none() || self.finished,
+            natural_end: natural,
+            abandoned_tracees: self
+                .boundary
+                .tracer_summary
+                .as_ref()
+                .map_or(0, |summary| summary.loss.abandoned_tracees),
+            unreaped_children: self
+                .boundary
+                .tracer_summary
+                .as_ref()
+                .map_or(0, |summary| summary.unreaped_children.len()),
+            observer_panicked: self
+                .boundary
+                .tracer_summary
+                .as_ref()
+                .is_some_and(|summary| summary.thread_panicked),
+        })
     }
 
     fn observer_summary(&mut self) -> Option<CoverageSummary> {
@@ -1745,6 +1912,59 @@ fn observer_verdict(summary: Option<&TracerSummary>) -> bool {
                 && !summary.thread_panicked
         }
         None => true,
+    }
+}
+
+/// What is known about the tree when its budget is spent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeInputs {
+    /// The namespace init still has an entry in `/proc`.
+    pub init_alive: bool,
+    /// The backend's exit was seen.
+    pub backend_reaped: bool,
+    /// The observer said it was done, or there was no observer.
+    pub tracer_finished: bool,
+    /// The loop saw the tree end on its own rather than running out of time.
+    pub natural_end: bool,
+    /// Tracees the observer had to kill on the way out.
+    pub abandoned_tracees: u64,
+    /// Direct children whose exit status no longer has a route here.
+    pub unreaped_children: usize,
+    /// The observer's thread panicked, so its counters mean nothing.
+    pub observer_panicked: bool,
+}
+
+/// The tree observation those facts justify (§9.3, §13.2).
+///
+/// `tree_empty = Some(true)` needs every one of them to say the tree ended and
+/// that the ending was seen. Anything unknown — an init still there, a backend
+/// whose exit was never collected, an observer that gave up on a tracee or
+/// lost a child's status — is `None` and `pending`, which the supervisor turns
+/// into `tree_unknown`. There is no input combination that produces `false`:
+/// this code either watched the tree end or does not know.
+#[must_use]
+pub fn verdict(inputs: &TreeInputs) -> TreeObservation {
+    let verified = inputs.natural_end
+        && !inputs.init_alive
+        && inputs.backend_reaped
+        && inputs.tracer_finished
+        && inputs.abandoned_tracees == 0
+        && inputs.unreaped_children == 0
+        && !inputs.observer_panicked;
+    if verified {
+        TreeObservation {
+            tree_empty: Some(true),
+            verified_at: Some(SystemTime::now()),
+            verification_scope: "attempt_tree".to_owned(),
+            integrity: "verified".to_owned(),
+        }
+    } else {
+        TreeObservation {
+            tree_empty: None,
+            verified_at: None,
+            verification_scope: "attempt_tree".to_owned(),
+            integrity: "pending".to_owned(),
+        }
     }
 }
 
@@ -1857,6 +2077,85 @@ mod tests {
             !observer_verdict(Some(&panicked)),
             "a panicked observer's counters cannot verify anything"
         );
+    }
+
+    #[test]
+    fn a_tree_is_only_empty_when_every_fact_says_its_end_was_seen() {
+        let seen = TreeInputs {
+            init_alive: false,
+            backend_reaped: true,
+            tracer_finished: true,
+            natural_end: true,
+            abandoned_tracees: 0,
+            unreaped_children: 0,
+            observer_panicked: false,
+        };
+        let verified = verdict(&seen);
+        assert_eq!(verified.tree_empty, Some(true));
+        assert_eq!(verified.integrity, "verified");
+        assert!(verified.verified_at.is_some());
+
+        // Each fact on its own is enough to withhold the claim, and none of
+        // them turns it into a claim that the tree is NOT empty: unknown is
+        // unknown.
+        let doubts = [
+            (
+                "the init is still there",
+                TreeInputs {
+                    init_alive: true,
+                    ..seen
+                },
+            ),
+            (
+                "the backend was never reaped",
+                TreeInputs {
+                    backend_reaped: false,
+                    ..seen
+                },
+            ),
+            (
+                "the observer did not finish",
+                TreeInputs {
+                    tracer_finished: false,
+                    ..seen
+                },
+            ),
+            (
+                "the budget ran out",
+                TreeInputs {
+                    natural_end: false,
+                    ..seen
+                },
+            ),
+            (
+                "a tracee had to be killed",
+                TreeInputs {
+                    abandoned_tracees: 1,
+                    ..seen
+                },
+            ),
+            (
+                "a child's status was lost",
+                TreeInputs {
+                    unreaped_children: 1,
+                    ..seen
+                },
+            ),
+            (
+                "the observer panicked",
+                TreeInputs {
+                    observer_panicked: true,
+                    ..seen
+                },
+            ),
+        ];
+        for (why, inputs) in doubts {
+            let observation = verdict(&inputs);
+            assert_eq!(observation.tree_empty, None, "{why}");
+            assert_eq!(observation.verified_at, None, "{why}");
+            assert_ne!(observation.integrity, "verified", "{why}");
+            assert_eq!(observation.verification_scope, "attempt_tree", "{why}");
+        }
     }
 
     #[test]
