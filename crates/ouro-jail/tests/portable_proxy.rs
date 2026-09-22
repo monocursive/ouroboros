@@ -24,6 +24,7 @@ use ouro_jail::proxy::{
     ProxyHandle, ProxyResult, ProxySink, ProxySummary, Reason, RequestKind, ResolveError, Resolver,
     SystemResolver,
 };
+use ouro_jail::records::{Completion, Decision};
 
 /// Upper bound for any wait. Never reached when the behaviour is correct.
 const WAIT: Duration = Duration::from_secs(20);
@@ -323,7 +324,7 @@ fn n02_allowed_connect_tunnel_yields_one_allow_result_at_close() {
     assert_eq!(resolver.calls("fixture.test"), 1);
     let (summary, results) = harness.stop(WAIT);
     assert_eq!(results.len(), 1);
-    assert!(summary.drained);
+    assert!(summary.complete());
     assert_eq!(summary.results_missing, 0);
 }
 
@@ -405,8 +406,12 @@ fn n02_plain_http_forwards_exactly_the_framed_request_without_proxy_credentials(
          Host: fixture.test:{port}\r\n\
          Proxy-Authorization: Basic SECRET-PROXY-CRED\r\n\
          Proxy-Connection: keep-alive\r\n\
-         Connection: keep-alive, X-Hop\r\n\
+         Connection: X-Hop\r\n\
          X-Hop: SECRET-HOP\r\n\
+         Keep-Alive: timeout=5\r\n\
+         TE: trailers\r\n\
+         Trailer: X-Checksum\r\n\
+         Upgrade: websocket\r\n\
          X-Keep: SECRET-HEADER\r\n\
          Content-Length: 11\r\n\r\n\
          SECRET-BODYGET /smuggled HTTP/1.1\r\nHost: fixture.test\r\n\r\n"
@@ -440,6 +445,11 @@ fn n02_plain_http_forwards_exactly_the_framed_request_without_proxy_credentials(
         u64::try_from(response.len()).expect("fits")
     );
     assert_eq!(result.end, Some(EndReason::UpstreamClosed));
+    assert_eq!(
+        result.discarded_bytes,
+        u64::try_from("GET /smuggled HTTP/1.1\r\nHost: fixture.test\r\n\r\n".len()).expect("fits"),
+        "the pipelined bytes are counted, not forwarded"
+    );
     let event = proxy::proxy_event(result, ATTEMPT, 1, SystemTime::now(), 1);
     let text = serde_json::to_string(&event).expect("serializes");
     assert!(
@@ -1015,7 +1025,7 @@ fn n04_saturation_refuses_with_overload_then_recovers() {
     read_to_eof(&mut client);
     server.join().expect("the server ran");
     let (summary, results) = harness.stop(WAIT);
-    assert!(summary.drained);
+    assert!(summary.complete());
     assert!(summary.complete());
     assert_eq!(summary.accepted, u64::try_from(CAP + 2).expect("fits"));
     // Each parked connection is closed by stop and settled once: a refused
@@ -1127,7 +1137,7 @@ fn n04_stop_closes_every_connection_and_accounts_for_each() {
 
     let path = harness.path.clone();
     let (summary, results) = harness.stop(WAIT);
-    assert!(summary.drained, "{summary:?}");
+    assert!(summary.complete(), "{summary:?}");
     assert_eq!(summary.accepted, 4);
     assert_eq!(summary.results_missing, 0);
     // The idle connection sent nothing: no request. The partial one is a
@@ -1216,7 +1226,7 @@ fn n04_a_drain_cut_short_reports_the_missing_result() {
     assert_eq!(summary.accepted, 1);
     assert_eq!(summary.results_emitted, 0);
     assert_eq!(summary.results_missing, 1, "{summary:?}");
-    assert!(!summary.drained);
+    assert!(!summary.complete());
     assert!(results.is_empty());
     // The client is closed by stop, not left waiting for the resolver.
     assert!(read_to_eof(&mut client).is_empty());
@@ -1247,25 +1257,115 @@ fn n04_resolver_deadline_bounds_the_request() {
     harness.stop(WAIT);
 }
 
+/// A lookup that reports the name it was given and blocks until released.
+struct HeldLookup {
+    names: Mutex<Vec<String>>,
+    released: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl HeldLookup {
+    fn new() -> Arc<Self> {
+        Arc::new(HeldLookup {
+            names: Mutex::new(Vec::new()),
+            released: Mutex::new(false),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn lookup(self: &Arc<Self>) -> Arc<proxy::Lookup> {
+        let this = Arc::clone(self);
+        Arc::new(move |name: &str| {
+            this.names
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(name.to_owned());
+            this.changed.notify_all();
+            let mut released = this.released.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*released {
+                released = this
+                    .changed
+                    .wait(released)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            Ok(vec!["127.0.0.1".parse().expect("ip")])
+        })
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_all();
+    }
+}
+
+fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + WAIT;
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 #[test]
-fn n04_system_resolver_is_bounded_and_refuses_beyond_its_worker_cap() {
+fn n04_system_resolver_is_bounded_absolute_and_refuses_what_is_not_a_name() {
     let refusing = SystemResolver::new(0);
     assert_eq!(
         refusing.resolve("localhost", Instant::now() + WAIT),
         Err(ResolveError::Overloaded)
     );
     let resolver = SystemResolver::new(4);
-    assert_eq!(
-        resolver.resolve("127.0.0.1", Instant::now() + WAIT),
-        Err(ResolveError::Failed),
-        "numeric strings never reach getaddrinfo"
-    );
+    for bad in ["127.0.0.1", "::1", "", "b\u{fc}cher.test", "example.test."] {
+        assert_eq!(
+            resolver.resolve(bad, Instant::now() + WAIT),
+            Err(ResolveError::Invalid),
+            "{bad:?} never reaches a lookup"
+        );
+    }
     // `localhost` comes from the host's own configuration, not public DNS.
     let answers = resolver
         .resolve("localhost", Instant::now() + WAIT)
         .expect("localhost resolves");
     assert!(!answers.is_empty());
     assert!(answers.iter().all(IpAddr::is_loopback), "{answers:?}");
+    wait_until("the lookup worker exits", || resolver.in_flight() == 0);
+}
+
+#[test]
+fn n04_system_resolver_looks_up_the_absolute_name_and_keeps_its_deadline() {
+    let held = HeldLookup::new();
+    let resolver = Arc::new(SystemResolver::with_lookup(1, held.lookup()));
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(300);
+    // The lookup never returns in time: the caller gets Timeout at the
+    // deadline, not when the lookup finishes.
+    assert_eq!(
+        resolver.resolve("example.test", deadline),
+        Err(ResolveError::Timeout)
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert_eq!(
+        *held.names.lock().unwrap_or_else(PoisonError::into_inner),
+        vec!["example.test.".to_owned()],
+        "an absolute name: search domains never apply"
+    );
+    assert_eq!(proxy::absolute_name("a.test"), "a.test.");
+    // The abandoned lookup still counts against the cap until it ends ...
+    assert_eq!(resolver.in_flight(), 1);
+    assert_eq!(
+        resolver.resolve("other.test", Instant::now() + WAIT),
+        Err(ResolveError::Overloaded)
+    );
+    // ... and releases its slot when it does.
+    held.release();
+    wait_until("the late lookup ends", || resolver.in_flight() == 0);
+    assert!(
+        resolver
+            .resolve("other.test", Instant::now() + WAIT)
+            .is_ok()
+    );
+    wait_until("the second lookup ends", || resolver.in_flight() == 0);
 }
 
 #[test]
@@ -1384,4 +1484,708 @@ fn n04_connect_falls_back_across_approved_answers_only() {
     assert_eq!(resolver.calls("fallback.test"), 1, "no second resolution");
     server.join().expect("the server ran");
     harness.stop(WAIT);
+}
+
+// ---------------------------------------------------------------------------
+// Review regressions (R02-R18): one request per connection, early data,
+// stop ordering, truthful failures, bounded work.
+// ---------------------------------------------------------------------------
+
+/// Waits until every proxy thread has let go of the shared state: the sink
+/// is then held by the test alone.
+fn wait_until_gone(sink: &Arc<Sink>) {
+    wait_until("the proxy's threads exit", || Arc::strong_count(sink) == 1);
+}
+
+/// R02: requests carrying a 10,000-code-point label used to cost 67 ms
+/// (macOS) to 131 ms (reference host) of supervisor CPU each; 64 in a row
+/// were over four seconds. They now refuse at the IDNA mapping bound.
+#[test]
+fn n04_hosts_that_cost_quadratic_idna_work_refuse_fast() {
+    let label: String = (0..10_000u32)
+        .map(|i| char::from_u32(0x4E00 + i).expect("a CJK ideograph"))
+        .collect();
+    let request = format!("CONNECT {label}.example:443 HTTP/1.1\r\n\r\n");
+    assert!(request.len() < 32 * 1024);
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&["*.example:443"]), &resolver);
+    let started = Instant::now();
+    for _ in 0..64 {
+        let (status, reason) = refused(&harness, &request);
+        assert_eq!((status, reason.as_str()), (400, "malformed_request"));
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    harness.stop(WAIT);
+}
+
+/// R03: one request per connection. A pipelined second request after a
+/// body-less GET is read, counted and dropped, never forwarded, and gets no
+/// result of its own.
+#[test]
+fn n02_a_pipelined_second_request_is_discarded_and_stated() {
+    let (listener, port) = loopback();
+    let response: &'static [u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+    let server = collect_upstream(listener, response, b"\r\n\r\n");
+    let resolver = fixtures("", &[]);
+    let harness = start(
+        &allow(&[&format!("127.0.0.1:{port}"), "other.test:80"]),
+        &resolver,
+    );
+    let mut client = harness.connect();
+    let second = "GET http://other.test/b HTTP/1.1\r\nHost: other.test\r\n\r\n";
+    let request =
+        format!("GET http://127.0.0.1:{port}/a HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n{second}");
+    client.write_all(request.as_bytes()).expect("writes");
+    assert_eq!(read_to_eof(&mut client), response);
+    let received = String::from_utf8(server.join().expect("the server ran")).expect("ASCII");
+    assert!(!received.contains("other.test"), "{received:?}");
+    assert!(!received.contains("/b"), "{received:?}");
+    let results = harness.sink.wait_for(1);
+    assert_eq!(results[0].reason, Reason::Relayed);
+    assert_eq!(
+        results[0].discarded_bytes,
+        u64::try_from(second.len()).expect("fits")
+    );
+    assert_eq!(resolver.calls("other.test"), 0);
+    let (summary, results) = harness.stop(WAIT);
+    assert_eq!(results.len(), 1, "no result for the discarded request");
+    assert_eq!(summary.accepted, 1);
+}
+
+/// R12: bytes sent with the CONNECT head are forwarded first, after the 200,
+/// and counted in `bytes_out`.
+#[test]
+fn n02_connect_early_data_is_forwarded_in_order_and_counted() {
+    let (listener, port) = loopback();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accepts");
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).expect("reads to EOF");
+        got
+    });
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&[&format!("127.0.0.1:{port}")]), &resolver);
+    let mut client = harness.connect();
+    client
+        .write_all(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\nEARLY-DATA").as_bytes())
+        .expect("writes");
+    assert_eq!(read_head(&mut client).0, 200);
+    client.write_all(b"+LATE").expect("writes");
+    client.shutdown(Shutdown::Write).expect("half-closes");
+    assert_eq!(server.join().expect("the server ran"), b"EARLY-DATA+LATE");
+    read_to_eof(&mut client);
+    let results = harness.sink.wait_for(1);
+    assert_eq!(results[0].bytes_out, 15);
+    harness.stop(WAIT);
+}
+
+/// Y02: a half-closed client still receives the destination's answer.
+#[test]
+fn n02_a_half_closed_tunnel_still_delivers_the_response() {
+    let (listener, port) = loopback();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accepts");
+        let mut got = Vec::new();
+        stream.read_to_end(&mut got).expect("reads to EOF");
+        // Only after the client's EOF does the destination answer.
+        stream.write_all(b"pong").expect("answers");
+        got
+    });
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&[&format!("127.0.0.1:{port}")]), &resolver);
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request(&format!("127.0.0.1:{port}")).as_bytes())
+        .expect("writes");
+    assert_eq!(read_head(&mut client).0, 200);
+    client.write_all(b"ping").expect("writes");
+    client.shutdown(Shutdown::Write).expect("half-closes");
+    assert_eq!(read_to_eof(&mut client), b"pong");
+    assert_eq!(server.join().expect("the server ran"), b"ping");
+    let results = harness.sink.wait_for(1);
+    assert_eq!((results[0].bytes_out, results[0].bytes_in), (4, 4));
+    assert_eq!(results[0].end, Some(EndReason::ClientClosed));
+    harness.stop(WAIT);
+}
+
+/// R14: a client that closed completely releases its slot even while the
+/// destination stays silent and open.
+#[test]
+fn n04_a_closed_client_with_a_silent_destination_releases_its_slot() {
+    let (listener, port) = loopback();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accepts");
+        // Silent and open until the test is done.
+        let _ = release_rx.recv_timeout(WAIT);
+        drop(stream);
+    });
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&[&format!("127.0.0.1:{port}")]), &resolver);
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request(&format!("127.0.0.1:{port}")).as_bytes())
+        .expect("writes");
+    assert_eq!(read_head(&mut client).0, 200);
+    drop(client);
+    let results = harness.sink.wait_for(1);
+    assert_eq!(results[0].end, Some(EndReason::ClientClosed));
+    assert_eq!(harness.handle.active_connections(), 0);
+    let _ = release_tx.send(());
+    server.join().expect("the server ran");
+    harness.stop(WAIT);
+}
+
+/// R13: a result that settles after the seal is dropped, never delivered.
+#[test]
+fn n04_a_result_after_the_seal_is_not_delivered() {
+    let held = HeldGate::new();
+    let harness = start_with(
+        &allow(&["gate.test:443"]),
+        Budgets::default(),
+        Arc::clone(&held) as Arc<dyn Resolver + Send + Sync>,
+    );
+    let sink = Arc::clone(&harness.sink);
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request("gate.test:443").as_bytes())
+        .expect("writes");
+    held.wait_entered();
+    let (summary, results) = harness.stop(Duration::ZERO);
+    assert_eq!(summary.results_missing, 1);
+    assert!(results.is_empty());
+    // The handler finishes now: its result must not reach the sink.
+    held.release();
+    wait_until_gone(&sink);
+    assert!(
+        sink.snapshot().is_empty(),
+        "a result counted missing was delivered"
+    );
+    read_to_eof(&mut client);
+}
+
+/// A resolver that announces entry and blocks until released, then answers
+/// with a forbidden address (so a late request is denied, not relayed).
+struct HeldGate {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+    answer: IpAddr,
+}
+
+impl HeldGate {
+    fn new() -> Arc<Self> {
+        HeldGate::answering("10.0.0.1".parse().expect("ip"))
+    }
+
+    fn answering(answer: IpAddr) -> Arc<Self> {
+        Arc::new(HeldGate {
+            state: Mutex::new((false, false)),
+            changed: Condvar::new(),
+            answer,
+        })
+    }
+
+    fn wait_entered(&self) {
+        let deadline = Instant::now() + WAIT;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while !state.0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "the request never reached the resolver");
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
+        self.changed.notify_all();
+    }
+}
+
+impl Resolver for HeldGate {
+    fn resolve(&self, _host: &str, _deadline: Instant) -> Result<Vec<IpAddr>, ResolveError> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 = true;
+        self.changed.notify_all();
+        while !state.1 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        Ok(vec![self.answer])
+    }
+}
+
+/// R17: a request whose resolution completes after stop began never
+/// connects upstream.
+#[test]
+fn n04_no_upstream_connect_after_stop_began() {
+    let (listener, port) = loopback();
+    listener.set_nonblocking(true).expect("nonblocking");
+    let held = HeldGate::answering("127.0.0.1".parse().expect("ip"));
+    let harness = start_with(
+        &allow(&[&format!("gate.test:{port}"), &format!("127.0.0.1:{port}")]),
+        Budgets::default(),
+        Arc::clone(&held) as Arc<dyn Resolver + Send + Sync>,
+    );
+    let sink = Arc::clone(&harness.sink);
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request(&format!("gate.test:{port}")).as_bytes())
+        .expect("writes");
+    held.wait_entered();
+    let stopper = thread::spawn(move || harness.stop(WAIT));
+    // Stop has begun once it has closed this client.
+    assert!(read_to_eof(&mut client).is_empty());
+    held.release();
+    let (summary, results) = stopper.join().expect("stop ran");
+    wait_until_gone(&sink);
+    assert!(summary.complete(), "{summary:?}");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].reason, Reason::Stopping);
+    assert_eq!(results[0].connected, None);
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),
+        "the proxy connected upstream after stop began"
+    );
+}
+
+/// R16: stop closes a tunnel whose destination is silent and keeps it open.
+#[test]
+fn n04_stop_closes_a_tunnel_to_a_silent_destination() {
+    let (listener, port) = loopback();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accepts");
+        let _ = release_rx.recv_timeout(WAIT);
+        drop(stream);
+    });
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&[&format!("127.0.0.1:{port}")]), &resolver);
+    let mut client = harness.connect();
+    client
+        .write_all(connect_request(&format!("127.0.0.1:{port}")).as_bytes())
+        .expect("writes");
+    assert_eq!(read_head(&mut client).0, 200);
+    let (summary, results) = harness.stop(Duration::from_secs(5));
+    assert!(summary.complete(), "{summary:?}");
+    assert_eq!(results[0].end, Some(EndReason::Stopped));
+    let _ = release_tx.send(());
+    server.join().expect("the server ran");
+}
+
+/// R05: an unrepresentable stop budget waits for settlement, never panics.
+#[test]
+fn n04_stop_with_the_largest_budget_does_not_panic() {
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&["a.test:443"]), &resolver);
+    let (summary, _) = harness.stop(Duration::MAX);
+    assert!(summary.complete());
+    assert!(summary.listener_closed);
+}
+
+/// R07: stop closes the listener even when its path is already gone.
+#[test]
+fn n04_stop_closes_the_listener_after_its_path_was_removed() {
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&["a.test:443"]), &resolver);
+    std::fs::remove_file(&harness.path).expect("removes the socket path");
+    let started = Instant::now();
+    let (summary, _) = harness.stop(Duration::from_secs(5));
+    assert!(summary.listener_closed, "{summary:?}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// R15: an overloaded resolver has its own reason, not a resolution failure.
+struct Overloaded;
+
+impl Resolver for Overloaded {
+    fn resolve(&self, _host: &str, _deadline: Instant) -> Result<Vec<IpAddr>, ResolveError> {
+        Err(ResolveError::Overloaded)
+    }
+}
+
+#[test]
+fn n04_resolver_overload_is_reported_as_such() {
+    let harness = start_with(
+        &allow(&["a.test:443"]),
+        Budgets::default(),
+        Arc::new(Overloaded),
+    );
+    let (status, reason) = refused(&harness, &connect_request("a.test:443"));
+    assert_eq!((status, reason.as_str()), (503, "resolver_overloaded"));
+    assert_eq!(
+        harness.sink.wait_for(1)[0].reason,
+        Reason::ResolverOverloaded
+    );
+    harness.stop(WAIT);
+}
+
+/// X20/R18: a handler that panics still settles once, answers 500, closes
+/// its client and frees its slot.
+struct Panics;
+
+impl Resolver for Panics {
+    fn resolve(&self, _host: &str, _deadline: Instant) -> Result<Vec<IpAddr>, ResolveError> {
+        panic!("a resolver bug");
+    }
+}
+
+#[test]
+fn n04_a_panicking_handler_settles_answers_and_closes() {
+    let harness = start_with(
+        &allow(&["a.test:443"]),
+        Budgets::default(),
+        Arc::new(Panics),
+    );
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        let mut client = harness.connect();
+        client
+            .write_all(connect_request("a.test:443").as_bytes())
+            .expect("writes");
+        clients.push(client);
+    }
+    for client in &mut clients {
+        let (status, head) = read_head(client);
+        assert_eq!((status, reason_of(&head)), (500, Some("internal_error")));
+        // The safe reason body, then EOF: the client is closed.
+        assert_eq!(read_to_eof(client), b"internal_error\n");
+    }
+    let results = harness.sink.wait_for(4);
+    assert!(results.iter().all(|r| r.reason == Reason::InternalError));
+    assert_eq!(harness.handle.active_connections(), 0);
+    let (summary, _) = harness.stop(WAIT);
+    assert!(summary.complete());
+}
+
+/// X33: a CONNECT Host without a port means the CONNECT port.
+#[test]
+fn n03_a_connect_host_without_a_port_means_the_connect_port() {
+    let (listener, port) = loopback();
+    let server = echo_server(listener, 1);
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&[&format!("127.0.0.1:{port}")]), &resolver);
+    let mut client = harness.connect();
+    client
+        .write_all(
+            format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes(),
+        )
+        .expect("writes");
+    assert_eq!(read_head(&mut client).0, 200);
+    client.shutdown(Shutdown::Write).expect("half-closes");
+    read_to_eof(&mut client);
+    server.join().expect("the server ran");
+    harness.stop(WAIT);
+}
+
+/// The event for a proxy-side resource failure blames neither side.
+#[test]
+fn n02_a_resource_failure_event_is_truthful() {
+    let result = ProxyResult {
+        request_id: 7,
+        kind: RequestKind::Connect,
+        destination: None,
+        decision: ProxyDecision::Allow,
+        reason: Reason::ResourceExhausted,
+        connected: None,
+        connect_errno: Some(libc::EMFILE),
+        bytes_in: 0,
+        bytes_out: 0,
+        discarded_bytes: 0,
+        duration: Duration::from_millis(3),
+        end: None,
+    };
+    let event = proxy::proxy_event(&result, ATTEMPT, 1, SystemTime::now(), 1);
+    assert_eq!(event.decision, Some(Decision::Allow));
+    let outcome = event.outcome.clone().expect("a result");
+    assert_eq!(outcome.ok, Some(false));
+    assert_eq!(outcome.errno.as_deref(), Some("EMFILE"));
+    assert_eq!(outcome.completion, Completion::ProxyClose);
+    assert_eq!(event.fields["reason"], "resource_exhausted");
+    assert_eq!(event.fields["end"], serde_json::Value::Null);
+    let value = serde_json::to_value(&event).expect("serializes");
+    let errors: Vec<String> = jail_event_validator()
+        .iter_errors(&value)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor budget and exhaustion, in helper processes with lowered limits
+// ---------------------------------------------------------------------------
+
+const HELPER_MODE: &str = "OURO_PROXY_TEST_HELPER";
+const HELPER_PORT: &str = "OURO_PROXY_TEST_PORT";
+
+/// Runs `proxy_limits_helper` in a child process whose descriptor limits
+/// are first set by `ulimit` (the shell's, so no unsafe code is needed
+/// here), and returns its stdout.
+fn run_helper(mode: &str, ulimits: &str, port: Option<u16>) -> String {
+    let exe = std::env::current_exe().expect("the test binary");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!("{ulimits} && exec \"$0\" \"$@\""))
+        .arg(exe)
+        .args(["--ignored", "--exact", "proxy_limits_helper", "--nocapture"])
+        .env(HELPER_MODE, mode);
+    if let Some(port) = port {
+        command.env(HELPER_PORT, port.to_string());
+    }
+    let output = command.output().expect("the helper runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "helper {mode} failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
+
+fn helper_value<'a>(stdout: &'a str, key: &str) -> &'a str {
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("HELPER {key}=")))
+        .unwrap_or_else(|| panic!("no {key} in {stdout}"))
+}
+
+#[test]
+fn n04_start_refuses_a_descriptor_budget_that_does_not_fit_and_names_it() {
+    let stdout = run_helper("fit", "ulimit -S -n 100 && ulimit -H -n 200", None);
+    let error = helper_value(&stdout, "error");
+    assert!(error.contains("hard limit 200"), "{error}");
+    assert!(
+        error.contains("128 connections x 2 descriptors + 64 headroom = 320"),
+        "{error}"
+    );
+}
+
+#[test]
+fn n04_start_raises_the_soft_descriptor_limit_to_the_hard_limit() {
+    let stdout = run_helper("raise", "ulimit -S -n 64", None);
+    let before: u64 = helper_value(&stdout, "soft_before")
+        .parse()
+        .expect("a number");
+    let after: u64 = helper_value(&stdout, "soft_after")
+        .parse()
+        .expect("a number");
+    assert_eq!(before, 64);
+    assert!(after >= 320, "raised to {after}");
+}
+
+#[test]
+fn n04_descriptor_exhaustion_is_reported_truthfully() {
+    let (listener, port) = loopback();
+    let server = thread::spawn(move || {
+        let mut served = 0;
+        while let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.write_all(b"hi");
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest);
+            served += 1;
+            if served == 2 {
+                break;
+            }
+        }
+        served
+    });
+    let stdout = run_helper("exhaust", "ulimit -S -n 256", Some(port));
+    // Two descriptors free: the client's and the accepted one. The upstream
+    // socket cannot be created: a proxy-side failure, answered with 503,
+    // never a connection that did not happen.
+    assert_eq!(helper_value(&stdout, "free2_status"), "503");
+    assert_eq!(helper_value(&stdout, "free2_header"), "resource_exhausted");
+    assert_eq!(
+        helper_value(&stdout, "free2_result"),
+        "Allow ResourceExhausted connected=false errno=EMFILE end=None"
+    );
+    // Three free: the tunnel works, with no extra descriptor.
+    assert_eq!(helper_value(&stdout, "free3_status"), "200");
+    assert_eq!(helper_value(&stdout, "free3_relayed"), "hi");
+    // One free: the accept itself fails; once descriptors return, the
+    // pending connection is served.
+    assert_eq!(helper_value(&stdout, "free1_status"), "200");
+    assert_eq!(server.join().expect("the server ran"), 2);
+}
+
+#[test]
+fn n04_a_tunnel_holds_two_descriptors() {
+    let (listener, port) = loopback();
+    let server = thread::spawn(move || {
+        let mut held = Vec::new();
+        for _ in 0..16 {
+            match listener.accept() {
+                Ok((stream, _)) => held.push(stream),
+                Err(_) => break,
+            }
+        }
+        held
+    });
+    let stdout = run_helper("fds", "true", Some(port));
+    assert_eq!(helper_value(&stdout, "proxy_fds_for_16_tunnels"), "32");
+    assert_eq!(helper_value(&stdout, "fds_after_close"), "0");
+    drop(server.join().expect("the server ran"));
+}
+
+fn helper_connect(path: &Path) -> std::io::Result<UnixStream> {
+    let stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(WAIT))?;
+    stream.set_write_timeout(Some(WAIT))?;
+    Ok(stream)
+}
+
+/// The child half of the descriptor tests. Ignored so it never runs in an
+/// ordinary pass; the parents invoke it by name with `--ignored` after
+/// lowering the limits with `ulimit`.
+#[test]
+#[ignore = "child helper invoked by the n04 descriptor tests"]
+fn proxy_limits_helper() {
+    let mode = std::env::var(HELPER_MODE).expect("the helper needs a mode");
+    let port: Option<u16> = std::env::var(HELPER_PORT)
+        .ok()
+        .map(|p| p.parse().expect("a port"));
+    let resolver = fixtures("", &[]);
+    let resolver = Arc::clone(&resolver) as Arc<dyn Resolver + Send + Sync>;
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("proxy.sock");
+    let listener = UnixListener::bind(&path).expect("binds");
+    let allow: Vec<String> = port
+        .map(|p| vec![format!("127.0.0.1:{p}")])
+        .unwrap_or_default();
+    let config = |listener, budgets| ProxyConfig {
+        listener,
+        rules: Rules::from_strings(&allow, &[]).expect("rules"),
+        budgets,
+        resolver: Arc::clone(&resolver),
+    };
+    let sink = Arc::new(Sink::default());
+    match mode.as_str() {
+        "fit" => match proxy::start(config(listener, Budgets::default()), sink) {
+            Ok(_) => panic!("the budget should not fit"),
+            Err(error) => println!("HELPER error={error}"),
+        },
+        "raise" => {
+            let (before, _) = proxy::nofile_limits().expect("limits");
+            let handle = proxy::start(config(listener, Budgets::default()), sink).expect("starts");
+            let (after, _) = proxy::nofile_limits().expect("limits");
+            println!("HELPER soft_before={before}");
+            println!("HELPER soft_after={after}");
+            let _ = handle.stop(WAIT);
+        }
+        "exhaust" => {
+            let port = port.expect("a port");
+            let budgets = Budgets {
+                max_connections: 4,
+                ..Budgets::default()
+            };
+            let handle = proxy::start(
+                config(listener, budgets),
+                Arc::clone(&sink) as Arc<dyn ProxySink>,
+            )
+            .expect("starts");
+            let connect = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n");
+            let hog = || {
+                let mut files = Vec::new();
+                while let Ok(file) = std::fs::File::open("/dev/null") {
+                    files.push(file);
+                }
+                files
+            };
+            // Two free.
+            let mut files = hog();
+            files.truncate(files.len() - 2);
+            let mut client = helper_connect(&path).expect("connects");
+            client.write_all(connect.as_bytes()).expect("writes");
+            let (status, head) = read_head(&mut client);
+            drop(files);
+            println!("HELPER free2_status={status}");
+            println!("HELPER free2_header={}", reason_of(&head).unwrap_or("-"));
+            let results = sink.wait_for(1);
+            let r = &results[0];
+            println!(
+                "HELPER free2_result={:?} {:?} connected={} errno={} end={:?}",
+                r.decision,
+                r.reason,
+                r.connected.is_some(),
+                if r.connect_errno == Some(libc::EMFILE) {
+                    "EMFILE"
+                } else {
+                    "other"
+                },
+                r.end
+            );
+            drop(client);
+            // Three free.
+            let mut files = hog();
+            files.truncate(files.len() - 3);
+            let mut client = helper_connect(&path).expect("connects");
+            client.write_all(connect.as_bytes()).expect("writes");
+            let (status, _) = read_head(&mut client);
+            let mut hi = [0u8; 2];
+            client.read_exact(&mut hi).expect("relayed bytes");
+            drop(files);
+            println!("HELPER free3_status={status}");
+            println!("HELPER free3_relayed={}", String::from_utf8_lossy(&hi));
+            client.shutdown(Shutdown::Write).expect("half-closes");
+            read_to_eof(&mut client);
+            sink.wait_for(2);
+            // One free: the client takes it, the accept fails and backs off.
+            let mut files = hog();
+            files.truncate(files.len() - 1);
+            let mut client = helper_connect(&path).expect("connects");
+            client.write_all(connect.as_bytes()).expect("writes");
+            // Give descriptors back once the proxy has seen the pending
+            // connection and failed to accept it; it then serves it.
+            drop(files);
+            let (status, _) = read_head(&mut client);
+            println!("HELPER free1_status={status}");
+            client.shutdown(Shutdown::Write).expect("half-closes");
+            read_to_eof(&mut client);
+            sink.wait_for(3);
+            let _ = handle.stop(WAIT);
+        }
+        "fds" => {
+            let port = port.expect("a port");
+            let handle = proxy::start(
+                config(listener, Budgets::default()),
+                Arc::clone(&sink) as Arc<dyn ProxySink>,
+            )
+            .expect("starts");
+            let before = proxy::open_descriptor_count().expect("countable");
+            let mut clients = Vec::new();
+            for _ in 0..16 {
+                let mut client = helper_connect(&path).expect("connects");
+                client
+                    .write_all(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n").as_bytes())
+                    .expect("writes");
+                assert_eq!(read_head(&mut client).0, 200);
+                clients.push(client);
+            }
+            let after = proxy::open_descriptor_count().expect("countable");
+            println!(
+                "HELPER proxy_fds_for_16_tunnels={}",
+                after - before - clients.len()
+            );
+            drop(clients);
+            sink.wait_for(16);
+            // Every descriptor of a settled connection is closed again, not
+            // kept alive by the stop registry.
+            let deadline = Instant::now() + WAIT;
+            let mut now = proxy::open_descriptor_count().expect("countable");
+            while now != before && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(2));
+                now = proxy::open_descriptor_count().expect("countable");
+            }
+            println!("HELPER fds_after_close={}", now.abs_diff(before));
+            let _ = handle.stop(WAIT);
+        }
+        other => panic!("unknown helper mode {other}"),
+    }
 }

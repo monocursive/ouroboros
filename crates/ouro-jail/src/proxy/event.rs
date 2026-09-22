@@ -73,6 +73,10 @@ pub fn proxy_event(
             .map_or(Value::Null, |address| Value::from(address.to_string())),
     );
     fields.insert(
+        "discarded_bytes".to_owned(),
+        Value::from(result.discarded_bytes),
+    );
+    fields.insert(
         "end".to_owned(),
         result
             .end

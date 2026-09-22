@@ -208,6 +208,13 @@ fn decompose_into(c: char, out: &mut Vec<char>) {
     }
 }
 
+/// Full canonical decomposition of one code point, for the bound test in
+/// `idna`.
+#[cfg(test)]
+pub(super) fn decompose_for_test(c: char, out: &mut Vec<char>) {
+    decompose_into(c, out);
+}
+
 fn compose_pair(first: char, second: char) -> Option<char> {
     let (a, b) = (u32::from(first), u32::from(second));
     if (L_BASE..L_BASE + L_COUNT).contains(&a) && (V_BASE..V_BASE + V_COUNT).contains(&b) {

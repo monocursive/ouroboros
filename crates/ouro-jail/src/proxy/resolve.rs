@@ -5,6 +5,7 @@
 //! happens inside the sandbox.
 
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -21,6 +22,9 @@ pub enum ResolveError {
     Failed,
     /// Too many resolutions are already outstanding.
     Overloaded,
+    /// Not a normalized host name (numeric, empty, non-ASCII or already
+    /// absolute): the proxy never asks for one, and a resolver never guesses.
+    Invalid,
 }
 
 /// A resolver. Implementations must return by `deadline`; the proxy relies on
@@ -31,6 +35,18 @@ pub trait Resolver {
     /// # Errors
     /// [`ResolveError`].
     fn resolve(&self, host: &str, deadline: Instant) -> Result<Vec<IpAddr>, ResolveError>;
+}
+
+/// The lookup a [`SystemResolver`] runs on its worker thread. It receives the
+/// absolute name (see [`absolute_name`]).
+pub type Lookup = dyn Fn(&str) -> io::Result<Vec<IpAddr>> + Send + Sync;
+
+/// The name a [`SystemResolver`] looks up: the normalized name with a
+/// trailing dot. The rule permitted exactly this DNS name, so the host's
+/// search domains must never turn it into another one.
+#[must_use]
+pub fn absolute_name(host: &str) -> String {
+    format!("{host}.")
 }
 
 /// The host's system resolver (`getaddrinfo` through std), bounded by the
@@ -44,15 +60,30 @@ pub trait Resolver {
 pub struct SystemResolver {
     in_flight: Arc<AtomicUsize>,
     max_in_flight: usize,
+    lookup: Arc<Lookup>,
+}
+
+fn system_lookup(name: &str) -> io::Result<Vec<IpAddr>> {
+    (name, 0u16)
+        .to_socket_addrs()
+        .map(|addresses| addresses.map(|address| address.ip()).collect())
 }
 
 impl SystemResolver {
     /// A resolver with at most `max_in_flight` concurrent lookups.
     #[must_use]
     pub fn new(max_in_flight: usize) -> Self {
+        SystemResolver::with_lookup(max_in_flight, Arc::new(system_lookup))
+    }
+
+    /// The same bounded resolver over another lookup function; the tests
+    /// use it to hold a lookup past its deadline.
+    #[must_use]
+    pub fn with_lookup(max_in_flight: usize, lookup: Arc<Lookup>) -> Self {
         SystemResolver {
             in_flight: Arc::new(AtomicUsize::new(0)),
             max_in_flight,
+            lookup,
         }
     }
 
@@ -80,14 +111,14 @@ impl Drop for InFlight {
 impl Resolver for SystemResolver {
     fn resolve(&self, host: &str, deadline: Instant) -> Result<Vec<IpAddr>, ResolveError> {
         // Numeric strings never reach a resolver (the network rules parse
-        // them first); refusing here keeps std from parsing one itself. A
-        // name that already ends in a dot is not a normalized name.
+        // them first); refusing here keeps the lookup from parsing one
+        // itself. A name that already ends in a dot is not a normalized name.
         if host.parse::<IpAddr>().is_ok()
             || host.is_empty()
             || !host.is_ascii()
             || host.ends_with('.')
         {
-            return Err(ResolveError::Failed);
+            return Err(ResolveError::Invalid);
         }
         let mut current = self.in_flight.load(Ordering::SeqCst);
         loop {
@@ -106,19 +137,15 @@ impl Resolver for SystemResolver {
         }
         let guard = InFlight(Arc::clone(&self.in_flight));
         let (sender, receiver) = mpsc::sync_channel(1);
-        // An absolute name: the rule permitted exactly this DNS name, so the
-        // host's search domains must not turn it into another one.
-        let name = format!("{host}.");
+        let name = absolute_name(host);
+        let lookup = Arc::clone(&self.lookup);
         let spawned = thread::Builder::new()
             .name("ouro-proxy-resolve".to_owned())
             // `getaddrinfo` and its NSS modules use generous stack.
             .stack_size(1024 * 1024)
             .spawn(move || {
                 let _guard = guard;
-                let answers: Result<Vec<IpAddr>, ()> = (name.as_str(), 0u16)
-                    .to_socket_addrs()
-                    .map(|addresses| addresses.map(|address| address.ip()).collect())
-                    .map_err(|_| ());
+                let answers = lookup(&name).map_err(|_| ());
                 let _ = sender.send(answers);
             });
         if spawned.is_err() {

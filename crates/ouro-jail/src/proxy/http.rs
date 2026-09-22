@@ -9,6 +9,7 @@
 //! Nothing here keeps or reports request content. Parse failures are safe
 //! [`Reason`] codes; the forwarded head is built from validated parts only.
 
+use std::collections::HashSet;
 use std::io::{self, Read};
 use std::os::unix::net::UnixStream;
 use std::time::Instant;
@@ -84,11 +85,8 @@ fn scan(buf: &[u8], from: usize) -> Result<Option<usize>, Reason> {
 /// [`HeadError::NoBytes`] for a clean close before any byte; otherwise a
 /// refusal: `header_timeout`, `header_too_large`, `malformed_request` or
 /// `client_closed`.
-pub fn read_head(
-    stream: &mut UnixStream,
-    max: usize,
-    deadline: Instant,
-) -> Result<Head, HeadError> {
+pub fn read_head(stream: &UnixStream, max: usize, deadline: Instant) -> Result<Head, HeadError> {
+    let mut reader = stream;
     let mut buf: Vec<u8> = Vec::with_capacity(max.min(4096));
     let mut chunk = [0u8; 4096];
     loop {
@@ -103,7 +101,7 @@ pub fn read_head(
         if room == 0 {
             return Err(HeadError::Reject(Reason::HeaderTooLarge));
         }
-        let read = match stream.read(chunk.get_mut(..room).unwrap_or_default()) {
+        let read = match reader.read(chunk.get_mut(..room).unwrap_or_default()) {
             Ok(read) => read,
             Err(error) => {
                 return Err(HeadError::Reject(match error.kind() {
@@ -315,7 +313,7 @@ pub fn parse_request(head: &[u8]) -> Result<Request, Reason> {
 
     // Names listed in Connection are removed; a framing or Host field must
     // never be removable that way, or upstream framing would differ from ours.
-    let mut listed: Vec<String> = Vec::new();
+    let mut listed: HashSet<String> = HashSet::new();
     for field in named("connection") {
         for token in field.value.split(|&b| b == b',') {
             let token = trim_ows(token);
@@ -332,7 +330,7 @@ pub fn parse_request(head: &[u8]) -> Result<Request, Reason> {
             ) {
                 return Err(Reason::AmbiguousFraming);
             }
-            listed.push(token);
+            listed.insert(token);
         }
     }
 
@@ -527,6 +525,41 @@ mod tests {
         ];
         for case in cases {
             assert!(parse(case).is_err(), "{case:?}");
+        }
+    }
+
+    #[test]
+    fn control_bytes_in_header_values_refuse() {
+        for byte in [0x01u8, 0x0b, 0x0c, 0x1f, 0x7f] {
+            let mut head = b"GET http://e.com/ HTTP/1.1\r\nHost: e.com\r\nX-V: a".to_vec();
+            head.push(byte);
+            head.extend_from_slice(b"b\r\n\r\n");
+            assert_eq!(
+                parse_request(&head).err(),
+                Some(Reason::MalformedRequest),
+                "{byte:#x}"
+            );
+        }
+        // A horizontal tab inside a value is allowed.
+        assert!(parse("GET http://e.com/ HTTP/1.1\r\nHost: e.com\r\nX-V: a\tb\r\n\r\n").is_ok());
+    }
+
+    /// `parse_request` is public: bytes that never went through `read_head`
+    /// get the same line-ending checks.
+    #[test]
+    fn parse_request_checks_line_endings_itself() {
+        for head in [
+            &b"GET http://e.com/ HTTP/1.1\nHost: e.com\r\n\r\n"[..],
+            b"GET http://e.com/ HTTP/1.1\r\nHost: e.com\rX: y\r\n\r\n",
+            b"GET http://e.com/ HTTP/1.1\r\nHost: e\0.com\r\n\r\n",
+            b"GET http://e.com/ HTTP/1.1\r\nHost: e.com\r\n\r\nGET / HTTP/1.1\r\n\r\n",
+            b"GET http://e.com/ HTTP/1.1\r\nHost: e.com\r\n",
+        ] {
+            assert_eq!(
+                parse_request(head).err(),
+                Some(Reason::MalformedRequest),
+                "{head:?}"
+            );
         }
     }
 

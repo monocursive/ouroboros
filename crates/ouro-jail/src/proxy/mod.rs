@@ -18,6 +18,12 @@
 //!    framed request with hop-by-hop headers and proxy credentials removed,
 //!    and relays the response as a stream.
 //!
+//! One request per client connection: bytes after the first request are
+//! read, counted in [`ProxyResult::discarded_bytes`] and dropped, and the
+//! connection closes after its response. Deadlines are per phase: the header
+//! deadline runs from accept, the resolve and connect deadlines from the start
+//! of their phase.
+//!
 //! Each accepted connection yields exactly one [`ProxyResult`] through the
 //! [`ProxySink`] (immediately on denial or connect failure, at close for a
 //! relayed request), unless it closed before sending a byte, in which case
@@ -28,8 +34,10 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -41,9 +49,13 @@ mod event;
 pub mod http;
 mod relay;
 mod resolve;
+mod sys;
 
 pub use event::proxy_event;
-pub use resolve::{FixtureAnswer, FixtureResolver, ResolveError, Resolver, SystemResolver};
+pub use resolve::{
+    FixtureAnswer, FixtureResolver, Lookup, ResolveError, Resolver, SystemResolver, absolute_name,
+};
+pub use sys::{nofile_limits, open_descriptor_count, raise_nofile_soft_to_hard};
 
 /// Resource budgets per attempt (§10). These are budgets, not grants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,12 +66,14 @@ pub struct Budgets {
     pub max_header_bytes: usize,
     /// From accept to a complete request head.
     pub header_deadline: Duration,
-    /// For one resolution.
+    /// For one resolution, from its start.
     pub resolve_deadline: Duration,
-    /// For connecting upstream, over every approved address.
+    /// For connecting upstream, over every approved address, from its start.
     pub connect_deadline: Duration,
-    /// Total relay buffer bytes; each relay direction reserves an equal
-    /// share, `relay_buffer_bytes / (2 * max_connections)`.
+    /// Total relay buffer bytes. Each relay direction of an admitted
+    /// connection owns `relay_buffer_bytes / (2 * max_connections)`, and at
+    /// most `max_connections` connections are admitted, so the total holds
+    /// by construction.
     pub relay_buffer_bytes: usize,
 }
 
@@ -79,18 +93,37 @@ impl Default for Budgets {
 }
 
 impl Budgets {
-    /// The buffer one relay direction reserves.
+    /// The buffer one relay direction owns.
     #[must_use]
     pub fn relay_chunk(&self) -> usize {
         self.relay_buffer_bytes
             .checked_div(self.max_connections.saturating_mul(2))
             .unwrap_or(0)
     }
+
+    /// The descriptors the budget needs: [`FDS_PER_CONNECTION`] per
+    /// connection plus [`FD_HEADROOM`].
+    #[must_use]
+    pub fn descriptors_needed(&self) -> usize {
+        self.max_connections
+            .saturating_mul(FDS_PER_CONNECTION)
+            .saturating_add(FD_HEADROOM)
+    }
 }
 
 /// The longest deadline a budget may carry; beyond it `Instant` arithmetic
 /// is not guaranteed and no request needs that long.
 pub const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Descriptors one admitted connection holds at most: the client's socket
+/// and the destination's. Both relay directions and the stop registry share
+/// them; nothing is duplicated.
+pub const FDS_PER_CONNECTION: usize = 2;
+
+/// Descriptors reserved beyond the connections: the listener and its wake
+/// pair, connections being refused for overload, resolver lookups, and the
+/// rest of the supervisor.
+pub const FD_HEADROOM: usize = 64;
 
 /// Everything the proxy needs.
 pub struct ProxyConfig {
@@ -157,6 +190,8 @@ pub enum Reason {
     ResolveFailed,
     /// Resolution exceeded the deadline.
     ResolveTimeout,
+    /// The resolver refused: too many lookups outstanding.
+    ResolverOverloaded,
     /// The request head is malformed.
     MalformedRequest,
     /// The body framing is ambiguous (duplicate or conflicting lengths).
@@ -173,6 +208,8 @@ pub enum Reason {
     ClientClosed,
     /// The connection budget was exhausted.
     Overload,
+    /// The proxy ran out of a process resource (descriptors or threads).
+    ResourceExhausted,
     /// The proxy is stopping.
     Stopping,
     /// The handler failed unexpectedly; the request was not relayed.
@@ -193,6 +230,7 @@ impl Reason {
             Reason::ResolveEmpty => "resolve_empty",
             Reason::ResolveFailed => "resolve_failed",
             Reason::ResolveTimeout => "resolve_timeout",
+            Reason::ResolverOverloaded => "resolver_overloaded",
             Reason::MalformedRequest => "malformed_request",
             Reason::AmbiguousFraming => "ambiguous_framing",
             Reason::HostMismatch => "host_mismatch",
@@ -201,6 +239,7 @@ impl Reason {
             Reason::HeaderTimeout => "header_timeout",
             Reason::ClientClosed => "client_closed",
             Reason::Overload => "overload",
+            Reason::ResourceExhausted => "resource_exhausted",
             Reason::Stopping => "stopping",
             Reason::InternalError => "internal_error",
         }
@@ -217,7 +256,10 @@ impl Reason {
             Reason::ResolveTimeout | Reason::ConnectTimeout => (504, "Gateway Timeout"),
             Reason::HeaderTooLarge => (431, "Request Header Fields Too Large"),
             Reason::HeaderTimeout => (408, "Request Timeout"),
-            Reason::Overload | Reason::Stopping => (503, "Service Unavailable"),
+            Reason::Overload
+            | Reason::ResourceExhausted
+            | Reason::ResolverOverloaded
+            | Reason::Stopping => (503, "Service Unavailable"),
             Reason::InternalError => (500, "Internal Server Error"),
             Reason::MalformedRequest
             | Reason::AmbiguousFraming
@@ -229,7 +271,7 @@ impl Reason {
     }
 }
 
-/// How an allowed, connected request ended.
+/// How an allowed, connected, relayed request ended.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EndReason {
     /// The upstream closed its side first.
@@ -275,7 +317,8 @@ pub struct ProxyResult {
     pub decision: ProxyDecision,
     /// Why.
     pub reason: Reason,
-    /// The numeric address actually connected.
+    /// The numeric address actually connected, whether or not anything was
+    /// relayed afterwards.
     pub connected: Option<SocketAddr>,
     /// The OS error of a failed connect, when there was one.
     pub connect_errno: Option<i32>,
@@ -284,9 +327,12 @@ pub struct ProxyResult {
     /// Bytes relayed from the client to the destination (for plain HTTP
     /// including the rewritten request head).
     pub bytes_out: u64,
+    /// Client bytes after the first request (a second, pipelined request,
+    /// for example), read and not forwarded: one request per connection.
+    pub discarded_bytes: u64,
     /// From accept to the result.
     pub duration: Duration,
-    /// How a relayed request ended.
+    /// How a relayed request ended; `None` when nothing was relayed.
     pub end: Option<EndReason>,
 }
 
@@ -297,32 +343,32 @@ pub trait ProxySink: Send + Sync {
     fn emit(&self, result: ProxyResult);
 }
 
-/// What [`ProxyHandle::stop`] established.
+/// What [`ProxyHandle::stop`] established. It covers accepted connections
+/// only: connections still in the kernel's backlog when stop began are
+/// closed without being accepted, so they have no result and no count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ProxySummary {
     /// Connections accepted, including the ones refused for overload.
     pub accepted: u64,
     /// Results delivered to the sink.
     pub results_emitted: u64,
-    /// Connections whose result could not be emitted because the drain budget
-    /// ran out first. Coverage must reflect these.
+    /// Accepted connections whose result was not delivered because the drain
+    /// budget ran out first. Coverage must reflect these.
     pub results_missing: u64,
     /// Connections that closed before sending a byte: no request, no result.
     pub without_request: u64,
-    /// The accept loop exited and dropped the listener.
+    /// The accept loop exited and dropped the listener within the budget.
     pub listener_closed: bool,
-    /// Every connection finished within the budget.
-    pub drained: bool,
 }
 
 impl ProxySummary {
-    /// Whether every request's result was delivered: no missing result and
-    /// a complete drain. When false, `proxy.net` coverage has a gap (§10,
-    /// §11.4: "An interrupted drain can leave that result missing; coverage
-    /// must reflect it").
+    /// Whether every accepted connection settled: its result was delivered
+    /// or it sent no request. When false, `proxy.net` coverage has a gap
+    /// (§10, §11.4: "An interrupted drain can leave that result missing;
+    /// coverage must reflect it").
     #[must_use]
     pub fn complete(&self) -> bool {
-        self.results_missing == 0 && self.drained
+        self.results_missing == 0
     }
 }
 
@@ -330,16 +376,16 @@ impl ProxySummary {
 // Shared state
 // ---------------------------------------------------------------------------
 
-/// A closable handle on one socket of a live connection.
+/// A socket of a live connection, shared with its handler, so stop can shut
+/// it down without holding a second descriptor.
 enum Closer {
-    Unix(UnixStream),
-    Tcp(TcpStream),
+    Unix(Arc<UnixStream>),
+    Tcp(Arc<TcpStream>),
 }
 
 impl Closer {
     fn shutdown(&self) {
-        // Closing is best effort: a socket already closed has nothing left
-        // to unblock.
+        // Best effort: a socket already closed has nothing left to unblock.
         let _ = match self {
             Closer::Unix(stream) => stream.shutdown(Shutdown::Both),
             Closer::Tcp(stream) => stream.shutdown(Shutdown::Both),
@@ -347,6 +393,7 @@ impl Closer {
     }
 }
 
+/// The single source of truth for stopping, and the sockets stop closes.
 #[derive(Default)]
 struct Registry {
     stopping: bool,
@@ -361,49 +408,92 @@ struct Accounting {
     sealed: bool,
 }
 
+impl Accounting {
+    fn missing(&self) -> u64 {
+        self.accepted
+            .saturating_sub(self.emitted)
+            .saturating_sub(self.without_request)
+    }
+}
+
 struct Shared {
     rules: Rules,
     budgets: Budgets,
     resolver: Arc<dyn Resolver + Send + Sync>,
     sink: Arc<dyn ProxySink>,
-    stopping: AtomicBool,
     registry: Mutex<Registry>,
     accounting: Mutex<Accounting>,
     /// Signalled whenever a connection settles (result or no request).
     settled: Condvar,
-    /// Admitted connections still being served. Only the accept thread
-    /// increments it, so the admission check cannot overshoot.
+    /// Admitted connections that have not settled. Only the accept thread
+    /// increments it, under the registry lock, so admission cannot overshoot.
     active: AtomicUsize,
-    relay_pool: AtomicUsize,
     next_id: AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic elsewhere must not stop accounting; the data stays consistent
-    // because every critical section is a few counter updates.
+    // because every critical section is a few field updates.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What the accept thread does with one accepted socket.
+enum Admission {
+    /// Stop began: close it without a result, like the backlog.
+    Stopping,
+    /// Over the connection budget: refuse it with a result.
+    Overload(u64),
+    /// Admitted and registered.
+    Admitted(u64),
 }
 
 impl Shared {
     fn is_stopping(&self) -> bool {
-        self.stopping.load(Ordering::SeqCst)
+        lock(&self.registry).stopping
     }
 
-    /// Registers a socket so that stop can shut it down. Refuses (and shuts
-    /// the socket down) once stopping has begun.
+    /// Admits one accepted socket. The stopping check, the id, the accepted
+    /// count, the admission and the registration happen under the registry
+    /// lock, so stop either sees this connection registered and counted, or
+    /// the connection sees stop.
+    fn admit(&self, client: &Arc<UnixStream>) -> Admission {
+        let mut registry = lock(&self.registry);
+        if registry.stopping {
+            return Admission::Stopping;
+        }
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        lock(&self.accounting).accepted += 1;
+        if self.active.load(Ordering::SeqCst) >= self.budgets.max_connections {
+            return Admission::Overload(id);
+        }
+        self.active.fetch_add(1, Ordering::SeqCst);
+        registry
+            .live
+            .insert(id, vec![Closer::Unix(Arc::clone(client))]);
+        Admission::Admitted(id)
+    }
+
+    /// Registers another socket of a live connection; `false` once stop
+    /// began (the caller then closes it).
     fn register(&self, id: u64, closer: Closer) -> bool {
         let mut registry = lock(&self.registry);
         if registry.stopping {
-            drop(registry);
-            closer.shutdown();
             return false;
         }
         registry.live.entry(id).or_default().push(closer);
         true
     }
 
-    fn unregister(&self, id: u64) {
-        lock(&self.registry).live.remove(&id);
+    /// Removes a connection's sockets from the registry and shuts them down.
+    fn close_connection(&self, id: u64) {
+        let closers = lock(&self.registry).live.remove(&id);
+        for closer in closers.iter().flatten() {
+            closer.shutdown();
+        }
+    }
+
+    fn release(&self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
     }
 
     fn emit(&self, result: ProxyResult) {
@@ -421,34 +511,13 @@ impl Shared {
     }
 
     fn no_request(&self) {
-        lock(&self.accounting).without_request += 1;
-        self.settled.notify_all();
-    }
-
-    fn reserve_relay(&self) -> bool {
-        let chunk = self.budgets.relay_chunk();
-        let mut current = self.relay_pool.load(Ordering::SeqCst);
-        loop {
-            let Some(next) = current.checked_sub(chunk.saturating_mul(2)) else {
-                return false;
-            };
-            match self.relay_pool.compare_exchange(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(actual) => current = actual,
-            }
+        let mut accounting = lock(&self.accounting);
+        if accounting.sealed {
+            return;
         }
-    }
-
-    fn release_relay(&self) {
-        self.relay_pool.fetch_add(
-            self.budgets.relay_chunk().saturating_mul(2),
-            Ordering::SeqCst,
-        );
+        accounting.without_request += 1;
+        drop(accounting);
+        self.settled.notify_all();
     }
 }
 
@@ -459,16 +528,46 @@ impl Shared {
 /// A running proxy.
 pub struct ProxyHandle {
     shared: Arc<Shared>,
-    wake: Option<std::os::unix::net::SocketAddr>,
+    /// Writing a byte here wakes the accept thread, whatever happened to the
+    /// listener's path.
+    wake: Option<UnixStream>,
     accept_done: Option<mpsc::Receiver<()>>,
+}
+
+fn invalid(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// Raises the soft descriptor limit to the hard one and checks that the
+/// budget fits, naming the numbers when it does not.
+fn check_descriptors(budgets: &Budgets) -> io::Result<()> {
+    let (soft, hard) = sys::raise_nofile_soft_to_hard()?;
+    let open = sys::open_descriptor_count()?;
+    let need = budgets.descriptors_needed();
+    let open = u64::try_from(open).unwrap_or(u64::MAX);
+    let free = soft.saturating_sub(open);
+    if free < u64::try_from(need).unwrap_or(u64::MAX) {
+        return Err(io::Error::other(format!(
+            "RLIMIT_NOFILE allows {soft} descriptors (hard limit {hard}) and {open} are open, \
+             leaving {free}; the proxy budget needs {} connections x {FDS_PER_CONNECTION} \
+             descriptors + {FD_HEADROOM} headroom = {need}",
+            budgets.max_connections
+        )));
+    }
+    Ok(())
 }
 
 /// Starts the proxy on the caller's listener.
 ///
+/// Raises this process's soft `RLIMIT_NOFILE` to its hard limit, then
+/// refuses unless `max_connections x FDS_PER_CONNECTION + FD_HEADROOM`
+/// descriptors are free.
+///
 /// # Errors
 /// Returns an error when the budgets are unusable (zero connections, a
 /// zero-byte relay share or header budget, a deadline of zero or above
-/// [`MAX_DEADLINE`]) or the accept thread cannot start.
+/// [`MAX_DEADLINE`]), when the descriptor budget does not fit, or when the
+/// accept thread cannot start.
 pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyHandle> {
     let ProxyConfig {
         listener,
@@ -484,24 +583,24 @@ pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyH
         || !deadline_ok(budgets.resolve_deadline)
         || !deadline_ok(budgets.connect_deadline)
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the proxy budgets leave no usable connection or have an unusable deadline",
+        return Err(invalid(
+            "the proxy budgets leave no usable connection or have an unusable deadline".to_owned(),
         ));
     }
-    listener.set_nonblocking(false)?;
-    let wake = listener.local_addr().ok();
+    check_descriptors(&budgets)?;
+    // Accept only when poll says a connection is pending; a nonblocking
+    // listener keeps a vanished connection from blocking the loop.
+    listener.set_nonblocking(true)?;
+    let (wake, wake_reader) = UnixStream::pair()?;
     let shared = Arc::new(Shared {
         rules,
         budgets,
         resolver,
         sink,
-        stopping: AtomicBool::new(false),
         registry: Mutex::new(Registry::default()),
         accounting: Mutex::new(Accounting::default()),
         settled: Condvar::new(),
         active: AtomicUsize::new(0),
-        relay_pool: AtomicUsize::new(budgets.relay_chunk() * 2 * budgets.max_connections),
         next_id: AtomicU64::new(1),
     });
     let (done_tx, done_rx) = mpsc::channel();
@@ -509,26 +608,25 @@ pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyH
     thread::Builder::new()
         .name("ouro-proxy-accept".to_owned())
         .spawn(move || {
-            accept_loop(&accept_shared, &listener);
+            accept_loop(&accept_shared, &listener, &wake_reader);
             drop(listener);
             let _ = done_tx.send(());
         })?;
     Ok(ProxyHandle {
         shared,
-        wake,
+        wake: Some(wake),
         accept_done: Some(done_rx),
     })
 }
 
 impl ProxyHandle {
-    /// The number of connections currently being handled.
+    /// The number of admitted connections that have not settled.
     #[must_use]
     pub fn active_connections(&self) -> usize {
         self.shared.active.load(Ordering::SeqCst)
     }
 
-    fn begin_stop(&self) {
-        self.shared.stopping.store(true, Ordering::SeqCst);
+    fn begin_stop(&mut self) {
         let live = {
             let mut registry = lock(&self.shared.registry);
             registry.stopping = true;
@@ -537,156 +635,165 @@ impl ProxyHandle {
         for closer in live.values().flatten() {
             closer.shutdown();
         }
-        // Wake a blocked accept(2): the accept loop sees `stopping` on the
-        // next connection and exits, dropping the listener. The connect runs
-        // on its own thread because a full backlog blocks a Unix connect.
-        if let Some(address) = self.wake.clone() {
-            let _ = thread::Builder::new()
-                .name("ouro-proxy-wake".to_owned())
-                .stack_size(64 * 1024)
-                .spawn(move || {
-                    let _ = UnixStream::connect_addr(&address);
-                });
+        // Wake the accept thread through its own channel, not through the
+        // listener's path, which the caller may already have removed.
+        if let Some(mut wake) = self.wake.take() {
+            let _ = wake.write_all(b"s");
         }
     }
 
     /// Closes the listener and every connection, waits up to `budget` for
     /// every accepted connection to settle (emit its result, or close without
     /// a request), then seals: a result that arrives later is dropped and
-    /// counted in `results_missing`.
+    /// counted in `results_missing`. Connections still in the backlog are
+    /// closed without results. A budget too large to represent waits for
+    /// every connection to settle.
     #[must_use]
     pub fn stop(mut self, budget: Duration) -> ProxySummary {
-        let deadline = Instant::now() + budget;
+        let deadline = Instant::now().checked_add(budget);
         self.begin_stop();
+        let remaining = |deadline: Option<Instant>| {
+            deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        };
         let listener_closed = match self.accept_done.take() {
-            Some(done) => done
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .is_ok(),
+            Some(done) => match remaining(deadline) {
+                Some(left) => done.recv_timeout(left).is_ok(),
+                None => done.recv().is_ok(),
+            },
             None => false,
         };
         let mut accounting = lock(&self.shared.accounting);
-        let unsettled = |accounting: &Accounting| {
-            accounting.accepted > accounting.emitted + accounting.without_request
-        };
-        while unsettled(&accounting) {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            accounting = self
-                .shared
-                .settled
-                .wait_timeout(accounting, remaining)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+        while accounting.missing() > 0 {
+            accounting = match remaining(deadline) {
+                Some(left) if left.is_zero() => break,
+                Some(left) => {
+                    self.shared
+                        .settled
+                        .wait_timeout(accounting, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => self
+                    .shared
+                    .settled
+                    .wait(accounting)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
         }
-        let drained = !unsettled(&accounting);
         accounting.sealed = true;
-        let missing = accounting
-            .accepted
-            .saturating_sub(accounting.emitted)
-            .saturating_sub(accounting.without_request);
         ProxySummary {
             accepted: accounting.accepted,
             results_emitted: accounting.emitted,
-            results_missing: missing,
+            results_missing: accounting.missing(),
             without_request: accounting.without_request,
             listener_closed,
-            drained,
         }
     }
 }
 
 impl Drop for ProxyHandle {
     fn drop(&mut self) {
-        if self.accept_done.is_some() {
+        if self.wake.is_some() {
             self.begin_stop();
         }
     }
 }
 
-fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener) {
+fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener, wake: &UnixStream) {
     loop {
-        let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+        match sys::poll(&[listener.as_fd(), wake.as_fd()], libc::POLLIN, None) {
+            Ok(revents) if revents.get(1).is_some_and(|&events| events != 0) => return,
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => {
-                if shared.is_stopping() {
+                if backoff(wake) {
                     return;
                 }
-                // A transient accept failure (for example descriptor
-                // exhaustion) must not spin: back off briefly and retry.
-                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        }
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                        | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                // Descriptor exhaustion leaves the connection pending, so
+                // poll would report it again at once: back off, but on the
+                // wake channel, so stop still ends the loop promptly.
+                if backoff(wake) {
+                    return;
+                }
                 continue;
             }
         };
-        if shared.is_stopping() {
-            return;
-        }
+        // macOS hands out accepted sockets with the listener's O_NONBLOCK.
+        let _ = stream.set_nonblocking(false);
         let accepted_at = Instant::now();
-        let id = shared.next_id.fetch_add(1, Ordering::SeqCst);
-        lock(&shared.accounting).accepted += 1;
-        if shared.active.load(Ordering::SeqCst) >= shared.budgets.max_connections {
-            refuse_inline(shared, stream, id, accepted_at, Reason::Overload);
-            continue;
-        }
-        // Register the client for stop before the handler runs, so a stop
-        // that begins at any later point closes this connection too.
-        let registered = stream
-            .try_clone()
-            .is_ok_and(|clone| shared.register(id, Closer::Unix(clone)));
-        if !registered {
-            if shared.is_stopping() {
-                // `accepted` counted it; settle it as a refusal.
-                shared.emit(denial(
-                    id,
-                    None,
-                    RequestKind::Unknown,
-                    Reason::Stopping,
-                    accepted_at,
-                ));
-                return;
+        let client = Arc::new(stream);
+        match shared.admit(&client) {
+            Admission::Stopping => return,
+            Admission::Overload(id) => {
+                refuse_inline(shared, &client, id, accepted_at, Reason::Overload);
             }
-            refuse_inline(shared, stream, id, accepted_at, Reason::Overload);
-            continue;
-        }
-        shared.active.fetch_add(1, Ordering::SeqCst);
-        let handler_shared = Arc::clone(shared);
-        let spawned = thread::Builder::new()
-            .name("ouro-proxy-conn".to_owned())
-            .stack_size(256 * 1024)
-            .spawn(move || handle_connection(&handler_shared, stream, id, accepted_at));
-        if spawned.is_err() {
-            // The closure (and its stream) was dropped without running:
-            // release the admission here and report the refusal.
-            shared.unregister(id);
-            shared.active.fetch_sub(1, Ordering::SeqCst);
-            shared.emit(denial(
-                id,
-                None,
-                RequestKind::Unknown,
-                Reason::Overload,
-                accepted_at,
-            ));
+            Admission::Admitted(id) => spawn_handler(shared, client, id, accepted_at),
         }
     }
 }
 
-/// Refuses a connection on the accept thread without reading from it: the
-/// short response goes into an empty socket buffer, never blocking.
+/// Waits 10 ms on the wake channel; `true` when stop woke it.
+fn backoff(wake: &UnixStream) -> bool {
+    matches!(
+        sys::poll(&[wake.as_fd()], libc::POLLIN, Some(Duration::from_millis(10))),
+        Ok(revents) if revents.first().is_some_and(|&events| events != 0)
+    )
+}
+
+fn spawn_handler(shared: &Arc<Shared>, client: Arc<UnixStream>, id: u64, accepted_at: Instant) {
+    // The socket travels by channel, so a failed spawn leaves it here to be
+    // answered, instead of dropping it inside the lost closure.
+    let (handoff, receive) = mpsc::sync_channel::<Arc<UnixStream>>(1);
+    let handler_shared = Arc::clone(shared);
+    let spawned = thread::Builder::new()
+        .name("ouro-proxy-conn".to_owned())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            if let Ok(client) = receive.recv() {
+                handle_connection(&handler_shared, &client, id, accepted_at);
+            }
+        });
+    let unhandled = match spawned {
+        Ok(_) => handoff.send(client).err().map(|error| error.0),
+        Err(_) => Some(client),
+    };
+    if let Some(client) = unhandled {
+        shared.close_connection(id);
+        shared.release();
+        refuse_inline(shared, &client, id, accepted_at, Reason::ResourceExhausted);
+    }
+}
+
+/// Refuses a connection without reading from it: the short response goes
+/// into an empty socket buffer and never blocks.
 fn refuse_inline(
     shared: &Shared,
-    stream: UnixStream,
+    client: &UnixStream,
     id: u64,
     accepted_at: Instant,
     reason: Reason,
 ) {
     shared.emit(denial(id, None, RequestKind::Unknown, reason, accepted_at));
-    if stream.set_nonblocking(true).is_ok() {
-        let mut stream = stream;
-        let _ = stream.write_all(&http::error_response(reason));
-        let _ = stream.shutdown(Shutdown::Both);
+    if client.set_nonblocking(true).is_ok() {
+        let _ = (&*client).write_all(&http::error_response(reason));
     }
+    let _ = client.shutdown(Shutdown::Both);
 }
 
 fn denial(
@@ -706,6 +813,7 @@ fn denial(
         connect_errno: None,
         bytes_in: 0,
         bytes_out: 0,
+        discarded_bytes: 0,
         duration: accepted_at.elapsed(),
         end: None,
     }
@@ -727,13 +835,16 @@ struct ResultSlot<'a> {
     destination: Option<Destination>,
     admitted: bool,
     done: bool,
+    /// Whether the client may already have received bytes, so no error
+    /// response can follow.
+    replied: bool,
 }
 
 impl ResultSlot<'_> {
     fn release(&mut self) {
         if self.admitted {
             self.admitted = false;
-            self.shared.active.fetch_sub(1, Ordering::SeqCst);
+            self.shared.release();
         }
     }
 
@@ -756,6 +867,24 @@ impl ResultSlot<'_> {
         self.emit(result);
     }
 
+    /// An allowed request's result.
+    fn allowed(&self, reason: Reason, connected: Option<SocketAddr>) -> ProxyResult {
+        ProxyResult {
+            request_id: self.id,
+            kind: self.kind,
+            destination: self.destination.clone(),
+            decision: ProxyDecision::Allow,
+            reason,
+            connected,
+            connect_errno: None,
+            bytes_in: 0,
+            bytes_out: 0,
+            discarded_bytes: 0,
+            duration: self.accepted_at.elapsed(),
+            end: None,
+        }
+    }
+
     fn no_request(&mut self) {
         if !self.done {
             self.done = true;
@@ -774,13 +903,13 @@ impl Drop for ResultSlot<'_> {
     }
 }
 
-fn respond(client: &mut UnixStream, reason: Reason, budget: Duration) {
+fn respond(client: &UnixStream, reason: Reason, budget: Duration) {
     let _ = client.set_write_timeout(Some(budget.max(Duration::from_millis(1))));
-    let _ = client.write_all(&http::error_response(reason));
+    let _ = (&*client).write_all(&http::error_response(reason));
     let _ = client.shutdown(Shutdown::Both);
 }
 
-fn handle_connection(shared: &Shared, client: UnixStream, id: u64, accepted_at: Instant) {
+fn handle_connection(shared: &Shared, client: &Arc<UnixStream>, id: u64, accepted_at: Instant) {
     let mut slot = ResultSlot {
         shared,
         id,
@@ -789,15 +918,28 @@ fn handle_connection(shared: &Shared, client: UnixStream, id: u64, accepted_at: 
         destination: None,
         admitted: true,
         done: false,
+        replied: false,
     };
-    let respond_budget = shared.budgets.header_deadline;
-    let mut client = client;
-    let outcome = serve(shared, &mut slot, &mut client, accepted_at);
-    shared.unregister(id);
-    if let Err(reason) = outcome {
+    // A panic anywhere below (a resolver bug, say) still settles the
+    // connection once, answers the client if nothing was sent yet, and
+    // closes its sockets.
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        serve(shared, &mut slot, client, accepted_at)
+    }));
+    let refusal = match outcome {
+        Ok(Ok(())) => None,
+        Ok(Err(reason)) => Some(reason),
+        Err(_) => Some(Reason::InternalError),
+    };
+    if let Some(reason) = refusal {
         slot.deny(reason);
-        respond(&mut client, reason, respond_budget);
+        if !slot.replied {
+            respond(client, reason, shared.budgets.header_deadline);
+        }
     }
+    drop(slot);
+    shared.close_connection(id);
+    let _ = client.shutdown(Shutdown::Both);
 }
 
 /// Serves one request. `Err` is a denial the caller reports and answers;
@@ -805,7 +947,7 @@ fn handle_connection(shared: &Shared, client: UnixStream, id: u64, accepted_at: 
 fn serve(
     shared: &Shared,
     slot: &mut ResultSlot<'_>,
-    client: &mut UnixStream,
+    client: &Arc<UnixStream>,
     accepted_at: Instant,
 ) -> Result<(), Reason> {
     let budgets = shared.budgets;
@@ -820,7 +962,7 @@ fn serve(
             return Ok(());
         }
         Err(http::HeadError::Reject(reason)) => {
-            return Err(if shared.is_stopping() && reason == Reason::ClientClosed {
+            return Err(if reason == Reason::ClientClosed && shared.is_stopping() {
                 Reason::Stopping
             } else {
                 reason
@@ -845,7 +987,10 @@ fn serve(
             match shared.resolver.resolve(name, deadline) {
                 Ok(answers) => answers,
                 Err(ResolveError::Timeout) => return Err(Reason::ResolveTimeout),
-                Err(_) => return Err(Reason::ResolveFailed),
+                Err(ResolveError::Overloaded) => return Err(Reason::ResolverOverloaded),
+                Err(ResolveError::Failed | ResolveError::Invalid) => {
+                    return Err(Reason::ResolveFailed);
+                }
             }
         }
     };
@@ -861,12 +1006,16 @@ fn serve(
     if shared.is_stopping() {
         return Err(Reason::Stopping);
     }
-    if !shared.reserve_relay() {
-        return Err(Reason::Overload);
-    }
-    let result = connect_and_relay(shared, slot, client, &request, &approved, head, accepted_at);
-    shared.release_relay();
-    result
+    connect_and_relay(shared, slot, client, &request, &approved, &head)
+}
+
+/// Whether a connect error is this process running out of a resource
+/// rather than anything the destination did.
+fn local_exhaustion(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
 }
 
 fn connect_upstream(
@@ -883,6 +1032,9 @@ fn connect_upstream(
         let target = SocketAddr::new(address, port);
         match TcpStream::connect_timeout(&target, remaining) {
             Ok(stream) => return Ok((stream, target)),
+            Err(error) if local_exhaustion(&error) => {
+                return Err((Reason::ResourceExhausted, error.raw_os_error()));
+            }
             Err(error) => {
                 let reason = if matches!(
                     error.kind(),
@@ -902,99 +1054,112 @@ fn connect_upstream(
 fn connect_and_relay(
     shared: &Shared,
     slot: &mut ResultSlot<'_>,
-    client: &mut UnixStream,
+    client: &Arc<UnixStream>,
     request: &http::Request,
     approved: &[IpAddr],
-    head: http::Head,
-    accepted_at: Instant,
+    head: &http::Head,
 ) -> Result<(), Reason> {
     let budgets = shared.budgets;
+    let reply_budget = budgets.header_deadline;
     let deadline = Instant::now() + budgets.connect_deadline;
     let (upstream, connected) = match connect_upstream(approved, request.destination.port, deadline)
     {
         Ok(pair) => pair,
         Err((reason, errno)) => {
-            // Allowed by policy; the connection itself failed.
-            slot.emit(ProxyResult {
-                request_id: slot.id,
-                kind: request.kind(),
-                destination: Some(request.destination.clone()),
-                decision: ProxyDecision::Allow,
-                reason,
-                connected: None,
-                connect_errno: errno,
-                bytes_in: 0,
-                bytes_out: 0,
-                duration: accepted_at.elapsed(),
-                end: None,
-            });
-            respond(client, reason, budgets.header_deadline);
+            // Allowed by policy; the connection itself was not made.
+            let mut result = slot.allowed(reason, None);
+            result.connect_errno = errno;
+            slot.emit(result);
+            slot.replied = true;
+            respond(client, reason, reply_budget);
             return Ok(());
         }
     };
-    let _ = upstream.set_nodelay(true);
-    let registered = upstream
-        .try_clone()
-        .is_ok_and(|clone| shared.register(slot.id, Closer::Tcp(clone)));
-    if !registered {
-        // The destination was connected, so say so: allowed, connected,
-        // nothing relayed, ended by the stop (or by a descriptor failure).
+    let upstream = Arc::new(upstream);
+    if !shared.register(slot.id, Closer::Tcp(Arc::clone(&upstream))) {
+        // Stop began while connecting: the connection was made, nothing
+        // was relayed.
         let _ = upstream.shutdown(Shutdown::Both);
-        slot.emit(ProxyResult {
-            request_id: slot.id,
-            kind: request.kind(),
-            destination: Some(request.destination.clone()),
-            decision: ProxyDecision::Allow,
-            reason: Reason::Relayed,
-            connected: Some(connected),
-            connect_errno: None,
-            bytes_in: 0,
-            bytes_out: 0,
-            duration: accepted_at.elapsed(),
-            end: Some(if shared.is_stopping() {
-                EndReason::Stopped
-            } else {
-                EndReason::ClientError
-            }),
-        });
-        let _ = client.shutdown(Shutdown::Both);
+        let mut result = slot.allowed(Reason::Stopping, Some(connected));
+        result.end = Some(EndReason::Stopped);
+        slot.emit(result);
+        slot.replied = true;
+        respond(client, Reason::Stopping, reply_budget);
         return Ok(());
     }
+    let _ = upstream.set_nodelay(true);
     let chunk = budgets.relay_chunk();
-    let outcome = match &request.framing {
-        http::Framing::Tunnel => relay::tunnel(
-            client,
-            upstream,
-            head.leftover(),
-            chunk,
-            budgets.header_deadline,
-        ),
+    // From here the client may receive relayed bytes; an error response can
+    // no longer follow.
+    slot.replied = true;
+    let relayed = match request.framing {
+        http::Framing::Tunnel => {
+            relay::tunnel(client, &upstream, head.leftover(), chunk, reply_budget)
+        }
         framing => relay::http(
             client,
-            upstream,
+            &upstream,
             &request.forward_head,
             framing,
             head.leftover(),
             chunk,
         ),
     };
+    let Ok(outcome) = relayed else {
+        // The relay could not start; nothing was written to either side.
+        let _ = upstream.shutdown(Shutdown::Both);
+        slot.emit(slot.allowed(Reason::ResourceExhausted, Some(connected)));
+        respond(client, Reason::ResourceExhausted, reply_budget);
+        return Ok(());
+    };
     let end = if shared.is_stopping() {
         EndReason::Stopped
     } else {
         outcome.end
     };
-    slot.emit(ProxyResult {
-        request_id: slot.id,
-        kind: request.kind(),
-        destination: Some(request.destination.clone()),
-        decision: ProxyDecision::Allow,
-        reason: Reason::Relayed,
-        connected: Some(connected),
-        connect_errno: None,
-        bytes_in: outcome.bytes_in,
-        bytes_out: outcome.bytes_out,
-        duration: accepted_at.elapsed(),
-        end: Some(end),
-    });
+    let mut result = slot.allowed(Reason::Relayed, Some(connected));
+    result.bytes_in = outcome.bytes_in;
+    result.bytes_out = outcome.bytes_out;
+    result.discarded_bytes = outcome.discarded;
+    result.end = Some(end);
+    slot.emit(result);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn connect_deadline_is_shared_across_answers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binds");
+        let port = listener.local_addr().expect("address").port();
+        listener.set_nonblocking(true).expect("nonblocking");
+        let approved = [
+            "127.0.0.1".parse().expect("ip"),
+            "127.0.0.1".parse().expect("ip"),
+        ];
+        // A deadline already spent: no attempt is made at all.
+        let spent = Instant::now();
+        let error = connect_upstream(&approved, port, spent).expect_err("no time left");
+        assert_eq!(error, (Reason::ConnectTimeout, None));
+        assert!(listener.accept().is_err(), "nothing connected");
+        // With time left the first answer is used.
+        let (stream, target) =
+            connect_upstream(&approved, port, Instant::now() + Duration::from_secs(10))
+                .expect("connects");
+        assert_eq!(target.port(), port);
+        drop(stream);
+    }
+
+    #[test]
+    fn local_exhaustion_is_not_blamed_on_the_destination() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            assert!(local_exhaustion(&io::Error::from_raw_os_error(errno)));
+        }
+        assert!(!local_exhaustion(&io::Error::from_raw_os_error(
+            libc::ECONNREFUSED
+        )));
+    }
 }

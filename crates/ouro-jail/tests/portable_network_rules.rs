@@ -15,11 +15,12 @@
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use ouro_jail::network::{
     AddressClass, AnswerDenial, Destination, Host, HostRule, HostRuleError, IDNA_TABLE_SHA256,
-    IDNA_UNICODE_VERSION, IDNA_UTS46_REVISION, NETWORK_ADDRESSES_JSON, Rules, idna, nfc,
-    normalize_host, parse_authority,
+    IDNA_UNICODE_VERSION, IDNA_UTS46_REVISION, IdnaError, NETWORK_ADDRESSES_JSON, Rules, idna, nfc,
+    normalize_host, parse_authority, parse_ipv6,
 };
 use sha2::{Digest, Sha256};
 
@@ -504,6 +505,127 @@ fn n03_ambiguous_ipv4_spellings_never_become_names() {
         "one terminal dot on an IPv4 literal"
     );
     assert!(parse_authority("0x7f.example:80", None).is_ok(), "a name");
+}
+
+/// Each syntax refusal names its own reason, before IDNA would have refused
+/// the same input for a less useful one.
+#[test]
+fn n03_syntax_refusals_name_their_reason() {
+    let malformed = |raw: &str| match normalize_host(raw) {
+        Err(HostRuleError::Malformed(reason)) => reason,
+        other => panic!("{raw:?}: {other:?}"),
+    };
+    assert_eq!(malformed("user@example.com"), "userinfo is not allowed");
+    assert_eq!(
+        malformed("ex%61mple.com"),
+        "percent escapes and zone identifiers are not allowed"
+    );
+    assert_eq!(
+        malformed("exa\u{1}mple.com"),
+        "control characters and whitespace are not allowed"
+    );
+    assert_eq!(
+        malformed("exa mple.com"),
+        "control characters and whitespace are not allowed"
+    );
+    assert_eq!(
+        parse_ipv6("fe80::1%eth0"),
+        Err("an IPv6 zone identifier names a link, not a destination")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bounded IDNA work: the reviewer's R01, R10 and R19 shapes.
+// ---------------------------------------------------------------------------
+
+/// One label of `n` distinct valid CJK ideographs (3 UTF-8 bytes each).
+fn costly_label(n: u32) -> String {
+    (0..n)
+        .map(|i| char::from_u32(0x4E00 + i).expect("a CJK ideograph"))
+        .collect()
+}
+
+/// Runs `normalize_host` `rounds` times; returns the error and the time.
+fn timed(host: &str, rounds: u32) -> (HostRuleError, Duration) {
+    let started = Instant::now();
+    let mut last = None;
+    for _ in 0..rounds {
+        last = Some(normalize_host(host).expect_err("the host refuses"));
+    }
+    (last.expect("at least one round"), started.elapsed())
+}
+
+/// A long label used to be punycode-encoded (quadratic) before
+/// VerifyDnsLength refused it: 67 ms per host on macOS, 131 ms on the
+/// reference host. It now refuses at the mapping bound. Twenty rounds of the
+/// old cost are over a second; the bound below is a fifth of that.
+#[test]
+fn n03_a_long_label_refuses_before_any_quadratic_work() {
+    let host = format!("{}.example", costly_label(10_000));
+    let (error, elapsed) = timed(&host, 20);
+    assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
+    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    // Squared katakana (U+3300..U+3357) map to two to five code points.
+    let squares: String = (0..10_000u32)
+        .map(|i| char::from_u32(0x3300 + (i % 0x58)).expect("a square"))
+        .collect();
+    let (error, elapsed) = timed(&format!("{}{squares}", costly_label(3_000)), 20);
+    assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
+    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    // Just inside the mapping bound, the label bound refuses before encoding.
+    let (error, elapsed) = timed(&format!("{}.example", costly_label(1_000)), 20);
+    assert_eq!(error, HostRuleError::Idna(IdnaError::LabelLength));
+    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+}
+
+/// U+FDFA maps to eighteen code points: 10,800 of them used to expand to
+/// 194,400 code points (and their NFC copies) per request. The mapping step
+/// now stops at its bound.
+#[test]
+fn n03_mapping_expansion_is_bounded() {
+    let host: String = std::iter::repeat_n('\u{fdfa}', 10_800).collect();
+    let (error, elapsed) = timed(&host, 20);
+    assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
+    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+}
+
+/// A long A-label used to be decoded with a quadratic insert; decoding now
+/// stops after 63 code points, and a very long one refuses at the mapping
+/// bound before decoding starts.
+#[test]
+fn n03_a_long_a_label_refuses_before_quadratic_decoding() {
+    let (error, elapsed) = timed(&format!("xn--{}", "a".repeat(30_000)), 20);
+    assert_eq!(error, HostRuleError::Idna(IdnaError::NameLength));
+    assert!(elapsed < Duration::from_millis(250), "{elapsed:?}");
+    let (error, _) = timed(&format!("xn--{}", "a".repeat(1_000)), 1);
+    assert_eq!(error, HostRuleError::Idna(IdnaError::LabelLength));
+}
+
+/// The early refusals lose no valid name: the longest valid labels and names
+/// still pass, and one more refuses.
+#[test]
+fn n03_the_bounds_keep_every_valid_length() {
+    let label63 = "a".repeat(63);
+    let name253 = format!("{label63}.{label63}.{label63}.{}", "a".repeat(61));
+    assert_eq!(name253.len(), 253);
+    assert_eq!(normalize_host(&name253), Ok(Host::Name(name253.clone())));
+    assert_eq!(
+        normalize_host(&format!("{name253}.")),
+        Ok(Host::Name(name253.clone())),
+        "one terminal dot is removed"
+    );
+    assert!(normalize_host(&format!("{name253}a")).is_err());
+    // A maximal U-label: 63 output bytes from a non-ASCII label.
+    let unicode = format!("{}\u{fc}", "a".repeat(55));
+    let ascii = idna::to_ascii(&unicode, true).expect("a valid U-label");
+    assert!(ascii.len() <= 63, "{ascii}");
+    // Uppercase and full-width forms map (and shrink under NFC) inside the
+    // bound: 253 full-width letters and dots are 253 code points.
+    let wide: String = name253
+        .chars()
+        .map(|c| if c == '.' { '\u{ff0e}' } else { '\u{ff41}' })
+        .collect();
+    assert_eq!(normalize_host(&wide), Ok(Host::Name(name253)));
 }
 
 #[test]
