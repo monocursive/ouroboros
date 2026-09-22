@@ -67,6 +67,7 @@ use crate::capability::{
 };
 use crate::environment;
 use crate::observer::{CoverageClass, CoverageSummary};
+use crate::platform::ReleaseFailure;
 use crate::platform::{
     BoundaryIdentity, Deadline as PortableDeadline, PreparedExecution, PreparedPlan, RunEvent,
     RunningExecution, Sinks, StopReason, Teardown, TreeObservation,
@@ -344,6 +345,10 @@ struct Uncontained {
     leaf: ExecutionCgroup,
     /// The leaf as `/proc/<pid>/cgroup` names it.
     leaf_relative: String,
+    /// How a process's cgroup is read: [`cgroup::process_cgroup`]. A field
+    /// so an in-process test can make the read fail with the leaf intact,
+    /// which no live fixture can do deterministically.
+    cgroup_of: fn(libc::pid_t) -> std::io::Result<String>,
     /// Every distinct integrity loss detected, in order.
     losses: Vec<(Subject, Loss)>,
     /// Escaped processes that are this supervisor's own children, so their
@@ -383,7 +388,8 @@ impl Uncontained {
             ));
         }
         // §5.2, as for every profile: v1 refuses a privileged or setuid
-        // supervisor rather than model that boundary.
+        // supervisor rather than model that boundary. (Untestable on the
+        // reference host: the conformance account has no privilege to gain.)
         // SAFETY: getuid and geteuid take no arguments and cannot fail.
         let (ruid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
         if euid == 0 || ruid != euid {
@@ -614,6 +620,7 @@ impl Uncontained {
             },
             leaf,
             leaf_relative,
+            cgroup_of: cgroup::process_cgroup,
             losses: Vec::new(),
             escaped: Vec::new(),
             wall: None,
@@ -655,7 +662,13 @@ impl Uncontained {
                 format!("launcher placement in the execution cgroup failed: {err}"),
             )
         })?;
-        if !cgroup::process_cgroup(pid).is_ok_and(|path| path == self.leaf_relative) {
+        // Defence in depth, redundant on every host this build admits:
+        // `place` above already read the pid back from the leaf's own member
+        // list, and `ExecutionCgroup::create` refuses a supervisor whose
+        // `/proc/self/cgroup` does not lie in the delegated subtree, so the
+        // two spellings cannot disagree. It stays because every later
+        // membership check trusts this spelling; no fixture can reach it.
+        if !(self.cgroup_of)(pid).is_ok_and(|path| path == self.leaf_relative) {
             return Err(host_setup(
                 ErrorCode::MissingCapability,
                 "the launcher's own cgroup does not read back as the execution cgroup, so \
@@ -906,13 +919,11 @@ impl Uncontained {
     /// The live target's membership, read from its own cgroup file and
     /// confirmed alive afterwards, so the read was of the target.
     fn scan_target(&mut self) {
-        if self.target_exited() {
+        let fd = self.launcher_fd.as_raw_fd();
+        let (cgroup_of, pid) = (self.cgroup_of, self.pid);
+        let Some(read) = read_while_alive(|| !watch::readable(fd), || cgroup_of(pid)) else {
             return;
-        }
-        let read = cgroup::process_cgroup(self.pid);
-        if self.target_exited() {
-            return;
-        }
+        };
         match read {
             Ok(path) if cgroup::within(&path, &self.leaf_relative) => {}
             Ok(_) => self.lose(Subject::Target, Loss::MembershipEscape),
@@ -953,7 +964,11 @@ impl Uncontained {
     fn scan_descendants(&mut self) {
         // SAFETY: getpid takes no arguments and cannot fail.
         let own = unsafe { libc::getpid() };
-        let walked = tracer::descendants(own);
+        self.scan_walked(own, tracer::descendants(own));
+    }
+
+    /// [`Uncontained::scan_descendants`] over a given walk of `own`'s tree.
+    fn scan_walked(&mut self, own: libc::pid_t, walked: Vec<libc::pid_t>) {
         let ours: BTreeSet<libc::pid_t> = walked.iter().copied().chain([own]).collect();
         for pid in walked {
             if pid == self.pid {
@@ -962,24 +977,24 @@ impl Uncontained {
             let Ok(fd) = identity::pidfd_open(pid) else {
                 continue;
             };
-            if watch::readable(fd.as_raw_fd()) {
-                continue;
-            }
-            let Some(parent) = tracer::ppid(pid) else {
-                continue;
-            };
-            if !ours.contains(&parent) {
-                continue;
-            }
-            let Ok(path) = cgroup::process_cgroup(pid) else {
+            let raw = fd.as_raw_fd();
+            let cgroup_of = self.cgroup_of;
+            let Some((parent, cgroup)) = read_while_alive(
+                || !watch::readable(raw),
+                || (tracer::ppid(pid), cgroup_of(pid).ok()),
+            ) else {
                 continue;
             };
-            if watch::readable(fd.as_raw_fd()) || cgroup::within(&path, &self.leaf_relative) {
-                continue;
-            }
-            self.lose(Subject::Descendant, Loss::MembershipEscape);
-            if parent == own && !self.escaped.iter().any(|(known, _)| *known == pid) {
-                self.escaped.push((pid, fd));
+            match classify(own, &ours, parent, cgroup.as_deref(), &self.leaf_relative) {
+                Walked::Unattributed | Walked::Inside => {}
+                Walked::Unreadable => self.lose(Subject::Descendant, Loss::VerificationFailed),
+                Walked::EscapedDeeper => self.lose(Subject::Descendant, Loss::MembershipEscape),
+                Walked::EscapedChild => {
+                    self.lose(Subject::Descendant, Loss::MembershipEscape);
+                    if !self.escaped.iter().any(|(known, _)| *known == pid) {
+                        self.escaped.push((pid, fd));
+                    }
+                }
             }
         }
     }
@@ -994,8 +1009,10 @@ impl Uncontained {
         if self.tracer_attached || self.target_status.is_some() || !peek_exited(self.pid) {
             return;
         }
-        // An unreaped zombie keeps its pid, so this read is of the target.
-        match cgroup::process_cgroup(self.pid) {
+        // An unreaped zombie keeps its pid, so this read is of the target. A
+        // read that fails is a failed verification, never a pass: without it
+        // an escaped target that exited would settle as verified.
+        match (self.cgroup_of)(self.pid) {
             Ok(path) if cgroup::within(&path, &self.leaf_relative) => {}
             Ok(_) => self.lose(Subject::Target, Loss::MembershipEscape),
             Err(_) => self.lose(Subject::Target, Loss::VerificationFailed),
@@ -1015,14 +1032,20 @@ impl Uncontained {
         }
         // SAFETY: getpid takes no arguments and cannot fail.
         let own = unsafe { libc::getpid() };
-        for pid in tracer::children(own) {
+        self.reap_exited_children(tracer::children(own));
+    }
+
+    /// [`Uncontained::reap_orphans`] over a given list of this process's
+    /// children.
+    fn reap_exited_children(&mut self, children: Vec<libc::pid_t>) {
+        for pid in children {
             if pid == self.pid || !peek_exited(pid) {
                 continue;
             }
-            if cgroup::process_cgroup(pid)
-                .is_ok_and(|path| !cgroup::within(&path, &self.leaf_relative))
-            {
-                self.lose(Subject::Descendant, Loss::MembershipEscape);
+            match (self.cgroup_of)(pid) {
+                Ok(path) if cgroup::within(&path, &self.leaf_relative) => {}
+                Ok(_) => self.lose(Subject::Descendant, Loss::MembershipEscape),
+                Err(_) => self.lose(Subject::Descendant, Loss::VerificationFailed),
             }
             let mut status = 0;
             // SAFETY: `pid` is this process's own exited child; reaping it
@@ -1420,6 +1443,56 @@ fn peek_exited(pid: libc::pid_t) -> bool {
     rc == 0 && unsafe { info.si_pid() } != 0
 }
 
+/// `read` of one process, kept only when `alive` holds both before and after
+/// it. A process still alive after the read still holds its pid, so a
+/// `/proc` read in between was of it, not of a process that reused the
+/// number after an exit between the two checks.
+fn read_while_alive<T>(alive: impl Fn() -> bool, read: impl FnOnce() -> T) -> Option<T> {
+    if !alive() {
+        return None;
+    }
+    let value = read();
+    alive().then_some(value)
+}
+
+/// What one walked process is to the attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Walked {
+    /// Its parent is not this supervisor or a walked descendant: a pid
+    /// reused by an unrelated process, never attributed or signalled.
+    Unattributed,
+    /// In the leaf or a cgroup beneath it.
+    Inside,
+    /// Alive and ours, but its cgroup could not be read.
+    Unreadable,
+    /// Outside the leaf, and its parent is another descendant: recorded, not
+    /// signalled; it becomes this supervisor's child when its parent dies.
+    EscapedDeeper,
+    /// Outside the leaf and this supervisor's own child (an orphan the
+    /// subreaper adopted), so its pidfd provably names an attempt process.
+    EscapedChild,
+}
+
+/// Classifies one walked process from its parent and cgroup, both read
+/// while it was alive (see [`read_while_alive`]).
+fn classify(
+    own: libc::pid_t,
+    ours: &BTreeSet<libc::pid_t>,
+    parent: Option<libc::pid_t>,
+    cgroup: Option<&str>,
+    leaf: &str,
+) -> Walked {
+    let Some(parent) = parent.filter(|parent| ours.contains(parent)) else {
+        return Walked::Unattributed;
+    };
+    match cgroup {
+        None => Walked::Unreadable,
+        Some(cgroup) if cgroup::within(cgroup, leaf) => Walked::Inside,
+        Some(_) if parent == own => Walked::EscapedChild,
+        Some(_) => Walked::EscapedDeeper,
+    }
+}
+
 /// Whether `pid` is blocked in `read(2)` on the release descriptor, from
 /// `/proc/<pid>/syscall` (the number, then the arguments in hex). Checking
 /// the descriptor too means a transient read elsewhere during the launcher's
@@ -1460,33 +1533,42 @@ impl PreparedExecution for Prepared {
     }
 
     fn release(self: Box<Self>) -> Result<Box<dyn RunningExecution>, JailError> {
+        self.release_reporting_teardown()
+            .map_err(|failure| failure.error)
+    }
+
+    fn release_reporting_teardown(
+        self: Box<Self>,
+    ) -> Result<Box<dyn RunningExecution>, Box<ReleaseFailure>> {
         let mut boundary = self.boundary;
         // The blocked launcher must still be the only thing in the pinned
-        // leaf. A same-UID process can have changed either since prepared.
+        // leaf. A same-UID process can have changed either since prepared;
+        // the refusal then carries the teardown, `lost` included (§13.2).
         boundary.scan_target();
         let populated = boundary.scan_leaf();
         boundary.scan_descendants();
         if !boundary.losses.is_empty() || boundary.target_exited() || populated != Some(true) {
-            boundary.teardown();
-            return Err(host_setup(
+            return Err(boundary.fail_release(host_setup(
                 ErrorCode::BackendUnavailable,
                 "the registered boundary or the blocked launcher was lost before release",
-            ));
+            )));
         }
         let Some(release) = boundary.release.take() else {
-            return Err(host_setup(
+            return Err(boundary.fail_release(host_setup(
                 ErrorCode::BackendUnavailable,
                 "the release pipe is already closed",
-            ));
+            )));
         };
         if let Err(err) = shared::write_all(release.as_raw_fd(), &[1]) {
-            boundary.teardown();
-            return Err(host_setup(
+            return Err(boundary.fail_release(host_setup(
                 ErrorCode::BackendUnavailable,
                 format!("the release byte could not be written: {err}"),
-            ));
+            )));
         }
-        // Closing it makes a second release impossible (X03).
+        // X03 does not rest on this: the launcher reads exactly one byte and
+        // this descriptor would close at the end of the function anyway.
+        // Closing it here only makes the single release visible at a glance
+        // (an equivalent mutant; nothing can test it).
         drop(release);
         boundary.wall = boundary
             .snapshot
@@ -1500,17 +1582,35 @@ impl PreparedExecution for Prepared {
 
     fn abort(self: Box<Self>) -> Result<Teardown, JailError> {
         let mut boundary = self.boundary;
-        boundary.teardown();
-        let populated = boundary.scan_leaf();
-        let reaped = boundary.target_reaped();
-        Ok(Teardown {
+        Ok(boundary.torn_down())
+    }
+}
+
+impl Uncontained {
+    /// Tears everything down and says what that established (§13.2 row 4):
+    /// verified only on a reaped launcher, an empty identity-checked leaf and
+    /// a clean observer; `lost` after any detected loss.
+    fn torn_down(&mut self) -> Teardown {
+        self.teardown();
+        let populated = self.scan_leaf();
+        let reaped = self.target_reaped();
+        Teardown {
             tree: Some(verdict(&NoneTreeInputs {
-                integrity_lost: !boundary.losses.is_empty(),
+                integrity_lost: !self.losses.is_empty(),
                 natural_end: reaped,
                 target_reaped: reaped,
                 leaf_verified_empty: populated == Some(false),
-                observer_clean: shared::observer_verdict(boundary.tracer_summary.as_ref()),
+                observer_clean: shared::observer_verdict(self.tracer_summary.as_ref()),
             })),
+        }
+    }
+
+    /// A refused release, with the teardown it ran.
+    fn fail_release(mut self, error: JailError) -> Box<ReleaseFailure> {
+        let teardown = self.torn_down();
+        Box::new(ReleaseFailure {
+            error,
+            teardown: Some(teardown),
         })
     }
 }
@@ -1592,7 +1692,12 @@ impl RunningExecution for Uncontained {
         self.stop_at = Some(boottime_ns());
         // Where everything is, read before anything is signalled: a target
         // that left the leaf is still stopped through its pidfd, and the
-        // record says it left.
+        // record says it left. Defence in depth: `wait` checks the target on
+        // every step and `wait_tree` scans everything on every iteration, and
+        // an escaped descendant stays alive until it is killed. The only
+        // window this closes is an observed target that migrates and dies of
+        // this very signal within one wait step, which the observer reaps
+        // before any zombie check; no fixture can hit it deterministically.
         self.scan_target();
         let _ = self.scan_leaf();
         self.scan_descendants();
@@ -1878,6 +1983,404 @@ mod tests {
         assert!(!parse_blocked_on("running", 3));
         assert!(!parse_blocked_on(&format!("{} 0x3", libc::SYS_write), 3));
         assert!(!parse_blocked_on("", 3));
+    }
+
+    #[test]
+    fn a_read_is_kept_only_while_the_process_lives_on_both_sides() {
+        use std::cell::Cell;
+        let reads = Cell::new(0);
+        assert_eq!(
+            read_while_alive(|| true, || reads.set(reads.get() + 1)),
+            Some(())
+        );
+        assert_eq!(
+            read_while_alive(|| false, || reads.set(reads.get() + 1)),
+            None
+        );
+        assert_eq!(reads.get(), 1, "a process dead before the read is not read");
+        // An exit injected between the two checks: the pid may already name
+        // another process, so what was read is not attributed.
+        let checks = Cell::new(0);
+        let exits_after_the_read = || {
+            checks.set(checks.get() + 1);
+            checks.get() == 1
+        };
+        assert_eq!(
+            read_while_alive(exits_after_the_read, || "/elsewhere"),
+            None
+        );
+        assert_eq!(checks.get(), 2);
+    }
+
+    #[test]
+    fn only_processes_of_this_tree_are_attributed_and_only_children_signalled() {
+        let leaf = "/u/ouro-att_x.leaf";
+        let (own, child, grandchild, foreign) = (100, 200, 300, 999);
+        let ours: BTreeSet<libc::pid_t> = [own, child, grandchild].into_iter().collect();
+        let outside = Some("/u/elsewhere");
+        // A reused pid whose parent is not ours: never a loss, never killed.
+        assert_eq!(
+            classify(own, &ours, Some(foreign), outside, leaf),
+            Walked::Unattributed
+        );
+        assert_eq!(
+            classify(own, &ours, None, outside, leaf),
+            Walked::Unattributed
+        );
+        // Ours and inside, including a cgroup the child made beneath the leaf.
+        assert_eq!(
+            classify(own, &ours, Some(child), Some(leaf), leaf),
+            Walked::Inside
+        );
+        assert_eq!(
+            classify(
+                own,
+                &ours,
+                Some(child),
+                Some("/u/ouro-att_x.leaf/made"),
+                leaf
+            ),
+            Walked::Inside
+        );
+        // Ours and outside: recorded; killable only as this process's child.
+        assert_eq!(
+            classify(own, &ours, Some(own), outside, leaf),
+            Walked::EscapedChild
+        );
+        assert_eq!(
+            classify(own, &ours, Some(child), outside, leaf),
+            Walked::EscapedDeeper
+        );
+        // Ours and alive, cgroup unreadable: a failed verification.
+        assert_eq!(
+            classify(own, &ours, Some(child), None, leaf),
+            Walked::Unreadable
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Single integrity checks driven in process (A14, A15). The boundary
+    // holds a real child that has already exited and a leaf on an ordinary
+    // directory; it is never scanned for descendants or torn down, which
+    // would walk this test process's children, and those belong to other
+    // tests.
+    // -----------------------------------------------------------------------
+
+    const FAKE_LEAF: &str = "/fake/ouro-att_x.leaf";
+
+    fn read_inside(_pid: libc::pid_t) -> std::io::Result<String> {
+        Ok(FAKE_LEAF.to_owned())
+    }
+
+    fn read_fails(_pid: libc::pid_t) -> std::io::Result<String> {
+        Err(std::io::Error::other(
+            "injected: the cgroup file cannot be read",
+        ))
+    }
+
+    fn fake_leaf(root: &std::path::Path) -> std::path::PathBuf {
+        let path = root.join("leaf");
+        std::fs::create_dir(&path).unwrap();
+        for (name, value) in [
+            ("cgroup.kill", ""),
+            ("cgroup.procs", ""),
+            ("cgroup.events", "populated 0\n"),
+        ] {
+            std::fs::write(path.join(name), value).unwrap();
+        }
+        path
+    }
+
+    fn exited_child_boundary(
+        leaf: &std::path::Path,
+        cgroup_of: fn(libc::pid_t) -> std::io::Result<String>,
+    ) -> Uncontained {
+        let child = Command::new("/bin/true").spawn().expect("/bin/true runs");
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let launcher_fd = identity::pidfd_open(pid).expect("a pidfd of the child");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !peek_exited(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "/bin/true never exited"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (error, _writer) = exec::pipe().unwrap();
+        let snapshot = crate::policy::resolve(&crate::policy::ResolveInputs {
+            platform: Os::Linux,
+            base_profile: ProfileName::None,
+            policy_name: "none".to_owned(),
+            baseline: crate::profiles::baseline(ProfileName::None, Os::Linux, &|_| None),
+            workspace: b"/work".to_vec(),
+            scratch: crate::policy::ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        })
+        .unwrap()
+        .snapshot;
+        Uncontained {
+            snapshot,
+            attempt_id: "att_00000000-0000-4000-8000-000000000001".to_owned(),
+            trace: None,
+            observe_on: false,
+            pid,
+            child: Some(child),
+            launcher: identity::ProcessIdentity {
+                pid,
+                boot_id: String::new(),
+                start_time_ticks: 0,
+            },
+            launcher_fd,
+            target_images: Vec::new(),
+            release: None,
+            error,
+            error_bytes: Vec::new(),
+            error_eof: true,
+            tracer: None,
+            tracer_attached: false,
+            tracer_summary: None,
+            audit: AuditWriter::new(
+                "att_00000000-0000-4000-8000-000000000001",
+                None,
+                b"/work",
+                b"",
+            ),
+            applied: Applied {
+                filesystem: None,
+                network: AppliedNetwork {
+                    mode: "host".to_owned(),
+                    mechanism: None,
+                    allowed_hosts: Vec::new(),
+                },
+                syscalls: None,
+                limits: Vec::new(),
+                environment_names: Vec::new(),
+                removed_environment_names: Vec::new(),
+            },
+            leaf: ExecutionCgroup::open_for_test(leaf).unwrap(),
+            leaf_relative: FAKE_LEAF.to_owned(),
+            cgroup_of,
+            losses: Vec::new(),
+            escaped: Vec::new(),
+            wall: None,
+            wall_reported: false,
+            exec_confirmed: false,
+            target_outcome: None,
+            target_exit_seen: false,
+            target_status: None,
+            pending: Vec::new(),
+            stop_requested: None,
+            stop_at: None,
+            hard_killed: false,
+            hard_deadline: None,
+            finished: false,
+            evidence_reported: false,
+            sampled_at_ns: 0,
+        }
+    }
+
+    fn final_integrity(boundary: &Uncontained, leaf_empty: bool) -> String {
+        verdict(&NoneTreeInputs {
+            integrity_lost: boundary.integrity_lost(),
+            natural_end: true,
+            target_reaped: boundary.target_reaped(),
+            leaf_verified_empty: leaf_empty,
+            observer_clean: true,
+        })
+        .integrity
+    }
+
+    /// A15: a target zombie whose cgroup cannot be read is a failed
+    /// verification. Without the loss the run would settle as verified.
+    #[test]
+    fn an_unreadable_target_zombie_loses_integrity_instead_of_verifying() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = fake_leaf(root.path());
+
+        let mut control = exited_child_boundary(&leaf, read_inside);
+        control.collect_target();
+        assert!(control.target_reaped());
+        assert!(control.losses.is_empty());
+        assert_eq!(control.scan_leaf(), Some(false));
+        assert_eq!(final_integrity(&control, true), "verified");
+
+        let mut failing = exited_child_boundary(&leaf, read_fails);
+        failing.collect_target();
+        assert!(failing.target_reaped(), "the status is still collected");
+        assert_eq!(
+            failing.losses,
+            vec![(Subject::Target, Loss::VerificationFailed)]
+        );
+        assert!(failing.integrity_lost());
+        assert_eq!(final_integrity(&failing, true), "lost");
+    }
+
+    fn read_outside(_pid: libc::pid_t) -> std::io::Result<String> {
+        Ok("/fake/elsewhere".to_owned())
+    }
+
+    fn spawn_sleeper() -> std::process::Child {
+        Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("/bin/sleep runs")
+    }
+
+    fn end(mut child: std::process::Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// G5-G7 at the call site: a walked process is attributed only through
+    /// a parent in the walk, recorded when outside, and kept for signalling
+    /// only when it is this process's own child. The walk is given, so no
+    /// other test's children are ever looked at.
+    #[test]
+    fn walked_processes_are_attributed_before_they_are_recorded_or_signalled() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = fake_leaf(root.path());
+        // SAFETY: getpid takes no arguments and cannot fail.
+        let own = unsafe { libc::getpid() };
+
+        // Our child, outside the leaf: a loss, and signallable.
+        let child = spawn_sleeper();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let mut boundary = exited_child_boundary(&leaf, read_outside);
+        boundary.collect_target();
+        boundary.losses.clear();
+        boundary.scan_walked(own, vec![pid]);
+        assert_eq!(
+            boundary.losses,
+            vec![(Subject::Descendant, Loss::MembershipEscape)]
+        );
+        assert_eq!(
+            boundary
+                .escaped
+                .iter()
+                .map(|(known, _)| *known)
+                .collect::<Vec<_>>(),
+            vec![pid]
+        );
+
+        // The same process in a walk that does not contain its parent is a
+        // reused pid as far as this boundary can tell: nothing recorded.
+        let mut foreign = exited_child_boundary(&leaf, read_outside);
+        foreign.collect_target();
+        foreign.losses.clear();
+        foreign.scan_walked(1, vec![pid]);
+        assert!(foreign.losses.is_empty());
+        assert!(foreign.escaped.is_empty());
+
+        // Alive, ours, and its cgroup unreadable: a failed verification.
+        let mut unreadable = exited_child_boundary(&leaf, read_fails);
+        unreadable.collect_target();
+        unreadable.losses.clear();
+        unreadable.scan_walked(own, vec![pid]);
+        assert_eq!(
+            unreadable.losses,
+            vec![(Subject::Descendant, Loss::VerificationFailed)]
+        );
+        assert!(unreadable.escaped.is_empty());
+        end(child);
+
+        // A grandchild outside the leaf: recorded, never signalled.
+        let shell = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & wait"])
+            .spawn()
+            .expect("/bin/sh runs");
+        let shell_pid = libc::pid_t::try_from(shell.id()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let grandchild = loop {
+            if let Some(found) = tracer::children(shell_pid).first().copied() {
+                break found;
+            }
+            assert!(std::time::Instant::now() < deadline, "no grandchild");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let mut deeper = exited_child_boundary(&leaf, read_outside);
+        deeper.collect_target();
+        deeper.losses.clear();
+        deeper.scan_walked(own, vec![shell_pid, grandchild]);
+        assert_eq!(
+            deeper.losses,
+            vec![(Subject::Descendant, Loss::MembershipEscape)]
+        );
+        assert_eq!(
+            deeper
+                .escaped
+                .iter()
+                .map(|(known, _)| *known)
+                .collect::<Vec<_>>(),
+            vec![shell_pid],
+            "only this process's own child may be signalled"
+        );
+        // SAFETY: the grandchild is alive and this test's; its pid cannot be
+        // reused while its parent, our child, has not reaped it.
+        unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        end(shell);
+    }
+
+    /// An exited orphan whose zombie cannot be read is a failed verification,
+    /// as for the target (A15); it is still reaped.
+    #[test]
+    fn an_unreadable_orphan_zombie_loses_integrity_and_is_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = fake_leaf(root.path());
+        let mut boundary = exited_child_boundary(&leaf, read_fails);
+        let orphan = Command::new("/bin/true").spawn().expect("/bin/true runs");
+        let pid = libc::pid_t::try_from(orphan.id()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !peek_exited(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "/bin/true never exited"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        boundary.reap_exited_children(vec![pid]);
+        assert_eq!(
+            boundary.losses,
+            vec![(Subject::Descendant, Loss::VerificationFailed)]
+        );
+        assert!(!peek_exited(pid), "the zombie was reaped");
+        // The target's own collection is untouched by the orphan's.
+        boundary.collect_target();
+        assert!(boundary.target_reaped());
+        drop(orphan);
+    }
+
+    /// A14: a population read that fails while the leaf's identity is intact
+    /// is a failed verification, not an unknown that could pass later.
+    #[test]
+    fn an_unreadable_population_with_the_identity_intact_loses_integrity() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = fake_leaf(root.path());
+        let mut boundary = exited_child_boundary(&leaf, read_inside);
+        boundary.collect_target();
+        assert_eq!(boundary.scan_leaf(), Some(false), "the control reads");
+        assert!(boundary.losses.is_empty());
+
+        std::fs::write(leaf.join("cgroup.events"), "populated maybe\n").unwrap();
+        assert!(boundary.leaf.verify().is_ok(), "the identity is intact");
+        assert_eq!(boundary.scan_leaf(), None);
+        assert_eq!(
+            boundary.losses,
+            vec![(Subject::Boundary, Loss::VerificationFailed)]
+        );
+        assert_eq!(final_integrity(&boundary, false), "lost");
+
+        // A replaced directory at the same path is the other loss.
+        std::fs::rename(&leaf, root.path().join("moved")).unwrap();
+        fake_leaf(root.path());
+        assert_eq!(boundary.scan_leaf(), None);
+        assert!(
+            boundary
+                .losses
+                .contains(&(Subject::Boundary, Loss::IdentityReplaced))
+        );
     }
 
     #[test]

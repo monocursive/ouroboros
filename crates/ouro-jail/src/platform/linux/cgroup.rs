@@ -630,6 +630,20 @@ impl ExecutionCgroup {
     pub fn identity(&self) -> (u64, u64) {
         (self.device, self.inode)
     }
+    /// A leaf on an ordinary directory holding the control files, for tests
+    /// that drive one integrity check in process.
+    #[cfg(test)]
+    pub(crate) fn open_for_test(path: &Path) -> io::Result<Self> {
+        Self::open_created(
+            path,
+            &crate::policy::LimitsSnapshot {
+                wall: None,
+                pids: None,
+                mem: None,
+                cpu: None,
+            },
+        )
+    }
     /// Keep the leaf when this value is dropped. jail-v1 §9.3: a boundary
     /// whose integrity was lost retains its state for explicit recovery,
     /// even when it happens to be empty.

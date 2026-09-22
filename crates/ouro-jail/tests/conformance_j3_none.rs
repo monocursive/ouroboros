@@ -1278,7 +1278,7 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
     })
     .expect("the bare none baseline resolves");
     type Restrict = fn(&mut ouro_jail::policy::PolicySnapshot);
-    let restrictions: [(&str, Restrict); 3] = [
+    let restrictions: [(&str, Restrict); 4] = [
         ("filesystem.deny_read", |snapshot| {
             snapshot.filesystem.deny_read.push(PathRef {
                 root: RootToken::Workspace,
@@ -1293,6 +1293,10 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
         }),
         ("network.mode", |snapshot| {
             snapshot.network.mode = "none".to_owned();
+        }),
+        ("filesystem.protected_coverage", |snapshot| {
+            snapshot.filesystem.protected_coverage =
+                ouro_jail::policy::ProtectedCoverage::ExistingAndRoot;
         }),
     ];
     for (key, restrict) in restrictions {
@@ -1328,4 +1332,159 @@ fn the_boundary_itself_refuses_a_restriction_it_would_not_apply() {
         assert_eq!(error.key_path.as_deref(), Some(key));
         assert!(!marker.exists(), "{key}: a process ran");
     }
+}
+
+// ===========================================================================
+// The review's survivors, live (G1, A13)
+// ===========================================================================
+
+/// G1: the re-check in `release`. Between `prepared` and the gate's release a
+/// same-UID process moves the blocked launcher out of the leaf, or also
+/// replaces the emptied leaf. The release refuses, the target never runs,
+/// and the refused receipt carries the teardown: integrity `lost`.
+#[test]
+fn g1_tampering_between_prepared_and_release_refuses_with_integrity_lost() {
+    if !live() {
+        return;
+    }
+    for (label, replace) in [("migrated launcher", false), ("replaced leaf", true)] {
+        for observe in ["on", "off"] {
+            let destination = Destination::new("prerelease");
+            let (jail, _) = none_case(observe);
+            let marker = jail.root().join("target-ran");
+            let mut spawned = jail
+                .gate()
+                .receipt()
+                .target(["/bin/sh", "-c", &format!("touch {}", marker.display())])
+                .spawn()
+                .expect("the jail starts");
+            let prepared = spawned.owner().await_prepared().expect("prepared");
+            let receipt = spawned.receipt_value().expect("a prepared receipt");
+            let (leaf, inode) = leaf_of(&receipt);
+            let launcher = receipt["lifetime"]["native"]["details"]["launcher_pid"]
+                .as_i64()
+                .unwrap() as i32;
+            assert_eq!(members(&leaf), vec![launcher]);
+            std::fs::write(destination.path.join("cgroup.procs"), launcher.to_string())
+                .expect("the blocked launcher is moved out");
+            if replace {
+                std::fs::remove_dir(&leaf).expect("the emptied leaf is removed");
+                std::fs::create_dir(&leaf).expect("a look-alike at the same path");
+            }
+            spawned
+                .owner()
+                .release(
+                    &harness::gate::Release::Valid,
+                    prepared["attempt_id"].as_str().unwrap(),
+                    receipt["policy"]["digest"].as_str().unwrap(),
+                )
+                .expect("released");
+            let run = spawned.wait().expect("the jail ends");
+            assert_eq!(
+                run.code(),
+                Some(125),
+                "{label}/{observe}: {}",
+                run.stderr_text()
+            );
+            assert!(!marker.exists(), "{label}/{observe}: the target ran");
+            validate(&run);
+            let refused = run
+                .receipt_phase("refused")
+                .unwrap_or_else(|| panic!("{label}/{observe}: {}", run.stderr_text()));
+            assert_unprotected(&refused);
+            assert_eq!(refused["exec_observed"], false);
+            assert_eq!(refused["outcome"]["kind"], "refused");
+            assert!(
+                refused["outcome"]["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("lost before release"),
+                "{refused:#}"
+            );
+            assert_eq!(
+                refused["lifetime"]["integrity"], "lost",
+                "{label}/{observe}"
+            );
+            assert_eq!(refused["lifetime"]["tree_empty"], Value::Null);
+            let reason = if replace {
+                "identity_replaced"
+            } else {
+                "membership_escape"
+            };
+            assert!(
+                lifetime_notes(&run)
+                    .iter()
+                    .any(|note| note["reason"] == reason),
+                "{label}/{observe}: {:?}",
+                lifetime_notes(&run)
+            );
+            // The moved launcher was ended through its pidfd.
+            assert!(!populated(&destination.path), "{label}/{observe}");
+            if replace {
+                assert_ne!(std::fs::metadata(&leaf).unwrap().ino(), inode);
+            } else {
+                assert_eq!(std::fs::metadata(&leaf).unwrap().ino(), inode);
+            }
+            remove_cgroup(&leaf);
+        }
+    }
+}
+
+/// A13: an OOM kill in the leaf ends the whole tree at once, as for the
+/// contained profiles. The allocation happens in a descendant; the target
+/// itself only sleeps, so nothing but that forced stop ends it before the
+/// wall, and the cause is the memory event, not the deadline.
+#[test]
+fn a13_an_oom_kill_in_the_leaf_ends_the_tree() {
+    if !live() {
+        return;
+    }
+    let (jail, _) = none_case("on");
+    let code = "import os, time\n\
+                if os.fork() == 0:\n\
+                \x20   x = bytearray(512 * 1024 * 1024)\n\
+                \x20   os._exit(0)\n\
+                time.sleep(60)\n";
+    let mut spawned = jail
+        .args(["--limit", "mem=64MiB", "--limit", "wall=30s"])
+        .gate()
+        .receipt()
+        .target([PYTHON, "-c", code])
+        .spawn()
+        .expect("the jail starts");
+    let prepared = spawned.owner().await_prepared().expect("prepared");
+    let receipt = spawned.receipt_value().expect("a prepared receipt");
+    let (leaf, _) = leaf_of(&receipt);
+    // memory.max bounds resident memory; the host has swap. Disable swap in
+    // this leaf only, so the allocation deterministically reaches OOM.
+    std::fs::write(leaf.join("memory.swap.max"), "0").unwrap();
+    let started = Instant::now();
+    spawned
+        .owner()
+        .release(
+            &harness::gate::Release::Valid,
+            prepared["attempt_id"].as_str().unwrap(),
+            receipt["policy"]["digest"].as_str().unwrap(),
+        )
+        .expect("released");
+    let run = spawned.wait().expect("the jail ends");
+    validate(&run);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the tree ran on toward the wall after the OOM kill"
+    );
+    let settled = run
+        .receipt_phase("settled")
+        .unwrap_or_else(|| panic!("{}", run.stderr_text()));
+    assert_unprotected(&settled);
+    assert_eq!(settled["outcome"]["kind"], "signaled", "{settled:#}");
+    assert_eq!(settled["outcome"]["signal"], libc::SIGKILL);
+    assert_eq!(settled["outcome"]["cause"], "memory_oom");
+    let mem = settled["applied"]["limits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == "mem")
+        .unwrap();
+    assert_eq!(mem["hit"], true);
 }
