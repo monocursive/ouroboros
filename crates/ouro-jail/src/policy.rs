@@ -822,8 +822,13 @@ fn as_path(bytes: &[u8]) -> &std::path::Path {
 /// - a symlink component refuses: what it names is not what it spells, and
 ///   following it would be trusting the child's choice of target;
 /// - a component that does not exist, or that cannot be inspected, refuses:
-///   the subset relationship is unknown, and §6.3 says unknown refuses;
+///   the subset relationship is unknown, and §6.3 says unknown refuses. An
+///   absent object is not merely unidentifiable, it is racy: the child can
+///   create it as a symlink before the backend binds it;
 /// - a non-directory in the middle refuses for the same reason.
+///
+/// Only grants come here. A denial is compared lexically, because it can only
+/// remove authority whatever it names.
 ///
 /// The returned chain is every component's identity from the filesystem root
 /// down to the object itself, which is what makes "lies beneath a denied
@@ -1190,8 +1195,14 @@ fn apply_layer(
             let absolute = normalize_path(layer.base_dir.as_deref(), &expand(raw), &key)?;
             let reference = tokenizer.tokenize(&absolute, &key)?;
             // A grant written by the contained party is compared by filesystem
-            // identity. A denial is not: adding one never widens authority,
-            // whatever it names.
+            // identity. A denial is not, and the asymmetry is the point: a
+            // denial can only remove authority, so naming a symlink or a path
+            // that does not exist costs nothing. A grant naming an absent path
+            // is different, because there is nothing to pin: between this
+            // resolution and the backend's bind the child can create that path
+            // as a symlink, and §9.1 forbids following an untrusted symlink
+            // between policy validation and grant construction. So an absent
+            // grant target refuses as an unknown subset.
             if layer.origin.is_untrusted() && grant {
                 let chain = untrusted_identities(&absolute, &key, &layer.origin.label())?;
                 if let Some(denied) = denied_identity(tokenizer, &base, &chain) {

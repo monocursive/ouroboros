@@ -202,6 +202,75 @@ fn p02_a_grant_beneath_a_denied_subtree_refuses_at_any_depth() {
     }
 }
 
+/// §6.3 and §9.1: an absent path is a refusal for a grant and a narrowing for
+/// a denial.
+///
+/// The two halves are different questions. A denial of an absent path can only
+/// remove authority, so the lexical comparison is enough. A grant of an absent
+/// path has nothing to pin: the child owns the workspace, so between this
+/// resolution and the backend's bind it can create that name as a symlink to
+/// anywhere, and §9.1 forbids following an untrusted symlink across that
+/// window. So the grant refuses as an unknown subset, naming its key path.
+#[test]
+fn p02_an_absent_path_refuses_as_a_grant_and_narrows_as_a_denial() {
+    let workspace = Workspace::new();
+    let absent = "./not-created-yet";
+    assert!(
+        std::fs::symlink_metadata(workspace.root.join("not-created-yet")).is_err(),
+        "the path really is absent, or this test proves nothing"
+    );
+
+    // A grant refuses, with the exact key path for each kind.
+    for (delta, key) in [
+        (read_only(&[absent]), "jail.filesystem.read_only"),
+        (read_write(&[absent]), "jail.filesystem.read_write"),
+    ] {
+        match workspace.resolve_project(ProfileName::Tool, |_| {}, delta) {
+            Ok(_) => panic!("an absent grant target must refuse at {key}"),
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::PolicyWidening, "for {key}");
+                assert_eq!(error.key_path.as_deref(), Some(key));
+                assert_eq!(error.exit_code(), 125);
+                assert!(
+                    error.message.contains("unknown subset")
+                        && error.message.contains("does not exist"),
+                    "the refusal says which half of the rule applied: {}",
+                    error.message
+                );
+            }
+        }
+    }
+
+    // A denial of the same absent path is allowed, and lands in the snapshot.
+    let resolved = workspace
+        .resolve_project(
+            ProfileName::Tool,
+            |_| {},
+            PolicyDelta {
+                deny_read: vec![absent.as_bytes().to_vec()],
+                ..PolicyDelta::default()
+            },
+        )
+        .expect("denying an absent path only removes authority");
+    assert!(
+        resolved
+            .snapshot
+            .filesystem
+            .deny_read
+            .contains(&workspace.reference("not-created-yet")),
+        "the denial is recorded rather than quietly dropped: {:?}",
+        resolved.snapshot.filesystem.deny_read
+    );
+
+    // And once the object exists, the same grant is compared on its merits: it
+    // is inside the writable workspace, so it is accepted. The refusal above
+    // was about absence, not about the path.
+    std::fs::create_dir(workspace.root.join("not-created-yet")).expect("create it");
+    workspace
+        .resolve_project(ProfileName::Tool, |_| {}, read_only(&[absent]))
+        .expect("an existing path inside the writable root is an ordinary carve-out");
+}
+
 #[test]
 fn p02_an_object_that_does_not_exist_is_an_unknown_subset() {
     let workspace = Workspace::new();
