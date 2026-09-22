@@ -25,7 +25,7 @@ Produced by `doctor --json` on the operator-provisioned x86_64 VPS
 | `kernel.yama.ptrace_scope` | 1 (manual 2026-09-22); `kernel.io_uring_disabled` 0 |
 | Kernel options | `SECURITY_LANDLOCK`, `SECCOMP_FILTER`, `USER_NS`, `SECURITY_APPARMOR`, `CGROUPS`, `BPF_LSM` all `y` (manual 2026-09-22, [evidence](evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt)) |
 | Operator-installed AppArmor profile: name, executables granted `userns` | none installed; AppArmor enabled with Ubuntu's `bwrap-userns-restrict`, `unprivileged_userns`, `lxc-usernsexec` files and `bwrap`, `unpriv_bwrap` loaded; the legacy `ouroboros-sandbox-fleet` profile was removed 2026-09-22 (manual) |
-| Tracing capability provisioning: mechanism (ambient via unit / file caps) and set | Decided 2026-09-22, not yet applied or measured: ambient capabilities from a system-level service unit that runs the observer at a fixed path owned by `ouro-ci`, so a freshly built binary needs no privileged step per build. The set to measure is CAP_BPF plus CAP_PERFMON. Login shell `CapEff` is 0 (manual 2026-09-22) |
+| Tracing capability provisioning: mechanism (ambient via unit / file caps) and set | Revised 2026-09-22 for portability: no host provisioning for the first observer measurement. The ptrace tracer, which needs no capability under the default `ptrace_scope` of Ubuntu, Debian, Fedora and Arch, is measured first. If eBPF is later selected for performance, the installer sets file capabilities (CAP_BPF, CAP_PERFMON) on the installed `ouro-jail` binary once, which works on any distribution with extended attributes and needs no systemd. The service-unit choice is withdrawn. Login shell `CapEff` is 0 (manual 2026-09-22) |
 | Raw `doctor --json` output location | not_started; manual collection by [host-manifest.sh](host-manifest.sh): [evidence/reference-host-2026-09-22.txt](evidence/reference-host-2026-09-22.txt) as the administrator account and [evidence/reference-host-2026-09-22-ouro-ci.txt](evidence/reference-host-2026-09-22-ouro-ci.txt) as `ouro-ci`, the account conformance runs under |
 
 ### 1.1 Unprivileged bubblewrap on the reference host
@@ -62,6 +62,11 @@ one recorded setting rather than a path-pinned profile that must follow every
 launcher rebuild. The manifest already records its value, so the change is
 visible in every later evidence file. Not yet applied; the nesting probe is
 re-run once it is, and a multi-tenant host would need the scoped profile.
+The restriction itself is specific to Ubuntu 24.04 and later; Debian 13,
+Fedora and Arch ship usable unprivileged user namespaces by default. The
+portable install story is therefore: `doctor` detects that nested namespaces
+are unusable and names the one distribution-specific remediation; the tools
+never apply it.
 
 On the legacy tree's Ubuntu 24.04 hosted runners the apt bubblewrap could not
 apply its mounts without a sysctl change; on this 26.04.1 host it can, under
@@ -69,6 +74,11 @@ the distribution's own profile. J0 reruns this probe whenever that profile,
 bubblewrap or the kernel changes.
 
 ## 2. Observer privilege model (measured first)
+
+Order revised 2026-09-22 for portability: the ptrace tracer in §2.1 is
+measured first because it needs no host provisioning on any mainstream
+distribution. The eBPF rows below are measured only if ptrace misses the
+closed set (O01–O06) or the §4 overhead budget. jail-v1 §5.2 records the same.
 
 | Measurement | Result | Evidence |
 |---|---|---|
@@ -80,7 +90,7 @@ bubblewrap or the kernel changes.
 | Interference: AppArmor userns restriction, `perf_event_paranoid`, `unprivileged_bpf_disabled`; operator resolution | not_started | |
 | Result: `attaches` or `blocked` | not_started | |
 
-### 2.1 Fallback candidates (only if the eBPF candidate is blocked)
+### 2.1 ptrace tracer (measured first) and the fanotify supplement
 
 | Candidate | Closed-set coverage (§11.2) | Overhead | Known limits observed | Result |
 |---|---|---|---|---|

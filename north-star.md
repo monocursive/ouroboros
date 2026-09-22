@@ -1,6 +1,6 @@
 # North star: three tools, September 2026
 
-Status: **specification, revision 13.** Written 2026-09-21, revised 2026-09-22. Revision 6 cut the
+Status: **specification, revision 14.** Written 2026-09-21, revised 2026-09-22. Revision 6 cut the
 product to a jail, a ledger, and a fleet around existing agents. Revision 7
 answered five review findings by specifying the mechanism that would close
 each hole. Revision 8 keeps the findings as named limits and stops there.
@@ -48,6 +48,14 @@ crate split rules under D7 (jail-v1 §4); and sets the conformance runner model
 (jail-v1 §16). The bootstrap files that layout needs, the license, ignore
 rules, toolchain pin, workflows and link validator, exist from this revision.
 No crate does.
+
+Revision 14 (2026-09-22) applies a portability steer: the tools must install
+easily on a wide range of Linux distributions. The observer is measured
+ptrace-first because that needs no provisioning; eBPF, if selected for
+performance, gets its capabilities from the installer's file capabilities,
+never from a required service unit. Distribution-specific remediations, such
+as Ubuntu's user-namespace restriction, are named by `doctor` and applied by
+the operator (§11, jail-v1 §§3.2, 5.2).
 
 ## 0. Why
 
@@ -1174,10 +1182,12 @@ radius per store; `docs/experiments/` is never added.
   the tools. Ubuntu 24.04 restricts unprivileged user namespaces through
   AppArmor and gates BPF tracing behind capabilities the operator must
   provision. J0 measures this on the reference host before anything else
-  (jail-v1 §5.2). If the eBPF candidate cannot attach under a provisioning the
-  operator accepts, the fallback candidates named there are measured against
-  the same closed set. If none passes, the blocker is recorded and J1 does not
-  ship with `--observe off` as its acceptance run.
+  (jail-v1 §5.2). J0 measures the ptrace tracer first, because it needs no
+  provisioning on mainstream distributions, and the eBPF candidate second for
+  performance; an installed system gets eBPF capabilities from the installer's
+  file capabilities, never from a required service unit. If neither passes,
+  the blocker is recorded and J1 does not ship with `--observe off` as its
+  acceptance run.
 - **The workspace is not a git boundary.** Shared inodes and alternates are the
   operator's problem until a later proposal says otherwise.
 

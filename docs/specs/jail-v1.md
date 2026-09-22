@@ -1,6 +1,6 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 5, 2026-09-22. No implementation
+Status: implementation specification, revision 6, 2026-09-22. No implementation
 or backend conformance is claimed by this document.
 
 Parent: [North star](../../north-star.md), principally §§3–4 and §7. This document
@@ -173,7 +173,9 @@ capabilities inside the user namespace
 For `agent` the operator either installs a scoped profile granting `userns`,
 and capabilities within it, to the required executables, or changes that
 sysctl. The reference host uses the sysctl (decision 2026-09-22, recorded by
-the manifest); a multi-tenant host would need the scoped profile. All of
+the manifest); a multi-tenant host would need the scoped profile. The
+restriction is specific to Ubuntu 24.04 and later; `doctor` names the
+remediation for the host it runs on. All of
 these are host policy: the tools report the state and change none of them. Conformance runs on the host as a dedicated operator account,
 `ouro-ci`: no sudo, lingering enabled so its `user@` service delegates the
 cgroup controllers, the provisioned tracing capabilities, and nothing else
@@ -366,6 +368,13 @@ to the attempt before collecting arguments. Evaluate it separately from D8's
 enforcement candidates. No audit daemon, vendor protocol or seccomp-notification
 service is introduced.
 
+Measurement order, revised 2026-09-22 for portability across distributions:
+the ptrace tracer described below is measured first, because it needs no
+provisioning under the default Yama scope that Ubuntu, Debian, Fedora and
+Arch ship. The eBPF candidate is measured when ptrace misses the closed set
+or the performance budget. Whichever is selected must install on a wide range
+of distributions without a service manager or a privileged helper.
+
 The proof must identify attach points, kernel/configuration dependencies,
 required capabilities, attachment lifetime, descendant tracking, event loss,
 startup latency and runtime overhead. The reference deployment aims for a
@@ -389,17 +398,21 @@ Capability provisioning is the operator's act on the reference host, and J0
 records which mechanism was used: ambient capabilities granted by a systemd
 system service unit that starts the supervisor (`AmbientCapabilities=`; a user
 unit cannot grant capabilities the account lacks), or file capabilities the
-operator sets on the supervisor binary. Neither is installed by the tools. The
-reference host uses the first, running the observer at a fixed path owned by
-`ouro-ci` (decision 2026-09-22), so a rebuilt binary needs no privileged step. Measure the smallest set that attaches: `CAP_BPF` and
+operator sets on the supervisor binary. Neither is installed by the tools. An
+installed system uses the second: the package or installer sets the file
+capabilities on the `ouro-jail` binary once, which works on any distribution
+with extended attributes and does not assume systemd (revised 2026-09-22; the
+service-unit choice is withdrawn). The conformance loop measures the ptrace
+tracer first, which needs neither. Measure the smallest set that attaches: `CAP_BPF` and
 `CAP_PERFMON` are the candidates on the pinned kernel; needing `CAP_SYS_ADMIN`
 is a failed measurement, not a fallback. Record whether the AppArmor
 user-namespace restriction, `perf_event_paranoid` or a hardened
 `unprivileged_bpf_disabled` interfered, and how the operator resolved each.
 
-If the eBPF candidate cannot attach under a provisioning the operator accepts,
-or cannot satisfy the closed set, J0 measures these fallbacks against the same
-§11 semantics before any is selected. None is selected here:
+J0 measures the ptrace tracer below first, against the §11 semantics, because
+it needs no provisioning; the eBPF candidate follows if ptrace misses the
+closed set or the §5.2 budgets. `fanotify` is measured only as a supplement.
+None is selected here:
 
 - A ptrace tracer in the supervisor, attached to the launcher before exec with
   `PTRACE_O_TRACEEXEC`, `PTRACE_O_TRACEFORK`, `PTRACE_O_TRACEVFORK`,
