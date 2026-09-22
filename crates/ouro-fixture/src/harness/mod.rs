@@ -4,14 +4,18 @@
 //! trace pipes, runs `ouro-jail` and hands back a [`Run`] with the exit status,
 //! the byte-exact streams, the receipts, the control messages and the trace
 //! events. [`gate::GateOwner`] plays the trusted owner of jail-v1 §8.2.
+//! [`HttpServer`] is a loopback origin that records the requests it saw, and
+//! [`UnixProbe`] a host socket that records whether anything reached it.
 //!
 //! The harness never sleeps to synchronise. It waits on pipe readability, on
 //! EOF and on process exit. Timeouts exist only so a hang fails a test instead
 //! of stalling a suite, and are never used to order events.
 
 pub mod gate;
+pub mod http;
 pub mod pipes;
 pub mod tempdir;
+pub mod unix_probe;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -25,8 +29,10 @@ use std::time::Duration;
 use serde_json::Value;
 
 pub use gate::{ExpectedPlan, GateOwner, Proposal, Release};
+pub use http::{HttpServer, SeenRequest};
 pub use pipes::{Direction, GateWriter, LineReader};
 pub use tempdir::TempDir;
+pub use unix_probe::{ProbeKind, UnixProbe};
 
 /// The name of the variable that turns a skip into a failure.
 pub const CONFORMANCE_VAR: &str = "OURO_CONFORMANCE";

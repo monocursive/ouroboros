@@ -20,7 +20,9 @@
 //! |---|---|
 //! | Filesystem, closed set | `open` (`--via openat\|open\|creat\|openat2`), `mkdir` (`mkdir\|mkdirat`), `rename` (`rename\|renameat\|renameat2`), `unlink` (`unlink\|unlinkat`), `rmdir` (`rmdir\|unlinkat`), `link` (`link\|linkat`), `symlink` (`symlink\|symlinkat`), `mknod` (`mknod\|mknodat`), `truncate` |
 //! | Filesystem, outside the closed set | `ftruncate` (descriptor-based, names no path to the kernel), `write-mmap` |
-//! | Network | `connect` |
+//! | Network | `connect`, `udp-sendto`, `dns-query`, `http-get`, `http-connect` (proxy variables honoured, plain TCP) |
+//! | Unix sockets | `unix-connect` (`--seqpacket`, `--len exact\|nul\|full`), `unix-abstract-connect`, `unix-listen`, `unix-socket-dgram`, `unix-socketpair-dgram`, `scm-send`, `scm-recv` |
+//! | Inner sandbox | `sandbox-exec` (no_new_privs, Landlock, seccomp, then exec) |
 //! | Process | `exec`, `exec-replace` (`--via execve\|execveat`), `background`, `fork-storm`, `thread`, `exit`, `raise` |
 //! | Lifetime | `sleep`, `spin`, `ignore-term` |
 //! | Introspection | `echo-args`, `stdout-bytes`, `stderr-bytes`, `env`, `fds`, `status` |
@@ -29,12 +31,17 @@
 //! The crate is test-only: jail-v1 §4 excludes it from packaging and from the
 //! I02 vendor-name scan. No vendor name appears in it regardless.
 
+pub mod bounded;
 pub mod cli;
 pub mod errno;
 pub mod harness;
+pub mod net;
 pub mod ops;
 pub mod raw;
 pub mod report;
+pub mod sandbox;
+pub mod sockaddr;
+pub mod unix;
 
 /// Exit code when every expectation held.
 pub const EXIT_OK: i32 = 0;

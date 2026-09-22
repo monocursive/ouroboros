@@ -18,7 +18,7 @@ use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value, write_all};
 
 /// A pipe whose two ends are both close-on-exec.
-fn cloexec_pipe() -> Result<(c_int, c_int), std::io::Error> {
+pub(crate) fn cloexec_pipe() -> Result<(c_int, c_int), std::io::Error> {
     let mut fds = [0 as c_int; 2];
     #[cfg(target_os = "linux")]
     // SAFETY: `fds` is a live array of two ints, which is what `pipe2` writes.
@@ -46,7 +46,7 @@ fn cloexec_pipe() -> Result<(c_int, c_int), std::io::Error> {
 }
 
 /// This thread's errno, read without allocating: safe to call after `fork`.
-fn raw_errno() -> c_int {
+pub(crate) fn raw_errno() -> c_int {
     #[cfg(target_os = "linux")]
     // SAFETY: `__errno_location` returns a valid pointer to this thread's errno.
     unsafe {
@@ -68,7 +68,7 @@ pub type Usage = String;
 /// process, so a `script` whose last step is `exit 0` used to discard every
 /// earlier failed expectation and report success.
 pub struct Session<'a> {
-    rep: &'a Reporter,
+    pub(crate) rep: &'a Reporter,
     failed: std::cell::Cell<bool>,
     in_script: std::cell::Cell<bool>,
 }
@@ -98,7 +98,7 @@ impl<'a> Session<'a> {
     }
 }
 
-fn finish(mut report: OpReport, attempt: Attempt) -> Emitted {
+pub(crate) fn finish(mut report: OpReport, attempt: Attempt) -> Emitted {
     match attempt {
         Attempt::Performed { ret, errno } => {
             report.result(ret, errno);
@@ -119,7 +119,7 @@ fn refuse_path(mut report: OpReport, key: &str, p: &OsStr, reason: &'static str)
     Emitted::unusable(report)
 }
 
-fn close_fd(ret: i64) {
+pub(crate) fn close_fd(ret: i64) {
     if ret >= 0 {
         // SAFETY: `ret` is a descriptor this process just opened and has not
         // handed to anything else.
@@ -213,6 +213,126 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
             expect,
         } => Ok(ftruncate(rep, &path, length, &expect)),
         Mode::Connect { addr, udp, expect } => connect(rep, &addr, udp, &expect),
+        Mode::UdpSendto {
+            addr,
+            bytes,
+            expect,
+        } => crate::net::udp_sendto(rep, &addr, bytes, &expect),
+        Mode::DnsQuery {
+            resolver,
+            name,
+            timeout_ms,
+            expect,
+        } => crate::net::dns_query(rep, &resolver, &name, timeout_ms, &expect),
+        Mode::HttpGet {
+            url,
+            no_proxy,
+            host_header,
+            timeout_ms,
+            expect,
+        } => crate::net::http_get(
+            rep,
+            &url,
+            no_proxy,
+            host_header.as_deref(),
+            timeout_ms,
+            &expect,
+        ),
+        Mode::HttpConnect {
+            authority,
+            then_get,
+            host_header,
+            timeout_ms,
+            expect,
+        } => crate::net::http_connect(
+            rep,
+            &authority,
+            then_get.as_deref(),
+            host_header.as_deref(),
+            timeout_ms,
+            &expect,
+        ),
+        Mode::UnixConnect {
+            path,
+            seqpacket,
+            len,
+            exchange,
+            timeout_ms,
+            expect,
+        } => Ok(crate::unix::unix_connect(
+            rep,
+            &crate::unix::Target::Path(&path, len),
+            seqpacket,
+            exchange,
+            timeout_ms,
+            &expect,
+        )),
+        Mode::UnixAbstractConnect {
+            name,
+            seqpacket,
+            exchange,
+            timeout_ms,
+            expect,
+        } => Ok(crate::unix::unix_connect(
+            rep,
+            &crate::unix::Target::Abstract(&name),
+            seqpacket,
+            exchange,
+            timeout_ms,
+            &expect,
+        )),
+        Mode::UnixListen {
+            path,
+            seqpacket,
+            accept,
+            timeout_ms,
+            expect,
+            spawn,
+        } => crate::unix::unix_listen(rep, &path, seqpacket, accept, timeout_ms, &expect, &spawn),
+        Mode::UnixSocketDgram {
+            raw,
+            cloexec,
+            nonblock,
+            expect,
+        } => Ok(crate::unix::unix_socket_dgram(
+            rep, raw, cloexec, nonblock, &expect,
+        )),
+        Mode::UnixSocketpairDgram {
+            raw,
+            cloexec,
+            nonblock,
+            expect,
+        } => Ok(crate::unix::unix_socketpair_dgram(
+            rep, raw, cloexec, nonblock, &expect,
+        )),
+        Mode::ScmSend {
+            socket,
+            fd_path,
+            expect,
+        } => Ok(crate::unix::scm_send(rep, &socket, &fd_path, &expect)),
+        Mode::ScmRecv {
+            path,
+            timeout_ms,
+            expect,
+            spawn,
+        } => crate::unix::scm_recv(rep, &path, timeout_ms, &expect, &spawn),
+        Mode::SandboxExec {
+            landlock_rw,
+            landlock_ro,
+            landlock_deny_tcp,
+            seccomp_errno,
+            argv,
+        } => crate::sandbox::sandbox_exec(
+            session,
+            rep,
+            &crate::sandbox::Request {
+                rw: &landlock_rw,
+                ro: &landlock_ro,
+                deny_tcp: landlock_deny_tcp,
+                seccomp: &seccomp_errno,
+                argv: &argv,
+            },
+        ),
         Mode::Exec { via, expect, argv } => exec_and_wait(rep, via, &argv, &expect),
         Mode::ExecReplace { via, expect, argv } => exec_replace(session, rep, via, &argv, &expect),
         Mode::Sleep { ms } => {
@@ -277,7 +397,7 @@ fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, U
     }
 }
 
-fn check(rep: &Reporter, emitted: Emitted, expect: &Expect) -> bool {
+pub(crate) fn check(rep: &Reporter, emitted: Emitted, expect: &Expect) -> bool {
     rep.emit(&emitted.report);
     emitted.satisfies(expect)
 }
@@ -300,7 +420,7 @@ fn open(
 }
 
 /// Open and hand the descriptor back in `report.ret`. The caller closes it.
-fn open_keep(
+pub(crate) fn open_keep(
     path: &OsStr,
     via: OpenVia,
     create: bool,
@@ -798,7 +918,7 @@ fn connect(rep: &Reporter, addr: &str, udp: bool, expect: &Expect) -> Result<boo
 // ------------------------------------------------------------------ processes
 
 /// Argv/envp kept alive for the duration of an exec, with their pointer arrays.
-struct Image {
+pub(crate) struct Image {
     _argv: Vec<CString>,
     _envp: Vec<CString>,
     argv_ptrs: Vec<*const c_char>,
@@ -806,7 +926,7 @@ struct Image {
     path: CString,
 }
 
-fn image(argv: &[OsString]) -> Result<Image, Usage> {
+pub(crate) fn image(argv: &[OsString]) -> Result<Image, Usage> {
     let path = raw::cpath(&argv[0])
         .map_err(|e| format!("argv[0] cannot be a syscall argument: {}", e.reason))?;
     let mut cargv = Vec::with_capacity(argv.len());
@@ -838,14 +958,14 @@ fn image(argv: &[OsString]) -> Result<Image, Usage> {
     })
 }
 
-fn exec_name(via: ExecVia) -> &'static str {
+pub(crate) fn exec_name(via: ExecVia) -> &'static str {
     match via {
         ExecVia::Execve => "execve",
         ExecVia::Execveat => "execveat",
     }
 }
 
-fn do_exec(img: &Image, via: ExecVia) -> Attempt {
+pub(crate) fn do_exec(img: &Image, via: ExecVia) -> Attempt {
     match via {
         ExecVia::Execve => raw::execve(
             img.path.as_ptr(),
@@ -862,7 +982,7 @@ fn do_exec(img: &Image, via: ExecVia) -> Attempt {
     }
 }
 
-fn argv_report(name: &str, argv: &[OsString], via: ExecVia) -> OpReport {
+pub(crate) fn argv_report(name: &str, argv: &[OsString], via: ExecVia) -> OpReport {
     let mut report = OpReport::new(name);
     path_value(&mut report.args, "path", &argv[0]);
     report.set("argc", argv.len());
@@ -926,7 +1046,48 @@ fn exec_and_wait(
         return Ok(false);
     }
     let img = image(argv)?;
+    let spawned = spawn_exec(&img, via)?;
+    let emitted = Emitted::done(spawned.report(argv, via));
+    rep.emit(&emitted.report);
+    let exec_ok = emitted.satisfies(expect);
+    rep.emit(&wait_report(spawned.pid, None));
+    Ok(exec_ok)
+}
 
+/// A child forked and exec'd by [`spawn_exec`].
+pub(crate) struct Spawned {
+    pub(crate) pid: libc::pid_t,
+    /// The descriptor number the child used to report an exec failure.
+    error_pipe_fd: c_int,
+    /// The exec's errno when it failed; `None` once the image was replaced.
+    exec_errno: Option<c_int>,
+}
+
+impl Spawned {
+    /// The `execve`/`execveat` line for this spawn.
+    pub(crate) fn report(&self, argv: &[OsString], via: ExecVia) -> OpReport {
+        let mut report = argv_report(exec_name(via), argv, via);
+        report.set("pid", self.pid);
+        // The descriptor the child used to report an exec failure. It is
+        // close-on-exec, so a successful exec closes it; naming it lets a test
+        // assert its absence in the target exactly, instead of guessing which
+        // of the descriptors the environment supplied is ours.
+        report.set("error_pipe_fd", self.error_pipe_fd);
+        match self.exec_errno {
+            Some(e) => report.result(-1, Some(e)),
+            None => report.result(0, None),
+        }
+        report
+    }
+
+    pub(crate) fn exec_failed(&self) -> bool {
+        self.exec_errno.is_some()
+    }
+}
+
+/// Fork, exec IMG in the child, and return once the exec has happened or
+/// failed. Never waits for the child to exit.
+pub(crate) fn spawn_exec(img: &Image, via: ExecVia) -> Result<Spawned, Usage> {
     // Both ends are close-on-exec. The write end MUST be: it used to survive
     // the target's `execve`, which handed a harness-private descriptor to the
     // target (the thing X06 rules out) and made the parent's read wait for
@@ -949,7 +1110,7 @@ fn exec_and_wait(
     if pid == 0 {
         // SAFETY: async-signal-safe only, on descriptors this child owns.
         unsafe { libc::close(pr) };
-        let _ = do_exec(&img, via);
+        let _ = do_exec(img, via);
         let e = raw_errno();
         let bytes = e.to_ne_bytes();
         // SAFETY: `bytes` is live for the call; short writes are irrelevant
@@ -990,27 +1151,53 @@ fn exec_and_wait(
     // SAFETY: the parent owns the read end.
     unsafe { libc::close(pr) };
 
-    let mut report = argv_report(name, argv, via);
-    report.set("pid", pid);
-    // The descriptor the child used to report an exec failure. It is
-    // close-on-exec, so a successful exec closes it; naming it lets a test
-    // assert its absence in the target exactly, instead of guessing which of
-    // the descriptors the environment supplied is ours.
-    report.set("error_pipe_fd", pw);
-    if got == buf.len() {
-        report.result(-1, Some(c_int::from_ne_bytes(buf)));
-    } else {
-        report.result(0, None);
-    }
-    let emitted = Emitted::done(report);
-    rep.emit(&emitted.report);
-    let exec_ok = emitted.satisfies(expect);
+    Ok(Spawned {
+        pid,
+        error_pipe_fd: pw,
+        exec_errno: (got == buf.len()).then(|| c_int::from_ne_bytes(buf)),
+    })
+}
 
+/// Wait for this process's own child `pid` and describe its status.
+///
+/// With a deadline the wait is bounded: a child still running when it passes
+/// is killed with SIGKILL, reaped, and the line says so. Without one the wait
+/// blocks, as the `exec` mode always has.
+pub(crate) fn wait_report(
+    pid: libc::pid_t,
+    deadline: Option<crate::bounded::Deadline>,
+) -> OpReport {
     let mut status: c_int = 0;
-    // SAFETY: `status` is a live int; `pid` is this process's own child.
-    let waited = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+    let mut killed = false;
+    let waited = match deadline {
+        None => {
+            // SAFETY: `status` is a live int; `pid` is this process's own child.
+            unsafe { libc::waitpid(pid, &raw mut status, 0) }
+        }
+        Some(deadline) => loop {
+            // SAFETY: as above, without blocking.
+            let w = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+            if w != 0 {
+                break w;
+            }
+            if deadline.expired() {
+                // SAFETY: `pid` is this process's own unreaped child, so the
+                // number cannot have been reused by another process.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                killed = true;
+                // SAFETY: as above; the child is dying, so this returns.
+                break unsafe { libc::waitpid(pid, &raw mut status, 0) };
+            }
+            // A bound on a child that should already be finishing, not a
+            // synchronisation: nothing is ordered by this sleep.
+            sleep_ms(5);
+        },
+    };
     let mut wreport = OpReport::new("wait");
     wreport.set("pid", pid);
+    if deadline.is_some() {
+        wreport.set("killed_at_deadline", killed);
+    }
     if waited < 0 {
         wreport.result(-1, std::io::Error::last_os_error().raw_os_error());
     } else {
@@ -1033,8 +1220,7 @@ fn exec_and_wait(
         );
         wreport.result(i64::from(status), None);
     }
-    rep.emit(&wreport);
-    Ok(exec_ok)
+    wreport
 }
 
 fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Usage> {
@@ -1580,6 +1766,7 @@ fn terminates_the_process(mode: &Mode) -> Option<&'static str> {
     match mode {
         Mode::Exit { .. } => Some("exit"),
         Mode::ExecReplace { .. } => Some("exec-replace"),
+        Mode::SandboxExec { .. } => Some("sandbox-exec"),
         Mode::Raise { .. } => Some("raise"),
         _ => None,
     }
@@ -1615,7 +1802,7 @@ fn script(session: &Session<'_>, file: &OsStr) -> Result<bool, Usage> {
 
 // --------------------------------------------------------------------- timing
 
-fn sleep_ms(ms: u64) {
+pub(crate) fn sleep_ms(ms: u64) {
     let mut req = libc::timespec {
         tv_sec: (ms / 1000) as libc::time_t,
         tv_nsec: ((ms % 1000) * 1_000_000) as _,

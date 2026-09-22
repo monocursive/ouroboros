@@ -95,6 +95,18 @@ pub enum ExecVia {
     Execveat,
 }
 
+/// The `addrlen` a pathname `sockaddr_un` is passed with.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum UnixLen {
+    /// `offsetof(sun_path) + strlen(path)`: no terminating NUL.
+    Exact,
+    /// `offsetof(sun_path) + strlen(path) + 1`: the NUL included, as the Rust
+    /// standard library and `SUN_LEN(..) + 1` pass it. The default.
+    Nul,
+    /// `sizeof(struct sockaddr_un)`, as most C programs pass it.
+    Full,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Mode {
     /// Open a path. `--via creat` implies create, truncate and write-only.
@@ -220,6 +232,185 @@ pub enum Mode {
         udp: bool,
         #[arg(long, default_value = "ok")]
         expect: Expect,
+    },
+    /// Send N bytes (`byte i = i % 256`) to a numeric ADDR:PORT through an
+    /// unconnected UDP socket (`sendto` with a destination).
+    UdpSendto {
+        #[arg(value_name = "ADDR")]
+        addr: String,
+        #[arg(long, value_name = "N", default_value_t = 16)]
+        bytes: usize,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Send one DNS A query over UDP to RESOLVER (`IP`, `IP:PORT` or
+    /// `[IPv6]:PORT`; port 53 by default) and report what came back. `--expect
+    /// ok` means a response with the query's id arrived; `ETIMEDOUT` (marked
+    /// as the fixture's own deadline) means none did.
+    DnsQuery {
+        #[arg(value_name = "RESOLVER")]
+        resolver: String,
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(long, value_name = "MS", default_value_t = 3000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// HTTP/1.1 GET of an `http://` URL. With `http_proxy`/`HTTP_PROXY` set
+    /// (lowercase first) the request goes to the proxy in absolute form;
+    /// otherwise straight to the URL's numeric host. Plain TCP, no TLS.
+    HttpGet {
+        #[arg(value_name = "URL")]
+        url: String,
+        /// Ignore the proxy variables and connect directly: the bypass a
+        /// contained profile must defeat.
+        #[arg(long)]
+        no_proxy: bool,
+        /// Send this Host header instead of the URL's authority.
+        #[arg(long, value_name = "VALUE")]
+        host_header: Option<String>,
+        #[arg(long, value_name = "MS", default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// HTTP/1.1 CONNECT HOST:PORT through `https_proxy`/`HTTPS_PROXY`
+    /// (lowercase first). Without a proxy variable the mode refuses: a
+    /// CONNECT names a proxy by definition.
+    HttpConnect {
+        #[arg(value_name = "HOST:PORT")]
+        authority: String,
+        /// After a 2xx, send `GET PATH` through the tunnel and report that
+        /// response too.
+        #[arg(long, value_name = "PATH")]
+        then_get: Option<String>,
+        /// Send this Host header instead of HOST:PORT.
+        #[arg(long, value_name = "VALUE")]
+        host_header: Option<String>,
+        #[arg(long, value_name = "MS", default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Connect an AF_UNIX stream (or seqpacket) socket to a pathname.
+    /// `--expect` applies to the `connect`.
+    UnixConnect {
+        path: OsString,
+        /// SOCK_SEQPACKET instead of SOCK_STREAM (Linux).
+        #[arg(long)]
+        seqpacket: bool,
+        #[arg(long, value_enum, default_value_t = UnixLen::Nul)]
+        len: UnixLen,
+        /// After connecting, send one line and wait for it to come back.
+        #[arg(long)]
+        exchange: bool,
+        #[arg(long, value_name = "MS", default_value_t = 5000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Connect an AF_UNIX stream (or seqpacket) socket to an abstract name
+    /// (Linux). NAME is the name without the leading NUL.
+    UnixAbstractConnect {
+        name: OsString,
+        #[arg(long)]
+        seqpacket: bool,
+        #[arg(long)]
+        exchange: bool,
+        #[arg(long, value_name = "MS", default_value_t = 5000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Bind PATH, listen, then accept N connections and echo one line (one
+    /// record for seqpacket) on each. The `listen` line is written before
+    /// the first accept, so a reader can synchronise on it. With a trailing
+    /// `-- ARGV`, that program is started once the socket listens (so it
+    /// cannot race the bind) and waited for at the end. `--expect` applies to
+    /// the `bind`.
+    UnixListen {
+        path: OsString,
+        #[arg(long)]
+        seqpacket: bool,
+        #[arg(long, value_name = "N")]
+        accept: u32,
+        #[arg(long, value_name = "MS", default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+        #[arg(last = true, num_args = 0.., value_name = "ARGV")]
+        spawn: Vec<OsString>,
+    },
+    /// Create an AF_UNIX SOCK_DGRAM socket and report the result.
+    UnixSocketDgram {
+        /// Ask for SOCK_RAW, which Linux treats as SOCK_DGRAM for AF_UNIX.
+        #[arg(long)]
+        raw: bool,
+        /// OR SOCK_CLOEXEC into the type argument (Linux).
+        #[arg(long)]
+        cloexec: bool,
+        /// OR SOCK_NONBLOCK into the type argument (Linux).
+        #[arg(long)]
+        nonblock: bool,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Create an AF_UNIX SOCK_DGRAM socket pair and report the result.
+    UnixSocketpairDgram {
+        #[arg(long)]
+        raw: bool,
+        #[arg(long)]
+        cloexec: bool,
+        #[arg(long)]
+        nonblock: bool,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Open FD_PATH read-only, connect a stream socket to SOCKET_PATH and send
+    /// the descriptor with SCM_RIGHTS. `--expect` applies to the `connect`.
+    ScmSend {
+        #[arg(value_name = "SOCKET_PATH")]
+        socket: OsString,
+        #[arg(value_name = "FD_PATH")]
+        fd_path: OsString,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Bind PATH, listen, accept one connection, receive descriptors with
+    /// SCM_RIGHTS and report each one's `fstat` file type. A trailing
+    /// `-- ARGV` is started once the socket listens, as for `unix-listen`.
+    /// `--expect` applies to the `bind`.
+    ScmRecv {
+        path: OsString,
+        #[arg(long, value_name = "MS", default_value_t = 10_000)]
+        timeout_ms: u64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+        #[arg(last = true, num_args = 0.., value_name = "ARGV")]
+        spawn: Vec<OsString>,
+    },
+    /// Wrap a command the way a vendor agent's own sandbox wraps its tools
+    /// (Linux): set no_new_privs, install a Landlock ruleset granting the
+    /// listed trees, install a seccomp filter returning EPERM for the listed
+    /// syscalls (x86_64 numbers, architecture checked), report each step, then
+    /// replace this process with ARGV. Any failed step stops before the exec.
+    SandboxExec {
+        /// Grant every filesystem right beneath DIR.
+        #[arg(long = "landlock-rw", value_name = "DIR")]
+        landlock_rw: Vec<OsString>,
+        /// Grant execute, read-file and read-dir beneath DIR.
+        #[arg(long = "landlock-ro", value_name = "DIR")]
+        landlock_ro: Vec<OsString>,
+        /// Handle LANDLOCK_ACCESS_NET_CONNECT_TCP with no port rule, so every
+        /// TCP connect is denied. Needs Landlock ABI 4.
+        #[arg(long)]
+        landlock_deny_tcp: bool,
+        /// Return EPERM for this syscall (an x86_64 name, or a number).
+        #[arg(long = "seccomp-errno", value_name = "SYSCALL")]
+        seccomp_errno: Vec<String>,
+        #[arg(last = true, required = true, num_args = 1.., value_name = "ARGV")]
+        argv: Vec<OsString>,
     },
     /// Fork, exec ARGV in the child, wait. Reports the exec result and the
     /// child's raw wait status as two lines.
