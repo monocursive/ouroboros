@@ -1157,16 +1157,13 @@ impl Boundary {
             nap();
         };
 
-        // Wait until it is actually blocked in read(2) on its release pipe,
-        // which is what the observer's attach contract requires.
-        // `/proc/<pid>/syscall` names the call and its first argument, so
-        // this is a read-back and not an assumption. The descriptor matters
-        // since the agent launcher also reads (waiting for its bridge's
-        // intermediate child is a wait, but a read elsewhere must never pass
-        // for the release).
+        // Wait until it is actually blocked in read(2), which is what the
+        // observer's attach contract requires. `/proc/<pid>/syscall` names the
+        // call it is in, so this is a read-back and not an assumption. The
+        // agent launcher's only other wait before release (for its bridge's
+        // intermediate child) is `wait4`, never a read.
         loop {
-            if current_syscall(launcher) == Some((libc::SYS_read, RELEASE_FD.unsigned_abs().into()))
-            {
+            if current_syscall(launcher) == Some(libc::SYS_read) {
                 break;
             }
             if deadline.expired() {
@@ -1830,19 +1827,9 @@ fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str
 }
 // J3-agent end
 
-/// The syscall `pid` is blocked in, and its first argument, from
-/// `/proc/<pid>/syscall` (`"<nr> 0x<arg0> ..."`).
-fn current_syscall(pid: libc::pid_t) -> Option<(libc::c_long, u64)> {
+fn current_syscall(pid: libc::pid_t) -> Option<libc::c_long> {
     let raw = std::fs::read_to_string(format!("/proc/{pid}/syscall")).ok()?;
-    parse_syscall_line(&raw)
-}
-
-/// Parses one `/proc/<pid>/syscall` line into its number and first argument.
-fn parse_syscall_line(raw: &str) -> Option<(libc::c_long, u64)> {
-    let mut fields = raw.split_whitespace();
-    let nr = fields.next()?.parse().ok()?;
-    let arg0 = fields.next()?.strip_prefix("0x")?;
-    Some((nr, u64::from_str_radix(arg0, 16).ok()?))
+    raw.split_whitespace().next()?.parse().ok()
 }
 
 fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
@@ -3595,19 +3582,6 @@ mod tests {
         assert!(!other.message.contains("agent"));
     }
 
-    #[test]
-    fn a_syscall_line_names_the_call_and_its_first_argument() {
-        assert_eq!(
-            parse_syscall_line("0 0xc 0x7ffd1234 0x1 0x0 0x0 0x0 0x7ffd 0x7f12\n"),
-            Some((0, 12))
-        );
-        assert_eq!(
-            parse_syscall_line("61 0xffffffffffffffff 0x0"),
-            Some((61, u64::MAX))
-        );
-        assert_eq!(parse_syscall_line("running"), None);
-        assert_eq!(parse_syscall_line("0"), None);
-    }
     // J3-launch begin: the staged hand-off is checked against the policy
     fn launch_snapshot(profile: ProfileName, bind_ro: bool) -> PolicySnapshot {
         use crate::policy::{

@@ -2009,6 +2009,15 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
     let bridge = native["helpers"][0]["pid"].as_i64().unwrap();
     assert_eq!(native["helpers"][0]["kind"], "bridge");
     assert_eq!(native["helpers"][0]["seccomp_filters"], 2);
+    // Read independently of the jail: the bridge runs under exactly the agent
+    // baseline and the mediation filter, not the observer's narrowing one.
+    let status =
+        std::fs::read_to_string(format!("/proc/{}/status", native["helpers"][0]["pid"])).unwrap();
+    let filters = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Seccomp_filters:"))
+        .map(str::trim);
+    assert_eq!(filters, Some("2"), "{status}");
     let bridge_fds = readlinks(bridge);
     for fd in 0..3 {
         assert_eq!(

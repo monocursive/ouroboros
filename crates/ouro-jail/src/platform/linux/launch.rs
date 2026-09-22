@@ -328,8 +328,8 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // the release pipe.
     unsafe { libc::close(parsed.release_fd) };
     // J3-agent begin: the supervisor took both objects before release; the
-    // target never holds the listener or the sock_diag socket (X06). They are
-    // close-on-exec as well; closing them here does not depend on it.
+    // target never holds the listener or the sock_diag socket (X06). This
+    // close is the only thing that keeps them from it (see `mediate`).
     if let Some((listener_fd, sockdiag_fd)) = parsed.mediate {
         // SAFETY: closing descriptors this process placed itself.
         unsafe {
@@ -366,8 +366,12 @@ pub fn launch_main(args: &[OsString]) -> ! {
 // J3-agent begin: the launcher's agent setup
 /// Installs the unix-peer mediation filter with its own listener and opens a
 /// `NETLINK_SOCK_DIAG` socket in this network namespace, then places them at
-/// `listener_fd` and `sockdiag_fd`, close-on-exec, for the supervisor to take
-/// with `pidfd_getfd` while this process is blocked.
+/// `listener_fd` and `sockdiag_fd` for the supervisor to take with
+/// `pidfd_getfd` while this process is blocked. They are deliberately not
+/// close-on-exec: the explicit close after release is the one thing that
+/// keeps them from the target (X06 goes red without it), rather than two
+/// overlapping mechanisms neither of which a test could fail alone. The
+/// bridge's own `close_range` keeps them from the bridge.
 ///
 /// Refuses (`EEXIST`) if either number is already open: `dup3` would
 /// silently close whatever held it.
@@ -386,9 +390,9 @@ fn mediate(listener_fd: RawFd, sockdiag_fd: RawFd) -> Result<(), i32> {
         (listener.as_raw_fd(), listener_fd),
         (sockdiag.as_raw_fd(), sockdiag_fd),
     ] {
-        // SAFETY: both descriptors are live; dup3 places a close-on-exec copy
-        // at a number checked to be free above.
-        if unsafe { libc::dup3(source, target, libc::O_CLOEXEC) } < 0 {
+        // SAFETY: both descriptors are live; dup2 places a copy at a number
+        // checked to be free above.
+        if unsafe { libc::dup2(source, target) } < 0 {
             return Err(errno());
         }
     }
