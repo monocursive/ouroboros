@@ -1,0 +1,21 @@
+# Document contracts (jail-v1 §13, managed-teams §5): schemas, examples, golden
+# fixtures and the link/anchor check. Proves nothing about a runtime.
+name: contracts
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run docs/specs/jail-v1/validate_contract.py
+      - run: uv run docs/specs/managed-teams-v1/validate_policy.py
+      - run: uv run docs/specs/validate_links.py

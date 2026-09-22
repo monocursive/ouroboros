@@ -1,0 +1,19 @@
+# Cargo build output for every crate in the workspace.
+target/
+
+# Elixir fleet build output (milestone 3).
+/fleet/_build/
+/fleet/deps/
+
+# Editor and agent tooling state, never repository input.
+.elixir_ls/
+.claude/worktrees/
+.delta/
+.DS_Store
+
+# Python caches from the document validators.
+__pycache__/
+*.py[cod]
+
+# Release artifacts are published, not committed.
+/dist/

@@ -1,0 +1,5 @@
+# Pinned per jail-v1 §4. Bump deliberately, with the conformance rerun §16 requires.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

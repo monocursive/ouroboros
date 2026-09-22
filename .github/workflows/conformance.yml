@@ -1,0 +1,57 @@
+# The provisioned Linux conformance job (jail-v1 §3.2, §16). A GitHub-hosted runner
+# drives the reference host over SSH as the dedicated non-sudo account; no runner
+# agent lives on the host and nothing there polls GitHub. Fork pull requests have
+# no secrets and cannot reach the host, so this runs only on pushes to dev/main and
+# on manual dispatch. It is a no-op until the repository is configured with:
+#   variables: OURO_CI_HOST (address), OURO_CI_USER (account), OURO_CI_KNOWN_HOSTS
+#              (one `ssh-keyscan -t ed25519 <host>` line)
+#   secret:    OURO_CI_SSH_KEY (private key authorized for that account only)
+name: conformance
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: conformance-reference-host
+  cancel-in-progress: false
+jobs:
+  reference-host:
+    if: vars.OURO_CI_HOST != ''
+    runs-on: ubuntu-latest
+    env:
+      CI_HOST: ${{ vars.OURO_CI_HOST }}
+      CI_USER: ${{ vars.OURO_CI_USER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH identity
+        env:
+          KEY: ${{ secrets.OURO_CI_SSH_KEY }}
+          KNOWN_HOSTS: ${{ vars.OURO_CI_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/ouro_ci
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Host manifest
+        run: |
+          mkdir -p evidence
+          ssh -i ~/.ssh/ouro_ci -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$CI_USER@$CI_HOST" 'bash -s' < docs/specs/jail-v1/host-manifest.sh \
+            | tee evidence/host-manifest.txt
+      - name: Conformance suite
+        # J1 replaces this step with the xtask conformance driver: copy the tree to a
+        # per-run directory on the host, build, run the suite against the expected-
+        # capability manifest, and copy the report back. Once the workspace exists
+        # this step fails until that driver does, so the workspace cannot land
+        # without it (jail-v1 §16).
+        if: hashFiles('Cargo.toml') != ''
+        run: |
+          echo "conformance driver not implemented yet (J1)"
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reference-host-evidence-${{ github.run_id }}
+          path: evidence/

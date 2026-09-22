@@ -1,0 +1,34 @@
+# Portable gates from jail-v1 §16. The macOS leg is the native build and refusal
+# lane (M01–M03). The Ubuntu leg runs portable tests only and does not pretend to
+# exercise privileged kernel features; that is the conformance workflow's job.
+# Every step is skipped until the Cargo workspace exists (J1).
+name: rust
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ws
+        run: echo "present=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.ws.outputs.present == 'true'
+        name: Install the pinned toolchain
+        run: rustup toolchain install && rustup show
+      - if: steps.ws.outputs.present == 'true'
+        run: cargo fmt --all -- --check
+      - if: steps.ws.outputs.present == 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: steps.ws.outputs.present == 'true'
+        run: cargo test --workspace
