@@ -122,6 +122,23 @@ pub unsafe fn place_in_child(plan: &[(RawFd, RawFd)]) -> io::Result<()> {
     Ok(())
 }
 
+/// What [`LineReader::drain`] read, and why it stopped.
+///
+/// `error` is `None` when the channel reached EOF, which is the only way a
+/// transcript is known to be complete.
+pub struct Drained {
+    pub lines: Vec<Vec<u8>>,
+    pub error: Option<io::Error>,
+}
+
+impl Drained {
+    /// True when the channel did not reach EOF, so `lines` may be short.
+    #[must_use]
+    pub fn incomplete(&self) -> bool {
+        self.error.is_some()
+    }
+}
+
 /// A blocking NDJSON reader with a bounded wait, so a test fails instead of
 /// hanging. The bound catches hangs; it is never used to order events.
 pub struct LineReader {
@@ -162,12 +179,26 @@ impl LineReader {
     }
 
     /// Everything still readable, up to EOF.
-    pub fn drain(&mut self) -> io::Result<Vec<Vec<u8>>> {
-        let mut out = Vec::new();
-        while let Some(line) = self.next_line()? {
-            out.push(line);
+    ///
+    /// A timeout does NOT discard what was already read. A jail whose
+    /// descendant still holds the inherited channel end never reaches EOF, and
+    /// returning `Err` with the lines thrown away turned every
+    /// "no `refused` message" assertion into a vacuous pass sixty seconds
+    /// late. The caller gets the partial transcript and an explicit flag.
+    pub fn drain(&mut self) -> Drained {
+        let mut lines = Vec::new();
+        loop {
+            match self.next_line() {
+                Ok(Some(line)) => lines.push(line),
+                Ok(None) => return Drained { lines, error: None },
+                Err(e) => {
+                    return Drained {
+                        lines,
+                        error: Some(e),
+                    };
+                }
+            }
         }
-        Ok(out)
     }
 
     fn fill(&mut self, deadline: Instant) -> io::Result<()> {
@@ -259,6 +290,14 @@ impl GateWriter {
                 }
                 return Err(e);
             }
+            if n == 0 {
+                // A blocking write returning 0 with bytes left would spin
+                // forever; report it instead.
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the gate accepted no bytes",
+                ));
+            }
             buf = &buf[n as usize..];
         }
         Ok(())
@@ -331,6 +370,48 @@ mod tests {
         reader.timeout = Duration::from_millis(120);
         let err = reader.next_line().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_drain_that_times_out_keeps_every_line_it_already_read() {
+        // The H2 probe: the writer stays open, exactly like a jail whose
+        // descendant still holds the inherited channel end.
+        let (r, w) = cloexec_pipe().unwrap();
+        let mut writer = GateWriter::new(w);
+        writer
+            .write_all(b"{\"kind\":\"prepared\"}\n{\"kind\":\"settled\"}\n")
+            .unwrap();
+
+        let mut reader = LineReader::new(r);
+        reader.timeout = Duration::from_millis(150);
+        let drained = reader.drain();
+
+        assert!(drained.incomplete(), "the channel never reached EOF");
+        assert_eq!(
+            drained.error.as_ref().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            drained.lines.len(),
+            2,
+            "both complete lines must survive the timeout"
+        );
+        assert_eq!(drained.lines[0], b"{\"kind\":\"prepared\"}");
+        assert_eq!(drained.lines[1], b"{\"kind\":\"settled\"}");
+        drop(writer);
+    }
+
+    #[test]
+    fn a_drain_that_reaches_eof_is_complete() {
+        let (r, w) = cloexec_pipe().unwrap();
+        let mut writer = GateWriter::new(w);
+        writer.write_all(b"one\ntwo\n").unwrap();
+        writer.close();
+        let mut reader = LineReader::new(r);
+        reader.timeout = Duration::from_millis(500);
+        let drained = reader.drain();
+        assert!(!drained.incomplete());
+        assert_eq!(drained.lines.len(), 2);
     }
 
     #[test]

@@ -28,12 +28,36 @@ pub use gate::{ExpectedPlan, GateOwner, Proposal, Release};
 pub use pipes::{Direction, GateWriter, LineReader};
 pub use tempdir::TempDir;
 
+/// The name of the variable that turns a skip into a failure.
+pub const CONFORMANCE_VAR: &str = "OURO_CONFORMANCE";
+
+/// Conformance mode is exactly `OURO_CONFORMANCE=1`, and nothing else.
+///
+/// Separated from the environment so a plain `cargo test` proves the rule.
+/// Deleting the comparison is caught here, not only under the variable.
+#[must_use]
+pub fn conformance_mode(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// True when the suite is running in conformance mode, where a skip is a
 /// failure (jail-v1 §16: "a required live capability being skipped makes the
 /// conformance job fail").
 #[must_use]
 pub fn live_required() -> bool {
-    std::env::var("OURO_CONFORMANCE").as_deref() == Ok("1")
+    conformance_mode(std::env::var(CONFORMANCE_VAR).ok().as_deref())
+}
+
+/// What a skip must do. `Err` is the message the caller must panic with.
+///
+/// Also separated from the environment: a mutation that lets a skip pass in
+/// conformance mode is caught by a plain unit test.
+pub fn skip_decision(live_required: bool, reason: &str) -> Result<String, String> {
+    if live_required {
+        Err(format!("{CONFORMANCE_VAR}=1 forbids skipping: {reason}"))
+    } else {
+        Ok(format!("skipped: {reason}"))
+    }
 }
 
 /// Skip a live test, or fail it when conformance mode forbids skipping.
@@ -47,11 +71,10 @@ pub fn live_required() -> bool {
 /// }
 /// ```
 pub fn skip_or_fail(reason: &str) {
-    assert!(
-        !live_required(),
-        "OURO_CONFORMANCE=1 forbids skipping: {reason}"
-    );
-    eprintln!("skipped: {reason}");
+    match skip_decision(live_required(), reason) {
+        Ok(note) => eprintln!("{note}"),
+        Err(message) => panic!("{message}"),
+    }
 }
 
 // ------------------------------------------------------------ binary lookup
@@ -63,20 +86,24 @@ fn is_executable(p: &Path) -> bool {
     })
 }
 
-/// Look for `name` beside the running test binary: `target/<profile>/deps/…`
-/// puts built binaries one level up, and a plain `target/<profile>/…` run puts
-/// them next to it.
+/// Look for `name` beside the running test binary.
+///
+/// Cargo writes binaries to `target/<profile>/`, and integration tests run
+/// from `target/<profile>/deps/`. Those two directories are the only places a
+/// binary of this workspace can legitimately be, so the search stops there.
+/// It used to try a third level, `target/` itself, where Cargo never writes:
+/// anything found there is stale or stray, and the harness would have run it.
 fn sibling(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let mut dir = exe.parent()?;
-    for _ in 0..3 {
-        let candidate = dir.join(name);
-        if is_executable(&candidate) {
-            return Some(candidate);
-        }
-        dir = dir.parent()?;
-    }
-    None
+    let here = exe.parent()?;
+    let candidates: [Option<PathBuf>; 2] = [
+        Some(here.join(name)),
+        // Only step up out of `deps/`, never out of the profile directory.
+        (here.file_name() == Some(OsStr::new("deps")))
+            .then(|| here.parent().map(|p| p.join(name)))
+            .flatten(),
+    ];
+    candidates.into_iter().flatten().find(|c| is_executable(c))
 }
 
 /// An advisory lock held for the duration of a `cargo build`, so parallel test
@@ -117,10 +144,26 @@ impl Drop for BuildLock {
 /// workspace build directory, so the nested build is given a target directory
 /// of its own. Sharing one would block forever, and sharing a build directory
 /// between trees is a known source of stale cross-tree artifacts here.
+/// A stable short key for a path, so two worktrees never share a build
+/// directory. FNV-1a, because a hash crate is not worth a dependency here.
+fn path_key(p: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in p.as_os_str().as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 fn build_package(package: &str, name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let release = exe.components().any(|c| c.as_os_str() == "release");
-    let work = std::env::temp_dir().join("ouro-fixture-harness");
+    // Keyed on the manifest directory: a single shared target directory let
+    // two worktrees hand each other's binary back, which is the stale
+    // cross-tree artifact this project has already been bitten by.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let work = std::env::temp_dir().join(format!("ouro-fixture-harness-{}", path_key(&root)));
     let _lock = BuildLock::acquire(&work.join(format!("{package}.lock"))).ok()?;
     if let Some(found) = sibling(name) {
         return Some(found); // another process built it while we waited
@@ -151,24 +194,53 @@ fn build_package(package: &str, name: &str) -> Option<PathBuf> {
         .or_else(|| sibling(name))
 }
 
+/// An override from the environment, accepted only when it is executable.
+///
+/// A pointer at something that is not there is a configuration error, not a
+/// reason to fall back to whatever else the tree happens to contain.
+fn override_from(value: Option<&OsStr>) -> Option<PathBuf> {
+    let p = PathBuf::from(value?);
+    is_executable(&p).then_some(p)
+}
+
+/// Turn an optional binary into a required one.
+///
+/// Separated from the lookup so the panic is proved by a plain unit test
+/// rather than by the tree happening not to contain the binary. A missing
+/// binary must fail loudly; the mutation that returns some other path instead
+/// is caught here.
+#[must_use]
+pub fn require_binary(found: Option<PathBuf>, name: &str, env_var: &str) -> PathBuf {
+    match found {
+        Some(p) => p,
+        None => panic!(
+            "{name} not found: set {env_var} to an executable path, \
+             or run `cargo build -p {name}`"
+        ),
+    }
+}
+
+/// The `ouro-fixture` binary, or `None` when this tree has not built one.
+#[must_use]
+pub fn try_fixture_path() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("OURO_FIXTURE_BIN") {
+        return override_from(Some(v.as_os_str()));
+    }
+    sibling("ouro-fixture").or_else(|| build_package("ouro-fixture", "ouro-fixture"))
+}
+
 /// The `ouro-fixture` binary: `OURO_FIXTURE_BIN`, else a sibling of the test
 /// binary, else built on demand under a lock.
 #[must_use]
 pub fn fixture_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("OURO_FIXTURE_BIN") {
-        return PathBuf::from(p);
-    }
-    sibling("ouro-fixture")
-        .or_else(|| build_package("ouro-fixture", "ouro-fixture"))
-        .expect("ouro-fixture not found: set OURO_FIXTURE_BIN or run `cargo build -p ouro-fixture`")
+    require_binary(try_fixture_path(), "ouro-fixture", "OURO_FIXTURE_BIN")
 }
 
 /// The `ouro-jail` binary, or `None` when this tree has not built one yet.
 #[must_use]
 pub fn try_jail_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("OURO_JAIL_BIN") {
-        let p = PathBuf::from(p);
-        return is_executable(&p).then_some(p);
+    if let Some(v) = std::env::var_os("OURO_JAIL_BIN") {
+        return override_from(Some(v.as_os_str()));
     }
     sibling("ouro-jail")
 }
@@ -177,8 +249,7 @@ pub fn try_jail_path() -> Option<PathBuf> {
 /// live test must fail loudly rather than quietly test nothing.
 #[must_use]
 pub fn jail_path() -> PathBuf {
-    try_jail_path()
-        .expect("ouro-jail not found: set OURO_JAIL_BIN or run `cargo build -p ouro-jail`")
+    require_binary(try_jail_path(), "ouro-jail", "OURO_JAIL_BIN")
 }
 
 // --------------------------------------------------------------- the builder
@@ -387,6 +458,7 @@ impl Jail {
             .iter()
             .map(|c| (c.theirs.as_raw_fd(), c.target))
             .collect();
+        let channel_targets: Vec<RawFd> = channels.iter().map(|c| c.target).collect();
 
         let mut cmd = Command::new(&program);
         cmd.args(&argv)
@@ -428,12 +500,18 @@ impl Jail {
             ours.push(o);
         }
 
-        if let Some(bytes) = stdin
-            && let Some(mut pipe) = child.stdin.take()
-        {
-            use std::io::Write as _;
-            pipe.write_all(&bytes)?;
-        }
+        // Written on a thread: past the pipe capacity (64 KiB on Linux) a
+        // direct `write_all` blocks until the target reads, with no bound,
+        // and X05 asks for large streams.
+        let stdin_writer = match (stdin, child.stdin.take()) {
+            (Some(bytes), Some(mut pipe)) => Some(std::thread::spawn(move || {
+                use std::io::Write as _;
+                let r = pipe.write_all(&bytes);
+                drop(pipe);
+                r
+            })),
+            _ => None,
+        };
 
         let mut control = None;
         let mut gate = None;
@@ -464,6 +542,8 @@ impl Jail {
             trace_reader,
             stdout,
             stderr,
+            stdin_writer,
+            channel_targets,
             root,
             receipt,
             control_seen: Vec::new(),
@@ -492,6 +572,8 @@ pub struct Spawned {
     trace_reader: Option<LineReader>,
     stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
     stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stdin_writer: Option<std::thread::JoinHandle<io::Result<()>>>,
+    channel_targets: Vec<RawFd>,
     root: TempDir,
     receipt: Option<PathBuf>,
     control_seen: Vec<Value>,
@@ -506,6 +588,13 @@ impl Spawned {
     #[must_use]
     pub fn root(&self) -> &Path {
         self.root.path()
+    }
+
+    /// The descriptor numbers the jail was told to use for its channels, so a
+    /// test can assert that none of them reached the target.
+    #[must_use]
+    pub fn channel_targets(&self) -> &[RawFd] {
+        &self.channel_targets
     }
 
     /// The prepared receipt written to `--receipt PATH`, when it is there yet.
@@ -539,9 +628,15 @@ impl Spawned {
 
         let status = self.child.wait()?;
 
+        let mut channels_timed_out: Vec<String> = Vec::new();
+
         let mut control_messages = std::mem::take(&mut self.control_seen);
         if let Some(mut reader) = self.control.take() {
-            for line in reader.drain().unwrap_or_default() {
+            let drained = reader.drain();
+            if let Some(e) = &drained.error {
+                channels_timed_out.push(format!("control: {e}"));
+            }
+            for line in drained.lines {
                 if line.is_empty() {
                     continue;
                 }
@@ -553,7 +648,11 @@ impl Spawned {
 
         let mut trace_events = Vec::new();
         if let Some(mut reader) = self.trace_reader.take() {
-            for line in reader.drain().unwrap_or_default() {
+            let drained = reader.drain();
+            if let Some(e) = &drained.error {
+                channels_timed_out.push(format!("trace: {e}"));
+            }
+            for line in drained.lines {
                 if line.is_empty() {
                     continue;
                 }
@@ -561,6 +660,23 @@ impl Spawned {
                     trace_events.push(v);
                 }
             }
+        }
+
+        if !channels_timed_out.is_empty() {
+            eprintln!(
+                "ouro-fixture harness: channel never reached EOF ({}); \
+                 the transcript below is partial",
+                channels_timed_out.join(", ")
+            );
+        }
+
+        if let Some(h) = self.stdin_writer.take()
+            && let Ok(Err(e)) = h.join()
+            && e.kind() != io::ErrorKind::BrokenPipe
+        {
+            // A target that never read its stdin gives BrokenPipe, which is
+            // its business; anything else is the harness failing.
+            return Err(e);
         }
 
         let stdout = self
@@ -574,15 +690,33 @@ impl Spawned {
             .map(|h| h.join().unwrap_or_default())
             .unwrap_or_default();
 
+        // Receipts are read once, now, so a read or parse error is a recorded
+        // fact rather than a silently empty list that makes every negative
+        // assertion pass.
+        let data_dir = self.root.path().join("data");
+        let mut receipts = Vec::new();
+        let mut receipt_errors = Vec::new();
+        collect_receipts(&data_dir, &mut receipts, &mut receipt_errors);
+        if let Some(p) = &self.receipt {
+            match std::fs::read_to_string(p) {
+                Ok(text) => push_json(&text, p, &mut receipts, &mut receipt_errors),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => receipt_errors.push(format!("{}: {e}", p.display())),
+            }
+        }
+
         Ok(Run {
             status,
             stdout,
             stderr,
             control_messages,
             trace_events,
-            data_dir: self.root.path().join("data"),
+            data_dir,
             receipt_path: self.receipt.take(),
             gate_closed_by_harness,
+            channels_timed_out,
+            receipts,
+            receipt_errors,
             _root: self.root,
         })
     }
@@ -599,6 +733,13 @@ pub struct Run {
     pub receipt_path: Option<PathBuf>,
     /// True when the harness, not the test, closed the gate at `wait` time.
     pub gate_closed_by_harness: bool,
+    /// Non-empty when a channel never reached EOF, so `control_messages` and
+    /// `trace_events` are a partial transcript. Every helper that could turn
+    /// that into a vacuous pass panics instead; see
+    /// [`Run::assert_channels_complete`].
+    pub channels_timed_out: Vec<String>,
+    receipts: Vec<Value>,
+    receipt_errors: Vec<String>,
     _root: TempDir,
 }
 
@@ -633,24 +774,51 @@ impl Run {
             .collect()
     }
 
-    /// Every receipt found under the private data directory.
+    /// Panic when a channel did not reach EOF.
+    ///
+    /// An absent message only means something when the transcript is known to
+    /// be complete. Every helper below that a test uses to assert an absence
+    /// calls this first.
+    pub fn assert_channels_complete(&self) {
+        if let Err(message) = channel_guard(
+            &self.channels_timed_out,
+            self.control_messages.len(),
+            self.trace_events.len(),
+        ) {
+            panic!("{message}");
+        }
+    }
+
+    /// Every receipt read from the private data directory, once, at `wait`.
     ///
     /// `jail.json` is read as one JSON document when it parses that way and as
     /// NDJSON otherwise, because jail-v1 §7 fixes the file name but the J1
-    /// core slice chooses between the two encodings.
+    /// core slice chooses between the two encodings. A file that exists and
+    /// cannot be read or parsed panics: an unreadable receipt used to come
+    /// back as an empty list, which made "the run produced no refused receipt"
+    /// pass without reading anything.
     #[must_use]
     pub fn receipts(&self) -> Vec<Value> {
-        let mut out = Vec::new();
-        collect_receipts(&self.data_dir, &mut out);
-        if let Some(p) = &self.receipt_path
-            && let Ok(text) = std::fs::read_to_string(p)
-        {
-            push_json(&text, &mut out);
-        }
-        out
+        assert!(
+            self.receipt_errors.is_empty(),
+            "receipts could not be read: {}",
+            self.receipt_errors.join("; ")
+        );
+        self.receipts.clone()
+    }
+
+    /// The receipt read errors, without panicking. For a test about them.
+    #[must_use]
+    pub fn receipt_errors(&self) -> &[String] {
+        &self.receipt_errors
     }
 
     /// The last receipt with this phase, when there is one.
+    ///
+    /// `jail.json` holds the latest receipt only (§7, atomically replaced), so
+    /// after a completed run the earlier phases are not there; read them
+    /// through `Spawned::receipt_value()` while the attempt is still gated, or
+    /// from `control_messages`.
     #[must_use]
     pub fn receipt_phase(&self, phase: &str) -> Option<Value> {
         let mut last = None;
@@ -662,40 +830,99 @@ impl Run {
         last
     }
 
-    /// Control messages of one kind, in order.
+    /// Control messages of one kind, in order. Panics on a partial transcript.
     #[must_use]
     pub fn control_kind(&self, kind: &str) -> Vec<&Value> {
+        self.assert_channels_complete();
         self.control_messages
             .iter()
             .filter(|m| m.get("kind").and_then(Value::as_str) == Some(kind))
             .collect()
     }
+
+    /// The whole control transcript. Panics on a partial one.
+    #[must_use]
+    pub fn control_messages(&self) -> &[Value] {
+        self.assert_channels_complete();
+        &self.control_messages
+    }
+
+    /// The whole trace transcript. Panics on a partial one.
+    #[must_use]
+    pub fn trace_events(&self) -> &[Value] {
+        self.assert_channels_complete();
+        &self.trace_events
+    }
 }
 
-fn collect_receipts(dir: &Path, out: &mut Vec<Value>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+/// Whether an absence in the transcript means anything.
+///
+/// `Err` is the message the caller must panic with: a channel that never
+/// reached EOF leaves a partial transcript, and every "no such message"
+/// assertion against it would pass without reading anything.
+pub fn channel_guard(timed_out: &[String], controls: usize, traces: usize) -> Result<(), String> {
+    if timed_out.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "a channel never reached EOF ({}), so the {controls} control message(s) and \
+         {traces} trace event(s) collected are a partial transcript: an absence \
+         proves nothing here. Inspect `channels_timed_out` and the partial \
+         fields directly if that is what the test means to do.",
+        timed_out.join(", ")
+    ))
+}
+
+fn collect_receipts(dir: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        // An absent data directory is not an error: a refusal before state
+        // creation leaves none. An unreadable one is.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Err(e) => {
+            errors.push(format!("{}: {e}", dir.display()));
+            return;
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_receipts(&path, out);
-        } else if path.file_name() == Some(OsStr::new("jail.json"))
-            && let Ok(text) = std::fs::read_to_string(&path)
-        {
-            push_json(&text, out);
+            collect_receipts(&path, out, errors);
+        } else if path.file_name() == Some(OsStr::new("jail.json")) {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => push_json(&text, &path, out, errors),
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
         }
     }
 }
 
-fn push_json(text: &str, out: &mut Vec<Value>) {
-    if let Ok(v) = serde_json::from_str::<Value>(text) {
-        out.push(v);
-        return;
-    }
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            out.push(v);
+/// One receipt file: a single JSON document, or NDJSON. A file that is
+/// neither is an error, not an empty result.
+fn push_json(text: &str, from: &Path, out: &mut Vec<Value>, errors: &mut Vec<String>) {
+    match serde_json::from_str::<Value>(text) {
+        Ok(v) => out.push(v),
+        Err(whole) => {
+            let mut lines = 0usize;
+            let mut parsed = Vec::new();
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                lines += 1;
+                match serde_json::from_str::<Value>(line) {
+                    Ok(v) => parsed.push(v),
+                    Err(e) => {
+                        errors.push(format!(
+                            "{}: neither one JSON document ({whole}) nor NDJSON ({e})",
+                            from.display()
+                        ));
+                        return;
+                    }
+                }
+            }
+            if lines == 0 {
+                errors.push(format!("{}: empty receipt file", from.display()));
+                return;
+            }
+            out.extend(parsed);
         }
     }
 }
@@ -705,41 +932,158 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_required_follows_the_conformance_variable_exactly() {
-        // The process environment is shared between tests, so this asserts the
-        // predicate against whatever the suite was started with rather than
-        // mutating it.
-        let expected = std::env::var("OURO_CONFORMANCE").as_deref() == Ok("1");
+    fn conformance_mode_is_exactly_the_value_one() {
+        // Proved without touching the environment, so a plain `cargo test`
+        // catches a mutation that deletes the comparison.
+        assert!(conformance_mode(Some("1")));
+        assert!(!conformance_mode(Some("0")));
+        assert!(!conformance_mode(Some("")));
+        assert!(!conformance_mode(Some("true")));
+        assert!(!conformance_mode(Some("1 ")));
+        assert!(!conformance_mode(None));
+    }
+
+    #[test]
+    fn live_required_reads_that_rule_from_the_environment() {
+        let expected = conformance_mode(std::env::var(CONFORMANCE_VAR).ok().as_deref());
         assert_eq!(live_required(), expected);
     }
 
     #[test]
-    fn skip_or_fail_panics_only_in_conformance_mode() {
-        if live_required() {
-            let r = std::panic::catch_unwind(|| skip_or_fail("deliberate"));
-            assert!(r.is_err(), "a skip must fail under OURO_CONFORMANCE=1");
-        } else {
-            skip_or_fail("deliberate: this line is expected in the log");
-        }
+    fn a_skip_is_a_failure_in_conformance_mode_and_a_note_otherwise() {
+        // Both branches, in plain mode: the rule is proved even when the
+        // suite is not running under the variable.
+        let failed = skip_decision(true, "bubblewrap is absent")
+            .expect_err("conformance mode must refuse a skip");
+        assert!(failed.contains("forbids skipping"), "{failed}");
+        assert!(failed.contains("bubblewrap is absent"), "{failed}");
+
+        let noted =
+            skip_decision(false, "bubblewrap is absent").expect("plain mode records the skip");
+        assert_eq!(noted, "skipped: bubblewrap is absent");
+
+        // And the wrapper really panics on the Err branch.
+        let r = std::panic::catch_unwind(|| match skip_decision(true, "x") {
+            Ok(note) => eprintln!("{note}"),
+            Err(m) => panic!("{m}"),
+        });
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn a_required_binary_that_is_absent_panics_whatever_the_tree_contains() {
+        // The guard used to be exercised only when `ouro-jail` happened to be
+        // missing, so a fallback to some other path was invisible in a normal
+        // build.
+        let r = std::panic::catch_unwind(|| require_binary(None, "ouro-jail", "OURO_JAIL_BIN"));
+        let message = *r
+            .unwrap_err()
+            .downcast::<String>()
+            .expect("the panic carries its remediation");
+        assert!(message.contains("ouro-jail not found"), "{message}");
+        assert!(message.contains("OURO_JAIL_BIN"), "{message}");
+
+        let found = PathBuf::from("/bin/sh");
+        assert_eq!(
+            require_binary(Some(found.clone()), "ouro-jail", "OURO_JAIL_BIN"),
+            found
+        );
+    }
+
+    #[test]
+    fn an_override_must_point_at_something_executable() {
+        assert_eq!(override_from(None), None);
+        assert_eq!(
+            override_from(Some(OsStr::new("/nonexistent/ouro-jail"))),
+            None,
+            "a pointer at nothing is a configuration error, not a fallback"
+        );
+        let dir = TempDir::new("ouro-override").unwrap();
+        let plain = dir.path().join("not-executable");
+        std::fs::write(&plain, b"#!/bin/sh\n").unwrap();
+        assert_eq!(override_from(Some(plain.as_os_str())), None);
+        assert_eq!(
+            override_from(Some(OsStr::new("/bin/sh"))),
+            Some(PathBuf::from("/bin/sh"))
+        );
+    }
+
+    #[test]
+    fn the_binary_search_never_leaves_the_profile_directory() {
+        // `target/` itself is not a Cargo output location; a binary found
+        // there is stale or stray and used to be run anyway.
+        let exe = std::env::current_exe().unwrap();
+        let here = exe.parent().unwrap();
+        assert_eq!(
+            here.file_name(),
+            Some(OsStr::new("deps")),
+            "this test assumes the usual integration-test layout"
+        );
+        let profile = here.parent().unwrap();
+        let target_root = profile.parent().unwrap();
+
+        let stray = target_root.join("ouro-stray-probe");
+        std::fs::write(&stray, b"#!/bin/sh\nexit 9\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = sibling("ouro-stray-probe");
+        std::fs::remove_file(&stray).unwrap();
+        assert_eq!(found, None, "the search reached target/ itself");
+    }
+
+    #[test]
+    fn a_partial_transcript_refuses_to_answer_questions_about_absence() {
+        assert!(channel_guard(&[], 0, 0).is_ok());
+        let message = channel_guard(&["control: timed out".to_string()], 2, 0)
+            .expect_err("a timed-out channel must not look like silence");
+        assert!(message.contains("partial transcript"), "{message}");
+        assert!(message.contains("control: timed out"), "{message}");
+        assert!(message.contains("2 control message(s)"), "{message}");
+    }
+
+    #[test]
+    fn a_receipt_that_cannot_be_parsed_is_an_error_not_an_empty_list() {
+        let dir = TempDir::new("ouro-receipt-errors").unwrap();
+        let attempt = dir.path().join("attempts/att_1");
+        std::fs::create_dir_all(&attempt).unwrap();
+        std::fs::write(attempt.join("jail.json"), b"{ half written").unwrap();
+
+        let mut out = Vec::new();
+        let mut errors = Vec::new();
+        collect_receipts(dir.path(), &mut out, &mut errors);
+        assert!(out.is_empty());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("jail.json"), "{errors:?}");
+
+        // An empty file is an error too, not zero receipts.
+        std::fs::write(attempt.join("jail.json"), b"").unwrap();
+        let (mut out, mut errors) = (Vec::new(), Vec::new());
+        collect_receipts(dir.path(), &mut out, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+
+        // An absent data directory is not an error: a refusal before state
+        // creation leaves none.
+        let (mut out, mut errors) = (Vec::new(), Vec::new());
+        collect_receipts(&dir.path().join("nothing-here"), &mut out, &mut errors);
+        assert!(out.is_empty() && errors.is_empty());
+    }
+
+    #[test]
+    fn two_worktrees_never_share_one_on_demand_build_directory() {
+        let a = path_key(Path::new("/a/worktrees/one/crates/ouro-fixture"));
+        let b = path_key(Path::new("/a/worktrees/two/crates/ouro-fixture"));
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 16);
+        assert_eq!(
+            a,
+            path_key(Path::new("/a/worktrees/one/crates/ouro-fixture"))
+        );
     }
 
     #[test]
     fn the_fixture_binary_is_locatable_and_executable() {
         let p = fixture_path();
         assert!(is_executable(&p), "{} is not executable", p.display());
-    }
-
-    #[test]
-    fn a_missing_jail_binary_is_reported_as_missing_not_faked() {
-        // In this worktree `ouro-jail` does not exist yet (the core slice owns
-        // it), so the harness must say so rather than invent a path.
-        match try_jail_path() {
-            Some(p) => assert!(is_executable(&p)),
-            None => {
-                let r = std::panic::catch_unwind(jail_path);
-                assert!(r.is_err(), "jail_path must panic when there is no binary");
-            }
-        }
     }
 
     #[test]
@@ -765,7 +1109,9 @@ mod tests {
         .unwrap();
 
         let mut out = Vec::new();
-        collect_receipts(dir.path(), &mut out);
+        let mut errors = Vec::new();
+        collect_receipts(dir.path(), &mut out, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
         let phases: Vec<&str> = out
             .iter()
             .filter_map(|v| v.get("phase").and_then(Value::as_str))

@@ -11,10 +11,24 @@ fn main() -> std::process::ExitCode {
     let reporter = if cli.no_report {
         Reporter::silent()
     } else {
+        // A report descriptor that is closed or read-only would make every
+        // operation invisible while the process still exited 0.
+        if let Err(e) = Reporter::check_fd(cli.report_fd) {
+            eprintln!("ouro-fixture: {e}");
+            return std::process::ExitCode::from(EXIT_USAGE as u8);
+        }
         Reporter::to_fd(cli.report_fd)
     };
 
-    match ops::run(cli.mode, &reporter) {
+    let outcome = ops::run(cli.mode, &reporter);
+    if reporter.lost() > 0 {
+        eprintln!(
+            "ouro-fixture: {} report line(s) could not be written",
+            reporter.lost()
+        );
+        return std::process::ExitCode::from(EXIT_EXPECTATION_FAILED as u8);
+    }
+    match outcome {
         Ok(true) => std::process::ExitCode::from(EXIT_OK as u8),
         Ok(false) => std::process::ExitCode::from(EXIT_EXPECTATION_FAILED as u8),
         Err(usage) => {

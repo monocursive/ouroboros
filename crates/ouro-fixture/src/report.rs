@@ -166,25 +166,57 @@ impl Emitted {
 /// under comparison.
 pub struct Reporter {
     fd: Option<c_int>,
+    lost: std::cell::Cell<u64>,
 }
 
 impl Reporter {
     #[must_use]
     pub fn to_fd(fd: c_int) -> Self {
-        Reporter { fd: Some(fd) }
+        Reporter {
+            fd: Some(fd),
+            lost: std::cell::Cell::new(0),
+        }
     }
 
     #[must_use]
     pub fn silent() -> Self {
-        Reporter { fd: None }
+        Reporter {
+            fd: None,
+            lost: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Is this descriptor open and writable? A report that goes nowhere is a
+    /// usage error, not a run that quietly succeeded.
+    pub fn check_fd(fd: c_int) -> Result<(), String> {
+        // SAFETY: `F_GETFL` only reads the status flags of a descriptor number.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(format!("--report-fd {fd} is not open"));
+        }
+        let access = flags & libc::O_ACCMODE;
+        if access == libc::O_WRONLY || access == libc::O_RDWR {
+            Ok(())
+        } else {
+            Err(format!("--report-fd {fd} is not writable"))
+        }
     }
 
     pub fn emit(&self, report: &OpReport) {
         if let Some(fd) = self.fd {
             let mut line = report.to_line();
             line.push('\n');
-            write_all(fd, line.as_bytes());
+            if !write_all(fd, line.as_bytes()) {
+                self.lost.set(self.lost.get() + 1);
+            }
         }
+    }
+
+    /// How many report lines could not be written. A run that lost one has
+    /// not reported its result, whatever its operations did.
+    #[must_use]
+    pub fn lost(&self) -> u64 {
+        self.lost.get()
     }
 }
 
@@ -274,6 +306,32 @@ mod tests {
         assert!(!e.satisfies(&Expect::Any));
         assert!(!e.satisfies(&Expect::Ok));
         assert!(!e.satisfies(&Expect::Errno("ENOSYS".into())));
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_written_is_counted_not_ignored() {
+        // fd 2 is open here, so nothing is lost; a closed descriptor is
+        // refused up front by `check_fd`, which is the other half of the rule.
+        let good = Reporter::to_fd(2);
+        assert_eq!(good.lost(), 0);
+        assert!(Reporter::check_fd(2).is_ok());
+
+        // A descriptor this process never opened.
+        let err = Reporter::check_fd(9_001).unwrap_err();
+        assert!(err.contains("is not open"), "{err}");
+
+        // A read-only descriptor is refused. (fd 0 is not used here: a test
+        // runner may hand this process an O_RDWR /dev/null as stdin.)
+        let read_only = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        let err = Reporter::check_fd(read_only.as_raw_fd()).unwrap_err();
+        assert!(err.contains("not writable"), "{err}");
+
+        let mut r = OpReport::new("x");
+        r.result(0, None);
+        let bad = Reporter::to_fd(9_001);
+        bad.emit(&r);
+        assert_eq!(bad.lost(), 1, "a lost line must be counted");
     }
 
     #[test]

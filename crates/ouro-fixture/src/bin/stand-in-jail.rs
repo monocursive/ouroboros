@@ -190,6 +190,11 @@ fn main() -> std::process::ExitCode {
 
     // The gate and control channels never reach the target: announce the exec
     // and drop both descriptors before replacing this image.
+    //
+    // §8.3: "All other fds close before exec". The real jail owns that rule;
+    // this stand-in has to mirror it, because a descriptor the *environment*
+    // handed to the test process (a CI runner routinely does) would otherwise
+    // reach the target through this process and look like a harness leak.
     if let Some(w) = control.as_mut() {
         let msg = json!({
             "schema": CONTROL_SCHEMA,
@@ -205,6 +210,7 @@ fn main() -> std::process::ExitCode {
         let _ = w.flush();
     }
     drop(control);
+    close_extra_descriptors();
 
     let err = exec(&cli.argv);
     eprintln!("stand-in-jail: error exec_failed at launching [configuration]: {err}");
@@ -276,6 +282,58 @@ fn read_and_check_gate(fd: OwnedFd, attempt_id: &str, policy_digest: &str) -> Re
         return invalid("frame names a different policy digest".into());
     }
     Ok(())
+}
+
+/// Close every descriptor above stderr, so the target inherits only validated
+/// stdio (jail-v1 §8.3). Called immediately before the exec, after every
+/// channel this process owns has been dropped.
+fn close_extra_descriptors() {
+    #[cfg(target_os = "linux")]
+    {
+        // `close_range` is one syscall and cannot miss a descriptor.
+        const SYS_CLOSE_RANGE: libc::c_long = 436;
+        // SAFETY: closing a range of descriptor numbers this process owns;
+        // stdio is excluded and nothing below is used afterwards except the
+        // exec itself.
+        let rc = unsafe { libc::syscall(SYS_CLOSE_RANGE, 3u32, u32::MAX, 0u32) };
+        if rc == 0 {
+            return;
+        }
+        // Kernels before 5.9 have no `close_range`; fall through.
+    }
+    for fd in enumerate_descriptors() {
+        if fd > 2 {
+            // SAFETY: a descriptor number this process owns, closed once.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+/// The open descriptor numbers, from the kernel where it lists them and from a
+/// bounded probe otherwise.
+fn enumerate_descriptors() -> Vec<libc::c_int> {
+    let dir = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut out: Vec<libc::c_int> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().and_then(|n| n.parse().ok()))
+            .collect();
+        out.sort_unstable();
+        return out;
+    }
+    // SAFETY: `rl` is a live rlimit struct, which is what `getrlimit` writes.
+    let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    let limit = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0 {
+        libc::c_int::try_from(rl.rlim_cur).unwrap_or(65_536)
+    } else {
+        65_536
+    };
+    (0..limit.min(65_536)).collect()
 }
 
 fn exec(argv: &[OsString]) -> std::io::Error {

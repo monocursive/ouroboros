@@ -131,6 +131,12 @@ fn i02_scan(root: Option<PathBuf>) -> ExitCode {
             root.display()
         );
     }
+    for link in &scan.symlinks_skipped {
+        println!(
+            "i02-scan: {} is a symlink and was not followed",
+            link.display()
+        );
+    }
     for hit in &scan.hits {
         println!("{hit}");
     }

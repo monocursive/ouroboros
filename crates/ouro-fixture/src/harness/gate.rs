@@ -19,8 +19,14 @@ pub const CONTROL_SCHEMA: &str = "ouro.jail.control/1";
 /// Maximum frame size including the single trailing LF, jail-v1 §8.2.
 pub const GATE_MAX_BYTES: usize = 1024;
 
-/// What the owner authorised. `None` means "do not check this binding".
-#[derive(Debug, Default, Clone)]
+/// What the owner authorised.
+///
+/// `None` means "do not check this binding", which is a deliberate hole: it
+/// used to be reachable by `ExpectedPlan::default()`, so a plan that checked
+/// nothing looked exactly like a plan that checked everything. `Default` is
+/// gone, [`ExpectedPlan::bound`] names all three at once, and
+/// [`GateOwner::authorise`] refuses a plan that binds nothing at all.
+#[derive(Debug, Clone)]
 pub struct ExpectedPlan {
     pub attempt_id: Option<String>,
     pub policy_digest: Option<String>,
@@ -29,12 +35,56 @@ pub struct ExpectedPlan {
 }
 
 impl ExpectedPlan {
+    /// A plan that binds only the phase. At least one identity binding must
+    /// be added before it can authorise anything.
+    ///
+    /// There is deliberately no `Default`: `ExpectedPlan::default()` used to
+    /// be a plan that authorised anything while looking like a plan check.
+    #[allow(clippy::new_without_default)]
     #[must_use]
     pub fn new() -> Self {
         ExpectedPlan {
+            attempt_id: None,
+            policy_digest: None,
+            argv_digest: None,
             phase: Some("prepared".to_string()),
-            ..ExpectedPlan::default()
         }
+    }
+
+    /// The complete plan: every binding §8.2 asks an owner to compare.
+    #[must_use]
+    pub fn bound(
+        attempt_id: impl Into<String>,
+        policy_digest: impl Into<String>,
+        argv_digest: impl Into<String>,
+    ) -> Self {
+        ExpectedPlan::new()
+            .attempt_id(attempt_id)
+            .policy_digest(policy_digest)
+            .argv_digest(argv_digest)
+    }
+
+    /// The identity bindings this plan does not check.
+    #[must_use]
+    pub fn unbound(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.attempt_id.is_none() {
+            out.push("attempt_id");
+        }
+        if self.policy_digest.is_none() {
+            out.push("policy_digest");
+        }
+        if self.argv_digest.is_none() {
+            out.push("argv_digest");
+        }
+        out
+    }
+
+    /// True when the plan binds no identity at all, so it can authorise
+    /// anything the jail proposes.
+    #[must_use]
+    pub fn binds_nothing(&self) -> bool {
+        self.unbound().len() == 3
     }
 
     #[must_use]
@@ -320,6 +370,18 @@ impl<'a> GateOwner<'a> {
         plan: &ExpectedPlan,
     ) -> Result<Proposal, (Proposal, Vec<String>)> {
         let proposal = Proposal::read(control, receipt);
+        if plan.binds_nothing() {
+            // A plan with no identity binding matches every proposal, so
+            // releasing on it proves nothing while looking like a plan check.
+            return Err((
+                proposal,
+                vec![
+                    "the plan binds no attempt_id, policy_digest or argv_digest, \
+                     so it would authorise any attempt: use ExpectedPlan::bound(..)"
+                        .to_string(),
+                ],
+            ));
+        }
         let problems = mismatches(plan, &proposal);
         if problems.is_empty() {
             Ok(proposal)
@@ -353,9 +415,14 @@ impl<'a> GateOwner<'a> {
     }
 
     /// Drain and return whatever else the jail says on the control channel.
-    pub fn drain_control(&mut self) -> io::Result<Vec<Value>> {
+    ///
+    /// The lines read are kept whether or not the channel reached EOF; the
+    /// error is returned alongside them so a caller cannot mistake a timeout
+    /// for silence.
+    pub fn drain_control(&mut self) -> (Vec<Value>, Option<io::Error>) {
+        let drained = self.control.drain();
         let mut out = Vec::new();
-        for line in self.control.drain()? {
+        for line in drained.lines {
             if line.is_empty() {
                 continue;
             }
@@ -364,7 +431,7 @@ impl<'a> GateOwner<'a> {
                 out.push(v);
             }
         }
-        Ok(out)
+        (out, drained.error)
     }
 }
 
@@ -498,14 +565,53 @@ mod tests {
     }
 
     #[test]
-    fn an_unchecked_binding_is_not_compared() {
-        let plan = ExpectedPlan {
-            attempt_id: None,
-            policy_digest: None,
-            argv_digest: None,
-            phase: None,
+    fn a_plan_that_binds_nothing_authorises_nothing() {
+        // `mismatches` still skips an unbound field, so a partial plan works;
+        // but a plan with no identity binding at all is refused before it can
+        // look like a check that passed.
+        let empty = ExpectedPlan::new();
+        assert!(empty.binds_nothing());
+        assert_eq!(
+            empty.unbound(),
+            vec!["attempt_id", "policy_digest", "argv_digest"]
+        );
+
+        let partial = ExpectedPlan::new().attempt_id(ID);
+        assert!(!partial.binds_nothing());
+        assert_eq!(partial.unbound(), vec!["policy_digest", "argv_digest"]);
+
+        let complete = ExpectedPlan::bound(ID, DIGEST, "sha256:bb");
+        assert!(complete.unbound().is_empty());
+
+        // `mismatches` alone is permissive about an unbound identity field --
+        // an empty plan objects only to the phase -- which is exactly why
+        // `authorise` carries the refusal instead.
+        let anything = Proposal {
+            phase: Some("prepared".into()),
+            ..Proposal::default()
         };
-        let anything = Proposal::default();
-        assert!(mismatches(&plan, &anything).is_empty());
+        assert!(
+            mismatches(&empty, &anything).is_empty(),
+            "mismatches alone would authorise an unnamed attempt"
+        );
+
+        let control = serde_json::json!({"attempt_id": ID, "kind": "prepared"});
+        let refusal = refuse_unbound(&empty, &control);
+        assert!(
+            refusal.iter().any(|p| p.contains("binds no attempt_id")),
+            "{refusal:?}"
+        );
+        assert!(refuse_unbound(&partial, &control).is_empty());
+        assert!(refuse_unbound(&complete, &control).is_empty());
+    }
+
+    /// The refusal `authorise` applies, without a live channel.
+    fn refuse_unbound(plan: &ExpectedPlan, control: &Value) -> Vec<String> {
+        let _ = control;
+        if plan.binds_nothing() {
+            vec!["the plan binds no attempt_id, policy_digest or argv_digest".to_string()]
+        } else {
+            Vec::new()
+        }
     }
 }

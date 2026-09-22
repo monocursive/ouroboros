@@ -4,6 +4,16 @@
 //! in the execution core. They are allowed in launch profile data,
 //! documentation, fixtures and tests, which is why the scan takes explicit
 //! roots instead of walking the repository.
+//!
+//! §4 scopes the scan to `<crate>/src`, but §15 row I02 says "no vendor
+//! names/**protocol dependencies** in the execution core", and a dependency
+//! named after a vendor lives in `Cargo.toml`, not in `src/`. The roots below
+//! therefore also carry each crate's manifest and its `build.rs`.
+//!
+//! What this cannot catch, by construction, because it is a text scan: a
+//! token split across lines or across `concat!`, a Unicode look-alike
+//! (Cyrillic `а` in `clаude`), and a `\u{..}` escape. Those are deliberate
+//! evasions, not accidents; the scan is a guard against the accident.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +30,16 @@ pub const FORBIDDEN: &[&str] = &[
 ];
 
 /// The roots the scan covers when they exist, relative to the repository root.
-pub const ROOTS: &[&str] = &["crates/ouro-jail/src", "crates/ouro-ledger/src"];
+///
+/// A root may be a directory, which is walked, or a single file.
+pub const ROOTS: &[&str] = &[
+    "crates/ouro-jail/src",
+    "crates/ouro-jail/Cargo.toml",
+    "crates/ouro-jail/build.rs",
+    "crates/ouro-ledger/src",
+    "crates/ouro-ledger/Cargo.toml",
+    "crates/ouro-ledger/build.rs",
+];
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Hit {
@@ -48,6 +67,9 @@ pub struct Scan {
     pub roots_scanned: Vec<PathBuf>,
     pub roots_absent: Vec<PathBuf>,
     pub files_scanned: usize,
+    /// Symlinks the walk did not follow, named so a reader knows what was not
+    /// covered rather than assuming it was.
+    pub symlinks_skipped: Vec<PathBuf>,
 }
 
 /// Scan one file's bytes. Works on non-UTF-8 content: the tokens are ASCII.
@@ -74,14 +96,25 @@ fn walk(dir: &Path, scan: &mut Scan) -> std::io::Result<()> {
     entries.sort_by_key(std::fs::DirEntry::path);
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
+        // `symlink_metadata`, not `metadata`: following a directory symlink
+        // made a `src/selfloop -> ../src` scan the tree repeatedly until the
+        // kernel stopped it with ELOOP.
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_symlink() {
+            scan.symlinks_skipped.push(path);
+        } else if meta.is_dir() {
             walk(&path, scan)?;
-        } else if path.is_file() {
-            let bytes = std::fs::read(&path)?;
-            scan.files_scanned += 1;
-            scan.hits.extend(scan_bytes(&path, &bytes));
+        } else if meta.is_file() {
+            scan_file(&path, scan)?;
         }
     }
+    Ok(())
+}
+
+fn scan_file(path: &Path, scan: &mut Scan) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    scan.files_scanned += 1;
+    scan.hits.extend(scan_bytes(path, &bytes));
     Ok(())
 }
 
@@ -91,11 +124,16 @@ pub fn scan_roots(base: &Path, roots: &[&str]) -> std::io::Result<Scan> {
     let mut scan = Scan::default();
     for root in roots {
         let path = base.join(root);
-        if path.is_dir() {
-            walk(&path, &mut scan)?;
-            scan.roots_scanned.push(path);
-        } else {
-            scan.roots_absent.push(path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => {
+                walk(&path, &mut scan)?;
+                scan.roots_scanned.push(path);
+            }
+            Ok(m) if m.is_file() => {
+                scan_file(&path, &mut scan)?;
+                scan.roots_scanned.push(path);
+            }
+            _ => scan.roots_absent.push(path),
         }
     }
     scan.hits
@@ -148,8 +186,8 @@ mod tests {
 
         let clean = scan_roots(&base, ROOTS).unwrap();
         assert!(clean.hits.is_empty(), "{:?}", clean.hits);
-        assert_eq!(clean.roots_scanned.len(), 1);
-        assert_eq!(clean.roots_absent.len(), 1, "ouro-ledger is not here yet");
+        assert_eq!(clean.roots_scanned.len(), 1, "only src/ exists here");
+        assert_eq!(clean.roots_absent.len(), 5, "{:?}", clean.roots_absent);
         assert_eq!(clean.files_scanned, 1);
 
         std::fs::write(
@@ -171,12 +209,57 @@ mod tests {
     }
 
     #[test]
+    fn a_vendor_named_dependency_and_a_build_script_are_caught() {
+        // §15 row I02 covers "protocol dependencies", which live in the
+        // manifest, and a build script can inject one into the build.
+        let base = std::env::temp_dir().join(format!("xtask-i02-manifest-{}", std::process::id()));
+        let crate_dir = base.join("crates/ouro-jail");
+        std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+        std::fs::write(crate_dir.join("src/lib.rs"), b"pub mod policy;\n").unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            b"[dependencies]\nanthropic-protocol = \"1\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate_dir.join("build.rs"),
+            b"fn main() { println!(\"cargo:rustc-env=VENDOR=codex\"); }\n",
+        )
+        .unwrap();
+
+        let scan = scan_roots(&base, ROOTS).unwrap();
+        assert_eq!(scan.files_scanned, 3, "{:?}", scan.roots_scanned);
+        let tokens: Vec<&str> = scan.hits.iter().map(|h| h.token).collect();
+        assert!(tokens.contains(&"anthropic"), "{:?}", scan.hits);
+        assert!(tokens.contains(&"codex"), "{:?}", scan.hits);
+        assert_eq!(scan.hits.len(), 2, "{:?}", scan.hits);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_directory_symlink_is_named_and_not_followed() {
+        let base = std::env::temp_dir().join(format!("xtask-i02-link-{}", std::process::id()));
+        let src = base.join("crates/ouro-jail/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), b"pub mod policy;\n").unwrap();
+        std::os::unix::fs::symlink("../src", src.join("selfloop")).unwrap();
+
+        let scan = scan_roots(&base, ROOTS).unwrap();
+        assert_eq!(scan.files_scanned, 1, "the loop was followed");
+        assert_eq!(scan.symlinks_skipped.len(), 1);
+        assert!(scan.symlinks_skipped[0].ends_with("selfloop"));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn an_absent_root_is_reported_as_absent_not_as_clean() {
         let base = std::env::temp_dir().join(format!("xtask-i02-absent-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let scan = scan_roots(&base, ROOTS).unwrap();
         assert!(scan.roots_scanned.is_empty());
-        assert_eq!(scan.roots_absent.len(), 2);
+        assert_eq!(scan.roots_absent.len(), ROOTS.len());
         assert_eq!(scan.files_scanned, 0);
         std::fs::remove_dir_all(&base).unwrap();
     }

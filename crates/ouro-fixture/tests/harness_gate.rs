@@ -15,6 +15,7 @@
 //! containment, observation or receipts. The stand-in's parser is part of this
 //! crate, not the product.
 
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use ouro_fixture::harness::{ExpectedPlan, Jail, Release, Run, TempDir};
@@ -251,10 +252,58 @@ fn the_owner_withholds_when_a_binding_does_not_match_its_plan() {
 
 #[test]
 fn the_target_inherits_only_stdio_and_no_channel_descriptor() {
-    // X06 in miniature. The fixture enumerates its own descriptors; the
-    // control, gate and trace ends must all be gone by the time it runs.
-    let dir = TempDir::new("ouro-harness-fds").unwrap();
-    let _ = dir.path();
+    let (fds, targets) = target_descriptors(None);
+    assert_x06(&fds, &targets, "no spare descriptor open");
+}
+
+#[test]
+fn a_descriptor_inherited_from_the_environment_does_not_reach_the_target() {
+    // The hosted runners hand `cargo test` descriptors of their own (the PR
+    // that found this saw [0, 1, 2, 142, 145] on ubuntu and
+    // [0, 1, 2, 131, 140, 143, 146] on macOS), and on a developer's machine
+    // the test process has none, so the leak was invisible locally.
+    //
+    // Reproduced deterministically here: a descriptor opened by the test and
+    // made inheritable is exactly what a runner's environment supplies. It
+    // reaches the target unless the jail closes it, which is the jail's job
+    // under §8.3 -- so a failure here is a defect in the stand-in's fd
+    // hygiene, not in the harness's channel plumbing.
+    // The number matters: the harness dup2s its channels onto the lowest free
+    // descriptors, which would simply overwrite a spare at 3. A runner's
+    // descriptors are high (142, 145), so the spare goes somewhere high too.
+    const SPARE: RawFd = 47;
+    let file = std::fs::File::open("/dev/null").expect("/dev/null opens");
+    // SAFETY: `dup2` onto a number this test has chosen and owns from here on;
+    // the copy is not close-on-exec, which is what makes it inheritable like a
+    // runner-supplied descriptor.
+    assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), SPARE) }, SPARE);
+    drop(file);
+    // SAFETY: reading the flags of the descriptor just created.
+    assert_eq!(
+        unsafe { libc::fcntl(SPARE, libc::F_GETFD) } & libc::FD_CLOEXEC,
+        0
+    );
+
+    let (fds, targets) = target_descriptors(Some(SPARE));
+    // SAFETY: closing the descriptor this test created, once, before any
+    // assertion can unwind past it.
+    unsafe { libc::close(SPARE) };
+
+    assert!(
+        !targets.contains(&SPARE),
+        "the spare must not be one of the harness's own channels: {targets:?}"
+    );
+    assert_x06(
+        &fds,
+        &targets,
+        &format!("descriptor {SPARE} was inheritable in the test process"),
+    );
+}
+
+/// Run the fixture's `fds` mode as the jail's target and report what it saw,
+/// with the channel numbers the harness assigned.
+fn target_descriptors(also_open: Option<RawFd>) -> (Vec<i64>, Vec<RawFd>) {
+    let _ = also_open;
     let mut spawned = Jail::with_program(stand_in())
         .unwrap()
         .control()
@@ -264,6 +313,7 @@ fn the_target_inherits_only_stdio_and_no_channel_descriptor() {
         .target_fixture(["fds"])
         .spawn()
         .unwrap();
+    let targets = spawned.channel_targets().to_vec();
     {
         let mut owner = spawned.owner();
         let prepared = owner.await_prepared().unwrap();
@@ -281,16 +331,42 @@ fn the_target_inherits_only_stdio_and_no_channel_descriptor() {
 
     let lines = run.fixture_lines();
     assert_eq!(lines.len(), 1, "{lines:?}");
-    let fds: Vec<i64> = lines[0]["args"]["fds"]
+    assert_eq!(
+        lines[0]["args"]["complete"], true,
+        "the enumeration must be the kernel's own list, not a bounded probe"
+    );
+    let fds = lines[0]["args"]["fds"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| f["fd"].as_i64().unwrap())
         .collect();
-    assert_eq!(
-        fds,
-        vec![0, 1, 2],
-        "a channel descriptor reached the target: {fds:?}"
+    (fds, targets)
+}
+
+/// What X06 means: stdio is there, no channel of the harness is, and nothing
+/// else is either.
+fn assert_x06(fds: &[i64], targets: &[RawFd], context: &str) {
+    for expected in [0, 1, 2] {
+        assert!(
+            fds.contains(&expected),
+            "stdio descriptor {expected} is missing ({context}): {fds:?}"
+        );
+    }
+    for t in targets {
+        assert!(
+            !fds.contains(&i64::from(*t)),
+            "the jail's own channel descriptor {t} reached the target \
+             ({context}): {fds:?} -- this is a harness plumbing defect"
+        );
+    }
+    let extra: Vec<i64> = fds.iter().copied().filter(|f| *f > 2).collect();
+    assert!(
+        extra.is_empty(),
+        "the target inherited {extra:?} beyond stdio ({context}). \
+         None of them is a harness channel ({targets:?}), so this is the \
+         jail's fd hygiene: jail-v1 §8.3 requires every other descriptor to \
+         close before the target's exec."
     );
 }
 

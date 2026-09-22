@@ -17,6 +17,34 @@ use crate::cli::{
 use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value, write_all};
 
+/// A pipe whose two ends are both close-on-exec.
+fn cloexec_pipe() -> Result<(c_int, c_int), std::io::Error> {
+    let mut fds = [0 as c_int; 2];
+    #[cfg(target_os = "linux")]
+    // SAFETY: `fds` is a live array of two ints, which is what `pipe2` writes.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: as above, for `pipe`; Darwin has no `pipe2`.
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        // SAFETY: `fd` was just returned by `pipe` and is owned here.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let e = std::io::Error::last_os_error();
+            // SAFETY: both descriptors are owned here.
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(e);
+        }
+    }
+    Ok((fds[0], fds[1]))
+}
+
 /// This thread's errno, read without allocating: safe to call after `fork`.
 fn raw_errno() -> c_int {
     #[cfg(target_os = "linux")]
@@ -33,6 +61,42 @@ fn raw_errno() -> c_int {
 
 /// A usage error: the fixture refuses before doing anything. Exit code 2.
 pub type Usage = String;
+
+/// State shared by every step of one fixture process.
+///
+/// It exists for one reason: `exit` and a successful `exec-replace` end the
+/// process, so a `script` whose last step is `exit 0` used to discard every
+/// earlier failed expectation and report success.
+pub struct Session<'a> {
+    rep: &'a Reporter,
+    failed: std::cell::Cell<bool>,
+    in_script: std::cell::Cell<bool>,
+}
+
+impl<'a> Session<'a> {
+    #[must_use]
+    pub fn new(rep: &'a Reporter) -> Session<'a> {
+        Session {
+            rep,
+            failed: std::cell::Cell::new(false),
+            in_script: std::cell::Cell::new(false),
+        }
+    }
+
+    fn record(&self, ok: bool) -> bool {
+        if !ok {
+            self.failed.set(true);
+        }
+        ok
+    }
+
+    /// True when some earlier operation in this process did not meet its
+    /// expectation.
+    #[must_use]
+    pub fn failed_earlier(&self) -> bool {
+        self.failed.get()
+    }
+}
 
 fn finish(mut report: OpReport, attempt: Attempt) -> Emitted {
     match attempt {
@@ -65,6 +129,19 @@ fn close_fd(ret: i64) {
 
 /// Run one mode. `Ok(true)` when every expectation in it held.
 pub fn run(mode: Mode, rep: &Reporter) -> Result<bool, Usage> {
+    let session = Session::new(rep);
+    let ok = run_in(&session, mode)?;
+    Ok(ok && !session.failed_earlier())
+}
+
+/// Run one mode inside an existing session.
+pub fn run_in(session: &Session<'_>, mode: Mode) -> Result<bool, Usage> {
+    let rep = session.rep;
+    let ok = run_mode(session, rep, mode)?;
+    Ok(session.record(ok))
+}
+
+fn run_mode(session: &Session<'_>, rep: &Reporter, mode: Mode) -> Result<bool, Usage> {
     match mode {
         Mode::Open {
             path,
@@ -137,7 +214,7 @@ pub fn run(mode: Mode, rep: &Reporter) -> Result<bool, Usage> {
         } => Ok(ftruncate(rep, &path, length, &expect)),
         Mode::Connect { addr, udp, expect } => connect(rep, &addr, udp, &expect),
         Mode::Exec { via, expect, argv } => exec_and_wait(rep, via, &argv, &expect),
-        Mode::ExecReplace { via, expect, argv } => exec_replace(rep, via, &argv, &expect),
+        Mode::ExecReplace { via, expect, argv } => exec_replace(session, rep, via, &argv, &expect),
         Mode::Sleep { ms } => {
             let mut r = OpReport::new("sleep");
             r.set("ms", ms);
@@ -173,21 +250,30 @@ pub fn run(mode: Mode, rep: &Reporter) -> Result<bool, Usage> {
             env_names(rep);
             Ok(true)
         }
-        Mode::Fds => {
-            fds(rep);
-            Ok(true)
-        }
+        Mode::Fds => Ok(fds(rep)),
         Mode::Status => Ok(status(rep)),
         Mode::WriteMmap { path } => Ok(write_mmap(rep, &path)),
         Mode::Thread => Ok(thread(rep)),
         Mode::Exit { code } => {
+            // An `exit` step used to discard every earlier failed expectation
+            // in a `script`. It cannot report success over one now, and the
+            // line says why the code changed.
+            let earlier = session.failed_earlier();
+            let actual = if earlier {
+                crate::EXIT_EXPECTATION_FAILED
+            } else {
+                code
+            };
             let mut r = OpReport::new("exit");
             r.set("code", code);
+            r.set("earlier_expectation_failed", earlier);
+            r.set("exit_code", actual);
+            r.result(i64::from(actual), None);
             rep.emit(&r);
-            std::process::exit(code);
+            std::process::exit(actual);
         }
         Mode::Raise { signal } => raise(rep, &signal),
-        Mode::Script { file } => script(rep, &file),
+        Mode::Script { file } => script(session, &file),
     }
 }
 
@@ -789,12 +875,24 @@ fn argv_report(name: &str, argv: &[OsString], via: ExecVia) -> OpReport {
 }
 
 fn exec_replace(
+    session: &Session<'_>,
     rep: &Reporter,
     via: ExecVia,
     argv: &[OsString],
     expect: &Expect,
 ) -> Result<bool, Usage> {
     let name = exec_name(via);
+    if session.failed_earlier() {
+        // A successful exec replaces this image, so the accumulated failure
+        // would be lost. Refuse rather than hand the exit code to a program
+        // that knows nothing about it.
+        let mut report = argv_report(name, argv, via);
+        report.set("refused", "earlier_expectation_failed");
+        report.result(-1, None);
+        let e = Emitted::unusable(report);
+        rep.emit(&e.report);
+        return Ok(false);
+    }
     if let Some(reason) = unavailable(name) {
         let mut report = argv_report(name, argv, via);
         report.set("unsupported", reason);
@@ -829,15 +927,12 @@ fn exec_and_wait(
     }
     let img = image(argv)?;
 
-    let mut fds = [0 as c_int; 2];
-    // SAFETY: `fds` is a live array of two ints, which is what `pipe` writes.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(format!(
-            "could not create the exec error pipe: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let (pr, pw) = (fds[0], fds[1]);
+    // Both ends are close-on-exec. The write end MUST be: it used to survive
+    // the target's `execve`, which handed a harness-private descriptor to the
+    // target (the thing X06 rules out) and made the parent's read wait for
+    // every descendant to die instead of for the exec.
+    let (pr, pw) =
+        cloexec_pipe().map_err(|e| format!("could not create the exec error pipe: {e}"))?;
 
     // SAFETY: this process is single-threaded at this point; the child runs
     // only async-signal-safe calls (`close`, the exec syscall, `write`,
@@ -865,9 +960,10 @@ fn exec_and_wait(
         };
     }
 
-    // SAFETY: the parent owns the write end and closes it so the read below
-    // sees EOF when the child execs (the descriptor is close-on-exec free but
-    // the child closed it by exec'ing... it is closed here explicitly).
+    // The parent closes its write end; the child's copy closes on `exec`, so
+    // the read below sees EOF exactly when the target image is established,
+    // and never waits for a descendant.
+    // SAFETY: the parent owns this descriptor.
     unsafe { libc::close(pw) };
     let mut buf = [0u8; 4];
     let mut got = 0usize;
@@ -896,6 +992,11 @@ fn exec_and_wait(
 
     let mut report = argv_report(name, argv, via);
     report.set("pid", pid);
+    // The descriptor the child used to report an exec failure. It is
+    // close-on-exec, so a successful exec closes it; naming it lets a test
+    // assert its absence in the target exactly, instead of guessing which of
+    // the descriptors the environment supplied is ours.
+    report.set("error_pipe_fd", pw);
     if got == buf.len() {
         report.result(-1, Some(c_int::from_ne_bytes(buf)));
     } else {
@@ -943,16 +1044,33 @@ fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Usage>
         Some(image(argv)?)
     };
 
+    // The child reports whether `setsid` succeeded, so `detached` is a
+    // measurement rather than an assumption. One byte, no sleep.
+    let (sr, sw) = cloexec_pipe().map_err(|e| format!("could not create the detach pipe: {e}"))?;
+
     // SAFETY: single-threaded at this point; the child runs only `setsid`,
-    // `nanosleep`, the exec syscall and `_exit`, all async-signal-safe, over
-    // buffers built before the fork.
+    // `write`, `close`, `nanosleep`, the exec syscall and `_exit`, all
+    // async-signal-safe, over buffers built before the fork.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
+        // SAFETY: both descriptors are owned here.
+        unsafe {
+            libc::close(sr);
+            libc::close(sw);
+        }
         return Err(format!("fork failed: {}", std::io::Error::last_os_error()));
     }
     if pid == 0 {
         // SAFETY: async-signal-safe; detaches the descendant from this session.
-        unsafe { libc::setsid() };
+        let sid = unsafe { libc::setsid() };
+        // SAFETY: the child owns the read end and writes one byte of result
+        // through the write end; `close` and `write` are async-signal-safe.
+        unsafe {
+            libc::close(sr);
+            let byte = [u8::from(sid >= 0)];
+            libc::write(sw, byte.as_ptr().cast::<libc::c_void>(), 1);
+            libc::close(sw);
+        }
         sleep_ms(ms);
         if let Some(img) = &img {
             let _ = do_exec(img, ExecVia::Execve);
@@ -961,19 +1079,31 @@ fn background(rep: &Reporter, ms: u64, argv: &[OsString]) -> Result<bool, Usage>
         unsafe { libc::_exit(0) };
     }
 
+    // SAFETY: the parent owns the write end and closes it so the read ends.
+    unsafe { libc::close(sw) };
+    let mut byte = [0u8; 1];
+    // SAFETY: `byte` is live; the child writes exactly one byte right after
+    // `setsid`, so this returns immediately and never sleeps.
+    let got = unsafe { libc::read(sr, byte.as_mut_ptr().cast::<libc::c_void>(), 1) };
+    // SAFETY: the parent owns the read end.
+    unsafe { libc::close(sr) };
+    let detached = got == 1 && byte[0] == 1;
+
     let mut report = OpReport::new("background");
     report.set("pid", pid);
     report.set("delay_ms", ms);
     report.set("argc", argv.len());
-    report.set("detached", true);
+    report.set("detached", detached);
     report.result(i64::from(pid), None);
     rep.emit(&report);
-    Ok(true)
+    Ok(detached)
 }
 
 fn fork_storm(rep: &Reporter, count: u32) -> bool {
     let mut forked = 0u32;
-    let mut pids = Vec::with_capacity(count as usize);
+    // Reserve for what a process could plausibly fork, not for what was
+    // asked: `fork-storm 4000000000` reserved about 16 GB before forking once.
+    let mut pids: Vec<libc::pid_t> = Vec::with_capacity(std::cmp::min(count, 4096) as usize);
     for _ in 0..count {
         // SAFETY: single-threaded; the child only calls `_exit`.
         let pid = unsafe { libc::fork() };
@@ -1166,53 +1296,110 @@ fn env_names(rep: &Reporter) {
     rep.emit(&report);
 }
 
-fn fds(rep: &Reporter) {
+/// The kernel's own list of this process's open descriptors.
+///
+/// `/proc/self/fd` on Linux and `/dev/fd` on Darwin are the authoritative
+/// enumerations. Probing a range instead used to stop at 4096, so a leaked
+/// descriptor numbered above that was invisible and X06 ("no private
+/// authority reaches it") could pass with the leak in place.
+fn fd_directory() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    }
+}
+
+/// Descriptor numbers the kernel says are open, or `None` when the directory
+/// could not be listed. The directory's own descriptor is excluded: it is
+/// closed before the numbers are confirmed.
+fn open_fd_numbers() -> Option<Vec<c_int>> {
+    let entries = std::fs::read_dir(fd_directory()).ok()?;
+    let mut numbers: Vec<c_int> = Vec::new();
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str()
+            && let Ok(n) = name.parse::<c_int>()
+        {
+            numbers.push(n);
+        }
+    }
+    // `entries` is dropped here, closing the descriptor the listing used, so
+    // the confirmation pass below drops it from the result.
+    numbers.sort_unstable();
+    Some(numbers)
+}
+
+fn soft_fd_limit() -> u64 {
     // SAFETY: `rl` is a live rlimit struct, which is what `getrlimit` writes.
     let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: as above.
-    let limit = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0 {
-        std::cmp::min(rl.rlim_cur, 4096) as c_int
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut rl) } == 0 {
+        rl.rlim_cur as u64
     } else {
-        4096
-    };
-    let mut open = Vec::new();
-    for fd in 0..limit {
-        // SAFETY: `F_GETFD` only reads the descriptor flags and is safe for
-        // any integer; a closed descriptor returns -1 with EBADF.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 {
-            continue;
-        }
-        // SAFETY: `st` is a live stat struct for an open descriptor.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: as above.
-        let kind = if unsafe { libc::fstat(fd, &raw mut st) } == 0 {
-            match st.st_mode & libc::S_IFMT {
-                libc::S_IFIFO => "fifo",
-                libc::S_IFCHR => "character",
-                libc::S_IFDIR => "directory",
-                libc::S_IFBLK => "block",
-                libc::S_IFREG => "regular",
-                libc::S_IFLNK => "symlink",
-                libc::S_IFSOCK => "socket",
-                _ => "unknown",
-            }
-        } else {
-            "unreadable"
-        };
-        let mut m = serde_json::Map::new();
-        m.insert("fd".into(), Value::from(fd));
-        m.insert("kind".into(), Value::from(kind));
-        m.insert("cloexec".into(), Value::from(flags & libc::FD_CLOEXEC != 0));
-        open.push(Value::Object(m));
+        0
     }
+}
+
+fn describe_fd(fd: c_int) -> Option<Value> {
+    // SAFETY: `F_GETFD` only reads the descriptor flags and is safe for any
+    // integer; a closed descriptor returns -1 with EBADF.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return None;
+    }
+    // SAFETY: `st` is a live stat struct for an open descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    let kind = if unsafe { libc::fstat(fd, &raw mut st) } == 0 {
+        match st.st_mode & libc::S_IFMT {
+            libc::S_IFIFO => "fifo",
+            libc::S_IFCHR => "character",
+            libc::S_IFDIR => "directory",
+            libc::S_IFBLK => "block",
+            libc::S_IFREG => "regular",
+            libc::S_IFLNK => "symlink",
+            libc::S_IFSOCK => "socket",
+            _ => "unknown",
+        }
+    } else {
+        "unreadable"
+    };
+    let mut m = serde_json::Map::new();
+    m.insert("fd".into(), Value::from(fd));
+    m.insert("kind".into(), Value::from(kind));
+    m.insert("cloexec".into(), Value::from(flags & libc::FD_CLOEXEC != 0));
+    Some(Value::Object(m))
+}
+
+fn fds(rep: &Reporter) -> bool {
+    let limit = soft_fd_limit();
+    let (numbers, source, complete) = match open_fd_numbers() {
+        Some(n) => (n, fd_directory().to_string(), true),
+        None => {
+            // Fall back to probing the whole soft limit rather than a fixed
+            // slice of it, and say that is what happened.
+            let cap = c_int::try_from(limit).unwrap_or(c_int::MAX);
+            (
+                (0..cap).collect(),
+                format!("scan 0..{cap}"),
+                cap as u64 >= limit,
+            )
+        }
+    };
+
+    let open: Vec<Value> = numbers.into_iter().filter_map(describe_fd).collect();
+
     let mut report = OpReport::new("fds");
-    report.set("scanned_to", limit);
+    report.set("source", source);
+    report.set("soft_limit", limit);
+    report.set("complete", complete);
     report.set("count", open.len());
     report.set("fds", Value::Array(open));
     report.set("paths_reported", false);
     report.result(0, None);
     rep.emit(&report);
+    // An enumeration that could have missed a descriptor is not a result.
+    complete
 }
 
 fn status(rep: &Reporter) -> bool {
@@ -1388,11 +1575,23 @@ fn write_mmap(rep: &Reporter, path: &OsStr) -> bool {
 
 // -------------------------------------------------------------------- script
 
-fn script(rep: &Reporter, file: &OsStr) -> Result<bool, Usage> {
+/// Does this mode end the process, so that nothing after it can run?
+fn terminates_the_process(mode: &Mode) -> Option<&'static str> {
+    match mode {
+        Mode::Exit { .. } => Some("exit"),
+        Mode::ExecReplace { .. } => Some("exec-replace"),
+        Mode::Raise { .. } => Some("raise"),
+        _ => None,
+    }
+}
+
+fn script(session: &Session<'_>, file: &OsStr) -> Result<bool, Usage> {
     let text = std::fs::read_to_string(std::path::Path::new(file))
         .map_err(|e| format!("cannot read script {}: {e}", file.to_string_lossy()))?;
     let steps: Vec<Vec<String>> = serde_json::from_str(&text)
         .map_err(|e| format!("script must be a JSON array of argv arrays: {e}"))?;
+    let count = steps.len();
+    session.in_script.set(true);
     let mut all_ok = true;
     for (i, argv) in steps.into_iter().enumerate() {
         if argv.is_empty() {
@@ -1400,7 +1599,16 @@ fn script(rep: &Reporter, file: &OsStr) -> Result<bool, Usage> {
         }
         let step = Step::try_parse_from(std::iter::once("ouro-fixture".to_string()).chain(argv))
             .map_err(|e| format!("script step {i}: {e}"))?;
-        all_ok &= run(step.mode, rep)?;
+        if let Some(name) = terminates_the_process(&step.mode)
+            && i + 1 != count
+        {
+            return Err(format!(
+                "script step {i} is `{name}`, which ends the process: \
+                 the {} step(s) after it could never run",
+                count - i - 1
+            ));
+        }
+        all_ok &= run_in(session, step.mode)?;
     }
     Ok(all_ok)
 }
