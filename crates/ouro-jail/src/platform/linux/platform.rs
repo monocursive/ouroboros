@@ -1264,10 +1264,14 @@ impl Boundary {
         // read back and must be exactly the number installed.
         let expected =
             super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
-        self.seccomp_filters = Some(super::agent::verify_filter_count(
-            &status_field("Seccomp_filters"),
-            expected,
-        )?);
+        self.seccomp_filters = Some(
+            super::agent::verify_filter_count(&status_field("Seccomp_filters"), expected).map_err(
+                |mut error| {
+                    error.message = format!("the launcher: {}", error.message);
+                    error
+                },
+            )?,
+        );
         // J3-agent end
         let nspid = super::tracer::nspid(launcher).unwrap_or_default();
         if nspid.len() < 2 {
@@ -1337,32 +1341,11 @@ impl Boundary {
             }
             errno_bytes.extend_from_slice(&buffer[..usize::try_from(n).unwrap_or(0)]);
         }
-        let errno = super::launch::decode_error_report(&errno_bytes)
-            .map_or("no errno reported", super::sys::errno_name);
-        match self.status.parsed().exit_code {
-            Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
-                ErrorCode::MissingCapability,
-                format!(
-                    "the `agent` unix-peer mediation could not be established: the launcher \
-                     could not install the mediation filter with its listener or open \
-                     sock_diag ({errno})"
-                ),
-            ),
-            Some(super::launch::EXIT_BRIDGE_FAILED) => preparing(
-                ErrorCode::MissingCapability,
-                format!(
-                    "the `agent` bridge could not be established: the launcher could not \
-                     start it ({errno})"
-                ),
-            ),
-            _ => preparing(
-                ErrorCode::BackendUnavailable,
-                format!(
-                    "bubblewrap exited before the launcher blocked: {}",
-                    self.diagnostic().trim()
-                ),
-            ),
-        }
+        launcher_failure(
+            self.status.parsed().exit_code,
+            &errno_bytes,
+            self.diagnostic().trim(),
+        )
     }
     // J3-agent end
 
@@ -1815,6 +1798,37 @@ fn nap() {
     // SAFETY: `ts` is a live timespec and the second argument may be null.
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
+
+// J3-agent begin: naming the mechanism a launcher could not establish
+/// The refusal for a launcher that ended before it blocked, from its exit
+/// status (as bubblewrap reported it) and the errno it wrote: the agent
+/// launcher's mediation and bridge failures name themselves; anything else
+/// is the backend's.
+fn launcher_failure(exit_code: Option<i32>, errno_bytes: &[u8], diagnostic: &str) -> JailError {
+    let errno = super::launch::decode_error_report(errno_bytes)
+        .map_or("no errno reported", super::sys::errno_name);
+    match exit_code {
+        Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
+            ErrorCode::MissingCapability,
+            format!(
+                "the `agent` unix-peer mediation could not be established: the launcher could \
+                 not install the mediation filter with its listener or open sock_diag ({errno})"
+            ),
+        ),
+        Some(super::launch::EXIT_BRIDGE_FAILED) => preparing(
+            ErrorCode::MissingCapability,
+            format!(
+                "the `agent` bridge could not be established: the launcher could not start it \
+                 ({errno})"
+            ),
+        ),
+        _ => preparing(
+            ErrorCode::BackendUnavailable,
+            format!("bubblewrap exited before the launcher blocked: {diagnostic}"),
+        ),
+    }
+}
+// J3-agent end
 
 /// The syscall `pid` is blocked in, and its first argument, from
 /// `/proc/<pid>/syscall` (`"<nr> 0x<arg0> ..."`).
@@ -3554,6 +3568,31 @@ mod tests {
                 "seccomp_user_notification"
             ]
         );
+    }
+
+    #[test]
+    fn a_launcher_setup_failure_names_the_mechanism_it_could_not_establish() {
+        let busy = libc::EBUSY.to_le_bytes();
+        let mediation =
+            launcher_failure(Some(super::super::launch::EXIT_MEDIATION_FAILED), &busy, "");
+        assert_eq!(mediation.code, ErrorCode::MissingCapability);
+        assert_eq!(mediation.exit_code(), 125);
+        assert!(
+            mediation.message.contains("unix-peer mediation"),
+            "{}",
+            mediation.message
+        );
+        assert!(mediation.message.contains("EBUSY"), "{}", mediation.message);
+        let bridge = launcher_failure(Some(super::super::launch::EXIT_BRIDGE_FAILED), &[], "");
+        assert!(
+            bridge.message.contains("`agent` bridge"),
+            "{}",
+            bridge.message
+        );
+        assert!(bridge.message.contains("no errno reported"));
+        let other = launcher_failure(Some(1), &[], "{\"exit-code\": 1}");
+        assert_eq!(other.code, ErrorCode::BackendUnavailable);
+        assert!(!other.message.contains("agent"));
     }
 
     #[test]

@@ -95,3 +95,35 @@ apparmor_userns_restriction = "available"
 # row stays unavailable: `agent` runs without nested user namespaces, and S03
 # proves its Landlock and seccomp nesting instead.
 nested_user_namespace = "unavailable"
+
+# J3 wave 2 (`agent`), measured live as ouro-ci on 2026-09-22 with this slice's
+# build: `ouro-jail doctor --json` and `doctor --profile agent --json` (ready)
+# inside the delegated scope. Evidence: the J3 agent report's
+# j3-agent-doctor-2026-09-22-ouro-ci.json (proposed for evidence/; each row's
+# `evidence_ref` carries the measured facts) and the live suite
+# crates/ouro-jail/tests/conformance_j3_agent.rs (21 tests: S03, N01-N05, C01,
+# X06 for agent). No host configuration was changed.
+
+# An unprivileged child installs the agent's mediation filter with
+# SECCOMP_FILTER_FLAG_NEW_LISTENER and this process takes the listener with
+# pidfd_getfd (Yama scope 1 permits a descendant). Same mechanism as
+# evidence/unixpeer-spike-2026-09-22-ouro-ci.txt steps 1-2.
+seccomp_user_notification = "available"
+
+# One real `ouro-jail run --profile agent`: through 127.0.0.1:3128 an allowed
+# loopback origin (numeric grant) answers 200 and the proxy records
+# allow/relayed; an ungranted port answers 403 (deny/host_not_allowed) and its
+# listener sees no connection; direct TCP egress is ENETUNREACH.
+agent_proxy_bridge = "available"
+
+# In the same run: a host-bound pathname socket in the workspace is refused
+# EACCES by the mediator and never sees a connection; a socket the child binds
+# in scratch is reached.
+agent_unix_peer_mediation = "available"
+
+# In the same run: a Landlock (ABI 8) + seccomp inner sandbox starts inside
+# `agent` and denies a write and a read outside its grant (EACCES) and mkdir
+# (EPERM); remount, umount, setns and unshare fail EPERM; direct egress fails
+# ENETUNREACH. The namespace form stays unavailable (nested_user_namespace
+# above), which `agent` records and does not refuse for.
+agent_inner_sandbox = "available"

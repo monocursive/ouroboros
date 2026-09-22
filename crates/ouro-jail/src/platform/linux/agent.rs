@@ -410,16 +410,8 @@ impl AgentNet {
         if status("NoNewPrivs") != "1" || !status("CapEff").chars().all(|c| c == '0') {
             return Err(refusal("bridge", "it holds privilege"));
         }
-        let filters: u32 = status("Seccomp_filters").parse().unwrap_or(0);
-        if filters != EXPECTED_BRIDGE_FILTERS {
-            return Err(refusal(
-                "bridge",
-                format!(
-                    "it runs under {filters} seccomp filters, not the agent baseline and the \
-                     mediation filter ({EXPECTED_BRIDGE_FILTERS})"
-                ),
-            ));
-        }
+        let filters = verify_filter_count(&status("Seccomp_filters"), EXPECTED_BRIDGE_FILTERS)
+            .map_err(|error| refusal("bridge", error.message))?;
         // Listening is read back from the attempt's own network namespace,
         // through the bridge's /proc view, and tied to a descriptor it holds.
         loop {
@@ -575,41 +567,15 @@ impl AgentNet {
             .tally
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let missing = self
-            .proxy_summary
-            .map_or(0, |summary| summary.results_missing);
-        let stopped = self.proxy_summary.is_some();
-        let mut gaps = Vec::new();
-        if missing > 0 || tally.lost > 0 {
-            let now = crate::platform::elapsed_since_start_ns().to_string();
-            gaps.push(Gap {
-                classes: vec![CoverageClass::ProxyNet.as_str().to_owned()],
-                source: "proxy".to_owned(),
-                start_ns: "0".to_owned(),
-                end_ns: Some(now),
-                reason: if missing > 0 {
-                    "proxy_drain_incomplete".to_owned()
-                } else {
-                    "proxy_result_undelivered".to_owned()
-                },
-                lost_count: Some(missing + tally.lost),
-            });
-        }
-        let status = if !stopped || !gaps.is_empty() {
-            SourceStatus::Degraded
-        } else {
-            SourceStatus::Active
-        };
-        summary.sources.proxy = status;
-        summary.gaps.extend(gaps.iter().cloned());
-        summary.classes.insert(
-            CoverageClass::ProxyNet,
-            ClassSummary {
-                status,
-                observed_count: (status == SourceStatus::Active).then_some(tally.delivered),
-                gaps,
-            },
+        let class = proxy_coverage(
+            tally.delivered,
+            tally.lost,
+            self.proxy_summary.map(|summary| summary.results_missing),
+            &crate::platform::elapsed_since_start_ns().to_string(),
         );
+        summary.sources.proxy = class.status;
+        summary.gaps.extend(class.gaps.iter().cloned());
+        summary.classes.insert(CoverageClass::ProxyNet, class);
     }
 
     /// The most recent proxy results, oldest first.
@@ -709,6 +675,47 @@ impl AgentNet {
     #[must_use]
     pub fn baseline_digest(&self) -> &str {
         &self.baseline_digest
+    }
+}
+
+/// `proxy.net` from the proxy's accounting (§11.4): active with the count of
+/// results delivered to the trace only when the drain completed
+/// (`missing == Some(0)`) and nothing was lost in transport; otherwise
+/// degraded, with a null count and a gap naming the class and the known
+/// number of results that are missing. `missing == None` means the proxy was
+/// never stopped and drained, which is never complete.
+#[must_use]
+pub fn proxy_coverage(
+    delivered: u64,
+    lost: u64,
+    missing: Option<u64>,
+    now_ns: &str,
+) -> ClassSummary {
+    let mut gaps = Vec::new();
+    let drain_missing = missing.unwrap_or(0);
+    if missing.is_none() || drain_missing > 0 || lost > 0 {
+        gaps.push(Gap {
+            classes: vec![CoverageClass::ProxyNet.as_str().to_owned()],
+            source: "proxy".to_owned(),
+            start_ns: "0".to_owned(),
+            end_ns: Some(now_ns.to_owned()),
+            reason: match missing {
+                None => "proxy_not_drained".to_owned(),
+                Some(0) => "proxy_result_undelivered".to_owned(),
+                Some(_) => "proxy_drain_incomplete".to_owned(),
+            },
+            lost_count: missing.map(|missing| missing + lost),
+        });
+    }
+    let status = if gaps.is_empty() {
+        SourceStatus::Active
+    } else {
+        SourceStatus::Degraded
+    };
+    ClassSummary {
+        status,
+        observed_count: (status == SourceStatus::Active).then_some(delivered),
+        gaps,
     }
 }
 
@@ -821,7 +828,7 @@ pub fn verify_filter_count(observed: &str, expected: u32) -> Result<u32, JailErr
             ErrorStage::Preparing,
             Remediation::HostSetup,
             format!(
-                "the launcher runs under Seccomp_filters {observed:?}, not the {expected} \
+                "it runs under Seccomp_filters {observed:?}, not the {expected} \
                  filters this boundary installs"
             ),
         )),
@@ -846,6 +853,32 @@ mod tests {
             "an established flow, another port and 0.0.0.0 are not the bridge"
         );
         assert_eq!(listening_inode(header), None);
+    }
+
+    #[test]
+    fn proxy_coverage_is_active_only_for_a_complete_drain_with_nothing_lost() {
+        let complete = proxy_coverage(3, 0, Some(0), "9");
+        assert_eq!(complete.status, SourceStatus::Active);
+        assert_eq!(complete.observed_count, Some(3));
+        assert!(complete.gaps.is_empty());
+        for (lost, missing, reason, count) in [
+            (0, Some(2), "proxy_drain_incomplete", Some(2)),
+            (1, Some(0), "proxy_result_undelivered", Some(1)),
+            (1, Some(2), "proxy_drain_incomplete", Some(3)),
+            (0, None, "proxy_not_drained", None),
+        ] {
+            let degraded = proxy_coverage(3, lost, missing, "9");
+            assert_eq!(degraded.status, SourceStatus::Degraded, "{reason}");
+            assert_eq!(
+                degraded.observed_count, None,
+                "{reason}: a degraded count is null"
+            );
+            assert_eq!(degraded.gaps.len(), 1);
+            assert_eq!(degraded.gaps[0].reason, reason);
+            assert_eq!(degraded.gaps[0].classes, vec!["proxy.net".to_owned()]);
+            assert_eq!(degraded.gaps[0].source, "proxy");
+            assert_eq!(degraded.gaps[0].lost_count, count);
+        }
     }
 
     #[test]
