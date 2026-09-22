@@ -11,6 +11,15 @@ pub mod capability;
 pub mod cleanup;
 pub mod cli;
 pub mod config;
+// J3-launch begin: credential staging
+pub mod credentials;
+// J3-launch end
+// J3-launch begin: TEMPORARY scaffold of N's module (contract §3.1); N's line wins at integration
+pub mod environment;
+// J3-launch end
+// J3-launch begin: data-only launch profiles
+pub mod launch_profile;
+// J3-launch end
 pub mod network;
 pub mod observer;
 pub mod platform;

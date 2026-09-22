@@ -666,6 +666,253 @@ impl Drop for Lease {
     }
 }
 
+// ---------------------------------------------------------------------------
+// J3 launch: vendor state in jail state (§7, §8.1 step 2, §12)
+// ---------------------------------------------------------------------------
+
+pub mod anchored;
+
+use crate::records::StateCleanup;
+
+/// The vendor-state directory's name inside an attempt directory (§7).
+pub const VENDOR_STATE_NAME: &str = "vendor-state";
+
+/// Largest `jail-state.json` this tool reads back. It writes the file itself;
+/// the bound is there so a replaced file cannot grow a read without limit.
+const STATE_FILE_MAX: u64 = 1024 * 1024;
+
+/// What jail state records about an attempt's vendor state.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct VendorRegistration {
+    /// The directory's `(dev, ino)`, once it has been created.
+    pub identity: Option<(u64, u64)>,
+    /// Cleanup progress as last recorded.
+    pub state_cleanup: StateCleanup,
+    /// The safe reason recorded with a `pending` status, if any.
+    pub reason: Option<String>,
+}
+
+/// One staged credential's private provenance, kept in jail state only.
+///
+/// §12: "Source identity/paths and credential contents stay in private
+/// operational state, never the receipt." This is that private state: the
+/// source object's identity and size, never its path (which `policy.json`
+/// already holds) and never its bytes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PrivateCredential {
+    /// The logical id.
+    pub id: String,
+    /// `copy_rw` or `bind_ro`.
+    pub mode: String,
+    /// Source device.
+    pub source_dev: u64,
+    /// Source inode.
+    pub source_ino: u64,
+    /// Source size at staging.
+    pub source_size: u64,
+}
+
+fn state_parse_failed(detail: impl std::fmt::Display) -> JailError {
+    JailError::new(
+        ErrorCode::StateWriteFailed,
+        ErrorStage::Preparing,
+        Remediation::InspectState,
+        format!("the attempt state could not be read back: {detail}"),
+    )
+}
+
+/// Reads `jail-state.json` back as JSON.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the file is missing,
+/// unreadable, oversized, a symlink or not JSON.
+pub fn read_attempt_state(attempt_dir: &AttemptDir) -> Result<serde_json::Value, JailError> {
+    let path = attempt_dir.state_path();
+    let bytes = read_capped(&path, STATE_FILE_MAX)
+        .map_err(state_parse_failed)?
+        .ok_or_else(|| state_parse_failed("the file is absent"))?;
+    serde_json::from_slice(&bytes).map_err(state_parse_failed)
+}
+
+/// Read-modify-write of `jail-state.json` through the durable replacement.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the file cannot be read,
+/// parsed or durably replaced.
+pub fn update_attempt_state(
+    attempt_dir: &AttemptDir,
+    change: impl FnOnce(&mut serde_json::Value),
+) -> Result<(), JailError> {
+    let mut state = read_attempt_state(attempt_dir)?;
+    if state.get("schema").and_then(serde_json::Value::as_str) != Some("ouro.jail.state/1") {
+        return Err(state_parse_failed("the schema is not ouro.jail.state/1"));
+    }
+    change(&mut state);
+    let bytes = serde_json::to_vec_pretty(&state).map_err(state_parse_failed)?;
+    replace_atomically(&attempt_dir.state_path(), &bytes)
+}
+
+fn cleanup_word(status: StateCleanup) -> &'static str {
+    match status {
+        StateCleanup::NotNeeded => "not_needed",
+        StateCleanup::Pending => "pending",
+        StateCleanup::Complete => "complete",
+    }
+}
+
+/// What jail state says about vendor state, or `None` when none was ever
+/// registered.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when jail state cannot be read, and
+/// when it names vendor state with a cleanup status it cannot parse.
+pub fn vendor_registration(
+    attempt_dir: &AttemptDir,
+) -> Result<Option<VendorRegistration>, JailError> {
+    let state = read_attempt_state(attempt_dir)?;
+    let Some(vendor) = state.get("vendor_state").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let number = |key: &str| {
+        vendor
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| text.parse::<u64>().ok())
+    };
+    let identity = number("dev").zip(number("ino"));
+    let state_cleanup = match state
+        .get("state_cleanup")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("pending") => StateCleanup::Pending,
+        Some("complete") => StateCleanup::Complete,
+        // Registered vendor state is never `not_needed`; anything else is a
+        // state file this tool did not write.
+        other => {
+            return Err(state_parse_failed(format!(
+                "vendor state is registered with cleanup status {other:?}"
+            )));
+        }
+    };
+    let reason = state
+        .get("cleanup_reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Ok(Some(VendorRegistration {
+        identity,
+        state_cleanup,
+        reason,
+    }))
+}
+
+/// Opens this attempt's directory as the anchor for vendor-state work.
+///
+/// The attempt directory is operator state (§6.2): it must be a directory this
+/// operator owns, mode 0700 or stricter, and not a symlink.
+///
+/// # Errors
+/// Returns [`ErrorCode::UnsafeStatePath`] when it is not.
+pub fn open_attempt_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailError> {
+    let root = attempt_dir.root();
+    let dir = anchored::Dir::open_trusted(root)
+        .map_err(|error| unsafe_path(root, format!("cannot be opened: {error}")))?;
+    let stat = dir
+        .stat()
+        .map_err(|error| unsafe_path(root, format!("cannot be inspected: {error}")))?;
+    check_ownership(root, stat.uid, stat.mode, DIRECTORY_MODE)?;
+    Ok(dir)
+}
+
+/// Registers vendor state in jail state, then creates it (§7, §12).
+///
+/// "Register vendor state before the first copy, create it mode 0700." The
+/// registration is durable before `mkdirat` runs, so a crash between the two
+/// leaves a registered, absent directory that cleanup treats as removed, and
+/// never an unregistered directory nobody will clean. The directory's identity
+/// is recorded once it exists; cleanup refuses to delete anything else.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when either state write or the
+/// creation fails, and [`ErrorCode::UnsafeStatePath`] when the attempt
+/// directory fails its checks or `vendor-state` already exists.
+pub fn create_vendor_state(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailError> {
+    update_attempt_state(attempt_dir, |state| {
+        state["vendor_state"] = serde_json::json!({
+            "name": VENDOR_STATE_NAME,
+            "registered_at": crate::records::rfc3339_utc(std::time::SystemTime::now()),
+            "dev": null,
+            "ino": null,
+            "credentials": [],
+        });
+        state["state_cleanup"] = serde_json::Value::from(cleanup_word(StateCleanup::Pending));
+        state["cleanup_reason"] = serde_json::Value::Null;
+    })?;
+    let attempt = open_attempt_dir(attempt_dir)?;
+    let name = anchored::Name::new(VENDOR_STATE_NAME.as_bytes())
+        .map_err(|error| write_failed(attempt_dir.root(), &error))?;
+    let vendor = attempt.mkdir_at(&name, DIRECTORY_MODE).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            unsafe_path(
+                &attempt_dir.vendor_state_path(),
+                "already exists in a fresh attempt; it is not this attempt's vendor state",
+            )
+        } else {
+            write_failed(&attempt_dir.vendor_state_path(), &error)
+        }
+    })?;
+    attempt
+        .sync()
+        .map_err(|error| write_failed(attempt_dir.root(), &error))?;
+    let stat = vendor
+        .stat()
+        .map_err(|error| write_failed(&attempt_dir.vendor_state_path(), &error))?;
+    update_attempt_state(attempt_dir, |state| {
+        state["vendor_state"]["dev"] = serde_json::Value::from(stat.dev.to_string());
+        state["vendor_state"]["ino"] = serde_json::Value::from(stat.ino.to_string());
+    })?;
+    Ok(vendor)
+}
+
+/// Records the private provenance of staged credentials in jail state.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the state write fails.
+pub fn record_staged_credentials(
+    attempt_dir: &AttemptDir,
+    staged: &[PrivateCredential],
+) -> Result<(), JailError> {
+    let rows: Vec<serde_json::Value> = staged
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.id,
+                "mode": row.mode,
+                "source_dev": row.source_dev.to_string(),
+                "source_ino": row.source_ino.to_string(),
+                "source_size": row.source_size.to_string(),
+            })
+        })
+        .collect();
+    update_attempt_state(attempt_dir, |state| {
+        state["vendor_state"]["credentials"] = serde_json::Value::from(rows);
+    })
+}
+
+/// Records cleanup progress in jail state, atomically and durably.
+///
+/// # Errors
+/// Returns [`ErrorCode::StateWriteFailed`] when the state write fails.
+pub fn record_cleanup(
+    attempt_dir: &AttemptDir,
+    status: StateCleanup,
+    reason: Option<&str>,
+) -> Result<(), JailError> {
+    update_attempt_state(attempt_dir, |state| {
+        state["state_cleanup"] = serde_json::Value::from(cleanup_word(status));
+        state["cleanup_reason"] = reason.map_or(serde_json::Value::Null, serde_json::Value::from);
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

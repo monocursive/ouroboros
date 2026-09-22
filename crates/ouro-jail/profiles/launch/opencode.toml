@@ -1,0 +1,34 @@
+# EXPERIMENTAL launch profile (jail-v1 §12, north star §4.5).
+#
+# Example data only: `ouro-jail` never reads this directory. An operator who
+# wants it copies it to `<config-dir>/launch/opencode.toml` (mode 0600) and
+# checks every path and host against their own installation. It stays
+# experimental until a real run records the OpenCode version and the exact
+# files and hosts it needed (§12, acceptance row A01); nothing here has been
+# recorded yet.
+#
+# The north star's initial inputs: XDG config and data directories beneath
+# vendor state, provider keys `bind_ro` and the mutable config `copy_rw`, from
+# the node's OpenCode directories. The allowed hosts depend on the providers
+# the operator configures, so none are granted here: add them explicitly.
+
+name = "opencode"
+jail = "agent"
+state_subdirs = ["config/opencode", "data/opencode"]
+
+[environment]
+XDG_CONFIG_HOME = { state = "config" }
+XDG_DATA_HOME = { state = "data" }
+
+[credentials.auth]
+source = "~/.local/share/opencode/auth.json"
+dest = "data/opencode/auth.json"
+mode = "bind_ro"
+
+[credentials.config]
+source = "~/.config/opencode/opencode.json"
+dest = "config/opencode/opencode.json"
+mode = "copy_rw"
+
+[network]
+allow = []

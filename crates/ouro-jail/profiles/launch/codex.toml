@@ -1,0 +1,29 @@
+# EXPERIMENTAL launch profile (jail-v1 §12, north star §4.5).
+#
+# Example data only: `ouro-jail` never reads this directory. An operator who
+# wants it copies it to `<config-dir>/launch/codex.toml` (mode 0600) and checks
+# every path and host against their own installation. It stays experimental
+# until a real run records the Codex version and the exact files and hosts it
+# needed (§12, acceptance row A01); nothing here has been recorded yet.
+#
+# Sources are the north star's initial paths: the node's `~/.codex`. `copy_rw`
+# can rotate a refresh token the node's own file then lacks; `bind_ro` is the
+# alternative, and refresh then fails inside the attempt.
+
+name = "codex"
+jail = "agent"
+state_var = "CODEX_HOME"
+home_is_state = true
+
+[credentials.auth]
+source = "~/.codex/auth.json"
+dest = "auth.json"
+mode = "copy_rw"
+
+[credentials.config]
+source = "~/.codex/config.toml"
+dest = "config.toml"
+mode = "bind_ro"
+
+[network]
+allow = ["api.openai.com:443", "*.openai.com:443"]

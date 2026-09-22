@@ -97,6 +97,11 @@ pub const REQ_NETWORK_NONE: &str = "network_none";
 pub const REQ_NETWORK_PROXY: &str = "network_proxy";
 /// Requirement identifier for a supervisor-owned execution cgroup.
 pub const REQ_EXECUTION_CGROUP: &str = "execution_cgroup";
+// J3-launch begin: credential staging requirement (§12)
+/// Requirement identifier for staging launch credentials: anchored copies
+/// into vendor state and read-only binds of the exact source objects.
+pub const REQ_CREDENTIAL_STAGING: &str = "credential_staging";
+// J3-launch end
 
 /// Derives the capability requirements a snapshot implies (§6.4, §3.1).
 ///
@@ -145,6 +150,16 @@ pub fn requirements(snapshot: &PolicySnapshot) -> Vec<String> {
     if needs_cgroup {
         out.push(REQ_EXECUTION_CGROUP.to_owned());
     }
+    // J3-launch begin: a launch profile that declares credentials needs them
+    // staged, and a platform that cannot stage them must refuse, not skip.
+    if snapshot
+        .launch
+        .as_ref()
+        .is_some_and(|launch| !launch.credentials.is_empty())
+    {
+        out.push(REQ_CREDENTIAL_STAGING.to_owned());
+    }
+    // J3-launch end
     out
 }
 

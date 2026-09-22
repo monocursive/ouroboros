@@ -100,6 +100,14 @@ pub struct PreparedPlan {
     pub argv: Vec<Vec<u8>>,
     /// The absolute resolved workspace.
     pub workspace: PathBuf,
+    // J3-launch begin: vendor state and bind_ro handles staged by the
+    // supervisor, bound by descriptor (§9.1, §12). The only change to this
+    // file: a field, so the platform receives the exact objects staging
+    // examined instead of re-resolving paths.
+    /// The vendor-state directory and `bind_ro` sources, when a launch
+    /// profile needs them; `None` otherwise.
+    pub launch: Option<crate::credentials::LaunchHandoff>,
+    // J3-launch end
 }
 
 /// The output channels a prepared execution may write to.

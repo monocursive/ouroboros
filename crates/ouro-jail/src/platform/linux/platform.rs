@@ -68,6 +68,11 @@ const ARGS_FD: RawFd = 14;
 /// First fixed descriptor number used for pinned protected binds
 /// (`--ro-bind-fd`); the fixed channel descriptors live below it.
 const PINNED_FD_BASE: RawFd = 20;
+// J3-launch begin: the vendor-state directory's descriptor in bubblewrap
+/// Descriptor the vendor-state directory is handed to bubblewrap on
+/// (`--bind-fd`). The `bind_ro` credential views follow the pinned binds.
+const VENDOR_STATE_FD: RawFd = 16;
+// J3-launch end
 
 /// Preparation budget (§8.2).
 const PREPARE_BUDGET: Duration = Duration::from_secs(30);
@@ -194,6 +199,15 @@ fn inputs_for(
             "cgroup-v2-delegated",
             CapabilityScope::Tree,
         )),
+        // J3-launch begin: credential staging is anchored copies into vendor
+        // state plus read-only descriptor binds, which rest on the backend and
+        // on its read-only bind holding.
+        crate::capability::REQ_CREDENTIAL_STAGING => Some((
+            &["bwrap_present", "mount_readonly_bind"],
+            "anchored-copy+bubblewrap-bind-fd",
+            CapabilityScope::Tree,
+        )),
+        // J3-launch end
         _ => None,
     }
 }
@@ -637,6 +651,26 @@ impl Boundary {
         }
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
+        // J3-launch begin: the staged vendor state and bind_ro sources, bound
+        // by the descriptors staging examined (§9.1, §12).
+        let staged = staged_mounts(&snapshot, plan.launch.as_ref())?;
+        if staged.vendor.is_some() {
+            bplan.vendor_state = plan
+                .launch
+                .as_ref()
+                .and_then(|handoff| handoff.vendor_state.as_ref())
+                .map(|vendor| vendor.host_path.clone());
+            bplan.vendor_state_fd = Some(VENDOR_STATE_FD);
+        }
+        bplan.credential_binds = staged
+            .credentials
+            .iter()
+            .map(|(_, destination)| bwrap::CredentialBind {
+                fd: None,
+                destination: destination.clone(),
+            })
+            .collect();
+        // J3-launch end
 
         // Operator grants are enforced, not merely recorded (I02, north-star
         // §4.2): read-only grants become additional ro-binds at their
@@ -690,6 +724,12 @@ impl Boundary {
             &name_refs,
             snapshot.filesystem.protected_coverage,
         )?;
+        // J3-launch begin: credential views take the slots after the pins
+        let credential_base = PINNED_FD_BASE + pinned_fds.len() as RawFd;
+        for (index, view) in bplan.credential_binds.iter_mut().enumerate() {
+            view.fd = Some(credential_base + index as RawFd);
+        }
+        // J3-launch end
 
         let filter = seccomp::tool_baseline().map_err(|err| {
             preparing(
@@ -740,7 +780,11 @@ impl Boundary {
             )
         })?;
 
-        let mut fds = FdMap::with_target_limit(PINNED_FD_BASE + pinned_fds.len() as RawFd);
+        // J3-launch begin: room for the credential views after the pins
+        let mut fds = FdMap::with_target_limit(
+            PINNED_FD_BASE + pinned_fds.len() as RawFd + staged.credentials.len() as RawFd,
+        );
+        // J3-launch end
         let io = |err: std::io::Error| {
             preparing(
                 ErrorCode::BackendUnavailable,
@@ -760,6 +804,20 @@ impl Boundary {
         for (copy, target) in pinned_fds {
             fds.add(copy, target).map_err(io)?;
         }
+        // J3-launch begin: hand the staged descriptors to bubblewrap
+        if let Some(vendor) = staged.vendor {
+            fds.add(vendor, VENDOR_STATE_FD).map_err(io)?;
+        }
+        for ((source, _), view) in staged.credentials.into_iter().zip(&bplan.credential_binds) {
+            let Some(target) = view.fd else {
+                return Err(preparing(
+                    ErrorCode::InternalError,
+                    "a credential view has no descriptor slot",
+                ));
+            };
+            fds.add(source, target).map_err(io)?;
+        }
+        // J3-launch end
         // jail-v1 §2 I07 (every wait bounded): the `--args` payload can exceed
         // the pipe's capacity, so it must be written while the reader exists.
         // bwrap is spawned below first and blocks reading ARGS_FD; writing
@@ -1736,14 +1794,9 @@ fn resolve_path_ref(reference: &PathRef, workspace: &Path) -> Result<OsString, J
         RootToken::Workspace => workspace.to_path_buf(),
         RootToken::Scratch => PathBuf::from(bwrap::SCRATCH_INSIDE_PATH),
         RootToken::Host => PathBuf::from("/"),
-        RootToken::VendorState => {
-            return Err(error(
-                ErrorCode::CredentialUnavailable,
-                ErrorStage::Preparing,
-                Remediation::Unsupported,
-                "vendor state is a launch-profile feature this slice does not implement".to_owned(),
-            ));
-        }
+        // J3-launch begin: vendor state as the child sees it
+        RootToken::VendorState => PathBuf::from(bwrap::VENDOR_STATE_INSIDE_PATH),
+        // J3-launch end
     };
     let suffix = reference.path.as_bytes();
     if suffix.is_empty() {
@@ -1765,14 +1818,133 @@ fn host_path_of(
         RootToken::Workspace => Ok(join_suffix(workspace, reference)),
         RootToken::Scratch => Ok(join_suffix(scratch, reference)),
         RootToken::Host => Ok(join_suffix(Path::new("/"), reference)),
+        // J3-launch begin: vendor state has no host path a grant may bind; it
+        // is bound only by the descriptor the supervisor created it with.
         RootToken::VendorState => Err(error(
-            ErrorCode::CredentialUnavailable,
+            ErrorCode::InvalidConfig,
             ErrorStage::Preparing,
-            Remediation::Unsupported,
-            "vendor state is a launch-profile feature this slice does not implement".to_owned(),
+            Remediation::Configuration,
+            "vendor state is bound by descriptor, never as a path grant".to_owned(),
         )),
+        // J3-launch end
     }
 }
+
+// J3-launch begin: checking and duplicating the staged hand-off
+/// The staged objects bubblewrap binds by descriptor.
+struct StagedMounts {
+    /// A duplicate of the vendor-state directory descriptor.
+    vendor: Option<OwnedFd>,
+    /// Each `bind_ro` source descriptor and its in-sandbox destination.
+    credentials: Vec<(OwnedFd, PathBuf)>,
+}
+
+/// Checks the supervisor's hand-off against the policy and duplicates it.
+///
+/// The policy is the authority: vendor state is bound exactly when the
+/// snapshot has a managed vendor-state root, and exactly the snapshot's
+/// `bind_ro` declarations are bound, each by a descriptor whose object is
+/// still the regular file staging identified. Anything else refuses; nothing
+/// is ever bound by path. `tool` and `build` never bind a credential (§6.1).
+fn staged_mounts(
+    snapshot: &PolicySnapshot,
+    handoff: Option<&crate::credentials::LaunchHandoff>,
+) -> Result<StagedMounts, JailError> {
+    use crate::state::anchored::{Kind, fstat};
+    use std::os::fd::AsFd as _;
+    let refuse = |message: &str| {
+        error(
+            ErrorCode::InvalidConfig,
+            ErrorStage::Preparing,
+            Remediation::Configuration,
+            message.to_owned(),
+        )
+    };
+    let declared: Vec<&crate::policy::CredentialDecl> = snapshot
+        .launch
+        .iter()
+        .flat_map(|launch| launch.credentials.iter())
+        .collect();
+    if !declared.is_empty() && snapshot.profile != ProfileName::Agent {
+        return Err(refuse(
+            "only the `agent` profile stages launch credentials (jail-v1 §6.1)",
+        ));
+    }
+    let wants_vendor = snapshot.roots.vendor_state.is_some();
+    let Some(handoff) = handoff else {
+        if wants_vendor || !declared.is_empty() {
+            return Err(refuse(
+                "the policy has managed vendor state or credentials but nothing was staged",
+            ));
+        }
+        return Ok(StagedMounts {
+            vendor: None,
+            credentials: Vec::new(),
+        });
+    };
+    let vendor = match (&handoff.vendor_state, wants_vendor) {
+        (Some(vendor), true) => vendor,
+        (None, false) if handoff.binds.is_empty() => {
+            return Ok(StagedMounts {
+                vendor: None,
+                credentials: Vec::new(),
+            });
+        }
+        _ => {
+            return Err(refuse(
+                "the staged vendor state does not match the policy's vendor-state root",
+            ));
+        }
+    };
+    let stat = fstat(vendor.fd.as_fd()).map_err(|err| refuse(&err.to_string()))?;
+    if stat.kind != Kind::Directory || stat.identity() != vendor.identity {
+        return Err(refuse(
+            "the staged vendor-state descriptor is not the registered directory",
+        ));
+    }
+    let binds: Vec<&&crate::policy::CredentialDecl> = declared
+        .iter()
+        .filter(|declaration| declaration.mode == crate::credentials::MODE_BIND_RO)
+        .collect();
+    if binds.len() != handoff.binds.len() {
+        return Err(refuse(
+            "the staged read-only credentials do not match the policy's declarations",
+        ));
+    }
+    let mut credentials = Vec::with_capacity(binds.len());
+    for handle in &handoff.binds {
+        if !binds
+            .iter()
+            .any(|declaration| declaration.id == handle.id && declaration.dest == handle.dest)
+        {
+            return Err(refuse(
+                "a staged read-only credential is not one the policy declares",
+            ));
+        }
+        let source = fstat(handle.fd.as_fd()).map_err(|err| refuse(&err.to_string()))?;
+        if source.kind != Kind::Regular || source.identity() != handle.identity {
+            return Err(refuse(
+                "a staged read-only credential descriptor is not the object staging examined",
+            ));
+        }
+        let destination = Path::new(bwrap::VENDOR_STATE_INSIDE_PATH)
+            .join(OsStr::from_bytes(handle.dest.as_bytes()));
+        let duplicate = handle
+            .fd
+            .try_clone()
+            .map_err(|err| refuse(&err.to_string()))?;
+        credentials.push((duplicate, destination));
+    }
+    let vendor = vendor
+        .fd
+        .try_clone()
+        .map_err(|err| refuse(&err.to_string()))?;
+    Ok(StagedMounts {
+        vendor: Some(vendor),
+        credentials,
+    })
+}
+// J3-launch end
 
 type MountPreparation = (
     jfs::ProtectedScan,
@@ -2980,4 +3152,122 @@ mod tests {
         assert_eq!(capability.status, CapabilityStatus::Unsupported);
         assert_eq!(capability.measured_at, None);
     }
+    // J3-launch begin: the staged hand-off is checked against the policy
+    fn launch_snapshot(profile: ProfileName, bind_ro: bool) -> PolicySnapshot {
+        use crate::policy::{
+            CredentialDecl, LaunchSnapshot, ResolveInputs, ScratchRoot, VendorStateRoot,
+        };
+        let inputs = ResolveInputs {
+            platform: Os::Linux,
+            base_profile: profile,
+            policy_name: profile.as_str().to_owned(),
+            baseline: crate::profiles::baseline(profile, Os::Linux, &|_| None),
+            workspace: b"/work".to_vec(),
+            scratch: ScratchRoot::Managed,
+            vendor_state: None,
+            operator_home: None,
+            translation_prefixes: Vec::new(),
+            layers: Vec::new(),
+        };
+        let mut snapshot = crate::policy::resolve(&inputs).unwrap().snapshot;
+        snapshot.roots.vendor_state = Some(VendorStateRoot::Managed);
+        snapshot.launch = Some(LaunchSnapshot {
+            state_var: None,
+            home_is_state: false,
+            state_subdirs: Vec::new(),
+            credentials: if bind_ro {
+                vec![CredentialDecl {
+                    id: "c".to_owned(),
+                    source: NativeString::Text("/src/c".to_owned()),
+                    dest: NativeString::Text("c".to_owned()),
+                    mode: "bind_ro".to_owned(),
+                }]
+            } else {
+                Vec::new()
+            },
+        });
+        snapshot
+    }
+
+    fn handoff(root: &std::path::Path, bind: bool) -> crate::credentials::LaunchHandoff {
+        use crate::credentials::{BindHandle, LaunchHandoff, VendorStateHandle};
+        use crate::state::anchored::{Dir, Name, fstat};
+        use std::os::fd::AsFd as _;
+        use std::sync::Arc;
+        let dir = Dir::open_trusted(root).unwrap();
+        let vendor = dir.mkdir_at(&Name::new(b"v").unwrap(), 0o700).unwrap();
+        std::fs::write(root.join("c"), b"c").unwrap();
+        let source = dir.open_path_at(&Name::new(b"c").unwrap()).unwrap();
+        let source_identity = fstat(source.as_fd()).unwrap().identity();
+        let vendor_identity = vendor.stat().unwrap().identity();
+        LaunchHandoff {
+            vendor_state: Some(VendorStateHandle {
+                host_path: root.join("v"),
+                fd: Arc::new(vendor.into_fd()),
+                identity: vendor_identity,
+            }),
+            binds: if bind {
+                vec![BindHandle {
+                    id: "c".to_owned(),
+                    fd: Arc::new(source),
+                    dest: NativeString::Text("c".to_owned()),
+                    identity: source_identity,
+                }]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    #[test]
+    fn a_matching_hand_off_is_bound_and_every_mismatch_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let good = handoff(&path, true);
+        let staged = super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&good))
+            .expect("a matching hand-off");
+        assert!(staged.vendor.is_some());
+        assert_eq!(staged.credentials.len(), 1);
+        assert_eq!(
+            staged.credentials[0].1,
+            std::path::Path::new("/run/ouro/state/c")
+        );
+
+        // Credentials under `tool` (§6.1), even with a matching hand-off.
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Tool, true), Some(&good)).is_err()
+        );
+        // Managed vendor state with nothing staged, and credentials with no
+        // vendor state at all.
+        assert!(super::staged_mounts(&launch_snapshot(ProfileName::Agent, false), None).is_err());
+        let mut stateless = launch_snapshot(ProfileName::Agent, true);
+        stateless.roots.vendor_state = None;
+        assert!(super::staged_mounts(&stateless, None).is_err());
+        // A bind the policy does not declare.
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, false), Some(&good)).is_err()
+        );
+        // A declared bind that was not staged.
+        let other = tempfile::tempdir().unwrap();
+        let unbound = handoff(&other.path().canonicalize().unwrap(), false);
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&unbound))
+                .is_err()
+        );
+        // A descriptor that is not the object staging recorded.
+        let mut swapped = good.clone();
+        swapped.binds[0].identity = (0, 0);
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&swapped))
+                .is_err()
+        );
+        let mut moved = good;
+        if let Some(vendor) = moved.vendor_state.as_mut() {
+            vendor.identity = (0, 0);
+        }
+        assert!(
+            super::staged_mounts(&launch_snapshot(ProfileName::Agent, true), Some(&moved)).is_err()
+        );
+    }
+    // J3-launch end
 }
