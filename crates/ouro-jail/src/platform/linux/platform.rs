@@ -514,7 +514,12 @@ impl Boundary {
                 }
             }
         }
-        bplan.placeholders.clone_from(&placeholders);
+        // The plan renders from the paths; the handles that pin the
+        // identities stay here, in the supervisor.
+        bplan.placeholders = placeholders
+            .iter()
+            .map(|placeholder| placeholder.mount().clone())
+            .collect();
 
         let filter = seccomp::tool_baseline().map_err(|err| {
             preparing(

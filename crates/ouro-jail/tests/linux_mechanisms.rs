@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -985,6 +985,7 @@ struct ToolRun {
     before: Vec<OsString>,
     after: Vec<OsString>,
     placeholder_outcomes: Vec<PlaceholderOutcome>,
+    placeholder_identities: Vec<((u64, u64), (u64, u64))>,
     workspace: PathBuf,
     _dirs: (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir),
 }
@@ -1015,11 +1016,16 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
     let mut plan = BwrapPlan::tool(&workspace, &scratch, &jail_exe());
     plan.bwrap = bwrap_path();
     plan.protected = scan.segments.iter().map(|s| s.path.clone()).collect();
+    let mut placeholders = Vec::new();
     for (index, literal) in scan.absent_root_literals().iter().enumerate() {
         let source = holder_dir.path().join(format!("holder{index}"));
-        plan.placeholders
+        placeholders
             .push(Placeholder::create(&source, &workspace.join(literal)).expect("placeholder"));
     }
+    plan.placeholders = placeholders
+        .iter()
+        .map(|placeholder| placeholder.mount().clone())
+        .collect();
 
     let checks = [
         "status".to_owned(),
@@ -1106,8 +1112,18 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
         "status was {status_text:?}"
     );
 
-    let placeholder_outcomes = plan
-        .placeholders
+    // The identity each handle pins, beside what the name refers to now —
+    // after bubblewrap has bound a mount over it and unmounted it again. A
+    // real run is the case the comparison has to survive.
+    let placeholder_identities: Vec<((u64, u64), (u64, u64))> = placeholders
+        .iter()
+        .map(|placeholder| {
+            let seen = fs::symlink_metadata(placeholder.destination())
+                .expect("the placeholder destination survived the run");
+            (placeholder.identity(), (seen.dev(), seen.ino()))
+        })
+        .collect();
+    let placeholder_outcomes = placeholders
         .iter()
         .map(Placeholder::remove_if_unchanged)
         .collect();
@@ -1119,6 +1135,7 @@ fn run_tool_profile(force_args_fd: bool, narrow: bool) -> ToolRun {
         before,
         after,
         placeholder_outcomes,
+        placeholder_identities,
         workspace,
         _dirs: (ws_dir, scratch_dir, holder_dir),
     }
@@ -1206,7 +1223,16 @@ fn the_tool_profile_grants_what_it_says_and_nothing_else() {
         "inner pid {inner_pid} is not a namespace pid"
     );
 
-    // The placeholder is gone and the workspace is otherwise as it was.
+    // The placeholder is gone and the workspace is otherwise as it was. The
+    // read-only bind bubblewrap placed over the mount point, and took away
+    // again, left the underlying object alone: the identity registered at
+    // creation is still the one the name refers to.
+    for (registered, seen) in &run.placeholder_identities {
+        assert_eq!(
+            registered, seen,
+            "a run changed what the placeholder's name refers to"
+        );
+    }
     assert_eq!(
         run.placeholder_outcomes,
         vec![PlaceholderOutcome::Removed(
@@ -1286,31 +1312,198 @@ fn bubblewrap_creates_an_absent_bind_destination_and_leaves_it_behind() {
     fs::remove_dir(&destination).unwrap();
 }
 
+/// The two kinds of directory the placeholder check has to hold on: one whose
+/// filesystem hands a freed inode number straight back, and one that does not.
+///
+/// This is not decoration. A registered device and inode pair is only an
+/// identity while the number cannot be reused, and whether it is reused
+/// immediately is a property of the filesystem: tmpfs under `/tmp` does not,
+/// ext4 under `$HOME` does. A check tested only on tmpfs is a check tested
+/// only where the bug is invisible, which is how this defect reached a hosted
+/// runner in the first place.
+fn identity_bases(tag: &str) -> Vec<tempfile::TempDir> {
+    let mut bases = vec![temp_dir(tag)];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if home.is_dir()
+            && let Ok(dir) = tempfile::Builder::new()
+                .prefix(&format!("ouro-j1-{tag}-"))
+                .tempdir_in(&home)
+        {
+            bases.push(dir);
+        }
+    }
+    for base in &bases {
+        eprintln!(
+            "identity base {} is on {}",
+            base.path().display(),
+            filesystem_name(base.path())
+        );
+    }
+    bases
+}
+
+/// The filesystem behind a path, named where the magic number is one of the
+/// two this test cares about.
+fn filesystem_name(path: &Path) -> String {
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return "unknown".to_owned();
+    };
+    // SAFETY: `c` is a NUL-terminated path that outlives the call and `buf` is
+    // a live, writable statfs.
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::statfs(c.as_ptr(), &raw mut buf) } != 0 {
+        return "unknown".to_owned();
+    }
+    // The magic numbers the kernel documents for the two filesystems this
+    // test distinguishes. The literals take `f_type`'s own type, which is
+    // signed on some targets and unsigned on others; both hold these values.
+    match buf.f_type {
+        0x0102_1994 => "tmpfs".to_owned(),
+        0x0000_EF53 => "ext2/ext3/ext4".to_owned(),
+        other => format!("filesystem {other:#x}"),
+    }
+}
+
+/// Whether a directory hands a freed inode number straight back.
+///
+/// Reported, not asserted: the placeholder check must hold either way, and
+/// which filesystem does which is the host's business, not this crate's.
+fn reuses_inode_numbers(base: &Path) -> bool {
+    let probe = base.join("reuse-probe");
+    for _ in 0..8 {
+        fs::create_dir(&probe).expect("probe dir");
+        let first = fs::symlink_metadata(&probe).expect("probe stat").ino();
+        fs::remove_dir(&probe).expect("remove probe dir");
+        fs::create_dir(&probe).expect("probe dir again");
+        let second = fs::symlink_metadata(&probe)
+            .expect("probe stat again")
+            .ino();
+        fs::remove_dir(&probe).expect("remove probe dir again");
+        if first == second {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn a_placeholder_that_changed_is_kept_not_removed() {
-    let dir = temp_dir("holder");
+    for base in identity_bases("holder") {
+        let base = base.path();
+        eprintln!(
+            "{}: inode numbers are {}",
+            base.display(),
+            if reuses_inode_numbers(base) {
+                "reused immediately"
+            } else {
+                "not reused immediately"
+            }
+        );
+        let source = base.join("source");
+        let destination = base.join("dest");
+        let placeholder = Placeholder::create(&source, &destination).unwrap();
+
+        fs::write(destination.join("something"), b"x").unwrap();
+        assert_eq!(
+            placeholder.remove_if_unchanged(),
+            PlaceholderOutcome::KeptNotEmpty(destination.clone())
+        );
+        fs::remove_file(destination.join("something")).unwrap();
+
+        // Replace it with a different directory of the same name. On a
+        // filesystem that reuses inode numbers the replacement would arrive
+        // wearing the registered one, were the registered inode free to be
+        // handed out — the held handle is what stops that.
+        fs::remove_dir(&destination).unwrap();
+        fs::create_dir(&destination).unwrap();
+        match placeholder.remove_if_unchanged() {
+            PlaceholderOutcome::KeptChanged(path, reason) => {
+                assert_eq!(path, destination);
+                assert!(reason.contains("identity changed"), "reason was {reason}");
+            }
+            other => panic!(
+                "a replaced placeholder must be kept under {}, got {other:?}",
+                base.display()
+            ),
+        }
+        assert!(destination.exists(), "a replaced placeholder was removed");
+        fs::remove_dir(&destination).unwrap();
+    }
+}
+
+/// The mechanism the check above rests on, stated on its own.
+#[test]
+fn a_held_handle_denies_a_recreated_directory_the_same_inode() {
+    for base in identity_bases("pinned") {
+        let base = base.path();
+        let reuses = reuses_inode_numbers(base);
+        eprintln!(
+            "{} ({}): inode numbers are {}",
+            base.display(),
+            filesystem_name(base),
+            if reuses {
+                "reused immediately"
+            } else {
+                "not reused immediately"
+            }
+        );
+
+        let source = base.join("source");
+        let destination = base.join("dest");
+        let placeholder = Placeholder::create(&source, &destination).unwrap();
+        let (registered_dev, registered_ino) = placeholder.identity();
+
+        // The handle is still open across this.
+        fs::remove_dir(&destination).unwrap();
+        fs::create_dir(&destination).unwrap();
+        let replacement = fs::symlink_metadata(&destination).unwrap();
+        assert_ne!(
+            (replacement.dev(), replacement.ino()),
+            (registered_dev, registered_ino),
+            "a recreated directory got the pinned inode back under {} ({}); \
+             the handle did not pin it",
+            base.display(),
+            filesystem_name(base)
+        );
+
+        // And the removal that follows from it refuses to touch the stranger.
+        assert!(matches!(
+            placeholder.remove_if_unchanged(),
+            PlaceholderOutcome::KeptChanged(..)
+        ));
+        assert!(destination.exists());
+
+        // Dropping the placeholder releases the inode; only then may the
+        // number come back, which is what the fix turns on.
+        drop(placeholder);
+        fs::remove_dir(&destination).unwrap();
+    }
+}
+
+/// §9.1 says "unchanged", and the permissions are part of what was
+/// registered: a placeholder someone has chmod'd is not the thing that was
+/// created, even when it is the same inode.
+#[test]
+fn a_placeholder_whose_permissions_changed_is_kept_not_removed() {
+    let dir = temp_dir("chmod-holder");
     let source = dir.path().join("source");
     let destination = dir.path().join("dest");
     let placeholder = Placeholder::create(&source, &destination).unwrap();
 
-    fs::write(destination.join("something"), b"x").unwrap();
-    assert_eq!(
-        placeholder.remove_if_unchanged(),
-        PlaceholderOutcome::KeptNotEmpty(destination.clone())
-    );
-    fs::remove_file(destination.join("something")).unwrap();
-
-    // Replace it with a different directory of the same name.
-    fs::remove_dir(&destination).unwrap();
-    fs::create_dir(&destination).unwrap();
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
     match placeholder.remove_if_unchanged() {
         PlaceholderOutcome::KeptChanged(path, reason) => {
             assert_eq!(path, destination);
-            assert!(reason.contains("identity changed"), "reason was {reason}");
+            assert!(
+                reason.contains("permissions changed"),
+                "reason was {reason}"
+            );
         }
-        other => panic!("a replaced placeholder must be kept, got {other:?}"),
+        other => panic!("a chmod'd placeholder must be kept, got {other:?}"),
     }
-    assert!(destination.exists(), "a replaced placeholder was removed");
+    assert!(destination.exists());
 }
 
 #[test]

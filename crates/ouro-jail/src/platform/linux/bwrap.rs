@@ -102,6 +102,19 @@ pub fn bwrap_version(bwrap: &Path) -> io::Result<BwrapVersion> {
 // Placeholders
 // ---------------------------------------------------------------------------
 
+/// Where a placeholder is mounted from and to.
+///
+/// The plan needs only these two paths to render its argv; the identity that
+/// decides whether the thing may be removed afterwards lives in
+/// [`Placeholder`], which is not copyable because it holds an open handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceholderMount {
+    /// The empty directory bound over the destination.
+    pub source: PathBuf,
+    /// The mount point inside the workspace.
+    pub destination: PathBuf,
+}
+
 /// A mount point created so that an absent protected literal can still be
 /// covered by a read-only bind (jail-v1 §9.1: "Root-level protected literals
 /// must also be protected when absent").
@@ -111,20 +124,34 @@ pub fn bwrap_version(bwrap: &Path) -> io::Result<BwrapVersion> {
 /// its exact inode identity and ownership are registered *before use*, which
 /// is what the spec requires, and means the cleanup afterwards can tell "the
 /// empty directory we made" from "something the run created".
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The registration is a held handle, not a recorded number. A device and
+/// inode pair is not an identity across a delete and a recreate: on ext4 the
+/// freed inode is handed straight back, so a directory removed and remade
+/// under the same name arrives with the same number and a recorded pair
+/// matches something this code never created. An open descriptor cannot be
+/// fooled that way — the kernel will not free an inode that is still open, so
+/// while this handle lives the number cannot be reused, and a name that now
+/// resolves to a different inode is visibly a different object.
+#[derive(Debug)]
 pub struct Placeholder {
-    /// The empty directory bound over the destination.
-    pub source: PathBuf,
-    /// The mount point inside the workspace.
-    pub destination: PathBuf,
+    mount: PlaceholderMount,
     /// Device of the destination at registration.
-    pub dev: u64,
+    dev: u64,
     /// Inode of the destination at registration.
-    pub ino: u64,
+    ino: u64,
     /// Owning uid at registration.
-    pub uid: u32,
+    uid: u32,
     /// Permission bits at registration.
-    pub mode: u32,
+    mode: u32,
+    /// Creation time, as seconds and nanoseconds, where the filesystem keeps
+    /// one. Extra evidence for the receipt, never the check on its own: a
+    /// filesystem without birth times would make such a check vacuous.
+    birth: Option<(i64, u32)>,
+    /// The handle that keeps the registered inode alive, held from creation
+    /// to removal. `O_PATH`, so it carries no read or write authority, and
+    /// close-on-exec, so no child ever sees it.
+    handle: OwnedFd,
 }
 
 /// Why a placeholder could not be established.
@@ -210,34 +237,101 @@ impl Placeholder {
                 }
             });
         }
-        let stat = lstat(destination).map_err(|errno| PlaceholderError::Io {
-            path: destination.to_owned(),
-            errno,
-        })?;
+
+        // The handle is taken immediately, so the identity registered below is
+        // one that cannot be handed to another object while this lives.
+        // SAFETY: `dest_c` is NUL-terminated and outlives the call. `O_PATH`
+        // acquires no I/O authority and `O_NOFOLLOW` refuses a symlink at the
+        // final component.
+        let handle = unsafe {
+            libc::open(
+                dest_c.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if handle < 0 {
+            return Err(PlaceholderError::Io {
+                path: destination.to_owned(),
+                errno: last_errno(),
+            });
+        }
+        // SAFETY: `handle` was just opened and is owned here.
+        let handle = unsafe { OwnedFd::from_raw_fd(handle) };
+
+        let mut stat = empty_stat();
+        // SAFETY: `handle` is live and `stat` is a writable buffer; fstat on
+        // an `O_PATH` descriptor is permitted.
+        if unsafe { libc::fstat(handle.as_raw_fd(), &raw mut stat) } != 0 {
+            return Err(PlaceholderError::Io {
+                path: destination.to_owned(),
+                errno: last_errno(),
+            });
+        }
         Ok(Self {
-            source: source.to_owned(),
-            destination: destination.to_owned(),
+            mount: PlaceholderMount {
+                source: source.to_owned(),
+                destination: destination.to_owned(),
+            },
             dev: stat.st_dev,
             ino: stat.st_ino,
             uid: stat.st_uid,
             mode: stat.st_mode & 0o7777,
+            birth: birth_time(&handle),
+            handle,
         })
     }
 
-    /// Remove the placeholder if it is still the empty directory that was
-    /// registered.
+    /// Where this placeholder is mounted from and to.
+    #[must_use]
+    pub fn mount(&self) -> &PlaceholderMount {
+        &self.mount
+    }
+
+    /// The empty directory bound over the destination.
+    #[must_use]
+    pub fn source(&self) -> &Path {
+        &self.mount.source
+    }
+
+    /// The mount point inside the workspace.
+    #[must_use]
+    pub fn destination(&self) -> &Path {
+        &self.mount.destination
+    }
+
+    /// Device and inode registered at creation.
+    #[must_use]
+    pub const fn identity(&self) -> (u64, u64) {
+        (self.dev, self.ino)
+    }
+
+    /// The registered creation time, where the filesystem keeps one.
+    #[must_use]
+    pub const fn birth(&self) -> Option<(i64, u32)> {
+        self.birth
+    }
+
+    /// Remove the placeholder if it is still the directory that was created,
+    /// and still empty.
     ///
     /// jail-v1 §9.1: "remove only unchanged, empty placeholders it created
     /// after tree death. Never remove a pre-existing Git file/directory."
     ///
-    /// Every step works on one descriptor rather than on the name. The parent
-    /// is opened once without following a symlink; the entry is opened
-    /// through it; identity, emptiness and removal all refer to that open
-    /// object. A name resolved four times is four chances for something else
-    /// to be standing there by the last one, and the last one is a deletion.
+    /// The question this answers is not "does the name still have the numbers
+    /// I wrote down" but "does the name still resolve to the object I am
+    /// holding". Those differ exactly where it matters: delete the directory,
+    /// make another with the same name, and on ext4 the second one gets the
+    /// first one's inode number back. Comparing against the held handle cannot
+    /// be fooled, because the inode behind it is not free to be reused.
+    ///
+    /// Every step works on a descriptor rather than on the name. The parent is
+    /// opened once without following a symlink and everything else goes
+    /// through it, so a name resolved four times is not four chances for
+    /// something else to be standing there by the last one — and the last one
+    /// is a deletion.
     #[must_use]
     pub fn remove_if_unchanged(&self) -> PlaceholderOutcome {
-        let path = self.destination.clone();
+        let path = self.mount.destination.clone();
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return PlaceholderOutcome::KeptError(path, libc::EINVAL);
         };
@@ -248,45 +342,73 @@ impl Placeholder {
             return PlaceholderOutcome::KeptError(path, libc::EINVAL);
         };
 
-        // The entry itself, as a directory and without following a link.
-        // SAFETY: `parent_fd` is a live directory descriptor and `name_c` is a
-        // NUL-terminated name valid for the call.
-        let entry = unsafe {
-            libc::openat(
+        // What this code is holding.
+        let mut held = empty_stat();
+        // SAFETY: the handle is live and `held` is a writable buffer.
+        if unsafe { libc::fstat(self.handle.as_raw_fd(), &raw mut held) } != 0 {
+            return PlaceholderOutcome::KeptError(path, last_errno());
+        }
+
+        // What the name refers to now.
+        let mut now = empty_stat();
+        // SAFETY: `parent_fd` is a live directory descriptor, `name_c` is
+        // NUL-terminated, and `AT_SYMLINK_NOFOLLOW` stats the entry itself.
+        if unsafe {
+            libc::fstatat(
                 parent_fd.as_raw_fd(),
                 name_c.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                &raw mut now,
+                libc::AT_SYMLINK_NOFOLLOW,
             )
-        };
-        if entry < 0 {
+        } != 0
+        {
             let errno = last_errno();
             return match errno {
                 libc::ENOENT => PlaceholderOutcome::AlreadyGone(path),
-                libc::ENOTDIR | libc::ELOOP => {
-                    PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned())
-                }
                 other => PlaceholderOutcome::KeptError(path, other),
             };
         }
-        // SAFETY: `entry` was just opened and is owned here.
-        let entry = unsafe { OwnedFd::from_raw_fd(entry) };
-
-        let mut stat = super::sys::empty_stat();
-        // SAFETY: `entry` is live and `stat` is a writable buffer.
-        if unsafe { libc::fstat(entry.as_raw_fd(), &raw mut stat) } != 0 {
-            return PlaceholderOutcome::KeptError(path, last_errno());
+        if now.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned());
         }
-        if (stat.st_dev, stat.st_ino) != (self.dev, self.ino) {
+        if (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino) {
             return PlaceholderOutcome::KeptChanged(
                 path,
                 format!(
                     "identity changed from {}:{} to {}:{}",
-                    self.dev, self.ino, stat.st_dev, stat.st_ino
+                    held.st_dev, held.st_ino, now.st_dev, now.st_ino
                 ),
             );
         }
-        if stat.st_uid != self.uid {
+        if now.st_uid != self.uid {
             return PlaceholderOutcome::KeptChanged(path, "owner changed".to_owned());
+        }
+        if now.st_mode & 0o7777 != self.mode {
+            return PlaceholderOutcome::KeptChanged(path, "permissions changed".to_owned());
+        }
+
+        // Emptiness, through a fresh descriptor for the same entry — and that
+        // descriptor is checked against the handle too, so the window between
+        // the stat above and this open cannot be used to swap the object.
+        let entry = match open_entry(&parent_fd, &name_c) {
+            Ok(entry) => entry,
+            Err(libc::ENOENT) => return PlaceholderOutcome::AlreadyGone(path),
+            Err(errno @ (libc::ENOTDIR | libc::ELOOP)) => {
+                let _ = errno;
+                return PlaceholderOutcome::KeptChanged(path, "no longer a directory".to_owned());
+            }
+            Err(errno) => return PlaceholderOutcome::KeptError(path, errno),
+        };
+        let mut opened = empty_stat();
+        // SAFETY: `entry` is live and `opened` is a writable buffer.
+        if unsafe { libc::fstat(entry.as_raw_fd(), &raw mut opened) } != 0 {
+            return PlaceholderOutcome::KeptError(path, last_errno());
+        }
+        if (opened.st_dev, opened.st_ino) != (held.st_dev, held.st_ino) {
+            return PlaceholderOutcome::KeptChanged(
+                path,
+                "the entry was replaced while it was being checked".to_owned(),
+            );
         }
         match directory_is_empty(&entry) {
             Ok(true) => {}
@@ -302,9 +424,53 @@ impl Placeholder {
         {
             return PlaceholderOutcome::KeptError(path, last_errno());
         }
-        let _ = std::fs::remove_dir(&self.source);
+        let _ = std::fs::remove_dir(&self.mount.source);
         PlaceholderOutcome::Removed(path)
     }
+}
+
+/// Open one entry of a directory as a directory, without following a symlink.
+fn open_entry(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<OwnedFd, i32> {
+    // SAFETY: `parent` is a live directory descriptor and `name` is a
+    // NUL-terminated name valid for the call.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(last_errno());
+    }
+    // SAFETY: `fd` was just opened and is owned here.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The creation time of an open object, where the filesystem records one.
+///
+/// `None` on a filesystem that keeps no birth time, which is why this is
+/// recorded as evidence beside the handle rather than relied on: a check that
+/// silently passes wherever the fact is absent is not a check.
+fn birth_time(handle: &OwnedFd) -> Option<(i64, u32)> {
+    let mut buffer: libc::statx = unsafe { std::mem::zeroed() };
+    let empty = c"";
+    // SAFETY: `handle` is live, `empty` is a NUL-terminated empty string and
+    // `AT_EMPTY_PATH` makes statx describe the descriptor itself, which is
+    // permitted for an `O_PATH` one. `buffer` is a live writable statx.
+    let rc = unsafe {
+        libc::statx(
+            handle.as_raw_fd(),
+            empty.as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_BTIME,
+            &raw mut buffer,
+        )
+    };
+    if rc != 0 || buffer.stx_mask & libc::STATX_BTIME == 0 {
+        return None;
+    }
+    Some((buffer.stx_btime.tv_sec, buffer.stx_btime.tv_nsec))
 }
 
 /// Open a directory without following a symlink at its final component.
@@ -373,16 +539,6 @@ fn directory_is_empty(dir: &OwnedFd) -> Result<bool, i32> {
     }
 }
 
-fn lstat(path: &Path) -> Result<libc::stat, i32> {
-    let c = cstring_from_os(path.as_os_str()).map_err(|_| libc::EINVAL)?;
-    let mut st = empty_stat();
-    // SAFETY: `c` is NUL-terminated and outlives the call; `st` is writable.
-    if unsafe { libc::lstat(c.as_ptr(), &raw mut st) } != 0 {
-        return Err(last_errno());
-    }
-    Ok(st)
-}
-
 // ---------------------------------------------------------------------------
 // The plan
 // ---------------------------------------------------------------------------
@@ -419,7 +575,7 @@ pub struct BwrapPlan {
     /// doctor probes and by operator `--allow-host` grants.
     pub extra_ro_binds: Vec<(PathBuf, PathBuf)>,
     /// Placeholders for absent root-level literals.
-    pub placeholders: Vec<Placeholder>,
+    pub placeholders: Vec<PlaceholderMount>,
     /// The jail binary to bind at [`JAIL_INSIDE_PATH`].
     pub jail_exe: PathBuf,
     /// Descriptor carrying the seccomp program.
