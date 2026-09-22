@@ -1,0 +1,15 @@
+# TEMPORARY J1 scaffold, replaced at integration by the fixture slice.
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
