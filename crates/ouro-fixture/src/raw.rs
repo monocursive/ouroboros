@@ -8,9 +8,9 @@
 //! same-named libc wrapper is used and this is stated in the report.
 //!
 //! Syscalls that the architecture does not have (`open`, `mkdir`, `rename`,
-//! `unlink`, `rmdir`, `link`, `symlink`, `creat` do not exist on Linux
+//! `unlink`, `rmdir`, `link`, `symlink`, `creat`, `mknod` do not exist on Linux
 //! `aarch64`) and syscalls that the platform does not have (`openat2`,
-//! `renameat2`, `execveat` outside Linux) return [`Attempt::Absent`], which is
+//! `renameat2`, `execveat`, `mknodat` outside Linux) return [`Attempt::Absent`], which is
 //! jail-v1 §11.2's "calls absent on an architecture are identified as absent".
 //! An absent call is never a satisfied expectation.
 //!
@@ -67,8 +67,8 @@ pub fn cpath(p: &OsStr) -> Result<CString, PathRefused> {
 }
 
 /// Whether the non-`at` syscalls (`open`, `creat`, `mkdir`, `rename`,
-/// `unlink`, `rmdir`, `link`, `symlink`) have syscall numbers here. Linux
-/// `aarch64` and other newer ports dropped them; macOS keeps all of them.
+/// `unlink`, `rmdir`, `link`, `symlink`, `mknod`) have syscall numbers here.
+/// Linux `aarch64` and other newer ports dropped them; macOS keeps all of them.
 #[must_use]
 pub const fn has_legacy_syscalls() -> bool {
     !cfg!(target_os = "linux") || cfg!(any(target_arch = "x86_64", target_arch = "x86"))
@@ -384,6 +384,48 @@ mod imp {
         let r = unsafe { libc::syscall(libc::SYS_connect, fd as c_long, addr, len as c_long) };
         Attempt::finish(r)
     }
+
+    pub(crate) fn mknod(path: *const c_char, mode: u32, dev: u64) -> Attempt {
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        {
+            // SAFETY: `path` outlives the call; `mode` and `dev` are plain
+            // integers widened to the register width the ABI reads.
+            let r = unsafe { libc::syscall(libc::SYS_mknod, path, mode as c_long, dev as c_long) };
+            Attempt::finish(r)
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+        {
+            let _ = (path, mode, dev);
+            legacy_absent("mknod")
+        }
+    }
+
+    pub(crate) fn mknodat(dirfd: c_int, path: *const c_char, mode: u32, dev: u64) -> Attempt {
+        // SAFETY: `path` outlives the call.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_mknodat,
+                dirfd as c_long,
+                path,
+                mode as c_long,
+                dev as c_long,
+            )
+        };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn truncate(path: *const c_char, length: i64) -> Attempt {
+        // SAFETY: `path` outlives the call; `length` is a plain integer.
+        let r = unsafe { libc::syscall(libc::SYS_truncate, path, length as c_long) };
+        Attempt::finish(r)
+    }
+
+    pub(crate) fn ftruncate(fd: c_int, length: i64) -> Attempt {
+        // SAFETY: `fd` is a descriptor the caller owns; `length` is a plain
+        // integer. Nothing is dereferenced.
+        let r = unsafe { libc::syscall(libc::SYS_ftruncate, fd as c_long, length as c_long) };
+        Attempt::finish(r)
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -543,6 +585,30 @@ mod imp {
     pub(crate) fn connect(fd: c_int, addr: *const libc::sockaddr, len: libc::socklen_t) -> Attempt {
         // SAFETY: `addr` points to a live sockaddr of at least `len` bytes.
         let r = unsafe { libc::connect(fd, addr, len) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn mknod(path: *const c_char, mode: u32, dev: u64) -> Attempt {
+        // SAFETY: `path` outlives the call.
+        let r = unsafe { libc::mknod(path, mode as libc::mode_t, dev as libc::dev_t) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn mknodat(_dirfd: c_int, _path: *const c_char, _mode: u32, _dev: u64) -> Attempt {
+        // Darwin has no `mknodat`; `mkfifoat` is not the same syscall and
+        // would be a different operation in a trace.
+        linux_only!("mknodat")
+    }
+
+    pub(crate) fn truncate(path: *const c_char, length: i64) -> Attempt {
+        // SAFETY: `path` outlives the call.
+        let r = unsafe { libc::truncate(path, length as libc::off_t) };
+        Attempt::finish(c_long::from(r))
+    }
+
+    pub(crate) fn ftruncate(fd: c_int, length: i64) -> Attempt {
+        // SAFETY: `fd` is a descriptor the caller owns; nothing is dereferenced.
+        let r = unsafe { libc::ftruncate(fd, length as libc::off_t) };
         Attempt::finish(c_long::from(r))
     }
 }

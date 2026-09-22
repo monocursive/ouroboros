@@ -273,6 +273,145 @@ fn renameat2_works_on_linux_and_reports_unsupported_elsewhere() {
     }
 }
 
+#[test]
+fn mknod_creates_the_node_kind_it_names() {
+    let dir = Dir::new();
+
+    // mknodat: present on every Linux architecture, absent on Darwin.
+    let fifo = dir.at("node-fifo");
+    let out = run(&["mknod", &fifo, "--via", "mknodat"]);
+    let line = only(&out);
+    assert_eq!(line["op"], "mknodat");
+    if cfg!(target_os = "linux") {
+        assert_eq!(code(&out), 0, "{line}");
+        assert_eq!(line["args"]["dev"], 0);
+        assert_eq!(line["args"]["kind"], "S_IFIFO");
+        assert_eq!(line["args"]["dirfd"], "AT_FDCWD");
+        assert_eq!(line["args"]["mode"], "10600", "S_IFIFO | 0600, octal");
+        use std::os::unix::fs::FileTypeExt;
+        let meta = std::fs::symlink_metadata(&fifo).unwrap();
+        assert!(meta.file_type().is_fifo(), "not a fifo: {meta:?}");
+    } else {
+        assert_eq!(code(&out), EXIT_EXPECTATION_FAILED);
+        let reason = line["args"]["unsupported"].as_str().unwrap();
+        assert!(reason.contains("unsupported on this platform"), "{reason}");
+        assert!(!Path::new(&fifo).exists());
+    }
+
+    // mknod: the legacy number, and a regular file this time.
+    let reg = dir.at("node-regular");
+    let out = run(&[
+        "mknod",
+        &reg,
+        "--via",
+        "mknod",
+        "--regular",
+        "--mode",
+        "640",
+    ]);
+    let line = only(&out);
+    assert_eq!(line["op"], "mknod");
+    if !ouro_fixture::raw::has_legacy_syscalls() {
+        assert_eq!(code(&out), EXIT_EXPECTATION_FAILED);
+        assert!(line["args"]["unsupported"].is_string(), "{line}");
+        return;
+    }
+    assert_eq!(line["args"]["kind"], "S_IFREG");
+    assert_eq!(line["args"]["dev"], 0);
+    assert!(line["args"].get("dirfd").is_none(), "mknod takes no dirfd");
+    if cfg!(target_os = "linux") {
+        assert_eq!(code(&out), 0, "{line}");
+        let meta = std::fs::metadata(&reg).unwrap();
+        assert!(meta.is_file());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o640);
+    } else {
+        // Darwin restricts every `mknod` to the super-user, so the honest
+        // result here is EPERM and no node.
+        assert_eq!(line["errno"], "EPERM", "{line}");
+        assert_eq!(code(&out), EXIT_EXPECTATION_FAILED);
+        assert!(!Path::new(&reg).exists());
+    }
+}
+
+#[test]
+fn mknod_reports_the_kernels_refusal_rather_than_pre_judging_it() {
+    let dir = Dir::new();
+    let path = dir.at("exists");
+    assert_eq!(code(&run(&["open", &path, "--create", "--write"])), 0);
+
+    let out = run(&["mknod", &path, "--via", "mknodat", "--expect", "EEXIST"]);
+    let line = only(&out);
+    if cfg!(target_os = "linux") {
+        assert_eq!(line["errno"], "EEXIST", "{line}");
+        assert_eq!(code(&out), 0);
+    } else {
+        assert_eq!(code(&out), EXIT_EXPECTATION_FAILED, "mknodat is Linux only");
+    }
+}
+
+#[test]
+fn truncate_sets_the_length_by_path() {
+    let dir = Dir::new();
+    let path = dir.at("t-by-path");
+    std::fs::write(&path, vec![b'x'; 100]).unwrap();
+
+    let out = run(&["truncate", &path, "4096"]);
+    let line = only(&out);
+    assert_eq!(line["op"], "truncate");
+    assert_eq!(line["args"]["length"], 4096);
+    assert_eq!(line["errno"], Value::Null);
+    assert_eq!(code(&out), 0, "{line}");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 4096);
+
+    let out = run(&["truncate", &path, "0"]);
+    assert_eq!(code(&out), 0);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+
+    // A missing path and a negative length are the kernel's answers, not ours.
+    let out = run(&["truncate", &dir.at("absent"), "10", "--expect", "ENOENT"]);
+    assert_eq!(code(&out), 0, "{}", only(&out));
+    let out = run(&["truncate", &path, "--", "-1"]);
+    assert_eq!(only(&out)["errno"], "EINVAL", "{}", only(&out));
+    assert_eq!(code(&out), EXIT_EXPECTATION_FAILED);
+}
+
+#[test]
+fn ftruncate_reports_the_open_that_named_the_path_and_then_a_descriptor_only_call() {
+    let dir = Dir::new();
+    let path = dir.at("t-by-fd");
+    std::fs::write(&path, vec![b'x'; 100]).unwrap();
+
+    let out = run(&["ftruncate", &path, "2048"]);
+    let l = lines(&out);
+    assert_eq!(l.len(), 2, "the open and the truncation: {l:?}");
+
+    assert_eq!(l[0]["op"], "openat", "the path is named here");
+    assert!(l[0]["ret"].as_i64().unwrap() >= 0);
+
+    assert_eq!(l[1]["op"], "ftruncate");
+    assert_eq!(l[1]["args"]["length"], 2048);
+    assert_eq!(
+        l[1]["args"]["fd"], l[0]["ret"],
+        "the truncation uses the descriptor the open returned"
+    );
+    assert_eq!(
+        l[1]["args"]["path_named_to_the_kernel"], false,
+        "ftruncate passes no path; the report says so"
+    );
+    assert_eq!(l[1]["errno"], Value::Null);
+    assert_eq!(code(&out), 0);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 2048);
+
+    // A missing file fails at the open, so no truncation is reported at all.
+    let out = run(&["ftruncate", &dir.at("absent"), "10"]);
+    let l = lines(&out);
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert_eq!(l[0]["op"], "openat");
+    assert_eq!(l[0]["errno"], "ENOENT");
+    assert_eq!(code(&out), EXIT_EXPECTATION_FAILED);
+}
+
 // --------------------------------------------------------------- processes
 
 #[test]
@@ -652,6 +791,49 @@ fn a_script_runs_every_step_in_one_process_and_reports_each() {
     assert_eq!(ops, ["openat", "renameat", "unlinkat", "openat"]);
     assert_eq!(code(&out), 0);
     assert!(!Path::new(&b).exists());
+}
+
+#[test]
+fn a_script_accepts_the_node_and_truncation_modes_too() {
+    let dir = Dir::new();
+    let file = dir.at("s-file");
+    let node = dir.at("s-node");
+    let script = dir.at("nodes.json");
+    let steps = serde_json::json!([
+        ["open", file.clone(), "--create", "--write"],
+        ["truncate", file.clone(), "1024"],
+        ["ftruncate", file.clone(), "512"],
+        ["mknod", node.clone(), "--via", "mknodat"],
+    ]);
+    std::fs::write(&script, steps.to_string()).unwrap();
+
+    let out = run(&["script", &script]);
+    let ops: Vec<&str> = lines(&out)
+        .iter()
+        .map(|v| v["op"].as_str().unwrap().to_string())
+        .collect::<Vec<String>>()
+        .leak()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        ops,
+        ["openat", "truncate", "openat", "ftruncate", "mknodat"],
+        "every step runs in the one process, in order"
+    );
+    assert_eq!(std::fs::metadata(&file).unwrap().len(), 512);
+    if cfg!(target_os = "linux") {
+        assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(&node)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+    } else {
+        assert_eq!(code(&out), EXIT_EXPECTATION_FAILED, "mknodat is Linux only");
+    }
 }
 
 #[test]

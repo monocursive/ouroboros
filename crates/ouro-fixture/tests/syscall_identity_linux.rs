@@ -23,7 +23,8 @@ use std::process::Command;
 use ouro_fixture::harness::{self, TempDir};
 
 const TRACED: &str = "open,openat,openat2,creat,mkdir,mkdirat,rename,renameat,renameat2,\
-                      unlink,unlinkat,rmdir,link,linkat,symlink,symlinkat,execve,execveat,connect";
+                      unlink,unlinkat,rmdir,link,linkat,symlink,symlinkat,execve,execveat,connect,\
+                      mknod,mknodat,truncate,ftruncate";
 
 fn strace_available() -> bool {
     Command::new("strace")
@@ -190,6 +191,92 @@ fn the_directory_and_link_variants_are_distinct_at_the_kernel() {
             "{mode} --via {via} did not issue {syscall}; trace:\n{trace}"
         );
     }
+}
+
+#[test]
+fn the_node_creation_variants_are_distinct_at_the_kernel() {
+    if !strace_available() {
+        harness::skip_or_fail("strace is not installed on this host");
+        return;
+    }
+    let dir = TempDir::new("ouro-fixture-identity").unwrap();
+    let log = dir.path().join("trace");
+
+    for (via, syscall) in [("mknod", "mknod"), ("mknodat", "mknodat")] {
+        let path = dir.path().join(format!("n-{via}"));
+        let trace = traced(&log, &["mknod", &path.display().to_string(), "--via", via]);
+        assert!(
+            called(&trace, syscall, &path.display().to_string()),
+            "mknod --via {via} did not issue {syscall}; trace:\n{trace}"
+        );
+        let other = if syscall == "mknod" {
+            "mknodat"
+        } else {
+            "mknod"
+        };
+        assert!(
+            !called(&trace, other, &path.display().to_string()),
+            "mknod --via {via} also issued {other}; trace:\n{trace}"
+        );
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "--via {via} did not create a fifo"
+        );
+    }
+}
+
+#[test]
+fn truncate_names_a_path_to_the_kernel_and_ftruncate_names_only_a_descriptor() {
+    // This is the distinction the two modes exist to make visible: a tracer
+    // that attributes by path can attribute `truncate` and cannot attribute
+    // `ftruncate`, whose only argument is a descriptor number.
+    if !strace_available() {
+        harness::skip_or_fail("strace is not installed on this host");
+        return;
+    }
+    let dir = TempDir::new("ouro-fixture-identity").unwrap();
+    let log = dir.path().join("trace");
+
+    let by_path = dir.path().join("t-path");
+    std::fs::write(&by_path, vec![b'x'; 100]).unwrap();
+    let trace = traced(&log, &["truncate", &by_path.display().to_string(), "4096"]);
+    assert!(
+        called(&trace, "truncate", &by_path.display().to_string()),
+        "truncate did not issue truncate; trace:\n{trace}"
+    );
+    assert!(
+        !called(&trace, "ftruncate", &by_path.display().to_string()),
+        "truncate issued ftruncate; trace:\n{trace}"
+    );
+    assert_eq!(std::fs::metadata(&by_path).unwrap().len(), 4096);
+
+    let by_fd = dir.path().join("t-fd");
+    std::fs::write(&by_fd, vec![b'x'; 100]).unwrap();
+    let trace = traced(&log, &["ftruncate", &by_fd.display().to_string(), "2048"]);
+    let named = by_fd.display().to_string();
+    assert!(
+        called(&trace, "openat", &named),
+        "the open that names the path is missing; trace:\n{trace}"
+    );
+    assert!(
+        trace.lines().any(|l| l
+            .trim_start_matches(|c: char| c.is_ascii_digit() || c == ' ')
+            .starts_with("ftruncate(")),
+        "ftruncate is missing; trace:\n{trace}"
+    );
+    assert!(
+        !called(&trace, "ftruncate", &named),
+        "ftruncate cannot carry the path, yet the trace shows it doing so:\n{trace}"
+    );
+    assert!(
+        !called(&trace, "truncate", &named),
+        "the fd-based mode issued the path-based syscall; trace:\n{trace}"
+    );
+    assert_eq!(std::fs::metadata(&by_fd).unwrap().len(), 2048);
 }
 
 #[test]

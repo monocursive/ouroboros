@@ -11,8 +11,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use serde_json::Value;
 
 use crate::cli::{
-    ExecVia, LinkVia, MkdirVia, Mode, OpenVia, RenameVia, RmdirVia, Step, SymlinkVia, UnlinkVia,
-    parse_mode,
+    ExecVia, LinkVia, MkdirVia, MknodVia, Mode, OpenVia, RenameVia, RmdirVia, Step, SymlinkVia,
+    UnlinkVia, parse_mode,
 };
 use crate::raw::{self, Attempt};
 use crate::report::{Emitted, Expect, OpReport, Reporter, path_value, write_all};
@@ -113,6 +113,28 @@ pub fn run(mode: Mode, rep: &Reporter) -> Result<bool, Usage> {
             via,
             expect,
         } => Ok(check(rep, symlink(&target, &linkpath, via), &expect)),
+        Mode::Mknod {
+            path,
+            via,
+            fifo,
+            regular,
+            mode,
+            expect,
+        } => {
+            let _ = fifo; // the default kind; `--regular` is what changes it
+            let perm = parse_mode(&mode)?;
+            Ok(check(rep, mknod(&path, via, regular, perm), &expect))
+        }
+        Mode::Truncate {
+            path,
+            length,
+            expect,
+        } => Ok(check(rep, truncate(&path, length), &expect)),
+        Mode::Ftruncate {
+            path,
+            length,
+            expect,
+        } => Ok(ftruncate(rep, &path, length, &expect)),
         Mode::Connect { addr, udp, expect } => connect(rep, &addr, udp, &expect),
         Mode::Exec { via, expect, argv } => exec_and_wait(rep, via, &argv, &expect),
         Mode::ExecReplace { via, expect, argv } => exec_replace(rep, via, &argv, &expect),
@@ -176,7 +198,23 @@ fn check(rep: &Reporter, emitted: Emitted, expect: &Expect) -> bool {
 
 // ---------------------------------------------------------------- filesystem
 
+/// Open, and close the descriptor again. Most modes only want the result.
 fn open(
+    path: &OsStr,
+    via: OpenVia,
+    create: bool,
+    trunc: bool,
+    write: bool,
+    rdwr: bool,
+    mode: u32,
+) -> Emitted {
+    let emitted = open_keep(path, via, create, trunc, write, rdwr, mode);
+    close_fd(emitted.report.ret);
+    emitted
+}
+
+/// Open and hand the descriptor back in `report.ret`. The caller closes it.
+fn open_keep(
     path: &OsStr,
     via: OpenVia,
     create: bool,
@@ -236,9 +274,7 @@ fn open(
         OpenVia::Creat => raw::creat(c.as_ptr(), mode),
         OpenVia::Openat2 => raw::openat2(libc::AT_FDCWD, c.as_ptr(), flags, mode),
     };
-    let emitted = finish(report, attempt);
-    close_fd(emitted.report.ret);
-    emitted
+    finish(report, attempt)
 }
 
 fn mkdir(path: &OsStr, via: MkdirVia, mode: u32) -> Emitted {
@@ -443,11 +479,122 @@ fn symlink(target: &OsStr, linkpath: &OsStr, via: SymlinkVia) -> Emitted {
     finish(report, attempt)
 }
 
+/// The `S_IF*` file-type bits, widened once.
+///
+/// They are `u32` on Linux and `mode_t` (`u16`) on Darwin, so a cast that is
+/// necessary on one platform is a lint on the other. Both cfg arms are kept
+/// here rather than at every use.
+#[cfg(target_os = "linux")]
+const fn file_type_bits(regular: bool) -> u32 {
+    if regular {
+        libc::S_IFREG
+    } else {
+        libc::S_IFIFO
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn file_type_bits(regular: bool) -> u32 {
+    (if regular {
+        libc::S_IFREG
+    } else {
+        libc::S_IFIFO
+    }) as u32
+}
+
+/// The `S_IFMT` mask, widened the same way. Only a test needs it.
+#[cfg(all(test, target_os = "linux"))]
+const fn file_type_mask() -> u32 {
+    libc::S_IFMT
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+const fn file_type_mask() -> u32 {
+    libc::S_IFMT as u32
+}
+
+fn mknod(path: &OsStr, via: MknodVia, regular: bool, perm: u32) -> Emitted {
+    let name = match via {
+        MknodVia::Mknod => "mknod",
+        MknodVia::Mknodat => "mknodat",
+    };
+    let mut report = OpReport::new(name);
+    let c = match raw::cpath(path) {
+        Ok(c) => c,
+        Err(e) => return refuse_path(report, "path", path, e.reason),
+    };
+    if let Some(reason) = unavailable(name) {
+        report.set("unsupported", reason);
+        path_value(&mut report.args, "path", path);
+        report.result(-1, None);
+        return Emitted::unusable(report);
+    }
+
+    // The file-type bits are part of `mode`, not a separate argument. Only
+    // S_IFIFO and S_IFREG are offered: S_IFCHR and S_IFBLK need CAP_MKNOD, and
+    // a fixture that always fails would prove nothing.
+    let mode = file_type_bits(regular) | (perm & 0o7777);
+    let dev: u64 = 0;
+
+    path_value(&mut report.args, "path", path);
+    report.set("mode", format!("{mode:o}"));
+    report.set("dev", dev);
+    report.set("kind", if regular { "S_IFREG" } else { "S_IFIFO" });
+    report.set("mechanism", raw::mechanism());
+
+    let attempt = match via {
+        MknodVia::Mknod => raw::mknod(c.as_ptr(), mode, dev),
+        MknodVia::Mknodat => {
+            report.set("dirfd", "AT_FDCWD");
+            raw::mknodat(libc::AT_FDCWD, c.as_ptr(), mode, dev)
+        }
+    };
+    finish(report, attempt)
+}
+
+fn truncate(path: &OsStr, length: i64) -> Emitted {
+    let mut report = OpReport::new("truncate");
+    let c = match raw::cpath(path) {
+        Ok(c) => c,
+        Err(e) => return refuse_path(report, "path", path, e.reason),
+    };
+    path_value(&mut report.args, "path", path);
+    report.set("length", length);
+    report.set("mechanism", raw::mechanism());
+    finish(report, raw::truncate(c.as_ptr(), length))
+}
+
+/// Open the path, then truncate through the descriptor.
+///
+/// Both lines are emitted: the `openat` that names a path, and the
+/// `ftruncate` that names only a descriptor. A tracer that reports paths can
+/// attribute the first and not the second, which is the distinction this mode
+/// exists to make visible. `--expect` applies to the `ftruncate`.
+fn ftruncate(rep: &Reporter, path: &OsStr, length: i64, expect: &Expect) -> bool {
+    let opened = open_keep(path, OpenVia::Openat, false, false, false, true, 0o600);
+    rep.emit(&opened.report);
+    if opened.unusable || opened.report.ret < 0 {
+        return false;
+    }
+    let fd = opened.report.ret as c_int;
+
+    let mut report = OpReport::new("ftruncate");
+    path_value(&mut report.args, "path", path);
+    report.set("fd", fd);
+    report.set("length", length);
+    report.set("mechanism", raw::mechanism());
+    report.set("path_named_to_the_kernel", false);
+    let emitted = finish(report, raw::ftruncate(fd, length));
+    close_fd(i64::from(fd));
+    rep.emit(&emitted.report);
+    emitted.satisfies(expect)
+}
+
 /// Why a named syscall cannot run in this build, or `None` when it can.
 fn unavailable(name: &str) -> Option<String> {
     let legacy = matches!(
         name,
-        "open" | "creat" | "mkdir" | "rename" | "unlink" | "rmdir" | "link" | "symlink"
+        "open" | "creat" | "mkdir" | "rename" | "unlink" | "rmdir" | "link" | "symlink" | "mknod"
     );
     if legacy && !raw::has_legacy_syscalls() {
         return Some(format!(
@@ -456,7 +603,9 @@ fn unavailable(name: &str) -> Option<String> {
             std::env::consts::ARCH
         ));
     }
-    let linux_only = matches!(name, "openat2" | "renameat2" | "execveat");
+    // `mknodat` is here rather than in the legacy set: Darwin has no such
+    // syscall at all, while Linux has it on every architecture.
+    let linux_only = matches!(name, "openat2" | "renameat2" | "execveat" | "mknodat");
     if linux_only && !cfg!(target_os = "linux") {
         return Some(format!(
             "{name} is a Linux syscall; unsupported on this platform ({})",
@@ -1132,28 +1281,25 @@ fn status(rep: &Reporter) -> bool {
 
 fn write_mmap(rep: &Reporter, path: &OsStr) -> bool {
     const LEN: usize = 4096;
-    let opened = open(path, OpenVia::Openat, true, true, false, true, 0o600);
+    // One open, one reported line: reopening silently would put a second
+    // `openat` in a tracer's view that no report line accounts for.
+    let opened = open_keep(path, OpenVia::Openat, true, true, false, true, 0o600);
     rep.emit(&opened.report);
-    if opened.report.ret < 0 {
+    if opened.unusable || opened.report.ret < 0 {
         return false;
     }
-    // `open()` closed its descriptor, so reopen and keep this one.
-    let c = match raw::cpath(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let fd = match raw::openat(libc::AT_FDCWD, c.as_ptr(), libc::O_RDWR, 0) {
-        Attempt::Performed { ret, .. } if ret >= 0 => ret as c_int,
-        _ => return false,
-    };
+    let fd = opened.report.ret as c_int;
 
     let mut ok = true;
-    // SAFETY: `fd` is an open regular file this process owns.
-    let tr = unsafe { libc::ftruncate(fd, LEN as libc::off_t) };
+    let tr = match raw::ftruncate(fd, LEN as i64) {
+        Attempt::Performed { ret, .. } => ret,
+        Attempt::Absent(_) => -1,
+    };
     let mut r = OpReport::new("ftruncate");
     r.set("len", LEN);
+    r.set("closed_set", false);
     r.result(
-        i64::from(tr),
+        tr,
         if tr < 0 {
             std::io::Error::last_os_error().raw_os_error()
         } else {
@@ -1323,6 +1469,46 @@ mod tests {
         let expected_absent = !raw::has_legacy_syscalls();
         assert_eq!(unavailable("open").is_some(), expected_absent);
         assert_eq!(unavailable("rmdir").is_some(), expected_absent);
+        assert_eq!(
+            unavailable("mknod").is_some(),
+            expected_absent,
+            "mknod is one of the numbers aarch64 dropped"
+        );
+    }
+
+    #[test]
+    fn mknodat_is_linux_only_while_truncation_is_portable() {
+        // Darwin has `mknod` but no `mknodat`, so the two are classified
+        // differently even though they are the same operation.
+        assert_eq!(unavailable("mknodat").is_some(), !cfg!(target_os = "linux"));
+        assert_eq!(unavailable("truncate"), None);
+        assert_eq!(unavailable("ftruncate"), None);
+    }
+
+    #[test]
+    fn a_mknod_mode_carries_the_file_type_bits_with_the_permissions() {
+        // `mknod` takes one `mode`; getting the type bits wrong silently
+        // creates the wrong kind of node.
+        //
+        // `mknod` rather than `mknodat` so this runs on both platforms: the
+        // mode is computed and reported before the syscall, so a Darwin EPERM
+        // does not hide it.
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("f");
+        let e = mknod(fifo.as_os_str(), MknodVia::Mknod, false, 0o600);
+        if e.unusable {
+            // An architecture without the legacy number; it says so and the
+            // `unavailable` tests above cover that classification.
+            assert!(e.report.args.contains_key("unsupported"));
+            return;
+        }
+        let mode = e.report.args.get("mode").unwrap().as_str().unwrap();
+        let mode = u32::from_str_radix(mode, 8).unwrap();
+        assert_eq!(mode & 0o7777, 0o600);
+        assert_eq!(mode & file_type_mask(), file_type_bits(false));
+        assert_ne!(file_type_bits(true), file_type_bits(false));
+        assert_eq!(e.report.args.get("dev").unwrap(), 0);
+        assert_eq!(e.report.args.get("kind").unwrap(), "S_IFIFO");
     }
 
     #[test]

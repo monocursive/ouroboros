@@ -84,6 +84,12 @@ pub enum SymlinkVia {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum MknodVia {
+    Mknod,
+    Mknodat,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ExecVia {
     Execve,
     Execveat,
@@ -165,6 +171,43 @@ pub enum Mode {
         linkpath: OsString,
         #[arg(long, value_enum, default_value_t = SymlinkVia::Symlinkat)]
         via: SymlinkVia,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Create a filesystem node. The default `--fifo` is the one kind an
+    /// unprivileged user may create on Linux; `--regular` makes a plain file.
+    /// Character and block nodes need CAP_MKNOD and are not offered.
+    Mknod {
+        path: OsString,
+        #[arg(long, value_enum, default_value_t = MknodVia::Mknodat)]
+        via: MknodVia,
+        /// S_IFIFO. The default.
+        #[arg(long, conflicts_with = "regular")]
+        fifo: bool,
+        /// S_IFREG.
+        #[arg(long)]
+        regular: bool,
+        /// Permission bits, octal. The file-type bits come from the kind.
+        #[arg(long, value_name = "OCTAL", default_value = "600")]
+        mode: String,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Set a file's length by path.
+    Truncate {
+        path: OsString,
+        #[arg(value_name = "LEN")]
+        length: i64,
+        #[arg(long, default_value = "ok")]
+        expect: Expect,
+    },
+    /// Open PATH, then set its length through the descriptor. The open is
+    /// reported too, so a test can put the descriptor-based mutation beside
+    /// the path-based one and see which of them a tracer reports.
+    Ftruncate {
+        path: OsString,
+        #[arg(value_name = "LEN")]
+        length: i64,
         #[arg(long, default_value = "ok")]
         expect: Expect,
     },
@@ -301,6 +344,51 @@ mod tests {
             Step::try_parse_from(["ouro-fixture", "mkdir", "/tmp/d", "--via", "mkdir"]).unwrap();
         match step.mode {
             Mode::Mkdir { via, .. } => assert_eq!(via, MkdirVia::Mkdir),
+            other => panic!("wrong mode: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mknod_defaults_to_mknodat_and_a_fifo() {
+        let cli = parse(&["mknod", "/tmp/p"]);
+        match cli.mode {
+            Mode::Mknod {
+                via,
+                fifo,
+                regular,
+                mode,
+                expect,
+                ..
+            } => {
+                assert_eq!(via, MknodVia::Mknodat);
+                assert!(!fifo, "the flag is off; the kind still defaults to a fifo");
+                assert!(!regular);
+                assert_eq!(parse_mode(&mode).unwrap(), 0o600);
+                assert_eq!(expect, Expect::Ok);
+            }
+            other => panic!("wrong mode: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["ouro-fixture", "mknod", "/tmp/p", "--fifo", "--regular"])
+                .is_err(),
+            "the two kinds are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn the_truncation_modes_take_a_signed_length() {
+        match parse(&["truncate", "/tmp/f", "4096"]).mode {
+            Mode::Truncate { length, .. } => assert_eq!(length, 4096),
+            other => panic!("wrong mode: {other:?}"),
+        }
+        match parse(&["ftruncate", "/tmp/f", "0"]).mode {
+            Mode::Ftruncate { length, .. } => assert_eq!(length, 0),
+            other => panic!("wrong mode: {other:?}"),
+        }
+        // A negative length must reach the kernel, which answers EINVAL; the
+        // fixture does not pre-judge it.
+        match parse(&["truncate", "/tmp/f", "--", "-1"]).mode {
+            Mode::Truncate { length, .. } => assert_eq!(length, -1),
             other => panic!("wrong mode: {other:?}"),
         }
     }
