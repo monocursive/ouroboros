@@ -1,0 +1,13 @@
+[package]
+name = "ouro-tracer-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "J0 spike: a purpose-built ptrace tracer for the jail-v1 closed set. Disposable measurement code, not the product observer."
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+debug = false
