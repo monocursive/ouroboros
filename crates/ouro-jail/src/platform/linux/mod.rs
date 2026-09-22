@@ -29,6 +29,12 @@ pub mod launch;
 pub mod platform;
 #[cfg(target_os = "linux")]
 pub mod probe;
+// J3-unixpeer begin: N05 mechanism modules
+#[cfg(target_os = "linux")]
+pub mod sockdiag;
+#[cfg(target_os = "linux")]
+pub mod unixpeer;
+// J3-unixpeer end
 #[cfg(target_os = "linux")]
 pub mod sys;
 #[cfg(target_os = "linux")]
