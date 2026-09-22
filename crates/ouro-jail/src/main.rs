@@ -364,6 +364,24 @@ fn doctor_json(report: &DoctorReport) -> serde_json::Value {
             .map(capability_json)
             .collect::<Vec<_>>(),
         "ready": report.ready,
+        // J3-launch begin: §14.1 launch readiness, names and statuses only
+        "launch": report.launch.as_ref().map(|launch| serde_json::json!({
+            "name": launch.name,
+            "support": launch.support,
+            "support_reason": launch.support_reason,
+            "credentials": launch
+                .credentials
+                .iter()
+                .map(|check| serde_json::json!({
+                    "id": check.id,
+                    "mode": check.mode,
+                    "dest": check.dest,
+                    "status": if check.available { "available" } else { "unavailable" },
+                    "reason_code": check.reason_code,
+                }))
+                .collect::<Vec<_>>(),
+        })),
+        // J3-launch end
     })
 }
 
@@ -383,6 +401,28 @@ fn print_doctor_text(report: &DoctorReport) {
             capability.reason_code.as_deref().unwrap_or("none")
         );
     }
+    // J3-launch begin: §14.1 launch readiness, names and statuses only
+    if let Some(launch) = &report.launch {
+        println!(
+            "launch {} {} reason={}",
+            launch.name, launch.support, launch.support_reason
+        );
+        for check in &launch.credentials {
+            println!(
+                "credential {} mode={} dest={} {} reason={}",
+                check.id,
+                check.mode,
+                check.dest.to_display(),
+                if check.available {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+                check.reason_code
+            );
+        }
+    }
+    // J3-launch end
     println!("ready {}", report.ready);
 }
 

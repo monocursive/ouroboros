@@ -216,7 +216,8 @@ fn stage_one(
         ));
     };
 
-    let source = open_source(id, declaration.source.as_bytes())?;
+    let source =
+        open_source(declaration.source.as_bytes()).map_err(|refused| refused.into_error(id))?;
     let identity = SourceIdentity {
         dev: source.stat.dev,
         ino: source.stat.ino,
@@ -301,6 +302,36 @@ impl Source {
     }
 }
 
+/// Why a source cannot be staged: a stable reason code for `doctor`, the
+/// remediation, and a safe message that names no path.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceRefusal {
+    /// A stable reason code.
+    pub reason: &'static str,
+    /// What the operator can do about it.
+    pub remediation: Remediation,
+    /// A safe message: kinds, owners and modes, never a path.
+    pub message: String,
+}
+
+impl SourceRefusal {
+    fn new(reason: &'static str, remediation: Remediation, message: impl Into<String>) -> Self {
+        SourceRefusal {
+            reason,
+            remediation,
+            message: message.into(),
+        }
+    }
+
+    fn configuration(reason: &'static str, message: impl Into<String>) -> Self {
+        SourceRefusal::new(reason, Remediation::Configuration, message)
+    }
+
+    fn into_error(self, id: &str) -> JailError {
+        refusal(id, self.remediation, self.message)
+    }
+}
+
 /// Opens an absolute source path with a no-follow walk from `/` (§12).
 ///
 /// Every directory on the way is opened relative to the previous one with
@@ -309,65 +340,74 @@ impl Source {
 /// is sticky: a directory someone else can write lets them swap the next
 /// component. The final component must be a regular file owned by this
 /// operator or root with no group or other write bit.
-fn open_source(id: &str, path: &[u8]) -> Result<Source, JailError> {
-    let unusable = |message: String| refusal(id, Remediation::Configuration, message);
-    let components = anchored::split_absolute(path)
-        .map_err(|error| unusable(format!("the source is not an absolute path: {error}")))?;
-    let Some((file_name, directories)) = components.split_last() else {
-        return Err(unusable("the source names the filesystem root".to_owned()));
+fn open_source(path: &[u8]) -> Result<Source, SourceRefusal> {
+    let uninspectable = |error: std::io::Error| {
+        SourceRefusal::configuration(
+            "source_uninspectable",
+            format!("the source path cannot be inspected: {error}"),
+        )
     };
-    let mut current = Dir::open_root_for_walk()
-        .map_err(|error| unusable(format!("the filesystem root cannot be opened: {error}")))?;
-    check_directory(
-        id,
-        &current
-            .stat()
-            .map_err(|error| unusable(error.to_string()))?,
-    )?;
+    let components = anchored::split_absolute(path).map_err(|error| {
+        SourceRefusal::configuration(
+            "source_path_invalid",
+            format!("the source is not an absolute path: {error}"),
+        )
+    })?;
+    let Some((file_name, directories)) = components.split_last() else {
+        return Err(SourceRefusal::configuration(
+            "source_path_invalid",
+            "the source names the filesystem root",
+        ));
+    };
+    let mut current = Dir::open_root_for_walk().map_err(uninspectable)?;
+    check_directory(&current.stat().map_err(uninspectable)?)?;
     for component in directories {
         let stat = match current.stat_at(component) {
             Ok(stat) => stat,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(unusable("the source does not exist".to_owned()));
+                return Err(SourceRefusal::configuration(
+                    "source_missing",
+                    "the source does not exist",
+                ));
             }
-            Err(error) => {
-                return Err(unusable(format!(
-                    "the source path cannot be inspected: {error}"
-                )));
-            }
+            Err(error) => return Err(uninspectable(error)),
         };
         if stat.kind != Kind::Directory {
-            return Err(unusable(format!(
-                "a component of the source path is {}, and a credential path is never followed \
-                 through one",
-                stat.kind.describe()
-            )));
+            return Err(SourceRefusal::configuration(
+                "source_path_not_directory",
+                format!(
+                    "a component of the source path is {}, and a credential path is never \
+                     followed through one",
+                    stat.kind.describe()
+                ),
+            ));
         }
         current = current
             .open_walk_at(component, Some(&stat))
-            .map_err(|error| unusable(format!("the source path cannot be opened: {error}")))?;
-        check_directory(id, &stat)?;
+            .map_err(uninspectable)?;
+        check_directory(&stat)?;
     }
     let stat = match current.stat_at(file_name) {
         Ok(stat) => stat,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(unusable("the source does not exist".to_owned()));
+            return Err(SourceRefusal::configuration(
+                "source_missing",
+                "the source does not exist",
+            ));
         }
-        Err(error) => return Err(unusable(format!("the source cannot be inspected: {error}"))),
+        Err(error) => return Err(uninspectable(error)),
     };
-    check_file(id, &stat)?;
-    let handle = open_final(&current, file_name, &stat)
-        .map_err(|error| unusable(format!("the source cannot be opened: {error}")))?;
-    let opened = anchored::fstat(handle.as_fd())
-        .map_err(|error| unusable(format!("the source cannot be inspected: {error}")))?;
+    check_file(&stat)?;
+    let handle = open_final(&current, file_name, &stat).map_err(uninspectable)?;
+    let opened = anchored::fstat(handle.as_fd()).map_err(uninspectable)?;
     if opened.identity() != stat.identity() {
-        return Err(refusal(
-            id,
+        return Err(SourceRefusal::new(
+            "source_replaced",
             Remediation::Retry,
             "the source was replaced while it was being opened",
         ));
     }
-    check_file(id, &opened)?;
+    check_file(&opened)?;
     Ok(Source {
         handle,
         stat: opened,
@@ -384,12 +424,11 @@ fn open_final(dir: &Dir, name: &Name, stat: &Stat) -> std::io::Result<OwnedFd> {
     dir.open_read_at(name, Some(stat)).map(OwnedFd::from)
 }
 
-fn check_directory(id: &str, stat: &Stat) -> Result<(), JailError> {
+fn check_directory(stat: &Stat) -> Result<(), SourceRefusal> {
     let euid = crate::state::effective_uid();
     if stat.uid != 0 && stat.uid != euid {
-        return Err(refusal(
-            id,
-            Remediation::Configuration,
+        return Err(SourceRefusal::configuration(
+            "source_path_foreign_owner",
             format!(
                 "a directory on the source path is owned by uid {}, neither root nor this \
                  operator ({euid})",
@@ -398,9 +437,8 @@ fn check_directory(id: &str, stat: &Stat) -> Result<(), JailError> {
         ));
     }
     if stat.mode & 0o022 != 0 && stat.mode & 0o1000 == 0 {
-        return Err(refusal(
-            id,
-            Remediation::Configuration,
+        return Err(SourceRefusal::configuration(
+            "source_path_shared_writable",
             format!(
                 "a directory on the source path has mode {:04o}: writable by others without \
                  the sticky bit, so its entries can be replaced",
@@ -411,11 +449,10 @@ fn check_directory(id: &str, stat: &Stat) -> Result<(), JailError> {
     Ok(())
 }
 
-fn check_file(id: &str, stat: &Stat) -> Result<(), JailError> {
+fn check_file(stat: &Stat) -> Result<(), SourceRefusal> {
     if stat.kind != Kind::Regular {
-        return Err(refusal(
-            id,
-            Remediation::Configuration,
+        return Err(SourceRefusal::configuration(
+            "source_not_regular_file",
             format!(
                 "the source is {}; only a regular file is staged, and a credential directory \
                  is never recursed",
@@ -425,9 +462,8 @@ fn check_file(id: &str, stat: &Stat) -> Result<(), JailError> {
     }
     let euid = crate::state::effective_uid();
     if stat.uid != 0 && stat.uid != euid {
-        return Err(refusal(
-            id,
-            Remediation::Configuration,
+        return Err(SourceRefusal::configuration(
+            "source_foreign_owner",
             format!(
                 "the source is owned by uid {}, neither root nor this operator ({euid})",
                 stat.uid
@@ -435,9 +471,8 @@ fn check_file(id: &str, stat: &Stat) -> Result<(), JailError> {
         ));
     }
     if stat.mode & 0o022 != 0 {
-        return Err(refusal(
-            id,
-            Remediation::Configuration,
+        return Err(SourceRefusal::configuration(
+            "source_shared_writable",
             format!(
                 "the source has mode {:04o}; a credential others can write is refused",
                 stat.mode
@@ -445,6 +480,64 @@ fn check_file(id: &str, stat: &Stat) -> Result<(), JailError> {
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Inspection for `doctor` (§14.1)
+// ---------------------------------------------------------------------------
+
+/// One credential as `doctor --launch` reports it: the profile's own names
+/// and a status, never a value and never a source path (§14.1).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CredentialCheck {
+    /// The logical id.
+    pub id: String,
+    /// `copy_rw` or `bind_ro`.
+    pub mode: String,
+    /// The destination beneath vendor state, as the profile names it.
+    pub dest: NativeString,
+    /// Whether staging would accept this source now.
+    pub available: bool,
+    /// `ok` or the stable reason code of the refusal staging would make.
+    pub reason_code: &'static str,
+}
+
+/// Checks each credential's existence, type, ownership, mode and the copy
+/// budget exactly as [`stage`] would, without reading content and without
+/// writing anything (§14.1). The walk is the same no-follow walk; on Linux the
+/// final open is `O_PATH`, so even a special file is never opened for I/O.
+#[must_use]
+pub fn inspect(launch: &LaunchSnapshot) -> Vec<CredentialCheck> {
+    let mut declarations: Vec<&CredentialDecl> = launch.credentials.iter().collect();
+    declarations.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut copied: u64 = 0;
+    declarations
+        .into_iter()
+        .map(|declaration| {
+            let reason = match open_source(declaration.source.as_bytes()) {
+                Err(refused) => refused.reason,
+                Ok(source)
+                    if declaration.mode == MODE_COPY_RW
+                        && source.stat.size > COPY_BUDGET.saturating_sub(copied) =>
+                {
+                    "copy_budget_exceeded"
+                }
+                Ok(source) => {
+                    if declaration.mode == MODE_COPY_RW {
+                        copied += source.stat.size;
+                    }
+                    "ok"
+                }
+            };
+            CredentialCheck {
+                id: declaration.id.clone(),
+                mode: declaration.mode.clone(),
+                dest: declaration.dest.clone(),
+                available: reason == "ok",
+                reason_code: reason,
+            }
+        })
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {

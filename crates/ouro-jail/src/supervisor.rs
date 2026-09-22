@@ -111,7 +111,37 @@ pub struct DoctorReport {
     pub platform: PlatformRecord,
     /// Whether every requirement is satisfied.
     pub ready: bool,
+    // J3-launch begin: `doctor --launch` (§14.1)
+    /// The launch profile's own readiness, when `--launch` was given.
+    pub launch: Option<LaunchReadiness>,
+    // J3-launch end
 }
+
+// J3-launch begin: `doctor --launch` (§14.1)
+/// What `doctor --launch NAME` established about a launch profile.
+///
+/// §14.1: "Launch profile credential existence/type/permissions without
+/// printing values or user-specific paths; experimental/supported status
+/// separately." Each credential is named by the profile's own id, mode and
+/// destination; the support status is reported apart from the host probes.
+pub struct LaunchReadiness {
+    /// The launch profile name.
+    pub name: String,
+    /// `experimental` or `supported`.
+    pub support: &'static str,
+    /// Why the profile has that status.
+    pub support_reason: &'static str,
+    /// One check per declared credential, in id order.
+    pub credentials: Vec<crate::credentials::CredentialCheck>,
+}
+
+/// Every launch profile is `experimental` until a real run of that agent is
+/// recorded (§12, A01). This build records none and keeps no registry of
+/// supported profiles, so it never claims `supported`.
+pub const LAUNCH_SUPPORT: &str = "experimental";
+/// Why [`LAUNCH_SUPPORT`] is what it is.
+pub const LAUNCH_SUPPORT_REASON: &str = "no_recorded_run";
+// J3-launch end
 
 /// What `gc` found.
 pub struct GcReport {
@@ -645,11 +675,33 @@ pub fn doctor(ctx: &Context, args: &DoctorArgs) -> Result<DoctorReport, JailErro
         .requirements
         .iter()
         .all(|requirement| satisfied(requirement, &capabilities));
+    // J3-launch begin: §14.1 launch readiness; a missing or unsafe source
+    // makes the plan unavailable (north star §4.5: it refuses the launch).
+    let launch = args.launch.as_ref().map(|name| LaunchReadiness {
+        name: name.clone(),
+        support: LAUNCH_SUPPORT,
+        support_reason: LAUNCH_SUPPORT_REASON,
+        credentials: plan
+            .resolved
+            .snapshot
+            .launch
+            .as_ref()
+            .map(crate::credentials::inspect)
+            .unwrap_or_default(),
+    });
+    let ready = ready
+        && launch
+            .as_ref()
+            .is_none_or(|launch| launch.credentials.iter().all(|check| check.available));
+    // J3-launch end
     Ok(DoctorReport {
         requirements: plan.resolved.requirements,
         capabilities,
         platform: platform_record(ctx),
         ready,
+        // J3-launch begin
+        launch,
+        // J3-launch end
     })
 }
 

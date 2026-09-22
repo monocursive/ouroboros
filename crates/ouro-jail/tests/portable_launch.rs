@@ -1751,3 +1751,118 @@ fn explain_prints_credentials_by_id_mode_and_dest_never_by_source() {
         "{stdout}"
     );
 }
+
+#[test]
+fn doctor_launch_checks_each_credential_without_printing_paths_or_values() {
+    let fixture = inspection_fixture();
+    let json = jail_binary(&fixture, &["doctor", "--launch", "inspect", "--json"]);
+    // Not ready: two sources refuse (and macOS refuses execution too).
+    assert_eq!(
+        json.status.code(),
+        Some(125),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&json.stdout).into_owned();
+    assert_no_private_path(&fixture, "doctor --json", &stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["ready"], false);
+    let launch = &value["launch"];
+    assert_eq!(launch["name"], "inspect");
+    assert_eq!(launch["support"], "experimental");
+    assert_eq!(launch["support_reason"], "no_recorded_run");
+    let rows: Vec<(String, String, String)> = launch["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["id"].as_str().unwrap().to_owned(),
+                row["status"].as_str().unwrap().to_owned(),
+                row["reason_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("good".into(), "available".into(), "ok".into()),
+            (
+                "missing".into(),
+                "unavailable".into(),
+                "source_missing".into()
+            ),
+            (
+                "pipe".into(),
+                "unavailable".into(),
+                "source_not_regular_file".into()
+            ),
+        ]
+    );
+
+    let text = jail_binary(&fixture, &["doctor", "--launch", "inspect"]);
+    let stdout = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert_no_private_path(&fixture, "doctor", &stdout);
+    assert!(
+        stdout.contains("launch inspect experimental reason=no_recorded_run"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "credential missing mode=copy_rw dest=missing.json unavailable reason=source_missing"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_readiness_needs_every_credential_and_reports_support_apart_from_it() {
+    // The scripted platform satisfies every requirement, so readiness here is
+    // decided by the credentials alone.
+    let fixture = Fixture::new();
+    let auth = fixture.credential("auth.json", b"a");
+    let config = fixture.credential("config.toml", b"b");
+    agent_profile(&fixture, &auth, &config);
+    let ctx = fixture.context(Box::new(Sim::default()), Some(fixture.root.join("home")));
+    let args = cli::DoctorArgs {
+        profile: None,
+        launch: Some("fixture".into()),
+        json: true,
+    };
+    let report = supervisor::doctor(&ctx, &args).unwrap();
+    assert!(report.ready);
+    let launch = report.launch.as_ref().unwrap();
+    assert_eq!(
+        launch.support, "experimental",
+        "support is reported whatever readiness says"
+    );
+    assert!(launch.credentials.iter().all(|check| check.available));
+
+    std::fs::remove_file(&config).unwrap();
+    let report = supervisor::doctor(&ctx, &args).unwrap();
+    assert!(
+        !report.ready,
+        "a missing source makes the launch unavailable"
+    );
+    assert_eq!(report.launch.as_ref().unwrap().support, "experimental");
+
+    // Oversize copies are caught before exec by the same budget.
+    let big = std::fs::File::create(&config).unwrap();
+    big.set_len(ouro_jail::credentials::COPY_BUDGET).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    fixture.launch(
+        "fixture",
+        &format!(
+            "name = \"fixture\"\njail = \"agent\"\n\
+             [credentials.a]\nsource = \"{}\"\ndest = \"a\"\nmode = \"copy_rw\"\n\
+             [credentials.b]\nsource = \"{}\"\ndest = \"b\"\nmode = \"copy_rw\"\n",
+            auth.display(),
+            config.display()
+        ),
+    );
+    let report = supervisor::doctor(&ctx, &args).unwrap();
+    let checks = &report.launch.as_ref().unwrap().credentials;
+    assert_eq!(checks[0].reason_code, "ok");
+    assert_eq!(checks[1].reason_code, "copy_budget_exceeded");
+    assert!(!report.ready);
+}
