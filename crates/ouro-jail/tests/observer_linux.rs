@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use ouro_fixture::harness;
 use ouro_jail::platform::linux::tracer::{
     ClosedOp, GapReason, Tracer, TracerConfig, TracerError, TracerEvent, TracerSummary, cmdline,
     descendants, narrowing_filter, narrowing_filter_bytes, narrowing_filter_digest, nspid,
@@ -432,17 +433,41 @@ int main(int argc, char **argv) {
 }
 "##;
 
-// ------------------------------------------------------------- scaffolding
+mod common;
 
-fn conformance() -> bool {
-    std::env::var_os("OURO_CONFORMANCE").is_some_and(|value| value == "1")
+// ---------------------------------------------------------------------------
+// One tracer at a time
+// ---------------------------------------------------------------------------
+
+/// Serialise the checks in this binary.
+///
+/// Every check here drives real processes. A tracer's thread owns
+/// `waitpid(-1, __WALL)` for the whole process, so while one is attached it
+/// reaps *every* child this process has, including the `gcc` a second check is
+/// waiting on and the launcher a second tracer just seized. Two of them at
+/// once do not race on any data structure; they steal each other's children,
+/// and the loser waits for a status that has already been collected.
+///
+/// That is a property of the binary, not of how it is invoked, so it is
+/// enforced here rather than by passing `--test-threads=1`: the checks are
+/// correct under any parallelism the runner chooses.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A check that panicked while holding this poisoned it. There is no shared
+    // state behind the lock — only the process's children, which that check no
+    // longer has — so the next one takes the guard and carries on.
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Report a missing precondition. Under `OURO_CONFORMANCE=1` a skip is a
-/// failure, so a conformance run cannot pass by not running.
+// ------------------------------------------------------------- scaffolding
+
+/// Report a missing precondition, in the words the rest of the suite uses.
+/// Under `OURO_CONFORMANCE=1` a skip is a failure, so a conformance run
+/// cannot pass by not running.
 fn skip(reason: &str) -> bool {
-    assert!(!conformance(), "skipped under OURO_CONFORMANCE=1: {reason}");
-    eprintln!("skipped: {reason}");
+    harness::skip_or_fail(reason);
     false
 }
 
@@ -461,8 +486,13 @@ fn build() -> Result<&'static (PathBuf, PathBuf), String> {
             let source = dir.join("helper.c");
             std::fs::write(&source, HELPER_C).map_err(|e| format!("write helper.c: {e}"))?;
             let helper = dir.join("helper");
+            // `-B` beside the compiler, so building the fixture does not
+            // depend on `PATH`: `gcc` looks up `as` and `ld` there, and every
+            // other program these checks run is named absolutely for the same
+            // reason. A host that has the compiler but not its assembler
+            // still skips, with that as the reason.
             let out = Command::new("/usr/bin/gcc")
-                .args(["-O1", "-Wall", "-pthread", "-o"])
+                .args(["-O1", "-Wall", "-pthread", "-B/usr/bin", "-o"])
                 .arg(&helper)
                 .arg(&source)
                 .output()
@@ -818,6 +848,7 @@ fn find_launcher(root: libc::pid_t, argv0: &[u8], budget: Duration) -> Option<li
 /// same syscall; and a read-only open produces no event at all.
 #[test]
 fn o01_every_closed_set_result_matches_the_fixture() {
+    let _serial = serial();
     let Some(work) = setup("o01", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1003,7 +1034,11 @@ fn o01_every_closed_set_result_matches_the_fixture() {
 /// with the host pid in the events and the namespace pid in the process.
 #[test]
 fn o01_through_bubblewrap_carries_host_pids_for_namespace_processes() {
-    let Some(work) = setup("bwrap", &["/usr/bin/gcc", "/usr/bin/bwrap"]) else {
+    let _serial = serial();
+    if !common::live() {
+        return;
+    }
+    let Some(work) = setup("bwrap", &["/usr/bin/gcc"]) else {
         return;
     };
     let build_dir = work
@@ -1011,7 +1046,7 @@ fn o01_through_bubblewrap_carries_host_pids_for_namespace_processes() {
         .parent()
         .expect("the helper lives in a directory")
         .to_path_buf();
-    let mut command = Command::new("/usr/bin/bwrap");
+    let mut command = Command::new(common::bwrap_path());
     command
         .args([
             "--unshare-user",
@@ -1146,6 +1181,7 @@ fn o01_through_bubblewrap_carries_host_pids_for_namespace_processes() {
 /// confirmed transition, and the two are never confused.
 #[test]
 fn o02_exec_success_and_failure_are_distinct_events() {
+    let _serial = serial();
     let Some(work) = setup("exec", &["/usr/bin/gcc", "/bin/true"]) else {
         return;
     };
@@ -1230,6 +1266,7 @@ fn o02_exec_success_and_failure_are_distinct_events() {
 /// `proc.exit` — the spec ties that event to a witnessed exec.
 #[test]
 fn o02_a_fork_child_that_never_execs_emits_no_exit() {
+    let _serial = serial();
     let Some(work) = setup("fork", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1273,6 +1310,7 @@ fn o02_a_fork_child_that_never_execs_emits_no_exit() {
 /// group's status and not a worker's.
 #[test]
 fn o02_a_leader_leaving_live_workers_emits_exactly_one_exit() {
+    let _serial = serial();
     let Some(work) = setup("threads", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1319,6 +1357,7 @@ fn o02_a_leader_leaving_live_workers_emits_exactly_one_exit() {
 /// identity it was born with, and one confirmed transition is reported.
 #[test]
 fn o02_a_non_leader_exec_keeps_the_birth_identity() {
+    let _serial = serial();
     let Some(work) = setup("nonleader", &["/usr/bin/gcc", "/bin/true"]) else {
         return;
     };
@@ -1355,6 +1394,7 @@ fn o02_a_non_leader_exec_keeps_the_birth_identity() {
 /// rather than proceeding unobserved.
 #[test]
 fn the_narrowing_filter_without_a_tracer_fails_closed_with_enosys() {
+    let _serial = serial();
     let Some(work) = setup("enosys", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1391,6 +1431,7 @@ fn the_narrowing_filter_without_a_tracer_fails_closed_with_enosys() {
 /// invented.
 #[test]
 fn o03_queue_loss_is_bounded_counted_and_coalesced() {
+    let _serial = serial();
     let Some(work) = setup("loss", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1503,6 +1544,7 @@ fn o03_queue_loss_is_bounded_counted_and_coalesced() {
 /// no events, and the filter does not even stop for them.
 #[test]
 fn o04_write_read_and_mmap_produce_no_events_and_no_stops() {
+    let _serial = serial();
     let Some(work) = setup("o04", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1556,11 +1598,15 @@ fn o04_write_read_and_mmap_produce_no_events_and_no_stops() {
 /// a mode 0000 file (asserted by `o01_every_closed_set_result_matches_the_fixture`).
 #[test]
 fn o01_a_denied_write_keeps_its_own_operation_and_errno() {
-    let Some(work) = setup("denied", &["/usr/bin/gcc", "/usr/bin/bwrap"]) else {
+    let _serial = serial();
+    if !common::live() {
+        return;
+    }
+    let Some(work) = setup("denied", &["/usr/bin/gcc"]) else {
         return;
     };
     let build_dir = work.helper.parent().expect("a directory").to_path_buf();
-    let mut command = Command::new("/usr/bin/bwrap");
+    let mut command = Command::new(common::bwrap_path());
     command
         .args([
             "--unshare-user",
@@ -1652,6 +1698,7 @@ fn o01_a_denied_write_keeps_its_own_operation_and_errno() {
 /// measured in J0 can be compared with the cost of the module that shipped.
 #[test]
 fn perf_the_j0_file_workload_costs_what_the_spike_cost() {
+    let _serial = serial();
     let Some(work) = setup("perf", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1707,6 +1754,7 @@ fn perf_the_j0_file_workload_costs_what_the_spike_cost() {
 /// ours, and one that is already traced.
 #[test]
 fn attach_refuses_what_it_may_not_trace() {
+    let _serial = serial();
     let Some(work) = setup("preconditions", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1737,6 +1785,7 @@ fn attach_refuses_what_it_may_not_trace() {
 /// digest names those bytes.
 #[test]
 fn the_launcher_installs_the_published_filter() {
+    let _serial = serial();
     let Some(work) = setup("filter", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1763,6 +1812,7 @@ fn the_launcher_installs_the_published_filter() {
 /// end of the name says so instead of presenting a prefix as the name.
 #[test]
 fn o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete() {
+    let _serial = serial();
     let Some(work) = setup("o06", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1862,6 +1912,7 @@ fn o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete() {
 /// the call is counted as an invalid argument, not as lost coverage.
 #[test]
 fn o03_an_undecodable_open_how_is_never_a_covered_open() {
+    let _serial = serial();
     let Some(work) = setup("openhow", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1919,6 +1970,7 @@ fn o03_an_undecodable_open_how_is_never_a_covered_open() {
 /// exited from one that was killed. A signal death is not an exit code.
 #[test]
 fn o02_an_exit_carries_the_raw_wait_status_of_a_signal_death() {
+    let _serial = serial();
     let Some(work) = setup("raise", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1960,6 +2012,7 @@ fn o02_an_exit_carries_the_raw_wait_status_of_a_signal_death() {
 /// gaps rather than events the observer cannot stand behind.
 #[test]
 fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
+    let _serial = serial();
     let Some(work) = setup("inflight", &["/usr/bin/gcc"]) else {
         return;
     };

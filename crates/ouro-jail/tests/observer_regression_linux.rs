@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use ouro_fixture::harness;
 use ouro_jail::platform::linux::seccomp;
 use ouro_jail::platform::linux::tracer::{
     ClosedOp, GapReason, OpSet, Tracer, TracerConfig, TracerEvent, TracerSummary,
@@ -676,15 +677,37 @@ int main(int argc, char **argv) {
 }
 "##;
 
-// ------------------------------------------------------------- scaffolding
+// ---------------------------------------------------------------------------
+// One tracer at a time
+// ---------------------------------------------------------------------------
 
-fn conformance() -> bool {
-    std::env::var_os("OURO_CONFORMANCE").is_some_and(|value| value == "1")
+/// Serialise the checks in this binary.
+///
+/// Every check here drives real processes. A tracer's thread owns
+/// `waitpid(-1, __WALL)` for the whole process, so while one is attached it
+/// reaps *every* child this process has, including the `gcc` a second check is
+/// waiting on and the launcher a second tracer just seized. Two of them at
+/// once do not race on any data structure; they steal each other's children,
+/// and the loser waits for a status that has already been collected.
+///
+/// That is a property of the binary, not of how it is invoked, so it is
+/// enforced here rather than by passing `--test-threads=1`: the checks are
+/// correct under any parallelism the runner chooses.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A check that panicked while holding this poisoned it. There is no shared
+    // state behind the lock — only the process's children, which that check no
+    // longer has — so the next one takes the guard and carries on.
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+// ------------------------------------------------------------- scaffolding
+
+/// Report a missing precondition, in the words the rest of the suite uses.
 fn skip(reason: &str) {
-    assert!(!conformance(), "skipped under OURO_CONFORMANCE=1: {reason}");
-    eprintln!("skipped: {reason}");
+    harness::skip_or_fail(reason);
 }
 
 fn build() -> Result<&'static (PathBuf, PathBuf), String> {
@@ -699,8 +722,13 @@ fn build() -> Result<&'static (PathBuf, PathBuf), String> {
             let source = dir.join("regress.c");
             std::fs::write(&source, HELPER_C).map_err(|e| format!("write regress.c: {e}"))?;
             let helper = dir.join("regress");
+            // `-B` beside the compiler, so building the fixture does not
+            // depend on `PATH`: `gcc` looks up `as` and `ld` there, and every
+            // other program these checks run is named absolutely for the same
+            // reason. A host that has the compiler but not its assembler
+            // still skips, with that as the reason.
             let out = Command::new("/usr/bin/gcc")
-                .args(["-O1", "-Wall", "-pthread", "-o"])
+                .args(["-O1", "-Wall", "-pthread", "-B/usr/bin", "-o"])
                 .arg(&helper)
                 .arg(&source)
                 .output()
@@ -1055,6 +1083,7 @@ fn filter_bytes(program: &[libc::sock_filter]) -> Vec<u8> {
 /// survived because nothing exercised it.
 #[test]
 fn r1_a_restarted_syscall_produces_exactly_one_result() {
+    let _serial = serial();
     let Some(work) = setup("r1") else { return };
     let fifo = work.path("f");
     mkfifo(&fifo);
@@ -1100,6 +1129,7 @@ fn r1_a_restarted_syscall_produces_exactly_one_result() {
 /// `PTRACE_GETSIGINFO` and preserved with `PTRACE_LISTEN`.
 #[test]
 fn r2_a_group_stop_during_a_covered_call_is_survived() {
+    let _serial = serial();
     let Some(work) = setup("r2") else { return };
     let fifo = work.path("f");
     mkfifo(&fifo);
@@ -1129,6 +1159,7 @@ fn r2_a_group_stop_during_a_covered_call_is_survived() {
 /// still be attached, and the observer keeps working after SIGCONT.
 #[test]
 fn r3_attaching_to_an_already_stopped_tracee_works() {
+    let _serial = serial();
     let Some(work) = setup("r3") else { return };
     let helper = work.helper_s();
     let base = work.base();
@@ -1154,6 +1185,7 @@ fn r3_attaching_to_an_already_stopped_tracee_works() {
 /// never a manufactured result, and still yields one exit with the real code.
 #[test]
 fn r4_an_exit_while_a_call_is_in_flight_is_a_gap_not_a_result() {
+    let _serial = serial();
     let Some(work) = setup("r4") else { return };
     let fifo = work.path("f");
     mkfifo(&fifo);
@@ -1194,6 +1226,7 @@ fn r4_an_exit_while_a_call_is_in_flight_is_a_gap_not_a_result() {
 /// per child, each with the child's own exit code.
 #[test]
 fn r5_a_fork_burst_keeps_attribution() {
+    let _serial = serial();
     let Some(work) = setup("r5") else { return };
     const N: usize = 300;
     let helper = work.helper_s();
@@ -1237,6 +1270,7 @@ fn r5_a_fork_burst_keeps_attribution() {
 /// not read is the tracee's invalid argument, not a hole in coverage.
 #[test]
 fn r6_hostile_path_pointers_never_produce_a_confident_path() {
+    let _serial = serial();
     for kind in ["edge", "nonul", "unmapped", "minus1", "null", "long"] {
         let Some(work) = setup(&format!("r6-{kind}")) else {
             return;
@@ -1309,6 +1343,7 @@ fn r6_hostile_path_pointers_never_produce_a_confident_path() {
 /// 112 bytes of unrelated tracee memory into the observer.
 #[test]
 fn r7_a_lying_sockaddr_length_retains_only_the_family_it_names() {
+    let _serial = serial();
     for kind in [
         "lie-long",
         "edge",
@@ -1370,6 +1405,7 @@ fn r7_a_lying_sockaddr_length_retains_only_the_family_it_names() {
 /// and are now named. A call from an ABI the set does not name still is not.
 #[test]
 fn r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi() {
+    let _serial = serial();
     let Some(work) = setup("r8") else { return };
     let helper = work.helper_s();
     let base = work.base();
@@ -1409,6 +1445,7 @@ fn r8_the_grown_closed_set_names_mknod_and_truncate_but_never_another_abi() {
 /// is never delivered as a covered open.
 #[test]
 fn r9_open_how_sizes_are_decoded_or_declared_unavailable() {
+    let _serial = serial();
     let Some(work) = setup("r9") else { return };
     let helper = work.helper_s();
     let base = work.base();
@@ -1453,6 +1490,7 @@ fn r9_open_how_sizes_are_decoded_or_declared_unavailable() {
 /// must not make the observer hold more than the budget.
 #[test]
 fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
+    let _serial = serial();
     let Some(work) = setup("r10") else { return };
     const N: u64 = 16_000;
     let helper = work.helper_s();
@@ -1498,6 +1536,7 @@ fn r10_the_queue_bound_is_the_four_mib_of_the_spec() {
 /// real tree — still has its exit reported. It has exactly one route.
 #[test]
 fn r11_a_late_untraced_child_exit_is_still_reported() {
+    let _serial = serial();
     let Some(work) = setup("r11") else { return };
     let helper = work.helper_s();
     let base = work.base();
@@ -1538,6 +1577,7 @@ fn r11_a_late_untraced_child_exit_is_still_reported() {
 /// consumer cannot be wedged either.
 #[test]
 fn r12_finish_returns_even_when_a_tracee_will_not_die() {
+    let _serial = serial();
     let Some(work) = setup("r12") else { return };
     let helper = work.helper_s();
     let mut run = launch(&work, &[&helper, "sleep-forever"]);
@@ -1588,6 +1628,7 @@ fn r12_finish_returns_even_when_a_tracee_will_not_die() {
 /// event, and every call is still observed.
 #[test]
 fn r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount() {
+    let _serial = serial();
     let Some(work) = setup("r13") else { return };
     const N: u64 = 20_000;
     let helper = work.helper_s();
@@ -1633,6 +1674,7 @@ fn r13_a_stalled_consumer_stalls_the_tree_by_a_bounded_amount() {
 /// tracee.
 #[test]
 fn r17_a_foreign_filter_is_named_not_guessed() {
+    let _serial = serial();
     let Some(work) = setup("r17") else { return };
     let program = [
         libc::sock_filter {
@@ -1700,6 +1742,7 @@ fn r17_a_foreign_filter_is_named_not_guessed() {
 /// connection.
 #[test]
 fn r18_einprogress_is_the_raw_return() {
+    let _serial = serial();
     let Some(work) = setup("r18") else { return };
     let helper = work.helper_s();
     let mut run = launch(&work, &[&helper, "inprogress"]);
@@ -1722,6 +1765,7 @@ fn r18_einprogress_is_the_raw_return() {
 /// coverage.
 #[test]
 fn r19_two_paths_are_independent_evidence() {
+    let _serial = serial();
     let Some(work) = setup("r19") else { return };
     let helper = work.helper_s();
     let base = work.base();
@@ -1765,6 +1809,7 @@ fn r19_two_paths_are_independent_evidence() {
 /// by the kernel, so it is counted rather than left unexplained.
 #[test]
 fn r20_a_non_leader_exec_accounts_for_every_thread() {
+    let _serial = serial();
     let Some(work) = setup("r20") else { return };
     let helper = work.helper_s();
     let mut run = launch(&work, &[&helper, "threads-exec", "/bin/true"]);
@@ -1794,6 +1839,7 @@ fn r20_a_non_leader_exec_accounts_for_every_thread() {
 /// and are still reported.
 #[test]
 fn r21_the_tool_baseline_denies_the_abi_the_observer_cannot_name() {
+    let _serial = serial();
     let Some(work) = setup("r21") else { return };
     let baseline = seccomp::tool_baseline().expect("the tool baseline");
     let path = work.path("baseline.bin");
@@ -1842,6 +1888,7 @@ fn r21_the_tool_baseline_denies_the_abi_the_observer_cannot_name() {
 /// R22: a read-only open costs one stop and produces no event.
 #[test]
 fn r22_a_read_only_open_costs_one_stop_and_no_event() {
+    let _serial = serial();
     let Some(work) = setup("r22") else { return };
     const N: u64 = 5000;
     let target = work.path("readable");
@@ -1875,6 +1922,7 @@ fn r22_a_read_only_open_costs_one_stop_and_no_event() {
 /// every other event's `pid`, and the forking thread is named separately.
 #[test]
 fn r23_fork_names_the_thread_group_and_the_thread_that_forked() {
+    let _serial = serial();
     let Some(work) = setup("r23") else { return };
     let helper = work.helper_s();
     let mut run = launch(&work, &[&helper, "worker-fork", "/bin/true"]);
@@ -1938,6 +1986,7 @@ fn r23_fork_names_the_thread_group_and_the_thread_that_forked() {
 /// lifecycle facts, and the gap names the classes it cost.
 #[test]
 fn r24_a_queue_gap_names_what_it_lost_and_never_swallows_the_exit() {
+    let _serial = serial();
     let Some(work) = setup("r24") else { return };
     let helper = work.helper_s();
     let a = work.path("a");
@@ -2003,6 +2052,7 @@ fn r24_a_queue_gap_names_what_it_lost_and_never_swallows_the_exit() {
 /// without resolving it.
 #[test]
 fn r25_symlink_reports_the_link_it_creates_as_its_primary_path() {
+    let _serial = serial();
     let Some(work) = setup("r25") else { return };
     let helper = work.helper_s();
     let base = work.base();
@@ -2042,6 +2092,7 @@ fn r25_symlink_reports_the_link_it_creates_as_its_primary_path() {
 /// strict evidence would let an untrusted child stop its own attempt.
 #[test]
 fn r26_a_tracee_cannot_manufacture_the_observers_loss() {
+    let _serial = serial();
     let Some(work) = setup("r26") else { return };
     const N: u64 = 5000;
     let helper = work.helper_s();
@@ -2077,6 +2128,7 @@ fn r26_a_tracee_cannot_manufacture_the_observers_loss() {
 /// never labelled from this one. i386 42 is `pipe`; x86_64 42 is `connect`.
 #[test]
 fn r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table() {
+    let _serial = serial();
     let Some(work) = setup("r27") else { return };
     let program = [
         libc::sock_filter {
@@ -2138,6 +2190,7 @@ fn r27_a_foreign_architecture_stop_is_never_labelled_from_the_x86_64_table() {
 /// per-thread pairing key is for.
 #[test]
 fn r28_concurrent_threads_pair_their_own_entries_and_exits() {
+    let _serial = serial();
     let Some(work) = setup("r28") else { return };
     const N: u64 = 2000;
     let leader_path = work.path("by-leader");
@@ -2197,6 +2250,7 @@ fn r28_concurrent_threads_pair_their_own_entries_and_exits() {
 /// with it; a mutation that dropped the option survived until this test.
 #[test]
 fn r29_a_dead_supervisor_kills_its_traced_tree() {
+    let _serial = serial();
     if build().is_err() {
         skip("r29: the fixture could not be built");
         return;
@@ -2246,6 +2300,7 @@ fn r29_a_dead_supervisor_kills_its_traced_tree() {
 #[test]
 #[ignore]
 fn exitkill_child_supervisor() {
+    let _serial = serial();
     let Some(pid_file) = std::env::var_os("OURO_REGRESS_EXITKILL") else {
         return;
     };
@@ -2271,6 +2326,7 @@ fn exitkill_child_supervisor() {
 /// no zombie behind.
 #[test]
 fn r30_repeated_attach_and_finish_leaks_nothing() {
+    let _serial = serial();
     let Ok((helper, filter)) = build() else {
         skip("r30: the fixture could not be built");
         return;
