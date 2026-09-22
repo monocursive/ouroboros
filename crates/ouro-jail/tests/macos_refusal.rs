@@ -18,6 +18,8 @@ use std::process::{Command, Output};
 
 use jsonschema::{Registry, Resource, Validator};
 
+mod common;
+
 /// A private state root, a private config directory and an empty workspace.
 struct Harness {
     _temp: tempfile::TempDir,
@@ -29,7 +31,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt as _;
-        let temp = tempfile::tempdir().expect("a temporary directory");
+        let temp = common::private_tempdir();
         let make = |name: &str, mode: u32| {
             let path = temp.path().join(name);
             std::fs::create_dir(&path).expect("a directory");

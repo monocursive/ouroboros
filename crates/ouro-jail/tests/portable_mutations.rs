@@ -286,7 +286,7 @@ fn normalization_refuses_an_escape_rather_than_clamping_it_to_the_root() {
 
 #[test]
 fn a_symlinked_state_directory_refuses_for_being_a_symlink() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let real = temp.path().join("real");
     std::fs::create_dir(&real).expect("a directory");
     std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).expect("mode");
@@ -306,6 +306,8 @@ fn a_symlinked_state_directory_refuses_for_being_a_symlink() {
 }
 
 use std::os::unix::fs::PermissionsExt as _;
+
+mod common;
 
 #[test]
 fn the_ownership_predicate_refuses_a_foreign_owner() {
@@ -342,7 +344,7 @@ impl Durable for Recorder {
 
 #[test]
 fn a_durable_replacement_syncs_the_file_and_then_the_parent_directory() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let target = temp.path().join("jail.json");
     let recorder = Recorder::default();
 
@@ -458,7 +460,7 @@ fn minimal_record() -> AttemptRecord {
 
 #[test]
 fn the_receipt_revision_advances_on_each_successful_replacement() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let data = temp.path().join("data");
     std::fs::create_dir(&data).expect("data");
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).expect("mode");
@@ -494,7 +496,7 @@ fn the_receipt_revision_advances_on_each_successful_replacement() {
 
 #[test]
 fn a_descriptor_open_for_the_wrong_direction_refuses() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let data = temp.path().join("data");
     let config = temp.path().join("config");
     let work = temp.path().join("work");
@@ -547,7 +549,7 @@ fn a_descriptor_open_for_the_wrong_direction_refuses() {
 
 #[test]
 fn a_second_claim_of_the_same_attempt_refuses() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let data = temp.path().join("data");
     let config = temp.path().join("config");
     let work = temp.path().join("work");

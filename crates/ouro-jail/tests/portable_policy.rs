@@ -19,6 +19,8 @@ use ouro_jail::policy::{
 use ouro_jail::profiles;
 use ouro_jail::records::{ErrorCode, EvidenceMode, JailError, NativeString, ObserveMode, Os};
 
+mod common;
+
 /// A workspace with the shape the battery uses: a denied subtree, a read-only
 /// one, a symlink to the denied subtree and a symlink out of the workspace.
 struct Workspace {
@@ -28,7 +30,7 @@ struct Workspace {
 
 impl Workspace {
     fn new() -> Self {
-        let temp = tempfile::tempdir().expect("a temporary directory");
+        let temp = common::private_tempdir();
         // Resolve now: on macOS the temporary directory is reached through
         // `/var`, a symlink to `/private/var`.
         let root = std::fs::canonicalize(temp.path()).expect("canonical");

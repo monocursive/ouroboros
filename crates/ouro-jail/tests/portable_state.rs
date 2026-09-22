@@ -17,6 +17,8 @@ use std::process::Command;
 use ouro_jail::records::ErrorCode;
 use ouro_jail::state::{self, AttemptDir, AttemptId, Lease, TempWrite};
 
+mod common;
+
 /// The environment variable that turns the child helper below into a prober.
 const LOCK_PROBE: &str = "OURO_TEST_LOCK_PROBE";
 /// The exit status the child uses when the lease is already held.
@@ -32,7 +34,7 @@ fn private_dir(root: &Path, name: &str) -> std::path::PathBuf {
 
 #[test]
 fn a_durable_replacement_leaves_the_old_file_when_it_is_abandoned() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let data = private_dir(temp.path(), "data");
     let target = data.join("jail.json");
     state::replace_atomically(&target, b"first").expect("the first write");
@@ -73,7 +75,7 @@ fn a_durable_replacement_leaves_the_old_file_when_it_is_abandoned() {
 
 #[test]
 fn the_lease_is_exclusive_across_processes() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let data = private_dir(temp.path(), "data");
     let lock = data.join("jail.lock");
 
@@ -114,7 +116,7 @@ fn lock_probe_child_helper() {
 
 #[test]
 fn a_symlinked_state_root_refuses() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let real = private_dir(temp.path(), "real");
     let link = temp.path().join("link");
     std::os::unix::fs::symlink(&real, &link).expect("a symlink");
@@ -127,7 +129,7 @@ fn a_symlinked_state_root_refuses() {
 
 #[test]
 fn a_group_or_world_accessible_state_root_refuses() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     for mode in [0o755u32, 0o770, 0o701] {
         let path = temp.path().join(format!("mode{mode:o}"));
         std::fs::create_dir(&path).expect("a directory");
@@ -142,7 +144,7 @@ fn a_group_or_world_accessible_state_root_refuses() {
 
 #[test]
 fn a_file_where_a_state_directory_belongs_refuses() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let path = temp.path().join("not-a-directory");
     std::fs::write(&path, b"x").expect("a file");
     let error = state::check_state_dir(&path).expect_err("a file is not a state directory");
@@ -151,7 +153,7 @@ fn a_file_where_a_state_directory_belongs_refuses() {
 
 #[test]
 fn the_attempt_directory_has_the_layout_of_section_seven() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let data = private_dir(temp.path(), "data");
     let id = AttemptId::generate();
     let dir = AttemptDir::new(&data, &id);

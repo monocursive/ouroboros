@@ -15,6 +15,8 @@ use ouro_jail::policy::{Layer, LayerOrigin, PolicyDelta, ProfileName, ResolveInp
 use ouro_jail::profiles;
 use ouro_jail::records::{NativeString, Os};
 
+mod common;
+
 fn inputs(workspace: &str, layers: Vec<Layer>) -> ResolveInputs {
     ResolveInputs {
         platform: Os::Linux,
@@ -75,7 +77,7 @@ fn the_policy_digest_is_stable_across_equivalent_workspace_spellings() {
 /// object is unknown. This one proves the symlink rule itself.
 #[test]
 fn a_workspace_symlink_cannot_re_grant_a_denied_subtree() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let root = std::fs::canonicalize(temp.path()).expect("canonical");
     std::fs::create_dir(root.join("secrets")).expect("secrets");
     std::os::unix::fs::symlink("secrets", root.join("alias")).expect("alias");
@@ -228,7 +230,7 @@ fn equivalent_wall_spellings_compare_equal() {
 /// grants outright.
 #[test]
 fn a_tool_policy_rejects_a_host_grant() {
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let root: PathBuf = std::fs::canonicalize(temp.path()).expect("canonical");
     let workspace = root.to_str().expect("a UTF-8 temporary path");
     let layer = project(

@@ -15,6 +15,8 @@ use std::process::{Command, Stdio};
 
 use ouro_jail::records::{ErrorCode, GateExpectation, JailError, read_release};
 
+mod common;
+
 const ATTEMPT: &str = "att_00000000-0000-4000-8000-000000000001";
 
 fn expectation() -> GateExpectation {
@@ -202,7 +204,7 @@ fn x02_a_non_utf8_frame_refuses() {
 fn x02_a_gate_that_never_delivers_times_out_rather_than_waiting_forever() {
     use std::time::{Duration, Instant};
 
-    let temp = tempfile::tempdir().expect("a temporary directory");
+    let temp = common::private_tempdir();
     let fifo = temp.path().join("gate.fifo");
     let status = std::process::Command::new("/usr/bin/mkfifo")
         .arg(&fifo)
