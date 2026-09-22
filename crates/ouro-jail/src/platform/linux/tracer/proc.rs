@@ -44,6 +44,17 @@ pub fn tgid(pid: pid_t) -> Option<pid_t> {
     status_field(pid, "Tgid")?.parse().ok()
 }
 
+/// The parent this task currently reports, or `None` when it is gone.
+///
+/// A child that has been reaped by somebody else has no `/proc` entry at all,
+/// and one that was reparented reports a different parent. Either way this is
+/// how a caller checks that a process it spawned is still its own before it
+/// reads anything else about it.
+#[must_use]
+pub fn ppid(pid: pid_t) -> Option<pid_t> {
+    status_field(pid, "PPid")?.parse().ok()
+}
+
 /// The task id of the thread tracing `pid`, or `None` when nothing traces it.
 ///
 /// `TracerPid` names a *thread*, which is why a seize is confirmed against
@@ -69,8 +80,43 @@ pub fn nspid(pid: pid_t) -> Option<Vec<pid_t>> {
     if ids.is_empty() { None } else { Some(ids) }
 }
 
+/// Field 22 of `/proc/<pid>/stat`: the task's start time, in clock ticks
+/// since boot.
+///
+/// A pid alone does not identify a task: the kernel recycles pids. A pid with
+/// the start time the kernel recorded for it does, for as long as the boot
+/// lasts, which is why every birth this module reports carries one
+/// (jail-v1 §11.3, "internal attribution includes boot/birth identity").
+#[must_use]
+pub fn start_ticks(pid: pid_t) -> Option<u64> {
+    let raw = fs::read_to_string(proc_path(pid, "stat")).ok()?;
+    // The second field is the executable name in parentheses and may itself
+    // contain spaces and parentheses, so the fields are counted from the last
+    // closing parenthesis: field 3 (state) is the first one after it, and
+    // field 22 is therefore the twentieth.
+    let tail = &raw[raw.rfind(')')? + 1..];
+    tail.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// `/proc/<pid>/cmdline` split on NUL. Bytes, not text: an argv is not
 /// required to be UTF-8 (jail-v1 §11.3).
+///
+/// Three answers, and they are not the same:
+///
+/// * `None` — there is no such task. It was never there, or it has been
+///   reaped.
+/// * `Some(&[])` — the task is there and has no argv *at this instant*. The
+///   kernel serves this file from the task's memory map, so a task that is
+///   inside `execve` (its old image gone and its new argv not yet installed)
+///   and a zombie both read as empty. `posix_spawn` and
+///   `std::process::Command` return to their caller during that window, so
+///   the pid of a process that has just been spawned can read as empty for a
+///   moment.
+/// * `Some(argv)` — the argv the task has now.
+///
+/// A caller identifying a process by its argv — discovering the inside
+/// launcher under bubblewrap, for instance — must treat the empty answer as
+/// "not yet" and look again, not as "not the one".
 #[must_use]
 pub fn cmdline(pid: pid_t) -> Option<Vec<Vec<u8>>> {
     let raw = fs::read(proc_path(pid, "cmdline")).ok()?;
@@ -157,9 +203,23 @@ mod tests {
     }
 
     #[test]
+    fn start_ticks_of_this_process_is_stable_and_plausible() {
+        let me = std::process::id() as pid_t;
+        let a = start_ticks(me).expect("/proc/<pid>/stat field 22");
+        assert!(a > 0, "a task started after boot");
+        assert_eq!(start_ticks(me), Some(a), "a birth time never changes");
+        // The tracer thread is a task of this process and started later than
+        // or at the same tick as the process itself.
+        let tid = super::super::sys::gettid();
+        let t = start_ticks(tid).expect("a thread has a start time too");
+        assert!(t >= a, "thread {t} started before its process {a}");
+    }
+
+    #[test]
     fn a_task_that_does_not_exist_is_none_not_a_guess() {
         // pid 0 is never a task in /proc.
         assert_eq!(tgid(0), None);
+        assert_eq!(start_ticks(0), None);
         assert_eq!(nspid(0), None);
         assert_eq!(cmdline(0), None);
         assert!(children(0).is_empty());
@@ -174,20 +234,72 @@ mod tests {
             .spawn()
             .expect("/bin/sh must exist on the reference host");
         let pid = child.id() as pid_t;
-        let kids = children(std::process::id() as pid_t);
+        let me = std::process::id() as pid_t;
+        // Everything below is about *this* child. A blocking `waitpid(-1)`
+        // anywhere else in this test binary would reap it between these
+        // lines, and the failure would look like a flake; asserting the
+        // parent first makes a foreign reaper say its own name.
+        assert_eq!(
+            ppid(pid),
+            Some(me),
+            "the child {pid} is no longer ours: something in this test binary waited on \
+             any child and reaped it"
+        );
+        let kids = children(me);
         assert!(
             kids.contains(&pid),
             "spawned child {pid} missing from {kids:?}"
         );
-        let all = descendants(std::process::id() as pid_t);
+        let all = descendants(me);
         assert!(
             all.contains(&pid),
             "spawned child {pid} missing from {all:?}"
         );
-        let argv = cmdline(pid).expect("a live child has a cmdline");
+        // A task that is still inside `execve` has no argv yet, and
+        // `Command::spawn` returns during exactly that window. This is a
+        // bounded wait for the argv to appear, not a retry of a flaky
+        // assertion: the parent is checked again each time, so a reaper
+        // still fails by name rather than by timeout.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let argv = loop {
+            assert_eq!(
+                ppid(pid),
+                Some(me),
+                "the child {pid} stopped being ours while we waited for its argv: \
+                 something in this test binary waited on any child and reaped it"
+            );
+            match cmdline(pid) {
+                Some(argv) if !argv.is_empty() => break argv,
+                other => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the child {pid} never showed an argv: cmdline={other:?} ppid={:?}",
+                    ppid(pid)
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
         assert_eq!(argv[0], b"/bin/sh".to_vec());
         assert_eq!(tgid(pid), Some(pid));
+        assert_eq!(ppid(pid), Some(me), "and it was ours throughout");
         drop(child.stdin.take());
-        let _ = child.wait();
+        let status = child.wait().expect("the child is ours to wait for");
+        assert!(status.success());
+    }
+
+    /// The empty answer and the absent answer are different, and a caller
+    /// that confuses them would mistake a process mid-`execve` for one that
+    /// is not there.
+    #[test]
+    fn an_empty_cmdline_is_not_an_absent_one() {
+        assert_eq!(cmdline(0), None, "no such task");
+        let me = std::process::id() as pid_t;
+        let mine = cmdline(me).expect("this process has an argv");
+        assert!(!mine.is_empty(), "and it is not empty");
+    }
+
+    #[test]
+    fn the_parent_of_a_task_that_does_not_exist_is_none() {
+        assert_eq!(ppid(0), None);
+        assert_eq!(ppid(1), Some(0), "init reports no parent");
     }
 }

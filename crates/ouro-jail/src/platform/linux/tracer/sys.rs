@@ -17,6 +17,7 @@ pub const PTRACE_CONT: c_uint = 7;
 pub const PTRACE_DETACH: c_uint = 17;
 pub const PTRACE_SYSCALL: c_uint = 24;
 pub const PTRACE_GETEVENTMSG: c_uint = 0x4201;
+pub const PTRACE_GETSIGINFO: c_uint = 0x4202;
 pub const PTRACE_SEIZE: c_uint = 0x4206;
 pub const PTRACE_LISTEN: c_uint = 0x4208;
 /// Not in every `libc` release; kernel 4.3 and later.
@@ -164,6 +165,95 @@ pub fn listen(pid: pid_t) -> io::Result<()> {
     .map(|_| ())
 }
 
+/// Whether a stopped tracee is in a group-stop.
+///
+/// `PTRACE_GETSIGINFO` is the documented way to tell the two kinds of
+/// `PTRACE_EVENT_STOP` apart: it fails with `EINVAL` for a group-stop and
+/// succeeds for the stop a `PTRACE_INTERRUPT` or a fresh attach produced.
+/// Getting this wrong means either resuming a process the user stopped or
+/// leaving a fresh tracee in `PTRACE_LISTEN` forever.
+pub fn is_group_stop(pid: pid_t) -> bool {
+    // `siginfo_t` is larger than anything the kernel writes here; a local of
+    // the right type is the safe way to give the kernel its buffer.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    match ptrace_raw(
+        PTRACE_GETSIGINFO,
+        pid,
+        std::ptr::null_mut(),
+        (&raw mut info).cast::<c_void>(),
+    ) {
+        Ok(_) => false,
+        Err(err) => err.raw_os_error() == Some(libc::EINVAL),
+    }
+}
+
+/// Send `signal` to one task of this process.
+pub fn tgkill(tid: pid_t, signal: c_int) -> io::Result<()> {
+    // SAFETY: `tgkill` takes three integers. The tgid is this process, so the
+    // signal cannot reach a task outside it even if `tid` has been recycled.
+    let rc = unsafe { libc::syscall(libc::SYS_tgkill, libc::getpid(), tid, signal) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Send `signal` to a tracee. Used to end a tree that will not end itself.
+pub fn kill(pid: pid_t, signal: c_int) -> io::Result<()> {
+    // SAFETY: `kill` takes a pid and a signal and dereferences nothing.
+    let rc = unsafe { libc::kill(pid, signal) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+extern "C" fn wake_handler(_signal: c_int) {}
+
+/// The signal the supervisor uses to interrupt the tracer thread's
+/// `waitpid`.
+///
+/// A real-time signal above the range glibc reserves for its own threading
+/// implementation, so installing a handler for it cannot disturb anything
+/// else in the process.
+#[must_use]
+pub fn wake_signal() -> c_int {
+    libc::SIGRTMIN() + 1
+}
+
+/// Install the no-op handler that makes a blocking `waitpid` return `EINTR`.
+///
+/// The handler does nothing at all: it allocates nothing, takes no lock and
+/// touches no global state, so it is async-signal-safe by construction. It
+/// exists only so that the kernel interrupts the wait; without `SA_RESTART`
+/// the syscall returns `EINTR` and the tracer thread gets to look at its stop
+/// flag. This is process-global state, installed once, the first time a
+/// tracer is attached.
+///
+/// # Errors
+/// The `errno` of `sigaction`.
+pub fn install_wake_handler() -> io::Result<()> {
+    // SAFETY: `sigaction` is a plain C struct of integers and a function
+    // pointer; zeroing it is the documented way to start from a clean one.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    let handler: extern "C" fn(c_int) = wake_handler;
+    action.sa_sigaction = handler as *const () as usize;
+    // No SA_RESTART: the point is that `waitpid` returns EINTR.
+    action.sa_flags = 0;
+    // SAFETY: `sigemptyset` writes one `sigset_t` through the pointer.
+    unsafe { libc::sigemptyset(&raw mut action.sa_mask) };
+    // SAFETY: installs a handler for one signal. `action` is live for the
+    // call; the old action is not wanted, so the third argument is null.
+    let rc = unsafe { libc::sigaction(wake_signal(), &raw const action, std::ptr::null_mut()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 pub fn detach(pid: pid_t) -> io::Result<()> {
     ptrace_raw(
         PTRACE_DETACH,
@@ -298,6 +388,12 @@ pub fn wait_any(flags: c_int) -> Wait {
 
 /// This thread's kernel task id. `TracerPid` in `/proc/<pid>/status` names
 /// the tracer *thread*, so confirming a seize needs this and not `getpid`.
+/// This process's id, for the `/proc` walks that need it.
+pub fn getpid() -> pid_t {
+    // SAFETY: `getpid` takes no arguments and cannot fail.
+    unsafe { libc::getpid() }
+}
+
 pub fn gettid() -> pid_t {
     // SAFETY: `gettid` takes no arguments and cannot fail.
     unsafe { libc::gettid() }
@@ -429,6 +525,55 @@ mod tests {
         );
         let err = event_msg(me).expect_err("not a tracee");
         assert_eq!(err.raw_os_error(), Some(libc::ESRCH), "{err}");
+    }
+
+    /// The wake signal must be one nothing else in the process uses, and its
+    /// handler must interrupt a blocking call rather than let the kernel
+    /// restart it — that is the whole point of installing it without
+    /// `SA_RESTART`.
+    ///
+    /// The blocking call here is `nanosleep` and not `waitpid`: a test that
+    /// waits on any child would reap the children of other tests in this
+    /// binary, which is exactly the hazard the tracer thread exists to take
+    /// on deliberately.
+    #[test]
+    fn the_wake_signal_interrupts_a_blocking_call_instead_of_killing_us() {
+        assert!(
+            wake_signal() > libc::SIGRTMIN(),
+            "the first real-time signals belong to the threading implementation"
+        );
+        assert!(wake_signal() <= libc::SIGRTMAX());
+        install_wake_handler().expect("install the handler");
+        let tid = gettid();
+        let waker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            tgkill(tid, wake_signal()).expect("wake");
+        });
+        let request = libc::timespec {
+            tv_sec: 30,
+            tv_nsec: 0,
+        };
+        let mut remaining = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let started = std::time::Instant::now();
+        // SAFETY: two live `timespec` locals; `nanosleep` writes only the
+        // second one.
+        let rc = unsafe { libc::nanosleep(&raw const request, &raw mut remaining) };
+        let elapsed = started.elapsed();
+        let errno = io::Error::last_os_error().raw_os_error();
+        waker.join().expect("the waking thread");
+        assert_eq!(rc, -1, "the sleep must not have completed");
+        assert_eq!(
+            errno,
+            Some(libc::EINTR),
+            "the handler ran and did not restart it"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the signal must interrupt the call, not wait it out: {elapsed:?}"
+        );
     }
 
     #[test]

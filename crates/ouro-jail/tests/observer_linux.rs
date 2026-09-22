@@ -97,6 +97,10 @@ static int await_release(void) {
 static int mode_launch(int argc, char **argv) {
     if (argc < 4) return 2;
     if (install_filter(argv[2])) { fprintf(stderr, "install_filter failed\n"); return 3; }
+    /* The exec that brought us here is complete and the filter is on. The
+       supervisor seizes only after reading this, so the seize can never land
+       in the middle of an exec it did not ask about. */
+    report("ready", (long) getpid(), "", "");
     if (await_release()) return 4;
     if (strcmp(argv[3], "--probe-openat") == 0) {
         long r;
@@ -118,6 +122,7 @@ static int mode_launch(int argc, char **argv) {
 static int mode_closed_set(int argc, char **argv) {
     char a[512], b[512], c[512], s[512], d[512], miss[512], sock[512];
     char a2[512], b2[512], d2[512], a3[512], c3[512], s3[512], a4[512];
+    char n1[512], n2[512];
     struct ouro_open_how how;
     struct sockaddr_un sa;
     const char *base;
@@ -139,6 +144,8 @@ static int mode_closed_set(int argc, char **argv) {
     snprintf(c3, sizeof c3, "%s/c3", base);
     snprintf(s3, sizeof s3, "%s/s3", base);
     snprintf(a4, sizeof a4, "%s/a4", base);
+    snprintf(n1, sizeof n1, "%s/n1", base);
+    snprintf(n2, sizeof n2, "%s/n2", base);
 
     r = syscall(SYS_openat, AT_FDCWD, a, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     report("open_create", r, a, ""); if (r >= 0) close((int) r);
@@ -157,7 +164,7 @@ static int mode_closed_set(int argc, char **argv) {
     r = syscall(SYS_link, b, c);
     report("link", r, b, c);
     r = syscall(SYS_symlink, "a-target", s);
-    report("symlink", r, "a-target", s);
+    report("symlink", r, s, "a-target");
     r = syscall(SYS_unlink, c);
     report("unlink", r, c, "");
     r = syscall(SYS_unlink, c);
@@ -189,12 +196,23 @@ static int mode_closed_set(int argc, char **argv) {
     r = syscall(SYS_linkat, AT_FDCWD, a3, AT_FDCWD, c3, 0);
     report("linkat", r, a3, c3);
     r = syscall(SYS_symlinkat, "t2", AT_FDCWD, s3);
-    report("symlinkat", r, "t2", s3);
+    report("symlinkat", r, s3, "t2");
     how.flags = O_WRONLY | O_CREAT;
     how.mode = 0600;
     how.resolve = 0;
     r = syscall(437, AT_FDCWD, a4, &how, (long) sizeof how);
     report("openat2", r, a4, ""); if (r >= 0) close((int) r);
+
+    /* the three rows jail-v1 §11.2 gained: a pathname truncate and the two
+       mknod spellings. A FIFO needs no privilege. */
+    r = syscall(SYS_truncate, a3, 0L);
+    report("truncate", r, a3, "");
+    r = syscall(SYS_mknod, n1, S_IFIFO | 0600, 0);
+    report("mknod", r, n1, "");
+    r = syscall(SYS_mknodat, AT_FDCWD, n2, S_IFIFO | 0600, 0);
+    report("mknodat", r, n2, "");
+    r = syscall(SYS_ftruncate, 0, 0L);
+    report("ftruncate", r, "", "");
     return 0;
 }
 
@@ -522,6 +540,20 @@ struct Launched {
 }
 
 impl Launched {
+    /// Wait until the launcher has finished its own exec and installed the
+    /// filter. Seizing before that would attach in the middle of an exec
+    /// this test never asked about, and the kernel would rightly report that
+    /// transition too.
+    fn await_ready(&mut self) {
+        let mut line = String::new();
+        self.output
+            .read_line(&mut line)
+            .expect("the launcher announces itself");
+        let report = Report::parse(line.trim_end_matches('\n'))
+            .unwrap_or_else(|| panic!("unparseable readiness line {line:?}"));
+        assert_eq!(report.label, "ready", "unexpected first line {line:?}");
+    }
+
     /// Let the launcher exec.
     fn release(&mut self) {
         self.release
@@ -619,11 +651,13 @@ fn spawn_launcher(mut command: Command) -> Launched {
     // `std::process::Child` never reaps on drop, and the tracer thread owns
     // every wait in this process, so the handle itself is not kept.
     drop(child);
-    Launched {
+    let mut launched = Launched {
         pid,
         release,
         output,
-    }
+    };
+    launched.await_ready();
+    launched
 }
 
 /// Everything the observer said, and its counters.
@@ -826,6 +860,12 @@ fn o01_every_closed_set_result_matches_the_fixture() {
         ("linkat", Some(("linkat", ClosedOp::Link))),
         ("symlinkat", Some(("symlinkat", ClosedOp::Symlink))),
         ("openat2", Some(("openat2", ClosedOp::Open))),
+        ("truncate", Some(("truncate", ClosedOp::Truncate))),
+        ("mknod", Some(("mknod", ClosedOp::Mknod))),
+        ("mknodat", Some(("mknodat", ClosedOp::Mknod))),
+        // `ftruncate` mutates through a descriptor, like `write`, and is
+        // named in §11.2 as excluded.
+        ("ftruncate", None),
     ];
     let labels: Vec<&str> = reports.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(
@@ -1156,6 +1196,27 @@ fn o02_exec_success_and_failure_are_distinct_events() {
         "two confirmed transitions: into the fixture and into /bin/true"
     );
     assert_eq!(observed.summary.exec_transitions, 2);
+    // A confirmed transition names the image by the pathname snapshot of the
+    // entry it was paired with. Descendant argv digests stay null in J1, so
+    // this is the only name the consumer gets, and it is an argument
+    // snapshot rather than a resolved path (§11.3).
+    let images: Vec<String> = observed
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TracerEvent::Exec { path, .. } => Some(
+                path.as_ref()
+                    .map(|p| String::from_utf8_lossy(&p.bytes).into_owned())
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        images,
+        vec![helper.clone(), "/bin/true".to_string()],
+        "each transition carries the pathname its entry asked for"
+    );
     assert_eq!(observed.exits(), vec![(run.pid, 0)], "/bin/true exited 0");
     assert_eq!(
         observed.summary.loss.total(),
@@ -1794,11 +1855,13 @@ fn o06_a_path_is_bytes_and_a_short_snapshot_declares_itself_incomplete() {
     );
 }
 
-/// O03: an `open_how` the kernel would reject is metadata nobody can decode.
-/// The result is still reported, the flags are absent rather than invented,
-/// and the missing classification is a gap with its own reason.
+/// O03/L4: an `open_how` the kernel would reject is metadata nobody can
+/// decode, so membership of the covered mutation set was never established.
+/// No covered `Open` is delivered, nothing is guessed, and because the kernel
+/// rejected the same structure there is no covered operation to have missed:
+/// the call is counted as an invalid argument, not as lost coverage.
 #[test]
-fn o03_an_undecodable_open_how_is_a_gap_and_never_a_guess() {
+fn o03_an_undecodable_open_how_is_never_a_covered_open() {
     let Some(work) = setup("openhow", &["/usr/bin/gcc"]) else {
         return;
     };
@@ -1820,36 +1883,36 @@ fn o03_an_undecodable_open_how_is_a_gap_and_never_a_guess() {
         "the kernel refuses a short open_how too"
     );
 
-    let event = observed
-        .syscalls()
-        .into_iter()
-        .find(|event| {
-            matches!(
-                event,
-                TracerEvent::Syscall {
-                    syscall: "openat2",
-                    ..
-                }
-            )
-        })
-        .expect("the openat2 result must still be reported");
-    let TracerEvent::Syscall { args, ret, .. } = event else {
-        unreachable!()
-    };
-    assert_eq!(*ret, report.ret(), "the result is the one the caller saw");
-    assert_eq!(
-        args.flags, None,
-        "flags that could not be decoded are absent, not guessed"
-    );
-    assert_eq!(paths(event).0, target);
     assert!(
+        observed.syscalls().iter().all(|event| !matches!(
+            event,
+            TracerEvent::Syscall {
+                syscall: "openat2",
+                ..
+            }
+        )),
+        "an open whose flags could not be decoded must not be delivered as a \
+         covered Open: {}",
         observed
-            .gaps()
-            .contains(&(GapReason::FlagsUnavailable, Some(1))),
-        "the missing classification is a gap: {:?}",
-        observed.gaps()
+            .syscalls()
+            .iter()
+            .map(|e| describe(e))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
-    assert_eq!(observed.summary.loss.flags_unavailable, 1);
+    assert!(!Path::new(&target).exists(), "and the call really did fail");
+    assert_eq!(
+        observed.summary.argument_invalid, 1,
+        "the kernel rejected the same structure, so this is the tracee's \
+         argument and not the observer's coverage"
+    );
+    assert_eq!(
+        observed.summary.loss.total(),
+        0,
+        "a tracee must not be able to manufacture loss: {:?}",
+        observed.summary.loss
+    );
+    assert_eq!(observed.exits(), vec![(run.pid, 0)]);
 }
 
 /// `Exit` carries the raw wait status, so a consumer can tell a process that
@@ -1920,7 +1983,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
 
     assert_eq!(
         reports.len(),
-        23,
+        27,
         "the fixture still runs: the bound is ours, not the tracee's"
     );
     assert!(
@@ -1929,7 +1992,7 @@ fn o03_the_in_flight_bound_refuses_entries_and_reports_no_results() {
     );
     assert_eq!(observed.summary.ops.total(), 0);
     assert!(
-        observed.summary.loss.inflight_rejected >= 22,
+        observed.summary.loss.inflight_rejected >= 26,
         "every closed-set entry was refused: {}",
         observed.summary.loss.inflight_rejected
     );

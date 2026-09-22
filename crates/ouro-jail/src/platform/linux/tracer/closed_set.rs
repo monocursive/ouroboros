@@ -18,10 +18,18 @@
 pub enum ClosedOp {
     Exec,
     Open,
+    /// `truncate`: a mutation of an existing file named by a pathname. The
+    /// consumer maps it to `fs.write` with the action `truncated`.
+    /// `ftruncate` is deliberately not here: it names a descriptor, not a
+    /// pathname, and is excluded exactly as `write` is.
+    Truncate,
     Rename,
     Unlink,
     Rmdir,
     Mkdir,
+    /// `mknod`/`mknodat`: a directory entry created for a device, FIFO or
+    /// regular file. The consumer maps it to `fs.create`.
+    Mknod,
     Link,
     Symlink,
     Connect,
@@ -29,27 +37,37 @@ pub enum ClosedOp {
 
 impl ClosedOp {
     /// Every variant, for callers that count per operation.
-    pub const ALL: [ClosedOp; 9] = [
+    pub const ALL: [ClosedOp; 11] = [
         ClosedOp::Exec,
         ClosedOp::Open,
+        ClosedOp::Truncate,
         ClosedOp::Rename,
         ClosedOp::Unlink,
         ClosedOp::Rmdir,
         ClosedOp::Mkdir,
+        ClosedOp::Mknod,
         ClosedOp::Link,
         ClosedOp::Symlink,
         ClosedOp::Connect,
     ];
+
+    /// The bit this operation occupies in an [`OpSet`](super::OpSet).
+    #[must_use]
+    pub fn bit(self) -> u16 {
+        1u16 << (self as u16)
+    }
 
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             ClosedOp::Exec => "exec",
             ClosedOp::Open => "open",
+            ClosedOp::Truncate => "truncate",
             ClosedOp::Rename => "rename",
             ClosedOp::Unlink => "unlink",
             ClosedOp::Rmdir => "rmdir",
             ClosedOp::Mkdir => "mkdir",
+            ClosedOp::Mknod => "mknod",
             ClosedOp::Link => "link",
             ClosedOp::Symlink => "symlink",
             ClosedOp::Connect => "connect",
@@ -139,6 +157,8 @@ pub const CLOSED_SET: &[Entry] = &[
     row(257, "openat", ClosedOp::Open, (Some(0), Some(1)), (None, None), FlagSource::Arg(2)),
     row(437, "openat2", ClosedOp::Open, (Some(0), Some(1)), (None, None), FlagSource::OpenHow { ptr: 2, size: 3 }),
     row(85, "creat", ClosedOp::Open, (None, Some(0)), (None, None), FlagSource::ImpliedCreat),
+    // fs.write through a pathname. The second argument is a length, not flags.
+    row(76, "truncate", ClosedOp::Truncate, (None, Some(0)), (None, None), FlagSource::None),
     // fs.rename
     row(82, "rename", ClosedOp::Rename, (None, Some(0)), (None, Some(1)), FlagSource::None),
     row(264, "renameat", ClosedOp::Rename, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::None),
@@ -150,13 +170,19 @@ pub const CLOSED_SET: &[Entry] = &[
     // fs.create through directory entries
     row(83, "mkdir", ClosedOp::Mkdir, (None, Some(0)), (None, None), FlagSource::None),
     row(258, "mkdirat", ClosedOp::Mkdir, (Some(0), Some(1)), (None, None), FlagSource::None),
+    // mknod(path, mode, dev) and mknodat(dirfd, path, mode, dev): the second
+    // numeric argument is a mode, so it is not recorded as flags.
+    row(133, "mknod", ClosedOp::Mknod, (None, Some(0)), (None, None), FlagSource::None),
+    row(259, "mknodat", ClosedOp::Mknod, (Some(0), Some(1)), (None, None), FlagSource::None),
     row(86, "link", ClosedOp::Link, (None, Some(0)), (None, Some(1)), FlagSource::None),
     row(265, "linkat", ClosedOp::Link, (Some(0), Some(1)), (Some(2), Some(3)), FlagSource::Arg(4)),
-    // symlink(target, linkpath) and symlinkat(target, newdirfd, linkpath):
-    // the target is a string the kernel stores, not a path it resolves, so it
-    // has no directory fd. The link path does.
-    row(88, "symlink", ClosedOp::Symlink, (None, Some(0)), (None, Some(1)), FlagSource::None),
-    row(266, "symlinkat", ClosedOp::Symlink, (None, Some(0)), (Some(1), Some(2)), FlagSource::None),
+    // symlink(target, linkpath) and symlinkat(target, newdirfd, linkpath).
+    // `path` is the link the call creates, because that is the entry every
+    // other row puts there and the one the closed set classifies on. The
+    // target is a string the kernel stores without resolving it, so it is
+    // `path2` and has no directory fd.
+    row(88, "symlink", ClosedOp::Symlink, (None, Some(1)), (None, Some(0)), FlagSource::None),
+    row(266, "symlinkat", ClosedOp::Symlink, (Some(1), Some(2)), (None, Some(0)), FlagSource::None),
     // net.connect
     Entry {
         nr: 42,
@@ -202,18 +228,37 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn the_set_has_exactly_the_nineteen_rows_of_the_spec() {
-        assert_eq!(CLOSED_SET.len(), 19);
+    fn the_set_has_exactly_the_twenty_two_rows_of_the_spec() {
+        assert_eq!(CLOSED_SET.len(), 22);
         let numbers: BTreeSet<u64> = CLOSED_SET.iter().map(|e| e.nr).collect();
-        assert_eq!(numbers.len(), 19, "no syscall number may appear twice");
+        assert_eq!(numbers.len(), 22, "no syscall number may appear twice");
         let expected: BTreeSet<u64> = [
-            59, 322, 2, 257, 437, 85, 82, 264, 316, 87, 263, 84, 83, 258, 86, 265, 88, 266, 42,
+            59, 322, 2, 257, 437, 85, 76, 82, 264, 316, 87, 263, 84, 83, 258, 133, 259, 86, 265,
+            88, 266, 42,
         ]
         .into_iter()
         .collect();
         assert_eq!(numbers, expected);
         let names: BTreeSet<&str> = CLOSED_SET.iter().map(|e| e.name).collect();
-        assert_eq!(names.len(), 19, "no syscall name may appear twice");
+        assert_eq!(names.len(), 22, "no syscall name may appear twice");
+    }
+
+    /// `ftruncate` names a descriptor rather than a pathname, so it is
+    /// excluded exactly as `write` is, and the table must say so by not
+    /// containing it.
+    #[test]
+    fn descriptor_based_mutations_stay_outside_the_set() {
+        for nr in [
+            libc::SYS_ftruncate,
+            libc::SYS_write,
+            libc::SYS_pwrite64,
+            libc::SYS_writev,
+        ] {
+            assert!(
+                lookup(nr as u64).is_none(),
+                "syscall {nr} mutates through a descriptor and is outside the set"
+            );
+        }
     }
 
     /// The table must agree with the `SYS_*` numbers of this target, which is
@@ -239,6 +284,9 @@ mod tests {
             ("symlink", libc::SYS_symlink as u64),
             ("symlinkat", libc::SYS_symlinkat as u64),
             ("connect", libc::SYS_connect as u64),
+            ("truncate", libc::SYS_truncate as u64),
+            ("mknod", libc::SYS_mknod as u64),
+            ("mknodat", libc::SYS_mknodat as u64),
         ];
         for (name, nr) in expected {
             let entry = CLOSED_SET.iter().find(|e| e.name == *name).expect(name);
@@ -279,10 +327,34 @@ mod tests {
         }
         let renameat = CLOSED_SET.iter().find(|e| e.name == "renameat").unwrap();
         assert_eq!((renameat.dirfd, renameat.dirfd2), (Some(0), Some(2)));
-        // symlink's target is stored, not resolved, so it has no dirfd; the
-        // link path is resolved against newdirfd.
+    }
+
+    /// `path` is the entry the call creates or touches on every row. For
+    /// `symlink` that is the link, argument 1, not the target string the
+    /// kernel stores without resolving.
+    #[test]
+    fn symlink_puts_the_link_it_creates_in_the_primary_path() {
+        let symlink = CLOSED_SET.iter().find(|e| e.name == "symlink").unwrap();
+        assert_eq!(symlink.path, Some(1), "symlink(target, linkpath): the link");
+        assert_eq!(symlink.path2, Some(0), "and the target is the second path");
+        assert_eq!(symlink.dirfd, None);
+        assert_eq!(
+            symlink.dirfd2, None,
+            "a stored string is resolved against nothing"
+        );
         let symlinkat = CLOSED_SET.iter().find(|e| e.name == "symlinkat").unwrap();
-        assert_eq!((symlinkat.dirfd, symlinkat.dirfd2), (None, Some(1)));
+        assert_eq!(
+            symlinkat.path,
+            Some(2),
+            "symlinkat(target, newdirfd, linkpath)"
+        );
+        assert_eq!(
+            symlinkat.dirfd,
+            Some(1),
+            "the link resolves against newdirfd"
+        );
+        assert_eq!(symlinkat.path2, Some(0));
+        assert_eq!(symlinkat.dirfd2, None);
     }
 
     #[test]

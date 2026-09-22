@@ -54,9 +54,10 @@ mod sys;
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use libc::pid_t;
 
@@ -64,7 +65,7 @@ pub use closed_set::ClosedOp;
 pub use filter::{
     install_narrowing_filter, narrowing_filter, narrowing_filter_bytes, narrowing_filter_digest,
 };
-pub use proc::{children, cmdline, descendants, nspid, tgid, tracer_pid};
+pub use proc::{children, cmdline, descendants, nspid, ppid, start_ticks, tgid, tracer_pid};
 
 /// Bounds on what the observer will hold, from jail-v1 §11.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +77,36 @@ pub struct TracerConfig {
     /// at once. Beyond it an entry is refused and counted as loss instead of
     /// growing without bound.
     pub inflight_max: usize,
-    /// Most events buffered for a consumer that is not reading. §11.4 sets a
-    /// 4 MiB user-space queue; this is that budget as a count.
+    /// Most events buffered for a consumer that is not reading. A secondary
+    /// cap: [`TracerConfig::queue_bytes_max`] is the budget §11.4 states, and
+    /// whichever is reached first stops the queue growing.
     pub queue_max: usize,
+    /// The §11.4 user-space event queue budget, in bytes.
+    ///
+    /// It covers everything the observer holds on the consumer's behalf: the
+    /// buffered events and their pathname snapshots, the handoff channel and
+    /// the allocator's rounding. The buffer is therefore admitted against
+    /// three quarters of this figure, and each event is charged a fixed
+    /// [`EVENT_FIXED_BYTES`] on top of the bytes its snapshots hold.
+    pub queue_bytes_max: usize,
 }
+
+/// What one queued event costs besides its snapshots: the enum itself, the
+/// buffer slot, and the allocator's rounding of two small allocations.
+pub const EVENT_FIXED_BYTES: usize = 256;
+
+/// Slots above the handoff depth kept for the terminal gap and `Finished`.
+const TERMINAL_RESERVE: usize = 2;
+
+/// How many events the channel between the tracer thread and the consumer
+/// holds.
+///
+/// It is a handoff, not the queue: the queue is the tracer's own buffer,
+/// which is bounded in bytes ([`TracerConfig::queue_bytes_max`]) because a
+/// count cannot bound two four-kilobyte pathnames per event. A channel deep
+/// enough to hold `queue_max` events would put the whole backlog somewhere
+/// the tracer cannot measure it.
+const HANDOFF_DEPTH: usize = 64;
 
 impl Default for TracerConfig {
     fn default() -> Self {
@@ -87,6 +114,7 @@ impl Default for TracerConfig {
             path_snapshot_max: 4096,
             inflight_max: 16_384,
             queue_max: 16_384,
+            queue_bytes_max: 4 * 1024 * 1024,
         }
     }
 }
@@ -136,6 +164,51 @@ pub struct Args {
     pub sockaddr: Option<SockaddrSnapshot>,
 }
 
+/// A set of closed-set operations, small enough to pass by value.
+///
+/// A gap carries one so the consumer can degrade exactly the coverage
+/// classes it affected, which §11.4 requires: "A gap names the affected
+/// classes explicitly".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpSet(u16);
+
+impl OpSet {
+    /// A gap that affects no closed-set operation: the loss was bookkeeping,
+    /// not a result.
+    pub const EMPTY: OpSet = OpSet(0);
+
+    #[must_use]
+    pub fn of(op: ClosedOp) -> OpSet {
+        OpSet(op.bit())
+    }
+
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[must_use]
+    pub fn contains(self, op: ClosedOp) -> bool {
+        self.0 & op.bit() != 0
+    }
+
+    pub fn insert(&mut self, op: ClosedOp) {
+        self.0 |= op.bit();
+    }
+
+    #[must_use]
+    pub fn union(self, other: OpSet) -> OpSet {
+        OpSet(self.0 | other.0)
+    }
+
+    /// The operations in the set, in the order of [`ClosedOp::ALL`].
+    pub fn iter(self) -> impl Iterator<Item = ClosedOp> {
+        ClosedOp::ALL
+            .into_iter()
+            .filter(move |op| self.contains(*op))
+    }
+}
+
 /// Why coverage has a hole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GapReason {
@@ -150,6 +223,8 @@ pub enum GapReason {
     InflightExhausted,
     /// A pathname argument could not be read from the tracee at all.
     PathUnreadable,
+    /// A `connect` address could not be read from the tracee at all.
+    SockaddrUnreadable,
     /// `openat2`'s `open_how` could not be decoded, so the call cannot be
     /// classified as create or write.
     FlagsUnavailable,
@@ -163,8 +238,20 @@ pub enum GapReason {
     /// The filter stopped a syscall number that is not in this closed set,
     /// so the installed filter is not this module's.
     UnexpectedTraceStop,
-    /// The tracer stopped while tracees were still alive.
+    /// The tracer stopped while tracees were still alive; they were killed.
     TraceesAbandoned,
+    /// The tracer stopped while direct children of this process had not been
+    /// reaped, so their exit statuses have no delivery route left.
+    UnreapedChildren,
+    /// A stopped tracee could not be restarted, so it was killed rather than
+    /// left stopped forever.
+    RestartFailed,
+    /// A lifecycle event — an exec, an exit, a gap — was dropped. Lifecycle
+    /// events are not subject to result backpressure; this means the backlog
+    /// itself overflowed.
+    LifecycleDropped,
+    /// A tracee died and could not be attributed to a thread group.
+    DeathUnattributed,
 }
 
 impl GapReason {
@@ -176,12 +263,17 @@ impl GapReason {
             GapReason::EntryAbandoned => "entry_abandoned",
             GapReason::InflightExhausted => "inflight_exhausted",
             GapReason::PathUnreadable => "path_unreadable",
+            GapReason::SockaddrUnreadable => "sockaddr_unreadable",
             GapReason::FlagsUnavailable => "flags_unavailable",
             GapReason::SyscallInfoUnavailable => "syscall_info_unavailable",
             GapReason::IdentityUnavailable => "identity_unavailable",
             GapReason::FinalStatusUnknown => "final_status_unknown",
             GapReason::UnexpectedTraceStop => "unexpected_trace_stop",
             GapReason::TraceesAbandoned => "tracees_abandoned",
+            GapReason::UnreapedChildren => "unreaped_children",
+            GapReason::RestartFailed => "restart_failed",
+            GapReason::LifecycleDropped => "lifecycle_dropped",
+            GapReason::DeathUnattributed => "death_unattributed",
         }
     }
 }
@@ -192,16 +284,52 @@ impl GapReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TracerEvent {
     /// The seize is confirmed. Always the first event.
-    Attached { pid: pid_t },
+    Attached {
+        pid: pid_t,
+        /// The launcher's birth identity, so a later task that is given this
+        /// pid number can be told apart from it (§11.3).
+        start_ticks: Option<u64>,
+        monotonic_ns: u64,
+    },
     /// A new task was born and is now traced. Internal bookkeeping: §11.2
-    /// keeps fork out of the public syscall audit set.
+    /// keeps fork out of the public syscall audit set, so this is not an
+    /// audit event and does not expand it.
     Fork {
+        /// The thread group that created it, which is what every other
+        /// event's `pid` is.
         parent: pid_t,
+        /// The thread inside that group that made the call. Equal to
+        /// `parent` for a single-threaded process.
+        parent_tid: pid_t,
+        /// The new task id.
         child: pid_t,
+        /// True when the new task is a thread of `parent` rather than a new
+        /// process: it landed in the same thread group.
+        is_thread: bool,
+        /// The new task's birth identity.
+        child_start_ticks: Option<u64>,
         monotonic_ns: u64,
     },
     /// A confirmed exec transition. Never inferred from a syscall entry.
-    Exec { pid: pid_t, monotonic_ns: u64 },
+    Exec {
+        pid: pid_t,
+        /// The pathname argument of the `execve`/`execveat` that produced
+        /// this transition, snapshotted at its entry. Descendant argv
+        /// digests stay null in J1, so this snapshot is the only way to name
+        /// the image, and §11.3 makes it an argument snapshot rather than a
+        /// resolved path.
+        ///
+        /// `None` means the tracer did not witness the entry of this exec.
+        /// The case that matters is the first transition after
+        /// [`TracerEvent::Attached`]: seizing a process that is still inside
+        /// the `execve` that created it makes the kernel report that
+        /// transition to the new tracer, and there is no entry to pair it
+        /// with. A consumer that uses `Exec` as exec confirmation must
+        /// require a path, or attach only after the launcher has said it is
+        /// past its own exec.
+        path: Option<PathSnapshot>,
+        monotonic_ns: u64,
+    },
     /// One completed closed-set call. `ret` is the signed raw return, so a
     /// failure is `-errno`.
     Syscall {
@@ -226,9 +354,14 @@ pub enum TracerEvent {
     /// bubblewrap, which lives outside the namespaces it creates.
     UntracedChildExit { pid: pid_t, status: i32 },
     /// Coverage has a hole. `count` is `None` when the size of the hole
-    /// cannot be established.
+    /// cannot be established; `ops` names the closed-set operations it
+    /// affected, so the consumer degrades exactly those classes and no
+    /// others (§11.4), and is empty when the loss was bookkeeping rather
+    /// than a result. `from_ns` is the last point at which coverage was
+    /// known healthy, which is what §11.4 asks a gap to bound itself from.
     Gap {
         reason: GapReason,
+        ops: OpSet,
         from_ns: u64,
         to_ns: u64,
         count: Option<u64>,
@@ -242,10 +375,12 @@ pub enum TracerEvent {
 pub struct OpCounts {
     pub exec: u64,
     pub open: u64,
+    pub truncate: u64,
     pub rename: u64,
     pub unlink: u64,
     pub rmdir: u64,
     pub mkdir: u64,
+    pub mknod: u64,
     pub link: u64,
     pub symlink: u64,
     pub connect: u64,
@@ -257,10 +392,12 @@ impl OpCounts {
         match op {
             ClosedOp::Exec => self.exec,
             ClosedOp::Open => self.open,
+            ClosedOp::Truncate => self.truncate,
             ClosedOp::Rename => self.rename,
             ClosedOp::Unlink => self.unlink,
             ClosedOp::Rmdir => self.rmdir,
             ClosedOp::Mkdir => self.mkdir,
+            ClosedOp::Mknod => self.mknod,
             ClosedOp::Link => self.link,
             ClosedOp::Symlink => self.symlink,
             ClosedOp::Connect => self.connect,
@@ -276,10 +413,12 @@ impl OpCounts {
         let slot = match op {
             ClosedOp::Exec => &mut self.exec,
             ClosedOp::Open => &mut self.open,
+            ClosedOp::Truncate => &mut self.truncate,
             ClosedOp::Rename => &mut self.rename,
             ClosedOp::Unlink => &mut self.unlink,
             ClosedOp::Rmdir => &mut self.rmdir,
             ClosedOp::Mkdir => &mut self.mkdir,
+            ClosedOp::Mknod => &mut self.mknod,
             ClosedOp::Link => &mut self.link,
             ClosedOp::Symlink => &mut self.symlink,
             ClosedOp::Connect => &mut self.connect,
@@ -303,12 +442,25 @@ pub struct LossCounters {
     /// page. These carry `complete = false` and are not a hole in the result
     /// stream, only a weaker path assertion (§11.3).
     pub path_truncated: u64,
+    /// A `connect` address that could not be read at all.
+    pub sockaddr_unreadable: u64,
     pub flags_unavailable: u64,
     pub syscall_info_unavailable: u64,
     pub identity_unavailable: u64,
     pub final_status_unknown: u64,
     pub unexpected_trace_stops: u64,
+    /// Tracees still alive when the tracer was told to stop. They were
+    /// killed and reaped; anything they were about to do is unobserved.
     pub abandoned_tracees: u64,
+    /// Direct children of this process that were never reaped, so their exit
+    /// statuses have no route left to the supervisor.
+    pub unreaped_children: u64,
+    /// Stopped tracees that could not be restarted and were killed.
+    pub restart_failed: u64,
+    /// Lifecycle events dropped because their own backlog overflowed.
+    pub lifecycle_dropped: u64,
+    /// Task deaths that could not be attributed to a thread group.
+    pub death_unattributed: u64,
 }
 
 impl LossCounters {
@@ -321,17 +473,22 @@ impl LossCounters {
             + self.abandoned_entries
             + self.inflight_rejected
             + self.path_unreadable
+            + self.sockaddr_unreadable
             + self.flags_unavailable
             + self.syscall_info_unavailable
             + self.identity_unavailable
             + self.final_status_unknown
             + self.unexpected_trace_stops
             + self.abandoned_tracees
+            + self.unreaped_children
+            + self.restart_failed
+            + self.lifecycle_dropped
+            + self.death_unattributed
     }
 }
 
 /// What the tracer thread did, read once it has stopped.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TracerSummary {
     /// Every `waitpid` return the thread handled.
     pub stops: u64,
@@ -352,6 +509,20 @@ pub struct TracerSummary {
     /// Open-family calls that asked for read-only access. Not loss: §11.2
     /// puts them outside the closed set.
     pub filtered_readonly_opens: u64,
+    /// Arguments the observer could not read *and the kernel rejected too*:
+    /// an `EFAULT` pathname, an `EINVAL` `open_how`. The call had no valid
+    /// argument to observe, so this is not a hole in coverage and does not
+    /// feed [`LossCounters::total`] — otherwise a tracee could manufacture
+    /// unlimited "loss" by passing pointers that cannot work.
+    pub argument_invalid: u64,
+    /// Tasks the kernel destroyed as part of another thread's `execve`,
+    /// which it does not report. `tracees` equals `reaped_tasks` plus this.
+    pub tasks_destroyed_by_exec: u64,
+    /// The most bytes the observer ever held on the consumer's behalf.
+    pub queue_bytes_peak: usize,
+    /// Direct children of this process that were still unreaped when the
+    /// tracer stopped.
+    pub unreaped_children: Vec<pid_t>,
     /// Syscall exits in the `ERESTARTSYS` family. Not loss and not results:
     /// the kernel re-enters the call, which then produces its one result.
     pub restarts: u64,
@@ -415,6 +586,10 @@ pub struct Tracer {
     events: Receiver<TracerEvent>,
     handle: Option<JoinHandle<TracerSummary>>,
     stop: Arc<AtomicBool>,
+    /// How long the thread may take to end a live tree once told to stop.
+    shutdown_ns: Arc<AtomicU64>,
+    /// The tracer thread's task id, so its `waitpid` can be interrupted.
+    tid: Arc<AtomicI32>,
 }
 
 impl Tracer {
@@ -439,14 +614,26 @@ impl Tracer {
     /// [`TracerError`], which distinguishes a refused seize from one that
     /// could not be confirmed.
     pub fn attach(launcher: pid_t, config: TracerConfig) -> Result<Tracer, TracerError> {
-        let (tx, rx): (SyncSender<TracerEvent>, Receiver<TracerEvent>) =
-            sync_channel(config.queue_max.max(1));
+        // A shallow handoff plus two slots for the terminal gap and
+        // `Finished`, so they have somewhere to land the moment the consumer
+        // reads anything at all. Everything else waits in the tracer's own
+        // byte-bounded buffer.
+        let depth = HANDOFF_DEPTH.min(config.queue_max.max(1)) + TERMINAL_RESERVE;
+        let (tx, rx): (SyncSender<TracerEvent>, Receiver<TracerEvent>) = sync_channel(depth);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), TracerError>>();
         let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
+        let shutdown_ns = Arc::new(AtomicU64::new(
+            u64::try_from(Tracer::DEFAULT_SHUTDOWN.as_nanos()).unwrap_or(u64::MAX),
+        ));
+        let tid = Arc::new(AtomicI32::new(0));
+        let thread = session::Handles {
+            stop: Arc::clone(&stop),
+            shutdown_ns: Arc::clone(&shutdown_ns),
+            tid: Arc::clone(&tid),
+        };
         let handle = std::thread::Builder::new()
             .name("ouro-jail-tracer".to_string())
-            .spawn(move || session::run(launcher, config, tx, ready_tx, thread_stop))
+            .spawn(move || session::run(launcher, config, tx, ready_tx, thread))
             .map_err(|err| TracerError::ThreadSpawn {
                 message: err.to_string(),
             })?;
@@ -456,6 +643,8 @@ impl Tracer {
                 events: rx,
                 handle: Some(handle),
                 stop,
+                shutdown_ns,
+                tid,
             }),
             Ok(Err(err)) => {
                 let _ = handle.join();
@@ -496,32 +685,88 @@ impl Tracer {
         filter::narrowing_filter_digest()
     }
 
-    /// Stop the tracer thread, join it and take its counters.
+    /// Stop the tracer thread, join it and take its counters, within
+    /// [`Tracer::DEFAULT_SHUTDOWN`].
     ///
-    /// Call it after the tree is dead — after
-    /// [`TracerEvent::Finished`], which the thread emits when its last
-    /// tracee has been reaped. With tracees still alive this blocks until
-    /// they are gone, because the thread is inside `waitpid`; the supervisor
-    /// terminates the tree first.
+    /// The intended sequence is to read [`Tracer::events`] until
+    /// [`TracerEvent::Finished`] and then call this. It is safe to call at
+    /// any time: see [`Tracer::finish_within`] for what happens when the
+    /// tree is still alive.
     #[must_use]
-    pub fn finish(mut self) -> TracerSummary {
+    pub fn finish(self) -> TracerSummary {
+        self.finish_within(Tracer::DEFAULT_SHUTDOWN)
+    }
+
+    /// How long [`Tracer::finish`] and `Drop` give a live tree to end. It is
+    /// the tree-death budget of jail-v1 §9.3.
+    pub const DEFAULT_SHUTDOWN: Duration = Duration::from_secs(5);
+
+    /// Stop the tracer thread within `budget`, join it and take its counters.
+    ///
+    /// This always returns. If tracees are still alive it interrupts the
+    /// thread's `waitpid`, lets the tree end for up to `budget`, and on
+    /// expiry kills every remaining tracee, reaps it, and records the loss as
+    /// [`GapReason::TraceesAbandoned`] with a count. Direct children of this
+    /// process that were never reaped are listed in
+    /// [`TracerSummary::unreaped_children`] and reported as
+    /// [`GapReason::UnreapedChildren`]: their exit statuses had exactly one
+    /// route to the supervisor and it is now closed.
+    #[must_use]
+    pub fn finish_within(mut self, budget: Duration) -> TracerSummary {
+        self.shutdown_ns.store(
+            u64::try_from(budget.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
         self.stop.store(true, Ordering::Release);
-        match self.handle.take() {
-            Some(handle) => handle.join().unwrap_or(TracerSummary {
-                thread_panicked: true,
-                ..TracerSummary::default()
-            }),
-            None => TracerSummary::default(),
+        let Some(handle) = self.handle.take() else {
+            return TracerSummary::default();
+        };
+        // The thread may be inside a blocking `waitpid`. Keep interrupting it
+        // until it is gone: a single signal could arrive in the window
+        // between its stop-flag check and the wait it is about to enter.
+        let tid = Arc::clone(&self.tid);
+        let joined = Arc::new(AtomicBool::new(false));
+        let waker_flag = Arc::clone(&joined);
+        let waker = std::thread::Builder::new()
+            .name("ouro-jail-tracer-wake".to_string())
+            .spawn(move || {
+                while !waker_flag.load(Ordering::Acquire) {
+                    let target = tid.load(Ordering::Acquire);
+                    if target > 0 {
+                        let _ = sys::tgkill(target, sys::wake_signal());
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+            .ok();
+        let summary = handle.join().unwrap_or(TracerSummary {
+            thread_panicked: true,
+            ..TracerSummary::default()
+        });
+        joined.store(true, Ordering::Release);
+        if let Some(waker) = waker {
+            let _ = waker.join();
         }
+        summary
     }
 }
 
 impl Drop for Tracer {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        if self.handle.is_none() {
+            return;
         }
+        // Dropping must never hang, including when the consumer is
+        // panicking, so it is the same bounded shutdown as `finish`.
+        let taken = Tracer {
+            launcher: self.launcher,
+            events: std::mem::replace(&mut self.events, sync_channel(1).1),
+            handle: self.handle.take(),
+            stop: Arc::clone(&self.stop),
+            shutdown_ns: Arc::clone(&self.shutdown_ns),
+            tid: Arc::clone(&self.tid),
+        };
+        let _ = taken.finish_within(Tracer::DEFAULT_SHUTDOWN);
     }
 }
 
@@ -558,10 +803,10 @@ mod tests {
     #[test]
     fn attaching_to_a_task_that_does_not_exist_fails_and_leaves_no_thread() {
         // pid 0 is never a task. The error must name the refusal, and the
-        // thread must be joined rather than left behind.
-        let before = std::fs::read_dir("/proc/self/task")
-            .map(Iterator::count)
-            .unwrap_or(0);
+        // tracer thread must be joined rather than left behind. Counting
+        // threads by name rather than by total keeps this correct while the
+        // rest of the suite runs in parallel.
+        let before = tracer_threads();
         match Tracer::attach(0, TracerConfig::default()) {
             Err(TracerError::Seize { pid, errno }) => {
                 assert_eq!(pid, 0);
@@ -573,13 +818,25 @@ mod tests {
             Err(other) => panic!("expected a refused seize, got {other}"),
             Ok(_) => panic!("seizing pid 0 must not succeed"),
         }
-        let after = std::fs::read_dir("/proc/self/task")
-            .map(Iterator::count)
-            .unwrap_or(0);
         assert_eq!(
-            before, after,
-            "a failed attach must not leave a thread running"
+            tracer_threads(),
+            before,
+            "a failed attach must not leave a tracer thread running"
         );
+    }
+
+    /// Tasks of this process whose name is the tracer thread's.
+    fn tracer_threads() -> usize {
+        let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+            return 0;
+        };
+        tasks
+            .flatten()
+            .filter(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.trim() == "ouro-jail-tracer")
+            })
+            .count()
     }
 
     #[test]
@@ -623,13 +880,18 @@ mod tests {
         for op in ClosedOp::ALL {
             assert_eq!(counts.get(op), 1, "{}", op.as_str());
         }
-        assert_eq!(counts.total(), 9);
+        assert_eq!(counts.total(), ClosedOp::ALL.len() as u64);
     }
 
     #[test]
     fn gap_reasons_have_distinct_names() {
         let reasons = [
             GapReason::QueueFull,
+            GapReason::SockaddrUnreadable,
+            GapReason::UnreapedChildren,
+            GapReason::RestartFailed,
+            GapReason::LifecycleDropped,
+            GapReason::DeathUnattributed,
             GapReason::UnmatchedExit,
             GapReason::EntryAbandoned,
             GapReason::InflightExhausted,
