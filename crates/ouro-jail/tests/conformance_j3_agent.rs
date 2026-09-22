@@ -1673,6 +1673,10 @@ fn n05_a_proxy_replaced_before_the_first_connect_is_never_reached() {
         run.stdout_text(),
         run.stderr_text()
     );
+    assert!(
+        proxy_dir.join("proxy.sock").exists(),
+        "the jail removes only the socket node it bound, never a replacement"
+    );
     assert_eq!(rogue.stop(), 0, "the replacement was reached");
     assert_eq!(origin.stop().len(), 0);
     let get = ops(&run.fixture_lines(), "http-get")[0].clone();
@@ -2040,6 +2044,22 @@ fn x06_no_notification_sockdiag_proxy_or_bridge_descriptor_reaches_the_target() 
         .map(|entry| entry["fd"].as_i64().unwrap())
         .collect();
     assert_eq!(fds, [0, 1, 2], "{lines:#?}");
+    // The proxy raises the supervisor's descriptor limit only after the
+    // backend is spawned: the target keeps the limit it was started with.
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into a live rlimit.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) },
+        0
+    );
+    assert_eq!(
+        ops(&lines, "fds")[0]["args"]["soft_limit"],
+        limit.rlim_cur,
+        "the target inherited a raised descriptor limit"
+    );
     let status = &ops(&lines, "status")[0]["args"]["fields"];
     assert_eq!(status["NoNewPrivs"], "1");
     assert_eq!(status["Seccomp"], "2");
