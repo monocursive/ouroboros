@@ -16,4 +16,5 @@ allow = [
 multiple-versions = "warn"
 
 [advisories]
-unmaintained = "warn"
+# cargo-deny 0.20 uses dependency scope here rather than a lint level.
+unmaintained = "all"

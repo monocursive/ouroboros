@@ -40,7 +40,7 @@ jobs:
       # this is the step that makes it enforced rather than declared.
       - name: Dependency policy (cargo-deny)
         run: |
-          cargo install cargo-deny --locked
+          cargo install cargo-deny --version 0.20.2 --locked
           cargo deny --workspace check bans licenses advisories
       - name: Tests
         # One test thread: a ptrace tracer owns every waitpid in its process, so two
