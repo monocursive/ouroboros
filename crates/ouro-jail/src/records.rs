@@ -1387,6 +1387,36 @@ impl Event {
         }
     }
 
+    /// An audit-source result for one closed-set operation (§11.2).
+    ///
+    /// `decision` is always null here: an errno alone cannot identify DAC, an
+    /// LSM, seccomp or a particular jail policy decision, so the audit source
+    /// states the result and leaves the decision to whoever made one.
+    #[must_use]
+    pub fn audit_result(
+        attempt_id: &str,
+        source_seq: u64,
+        observed_at: SystemTime,
+        monotonic_ns: u128,
+        operation: &str,
+        outcome: EventOutcome,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        Event {
+            schema: SCHEMA_EVENT.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            source: EventSource::Audit,
+            source_seq,
+            observed_at: rfc3339_utc(observed_at),
+            monotonic_ns: monotonic_ns.to_string(),
+            operation: operation.to_owned(),
+            stage: EventStage::Result,
+            decision: None,
+            outcome: Some(outcome),
+            fields,
+        }
+    }
+
     /// A wrapper `jail.receipt` event referencing a persisted receipt.
     #[must_use]
     pub fn receipt_note(

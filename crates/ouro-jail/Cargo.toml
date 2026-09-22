@@ -30,4 +30,8 @@ uuid = { version = "1.24.0", features = ["v4"] }
 
 [dev-dependencies]
 jsonschema = { version = "0.57.0", default-features = false }
+# The conformance suite drives the real jail through the shared harness and
+# runs the shared fixture inside it. No cycle: `ouro-fixture` does not depend
+# on `ouro-jail`, and this is a dev-dependency, so nothing ships with it.
+ouro-fixture = { path = "../ouro-fixture" }
 tempfile = "3.27.0"

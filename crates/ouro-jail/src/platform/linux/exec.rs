@@ -101,20 +101,25 @@ impl FdMap {
     /// Arrange for this layout to be installed in `command`'s child.
     ///
     /// The closure runs after `fork` and before `exec` and calls nothing but
-    /// `dup2`. Every source is at or above [`RESERVE_BASE`] and every target
-    /// below it, so no `dup2` can clobber a later source.
+    /// `close_range` and `dup2`, both async-signal-safe. Every descriptor
+    /// above stdio is first marked close-on-exec, so nothing the supervisor
+    /// happens to hold — the gate, control and trace channels among them —
+    /// survives into the child (§8.3). The `dup2` calls then clear that flag
+    /// on exactly the descriptors this map names. Every source is at or above
+    /// [`RESERVE_BASE`] and every target below it, so no `dup2` can clobber a
+    /// later source.
     pub fn apply(&self, command: &mut Command) {
         let moves: Vec<(RawFd, RawFd)> = self
             .moves
             .iter()
             .map(|(fd, target)| (fd.as_raw_fd(), *target))
             .collect();
-        // SAFETY: the closure performs only `dup2`, which is
-        // async-signal-safe, and constructs an `io::Error` from an errno,
-        // which does not allocate. It captures a `Vec` of plain integers that
-        // was built before the fork.
+        // SAFETY: the closure performs only `close_range` and `dup2` over a
+        // `Vec` of plain integers built before the fork, and constructs an
+        // `io::Error` from an errno, which does not allocate.
         unsafe {
             command.pre_exec(move || {
+                close_range_cloexec()?;
                 for (source, target) in &moves {
                     if libc::dup2(*source, *target) < 0 {
                         return Err(io::Error::last_os_error());
@@ -124,6 +129,30 @@ impl FdMap {
             });
         }
     }
+}
+
+/// `CLOSE_RANGE_CLOEXEC` from `linux/close_range.h`.
+const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
+
+/// Mark every descriptor above stdio close-on-exec.
+///
+/// Async-signal-safe: one syscall, no allocation. Used between `fork` and
+/// `exec` so that only the descriptors the caller re-installs with `dup2`
+/// reach the child.
+fn close_range_cloexec() -> io::Result<()> {
+    // SAFETY: close_range takes three scalars and dereferences nothing.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3,
+            libc::c_uint::MAX,
+            CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// How a waited-for process ended.

@@ -152,6 +152,14 @@ pub fn doctor_command(run_dir: &str) -> String {
 /// The output is redirected to `test.log` and then echoed, rather than piped
 /// through `tee`, so the exit status is the suite's without depending on the
 /// remote login shell providing `pipefail` or `PIPESTATUS`.
+/// The remote test command.
+///
+/// One test thread, not two. The ptrace observer's thread owns every
+/// `waitpid` in its process (CONTRACT §3.5), so two tests attaching a tracer
+/// in the same test binary reap each other's children and both block for
+/// ever. Measured on the reference host: `observer_linux` passes in under
+/// four seconds at `--test-threads=1` and never finishes at 2. This is a
+/// property of the mechanism, not a preference about speed.
 #[must_use]
 pub fn test_command(run_dir: &str, jobs: u32) -> String {
     let p = run_path(run_dir);
@@ -159,7 +167,7 @@ pub fn test_command(run_dir: &str, jobs: u32) -> String {
         "cd {p} && OURO_CONFORMANCE=1 \
          OURO_JAIL_BIN=$PWD/target/release/ouro-jail \
          OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture \
-         {REMOTE_CARGO} test --workspace --release -j{jobs} -- --test-threads=2 \
+         {REMOTE_CARGO} test --workspace --release -j{jobs} -- --test-threads=1 \
          > test.log 2>&1; rc=$?; cat test.log; exit $rc"
     )
 }
@@ -585,7 +593,10 @@ mod tests {
             t.contains("OURO_FIXTURE_BIN=$PWD/target/release/ouro-fixture"),
             "{t}"
         );
-        assert!(t.contains("--test-threads=2"), "{t}");
+        assert!(
+            t.contains("--test-threads=1"),
+            "the suite runs serially because a tracer owns every waitpid in its process: {t}"
+        );
         assert!(t.contains("> test.log 2>&1"), "{t}");
         assert!(
             t.contains("exit $rc"),

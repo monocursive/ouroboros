@@ -18,13 +18,16 @@
 //! fails writes its errno to a close-on-exec error pipe, so the supervisor
 //! distinguishes "exec failed with ENOENT" from "exec succeeded", which is
 //! EOF with no bytes.
+//!
+//! The narrowing filter it installs is the observer's own
+//! ([`tracer::install_narrowing_filter`](super::tracer::install_narrowing_filter)),
+//! so the syscalls the launcher narrows to and the syscalls the tracer
+//! expects to be stopped on cannot drift apart.
 
 use std::ffi::{CString, OsString};
 use std::fmt;
 use std::os::fd::RawFd;
 
-use super::bpf::{BpfError, Program};
-use super::seccomp;
 use super::sys::{PathError, cstring_from_os};
 
 /// The hidden subcommand token.
@@ -156,62 +159,6 @@ fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, Launc
 }
 
 // ---------------------------------------------------------------------------
-// The narrowing filter placeholder
-// ---------------------------------------------------------------------------
-
-/// x86_64 numbers of the `linux-closed-v1` closed set (jail-v1 §11.2).
-pub const CLOSED_SET_NRS: &[(&str, u32)] = &[
-    ("execve", 59),
-    ("execveat", 322),
-    ("open", 2),
-    ("openat", 257),
-    ("openat2", 437),
-    ("creat", 85),
-    ("rename", 82),
-    ("renameat", 264),
-    ("renameat2", 316),
-    ("unlink", 87),
-    ("unlinkat", 263),
-    ("rmdir", 84),
-    ("mkdir", 83),
-    ("mkdirat", 258),
-    ("link", 86),
-    ("linkat", 265),
-    ("symlink", 88),
-    ("symlinkat", 266),
-    ("connect", 42),
-];
-
-/// The filter that sends the closed set to the tracer and allows everything
-/// else.
-///
-/// Replaced by `tracer::narrowing_filter` at integration; the observer agent
-/// owns the real one. This copy exists so that phase 1 can demonstrate the
-/// property the supervisor depends on: with the filter installed and no
-/// tracer attached, a closed-set syscall fails with `ENOSYS` rather than
-/// succeeding unobserved.
-///
-/// # Errors
-///
-/// [`BpfError`] only if the closed set grows past what classic BPF can encode.
-pub fn narrowing_filter() -> Result<Program, BpfError> {
-    use super::bpf::Asm;
-    let mut asm = Asm::new();
-    asm.ld_w_abs(seccomp::SD_ARCH)
-        .jeq(seccomp::AUDIT_ARCH_X86_64, None, Some("allow"));
-    asm.ld_w_abs(seccomp::SD_NR)
-        // x32 passes through to the baseline, which denies it. The narrowing
-        // filter's job is observation, not enforcement.
-        .jset(seccomp::X32_SYSCALL_BIT, Some("allow"), None);
-    for (_, nr) in CLOSED_SET_NRS {
-        asm.jeq(*nr, Some("trace"), None);
-    }
-    asm.label("allow").ret(seccomp::SECCOMP_RET_ALLOW);
-    asm.label("trace").ret(seccomp::SECCOMP_RET_TRACE);
-    asm.assemble()
-}
-
-// ---------------------------------------------------------------------------
 // The launcher itself
 // ---------------------------------------------------------------------------
 
@@ -253,18 +200,6 @@ pub fn launch_main(args: &[OsString]) -> ! {
     argv_ptrs.push(std::ptr::null());
     let program = argv_c[0].clone();
 
-    let filter = if parsed.narrow {
-        match narrowing_filter() {
-            Ok(program) => Some(program),
-            Err(err) => {
-                eprintln!("ouro-jail {SUBCOMMAND}: narrowing filter: {err}");
-                std::process::exit(EXIT_INTERNAL);
-            }
-        }
-    } else {
-        None
-    };
-
     // The target must not inherit the error pipe: EOF with no bytes is how the
     // supervisor learns the exec succeeded.
     // SAFETY: F_SETFD takes scalars and dereferences nothing.
@@ -273,20 +208,12 @@ pub fn launch_main(args: &[OsString]) -> ! {
         report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
     }
 
-    if let Some(filter) = filter.as_ref() {
-        if let Err(err) = seccomp::set_no_new_privs() {
-            report_and_exit(
-                parsed.error_fd,
-                err.raw_os_error().unwrap_or(libc::EINVAL),
-                EXIT_INTERNAL,
-            );
-        }
-        if let Err(err) = seccomp::install(filter) {
-            report_and_exit(
-                parsed.error_fd,
-                err.raw_os_error().unwrap_or(libc::EINVAL),
-                EXIT_INTERNAL,
-            );
+    if parsed.narrow {
+        // The observer's own filter, so the numbers the launcher narrows to
+        // and the numbers the tracer expects to be stopped on are one table.
+        // It sets no_new_privs and loads the program without allocating.
+        if let Err(errno) = super::tracer::install_narrowing_filter() {
+            report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
         }
     }
     drop(parsed.argv);
@@ -479,23 +406,6 @@ mod tests {
         args.push(OsStr::from_bytes(b"\xff\xfe").to_owned());
         let parsed = parse(&args).unwrap();
         assert_eq!(parsed.argv[1].as_bytes(), b"\xff\xfe");
-    }
-
-    #[test]
-    fn the_narrowing_filter_traces_exactly_the_closed_set() {
-        let program = narrowing_filter().unwrap();
-        let text = program.disassemble().join("\n");
-        assert_eq!(CLOSED_SET_NRS.len(), 19);
-        for (name, nr) in CLOSED_SET_NRS {
-            assert!(
-                text.contains(&format!("#0x{nr:08x}")),
-                "{name} ({nr}) missing from the narrowing filter"
-            );
-        }
-        let insns = program.insns();
-        let last = insns.len() - 1;
-        assert_eq!(insns[last].k, seccomp::SECCOMP_RET_TRACE);
-        assert_eq!(insns[last - 1].k, seccomp::SECCOMP_RET_ALLOW);
     }
 
     #[test]

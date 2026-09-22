@@ -37,6 +37,11 @@ fn main() -> ExitCode {
     }
 }
 
+fn stderr_is_a_terminal() -> bool {
+    // SAFETY: isatty takes a descriptor number and dereferences nothing.
+    unsafe { libc::isatty(2) == 1 }
+}
+
 fn build_context() -> Result<Context, JailError> {
     let env_settings = config::env_settings(&|name| std::env::var_os(name))?;
     let cwd = std::env::current_dir().map_err(|error| {
@@ -408,7 +413,12 @@ fn run(context: &Context, args: &RunArgs) -> ExitCode {
     }
     if let Some(path) = &report.receipt_path
         && report.receipt.is_some()
+        && stderr_is_a_terminal()
     {
+        // §8.3: the child's stderr is inherited without capture. Writing the
+        // supervisor's own diagnostic into it would make the stream differ
+        // from direct execution (X05), so the line goes out only when a
+        // terminal is watching, where no byte comparison is being made.
         eprintln!("ouro-jail: receipt {}", path.display());
     }
     exit(report.exit_code)

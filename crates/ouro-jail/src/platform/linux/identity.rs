@@ -5,6 +5,11 @@
 //! triple recorded here — pid, the boot id, and the process's birth time in
 //! clock ticks — names one process on one boot, and [`ProcessIdentity::is_live`]
 //! re-reads it rather than trusting it.
+//!
+//! The `/proc` reads that the observer also needs — `children`, `descendants`,
+//! `cmdline`, `nspid` — live in [`tracer::proc`](super::tracer) and are used
+//! from there, so there is one implementation of each and not two that can
+//! disagree.
 
 use std::fs;
 use std::io;
@@ -203,37 +208,6 @@ pub fn parse_ns_link(link: &str) -> Option<u64> {
     link.get(open + 1..close)?.parse().ok()
 }
 
-/// The `NSpid` line of `/proc/<pid>/status`: the process's id in each pid
-/// namespace from the outermost inwards.
-///
-/// # Errors
-///
-/// Any failure reading the status file, or [`io::ErrorKind::InvalidData`] when
-/// the kernel does not expose `NSpid`.
-pub fn nspid(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
-    let raw = fs::read_to_string(format!("/proc/{pid}/status"))?;
-    parse_status_list(&raw, "NSpid")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no NSpid line"))
-}
-
-/// Parse a whitespace-separated numeric field out of `/proc/<pid>/status`.
-#[must_use]
-pub fn parse_status_list(raw: &str, key: &str) -> Option<Vec<libc::pid_t>> {
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix(key)
-            && let Some(values) = rest.strip_prefix(':')
-        {
-            return Some(
-                values
-                    .split_ascii_whitespace()
-                    .filter_map(|v| v.parse().ok())
-                    .collect(),
-            );
-        }
-    }
-    None
-}
-
 /// A named field of `/proc/<pid>/status`, trimmed.
 ///
 /// # Errors
@@ -253,86 +227,6 @@ pub fn status_field(pid: libc::pid_t, key: &str) -> io::Result<String> {
         io::ErrorKind::InvalidData,
         format!("no {key} line in status of {pid}"),
     ))
-}
-
-/// The direct children of `pid`, gathered from every thread's `children` file.
-///
-/// The kernel only guarantees this list is accurate while the parent is
-/// stopped; the supervisor reads it while the launcher is blocked on the
-/// release pipe, which is exactly such a moment.
-///
-/// # Errors
-///
-/// Any failure listing `/proc/<pid>/task`.
-pub fn children(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(format!("/proc/{pid}/task"))? {
-        let entry = entry?;
-        let path = entry.path().join("children");
-        let Ok(raw) = fs::read_to_string(&path) else {
-            continue;
-        };
-        for token in raw.split_ascii_whitespace() {
-            if let Ok(child) = token.parse::<libc::pid_t>()
-                && !out.contains(&child)
-            {
-                out.push(child);
-            }
-        }
-    }
-    out.sort_unstable();
-    Ok(out)
-}
-
-/// Every descendant of `pid`, breadth first.
-///
-/// Bounded at 65_536 processes and depth 64: a fork storm must not turn a
-/// read of `/proc` into an unbounded allocation.
-///
-/// # Errors
-///
-/// Any failure reading `/proc` for the root pid. A descendant that vanishes
-/// mid-walk is skipped, because that is the normal case, not an error.
-pub fn descendants(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
-    const MAX_PROCESSES: usize = 65_536;
-    const MAX_DEPTH: usize = 64;
-    let mut out: Vec<libc::pid_t> = Vec::new();
-    let mut frontier = children(pid)?;
-    let mut depth = 0usize;
-    while !frontier.is_empty() && depth < MAX_DEPTH && out.len() < MAX_PROCESSES {
-        let mut next = Vec::new();
-        for child in frontier {
-            if out.contains(&child) {
-                continue;
-            }
-            out.push(child);
-            if out.len() >= MAX_PROCESSES {
-                break;
-            }
-            if let Ok(grandchildren) = children(child) {
-                next.extend(grandchildren);
-            }
-        }
-        frontier = next;
-        depth += 1;
-    }
-    out.sort_unstable();
-    Ok(out)
-}
-
-/// The argv of a process, as the NUL-separated bytes `/proc/<pid>/cmdline`
-/// holds, split into arguments.
-///
-/// # Errors
-///
-/// Any failure reading the file.
-pub fn cmdline(pid: libc::pid_t) -> io::Result<Vec<Vec<u8>>> {
-    let raw = fs::read(format!("/proc/{pid}/cmdline"))?;
-    Ok(raw
-        .split(|b| *b == 0)
-        .filter(|part| !part.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect())
 }
 
 /// Whether a path is a directory owned by this process's uid.
@@ -382,12 +276,5 @@ mod tests {
         assert_eq!(parse_ns_link("pid:[4026531836]"), Some(4_026_531_836));
         assert_eq!(parse_ns_link("mnt:[1]"), Some(1));
         assert_eq!(parse_ns_link("garbage"), None);
-    }
-
-    #[test]
-    fn status_lists_parse() {
-        let raw = "Name:\tx\nNSpid:\t1234\t2\nThreads:\t1\n";
-        assert_eq!(parse_status_list(raw, "NSpid"), Some(vec![1234, 2]));
-        assert_eq!(parse_status_list(raw, "NStgid"), None);
     }
 }

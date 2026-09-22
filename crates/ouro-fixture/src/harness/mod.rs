@@ -16,6 +16,7 @@ pub mod tempdir;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -230,8 +231,15 @@ impl Jail {
     /// harness itself against a stand-in.
     pub fn with_program(program: impl Into<PathBuf>) -> io::Result<Jail> {
         let root = TempDir::new("ouro-jail-harness")?;
-        std::fs::create_dir_all(root.path().join("data"))?;
-        std::fs::create_dir_all(root.path().join("config"))?;
+        // §6.2 requires the state root to be 0700 or stricter, and
+        // `create_dir_all` applies the process umask, which on a host with
+        // umask 002 leaves 0775. Setting the mode explicitly is what makes the
+        // run reach preparation instead of refusing `unsafe_state_path`.
+        for name in ["data", "config"] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(Jail {
             program: program.into(),
             args: Vec::new(),

@@ -92,6 +92,15 @@ pub struct BoundaryIdentity {
     pub native: Option<NativeLifetime>,
     /// The blocked launcher's stable identity.
     pub process: Option<ProcessRecord>,
+    /// The enforcement backend's name, for the receipt's `jail.backend`.
+    ///
+    /// ADDITIVE, defaulting to `None`: `jail.backend` and `backend_version`
+    /// are facts about the mechanism that made the boundary, which only the
+    /// platform that made it knows. `applied` is reported separately through
+    /// [`PreparedExecution::applied`].
+    pub backend: Option<String>,
+    /// The backend's own version string, as the backend reports it.
+    pub backend_version: Option<String>,
 }
 
 /// Why the supervisor is asking for termination (§9.3).
@@ -273,7 +282,11 @@ pub fn current() -> Box<dyn Platform> {
     {
         Box::new(macos::MacosPlatform)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(linux::platform::LinuxPlatform::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Box::new(Unimplemented)
     }

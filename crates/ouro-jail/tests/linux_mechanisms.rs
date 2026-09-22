@@ -28,6 +28,7 @@ use ouro_jail::platform::linux::identity::{self, ProcessIdentity};
 use ouro_jail::platform::linux::launch;
 use ouro_jail::platform::linux::probe::{self, ProbeStatus};
 use ouro_jail::platform::linux::seccomp;
+use ouro_jail::platform::linux::tracer;
 
 const RELEASE_FD: i32 = 12;
 const ERROR_FD: i32 = 13;
@@ -152,14 +153,14 @@ fn namespace_ids_children_and_cmdline_describe_an_owned_child() {
         "an ordinary child shares our pid namespace"
     );
 
-    let kids = identity::children(identity::ProcessIdentity::own().unwrap().pid).unwrap();
+    let kids = tracer::children(identity::ProcessIdentity::own().unwrap().pid);
     assert!(kids.contains(&pid), "children() missed our own child {pid}");
-    let descendants = identity::descendants(identity::ProcessIdentity::own().unwrap().pid).unwrap();
+    let descendants = tracer::descendants(identity::ProcessIdentity::own().unwrap().pid);
     assert!(descendants.contains(&pid));
 
-    let argv = identity::cmdline(pid).unwrap();
+    let argv = tracer::cmdline(pid).unwrap();
     assert_eq!(argv[0], b"/bin/sleep");
-    assert_eq!(identity::nspid(pid).unwrap(), vec![pid]);
+    assert_eq!(tracer::nspid(pid).unwrap(), vec![pid]);
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -726,10 +727,50 @@ fn the_syscall_numbers_are_this_kernels_numbers() {
         assert_eq!(table.get(name), Some(&nr), "{name} has the wrong number");
         checked += 1;
     }
-    for (name, nr) in launch::CLOSED_SET_NRS {
-        assert_eq!(table.get(*name), Some(nr), "{name} has the wrong number");
-        checked += 1;
-    }
+    // The observer's closed set, checked against the numbers the narrowing
+    // filter really installs rather than against a second copy of the table.
+    // The nineteen names are jail-v1 §11.2's list.
+    const CLOSED_SET_NAMES: [&str; 19] = [
+        "execve",
+        "execveat",
+        "open",
+        "openat",
+        "openat2",
+        "creat",
+        "rename",
+        "renameat",
+        "renameat2",
+        "unlink",
+        "unlinkat",
+        "rmdir",
+        "mkdir",
+        "mkdirat",
+        "link",
+        "linkat",
+        "symlink",
+        "symlinkat",
+        "connect",
+    ];
+    let expected: std::collections::BTreeSet<u32> = CLOSED_SET_NAMES
+        .iter()
+        .map(|name| {
+            *table
+                .get(*name)
+                .unwrap_or_else(|| panic!("{name} is not in this kernel's syscall table"))
+        })
+        .collect();
+    let installed: std::collections::BTreeSet<u32> = tracer::narrowing_filter()
+        .iter()
+        // A `jeq #k` in the narrowing filter is a syscall number it traces;
+        // the architecture compare and the x32 mask are the other immediates.
+        .filter(|insn| insn.code == 0x15 && insn.k < 0x4000_0000)
+        .map(|insn| insn.k)
+        .collect();
+    assert_eq!(
+        installed, expected,
+        "the narrowing filter does not trace exactly the closed set"
+    );
+    checked += expected.len();
     assert_eq!(checked, 29 + 5 + 19);
 }
 
@@ -814,7 +855,7 @@ fn the_launcher_execs_the_target_only_after_the_release_byte() {
     // Before release the target has not run. The launcher is blocked in
     // read(), which is observable rather than assumed.
     let pid = i32::try_from(launcher.child.id()).unwrap();
-    let argv = identity::cmdline(pid).unwrap();
+    let argv = tracer::cmdline(pid).unwrap();
     assert_eq!(argv[1], b"__launch", "the launcher has not exec'd yet");
     assert!(!marker.exists(), "the target ran before release");
 

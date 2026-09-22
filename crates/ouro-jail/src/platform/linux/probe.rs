@@ -757,8 +757,8 @@ fn write_status(out: &mut impl std::io::Write) {
     let _ = writeln!(
         out,
         "nspid={}",
-        identity::nspid(pid).map_or_else(
-            |_| "unknown".to_owned(),
+        super::tracer::nspid(pid).map_or_else(
+            || "unknown".to_owned(),
             |v| v
                 .iter()
                 .map(ToString::to_string)

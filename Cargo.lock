@@ -601,6 +601,7 @@ dependencies = [
  "clap",
  "jsonschema",
  "libc",
+ "ouro-fixture",
  "serde",
  "serde_json",
  "sha2",

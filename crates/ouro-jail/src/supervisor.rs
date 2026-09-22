@@ -1197,6 +1197,15 @@ fn apply_boundary(record: &mut AttemptRecord, boundary: &BoundaryIdentity, profi
         integrity: "verified".to_owned(),
     };
     record.process = boundary.process.clone();
+    // §13.2 wants the backend that made the boundary and its version; only
+    // the platform that made it can say.
+    if boundary.backend.is_some() {
+        record.jail.backend.clone_from(&boundary.backend);
+        record
+            .jail
+            .backend_version
+            .clone_from(&boundary.backend_version);
+    }
 }
 
 /// Whether either path is the other or one of its ancestors.
