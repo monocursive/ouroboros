@@ -330,6 +330,13 @@ impl LinuxPlatform {
             .collect();
         let measured_at = rfc3339_utc(SystemTime::now());
 
+        // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
+        // Shadows the fn for this call only; the closure falls back to it.
+        let capability_for = |requirement: &str, results: &[ProbeResult], measured_at: &str| {
+            super::uncontained::capability_for(plan.profile, requirement, results, measured_at)
+                .unwrap_or_else(|| capability_for(requirement, results, measured_at))
+        };
+        // J3-none end
         let mut out: Vec<Capability> = plan
             .requirements
             .iter()
@@ -373,6 +380,13 @@ impl Platform for LinuxPlatform {
         // A run measures what its plan asks about: every probe is a real
         // sandbox, fork or ptrace session, and the leaf and observer probes
         // are not free. `doctor` runs them all through `probe_all`.
+        // J3-none begin: `none` terminates its tree through the delegated leaf (§9.3)
+        // Shadows the fn for this call only; the closure falls back to it.
+        let probes_for = |requirement: &str| {
+            super::uncontained::probes_for(plan.profile, requirement)
+                .unwrap_or_else(|| probes_for(requirement))
+        };
+        // J3-none end
         let wanted: std::collections::BTreeSet<&str> = plan
             .requirements
             .iter()
@@ -391,6 +405,11 @@ impl Platform for LinuxPlatform {
         sinks: Sinks,
     ) -> Result<Box<dyn PreparedExecution>, JailError> {
         let deadline = clock::Deadline::after(PREPARE_BUDGET);
+        // J3-none begin: the uncontained profile has its own registered boundary (§9.3)
+        if plan.request.snapshot.profile == ProfileName::None {
+            return super::uncontained::prepare(plan, sinks, deadline);
+        }
+        // J3-none end
         let prepared = Boundary::create(&self.bwrap, plan, sinks, deadline)?;
         Ok(Box::new(LinuxPrepared { boundary: prepared }))
     }
@@ -3026,6 +3045,65 @@ fn sleep_for(step: Duration) {
     // SAFETY: `ts` is a live timespec and the second argument may be null.
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
+
+// J3-none begin: J2 helpers the uncontained boundary reuses instead of copying
+/// The J2 helpers `super::uncontained` calls. Delegation only: each body stays
+/// above, in one copy, so the two boundaries cannot drift apart.
+pub(super) mod shared {
+    use std::os::fd::RawFd;
+    use std::time::Duration;
+
+    use crate::capability::{Capability, CapabilityScope};
+    use crate::platform::{Deadline, RunEvent};
+
+    use super::super::probe::ProbeResult;
+    use super::super::tracer::TracerSummary;
+
+    pub(in crate::platform::linux) const STOP_GRACE: Duration = super::STOP_GRACE;
+    pub(in crate::platform::linux) const SETTLE_GRACE: Duration = super::SETTLE_GRACE;
+    pub(in crate::platform::linux) const WAIT_STEP: Duration = super::WAIT_STEP;
+    pub(in crate::platform::linux) const LIMIT_SAMPLE_INTERVAL: Duration =
+        super::LIMIT_SAMPLE_INTERVAL;
+
+    pub(in crate::platform::linux) fn capability_from(
+        requirement: &str,
+        probes: &[&str],
+        mechanism: &str,
+        scope: CapabilityScope,
+        results: &[ProbeResult],
+        measured_at: &str,
+    ) -> Capability {
+        super::capability_from(requirement, probes, mechanism, scope, results, measured_at)
+    }
+    pub(in crate::platform::linux) fn outcome_from_status(status: i32) -> RunEvent {
+        super::outcome_from_status(status)
+    }
+    pub(in crate::platform::linux) fn observer_verdict(summary: Option<&TracerSummary>) -> bool {
+        super::observer_verdict(summary)
+    }
+    pub(in crate::platform::linux) fn image_changed(pid: libc::pid_t) -> bool {
+        super::image_changed(pid)
+    }
+    pub(in crate::platform::linux) fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+        super::set_nonblocking(fd)
+    }
+    pub(in crate::platform::linux) fn write_all(fd: RawFd, bytes: &[u8]) -> std::io::Result<()> {
+        super::write_all(fd, bytes)
+    }
+    pub(in crate::platform::linux) fn read_environment_names(pid: libc::pid_t) -> Vec<String> {
+        super::read_environment_names(pid)
+    }
+    pub(in crate::platform::linux) fn step_for(deadline: Deadline) -> Duration {
+        super::step_for(deadline)
+    }
+    pub(in crate::platform::linux) fn sleep_for(step: Duration) {
+        super::sleep_for(step);
+    }
+    pub(in crate::platform::linux) fn nap() {
+        super::nap();
+    }
+}
+// J3-none end
 
 impl Drop for Boundary {
     fn drop(&mut self) {

@@ -33,5 +33,9 @@ pub mod probe;
 pub mod sys;
 #[cfg(target_os = "linux")]
 pub mod tracer;
+// J3-none begin: the uncontained `none` boundary (§9.3)
+#[cfg(target_os = "linux")]
+pub mod uncontained;
+// J3-none end
 #[cfg(target_os = "linux")]
 pub mod watch;

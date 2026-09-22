@@ -892,6 +892,18 @@ fn first_unsatisfied(requirements: &[String], capabilities: &[Capability]) -> Op
         } else {
             Remediation::HostSetup
         };
+        // J3-none begin: a restriction `none` cannot apply is the policy's to drop
+        let (message, remediation) = if reason == crate::capability::REASON_NOT_APPLIED_BY_NONE {
+            (
+                format!(
+                    "the uncontained profile cannot apply `{requirement}`; a contained profile can"
+                ),
+                Remediation::Configuration,
+            )
+        } else {
+            (message, remediation)
+        };
+        // J3-none end
         return Some(JailError::new(
             code,
             ErrorStage::Probing,
@@ -1279,6 +1291,29 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
                 .get_or_insert("operator_signal".to_owned());
             running.request_stop(StopReason::OperatorSignal);
         }
+        // J3-none begin: a detected integrity loss reaches the receipt now, not only at the end
+        if record.lifetime.integrity != "lost" && running.integrity_lost() {
+            record.lifetime.integrity = "lost".to_owned();
+            record.lifetime.tree_empty = None;
+            record.lifetime.verified_at = None;
+            let phase = if record.exec_observed {
+                Phase::Enforced
+            } else {
+                Phase::Prepared
+            };
+            if let Err(error) = persist(&attempt_dir, &mut record, phase, args, &mut journal) {
+                // As for the exec confirmation: persistence that fails after
+                // release stops the tree (§7).
+                record.errors.push(error.to_object());
+                record
+                    .outcome
+                    .cause
+                    .get_or_insert("state_write_failed".to_owned());
+                outcome_error.get_or_insert(error);
+                running.request_stop(StopReason::EvidenceLoss);
+            }
+        }
+        // J3-none end
         match running.wait(crate::platform::Deadline { at: wall_deadline }) {
             RunEvent::Poll => continue,
             RunEvent::ExecConfirmed => {
@@ -1497,16 +1532,24 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         record.state_cleanup = remove_managed_scratch(&attempt_dir, &plan);
     }
     // J3-launch end
+    // J3-none begin: a detected integrity loss is not a budget overrun (§9.3)
+    let tree_message = if record.lifetime.integrity == "lost" {
+        "the lifetime boundary's integrity was lost (a membership escape, a replaced \
+         identity or a failed verification was detected), so tree death is unknown"
+    } else {
+        "tree death could not be verified within its budget"
+    };
     let tree_error = (!settled).then(|| {
         let error = JailError::new(
             ErrorCode::TreeUnknown,
             ErrorStage::Reconciling,
             Remediation::InspectState,
-            "tree death could not be verified within its budget".to_owned(),
+            tree_message.to_owned(),
         );
         record.errors.push(error.to_object());
         error
     });
+    // J3-none end
     // §13.3 terminal drain, before the settled receipt is written: whatever
     // the external trace consumer has not accepted within the no-progress
     // deadline is recorded as evidence loss, and that loss belongs in the

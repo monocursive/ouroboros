@@ -63,6 +63,41 @@ pub fn delegated_root(uid: u32) -> Option<PathBuf> {
     }
 }
 
+/// The unified-hierarchy cgroup of `pid`, as a path relative to the v2 root
+/// of this process's cgroup namespace.
+///
+/// A zombie still reports the cgroup it died in (measured on the reference
+/// host); a process that is gone is an error, never a guess.
+///
+/// # Errors
+///
+/// Any failure reading `/proc/<pid>/cgroup`, or
+/// [`io::ErrorKind::InvalidData`] when it has no unified (`0::`) line.
+pub fn process_cgroup(pid: libc::pid_t) -> io::Result<String> {
+    let raw = fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
+    parse_own_cgroup(&raw).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no unified (0::) line in the process's cgroup file",
+        )
+    })
+}
+
+/// Whether the cgroup path `member` is `boundary` or lies beneath it.
+///
+/// Component-wise, like [`common_ancestor_ok`]: `/a/leaf.x` is not inside
+/// `/a/leaf`. A process in a cgroup the child created inside the boundary is
+/// still inside it: population, `cgroup.kill` and the limits are recursive.
+#[must_use]
+pub fn within(member: &str, boundary: &str) -> bool {
+    let boundary = boundary.trim_end_matches('/');
+    !boundary.is_empty()
+        && (member == boundary
+            || member
+                .strip_prefix(boundary)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
+
 /// Whether a process in `own` may move a process into `leaf`.
 ///
 /// cgroup v2 requires write access to `cgroup.procs` of the common ancestor of
@@ -329,6 +364,8 @@ pub struct ExecutionCgroup {
     baseline: Counters,
     oom_killed: bool,
     removed: bool,
+    /// Set by [`ExecutionCgroup::retain`]: never removed on drop.
+    retained: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -417,6 +454,7 @@ impl ExecutionCgroup {
             baseline: Counters::default(),
             oom_killed: false,
             removed: false,
+            retained: false,
         };
         // Verify kill permission before any target is placed here.
         leaf.file("cgroup.kill", true)?;
@@ -575,6 +613,29 @@ impl ExecutionCgroup {
     pub fn limits(&self) -> Vec<crate::records::AppliedLimit> {
         self.limits.clone()
     }
+    /// The leaf's path, as created.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    /// The leaf's path relative to the v2 root, the form `/proc/<pid>/cgroup`
+    /// uses, or `None` when the leaf does not lie under [`CGROUP_ROOT`].
+    #[must_use]
+    pub fn relative_path(&self) -> Option<String> {
+        let relative = self.path.strip_prefix(CGROUP_ROOT).ok()?;
+        Some(format!("/{}", relative.to_str()?))
+    }
+    /// The filesystem identity pinned at creation: `(device, inode)`.
+    #[must_use]
+    pub fn identity(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+    /// Keep the leaf when this value is dropped. jail-v1 §9.3: a boundary
+    /// whose integrity was lost retains its state for explicit recovery,
+    /// even when it happens to be empty.
+    pub fn retain(&mut self) {
+        self.retained = true;
+    }
     pub fn oom_killed(&self) -> bool {
         self.oom_killed
     }
@@ -614,8 +675,9 @@ impl ExecutionCgroup {
 
 impl Drop for ExecutionCgroup {
     fn drop(&mut self) {
-        // A nonempty or unidentifiable leaf is retained for explicit recovery.
-        if !self.removed {
+        // A nonempty or unidentifiable leaf is retained for explicit recovery,
+        // and so is one whose boundary integrity was lost.
+        if !self.removed && !self.retained {
             let _ = self.remove();
         }
     }
@@ -748,6 +810,47 @@ mod tests {
         assert!(memory_max(&(page - 1).to_string()).is_err());
         assert!(memory_max("0").is_err());
         assert!(memory_max("many").is_err());
+    }
+
+    #[test]
+    fn membership_is_containment_by_component() {
+        let leaf = "/user.slice/user-1001.slice/user@1001.service/ouro-att_x.leaf";
+        assert!(within(leaf, leaf));
+        assert!(within(&format!("{leaf}/child-made"), leaf));
+        assert!(within(leaf, &format!("{leaf}/")));
+        assert!(!within(&format!("{leaf}.evil"), leaf));
+        assert!(!within(
+            "/user.slice/user-1001.slice/user@1001.service/app.slice/run-1.scope",
+            leaf
+        ));
+        assert!(!within("/", leaf));
+        assert!(!within(leaf, ""), "an empty boundary contains nothing");
+        assert!(!within(leaf, "/"), "the root is not a registered boundary");
+    }
+
+    #[test]
+    fn a_leaf_outside_the_cgroup_root_has_no_relative_path() {
+        // Retention itself is observable only on cgroupfs, where an empty
+        // leaf can be removed; the live R06 cases check it there.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("leaf");
+        fs::create_dir(&path).unwrap();
+        for (name, value) in [
+            ("cgroup.kill", ""),
+            ("cgroup.procs", ""),
+            ("cgroup.events", "populated 0\n"),
+        ] {
+            fs::write(path.join(name), value).unwrap();
+        }
+        let limits = crate::policy::LimitsSnapshot {
+            wall: None,
+            pids: None,
+            mem: None,
+            cpu: None,
+        };
+        let leaf = ExecutionCgroup::open_created(&path, &limits).unwrap();
+        assert_eq!(leaf.relative_path(), None);
+        assert_eq!(leaf.path(), path.as_path());
     }
 
     #[test]

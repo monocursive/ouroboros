@@ -14,9 +14,9 @@ pub mod config;
 // J3-launch begin: credential staging
 pub mod credentials;
 // J3-launch end
-// J3-launch begin: TEMPORARY scaffold of N's module (contract §3.1); N's line wins at integration
+// J3-none begin: reserved environment names (§12)
 pub mod environment;
-// J3-launch end
+// J3-none end
 // J3-launch begin: data-only launch profiles
 pub mod launch_profile;
 // J3-launch end

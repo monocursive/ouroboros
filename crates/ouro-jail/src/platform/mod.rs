@@ -353,6 +353,16 @@ pub trait RunningExecution {
     fn limit_cause(&self) -> Option<String> {
         None
     }
+    // J3-none begin: a detected lifetime-integrity loss reaches the next receipt (§9.3)
+    /// Whether the platform has detected, while running, that the boundary's
+    /// lifetime integrity was lost: a membership escape, a replaced identity
+    /// or a failed verification. Once true it stays true. The default is a
+    /// platform that detects no such loss before tree verification.
+    fn integrity_lost(&self) -> bool {
+        false
+    }
+    // J3-none end
+
     /// Waits for the next event, up to `deadline`.
     fn wait(&mut self, deadline: Deadline) -> RunEvent;
 
