@@ -1,7 +1,9 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 9, 2026-09-22. No implementation
-or backend conformance is claimed by this document. Revision 9 makes the jail
+Status: implementation specification, revision 10, 2026-09-23. No implementation
+or backend conformance is claimed by this document. Revision 10 names the
+host-peer isolation mechanism for `agent` (§10) and records the decisions the
+J3 reviews forced (§§6.1, 9.1, 10, 12; review-resolutions.md). Revision 9 makes the jail
 work on a stock host: no required host configuration, so `agent` no longer
 requires nested user namespaces (§§3.2, 9.2, S03). Revision 8 recorded the
 clarifications the first adversarial reviews of the J1 implementation forced
@@ -496,6 +498,10 @@ environment; the executable must be visible under the final policy. Scripts
 and dynamic executables need their interpreter/runtime paths visible as well.
 
 Default profile: `tool`, or the launch profile's `jail` when `--launch` is set.
+Precedence is `--profile`, then `config.toml`'s `jail.profile`, then the launch
+profile's `jail`, then `tool`. When `config.toml` selects a profile and the
+launch profile's `jail` names a different built-in base, resolution refuses
+with both names rather than replacing either; `--profile` settles it.
 Default workspace: the invocation directory. Default scratch: a new private
 attempt directory. Default observation: `on`. Default evidence: `strict`.
 `--profile none` is the only way to select `none`; files and environment cannot
@@ -912,6 +918,13 @@ repositories, symlink replacement and mount replacement separately. A newly
 created protected segment below a previously ordinary nested directory remains
 outside Linux `existing_and_root` coverage. Requiring `all_descendants` refuses.
 
+Vendor state is bound read-write at `/run/ouro/state`, and each `bind_ro`
+credential view read-only at its destination beneath it, after every operator
+grant; the attempt directory above it is never visible. Vendor state and
+scratch are attempt-private and removed at settlement, so the root-level
+protected literals above do not apply to them: `existing_and_root` speaks of
+the persistent writable roots (workspace and operator grants).
+
 ### 9.2 Syscall and namespace plan
 
 Use the selected unprivileged bubblewrap integration with user, mount, PID,
@@ -1083,6 +1096,42 @@ socket aliases and SCM_RIGHTS authority from a host peer. Enumerating/masking
 only existing socket nodes cannot satisfy it. If this cannot be enforced,
 `agent` refuses; do not advertise no-host-sockets based only on TCP/UDP tests.
 
+The Linux mechanism, measured on a stock host with no host configuration
+([spike](jail-v1/evidence/unixpeer-spike-2026-09-22-ouro-ci.txt)), is seccomp
+user-notification mediation. The `agent` filter returns
+`SECCOMP_RET_USER_NOTIF` for `connect` and permits AF_UNIX sockets only of
+type stream or seqpacket; datagram and raw AF_UNIX sockets are refused at
+`socket`/`socketpair`, because a datagram send can name a peer in
+`sendmsg`'s `msg_name`, which a filter cannot read. The trusted launcher
+installs the filter with its own listener and opens a `NETLINK_SOCK_DIAG`
+socket inside the attempt's network namespace; the supervisor takes both from
+the blocked launcher by descriptor before release. For each notification the
+supervisor reads the address, revalidates the notification, and takes a
+duplicate of the child's socket. A pathname address is resolved in the
+child's own view without leaving it, pinned by an `O_PATH` handle, and
+allowed only when a listener bound to that node's filesystem identity lives
+in the attempt's network namespace; the supervisor then connects the child's
+socket through the pinned handle, so the kernel reaches exactly the node that
+was checked. A node whose inode number does not fit the kernel's 32-bit
+socket-diagnostic identity is refused. Non-AF_UNIX and abstract addresses are
+connected by the supervisor on the child's own socket, whose network
+namespace is fixed at creation. The supervisor never answers with
+`SECCOMP_USER_NOTIF_FLAG_CONTINUE` for a security decision. Without a live
+listener the filter fails closed.
+
+Named limits of this mechanism: a mediated connect runs in the supervisor's
+security context, so an inner sandbox's Landlock network rules and
+abstract-socket scope do not compose through it (inner seccomp filters do,
+because their denials outrank the notification); the reach of a mediated
+connect is still only the attempt's own network namespace. A listener's peer
+credentials name the supervisor for a mediated pathname connect. A listener
+bound inside a network namespace nested within the attempt is not in the
+attempt's diagnostic view and is refused. An inner sandbox cannot install its
+own seccomp notification listener while the outer one holds one. A connect
+mediated this way is not a ptrace stop; the mediator emits its evidence. When
+the kernel offers a native, composable restriction of pathname Unix peers,
+prefer it and drop the mediation.
+
 Set `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase equivalents
 to `http://127.0.0.1:3128`; set `NO_PROXY` and `no_proxy` to the empty string.
 Environment variables offer compatibility; the network namespace and separate
@@ -1123,7 +1172,17 @@ Initial budgets per attempt: 128 active connections, 32 KiB request headers,
 10-second DNS/connect/header deadline, 1 MiB total bounded relay buffers.
 At capacity, reject excess requests with a safe overload reason. Stream data
 with backpressure; do not buffer response bodies. Connections close on stop.
-These limits are resource budgets, not permission grants.
+These limits are resource budgets, not permission grants. The header deadline
+runs from accept and is absolute; resolution and connection each have their
+own 10-second deadline. The proxy serves one request per client connection:
+bytes after the first request are discarded and the connection closes after
+its response. Per-request work is bounded as well: host normalization refuses
+an over-long label or name before any encoding, so no request can make the
+supervisor do unbounded work. The proxy's descriptors are budgeted against the
+supervisor's limit; a request it cannot serve for lack of resources is
+recorded as the proxy's failure, never as the client's. A numeric allow rule is
+an explicit address grant for that address and port, whatever name resolved
+to it (network-rules.md).
 
 Emit one proxy `net.connect` result per request: immediately for denial or
 connect failure, at close for a successful tunnel so counters are final.
@@ -1345,7 +1404,14 @@ owner and mode, and reject special files. Initial total credential-copy budget:
 16 MiB per attempt; larger inputs refuse before exec. File identity and digest
 are computed from the same bytes copied. A readonly bind records source
 identity; if stable content cannot be established, its digest is unavailable
-rather than invented. Never recurse through a credential directory by default.
+rather than invented. Stable content is established only on a filesystem that
+cannot change (squashfs, erofs, iso9660) and when the content did not change
+while it was hashed; a read-only mount of a writable filesystem does not
+qualify. Never recurse through a credential directory by default. A credential
+source inside any child-writable grant refuses, compared by identity as for the
+launch profile file, and a `bind_ro` source with more than one hard link
+refuses, because the child could otherwise alter what it was granted
+read-only.
 
 Register vendor state before the first copy, create it mode 0700, and keep its
 parent unavailable to the contained child. Generated HOME/state paths and
