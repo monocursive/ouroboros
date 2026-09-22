@@ -145,6 +145,9 @@ mod tests {
                 // J3-launch begin: the new hand-off field
                 launch: None,
                 // J3-launch end
+                // J3-agent begin: the proxy directory hand-off
+                proxy: None,
+                // J3-agent end
             },
             Sinks { trace: None },
         );

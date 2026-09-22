@@ -109,7 +109,42 @@ pub struct PreparedPlan {
     /// profile needs them; `None` otherwise.
     pub launch: Option<crate::credentials::LaunchHandoff>,
     // J3-launch end
+    // J3-agent begin: the registered proxy directory (jail-v1 §10)
+    /// The attempt's registered, 0700 proxy directory, for a proxy-mode
+    /// profile; `None` otherwise. The platform binds the proxy socket inside
+    /// it and exposes it read-only by this descriptor.
+    pub proxy: Option<ProxyDirHandoff>,
+    // J3-agent end
 }
+
+// J3-agent begin: the proxy directory hand-off
+/// The proxy directory the supervisor registered and created (§10).
+#[derive(Clone)]
+pub struct ProxyDirHandoff {
+    /// `<attempt>/proxy`, for diagnostics; never bound or resolved by path.
+    pub host_path: PathBuf,
+    /// The directory, opened by the supervisor at creation.
+    pub fd: std::sync::Arc<std::os::fd::OwnedFd>,
+    /// Its `(dev, ino)` as registered in jail state.
+    pub identity: (u64, u64),
+}
+
+impl PartialEq for ProxyDirHandoff {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity && self.host_path == other.host_path
+    }
+}
+
+impl Eq for ProxyDirHandoff {}
+
+impl std::fmt::Debug for ProxyDirHandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyDirHandoff")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+// J3-agent end
 
 /// The output channels a prepared execution may write to.
 ///

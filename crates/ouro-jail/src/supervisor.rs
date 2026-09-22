@@ -1182,6 +1182,22 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         }
     };
     // J3-launch end
+    // J3-agent begin: §10 — the proxy directory is registered before it is
+    // created, outside every shared root, for a proxy-mode profile only.
+    let proxy_handoff = match prepare_proxy_dir(&attempt_dir, &plan) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            return Ok(refuse(
+                &attempt_dir,
+                &mut record,
+                &error,
+                args,
+                control.as_mut(),
+                &mut journal,
+            ));
+        }
+    };
+    // J3-agent end
 
     // Steps 3 to 5: create the boundary and the blocked launcher.
     let prepared = match ctx.platform.prepare(
@@ -1194,6 +1210,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
             // J3-launch begin: the staged objects, bound by descriptor
             launch: launch_handoff,
             // J3-launch end
+            // J3-agent begin: the registered proxy directory
+            proxy: proxy_handoff,
+            // J3-agent end
         },
         Sinks {
             trace: Some(Arc::clone(&trace)),
@@ -1615,6 +1634,9 @@ fn run_inner(ctx: &Context, args: &RunArgs) -> Result<RunReport, JailError> {
         error
     });
     // J3-none end
+    // J3-agent begin: the proxy stopped inside `wait_tree`
+    remove_proxy_directory(&attempt_dir, &mut record);
+    // J3-agent end
     // §13.3 terminal drain, before the settled receipt is written: whatever
     // the external trace consumer has not accepted within the no-progress
     // deadline is recorded as evidence loss, and that loss belongs in the
@@ -2092,6 +2114,9 @@ fn refuse(
     // J3-launch begin: §12 vendor state on a pre-exec refusal
     refuse_vendor_state(attempt_dir, record, args, journal);
     // J3-launch end
+    // J3-agent begin: the proxy stopped with the boundary's teardown
+    remove_proxy_directory(attempt_dir, record);
+    // J3-agent end
     let receipt = persist_terminal(attempt_dir, record, Phase::Refused, args, journal);
     match receipt {
         Ok(receipt) => {
@@ -2346,6 +2371,57 @@ fn refuse_vendor_state(
     record.cleanup_error = result.reason;
 }
 // J3-launch end
+
+// J3-agent begin: the proxy directory (§10)
+/// Registers and creates `<attempt>/proxy/` for a proxy-mode profile and
+/// returns the hand-off the platform binds the proxy socket in.
+fn prepare_proxy_dir(
+    attempt_dir: &AttemptDir,
+    plan: &Plan,
+) -> Result<Option<crate::platform::ProxyDirHandoff>, JailError> {
+    if plan.resolved.snapshot.network.mode != NetworkMode::Proxy.as_str() {
+        return Ok(None);
+    }
+    let dir = state::create_proxy_dir(attempt_dir)?;
+    let identity = dir
+        .stat()
+        .map_err(|error| {
+            JailError::new(
+                ErrorCode::StateWriteFailed,
+                ErrorStage::Preparing,
+                Remediation::InspectState,
+                format!("the proxy directory could not be inspected: {error}"),
+            )
+        })?
+        .identity();
+    Ok(Some(crate::platform::ProxyDirHandoff {
+        host_path: attempt_dir.proxy_dir_path(),
+        fd: Arc::new(dir.into_fd()),
+        identity,
+    }))
+}
+
+/// Removes the proxy directory once the platform stopped the proxy. A
+/// directory that cannot be removed is retained and said so in jail state
+/// and in the receipt's errors; it never changes the outcome.
+fn remove_proxy_directory(attempt_dir: &AttemptDir, record: &mut AttemptRecord) {
+    match state::remove_proxy_dir(attempt_dir) {
+        Ok(state::ProxyDirRemoval::Retained(reason)) => {
+            record.errors.push(
+                JailError::new(
+                    ErrorCode::StateWriteFailed,
+                    ErrorStage::Reconciling,
+                    Remediation::InspectState,
+                    format!("the proxy directory was retained: {reason}"),
+                )
+                .to_object(),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => record.errors.push(error.to_object()),
+    }
+}
+// J3-agent end
 
 /// The wrapper source's own event stream for this attempt (§13.1).
 ///

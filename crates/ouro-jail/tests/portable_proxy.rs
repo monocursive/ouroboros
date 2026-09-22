@@ -1172,7 +1172,65 @@ fn n04_stop_closes_every_connection_and_accounts_for_each() {
     server.join().expect("the server ran");
 }
 
-/// A resolver that announces each call and then blocks until the deadline.
+// J3-agent begin: a proxy whose listener dies stops serving, visibly
+/// The descriptor of this process's socket bound at `path`, found by asking
+/// every open descriptor its own name.
+#[cfg(target_os = "linux")]
+fn socket_bound_at(path: &Path) -> Option<i32> {
+    use std::os::unix::ffi::OsStrExt as _;
+    (3..1024).find(|fd| {
+        // SAFETY: getsockname writes at most `len` bytes into a zeroed,
+        // correctly sized sockaddr_un; any fd number is safe to ask.
+        unsafe {
+            let mut address: libc::sockaddr_un = std::mem::zeroed();
+            let mut len =
+                libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_un>()).expect("fits");
+            if libc::getsockname(*fd, std::ptr::from_mut(&mut address).cast(), &raw mut len) != 0
+                || i32::from(address.sun_family) != libc::AF_UNIX
+            {
+                return false;
+            }
+            let bytes: Vec<u8> = address
+                .sun_path
+                .iter()
+                .take_while(|byte| **byte != 0)
+                .map(|byte| *byte as u8)
+                .collect();
+            bytes == path.as_os_str().as_bytes()
+        }
+    })
+}
+
+/// N04 proxy death, in process: the listener is shut down underneath the
+/// proxy (what a dead listener looks like to its clients). The accept loop
+/// ends, `serving()` says so, and every new connection is refused; nothing
+/// accepts on the path again.
+#[cfg(target_os = "linux")]
+#[test]
+fn n04_a_listener_shut_down_underneath_the_proxy_stops_serving_and_refuses() {
+    let resolver = fixtures("", &[]);
+    let harness = start(&allow(&["127.0.0.1:1"]), &resolver);
+    assert!(harness.handle.serving());
+    let (status, _) = refused(&harness, &connect_request("denied.test:443"));
+    assert_eq!(status, 403, "the proxy serves before its listener dies");
+    let fd = socket_bound_at(&harness.path).expect("the proxy's listener is in this process");
+    // SAFETY: shutting down a socket this process owns; the descriptor stays
+    // open and owned by the proxy.
+    assert_eq!(unsafe { libc::shutdown(fd, libc::SHUT_RDWR) }, 0);
+    let deadline = Instant::now() + WAIT;
+    while harness.handle.serving() {
+        assert!(Instant::now() < deadline, "the accept loop never noticed");
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = UnixStream::connect(&harness.path).expect_err("nothing accepts any more");
+    assert_eq!(error.kind(), ErrorKind::ConnectionRefused, "{error}");
+    let (summary, results) = harness.stop(WAIT);
+    assert_eq!(summary.accepted, 1);
+    assert_eq!(results.len(), 1);
+}
+// J3-agent end
+
+/// A resolver that announces each call and then blocks until the deadline./// A resolver that announces each call and then blocks until the deadline.
 struct GateResolver {
     entered: Mutex<mpsc::Sender<()>>,
     hold: Mutex<()>,

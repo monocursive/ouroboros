@@ -40,6 +40,26 @@ enum PathClass {
     Unavailable(&'static str),
 }
 
+// J3-agent begin: one mediated connect, as the audit writer needs it
+/// One `connect` the unix-peer mediator decided, with the result the child
+/// received.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediatedConnect {
+    /// The connecting thread.
+    pub tid: libc::pid_t,
+    /// Its thread group, when `/proc` said.
+    pub tgid: Option<libc::pid_t>,
+    /// The address family the child named.
+    pub family: Option<u16>,
+    /// Whether the whole address was read.
+    pub address_complete: bool,
+    /// The value the child's `connect` returned: 0 or `-errno`.
+    pub ret: i64,
+    /// The mediator's safe reason code.
+    pub reason: &'static str,
+}
+// J3-agent end
+
 /// Turns tracer events into audit events and counts what it emitted.
 pub struct AuditWriter {
     attempt_id: String,
@@ -240,6 +260,98 @@ impl AuditWriter {
             self.bump(class_of(operation));
         }
     }
+
+    // J3-agent begin: mediated connects are audit-source results (§10, §11.4)
+    /// One `connect` the unix-peer mediator decided (jail-v1 §10).
+    ///
+    /// A mediated connect is not a ptrace stop — `SECCOMP_RET_USER_NOTIF`
+    /// outranks the observer's `SECCOMP_RET_TRACE` — so for `agent` the
+    /// mediator is the witness of every native `connect` in the attempt's
+    /// tree, and this is the audit source's `net.connect` result for it, with
+    /// the return value the child's `connect` actually got. It follows the
+    /// closed set's classification exactly: an `EACCES`/`EPERM` result is one
+    /// `fs.deny` with `attempted_operation = net.connect`, counted under
+    /// `fs.deny` only. `fields.observation` says which mechanism saw it; the
+    /// mediator's safe reason code is recorded as `mediator_reason`, and the
+    /// audit `decision` stays null (§13.1). Proxy-source facts are never
+    /// merged into it: the proxy emits its own `net.connect` results.
+    pub fn record_mediated_connect(&mut self, record: &MediatedConnect) {
+        let errno = (record.ret < 0)
+            .then(|| i32::try_from(-record.ret).ok())
+            .flatten();
+        let denied = matches!(errno, Some(libc::EACCES | libc::EPERM));
+        let operation = if denied { "fs.deny" } else { "net.connect" };
+        let mut fields = Map::new();
+        fields.insert("syscall".to_owned(), Value::from("connect"));
+        fields.insert(
+            "pid".to_owned(),
+            record
+                .tgid
+                .map_or(Value::Null, |pid| Value::from(i64::from(pid))),
+        );
+        fields.insert("tid".to_owned(), Value::from(i64::from(record.tid)));
+        fields.insert(
+            "path_basis".to_owned(),
+            Value::from("argument_snapshot".to_owned()),
+        );
+        self.describe_path(&mut fields, "path", None, None);
+        fields.insert(
+            "address_family".to_owned(),
+            record
+                .family
+                .map_or(Value::Null, |family| Value::from(i64::from(family))),
+        );
+        fields.insert(
+            "address_complete".to_owned(),
+            Value::from(record.address_complete),
+        );
+        fields.insert(
+            "observation".to_owned(),
+            Value::from("seccomp_user_notification"),
+        );
+        fields.insert("mediator_reason".to_owned(), Value::from(record.reason));
+        if denied {
+            fields.insert(
+                "attempted_operation".to_owned(),
+                Value::from("net.connect".to_owned()),
+            );
+        }
+        let outcome = EventOutcome {
+            ok: Some(record.ret >= 0),
+            return_value: Some(record.ret),
+            errno: errno.map(|code| super::sys::errno_name(code).to_owned()),
+            completion: Completion::SyscallReturn,
+            bytes_in: None,
+            bytes_out: None,
+            duration_ms: None,
+        };
+        let seq = self.next_seq();
+        let event = Event::audit_result(
+            &self.attempt_id,
+            seq,
+            SystemTime::now(),
+            crate::platform::elapsed_since_start_ns(),
+            operation,
+            outcome,
+            fields,
+        );
+        if self.emit(&event, class_of(operation)) {
+            self.bump(class_of(operation));
+        }
+    }
+
+    /// Mediation records that never reached this writer (the bounded queue
+    /// between the mediator and the supervision loop overflowed): a hole in
+    /// `net` and `fs.deny`, with a known count.
+    pub fn record_mediation_loss(&mut self, lost: u64, from_ns: u64, to_ns: u64) {
+        if lost == 0 {
+            return;
+        }
+        let mut ops = OpSet::EMPTY;
+        ops.insert(ClosedOp::Connect);
+        self.record_gap(GapReason::QueueFull, ops, from_ns, to_ns, Some(lost));
+    }
+    // J3-agent end
 
     /// A confirmed exec transition (`PTRACE_EVENT_EXEC`).
     ///

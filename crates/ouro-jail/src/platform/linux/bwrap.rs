@@ -27,6 +27,12 @@ pub const SCRATCH_INSIDE_PATH: &str = "/tmp";
 /// visible and no operator grant can shadow it (J3 contract §3.2).
 pub const VENDOR_STATE_INSIDE_PATH: &str = "/run/ouro/state";
 // J3-launch end
+// J3-agent begin: the proxy's dedicated directory inside the sandbox
+/// Where the attempt's proxy directory appears inside the sandbox, read-only
+/// (jail-v1 §10: "Expose only its dedicated directory at `/run/ouro/proxy`,
+/// read-only to the child").
+pub const PROXY_INSIDE_PATH: &str = "/run/ouro/proxy";
+// J3-agent end
 
 /// The system roots the `tool` profile grants read-only (north-star §4.2).
 pub const RUNTIME_ROOTS: [&str; 7] = [
@@ -638,6 +644,14 @@ pub struct BwrapPlan {
     /// its destination under [`VENDOR_STATE_INSIDE_PATH`] (`--ro-bind-fd`).
     pub credential_binds: Vec<CredentialBind>,
     // J3-launch end
+    // J3-agent begin: the proxy directory, bound by descriptor only (§10)
+    /// The host proxy directory, for the mount table and diagnostics. Never
+    /// bound by this path: only by [`BwrapPlan::proxy_dir_fd`].
+    pub proxy_dir: Option<PathBuf>,
+    /// Descriptor number, valid in the bubblewrap process, of the pinned
+    /// proxy directory (`--ro-bind-fd` at [`PROXY_INSIDE_PATH`]).
+    pub proxy_dir_fd: Option<RawFd>,
+    // J3-agent end
 }
 
 // J3-launch begin: one bind_ro credential view
@@ -758,6 +772,10 @@ impl BwrapPlan {
             vendor_state_fd: None,
             credential_binds: Vec::new(),
             // J3-launch end
+            // J3-agent begin
+            proxy_dir: None,
+            proxy_dir_fd: None,
+            // J3-agent end
         }
     }
 
@@ -877,6 +895,15 @@ impl BwrapPlan {
             });
         }
         // J3-launch end
+        // J3-agent begin: the proxy directory, read-only, after every grant
+        if let Some(host) = &self.proxy_dir {
+            rows.push(MountRow {
+                kind: "proxy",
+                source: Some(host.as_os_str().to_owned()),
+                destination: OsString::from(PROXY_INSIDE_PATH),
+            });
+        }
+        // J3-agent end
         rows.push(MountRow {
             kind: "ro-bind",
             source: Some(self.jail_exe.as_os_str().to_owned()),
@@ -923,6 +950,11 @@ impl BwrapPlan {
             return Err(PlanError::StagedFdMissing("credential"));
         }
         // J3-launch end
+        // J3-agent begin
+        if self.proxy_dir.is_some() && self.proxy_dir_fd.is_none() {
+            return Err(PlanError::StagedFdMissing("proxy directory"));
+        }
+        // J3-agent end
         let mut tail: Vec<OsString> = Vec::new();
         // Scoped so the closure's borrow of `tail` ends before the length of
         // the rendered list is measured.
@@ -967,6 +999,9 @@ impl BwrapPlan {
                         .iter()
                         .find(|view| view.destination.as_os_str() == row.destination)
                         .and_then(|view| view.fd),
+                    // J3-agent begin
+                    "proxy" => self.proxy_dir_fd,
+                    // J3-agent end
                     _ => fd,
                 };
                 // J3-launch end
@@ -984,6 +1019,9 @@ impl BwrapPlan {
                     "vendor-state" => "--bind-fd",
                     "credential" => "--ro-bind-fd",
                     // J3-launch end
+                    // J3-agent begin
+                    "proxy" => "--ro-bind-fd",
+                    // J3-agent end
                     _ => unreachable!("mount table kind"),
                 };
                 if let Some(fd) = fd {
@@ -1074,6 +1112,21 @@ pub fn inner_launch_command(
     narrow: bool,
     target: &[OsString],
 ) -> Vec<OsString> {
+    inner_launch_command_with(release_fd, error_fd, narrow, None, target)
+}
+
+// J3-agent begin: the agent launcher's mediation and bridge options
+/// [`inner_launch_command`], plus, for `agent`, the descriptor numbers the
+/// launcher places its mediation listener and sock_diag socket at, and the
+/// bridge (jail-v1 §10).
+#[must_use]
+pub fn inner_launch_command_with(
+    release_fd: RawFd,
+    error_fd: RawFd,
+    narrow: bool,
+    agent: Option<(RawFd, RawFd)>,
+    target: &[OsString],
+) -> Vec<OsString> {
     let mut out = vec![
         OsString::from(JAIL_INSIDE_PATH),
         OsString::from(super::launch::SUBCOMMAND),
@@ -1085,6 +1138,12 @@ pub fn inner_launch_command(
     if narrow {
         out.push(OsString::from("--narrow"));
     }
+    if let Some((listener, sockdiag)) = agent {
+        out.push(OsString::from("--mediate"));
+        out.push(OsString::from(format!("{listener},{sockdiag}")));
+        out.push(OsString::from("--bridge"));
+    }
+    // J3-agent end
     out.push(OsString::from("--"));
     out.extend(target.iter().cloned());
     out
@@ -1493,4 +1552,45 @@ mod tests {
         assert!(matches!(plan.render(), Err(PlanError::ArgumentNul)));
     }
     // J3-launch end
+
+    // J3-agent begin: the proxy directory renders by descriptor or not at all
+    #[test]
+    fn the_proxy_directory_is_bound_read_only_by_descriptor_after_every_grant() {
+        let mut plan = sample_plan();
+        plan.proxy_dir = Some(PathBuf::from("/data/attempts/att_x/proxy"));
+        assert!(matches!(
+            plan.render(),
+            Err(PlanError::StagedFdMissing("proxy directory"))
+        ));
+        plan.proxy_dir_fd = Some(17);
+        let text = argv_text(&plan);
+        assert!(
+            text.contains(&format!("--ro-bind-fd 17 {PROXY_INSIDE_PATH}")),
+            "{text}"
+        );
+        assert!(
+            !text.contains("/data/attempts/att_x/proxy"),
+            "the host path never reaches the argv: {text}"
+        );
+        let proxy_at = text.find(PROXY_INSIDE_PATH).unwrap();
+        let jail_at = text.find(JAIL_INSIDE_PATH).unwrap();
+        assert!(proxy_at < jail_at, "after every grant, before the binary");
+        let inner = inner_launch_command_with(12, 13, true, Some((18, 19)), &[OsString::from("x")]);
+        let joined: Vec<String> = inner
+            .iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        let sep = joined.iter().position(|part| part == "--").unwrap();
+        assert!(
+            joined[..sep]
+                .windows(2)
+                .any(|w| w == ["--mediate", "18,19"])
+        );
+        assert!(joined[..sep].contains(&"--bridge".to_owned()));
+        assert_eq!(
+            inner_launch_command(12, 13, false, &[OsString::from("x")]),
+            inner_launch_command_with(12, 13, false, None, &[OsString::from("x")])
+        );
+    }
+    // J3-agent end
 }

@@ -7,15 +7,17 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use super::{
-    MediationRecord, MediationSink, NON_UNIX_NOTE, PeerAddr, SockFilter, Verdict, base_for,
-    classify, filter_rules, relative_bytes,
+    MediationRecord, MediationSink, NON_UNIX_NOTE, PeerAddr, Verdict, base_for, classify,
+    mediation_program, relative_bytes,
 };
 use crate::platform::linux::identity::pidfd_open;
 use crate::platform::linux::sockdiag::{SockDiag, VfsId};
 
 // ---- constants not in this libc ------------------------------------------
-const FLAG_NEW_LISTENER: libc::c_ulong = 1 << 3;
-const FLAG_WAIT_KILLABLE_RECV: libc::c_ulong = 1 << 5;
+/// `SECCOMP_FILTER_FLAG_NEW_LISTENER`.
+pub const FLAG_NEW_LISTENER: libc::c_ulong = 1 << 3;
+/// `SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`.
+pub const FLAG_WAIT_KILLABLE_RECV: libc::c_ulong = 1 << 5;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,17 @@ pub struct LauncherSetup {
     _listener: OwnedFd,
     _sockdiag: OwnedFd,
 }
+
+// J3-agent begin: the launcher places both at fixed numbers
+impl LauncherSetup {
+    /// The listener and the sock_diag socket, so the launcher can place them
+    /// at the descriptor numbers the supervisor expects.
+    #[must_use]
+    pub fn into_fds(self) -> (OwnedFd, OwnedFd) {
+        (self._listener, self._sockdiag)
+    }
+}
+// J3-agent end
 
 /// Install the agent mediation filter with a new user-notification listener and
 /// `WAIT_KILLABLE_RECV`, and open a `NETLINK_SOCK_DIAG` socket in this netns.
@@ -83,16 +96,29 @@ pub fn launcher_setup() -> io::Result<LauncherSetup> {
 ///
 /// The errno of `prctl` or `seccomp`.
 pub fn install_filter(flags: libc::c_ulong) -> io::Result<OwnedFd> {
-    let prog: Vec<libc::sock_filter> = filter_rules().into_iter().map(to_libc).collect();
-    let fprog = libc::sock_fprog {
-        len: u16::try_from(prog.len()).expect("the filter is short"),
-        filter: prog.as_ptr().cast_mut(),
-    };
+    install_program(&mediation_program(), flags)
+}
+
+// J3-agent begin: installing an already-built program, for a caller that
+// must not allocate between fork and the install (the doctor probe)
+/// [`install_filter`] for a program built by the caller.
+///
+/// Allocates nothing: `prctl` and `seccomp` only, so it may run between
+/// `fork` and `_exit` in a multithreaded process.
+///
+/// # Errors
+///
+/// The errno of `prctl` or `seccomp`.
+pub fn install_program(
+    program: &crate::platform::linux::bpf::Program,
+    flags: libc::c_ulong,
+) -> io::Result<OwnedFd> {
+    let fprog = program.sock_fprog();
     // SAFETY: PR_SET_NO_NEW_PRIVS takes scalars and dereferences nothing.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `fprog` points at `prog`'s instructions, both live for the call;
+    // SAFETY: `fprog` points at `program`'s instructions, both live for the call;
     // with FLAG_NEW_LISTENER the syscall returns a new fd (>= 0) owned here.
     let rc = unsafe {
         libc::syscall(
@@ -105,19 +131,13 @@ pub fn install_filter(flags: libc::c_ulong) -> io::Result<OwnedFd> {
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }
-    let fd = RawFd::try_from(rc).map_err(|_| io::Error::other("seccomp returned a huge fd"))?;
+    // A listener descriptor always fits a RawFd; `rc` comes from the kernel.
+    #[allow(clippy::cast_possible_truncation)]
+    let fd = rc as RawFd;
     // SAFETY: `fd` was just returned by seccomp(NEW_LISTENER) and is owned here.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
-
-fn to_libc(insn: SockFilter) -> libc::sock_filter {
-    libc::sock_filter {
-        code: insn.code,
-        jt: insn.jt,
-        jf: insn.jf,
-        k: insn.k,
-    }
-}
+// J3-agent end
 
 // ---------------------------------------------------------------------------
 // Step 2: the supervisor takes the listener and sock_diag fds
@@ -128,7 +148,27 @@ fn to_libc(insn: SockFilter) -> libc::sock_filter {
 pub struct PeerAuthority {
     listener: OwnedFd,
     sockdiag: SockDiag,
+    // J3-agent begin: the authorized proxy (jail-v1 §10)
+    authorized: Option<(u64, u64)>,
+    // J3-agent end
 }
+
+// J3-agent begin: "deny access to host peers except the authorized proxy"
+impl PeerAuthority {
+    /// Also allow a pathname connect that reaches exactly this node, by its
+    /// full `(st_dev, st_ino)`: the attempt's proxy socket, which lives in
+    /// the host network namespace and so is never in the attempt's sock_diag
+    /// view (jail-v1 §10). The supervisor keeps the node pinned for the whole
+    /// run, so the number cannot be reused by another object, and a
+    /// replacement bound at the same path has a different identity and is
+    /// refused like any other host peer.
+    #[must_use]
+    pub fn authorize_peer(mut self, identity: (u64, u64)) -> Self {
+        self.authorized = Some(identity);
+        self
+    }
+}
+// J3-agent end
 
 /// Take the listener and sock_diag fds from the blocked launcher with
 /// `pidfd_getfd` (§3.4 step 2).
@@ -147,11 +187,15 @@ pub fn take_from_launcher(launcher: BorrowedFd<'_>, fds: LauncherFds) -> io::Res
     Ok(PeerAuthority {
         listener,
         sockdiag: SockDiag::from_fd(sockdiag),
+        authorized: None,
     })
 }
 
 /// `pidfd_getfd(pidfd, targetfd, 0)`.
-fn pidfd_getfd(pidfd: BorrowedFd<'_>, target: RawFd) -> io::Result<OwnedFd> {
+///
+/// # Errors
+/// The errno of `pidfd_getfd`.
+pub fn pidfd_getfd(pidfd: BorrowedFd<'_>, target: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: pidfd_getfd takes three scalars and dereferences nothing; the
     // returned fd (>= 0) is a new descriptor owned by this process.
     let rc = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd.as_raw_fd(), target, 0) };
@@ -230,6 +274,9 @@ struct Workers {
     // whole requests.
     sockdiag: std::sync::Mutex<SockDiag>,
     sink: Arc<dyn MediationSink>,
+    // J3-agent begin
+    authorized: Option<(u64, u64)>,
+    // J3-agent end
     // Kept alive so the stop pipe read end outlives every worker.
     _stop_r_owned: OwnedFd,
 }
@@ -240,7 +287,11 @@ struct Workers {
 ///
 /// The errno of `pipe2`.
 pub fn spawn(authority: PeerAuthority, sink: Arc<dyn MediationSink>) -> io::Result<MediatorHandle> {
-    let PeerAuthority { listener, sockdiag } = authority;
+    let PeerAuthority {
+        listener,
+        sockdiag,
+        authorized,
+    } = authority;
     let mut pipe = [0i32; 2];
     // SAFETY: `pipe` is a two-element array; pipe2 writes two fds or returns -1.
     if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -263,6 +314,7 @@ pub fn spawn(authority: PeerAuthority, sink: Arc<dyn MediationSink>) -> io::Resu
         stop_r: stop_r_raw,
         sockdiag: std::sync::Mutex::new(sockdiag),
         sink,
+        authorized,
         _stop_r_owned: stop_r,
     });
     let mut joins = Vec::with_capacity(WORKERS);
@@ -352,16 +404,25 @@ fn service_one(w: &Workers) -> io::Result<()> {
     if !notif_id_valid(listener, id) {
         return Ok(());
     }
+    // J3-agent begin: read while the task is parked in its notification, so
+    // the thread group named is the one that asked (validated again below).
+    let mut facts = Facts {
+        pid,
+        tgid: task_tgid(pid),
+        family: None,
+        address_complete: false,
+    };
+    // J3-agent end
     let Ok(child_pidfd) = pidfd_open(pid) else {
         deny(listener, id, libc::ESRCH);
-        record(sink, pid, "task_gone", Verdict::Denied(libc::ESRCH));
+        record(sink, &facts, "task_gone", Verdict::Denied(libc::ESRCH));
         return Ok(());
     };
     let dup = match pidfd_getfd(child_pidfd.as_fd(), sockfd) {
         Ok(fd) => fd,
         Err(_) => {
             deny(listener, id, libc::EBADF);
-            record(sink, pid, "fd_unavailable", Verdict::Denied(libc::EBADF));
+            record(sink, &facts, "fd_unavailable", Verdict::Denied(libc::EBADF));
             return Ok(());
         }
     };
@@ -370,16 +431,20 @@ fn service_one(w: &Workers) -> io::Result<()> {
     if !notif_id_valid(listener, id) {
         return Ok(());
     }
+    // J3-agent begin
+    facts.family = (sockaddr.len() >= 2).then(|| u16::from_ne_bytes([sockaddr[0], sockaddr[1]]));
+    facts.address_complete = ualen <= 256 && sockaddr.len() == ualen;
+    // J3-agent end
 
     let (verdict, reason) = decide(w, pid, &dup, &sockaddr, ualen);
     match verdict {
         Ok(()) => {
             notif_send(listener, id, 0, 0);
-            record(sink, pid, reason, Verdict::Allowed);
+            record(sink, &facts, reason, Verdict::Allowed);
         }
         Err(errno) => {
             notif_send(listener, id, 0, -errno);
-            record(sink, pid, reason, Verdict::Denied(errno));
+            record(sink, &facts, reason, Verdict::Denied(errno));
         }
     }
     Ok(())
@@ -441,6 +506,16 @@ fn mediate_pathname(
     if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return (Err(libc::ECONNREFUSED), "not_a_socket");
     }
+    // J3-agent begin: the authorized proxy, by its full pinned identity. It
+    // is bound in the host network namespace, so sock_diag in the attempt's
+    // namespace never lists it; nothing else from the host is let through.
+    if w.authorized == Some((st.st_dev, st.st_ino)) {
+        return match connect_pinned(dup, &node, w.stop_r) {
+            Ok(()) => (Ok(()), "authorized_proxy"),
+            Err(errno) => (Err(errno), "proxy_connect_failed"),
+        };
+    }
+    // J3-agent end
     // Filesystem identity; refuse a node too wide for the sock_diag interface.
     let Some(want) = VfsId::from_stat(st.st_ino, st.st_dev) else {
         return (Err(libc::EACCES), "inode_too_wide");
@@ -458,8 +533,15 @@ fn mediate_pathname(
         Ok(false) => return (Err(libc::EACCES), "no_attempt_listener"),
         Err(_) => return (Err(libc::EACCES), "sock_diag_failed"),
     }
-    // Connect the duplicate through the pinned node, so the kernel reaches
-    // exactly the checked inode and not a path the child could swap.
+    match connect_pinned(dup, &node, w.stop_r) {
+        Ok(()) => (Ok(()), "attempt_listener"),
+        Err(e) => (Err(e), "connect_failed"),
+    }
+}
+
+/// Connects the duplicate through the pinned node, so the kernel reaches
+/// exactly the checked inode and not a path the child could swap.
+fn connect_pinned(dup: &OwnedFd, node: &OwnedFd, stop_r: RawFd) -> Result<(), i32> {
     let procpath = format!("/proc/self/fd/{}", node.as_raw_fd());
     let (addr, addr_len) = sockaddr_un(procpath.as_bytes());
     // SAFETY: `addr` is a live sockaddr_un; view its exact bytes as a slice for
@@ -467,11 +549,7 @@ fn mediate_pathname(
     let addr_bytes = unsafe {
         std::slice::from_raw_parts(std::ptr::from_ref(&addr).cast::<u8>(), addr_len as usize)
     };
-    let r = bounded_connect(dup.as_raw_fd(), addr_bytes, addr_len as usize, w.stop_r);
-    match r {
-        Ok(()) => (Ok(()), "attempt_listener"),
-        Err(e) => (Err(e), "connect_failed"),
-    }
+    bounded_connect(dup.as_raw_fd(), addr_bytes, addr_len as usize, stop_r)
 }
 
 /// Perform a connect on `fd` without ever blocking a worker.
@@ -554,9 +632,29 @@ fn so_error(fd: RawFd) -> i32 {
 
 // ---- syscall helpers ------------------------------------------------------
 
-fn record(sink: &dyn MediationSink, pid: libc::pid_t, reason: &'static str, verdict: Verdict) {
+// J3-agent begin: the facts a record carries beside its verdict
+struct Facts {
+    pid: libc::pid_t,
+    tgid: Option<libc::pid_t>,
+    family: Option<u16>,
+    address_complete: bool,
+}
+
+/// `Tgid:` of a task in `/proc/<tid>/status`, or `None`.
+fn task_tgid(tid: libc::pid_t) -> Option<libc::pid_t> {
+    let text = std::fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))
+        .and_then(|value| value.trim().parse().ok())
+}
+// J3-agent end
+
+fn record(sink: &dyn MediationSink, facts: &Facts, reason: &'static str, verdict: Verdict) {
     sink.record(MediationRecord {
-        pid,
+        pid: facts.pid,
+        tgid: facts.tgid,
+        family: facts.family,
+        address_complete: facts.address_complete,
         reason,
         verdict,
     });

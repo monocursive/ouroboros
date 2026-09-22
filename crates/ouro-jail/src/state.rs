@@ -901,6 +901,154 @@ fn withdraw_vendor_registration(attempt_dir: &AttemptDir) -> Result<(), JailErro
     })
 }
 
+// J3-agent begin: the proxy directory in jail state (jail-v1 §10)
+
+/// The proxy directory's name inside an attempt directory (§10).
+pub const PROXY_DIR_NAME: &str = "proxy";
+/// The proxy socket's name inside the proxy directory (§10).
+pub const PROXY_SOCKET_NAME: &str = "proxy.sock";
+
+impl AttemptDir {
+    /// `proxy/`: created only for a proxy-mode profile.
+    #[must_use]
+    pub fn proxy_dir_path(&self) -> PathBuf {
+        self.root.join(PROXY_DIR_NAME)
+    }
+}
+
+/// Registers the proxy directory in jail state, then creates it mode 0700
+/// (§10: "an operator-owned 0700 directory registered before creation").
+///
+/// As for vendor state: the registration is durable before `mkdirat`, the
+/// directory's identity is recorded once it exists, and an entry that was
+/// already there is not this attempt's and withdraws the registration.
+///
+/// # Errors
+/// [`ErrorCode::StateWriteFailed`] when a state write or the creation fails,
+/// [`ErrorCode::UnsafeStatePath`] when the attempt directory fails its checks
+/// or `proxy` already exists.
+pub fn create_proxy_dir(attempt_dir: &AttemptDir) -> Result<anchored::Dir, JailError> {
+    update_attempt_state(attempt_dir, |state| {
+        state["proxy_dir"] = serde_json::json!({
+            "name": PROXY_DIR_NAME,
+            "registered_at": crate::records::rfc3339_utc(std::time::SystemTime::now()),
+            "dev": null,
+            "ino": null,
+            "removed": false,
+        });
+    })?;
+    let attempt = open_attempt_dir(attempt_dir)?;
+    let name = anchored::Name::new(PROXY_DIR_NAME.as_bytes())
+        .map_err(|error| write_failed(attempt_dir.root(), &error))?;
+    let proxy = match attempt.mkdir_at(&name, DIRECTORY_MODE) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                update_attempt_state(attempt_dir, |state| {
+                    state["proxy_dir"] = serde_json::Value::Null;
+                    state["proxy_dir_withdrawn"] =
+                        serde_json::Value::from("the directory was not created by this attempt");
+                })?;
+                return Err(unsafe_path(
+                    &attempt_dir.proxy_dir_path(),
+                    "already exists in a fresh attempt; it is not this attempt's proxy directory",
+                ));
+            }
+            return Err(write_failed(&attempt_dir.proxy_dir_path(), &error));
+        }
+    };
+    let stat = proxy
+        .stat()
+        .map_err(|error| write_failed(&attempt_dir.proxy_dir_path(), &error))?;
+    update_attempt_state(attempt_dir, |state| {
+        state["proxy_dir"]["dev"] = serde_json::Value::from(stat.dev.to_string());
+        state["proxy_dir"]["ino"] = serde_json::Value::from(stat.ino.to_string());
+    })?;
+    attempt
+        .sync()
+        .map_err(|error| write_failed(attempt_dir.root(), &error))?;
+    Ok(proxy)
+}
+
+/// What became of the proxy directory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProxyDirRemoval {
+    /// None was registered.
+    NotRegistered,
+    /// Removed (or already absent), and recorded.
+    Removed,
+    /// Retained, with a safe reason recorded in jail state.
+    Retained(&'static str),
+}
+
+/// Removes the registered, empty proxy directory, anchored and never
+/// followed, and only when the directory is still the object registered.
+/// The platform removes the socket node it bound (by its pinned identity)
+/// when it stops the proxy; a directory that still holds anything is
+/// retained, never emptied by name. It holds nothing the child could write
+/// (it is bound read-only), so removal does not wait for tree death.
+///
+/// # Errors
+/// [`ErrorCode::StateWriteFailed`] when jail state cannot be read or updated.
+pub fn remove_proxy_dir(attempt_dir: &AttemptDir) -> Result<ProxyDirRemoval, JailError> {
+    let state = read_attempt_state(attempt_dir)?;
+    let Some(proxy) = state.get("proxy_dir").filter(|value| !value.is_null()) else {
+        return Ok(ProxyDirRemoval::NotRegistered);
+    };
+    if proxy.get("removed").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(ProxyDirRemoval::Removed);
+    }
+    let number = |key: &str| {
+        proxy
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| text.parse::<u64>().ok())
+    };
+    let registered = number("dev").zip(number("ino"));
+    let outcome = removal(attempt_dir, registered);
+    update_attempt_state(attempt_dir, |state| match outcome {
+        ProxyDirRemoval::Removed => {
+            state["proxy_dir"]["removed"] = serde_json::Value::from(true);
+        }
+        ProxyDirRemoval::Retained(reason) => {
+            state["proxy_dir"]["retained"] = serde_json::Value::from(reason);
+        }
+        ProxyDirRemoval::NotRegistered => {}
+    })?;
+    Ok(outcome)
+}
+
+fn removal(attempt_dir: &AttemptDir, registered: Option<(u64, u64)>) -> ProxyDirRemoval {
+    let Ok(attempt) = open_attempt_dir(attempt_dir) else {
+        return ProxyDirRemoval::Retained("attempt_directory_unusable");
+    };
+    let Ok(name) = anchored::Name::new(PROXY_DIR_NAME.as_bytes()) else {
+        return ProxyDirRemoval::Retained("name_invalid");
+    };
+    let stat = match attempt.stat_at(&name) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ProxyDirRemoval::Removed;
+        }
+        Err(_) => return ProxyDirRemoval::Retained("proxy_directory_unreadable"),
+    };
+    // No recorded identity means the directory was never proven ours.
+    if registered != Some(stat.identity()) || stat.kind != anchored::Kind::Directory {
+        return ProxyDirRemoval::Retained("proxy_directory_identity_changed");
+    }
+    // The platform removed its own socket node when it stopped the proxy;
+    // anything still here is not provably the jail's, so it is never
+    // deleted: the directory is retained instead.
+    if attempt.rmdir_at(&name).is_err() {
+        return ProxyDirRemoval::Retained("proxy_directory_not_empty");
+    }
+    if attempt.sync().is_err() {
+        return ProxyDirRemoval::Retained("sync_failed");
+    }
+    ProxyDirRemoval::Removed
+}
+// J3-agent end
+
 /// The jail-owned names of an attempt directory (§7), which an existing
 /// attempt root must not already hold before this supervisor claims it.
 pub const JAIL_OWNED_NAMES: [&str; 9] = [
@@ -1098,6 +1246,92 @@ mod tests {
             (metadata.dev(), metadata.ino())
         );
     }
+
+    // J3-agent begin
+    #[test]
+    fn the_proxy_directory_is_registered_created_private_and_removed_by_identity() {
+        use std::os::unix::fs::MetadataExt as _;
+        let (_dir, attempt) = claimed_attempt();
+        let proxy = create_proxy_dir(&attempt).unwrap();
+        let metadata = std::fs::metadata(attempt.proxy_dir_path()).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        let state = read_attempt_state(&attempt).unwrap();
+        assert_eq!(state["proxy_dir"]["dev"], metadata.dev().to_string());
+        assert_eq!(state["proxy_dir"]["ino"], metadata.ino().to_string());
+        assert_eq!(
+            proxy.stat().unwrap().identity(),
+            (metadata.dev(), metadata.ino())
+        );
+        // A leftover socket node is not provably ours: retained, not deleted.
+        // Bound through the directory descriptor: macOS's 104-byte
+        // `sun_path` cannot hold a temporary attempt path.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            let _listener = std::os::unix::net::UnixListener::bind(format!(
+                "/proc/self/fd/{}/{PROXY_SOCKET_NAME}",
+                proxy.as_fd().as_raw_fd()
+            ))
+            .unwrap();
+            assert_eq!(
+                remove_proxy_dir(&attempt).unwrap(),
+                ProxyDirRemoval::Retained("proxy_directory_not_empty")
+            );
+            assert!(attempt.proxy_dir_path().join(PROXY_SOCKET_NAME).exists());
+            std::fs::remove_file(attempt.proxy_dir_path().join(PROXY_SOCKET_NAME)).unwrap();
+        }
+        assert_eq!(
+            remove_proxy_dir(&attempt).unwrap(),
+            ProxyDirRemoval::Removed
+        );
+        assert!(!attempt.proxy_dir_path().exists());
+        assert_eq!(
+            read_attempt_state(&attempt).unwrap()["proxy_dir"]["removed"],
+            true
+        );
+        assert_eq!(
+            remove_proxy_dir(&attempt).unwrap(),
+            ProxyDirRemoval::Removed
+        );
+    }
+
+    #[test]
+    fn a_replaced_or_populated_proxy_directory_is_retained() {
+        let (_dir, attempt) = claimed_attempt();
+        drop(create_proxy_dir(&attempt).unwrap());
+        std::fs::write(attempt.proxy_dir_path().join("keep"), b"not ours").unwrap();
+        assert_eq!(
+            remove_proxy_dir(&attempt).unwrap(),
+            ProxyDirRemoval::Retained("proxy_directory_not_empty")
+        );
+        assert!(attempt.proxy_dir_path().join("keep").exists());
+
+        let (_dir, attempt) = claimed_attempt();
+        // Held open, so the replacement cannot be handed the same inode
+        // number (ext4 reuses a freed one at once).
+        let _held = create_proxy_dir(&attempt).unwrap();
+        std::fs::remove_dir(attempt.proxy_dir_path()).unwrap();
+        std::fs::create_dir(attempt.proxy_dir_path()).unwrap();
+        assert_eq!(
+            remove_proxy_dir(&attempt).unwrap(),
+            ProxyDirRemoval::Retained("proxy_directory_identity_changed"),
+            "a directory that is not the registered one is never removed"
+        );
+        assert!(attempt.proxy_dir_path().exists());
+
+        let (_dir, attempt) = claimed_attempt();
+        std::fs::create_dir(attempt.proxy_dir_path()).unwrap();
+        assert_eq!(
+            create_proxy_dir(&attempt).unwrap_err().code,
+            ErrorCode::UnsafeStatePath
+        );
+        assert_eq!(
+            remove_proxy_dir(&attempt).unwrap(),
+            ProxyDirRemoval::NotRegistered
+        );
+        assert!(attempt.proxy_dir_path().exists(), "not ours, never removed");
+    }
+    // J3-agent end
 
     #[test]
     fn a_generated_attempt_id_round_trips_through_the_grammar() {

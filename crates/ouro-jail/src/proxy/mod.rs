@@ -532,6 +532,9 @@ pub struct ProxyHandle {
     /// listener's path.
     wake: Option<UnixStream>,
     accept_done: Option<mpsc::Receiver<()>>,
+    // J3-agent begin: whether the accept loop still runs
+    serving: Arc<std::sync::atomic::AtomicBool>,
+    // J3-agent end
 }
 
 fn invalid(message: String) -> io::Error {
@@ -605,10 +608,15 @@ pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyH
     });
     let (done_tx, done_rx) = mpsc::channel();
     let accept_shared = Arc::clone(&shared);
+    // J3-agent begin
+    let serving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let serving_flag = Arc::clone(&serving);
+    // J3-agent end
     thread::Builder::new()
         .name("ouro-proxy-accept".to_owned())
         .spawn(move || {
             accept_loop(&accept_shared, &listener, &wake_reader);
+            serving_flag.store(false, Ordering::SeqCst);
             drop(listener);
             let _ = done_tx.send(());
         })?;
@@ -616,10 +624,22 @@ pub fn start(config: ProxyConfig, sink: Arc<dyn ProxySink>) -> io::Result<ProxyH
         shared,
         wake: Some(wake),
         accept_done: Some(done_rx),
+        serving,
     })
 }
 
 impl ProxyHandle {
+    // J3-agent begin: a proxy that stopped serving is a recorded fact (§10)
+    /// Whether the accept loop still runs. It stops on [`ProxyHandle::stop`]
+    /// and when its listener is no longer listening (shut down by anything),
+    /// after which every new connection to the socket is refused: the proxy
+    /// fails closed and nothing reconnects it.
+    #[must_use]
+    pub fn serving(&self) -> bool {
+        self.serving.load(Ordering::SeqCst)
+    }
+    // J3-agent end
+
     /// The number of admitted connections that have not settled.
     #[must_use]
     pub fn active_connections(&self) -> usize {
@@ -703,6 +723,19 @@ fn accept_loop(shared: &Arc<Shared>, listener: &UnixListener, wake: &UnixStream)
     loop {
         match sys::poll(&[listener.as_fd(), wake.as_fd()], libc::POLLIN, None) {
             Ok(revents) if revents.get(1).is_some_and(|&events| events != 0) => return,
+            // J3-agent begin: a listening socket reports POLLHUP only once it
+            // was shut down (measured on the reference host: accept then
+            // returns EAGAIN for ever and every connect is refused). It will
+            // never accept again, so the loop ends instead of spinning, and
+            // the proxy's death is visible through `serving()`.
+            Ok(revents)
+                if revents
+                    .first()
+                    .is_some_and(|&events| events & (libc::POLLHUP | libc::POLLERR) != 0) =>
+            {
+                return;
+            }
+            // J3-agent end
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => {

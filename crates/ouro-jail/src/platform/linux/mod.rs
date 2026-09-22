@@ -7,8 +7,16 @@
 //! and test on every host; everything below them is gated.
 
 pub mod bpf;
+// J3-agent begin: the loopback bridge is a portable byte relay; only its
+// hidden subcommand and its place in the sandbox are Linux's
+pub mod bridge;
+// J3-agent end
 pub mod seccomp;
 
+// J3-agent begin: the `agent` profile's proxy, mediator and bridge wiring
+#[cfg(target_os = "linux")]
+pub mod agent;
+// J3-agent end
 #[cfg(target_os = "linux")]
 pub mod audit;
 #[cfg(target_os = "linux")]

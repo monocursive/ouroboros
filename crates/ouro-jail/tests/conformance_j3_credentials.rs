@@ -3,9 +3,9 @@
 //!
 //! Two kinds of evidence, kept apart because §6.1 keeps them apart:
 //!
-//! - Mechanism: `tool` and `build` reject launch credentials (§6.1), and
-//!   `agent` is refused on this host until wave 2, so no `ouro-jail run` can
-//!   stage a credential yet. The staging and bind mechanism is therefore run
+//! - Mechanism: `tool` and `build` reject launch credentials (§6.1); `agent`
+//!   stages them through `ouro-jail run` since J3 wave 2, proved end to end
+//!   in `conformance_j3_agent.rs` (C01). The staging and bind mechanism is run
 //!   directly: `credentials::stage` into a real vendor-state directory, then a
 //!   real bubblewrap boundary built from the same `BwrapPlan` rows the
 //!   platform renders, binding the staged descriptors. What the child reads,
@@ -1018,8 +1018,9 @@ fn c01_launch_refusals_happen_before_any_attempt_exists() {
     assert_eq!(std::fs::read(&source).unwrap(), b"fixture-token");
 }
 
+// J3-agent begin: wave 2 wired `agent`; the launch profile now runs as it does
 #[test]
-fn an_agent_launch_profile_refuses_exactly_as_agent_does_on_this_host() {
+fn an_agent_launch_profile_runs_exactly_as_agent_does_on_this_host() {
     if !common::live() {
         return;
     }
@@ -1049,24 +1050,24 @@ fn an_agent_launch_profile_refuses_exactly_as_agent_does_on_this_host() {
 
     assert_eq!(
         launched_run.code(),
-        Some(125),
+        Some(0),
         "{}",
         launched_run.stderr_text()
     );
     assert_eq!(launched_run.code(), plain_run.code());
     let launched_receipt = jail_json(&attempt_of(&launched_run));
     let plain_receipt = jail_json(&attempt_of(&plain_run));
-    assert_eq!(
-        launched_receipt["outcome"]["error"]["code"],
-        plain_receipt["outcome"]["error"]["code"]
-    );
-    assert_eq!(launched_receipt["phase"], "refused");
-    assert_eq!(launched_receipt["credentials"], serde_json::json!([]));
-    assert_eq!(launched_receipt["state_cleanup"], "not_needed");
+    assert_eq!(launched_receipt["phase"], "settled");
+    assert_eq!(plain_receipt["phase"], "settled");
+    assert_eq!(launched_receipt["credentials"][0]["id"], "t");
+    assert_eq!(launched_receipt["credentials"][0]["mode"], "copy_rw");
+    assert_eq!(launched_receipt["state_cleanup"], "complete");
     assert!(cleanup::absent(
         &attempt_of(&launched_run).join("vendor-state")
     ));
+    assert_eq!(std::fs::read(&source).unwrap(), b"fixture-token");
 }
+// J3-agent end
 
 // ---------------------------------------------------------------------------
 // J3 review findings, adopted as live tests

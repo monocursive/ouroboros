@@ -558,12 +558,26 @@ fn internal_subcommand() -> Option<ExitCode> {
         // exists only where that ABI does.
         #[cfg(target_os = "linux")]
         "__seccomp-table" => {
-            print!(
-                "{}",
-                ouro_jail::platform::linux::seccomp::tool_baseline_table()
-            );
+            use ouro_jail::platform::linux::seccomp;
+            // J3-agent begin: the agent tables beside the tool one
+            let table = match args.get(2).and_then(|arg| arg.to_str()) {
+                None | Some("tool") => seccomp::tool_baseline_table(),
+                Some("agent") => {
+                    seccomp::agent_baseline_table(seccomp::AgentVariant::UnprivilegedInner)
+                }
+                Some("agent-namespace") => {
+                    seccomp::agent_baseline_table(seccomp::AgentVariant::NamespaceInner)
+                }
+                Some(_) => return Some(ExitCode::from(2)),
+            };
+            // J3-agent end
+            print!("{table}");
             Some(ExitCode::SUCCESS)
         }
+        // J3-agent begin: the in-namespace loopback bridge (jail-v1 §10)
+        #[cfg(target_os = "linux")]
+        "__bridge" => ouro_jail::platform::linux::bridge::bridge_main(&args[2..]),
+        // J3-agent end
         _ => None,
     }
 }

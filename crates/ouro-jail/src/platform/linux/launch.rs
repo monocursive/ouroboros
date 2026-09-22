@@ -44,6 +44,15 @@ pub const EXIT_USAGE: i32 = 125;
 pub const EXIT_INTERNAL: i32 = 126;
 /// `execvp` failed; the errno is on the error pipe.
 pub const EXIT_EXEC_FAILED: i32 = 127;
+// J3-agent begin: the agent launcher's own setup failures
+/// The unix-peer mediation (filter with its own listener, sock_diag socket)
+/// could not be set up; the errno is on the error pipe. The target did not
+/// run.
+pub const EXIT_MEDIATION_FAILED: i32 = 120;
+/// The in-namespace bridge could not be started; the errno is on the error
+/// pipe. The target did not run.
+pub const EXIT_BRIDGE_FAILED: i32 = 121;
+// J3-agent end
 
 /// Parsed `__launch` arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +63,14 @@ pub struct LaunchArgs {
     pub error_fd: RawFd,
     /// Whether to install the narrowing filter before releasing.
     pub narrow: bool,
+    // J3-agent begin: mediation and bridge (jail-v1 §10)
+    /// Install the unix-peer mediation filter with its own listener and open
+    /// a `NETLINK_SOCK_DIAG` socket, placing them at these two descriptor
+    /// numbers for the supervisor to take before release.
+    pub mediate: Option<(RawFd, RawFd)>,
+    /// Start the loopback bridge before blocking.
+    pub bridge: bool,
+    // J3-agent end
     /// The target's argv; element 0 is also the program to execute.
     pub argv: Vec<OsString>,
 }
@@ -96,7 +113,8 @@ impl fmt::Display for LaunchUsage {
 
 impl std::error::Error for LaunchUsage {}
 
-/// Parse `--release-fd N --error-fd M [--narrow] -- PROGRAM ARG...`.
+/// Parse `--release-fd N --error-fd M [--narrow] [--mediate L,S] [--bridge]
+/// -- PROGRAM ARG...`.
 ///
 /// # Errors
 ///
@@ -105,6 +123,8 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
     let mut release_fd: Option<RawFd> = None;
     let mut error_fd: Option<RawFd> = None;
     let mut narrow = false;
+    let mut mediate: Option<(RawFd, RawFd)> = None;
+    let mut bridge = false;
     let mut index = 0usize;
     let mut argv: Option<Vec<OsString>> = None;
 
@@ -128,6 +148,16 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
                 narrow = true;
                 index += 1;
             }
+            // J3-agent begin
+            "--mediate" => {
+                mediate = Some(fd_pair(args.get(index + 1), "--mediate")?);
+                index += 2;
+            }
+            "--bridge" => {
+                bridge = true;
+                index += 1;
+            }
+            // J3-agent end
             _ => return Err(LaunchUsage::UnknownOption(name)),
         }
     }
@@ -145,9 +175,32 @@ pub fn parse(args: &[OsString]) -> Result<LaunchArgs, LaunchUsage> {
         release_fd: release_fd.ok_or(LaunchUsage::Missing("--release-fd"))?,
         error_fd: error_fd.ok_or(LaunchUsage::Missing("--error-fd"))?,
         narrow,
+        mediate,
+        bridge,
         argv,
     })
 }
+
+// J3-agent begin: `--mediate L,S`
+fn fd_pair(raw: Option<&OsString>, option: &'static str) -> Result<(RawFd, RawFd), LaunchUsage> {
+    let raw = raw.ok_or(LaunchUsage::MissingValue(option))?;
+    let text = raw.to_str().ok_or(LaunchUsage::BadFd(option))?;
+    let (left, right) = text.split_once(',').ok_or(LaunchUsage::BadFd(option))?;
+    let parse = |part: &str| -> Result<RawFd, LaunchUsage> {
+        let value: RawFd = part.parse().map_err(|_| LaunchUsage::BadFd(option))?;
+        // Below 3 would replace stdio; the two must differ.
+        if value < 3 {
+            return Err(LaunchUsage::BadFd(option));
+        }
+        Ok(value)
+    };
+    let pair = (parse(left)?, parse(right)?);
+    if pair.0 == pair.1 {
+        return Err(LaunchUsage::BadFd(option));
+    }
+    Ok(pair)
+}
+// J3-agent end
 
 fn fd_value(raw: Option<&OsString>, option: &'static str) -> Result<RawFd, LaunchUsage> {
     let raw = raw.ok_or(LaunchUsage::MissingValue(option))?;
@@ -213,6 +266,24 @@ pub fn launch_main(args: &[OsString]) -> ! {
         report_and_exit(parsed.error_fd, errno, EXIT_INTERNAL);
     }
 
+    // J3-agent begin: mediation, then the bridge, both before the narrowing
+    // filter. The bridge must exist before it: an untraced process that
+    // meets the narrowing filter's SECCOMP_RET_TRACE gets ENOSYS, and the
+    // bridge is never traced (it is a helper, not a descendant of the
+    // target). It must come after the mediation filter, so its connect to
+    // the proxy is mediated like the target's.
+    if let Some((listener_fd, sockdiag_fd)) = parsed.mediate
+        && let Err(errno) = mediate(listener_fd, sockdiag_fd)
+    {
+        report_and_exit(parsed.error_fd, errno, EXIT_MEDIATION_FAILED);
+    }
+    if parsed.bridge
+        && let Err(errno) = spawn_bridge()
+    {
+        report_and_exit(parsed.error_fd, errno, EXIT_BRIDGE_FAILED);
+    }
+    // J3-agent end
+
     if parsed.narrow {
         // The observer's own filter, so the numbers the launcher narrows to
         // and the numbers the tracer expects to be stopped on are one table.
@@ -256,6 +327,17 @@ pub fn launch_main(args: &[OsString]) -> ! {
     // SAFETY: closing a descriptor this process owns; the target must not see
     // the release pipe.
     unsafe { libc::close(parsed.release_fd) };
+    // J3-agent begin: the supervisor took both objects before release; the
+    // target never holds the listener or the sock_diag socket (X06). They are
+    // close-on-exec as well; closing them here does not depend on it.
+    if let Some((listener_fd, sockdiag_fd)) = parsed.mediate {
+        // SAFETY: closing descriptors this process placed itself.
+        unsafe {
+            libc::close(listener_fd);
+            libc::close(sockdiag_fd);
+        }
+    }
+    // J3-agent end
 
     // `execve`, never `execvp`. On `ENOEXEC` the library call re-executes the
     // file through `/bin/sh`, so a file that is neither ELF nor a script with
@@ -280,6 +362,107 @@ pub fn launch_main(args: &[OsString]) -> ! {
     }
     report_and_exit(parsed.error_fd, last_errno, EXIT_EXEC_FAILED);
 }
+
+// J3-agent begin: the launcher's agent setup
+/// Installs the unix-peer mediation filter with its own listener and opens a
+/// `NETLINK_SOCK_DIAG` socket in this network namespace, then places them at
+/// `listener_fd` and `sockdiag_fd`, close-on-exec, for the supervisor to take
+/// with `pidfd_getfd` while this process is blocked.
+///
+/// Refuses (`EEXIST`) if either number is already open: `dup3` would
+/// silently close whatever held it.
+fn mediate(listener_fd: RawFd, sockdiag_fd: RawFd) -> Result<(), i32> {
+    use std::os::fd::AsRawFd as _;
+    for target in [listener_fd, sockdiag_fd] {
+        // SAFETY: F_GETFD takes a descriptor number and dereferences nothing.
+        if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
+            return Err(libc::EEXIST);
+        }
+    }
+    let setup = super::unixpeer::launcher_setup()
+        .map_err(|error| error.raw_os_error().unwrap_or(libc::EIO))?;
+    let (listener, sockdiag) = setup.into_fds();
+    for (source, target) in [
+        (listener.as_raw_fd(), listener_fd),
+        (sockdiag.as_raw_fd(), sockdiag_fd),
+    ] {
+        // SAFETY: both descriptors are live; dup3 places a close-on-exec copy
+        // at a number checked to be free above.
+        if unsafe { libc::dup3(source, target, libc::O_CLOEXEC) } < 0 {
+            return Err(errno());
+        }
+    }
+    // The originals close here; the placed copies stay open.
+    drop((listener, sockdiag));
+    Ok(())
+}
+
+/// Starts `/run/ouro/jail __bridge` with a double fork, so the bridge is
+/// reparented to the namespace init and is never a child of the target: a
+/// target that waits for every child it has must not find one it did not
+/// start, and Yama's descendant rule keeps the target from attaching to it.
+///
+/// The bridge gets `/dev/null` as stdio, no other descriptor, an empty
+/// environment and a session of its own, so no terminal or process-group
+/// signal aimed at the target reaches it. Between each fork and `execve`
+/// only async-signal-safe calls run.
+fn spawn_bridge() -> Result<(), i32> {
+    let path = CString::new(super::bwrap::JAIL_INSIDE_PATH).map_err(|_| libc::EINVAL)?;
+    let subcommand = CString::new(super::bridge::SUBCOMMAND).map_err(|_| libc::EINVAL)?;
+    let argv: [*const libc::c_char; 3] = [path.as_ptr(), subcommand.as_ptr(), std::ptr::null()];
+    let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+    let devnull = c"/dev/null";
+    // SAFETY: this process is single-threaded here (nothing has spawned a
+    // thread), and both children call only async-signal-safe functions.
+    let first = unsafe { libc::fork() };
+    if first < 0 {
+        return Err(errno());
+    }
+    if first == 0 {
+        // SAFETY: async-signal-safe calls only, then `_exit` or `execve`.
+        unsafe {
+            let second = libc::fork();
+            if second != 0 {
+                libc::_exit(i32::from(second < 0));
+            }
+            libc::setsid();
+            let null = libc::open(devnull.as_ptr(), libc::O_RDWR);
+            if null < 0 {
+                libc::_exit(EXIT_BRIDGE_FAILED);
+            }
+            for stdio in 0..3 {
+                if libc::dup2(null, stdio) < 0 {
+                    libc::_exit(EXIT_BRIDGE_FAILED);
+                }
+            }
+            // Nothing above stdio: not the release or error pipe, not the
+            // mediation listener, not the sock_diag socket.
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) < 0 {
+                libc::_exit(EXIT_BRIDGE_FAILED);
+            }
+            libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            libc::_exit(EXIT_BRIDGE_FAILED);
+        }
+    }
+    let mut status = 0;
+    loop {
+        // SAFETY: `first` is this process's own child; `status` is writable.
+        let rc = unsafe { libc::waitpid(first, &raw mut status, 0) };
+        if rc == first {
+            break;
+        }
+        let e = errno();
+        if e != libc::EINTR {
+            return Err(e);
+        }
+    }
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+        Ok(())
+    } else {
+        Err(libc::ECHILD)
+    }
+}
+// J3-agent end
 
 /// The same list as [`exec_candidates`], as raw bytes.
 ///
@@ -450,6 +633,45 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.argv, osv(&["/bin/echo", "--narrow", "--release-fd"]));
     }
+
+    // J3-agent begin
+    #[test]
+    fn the_agent_options_parse_and_bad_pairs_refuse() {
+        let parsed = parse(&osv(&[
+            "--release-fd",
+            "12",
+            "--error-fd",
+            "13",
+            "--mediate",
+            "18,19",
+            "--bridge",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.mediate, Some((18, 19)));
+        assert!(parsed.bridge);
+        let plain = parse(&osv(&["--release-fd", "3", "--error-fd", "4", "--", "x"])).unwrap();
+        assert_eq!(plain.mediate, None);
+        assert!(!plain.bridge);
+        for bad in ["18", "18,18", "2,19", "a,b", "18,19,20", "-1,4"] {
+            assert_eq!(
+                parse(&osv(&[
+                    "--release-fd",
+                    "3",
+                    "--error-fd",
+                    "4",
+                    "--mediate",
+                    bad,
+                    "--",
+                    "x"
+                ])),
+                Err(LaunchUsage::BadFd("--mediate")),
+                "{bad}"
+            );
+        }
+    }
+    // J3-agent end
 
     #[test]
     fn missing_pieces_are_usage_errors() {

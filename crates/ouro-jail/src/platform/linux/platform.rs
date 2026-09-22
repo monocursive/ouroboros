@@ -82,6 +82,10 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const SETTLE_GRACE: Duration = Duration::from_millis(500);
 /// Longest single block inside `wait`, so every source is re-checked often.
 const WAIT_STEP: Duration = Duration::from_millis(10);
+// J3-agent begin
+/// The most a stop gives the proxy to drain its last results (§10).
+const AGENT_STOP_BUDGET: Duration = Duration::from_secs(2);
+// J3-agent end
 /// How often the execution cgroup's counters are read while the target runs;
 /// they are always read once more before an outcome is classified.
 const LIMIT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
@@ -194,6 +198,20 @@ fn inputs_for(
             "network-namespace",
             CapabilityScope::Tree,
         )),
+        // J3-agent begin: the agent network rests on the empty network
+        // namespace and the unix-peer mediation's kernel mechanism; the proxy
+        // and the bridge are this implementation's own, and preparation
+        // refuses naming either one it cannot establish (§10).
+        REQ_NETWORK_PROXY => Some((
+            &[
+                "bwrap_present",
+                "network_namespace",
+                "seccomp_user_notification",
+            ],
+            "network-namespace+outside-http-proxy+loopback-bridge+unix-peer-mediation",
+            CapabilityScope::Tree,
+        )),
+        // J3-agent end
         REQ_EXECUTION_CGROUP => Some((
             &["cgroup_delegated_leaf"],
             "cgroup-v2-delegated",
@@ -219,7 +237,7 @@ fn probes_for(requirement: &str) -> &'static [&'static str] {
         return inputs_for(REQ_FILESYSTEM_CONTAINMENT).map_or(&[], |(probes, _, _)| probes);
     }
     match requirement {
-        "limit:wall" | REQ_NETWORK_PROXY => &[],
+        "limit:wall" => &[],
         "limit:pids" => &["cgroup_pids"],
         "limit:mem" => &["cgroup_memory"],
         "limit:cpu" => &["cgroup_cpu"],
@@ -247,17 +265,6 @@ fn capability_for(requirement: &str, results: &[ProbeResult], measured_at: &str)
             reason_code: Some("ok".to_owned()),
             measured_at: Some(measured_at.to_owned()),
             evidence_ref: Some("supervisor".to_owned()),
-        };
-    }
-    if requirement == REQ_NETWORK_PROXY {
-        return Capability {
-            name: requirement.to_owned(),
-            status: CapabilityStatus::Unsupported,
-            scope: CapabilityScope::Tree,
-            mechanism: None,
-            reason_code: Some("proxy_not_implemented".to_owned()),
-            measured_at: None,
-            evidence_ref: None,
         };
     }
     if requirement.starts_with("limit:") && requirement != "limit:wall" {
@@ -520,6 +527,13 @@ struct Boundary {
     /// Why no execution cgroup exists, when preferred ceilings run unenforced.
     cgroup_unavailable: Option<String>,
     watcher: super::watch::Watcher,
+    // J3-agent begin: the agent network, and the filter count read back
+    /// The proxy, mediator and bridge of an `agent` attempt.
+    agent: Option<super::agent::AgentNet>,
+    /// `Seccomp_filters` of the blocked launcher, read back and checked
+    /// against what this boundary installs.
+    seccomp_filters: Option<u32>,
+    // J3-agent end
 }
 impl Boundary {
     /// Whether the backend's pidfd reports its exit, independent of whether
@@ -558,14 +572,6 @@ impl Boundary {
                     "this slice refuses a privileged or setuid supervisor: real uid {ruid}, \
                      effective uid {euid} (jail-v1 §5.2)"
                 ),
-            ));
-        }
-        if snapshot.profile == ProfileName::Agent {
-            return Err(error(
-                ErrorCode::NestingFailed,
-                ErrorStage::Preparing,
-                Remediation::HostSetup,
-                "the `agent` profile needs a nested sandbox, which this host denies".to_owned(),
             ));
         }
         if !snapshot.profile.is_contained() {
@@ -670,6 +676,35 @@ impl Boundary {
         }
         bplan.bwrap = bwrap_path.to_path_buf();
         bplan.env = environment_for(&snapshot, &plan.workspace)?;
+        // J3-agent begin: §10 — the proxy socket in its registered directory,
+        // bound read-only by descriptor, and the proxy variables.
+        let mut agent = if snapshot.profile == ProfileName::Agent {
+            let Some(handoff) = plan.proxy.as_ref() else {
+                return Err(preparing(
+                    ErrorCode::MissingCapability,
+                    "the `agent` proxy could not be established: no proxy directory was prepared",
+                ));
+            };
+            let agent = super::agent::AgentNet::prepare(
+                &plan.attempt_id,
+                sinks.trace.clone(),
+                &snapshot,
+                handoff,
+                &exe,
+                bwrap_path,
+            )?;
+            bplan.proxy_dir = Some(agent.dir_path().to_path_buf());
+            bplan.proxy_dir_fd = Some(super::agent::PROXY_DIR_FD);
+            for (name, value) in super::bridge::proxy_environment() {
+                bplan
+                    .env
+                    .push((OsString::from(name), OsString::from(value)));
+            }
+            Some(agent)
+        } else {
+            None
+        };
+        // J3-agent end
         // J3-launch begin: the staged vendor state and bind_ro sources, bound
         // by the descriptors staging examined (§9.1, §12).
         let staged = staged_mounts(&snapshot, plan.launch.as_ref())?;
@@ -750,7 +785,14 @@ impl Boundary {
         }
         // J3-launch end
 
-        let filter = seccomp::tool_baseline().map_err(|err| {
+        // J3-agent begin: `agent` loads its own baseline, in the variant the
+        // measured nested-namespace capability selected (§9.2)
+        let filter = match agent.as_ref() {
+            Some(agent) => seccomp::agent_baseline(agent.variant()),
+            None => seccomp::tool_baseline(),
+        }
+        // J3-agent end
+        .map_err(|err| {
             preparing(
                 ErrorCode::BackendUnavailable,
                 format!("the syscall filter could not be built: {err}"),
@@ -763,7 +805,17 @@ impl Boundary {
             .iter()
             .map(|bytes| OsString::from_vec(bytes.clone()))
             .collect();
-        bplan.inner = bwrap::inner_launch_command(RELEASE_FD, ERROR_FD, observe_on, &target);
+        // J3-agent begin: the agent launcher mediates and starts the bridge
+        bplan.inner = bwrap::inner_launch_command_with(
+            RELEASE_FD,
+            ERROR_FD,
+            observe_on,
+            agent
+                .is_some()
+                .then_some((super::agent::LISTENER_FD, super::agent::SOCKDIAG_FD)),
+            &target,
+        );
+        // J3-agent end
         bplan.seccomp_fd = Some(SECCOMP_FD);
         bplan.json_status_fd = Some(STATUS_FD);
         bplan.args_fd = Some(ARGS_FD);
@@ -827,6 +879,12 @@ impl Boundary {
         if let Some(vendor) = staged.vendor {
             fds.add(vendor, VENDOR_STATE_FD).map_err(io)?;
         }
+        // J3-agent begin: the proxy directory, bound read-only by descriptor
+        if let Some(agent) = agent.as_ref() {
+            fds.add(agent.dir_fd().map_err(io)?, super::agent::PROXY_DIR_FD)
+                .map_err(io)?;
+        }
+        // J3-agent end
         for ((source, _), view) in staged.credentials.into_iter().zip(&bplan.credential_binds) {
             let Some(target) = view.fd else {
                 return Err(preparing(
@@ -971,7 +1029,20 @@ impl Boundary {
             cgroup_lost: false,
             cgroup_unavailable,
             watcher,
+            // J3-agent begin
+            agent: agent.take(),
+            seccomp_filters: None,
+            // J3-agent end
         };
+        // J3-agent begin: the proxy starts only now that the backend exists,
+        // so the descriptor limit it raises never reaches the child.
+        if let Some(agent) = boundary.agent.as_mut()
+            && let Err(err) = agent.start_proxy()
+        {
+            boundary.teardown();
+            return Err(err);
+        }
+        // J3-agent end
         if let Some(reason) = boundary.cgroup_unavailable.clone() {
             for (key, ceiling) in [
                 ("pids", &boundary.snapshot.limits.pids),
@@ -1081,28 +1152,30 @@ impl Boundary {
                 return Err(prepare_timeout("the inside launcher never appeared"));
             }
             if self.exited() {
-                return Err(preparing(
-                    ErrorCode::BackendUnavailable,
-                    format!(
-                        "bubblewrap exited before the launcher blocked: {}",
-                        self.diagnostic().trim()
-                    ),
-                ));
+                return Err(self.launcher_setup_failure());
             }
             nap();
         };
 
-        // Wait until it is actually blocked in read(2), which is what the
-        // observer's attach contract requires. `/proc/<pid>/syscall` names the
-        // call it is in, so this is a read-back and not an assumption.
+        // Wait until it is actually blocked in read(2) on its release pipe,
+        // which is what the observer's attach contract requires.
+        // `/proc/<pid>/syscall` names the call and its first argument, so
+        // this is a read-back and not an assumption. The descriptor matters
+        // since the agent launcher also reads (waiting for its bridge's
+        // intermediate child is a wait, but a read elsewhere must never pass
+        // for the release).
         loop {
-            if current_syscall(launcher) == Some(libc::SYS_read) {
+            if current_syscall(launcher) == Some((libc::SYS_read, RELEASE_FD.unsigned_abs().into()))
+            {
                 break;
             }
             if deadline.expired() {
                 return Err(prepare_timeout(
                     "the inside launcher did not block on its release pipe",
                 ));
+            }
+            if self.exited() {
+                return Err(self.launcher_setup_failure());
             }
             nap();
         }
@@ -1185,6 +1258,17 @@ impl Boundary {
                 format!("the syscall filter is not in force: Seccomp {seccomp_mode}"),
             ));
         }
+        // J3-agent begin: the J2 gap — `Seccomp: 2` says a filter is in
+        // force, not that every filter this boundary installs is: a missing
+        // narrowing or mediation filter leaves the mode at 2. The count is
+        // read back and must be exactly the number installed.
+        let expected =
+            super::agent::expected_launcher_filters(self.agent.is_some(), self.observe_on);
+        self.seccomp_filters = Some(super::agent::verify_filter_count(
+            &status_field("Seccomp_filters"),
+            expected,
+        )?);
+        // J3-agent end
         let nspid = super::tracer::nspid(launcher).unwrap_or_default();
         if nspid.len() < 2 {
             return Err(preparing(
@@ -1193,6 +1277,34 @@ impl Boundary {
             ));
         }
 
+        // J3-agent begin: while the launcher is blocked, take its mediation
+        // listener and sock_diag socket, start the mediator, and read back
+        // the bridge it started (§10). Either one missing refuses, naming it.
+        if let Some(agent) = self.agent.as_mut() {
+            let Some(launcher_fd) = self.launcher_fd.as_ref() else {
+                return Err(preparing(
+                    ErrorCode::MissingCapability,
+                    "the `agent` unix-peer mediation could not be established: the launcher \
+                     has no pidfd",
+                ));
+            };
+            agent.take_mediation(std::os::fd::AsFd::as_fd(launcher_fd))?;
+            let bridge = agent.discover_bridge(self.init_pid, self.ns_ids, &deadline)?;
+            if let Some(leaf) = self.cgroup.as_ref() {
+                // Charged to the attempt (§9.3): the bridge is in the leaf.
+                leaf.verify_member(bridge).map_err(|err| {
+                    preparing(
+                        ErrorCode::MissingCapability,
+                        format!(
+                            "the `agent` bridge could not be established: it is not in the \
+                             attempt's cgroup: {err}"
+                        ),
+                    )
+                })?;
+            }
+        }
+        // J3-agent end
+
         self.backend_version = bwrap::bwrap_version(bwrap_path)
             .map(|version| version.raw)
             .unwrap_or_default();
@@ -1200,6 +1312,59 @@ impl Boundary {
         self.applied = self.read_applied(launcher, filter_digest, scan);
         Ok(())
     }
+
+    // J3-agent begin: why the launcher ended before it blocked
+    /// The refusal for a backend that ended before the launcher blocked.
+    /// The agent launcher's own setup failures carry their exit status and
+    /// errno, so the refusal names the mechanism that could not be
+    /// established instead of a generic backend failure.
+    fn launcher_setup_failure(&mut self) -> JailError {
+        self.status.pump();
+        let mut errno_bytes = Vec::new();
+        let mut buffer = [0u8; 16];
+        loop {
+            // SAFETY: the buffer is live and the length matches; the
+            // descriptor is owned and non-blocking.
+            let n = unsafe {
+                libc::read(
+                    self.error.as_raw_fd(),
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            errno_bytes.extend_from_slice(&buffer[..usize::try_from(n).unwrap_or(0)]);
+        }
+        let errno = super::launch::decode_error_report(&errno_bytes)
+            .map_or("no errno reported", super::sys::errno_name);
+        match self.status.parsed().exit_code {
+            Some(super::launch::EXIT_MEDIATION_FAILED) => preparing(
+                ErrorCode::MissingCapability,
+                format!(
+                    "the `agent` unix-peer mediation could not be established: the launcher \
+                     could not install the mediation filter with its listener or open \
+                     sock_diag ({errno})"
+                ),
+            ),
+            Some(super::launch::EXIT_BRIDGE_FAILED) => preparing(
+                ErrorCode::MissingCapability,
+                format!(
+                    "the `agent` bridge could not be established: the launcher could not \
+                     start it ({errno})"
+                ),
+            ),
+            _ => preparing(
+                ErrorCode::BackendUnavailable,
+                format!(
+                    "bubblewrap exited before the launcher blocked: {}",
+                    self.diagnostic().trim()
+                ),
+            ),
+        }
+    }
+    // J3-agent end
 
     /// The `applied` group, read back from the boundary that exists.
     fn read_applied(
@@ -1262,15 +1427,24 @@ impl Boundary {
                 protected_coverage: scan_coverage(scan),
                 mounts,
             }),
-            network: AppliedNetwork {
-                mode: "none".to_owned(),
-                mechanism: Some("network-namespace".to_owned()),
-                allowed_hosts: Vec::new(),
-            },
+            // J3-agent begin: the agent network and its two stacked filters
+            network: self.agent.as_ref().map_or_else(
+                || AppliedNetwork {
+                    mode: "none".to_owned(),
+                    mechanism: Some("network-namespace".to_owned()),
+                    allowed_hosts: Vec::new(),
+                },
+                super::agent::AgentNet::applied_network,
+            ),
             syscalls: Some(AppliedSyscalls {
-                mechanism: "seccomp-bpf".to_owned(),
+                mechanism: if self.agent.is_some() {
+                    "seccomp-bpf+seccomp-user-notification".to_owned()
+                } else {
+                    "seccomp-bpf".to_owned()
+                },
                 digest: filter_digest.to_owned(),
             }),
+            // J3-agent end
             limits,
             environment_names,
             removed_environment_names: Vec::new(),
@@ -1315,7 +1489,32 @@ impl Boundary {
         }
         self.watcher.reap();
         self.remove_placeholders();
+        // J3-agent begin
+        self.stop_agent(deadline.remaining());
+        // J3-agent end
     }
+
+    // J3-agent begin: the agent network ends after the tree it served
+    /// Stops the proxy and the mediator, draining what they last reported.
+    /// Called once the tree is dead or given up on: until then the proxy and
+    /// the mediator are part of the boundary the child relies on.
+    fn stop_agent(&mut self, budget: Duration) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.stop(
+                &mut self.audit,
+                self.observe_on,
+                budget.min(AGENT_STOP_BUDGET),
+            );
+        }
+    }
+
+    /// Mediated connects and helper facts, while the target runs.
+    fn pump_agent(&mut self) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.pump(&mut self.audit, self.observe_on);
+        }
+    }
+    // J3-agent end
 
     /// Kills the namespace init and the backend through their descriptors.
     ///
@@ -1395,6 +1594,9 @@ impl Boundary {
         // The observer is stopped first, so after this nothing but this
         // thread waits for children; its account is kept for the verdict.
         self.stop_observer(deadline.remaining());
+        // J3-agent begin: the target never ran; nothing is left to serve
+        self.stop_agent(deadline.remaining());
+        // J3-agent end
         let backend_reaped = match self.child.take() {
             Some(mut child) => {
                 reap_until(&mut child, deadline);
@@ -1487,7 +1689,22 @@ impl Boundary {
         details.insert(
             "execution_cgroup".to_owned(),
             match &self.cgroup {
-                Some(leaf) => leaf.registration(self.bwrap_pid, self.init_pid),
+                // J3-agent begin: the bridge is a helper charged to the leaf
+                Some(leaf) => {
+                    let mut registration = leaf.registration(self.bwrap_pid, self.init_pid);
+                    if let Some(bridge) = self
+                        .agent
+                        .as_ref()
+                        .and_then(super::agent::AgentNet::bridge_pid)
+                        && let Some(helpers) = registration
+                            .get_mut("charged_helpers")
+                            .and_then(Value::as_array_mut)
+                    {
+                        helpers.push(serde_json::json!({"role": "bridge", "pid": bridge}));
+                    }
+                    registration
+                }
+                // J3-agent end
                 None => serde_json::json!({
                     "unavailable": self
                         .cgroup_unavailable
@@ -1520,6 +1737,25 @@ impl Boundary {
                 Value::Null
             },
         );
+        // J3-agent begin: the filter count read back, and the agent network
+        details.insert(
+            "seccomp_filters".to_owned(),
+            self.seccomp_filters.map_or(Value::Null, |count| {
+                serde_json::json!({
+                    "expected": super::agent::expected_launcher_filters(
+                        self.agent.is_some(),
+                        self.observe_on,
+                    ),
+                    "observed": count,
+                })
+            }),
+        );
+        if let Some(agent) = self.agent.as_ref() {
+            let (agent_details, helpers) = agent.details();
+            details.insert("agent".to_owned(), agent_details);
+            details.insert("helpers".to_owned(), helpers);
+        }
+        // J3-agent end
         for (key, value) in [
             ("pid_namespace", self.ns_ids.pid),
             ("mnt_namespace", self.ns_ids.mnt),
@@ -1580,9 +1816,19 @@ fn nap() {
     unsafe { libc::nanosleep(&raw const ts, std::ptr::null_mut()) };
 }
 
-fn current_syscall(pid: libc::pid_t) -> Option<libc::c_long> {
+/// The syscall `pid` is blocked in, and its first argument, from
+/// `/proc/<pid>/syscall` (`"<nr> 0x<arg0> ..."`).
+fn current_syscall(pid: libc::pid_t) -> Option<(libc::c_long, u64)> {
     let raw = std::fs::read_to_string(format!("/proc/{pid}/syscall")).ok()?;
-    raw.split_whitespace().next()?.parse().ok()
+    parse_syscall_line(&raw)
+}
+
+/// Parses one `/proc/<pid>/syscall` line into its number and first argument.
+fn parse_syscall_line(raw: &str) -> Option<(libc::c_long, u64)> {
+    let mut fields = raw.split_whitespace();
+    let nr = fields.next()?.parse().ok()?;
+    let arg0 = fields.next()?.strip_prefix("0x")?;
+    Some((nr, u64::from_str_radix(arg0, 16).ok()?))
 }
 
 fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
@@ -2555,6 +2801,9 @@ impl RunningExecution for LinuxRunning {
             }
             self.pump_error();
             self.pump_tracer(Duration::ZERO);
+            // J3-agent begin
+            self.boundary.pump_agent();
+            // J3-agent end
             self.pump_status();
             self.sample_limits(false);
             self.check_exec_without_tracer();
@@ -2666,6 +2915,10 @@ impl RunningExecution for LinuxRunning {
         // to whether every tracee really ended.
         self.pump_tracer(Duration::ZERO);
         self.boundary.stop_observer(deadline.remaining());
+        // J3-agent begin: the tree is dead or given up on; the proxy drains
+        // its last results and the mediator stops
+        self.boundary.stop_agent(deadline.remaining());
+        // J3-agent end
         self.sample_limits(true);
         while !self.boundary.watcher.ended() && !deadline.expired() {
             sleep_for(WAIT_STEP);
@@ -2731,18 +2984,28 @@ impl RunningExecution for LinuxRunning {
         {
             let _ = child.try_wait();
         }
-        if self.boundary.observe_on {
-            let summary = self.boundary.tracer_summary.clone().unwrap_or_default();
-            return Some(self.boundary.audit.summary(&summary, true));
+        // J3-agent begin: `proxy.net` is the proxy's own class, with or
+        // without the observer (§11.4)
+        self.boundary.stop_agent(TREE_BUDGET);
+        let mut summary = if self.boundary.observe_on {
+            let tracer = self.boundary.tracer_summary.clone().unwrap_or_default();
+            self.boundary.audit.summary(&tracer, true)
+        } else {
+            // §11.4: observation off makes every audit class unsupported
+            // with a null count. The wrapper's own `limits` class still
+            // exists.
+            let mut summary = CoverageSummary::unobserved();
+            summary.classes.insert(
+                crate::observer::CoverageClass::Limits,
+                self.boundary.audit.limits_class(),
+            );
+            summary
+        };
+        if let Some(agent) = self.boundary.agent.as_ref() {
+            agent.apply_coverage(&mut summary);
         }
-        // §11.4: observation off makes every audit class unsupported with a
-        // null count. The wrapper's own `limits` class still exists.
-        let mut summary = CoverageSummary::unobserved();
-        summary.classes.insert(
-            crate::observer::CoverageClass::Limits,
-            self.boundary.audit.limits_class(),
-        );
         Some(summary)
+        // J3-agent end
     }
 }
 
@@ -2993,7 +3256,15 @@ mod tests {
     #[test]
     fn a_run_probes_only_what_its_requirements_name() {
         assert!(super::probes_for("limit:wall").is_empty());
-        assert!(super::probes_for(super::REQ_NETWORK_PROXY).is_empty());
+        // J3-agent: the agent network is measured, never granted for free.
+        assert_eq!(
+            super::probes_for(super::REQ_NETWORK_PROXY),
+            [
+                "bwrap_present",
+                "network_namespace",
+                "seccomp_user_notification"
+            ]
+        );
         assert_eq!(super::probes_for("limit:pids"), ["cgroup_pids"]);
         assert_eq!(super::probes_for("limit:mem"), ["cgroup_memory"]);
         assert_eq!(super::probes_for("limit:cpu"), ["cgroup_cpu"]);
@@ -3251,10 +3522,52 @@ mod tests {
     }
 
     #[test]
-    fn a_proxy_requirement_is_unsupported_in_this_slice() {
-        let capability = capability_for(REQ_NETWORK_PROXY, &[], "2026-09-22T00:00:00Z");
-        assert_eq!(capability.status, CapabilityStatus::Unsupported);
-        assert_eq!(capability.measured_at, None);
+    fn a_proxy_requirement_rests_on_measured_probes_and_never_on_a_skip() {
+        // J3-agent: no longer unsupported; derived from what was measured.
+        let unmeasured = capability_for(REQ_NETWORK_PROXY, &[], "2026-09-22T00:00:00Z");
+        assert_eq!(unmeasured.status, CapabilityStatus::Skipped);
+        let ok = |name: &'static str| ProbeResult {
+            name,
+            status: ProbeStatus::Available,
+            mechanism: "m",
+            reason_code: "ok",
+            evidence: String::new(),
+        };
+        let all = [
+            ok("bwrap_present"),
+            ok("network_namespace"),
+            ok("seccomp_user_notification"),
+        ];
+        let measured = capability_for(REQ_NETWORK_PROXY, &all, "2026-09-22T00:00:00Z");
+        assert_eq!(measured.status, CapabilityStatus::Available);
+        let mut refused = all.clone();
+        refused[2].status = ProbeStatus::Unavailable;
+        refused[2].reason_code = "listener_refused";
+        let refused = capability_for(REQ_NETWORK_PROXY, &refused, "2026-09-22T00:00:00Z");
+        assert_eq!(refused.status, CapabilityStatus::Unavailable);
+        assert_eq!(refused.reason_code.as_deref(), Some("listener_refused"));
+        assert_eq!(
+            probes_for(REQ_NETWORK_PROXY),
+            &[
+                "bwrap_present",
+                "network_namespace",
+                "seccomp_user_notification"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_syscall_line_names_the_call_and_its_first_argument() {
+        assert_eq!(
+            parse_syscall_line("0 0xc 0x7ffd1234 0x1 0x0 0x0 0x0 0x7ffd 0x7f12\n"),
+            Some((0, 12))
+        );
+        assert_eq!(
+            parse_syscall_line("61 0xffffffffffffffff 0x0"),
+            Some((61, u64::MAX))
+        );
+        assert_eq!(parse_syscall_line("running"), None);
+        assert_eq!(parse_syscall_line("0"), None);
     }
     // J3-launch begin: the staged hand-off is checked against the policy
     fn launch_snapshot(profile: ProfileName, bind_ro: bool) -> PolicySnapshot {

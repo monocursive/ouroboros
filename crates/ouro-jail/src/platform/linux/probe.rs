@@ -27,11 +27,15 @@ use super::identity::{self, ns_ids};
 use super::seccomp;
 use super::sys::{empty_stat, errno_name};
 
+// J3-agent begin: the agent probes
+pub mod agent;
+// J3-agent end
+
 /// The hidden subcommand the probes run inside the sandbox.
 pub const INSIDE_SUBCOMMAND: &str = "__probe-inside";
 
 /// Every probe this implementation knows, in report order.
-pub const PROBE_NAMES: [&str; 14] = [
+pub const PROBE_NAMES: [&str; 18] = [
     "bwrap_present",
     "user_namespace",
     "pid_namespace",
@@ -46,6 +50,13 @@ pub const PROBE_NAMES: [&str; 14] = [
     "cgroup_cpu",
     "apparmor_userns_restriction",
     "nested_user_namespace",
+    // J3-agent begin: the unix-peer mediation's kernel mechanism (§10), and
+    // the three `agent` rows of §14.1, read from one real agent run
+    "seccomp_user_notification",
+    "agent_proxy_bridge",
+    "agent_unix_peer_mediation",
+    "agent_inner_sandbox",
+    // J3-agent end
 ];
 
 /// Per-probe deadline (jail-v1 §14.1).
@@ -149,6 +160,12 @@ pub fn run_one(name: &str, jail_exe: &Path, bwrap: &Path) -> ProbeResult {
         "cgroup_cpu" => probe_cgroup_leaf("cgroup_cpu", Some("cpu")),
         "apparmor_userns_restriction" => probe_apparmor(),
         "nested_user_namespace" => probe_nested_userns(jail_exe, bwrap),
+        // J3-agent begin
+        "seccomp_user_notification" => probe_user_notification(),
+        "agent_proxy_bridge" => agent::proxy_bridge(jail_exe),
+        "agent_unix_peer_mediation" => agent::unix_peer(jail_exe),
+        "agent_inner_sandbox" => agent::inner_sandbox(jail_exe),
+        // J3-agent end
         _ => ProbeResult::new(
             "unknown",
             ProbeStatus::Skipped,
@@ -538,6 +555,119 @@ fn probe_nested_userns(jail_exe: &Path, bwrap: &Path) -> ProbeResult {
 // Probes that need no sandbox
 // ---------------------------------------------------------------------------
 
+// J3-agent begin: the mediation's own mechanism, measured
+/// `seccomp_user_notification`: an unprivileged child installs the agent's
+/// mediation filter with its own notification listener, and this process
+/// takes that listener from it with `pidfd_getfd` — the two steps the
+/// `agent` launcher and supervisor perform (§10). Whether a connect is then
+/// mediated is the agent probes' and the conformance suite's question.
+fn probe_user_notification() -> ProbeResult {
+    const NAME: &str = "seccomp_user_notification";
+    const MECHANISM: &str = "seccomp-user-notification";
+    // Built before the fork: the child only makes syscalls.
+    let program = super::unixpeer::mediation_program();
+    let mut pipe = [0i32; 2];
+    // SAFETY: `pipe` is a two-element array; pipe2 writes two fds or fails.
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return ProbeResult::error(NAME, MECHANISM, format!("pipe2: {}", errno_name(last())));
+    }
+    // SAFETY: fork; the child calls only async-signal-safe functions
+    // (prctl, seccomp, write, pause, _exit) over data built before the fork.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        // SAFETY: as above; `program` is live and never freed in the child.
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+            libc::close(pipe[0]);
+            let listener =
+                super::unixpeer::install_program(&program, super::unixpeer::FLAG_NEW_LISTENER)
+                    .map_or(-1, std::os::fd::IntoRawFd::into_raw_fd);
+            let report = listener.to_le_bytes();
+            libc::write(pipe[1], report.as_ptr().cast(), report.len());
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    // SAFETY: closing this process's copy of the write end.
+    unsafe { libc::close(pipe[1]) };
+    if pid < 0 {
+        // SAFETY: the read end is still owned here.
+        unsafe { libc::close(pipe[0]) };
+        return ProbeResult::error(NAME, MECHANISM, format!("fork: {}", errno_name(last())));
+    }
+    let mut report = [0u8; 4];
+    let mut got = 0usize;
+    let deadline = Deadline::after(PROBE_DEADLINE);
+    while got < report.len() && !deadline.expired() {
+        let mut pfd = libc::pollfd {
+            fd: pipe[0],
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one live pollfd, bounded by the deadline.
+        if unsafe { libc::poll(&raw mut pfd, 1, deadline.remaining_millis_capped(100)) } <= 0 {
+            continue;
+        }
+        // SAFETY: the buffer is live and the length matches.
+        let n = unsafe {
+            libc::read(
+                pipe[0],
+                report[got..].as_mut_ptr().cast(),
+                report.len() - got,
+            )
+        };
+        if n <= 0 {
+            break;
+        }
+        got += usize::try_from(n).unwrap_or(0);
+    }
+    let listener = (got == report.len()).then(|| i32::from_le_bytes(report));
+    let taken = match (listener, identity::pidfd_open(pid)) {
+        (Some(fd), Ok(pidfd)) if fd >= 0 => {
+            super::unixpeer::pidfd_getfd(std::os::fd::AsFd::as_fd(&pidfd), fd).map(|_| fd)
+        }
+        (Some(_), _) | (None, _) => Err(io::Error::from_raw_os_error(libc::ENOSYS)),
+    };
+    // SAFETY: `pid` is this process's own child; killing and reaping it is
+    // the cleanup this probe owes, and the read end is closed once.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        let mut status = 0;
+        libc::waitpid(pid, &raw mut status, 0);
+        libc::close(pipe[0]);
+    }
+    match (listener, taken) {
+        (Some(fd), Ok(_)) if fd >= 0 => ProbeResult::new(
+            NAME,
+            ProbeStatus::Available,
+            MECHANISM,
+            "ok",
+            format!(
+                "an unprivileged child installed the mediation filter ({}) with a listener, \
+                 and pidfd_getfd took it",
+                super::unixpeer::filter_digest()
+            ),
+        ),
+        (Some(fd), _) if fd < 0 => ProbeResult::new(
+            NAME,
+            ProbeStatus::Unavailable,
+            MECHANISM,
+            "listener_refused",
+            "seccomp(SECCOMP_FILTER_FLAG_NEW_LISTENER) failed in an unprivileged child",
+        ),
+        (Some(_), Err(error)) => ProbeResult::new(
+            NAME,
+            ProbeStatus::Unavailable,
+            MECHANISM,
+            "listener_not_transferable",
+            format!("pidfd_getfd of the child's listener failed: {error}"),
+        ),
+        _ => ProbeResult::error(NAME, MECHANISM, "the child reported nothing"),
+    }
+}
+// J3-agent end
+
 fn own_pid() -> libc::pid_t {
     // SAFETY: getpid takes no arguments and cannot fail.
     unsafe { libc::getpid() }
@@ -911,6 +1041,13 @@ pub fn probe_inside_main(args: &[OsString]) -> ! {
             "listdir" => check_listdir(argument),
             "unshare-userns" => check_unshare_userns(),
             "socket-afunix" => check_socket_afunix(),
+            // J3-agent begin: the agent probe's inside checks
+            "http" => agent::check_http(argument),
+            "tcp" => agent::check_tcp(argument),
+            "unix" => agent::check_unix(argument),
+            "unix-self" => agent::check_unix_self(argument),
+            "inner" => agent::check_inner(argument),
+            // J3-agent end
             _ => format!("unknown_check:{check}"),
         };
         let _ = writeln!(out, "{label}={value}");

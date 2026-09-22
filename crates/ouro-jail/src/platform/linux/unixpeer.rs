@@ -61,137 +61,66 @@ pub static MEDIATION_TEST_DELAY_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
-// Step 1: the agent filter
+// Step 1: the mediation filter
 // ---------------------------------------------------------------------------
+
+use super::bpf::Program;
+pub use super::bpf::SockFilter;
+use super::seccomp::AF_UNIX;
+#[cfg(test)]
+use super::seccomp::{NR_SOCKET, NR_SOCKETPAIR, SD_ARCH, SD_NR, sd_arg_low};
 
 /// `SECCOMP_RET_USER_NOTIF`.
 pub const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 /// `SECCOMP_RET_ALLOW`.
-pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+pub const SECCOMP_RET_ALLOW: u32 = super::seccomp::SECCOMP_RET_ALLOW;
 /// `SECCOMP_RET_ERRNO`.
-pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+pub const SECCOMP_RET_ERRNO: u32 = super::seccomp::SECCOMP_RET_ERRNO;
 /// `AUDIT_ARCH_X86_64`.
-pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+pub const AUDIT_ARCH_X86_64: u32 = super::seccomp::AUDIT_ARCH_X86_64;
 
-const NR_CONNECT: u32 = 42;
-const NR_SOCKET: u32 = 41;
-const NR_SOCKETPAIR: u32 = 53;
-const AF_UNIX: u32 = 1;
-const SOCK_TYPE_MASK: u32 = 0xf;
-const SOCK_STREAM: u32 = 1;
-const SOCK_SEQPACKET: u32 = 5;
-const LINUX_EPERM: u32 = 1;
-/// The x32 ABI sets bit 30 of the syscall number while sharing the x86_64 audit
-/// arch; its numbering is a different table, so it must be denied, not matched
-/// against these numbers (`__X32_SYSCALL_BIT`, as in the `tool` baseline).
-const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+#[cfg(test)]
+use super::seccomp::{LINUX_EPERM, X32_SYSCALL_BIT};
+pub use super::seccomp::{NR_CONNECT, SOCK_SEQPACKET, SOCK_STREAM, SOCK_TYPE_MASK};
 
-// classic-BPF opcodes (linux/bpf_common.h), spelled out like `bpf.rs`.
-const LD_W_ABS: u16 = 0x20;
-const JEQ_K: u16 = 0x15;
-const JSET_K: u16 = 0x45;
-const JA: u16 = 0x05;
-const ALU_AND_K: u16 = 0x54;
-const RET_K: u16 = 0x06;
-const SD_NR: u32 = 0;
-const SD_ARCH: u32 = 4;
-const fn sd_arg_low(index: u32) -> u32 {
-    16 + 8 * index
-}
-
-const fn stmt(code: u16, k: u32) -> SockFilter {
-    SockFilter {
-        code,
-        jt: 0,
-        jf: 0,
-        k,
-    }
-}
-const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
-    SockFilter { code, jt, jf, k }
-}
-const fn ja(distance: u32) -> SockFilter {
-    SockFilter {
-        code: JA,
-        jt: 0,
-        jf: 0,
-        k: distance,
-    }
-}
-
-/// One classic-BPF instruction, laid out as `struct sock_filter`.
+/// The mediation filter, as a complete standalone program built with the
+/// shared assembler ([`super::bpf::Asm`]).
 ///
-/// A local copy of `bpf.rs`'s type: this fragment needs a `BPF_ALU|BPF_AND`
-/// instruction to mask the socket type before comparison, which the shared
-/// `bpf::Asm` assembler does not encode. Rather than edit the shared assembler
-/// (owned by the integrator), the agent filter is built here from raw
-/// instructions, exactly as the observer's narrowing filter is. See the report.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SockFilter {
-    /// Opcode.
-    pub code: u16,
-    /// Relative jump when true.
-    pub jt: u8,
-    /// Relative jump when false.
-    pub jf: u8,
-    /// Immediate.
-    pub k: u32,
-}
-
-/// The agent mediation filter, as a complete standalone cBPF program.
+/// It is the second of the `agent` profile's stacked seccomp filters, the one
+/// the trusted launcher installs with its own notification listener (the
+/// first is the agent baseline bubblewrap loads, see
+/// [`super::seccomp::agent_baseline`]). Seccomp evaluates every installed
+/// filter and takes the highest-priority action, so the two compose.
 ///
-/// It is installed as one of the `agent` profile's stacked seccomp filters
-/// (seccomp evaluates every installed filter and takes the highest-priority
-/// action, so this composes with the nesting filter). `connect` returns
-/// `SECCOMP_RET_USER_NOTIF`; AF_UNIX `socket`/`socketpair` are allowed only for
-/// `SOCK_STREAM`/`SOCK_SEQPACKET` (the type masked with `SOCK_TYPE_MASK` so the
-/// `SOCK_CLOEXEC`/`SOCK_NONBLOCK` bits do not defeat it), and AF_UNIX
-/// `SOCK_DGRAM`/`SOCK_RAW` are refused with `EPERM` because a datagram send can
-/// name a peer in `sendmsg`'s `msg_name`, which seccomp cannot read (§3.4
-/// step 1).
+/// `connect` returns `SECCOMP_RET_USER_NOTIF`; AF_UNIX `socket`/`socketpair`
+/// are allowed only for `SOCK_STREAM`/`SOCK_SEQPACKET` (the type masked with
+/// `SOCK_TYPE_MASK` so the `SOCK_CLOEXEC`/`SOCK_NONBLOCK` bits do not defeat
+/// it), and AF_UNIX `SOCK_DGRAM`/`SOCK_RAW` are refused with `EPERM` because a
+/// datagram send can name a peer in `sendmsg`'s `msg_name`, which seccomp
+/// cannot read (jail-v1 §10). This is the only filter that restricts AF_UNIX
+/// for `agent`: the agent baseline leaves `socket` to it.
 ///
-/// The fragment is **safe on its own**: it validates the architecture before
+/// The program is **safe on its own**: it validates the architecture before
 /// any syscall number and denies (`EPERM`) every ABI other than native x86_64,
 /// and denies the x32 numbering (which shares the x86_64 audit arch), exactly
-/// as the `tool` baseline in `seccomp.rs` does. It does not rely on a companion
-/// filter to reject a compat ABI — the reference host does accept an i386 (int
-/// 0x80) ABI, and a non-native `connect` there would otherwise fall through to
+/// as the `tool` baseline does. It does not rely on a companion filter to
+/// reject a compat ABI — the reference host does accept an i386 (int 0x80)
+/// ABI, and a non-native `connect` there would otherwise fall through to
 /// `SECCOMP_RET_ALLOW` and escape mediation entirely.
 ///
 /// `USER_NOTIF` (0x7fc00000) outranks `SECCOMP_RET_TRACE` (0x7ff00000), so a
 /// mediated connect is never a ptrace stop and the observer never sees it
-/// (§3.4 step 4, proved in the spike).
-///
-/// Instruction indices are noted so the jump arithmetic can be read; the
-/// interpreter unit test [`tests::the_filter_table`] validates every path.
+/// (proved in the spike); the mediator reports it instead.
+#[must_use]
+pub fn mediation_program() -> Program {
+    super::seccomp::mediation_filter()
+        .expect("the mediation filter is a few dozen instructions and always assembles")
+}
+
+/// The mediation filter's instructions, in program order.
 #[must_use]
 pub fn filter_rules() -> Vec<SockFilter> {
-    // The single arch/x32 denial verdict lives at the end (index 19); the two
-    // jumps that reach it carry their distance to that index.
-    const DENY: usize = 19;
-    vec![
-        stmt(LD_W_ABS, SD_ARCH),                            // 0: load arch
-        jump(JEQ_K, AUDIT_ARCH_X86_64, 1, 0),               // 1: x86_64? skip the arch-deny jump
-        ja((DENY - 3) as u32),                              // 2: not x86_64 -> DENY (16 ahead)
-        stmt(LD_W_ABS, SD_NR),                              // 3: load nr
-        jump(JSET_K, X32_SYSCALL_BIT, (DENY - 5) as u8, 0), // 4: x32 bit set -> DENY
-        jump(JEQ_K, NR_CONNECT, 0, 1),                      // 5: connect? -> 6 else -> 7
-        stmt(RET_K, SECCOMP_RET_USER_NOTIF),                // 6: connect -> USER_NOTIF
-        jump(JEQ_K, NR_SOCKET, 2, 0),                       // 7: socket? -> 10 (SOCK_CHECK)
-        jump(JEQ_K, NR_SOCKETPAIR, 1, 0),                   // 8: socketpair? -> 10
-        stmt(RET_K, SECCOMP_RET_ALLOW),                     // 9: any other native syscall -> ALLOW
-        stmt(LD_W_ABS, sd_arg_low(0)),                      // 10: SOCK_CHECK: load domain
-        jump(JEQ_K, AF_UNIX, 1, 0),                         // 11: AF_UNIX? skip the ALLOW
-        stmt(RET_K, SECCOMP_RET_ALLOW),                     // 12: non-AF_UNIX socket -> ALLOW
-        stmt(LD_W_ABS, sd_arg_low(1)),                      // 13: load type
-        stmt(ALU_AND_K, SOCK_TYPE_MASK),                    // 14: mask off CLOEXEC/NONBLOCK
-        jump(JEQ_K, SOCK_STREAM, 2, 0),                     // 15: stream? -> 18 ALLOW
-        jump(JEQ_K, SOCK_SEQPACKET, 1, 0),                  // 16: seqpacket? -> 18 ALLOW
-        stmt(RET_K, SECCOMP_RET_ERRNO | LINUX_EPERM),       // 17: dgram/raw AF_UNIX -> EPERM
-        stmt(RET_K, SECCOMP_RET_ALLOW),                     // 18: stream/seqpacket AF_UNIX -> ALLOW
-        stmt(RET_K, SECCOMP_RET_ERRNO | LINUX_EPERM),       // 19: DENY (non-native arch / x32)
-    ]
+    mediation_program().insns().to_vec()
 }
 
 /// The filter's kernel bytes: each instruction as `code` (LE u16), `jt`, `jf`,
@@ -200,31 +129,13 @@ pub fn filter_rules() -> Vec<SockFilter> {
 /// one filter, not two that can drift.
 #[must_use]
 pub fn filter_bytes() -> Vec<u8> {
-    let rules = filter_rules();
-    let mut out = Vec::with_capacity(rules.len() * 8);
-    for insn in rules {
-        out.extend_from_slice(&insn.code.to_le_bytes());
-        out.push(insn.jt);
-        out.push(insn.jf);
-        out.extend_from_slice(&insn.k.to_le_bytes());
-    }
-    out
+    mediation_program().to_bytes()
 }
 
 /// `sha256:<hex>` over the filter's kernel bytes, for the receipt.
 #[must_use]
 pub fn filter_digest() -> String {
-    use sha2::{Digest as _, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(filter_bytes());
-    let out = hasher.finalize();
-    let mut hex = String::with_capacity(7 + out.len() * 2);
-    hex.push_str("sha256:");
-    for byte in out {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    mediation_program().digest()
 }
 
 // ---------------------------------------------------------------------------
@@ -306,12 +217,24 @@ pub enum Verdict {
     Denied(i32),
 }
 
-/// One mediation decision, delivered to the sink so wave 2 can emit the
-/// `net.connect` evidence honestly (the tracer never sees a mediated connect).
+/// One mediation decision, delivered to the sink so the platform can emit
+/// the `net.connect` evidence honestly (the tracer never sees a mediated
+/// connect).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediationRecord {
-    /// The connecting task's host pid.
+    /// The connecting task's host pid (a thread id).
     pub pid: libc::pid_t,
+    // J3-agent begin: what the audit event needs besides the verdict
+    /// The thread group the task belonged to while its notification was
+    /// pending, read before the verdict was sent; `None` when `/proc` would
+    /// not say. The platform uses it to tell a helper's connect (the bridge)
+    /// from the target's.
+    pub tgid: Option<libc::pid_t>,
+    /// The address family the child named, when its `sockaddr` was read.
+    pub family: Option<u16>,
+    /// Whether the whole `sockaddr` the child passed was read.
+    pub address_complete: bool,
+    // J3-agent end
     /// A short, safe reason code (never a path or payload).
     pub reason: &'static str,
     /// The verdict.
@@ -348,13 +271,18 @@ impl MediationSink for CollectingSink {
 mod live;
 #[cfg(target_os = "linux")]
 pub use live::{
-    LauncherFds, LauncherSetup, MediatorHandle, PeerAuthority, install_filter, launcher_setup,
-    spawn, take_from_launcher,
+    FLAG_NEW_LISTENER, FLAG_WAIT_KILLABLE_RECV, LauncherFds, LauncherSetup, MediatorHandle,
+    PeerAuthority, install_filter, install_program, launcher_setup, pidfd_getfd, spawn,
+    take_from_launcher,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::linux::bpf::{
+        CODE_ALU_AND_K as ALU_AND_K, CODE_JA as JA, CODE_JEQ_K as JEQ_K, CODE_JSET_K as JSET_K,
+        CODE_LD_W_ABS as LD_W_ABS, CODE_RET_K as RET_K,
+    };
     use crate::platform::linux::sockdiag::VfsId;
 
     #[test]
