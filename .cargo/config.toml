@@ -1,0 +1,3 @@
+# Repository task runner (jail-v1 §4): `cargo xtask <task>`.
+[alias]
+xtask = "run -p xtask --"

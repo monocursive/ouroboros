@@ -35,21 +35,37 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/ouro_ci
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
       - name: Host manifest
+        # Redirected, not piped: GitHub's default shell for `run:` is
+        # `bash -e {0}` with no `pipefail`, so the step's status would be
+        # `tee`'s and an unreachable host would leave an empty manifest and a
+        # green step.
         run: |
           mkdir -p evidence
           ssh -i ~/.ssh/ouro_ci -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
             "$CI_USER@$CI_HOST" 'bash -s' < docs/specs/jail-v1/host-manifest.sh \
-            | tee evidence/host-manifest.txt
+            > evidence/host-manifest.txt
+          cat evidence/host-manifest.txt
+      - name: Install the pinned toolchain
+        # Only needed to build the driver itself; the suite is built on the host.
+        run: rustup toolchain install && rustup show
       - name: Conformance suite
-        # J1 replaces this step with the xtask conformance driver: copy the tree to a
-        # per-run directory on the host, build, run the suite against the expected-
-        # capability manifest, and copy the report back. Once the workspace exists
-        # this step fails until that driver does, so the workspace cannot land
-        # without it (jail-v1 §16).
-        if: hashFiles('Cargo.toml') != ''
+        # The xtask driver copies the tree to a per-run directory on the host,
+        # builds it, runs `doctor --json` against the expected-capability
+        # manifest, runs the suite with OURO_CONFORMANCE=1 so a skipped live
+        # capability fails the job (jail-v1 §16), and copies the evidence back.
+        # It removes the remote run directory on success and keeps it, with the
+        # path printed, on failure.
+        #
+        # The `hashFiles('Cargo.toml')` gate that used to guard this step is
+        # gone: the workspace exists, and a condition that silently disarms the
+        # only conformance step if the file is ever moved is worse than the
+        # failure it was meant to avoid (§16).
         run: |
-          echo "conformance driver not implemented yet (J1)"
-          exit 1
+          cargo run -p xtask -- conformance \
+            --host "$CI_HOST" --user "$CI_USER" \
+            --key ~/.ssh/ouro_ci --known-hosts ~/.ssh/known_hosts \
+            --evidence evidence/
       - uses: actions/upload-artifact@v4
         if: always()
         with:

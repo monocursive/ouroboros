@@ -188,6 +188,16 @@ it costs provisioning. The working assumption in §6 is confirmed on cost.
 
 ## 5. Gap-to-gate table
 
+Gap recorded 2026-09-22 by the J1 Linux slice review: bubblewrap 0.11.1 clears an
+inherited `PR_SET_PDEATHSIG` before arming its own for `--die-with-parent`, so a
+supervisor killed with SIGKILL during bubblewrap's startup (about 2 in 20 tries of
+`orphan_loop.sh` at the moment of `fork`) leaves the outer bubblewrap orphaned
+and blocked on its eventfd, holding the run's stdout/stderr write ends; the
+namespace init and the target die. The prescribed `prctl` in the supervisor's
+own `pre_exec` closes only the supervisor's fork-to-exec window. Candidate
+closures: an upstream change, or a trusted outside launcher that kills
+bubblewrap on the supervisor's death. Scheduled with L02.
+
 | Gate (jail-v1 §15 ID) | Selected integration status | Gap | Plan |
 |---|---|---|---|
 | (empty until a candidate is measured) | | | |

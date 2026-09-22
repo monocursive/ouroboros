@@ -1,0 +1,95 @@
+# Expected capabilities on the reference host (jail-v1 §16).
+#
+# `cargo xtask conformance` compares every row here with `ouro-jail doctor
+# --json` on the provisioned Linux host. This file is the pinned expectation,
+# so ANY deviation fails the job and has to be changed deliberately: a host
+# that silently gained a capability is as much a change as one that lost it.
+# `skipped` never satisfies a row (§3.1: "a skipped check cannot satisfy a
+# requirement"), and a capability the manifest names but doctor does not report
+# fails too.
+#
+# Statuses are the §3.1 vocabulary: available, unavailable, unsupported, error,
+# skipped. `available` means the probe succeeded on this host with this
+# identity; `unavailable` means the implementation exists but the host
+# prerequisites are missing; `unsupported` means the implementation lacks it.
+#
+# Host: Ubuntu 26.04.1 LTS, kernel 7.0.0-31-generic, x86_64 KVM, bubblewrap
+# 0.11.1, account `ouro-ci` (uid 1001, no sudo, CapEff 0), measured 2026-09-22.
+# Every row cites the J0 evidence that justifies it. Re-measure and re-pin when
+# the kernel, the distribution, bubblewrap or the account changes (§16).
+
+[expected]
+
+# bubblewrap 0.11.1 is installed and starts. Evidence:
+# evidence/bwrap-probe-2026-09-22-ouro-ci.txt, header line `bwrap: bubblewrap
+# 0.11.1` and check 1 (`--unshare-all`, exit 0); also
+# evidence/reference-host-2026-09-22-ouro-ci.txt `bwrap:`.
+bwrap_present = "available"
+
+# An unprivileged user namespace can be created. Evidence:
+# evidence/bwrap-probe-2026-09-22-ouro-ci.txt check 1 (exit 0) and check 2,
+# which shows the sandboxed process under `bwrap//&unpriv_bwrap (enforce)`;
+# evidence/reference-host-2026-09-22-ouro-ci.txt `userns_unshare_test: ok`.
+user_namespace = "available"
+
+# A PID namespace is applied: the shell inside sees pid 2. Evidence:
+# evidence/bwrap-probe-2026-09-22-ouro-ci.txt check 6 (`pid=2`, exit 0).
+pid_namespace = "available"
+
+# A network namespace is applied and blocks egress: connect fails with
+# ENETUNREACH under `--unshare-net`. Evidence:
+# evidence/bwrap-probe-2026-09-22-ouro-ci.txt check 5 (exit 1) and
+# backend-evaluation.md §1.1 row "`--unshare-net` blocks a connect".
+network_namespace = "available"
+
+# A read-only bind holds: a write under a `--ro-bind` /usr fails and leaves
+# nothing behind. Evidence: evidence/bwrap-probe-2026-09-22-ouro-ci.txt
+# check 3 (exit 0) and backend-evaluation.md §1.1 row "`--ro-bind` holds".
+mount_readonly_bind = "available"
+
+# A seccomp filter passed through `--seccomp` loads under the distribution's
+# AppArmor profile: `Seccomp: 2`, `NoNewPrivs: 1`. Evidence:
+# evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt measurement 4 (exit 0);
+# without a filter the sandbox shows `Seccomp: 0`
+# (evidence/bwrap-probe-2026-09-22-ouro-ci.txt check 7).
+seccomp_filter_load = "available"
+
+# PTRACE_SEIZE of an owned descendant works with no provisioning under
+# `kernel.yama.ptrace_scope=1`, including through bubblewrap's user and PID
+# namespaces. Evidence: evidence/ptrace-probe-2026-09-22-ouro-ci.txt §2 and
+# evidence/tracer-spike-2026-09-22-ouro-ci.txt §1 (15,109 closed-set events,
+# 30,220 stops, zero gaps); backend-evaluation.md §2.1.
+ptrace_seize_descendant = "available"
+
+# An SSH session lives in `/user.slice/user-<uid>.slice/session-N.scope`, which
+# systemd owns as root and does not delegate, so no leaf can be created there,
+# and the cgroup common-ancestor rule forbids moving into the delegated
+# `user@1001.service` subtree from outside it. Measured 2026-09-22 as ouro-ci:
+# `cat /proc/self/cgroup` reports `session-31.scope`, that directory is
+# `drwxr-xr-x root root`, and `mkdir` inside it returns "Permission denied",
+# while `user@1001.service` is `ouro-ci`-owned with `cpu memory pids` in
+# `cgroup.subtree_control` (evidence/reference-host-2026-09-22-ouro-ci.txt
+# lines `cgroup_user_*`). jail-v1 §6.4 lets `tool` run without a cgroup when
+# the ptrace observer supplies tree scope, so this row is expected to be
+# unavailable rather than to refuse; the systemd `--user --scope` route that
+# would change it is J2 (L03/L04).
+cgroup_delegated_leaf = "unavailable"
+
+# Informational, and deliberately phrased so `available` means THE RESTRICTION
+# IS ON: `kernel.apparmor_restrict_unprivileged_userns` is 1, which permits
+# `unshare(CLONE_NEWUSER)` but strips capabilities from the resulting
+# namespace. Evidence: evidence/reference-host-2026-09-22-ouro-ci.txt
+# `sysctl.kernel.apparmor_restrict_unprivileged_userns: 1`;
+# backend-evaluation.md §1 row for that sysctl.
+apparmor_userns_restriction = "available"
+
+# Nesting is denied by Ubuntu's own profile, not by our plan: every child of
+# bwrap is stacked under `unpriv_bwrap`, which carries `audit deny capability`,
+# so `unshare -Urm`, a nested read-only bind mount and bubblewrap-inside-
+# bubblewrap all fail with EPERM. Evidence:
+# evidence/bwrap-nesting-probe-2026-09-22-ouro-ci.txt measurements 1, 2, 3 and
+# 5 (all exit 1) with the profile text quoted verbatim; backend-evaluation.md
+# §1.1 rows for nested namespaces and nested bubblewrap. This stays
+# unavailable until an operator applies the sysctl or an AppArmor decision;
+# the agent profile (S03) needs it, `tool` does not.
+nested_user_namespace = "unavailable"

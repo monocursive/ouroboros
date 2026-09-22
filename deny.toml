@@ -1,0 +1,19 @@
+# Pinned dependency policy. cargo-deny is not run in CI yet; this file is the
+# policy that a future CI step enforces, not evidence that it was enforced.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+unmaintained = "warn"

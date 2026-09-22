@@ -1,0 +1,37 @@
+[package]
+name = "ouro-jail"
+description = "Runs an operator-supplied argv under an explicit policy and records what it applied."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "ouro_jail"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ouro-jail"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+clap = { version = "4.6.6", features = ["derive"] }
+libc = "0.2.189"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+toml = "0.8.23"
+uuid = { version = "1.24.0", features = ["v4"] }
+
+[dev-dependencies]
+jsonschema = { version = "0.57.0", default-features = false }
+# The conformance suite drives the real jail through the shared harness and
+# runs the shared fixture inside it. No cycle: `ouro-fixture` does not depend
+# on `ouro-jail`, and this is a dev-dependency, so nothing ships with it.
+ouro-fixture = { path = "../ouro-fixture" }
+tempfile = "3.27.0"

@@ -1,7 +1,12 @@
 # Portable gates from jail-v1 §16. The macOS leg is the native build and refusal
 # lane (M01–M03). The Ubuntu leg runs portable tests only and does not pretend to
 # exercise privileged kernel features; that is the conformance workflow's job.
-# Every step is skipped until the Cargo workspace exists (J1).
+#
+# A hosted runner has neither bubblewrap nor strace, so the live tests here skip
+# themselves. §16 allows that ("without pretending they exercised a privileged
+# kernel feature") but a green `ok` says nothing about what was not run, so the
+# last step copies every `skipped:` line into the job summary. Set
+# OURO_CONFORMANCE=1 only where those tools exist; here a skip must stay a skip.
 name: rust
 on:
   push:
@@ -19,16 +24,50 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # A hung test must fail the job, not hold the runner for six hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - id: ws
-        run: echo "present=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - if: steps.ws.outputs.present == 'true'
-        name: Install the pinned toolchain
+      - name: Install the pinned toolchain
         run: rustup toolchain install && rustup show
-      - if: steps.ws.outputs.present == 'true'
-        run: cargo fmt --all -- --check
-      - if: steps.ws.outputs.present == 'true'
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - if: steps.ws.outputs.present == 'true'
-        run: cargo test --workspace
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # jail-v1 §15 row I02: no vendor name in the execution core. Nothing ran
+      # this before, so a vendor name landed green.
+      - name: I02 vendor-name scan
+        run: cargo run -p xtask -- i02-scan
+      - name: Tests
+        # One test thread: a ptrace tracer owns every waitpid in its process, so two
+        # observer tests in parallel reap each other (the conformance driver pins
+        # this too); the binaries also serialize themselves, this is the second wall.
+        run: cargo test --workspace -- --test-threads=1 --nocapture 2>&1 | tee test-output.txt
+      # `tee` would otherwise mask the test step's own status.
+      - name: Report what was not exercised
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.os }}"
+            echo
+            if [ -f test-output.txt ]; then
+              count=$(grep -c '^skipped:' test-output.txt || true)
+              echo "Live tests skipped on this runner: **${count}**"
+              if [ "$count" -gt 0 ]; then
+                echo
+                echo '```'
+                grep '^skipped:' test-output.txt | sort | uniq -c
+                echo '```'
+                echo
+                echo "These are not failures here: §16 lets a generic runner"
+                echo "decline a privileged feature. They are listed so a green"
+                echo "job does not read as coverage. The conformance workflow"
+                echo "runs the same tests with OURO_CONFORMANCE=1, where a skip"
+                echo "fails the job."
+              fi
+            else
+              echo "No test output was produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+defaults:
+  run:
+    # `-o pipefail`, so a pipeline reports the failing command and not `tee`.
+    shell: bash

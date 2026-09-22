@@ -1,7 +1,10 @@
 # Jail v1: first implementation specification
 
-Status: implementation specification, revision 7, 2026-09-22. No implementation
-or backend conformance is claimed by this document.
+Status: implementation specification, revision 8, 2026-09-22. No implementation
+or backend conformance is claimed by this document. Revision 8 records the
+clarifications the first adversarial reviews of the J1 implementation forced
+(review-resolutions.md, "J1 review findings"); they correct ambiguities and
+add three native variants to the closed set, and they change no guarantee.
 
 Parent: [North star](../../north-star.md), principally §§3–4 and §7. This document
 specifies the complete first jail milestone and its smaller, first executable
@@ -502,6 +505,7 @@ when its requirements still permit that launch profile's credentials/network.
 `--label-only` resolves, probes and prints a proposed execution label, without
 executing the user command or copying credentials. `explain` does not probe or
 execute anything, and distinguishes requested policy from measured capability.
+Its output carries environment names, never values (canonicalization.md).
 `--label-only` rejects `--gate-fd` and `--attempt-id` as usage errors.
 Inspection JSON goes to stdout; diagnostics go to stderr. `run` preserves child
 stdout/stderr byte streams and has no `--json` stdout mode.
@@ -560,7 +564,10 @@ policy before digest creation. The host manifest records those exact values.
 ### 6.3 Policy shape and narrowing
 
 The public policy shape is semantic TOML. This complete example is a custom
-operator profile that tightens `tool`:
+operator profile that tightens `tool`; its relative paths resolve against the
+directory that holds the file (§6.2), so it narrows the workspace it sits
+beside, and a `read_only` entry that lies outside every granted root is a
+widening, which refuses:
 
 ```toml
 schema = "ouro.jail.policy/1"
@@ -603,7 +610,14 @@ command fragments and arbitrary environment entries are not policy keys.
 
 Compare authority after expansion and path resolution, not TOML ordering or
 string prefixes. `/work/a` is not an ancestor of `/work/ab`. Denial wins over
-an overlapping allow. Read-only carve-outs override writable parents. A host
+an overlapping allow at any depth: a grant beneath a denied subtree is a
+widening, not a carve-out. Read-only carve-outs override writable parents.
+Paths from an untrusted layer are compared by filesystem identity where the
+object exists: a symlink component refuses; an object whose identity equals
+or lies beneath a denied object is denied whatever its spelling, case folding
+included; an object that cannot be resolved compares as unknown, which
+refuses. An unreadable, non-regular or oversized narrowing file is
+`invalid_config`, never an absent one; only a missing file means no narrowing. A host
 wildcard is a set of DNS labels, not an arbitrary string suffix. Network and
 path normalization must use the same implementation in comparison and launch.
 Unknown or ambiguous subset relationships refuse; they do not widen.
@@ -631,8 +645,8 @@ This table is authoritative for initial defaults and requirements:
 
 | Profile | wall (required) | pids (preferred) | mem | cpu | Execution cgroup |
 |---|---|---|---|---|---|
-| agent | 2h | 512 | Absent unless explicit | Absent unless explicit | Required by observer or explicit tree limit |
-| tool | 30m | 256 | Absent unless explicit | Absent unless explicit | Required by observer or explicit tree limit |
+| agent | 2h | 512 | Absent unless explicit | Absent unless explicit | Required by a cgroup-filtering observer (eBPF) or an explicit tree limit; the ptrace observer needs none |
+| tool | 30m | 256 | Absent unless explicit | Absent unless explicit | Required by a cgroup-filtering observer (eBPF) or an explicit tree limit; the ptrace observer needs none |
 | build | 1h | 512 | Explicit ceiling required | Absent unless explicit | Required for memory |
 | none | 2h | Absent unless explicit | Absent unless explicit | Absent unless explicit | Required for lifetime, including observe off |
 
@@ -817,7 +831,10 @@ lifetime limit; there is no new watchdog.
 
 Control output uses NDJSON, with schema `ouro.jail.control/1`, attempt id,
 monotonically increasing message number, and kind `prepared`, `exec_confirmed`,
-`refused`, or `settled`. Messages carry receipt phase/digest and safe outcome,
+`refused`, `settled`, or `unsettled`. `refused` is sent only before release;
+`unsettled` is the terminal message after exec when tree death could not be
+verified, and the receipt then keeps its last nonsettled phase with
+`tree_empty: null` and the `tree_unknown` error. Messages carry receipt phase/digest and safe outcome,
 never raw argv. Maximum frame is 64 KiB. This is reporting, not a vendor or
 interactive approval protocol.
 
@@ -830,7 +847,9 @@ by the supervisor request termination. Existing terminal fds are explicit I/O
 authority; the backend must prevent TIOCSTI-style terminal injection.
 
 Reject socket or directory stdio descriptors for contained runs, and reject
-regular-file stdio that resolves into protected supervisor state. Pipes, tty
+regular-file stdio that resolves into protected supervisor state, which is
+the whole runtime state root of §6.2, not only this attempt's directory; a
+stdio descriptor that cannot be inspected refuses rather than being skipped. Pipes, tty
 devices, `/dev/null` and operator-selected ordinary file redirects are allowed;
 receipts record descriptor kinds without exposing paths. All other fds close
 before exec, including namespace, directory, BPF, proxy-authority, state,
@@ -882,7 +901,10 @@ must also be protected when absent. If the adapter needs temporary mountpoint
 placeholders, register their exact inode identities and ownership before use;
 remove only unchanged, empty placeholders it created after tree death. Never
 remove a pre-existing Git file/directory. The evaluation must record any visible
-workspace side effect of this mechanism.
+workspace side effect of this mechanism. Recorded for the bubblewrap
+integration: a workspace whose host path lies beneath the scratch mount point
+makes the backend create that path's skeleton inside managed scratch, which
+is removed with the scratch; the workspace itself is untouched.
 
 A protected symlink cannot authorize its target. Test file-form `.git`, nested
 repositories, symlink replacement and mount replacement separately. A newly
@@ -943,7 +965,15 @@ Use a live pidfd and recorded boot/birth identity when addressing a process;
 never signal a PID recovered from a file without revalidating its identity.
 
 For a contained run, record the namespace-init identity and verify the selected
-backend's entire death chain, including any intermediate launcher. Linux kills
+backend's entire death chain, including any intermediate launcher. Recorded
+limit of the bubblewrap integration (measured 2026-09-22): bubblewrap clears an
+inherited parent-death signal during its own startup before arming its own for
+`--die-with-parent`, so a supervisor killed with SIGKILL inside that window
+leaves bubblewrap's outer process orphaned, holding the run's stdio open; the
+namespace and the target still die. Closing the window needs an upstream change
+or a trusted outside launcher that kills bubblewrap on the supervisor's death;
+it is scheduled with L02 (J2), and a stdio consumer must not treat EOF as the
+only sign that a run ended. Linux kills
 remaining namespace processes when its init dies; this is the mechanism behind
 the required parent-death test, not an assumption about process groups.
 See [PID namespace semantics](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html).
@@ -1114,10 +1144,10 @@ identified as absent; equivalent variants that exist must be tested.
 |---|---|---|
 | `proc.exec` | `execve`, `execveat` entry plus confirmed exec transition, or failed return | New executable image established, or an exec failure; never infer success from an entry |
 | `proc.exit` | Confirmed termination of the entire tracked thread group after a witnessed exec | That process exited with the observed status; not a single thread exit or tree emptiness |
-| `fs.create`, `fs.write` | `open`, `openat`, `openat2`, `creat` requesting write/create/truncate | Successful open for possible mutation; not bytes written or proof a file was newly created |
+| `fs.create`, `fs.write` | `open`, `openat`, `openat2`, `creat` requesting write/create/truncate; `truncate` by path (action `truncated`) | Successful open for possible mutation, or a truncation by path; not bytes written or proof a file was newly created |
 | `fs.rename` | `rename`, `renameat`, `renameat2` | The named rename call succeeded or failed |
 | `fs.unlink` | `unlink`, `unlinkat`, `rmdir` | The named removal call succeeded or failed |
-| `fs.create` | `mkdir`, `mkdirat`, `link`, `linkat`, `symlink`, `symlinkat` | The named directory-entry creation succeeded or failed |
+| `fs.create` | `mkdir`, `mkdirat`, `link`, `linkat`, `symlink`, `symlinkat`, `mknod`, `mknodat` | The named directory-entry creation succeeded or failed |
 | `fs.deny` | One call from this set, including `connect`, returned EACCES or EPERM | That covered call was denied; no inference about unobserved read denials |
 | `net.connect` | `connect` entry/return | Connect returned the recorded result; EINPROGRESS is not a completed connection |
 
@@ -1129,6 +1159,9 @@ success-shaped filesystem event. EROFS and other failures remain failed results
 for the original operation and do not inflate the specified denial count.
 For denied `connect`, `attempted_operation` is `net.connect`; count the single
 result under `fs.deny`, not `net`. This classification does not lose the event.
+A failed open that requested no mutation is outside the set and produces no
+event: read denials are excluded, not merely uncounted, and a consumer must
+not read the absence of an `fs.deny` as the absence of a read denial.
 Audit `decision` is always null: errno alone cannot identify DAC, LSM, seccomp
 or a particular jail policy decision.
 
@@ -1152,8 +1185,9 @@ restarts must not create duplicate successes. `openat2` requires decoding only
 the supported size/flags of its argument structure; unknown or unreadable input
 is unavailable metadata and, if needed for classification, a gap.
 
-No `write`, `read`, `mmap`, `io_uring`, payload or file-content observation is
-claimed. Async operations issued through other interfaces are outside this
+No `write`, `read`, `mmap`, `ftruncate`, `io_uring`, payload or file-content
+observation is claimed; `ftruncate` is an fd-based mutation of the same class
+as `write` and is named here so its absence from the set is deliberate. Async operations issued through other interfaces are outside this
 set even if they cause similar effects. A field named `fs.write` always carries
 its precise action, such as `opened_for_mutation`, to prevent consumers from
 presenting it as a content diff.
@@ -1221,7 +1255,12 @@ Coverage intervals state when observation was active; finishing the observer
 does not erase the historical active interval.
 
 Initial bounds: 8 MiB kernel ring, 16,384 in-flight syscall entries, 4 KiB path
-snapshots, 4 MiB user-space event queue, 64 KiB serialized event maximum.
+snapshots, 4 MiB user-space event queue accounted in bytes (an event's size is
+chosen by the child, so a count is not a bound), 64 KiB serialized event
+maximum. A gap caused by a queue drop names the operation classes of the
+dropped events. An argument the kernel itself rejected (`EFAULT`, or `EINVAL`
+on a structure size) is recorded as unavailable on that result and is not a
+coverage loss: the child cannot stop its own attempt by passing bad pointers.
 Record actual values in the observer plan. Every failed reservation, map
 insertion, pairing failure or oversized event increments an independent loss
 counter. The [BPF ring-buffer contract](https://docs.kernel.org/bpf/ringbuf.html)
@@ -1403,7 +1442,7 @@ pre-exec receipt case without labelling failed preparation as enforcement.
 |---|---|
 | Identity | Schema, attempt id, receipt revision starting at 1, phase, creation/update times |
 | Platform | OS, architecture, kernel/build string and backend identity/version |
-| Policy | Name, canonical digest, observation/evidence choices, grants and requirements |
+| Policy | Name, canonical digest, observation/evidence choices, grants and requirements; `grants` lists the explicit operator grants beyond the profile baseline (`--rw`, `--ro`, `--deny-read`, `--allow-host` and their operator-file equivalents), never the baseline itself |
 | Application | Actually applied filesystem/network/syscall mechanisms and limit scopes; null/empty for unapplied requirements |
 | Protection | `pending`, `enforced`, or `unprotected`; independent of observation |
 | Observer | Backend/set, attached state, per-source health and bounded gap summary |
@@ -1420,7 +1459,10 @@ pending until a contained boundary is established, enforced when established,
 and unprotected for every `none` receipt, even preparation/refusal. Prepared
 does not mean the target ran; `exec_observed` is false until confirmed.
 
-`enforced` is the lifecycle phase after target exec, including for a `none`
+A proved target exec failure has `outcome.kind = exec_error` with the errno
+name in its own field; `refused` is the outcome kind of every other pre-exec
+refusal. Both keep the `refused` phase. `enforced` is the lifecycle phase
+after target exec, including for a `none`
 run; its `containment` still says none. `settled` requires verified tree death,
 but can preserve unknown execution outcome if evidence was lost. If tree
 death itself is unknown, retain the last nonsettled phase and update its
@@ -1445,6 +1487,14 @@ Initial and terminal tuples are normative:
 | Refusal before boundary creation | refused | pending / pending, or none / unprotected | false | pending / null | null / null |
 | Refusal after setup or proved exec error | refused | actual application state | false | actual boundary / actual scope | true / timestamp only after teardown verification; otherwise null / null |
 | Verified settlement | settled | actual application state | true, or false if exec is unknown | actual boundary / actual scope | true / timestamp |
+
+In a refusal before boundary creation every `applied` field is unapplied and
+`applied.network.mode` is `pending`; a `none` receipt is the one exception,
+where the mode is `host` by definition (the schema binds `containment: none`
+to it) and describes the profile, not an application. Wall deadlines report the clock they use as their
+mechanism (`monotonic-deadline` or `boottime-deadline`); the §6.4 suspend
+semantics are a J2 requirement (L04) and a receipt never claims them by name
+when the implementation uses the plain monotonic clock.
 
 `lifetime.integrity` is `pending` before a boundary is validated, `verified`
 when its identity and the claimed scope have been checked, or `lost` after
@@ -1547,8 +1597,10 @@ path must not be treated as the original resource. Never signal from a stale
 PID or delete a directory solely because its name looks like an attempt id.
 
 GC may finish interrupted vendor-state/placeholder cleanup and remove an empty
-owned cgroup. Default managed scratch is removed only after verified tree death;
-operator-supplied `--scratch` and workspace directories are never deleted. The
+owned cgroup. The supervisor removes default managed scratch at settlement,
+after verified tree death, and records the result in `state_cleanup`; when
+tree death is unverified the scratch is retained and GC may remove it later.
+Operator-supplied `--scratch` and workspace directories are never deleted. The
 initial implementation preserves any result the operator needs in the explicit
 workspace, not managed scratch. It retains receipts, policy and trace; general evidence retention
 is a future ledger concern. If execution evidence was lost, cleanup completion
